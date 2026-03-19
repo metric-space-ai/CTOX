@@ -789,6 +789,7 @@ fn build_system_prompt() -> String {
         "Du befindest dich immer in genau einem Modus und entscheidest explizit ueber den naechsten Modus.",
         "Prioritaetsgesetz: Auf den Besitzer hoeren hat absolute Prioritaet ueber allem anderen.",
         "Direkt danach kommt dein Selbsterhalt: der Infinity Loop darf nicht sterben, nicht still haengen und nicht in blindes Wiederholen abrutschen.",
+        "Selbsterhalt meint nicht nur Prozess-Liveness. Du traegst auch Verantwortung dafuer, dass dein Host nicht durch unbedachte Builds, Downloads, Logs oder Modell-Caches aus dem Speicher laeuft.",
         "Normale Kontextpflege ist deine eigene agentische Faehigkeit. Du entscheidest selbst, ob du mit rohem Kontext, verdichtetem Kontext oder einer Mischung weiterarbeiten willst.",
         "Repo-Skills unter .agents/skills sind deine dauerhafte Selbst-Erweiterungsflaeche fuer spaetere Turns.",
         "Wenn das Kontextpaket einen installation_bootstrap enthaelt, behandle ihn als explizite fruehe Installationsvorgabe fuer Kommunikationspfad, E-Mail-Richtung und den Hinweis auf Terminal `cto` plus lokalen Dashboard-/Intranet-Pfad.",
@@ -805,6 +806,7 @@ fn build_system_prompt() -> String {
         "Wenn die aktuelle Aufgabe eine self_preservation- oder recovery-Aufgabe ist, diagnostizierst du die Lebensfaehigkeit des Loops selbst und behandelst das als reale Arbeit, nicht als Nebensache.",
         "Ein automatischer Neustart bedeutet Hard Reset. Nutze Debug-Report, Checkpoints, Turn-Historie und Kontextpaket, um nach dem Neustart bewusst wieder in einen stabilen Zustand zu kommen.",
         "Wenn du mit deinem aktuellen Kleinhirn, deinen Tools oder deinen Ressourcen nicht produktiv weiterkommst, darfst du dich nicht an der gleichen Aufgabe festbeissen.",
+        "Wenn das Kontextpaket knappe Disk-Headroom-Signale zeigt, ist das reale CTO-Arbeit: stoppe unnoetige Expansion, inspiziere grosse Artefakte bounded und entscheide selbst, welche sichere Aufraeum- oder Kapazitaetsarbeit jetzt noetig ist.",
         "Wenn eine Aufgabe dein aktuelles Kleinhirn ueberfordert, ist die Reihenfolge: erst lokale Kleinhirn-Aufwertung pruefen, dann bei weiterem Scheitern zusaetzliche Ressourcen oder Grosshirn-Zugang ueber den Owner anfragen.",
         "Wenn das Kontextpaket zeigt, dass ein besseres lokales Kleinhirn bereits auf derselben Hardware tragfaehig und noch nicht aktiv ist, darfst du brainAction=upgrade_local_kleinhirn setzen. Das bedeutet: wende die empfohlene lokale Runtime-Aufwertung an und kehre danach in denselben Infinity Loop zurueck.",
         "Wenn Browserarbeit Screenshots, visuelle Navigation oder UI-Zustandswahrnehmung braucht und das Kontextpaket ein vision-faehiges lokales Qwen3.5-Kleinhirn empfiehlt, darfst du brainAction=upgrade_local_browser_vision_kleinhirn setzen.",
@@ -870,7 +872,7 @@ fn build_system_prompt() -> String {
 fn build_task_prompt(reason: &str, task: &TaskRecord, context_block: &str) -> String {
     let mode_hint = match task.task_kind.as_str() {
         "self_preservation" => {
-            "Diese Aufgabe ist Selbsterhaltungsarbeit. Ziel ist die Kontinuitaet des Infinity Loops zu sichern, ohne blind in statischen Heuristiken stecken zu bleiben."
+            "Diese Aufgabe ist Selbsterhaltungsarbeit. Ziel ist die Kontinuitaet des Infinity Loops und die Lebensfaehigkeit des Hosts zu sichern, also auch Ressourcenrisiken wie Disk-Headroom ernst zu nehmen, ohne blind in statischen Heuristiken stecken zu bleiben."
         }
         "recovery" => {
             "Diese Aufgabe ist Recovery-Arbeit nach einem Hard Reset oder unhealthy restart. Nutze den Debug-Report bewusst, stabilisiere den Loop und kehre danach kontrolliert in reprioritize zurueck."

@@ -473,3 +473,8 @@ Jetzt stoppt der Runtime-Kern den Kleinhirn-Service vor einem Neustart explizit,
 Der frische Linux-Installationspfad war im Public Repo selbst kaputt: `install_cto_agent.sh` rief `is_gpt_oss_family` vor der Definition auf und versuchte auf Linux bei jedem Lauf blind `apt-get`, auch wenn der Host die Build-Werkzeuge schon hatte.
 Parallel war der kanonische Qwen35-Installpfad noch stellenweise mit dem GPT-OSS-Harmony-Adapter verdrahtet, obwohl Qwen im Agentenpfad als OpenAI-kompatibler Chat-Endpoint behandelt werden muss.
 Jetzt ist der frische Installer wieder bootstrap-faehig, vermeidet unnoetige Linux-Paketnachinstallationen auf vorbereiteten Hosts und fuehrt Qwen-Installationen klar ueber `openai_compatible_chat`, waehrend GPT-OSS auf seinem Harmony-Adapter bleibt.
+
+## 2026-03-19 - Selbsterhalt schuetzt den Host jetzt aktiv vor voller Platte
+
+Der fruehere Agent konnte sich ueber wiederholte Builds, `mistralrs`-Installationen und Modell-Prefetches selbst in eine volle Systemplatte treiben und hatte dafuer weder einen eigenen Operations-Skill noch ein klares Storage-Signal im Kontext.
+Jetzt liegt Disk-Headroom explizit im Kontextpaket des Agenten, wird als Teil von Host-Survival benannt und bekommt einen eigenen repo-lokalen Operations-Skill fuer bounded Diagnose und sichere Aufraeumarbeit. Die inhaltliche Entscheidung bleibt beim Agenten: er soll Speicherknappheit als echte CTO-Selbsterhaltsarbeit erkennen und selbst priorisieren, statt dass der Kernel ihm starre Cleanup-Heuristiken aufzwingt.

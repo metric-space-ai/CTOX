@@ -21,6 +21,7 @@ use crate::contracts::now_iso;
 use crate::command_exec::snapshot_sessions;
 use crate::brain_runtime::load_kleinhirn_runtime_snapshot;
 use crate::brain_runtime::grosshirn_runtime_configured;
+use crate::brain_runtime::inspect_runtime_disk_headroom;
 use crate::brain_runtime::local_browser_vision_kleinhirn_upgrade_available;
 use crate::brain_runtime::local_kleinhirn_upgrade_available;
 use crate::runtime_db::BiosDialogueEntry;
@@ -72,6 +73,7 @@ pub struct ContextPackage {
     pub skill_system: ContextSkillSystemSummary,
     pub context_governance: ContextGovernanceSummary,
     pub self_preservation_stage: ContextSelfPreservationStage,
+    pub host_survival: ContextHostSurvivalSummary,
     pub focus_state: ContextFocusSnapshot,
     pub owner_calibration_summary: Option<String>,
     pub learning_summaries: ContextLearningSummaryBlock,
@@ -197,6 +199,17 @@ pub struct ContextSelfPreservationStage {
     pub guardrails_enabled: bool,
     pub agent_may_relax_bootstrap_guards: bool,
     pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextHostSurvivalSummary {
+    pub disk_status: String,
+    pub disk_mount_point: String,
+    pub disk_available_gb: Option<u64>,
+    pub disk_warning_floor_gb: u64,
+    pub disk_critical_floor_gb: u64,
+    pub operating_rule: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -373,6 +386,7 @@ pub fn prepare_context_package(
         negative: load_memory_summary(paths, "learning_negative")?,
     };
     let people_working_set = load_memory_summary(paths, "people_working_set")?;
+    let disk_headroom = inspect_runtime_disk_headroom(paths).ok();
 
     let keywords = extract_keywords(&format!("{} {}", task.title, task.detail));
     let boot_entries = select_boot_entries(load_boot_entries(paths), mode.recent_boot_entries);
@@ -511,6 +525,31 @@ pub fn prepare_context_package(
             agent_may_relax_bootstrap_guards: self_preservation_state
                 .agent_may_relax_bootstrap_guards,
             notes: self_preservation_state.notes,
+        },
+        host_survival: ContextHostSurvivalSummary {
+            disk_status: disk_headroom
+                .as_ref()
+                .map(|status| status.status.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            disk_mount_point: disk_headroom
+                .as_ref()
+                .map(|status| status.mount_point.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            disk_available_gb: disk_headroom.as_ref().map(|status| status.available_gb),
+            disk_warning_floor_gb: disk_headroom
+                .as_ref()
+                .map(|status| status.warning_floor_gb)
+                .unwrap_or(12),
+            disk_critical_floor_gb: disk_headroom
+                .as_ref()
+                .map(|status| status.critical_floor_gb)
+                .unwrap_or(6),
+            operating_rule: disk_headroom
+                .as_ref()
+                .map(|status| status.note())
+                .unwrap_or_else(|| {
+                    "If host disk headroom cannot be observed right now, treat storage survival as an open risk and verify it before heavy builds, model downloads or reinstalls.".to_string()
+                }),
         },
         focus_state: ContextFocusSnapshot {
             mode: focus.mode,
@@ -663,6 +702,7 @@ pub fn prepare_context_package(
             "Wenn ein Installation-Bootstrap im Kontext liegt, behandle ihn als echte Owner-/Installer-Vorgabe fuer die fruehe Kommunikationsfaehigkeit und Kanalplanung.".to_string(),
             "Repo-Skills unter .agents/skills sind deine persistente Selbst-Erweiterungsflaeche. Wenn du dort einen neuen Skill schreibst, taucht er im naechsten Turn wieder im Skill-Katalog auf.".to_string(),
             "Wenn du ein neues Tool baust, schreibe zusaetzlich einen Operations-Skill mit den konkreten Kommandos, Pfaden und Fehlergrenzen fuer spaetere Turns.".to_string(),
+            "hostSurvival gibt dir den aktuellen Disk-Headroom als CTO-Signal. Nutze ihn agentisch: wenn Speicher knapp wird, priorisiere bounded Inspektion, Kapazitaetsplanung und sichere Aufraeumarbeit selbst, statt blind weiter zu expandieren.".to_string(),
             "learningSummaries ist dein verdichtetes High-Level-Gedaechtnis. Nutze relevantLearningEntries, wenn du die Details eines frueheren Learnings wieder konkret anwenden musst.".to_string(),
             "peopleWorkingSet und relevantPeople halten hochverdichtete Personenpfade, Gespraechsnotizen und Mail-Referenzen bereit, damit du Menschen nicht wie stateless Tickets behandelst.".to_string(),
             "pendingProactiveContacts sind nur Entwuerfe oder Review-Faelle. Behaupte nie, dass ein proaktiver Vorschlag bereits versendet wurde, solange keine gesonderte Ausspielung stattgefunden hat.".to_string(),

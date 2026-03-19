@@ -4,6 +4,7 @@ use crate::agentic::run_agentic_task_once;
 use crate::agentic::probe_kleinhirn_health;
 use crate::agentic::should_run_agentic_loop;
 use crate::brain_runtime::apply_recommended_browser_vision_kleinhirn_upgrade;
+use crate::brain_runtime::attempt_kleinhirn_runtime_repair;
 use crate::brain_runtime::apply_targeted_kleinhirn_upgrade;
 use crate::brain_runtime::extract_requested_local_kleinhirn_model;
 use crate::brain_runtime::grosshirn_runtime_configured;
@@ -46,6 +47,7 @@ use crate::runtime_db::register_loop_incident;
 use crate::runtime_db::recover_orphaned_active_turns;
 use crate::runtime_db::refresh_task_grosshirn_boost;
 use crate::runtime_db::release_task_grosshirn_boost;
+use crate::runtime_db::resolve_loop_incident;
 use crate::runtime_db::reprioritize_tasks;
 use crate::runtime_db::requeue_task;
 use crate::runtime_db::set_agent_mode;
@@ -260,6 +262,34 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                         true,
                         true,
                     );
+                    match attempt_kleinhirn_runtime_repair(&paths) {
+                        Ok(repair_note) => {
+                            let _ = resolve_loop_incident(
+                                &paths,
+                                "kleinhirn_unavailable",
+                                &repair_note,
+                            );
+                            let _ = record_memory(
+                                &paths,
+                                "self_preservation",
+                                "Kernel self-repair stellte das Kleinhirn wieder her",
+                                &repair_note,
+                                "kleinhirn_runtime_self_repair",
+                            );
+                            let _ = set_agent_mode(
+                                &paths,
+                                "self_preservation",
+                                None,
+                                "",
+                                &repair_note,
+                            );
+                        }
+                        Err(repair_err) => {
+                            eprintln!(
+                                "kleinhirn runtime self-repair failed after periodic probe failure: {repair_err}"
+                            );
+                        }
+                    }
                     eprintln!("kleinhirn health probe failed: {detail}");
                 }
             }

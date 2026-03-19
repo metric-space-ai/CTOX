@@ -14,6 +14,7 @@ use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
@@ -57,6 +58,51 @@ struct StartupCalibrationCandidate {
 }
 
 const KLEINHIRN_TRANSITION_GRACE_SECS: u64 = 600;
+const RUNTIME_DISK_WARNING_FLOOR_GB: u64 = 12;
+const RUNTIME_DISK_CRITICAL_FLOOR_GB: u64 = 6;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeDiskHeadroomStatus {
+    pub mount_point: String,
+    pub available_gb: u64,
+    pub warning_floor_gb: u64,
+    pub critical_floor_gb: u64,
+    pub status: String,
+}
+
+impl RuntimeDiskHeadroomStatus {
+    pub fn still_low(&self) -> bool {
+        self.available_gb < self.warning_floor_gb
+    }
+
+    pub fn is_critical(&self) -> bool {
+        self.available_gb < self.critical_floor_gb
+    }
+
+    pub fn note(&self) -> String {
+        let guidance = if self.is_critical() {
+            "Treat host survival as urgent CTO work: stop growth-heavy actions, inspect the largest safe-to-delete build or cache artifacts and reclaim space before expanding again."
+        } else if self.still_low() {
+            "Do not expand blindly. Prefer bounded inspection of large artifacts, model caches and build outputs before attempting heavy new installs or model switches."
+        } else {
+            "Disk headroom is currently not your bottleneck, but keep it in mind before large local model or build actions."
+        };
+        format!(
+            "Host disk headroom on {} is {}GB. Warning floor is {}GB and critical floor is {}GB. {}",
+            self.mount_point,
+            self.available_gb,
+            self.warning_floor_gb,
+            self.critical_floor_gb,
+            guidance,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DiskFreeSpaceSnapshot {
+    available_kb: u64,
+    mount_point: String,
+}
 
 pub fn load_kleinhirn_runtime_snapshot(paths: &Paths) -> Option<KleinhirnRuntimeSnapshot> {
     let env_map = load_kleinhirn_env_map(paths).ok()?;
@@ -65,6 +111,47 @@ pub fn load_kleinhirn_runtime_snapshot(paths: &Paths) -> Option<KleinhirnRuntime
         runtime_model: env_map.get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL").cloned(),
         official_label: env_map.get("CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL").cloned(),
         adapter: env_map.get("CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER").cloned(),
+    })
+}
+
+pub fn attempt_kleinhirn_runtime_repair(paths: &Paths) -> anyhow::Result<String> {
+    let snapshot = load_kleinhirn_runtime_snapshot(paths).unwrap_or_default();
+    let runtime_model = snapshot
+        .runtime_model
+        .clone()
+        .or(snapshot.policy_model.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let label = snapshot
+        .official_label
+        .clone()
+        .unwrap_or_else(|| runtime_model.clone());
+
+    restart_kleinhirn_runtime(paths)
+        .and_then(|_| wait_for_kleinhirn_startup_ready(paths))
+        .and_then(|_| enforce_kleinhirn_ready(paths))?;
+
+    Ok(format!(
+        "Kernel self-repair restarted the local kleinhirn runtime and restored READY for {} ({}).",
+        label, runtime_model
+    ))
+}
+
+pub fn inspect_runtime_disk_headroom(paths: &Paths) -> anyhow::Result<RuntimeDiskHeadroomStatus> {
+    let snapshot = free_disk_space_for_path(&paths.root)?;
+    let available_gb = snapshot.available_kb / 1024 / 1024;
+    let status = if available_gb < RUNTIME_DISK_CRITICAL_FLOOR_GB {
+        "critical"
+    } else if available_gb < RUNTIME_DISK_WARNING_FLOOR_GB {
+        "warning"
+    } else {
+        "healthy"
+    };
+    Ok(RuntimeDiskHeadroomStatus {
+        mount_point: snapshot.mount_point,
+        available_gb,
+        warning_floor_gb: RUNTIME_DISK_WARNING_FLOOR_GB,
+        critical_floor_gb: RUNTIME_DISK_CRITICAL_FLOOR_GB,
+        status: status.to_string(),
     })
 }
 
@@ -362,7 +449,7 @@ fn apply_selected_kleinhirn_upgrade(
         KLEINHIRN_TRANSITION_GRACE_SECS,
     )?;
 
-    if let Err(err) = prefetch_selected_model_snapshot(selected) {
+    if let Err(err) = prefetch_selected_model_snapshot(paths, selected) {
         clear_kleinhirn_transition_state(paths);
         return Err(err);
     }
@@ -434,7 +521,7 @@ fn apply_selected_kleinhirn_upgrade(
     }
 }
 
-fn prefetch_selected_model_snapshot(selected: &BrainModel) -> anyhow::Result<()> {
+fn prefetch_selected_model_snapshot(_paths: &Paths, selected: &BrainModel) -> anyhow::Result<()> {
     let runtime_model = selected
         .runtime_model_id
         .clone()
@@ -467,6 +554,34 @@ snapshot_download(repo_id=repo_id, resume_download=True)
     }
 
     Ok(())
+}
+
+fn free_disk_space_for_path(path: &Path) -> anyhow::Result<DiskFreeSpaceSnapshot> {
+    let output = Command::new("df")
+        .arg("-Pk")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .with_context(|| format!("failed to inspect free disk space for {}", path.display()))?;
+    if !output.status.success() {
+        anyhow::bail!("df -Pk failed for {}", path.display());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let line = stdout
+        .lines()
+        .nth(1)
+        .ok_or_else(|| anyhow::anyhow!("df output for {} was empty", path.display()))?;
+    let columns: Vec<&str> = line.split_whitespace().collect();
+    if columns.len() < 6 {
+        anyhow::bail!("unexpected df output while inspecting {}", path.display());
+    }
+    Ok(DiskFreeSpaceSnapshot {
+        available_kb: columns[3]
+            .parse::<u64>()
+            .with_context(|| format!("failed to parse free disk space for {}", path.display()))?,
+        mount_point: columns[5].to_string(),
+    })
 }
 
 fn mistralrs_build_supports_feature(feature: &str) -> bool {
