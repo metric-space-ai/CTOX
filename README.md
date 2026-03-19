@@ -6,25 +6,27 @@ Diese README beschreibt den aktuellen Implementierungsstand des Repos, nicht nur
 
 ## Installation
 
-Der aktuelle Installationspfad ist bereits im Repo vorhanden:
+Fuer eine Ubuntu-24-Konsole gibt es jetzt einen echten Einzeiler, der den CTO-Agent in `~/cto-agent` klont oder aktualisiert, den Linux-Installer startet, die User-Services einrichtet und danach automatisch in den Attach-/Infinity-Loop wechselt:
+
+```sh
+bash -lc "$(curl -fsSL https://raw.githubusercontent.com/metric-space-ai/CTO-Agent/main/scripts/install_cto_agent_remote.sh)"
+```
+
+Wichtig dazu:
+
+- Der Einzeiler ist absichtlich **nicht** als `curl | sh` dokumentiert, damit der nachgelagerte Installer interaktiv bleibt und `install-bootstrap-tui` plus Auto-Attach nicht an einem verlorenen TTY scheitern.
+- Standardziel ist `~/cto-agent`. Das laesst sich bei Bedarf ueber `CTO_AGENT_INSTALL_DIR=/pfad` vor dem Einzeiler aendern.
+- Der Bootstrap ist fuer Linux mit `apt-get`, `sudo` und `systemd --user` ausgelegt; das ist der vorgesehene Ubuntu-24-Pfad.
+
+Der repo-lokale Installationspfad bleibt:
 
 ```sh
 sh scripts/install_cto_agent.sh
 ```
 
-Wichtig dazu:
-
 - Dieser Installer ist aktuell auf einen Linux-Host mit `systemd --user` als Always-on-Ziel ausgelegt.
 - Er baut den Rust-Host, initialisiert Contracts, TLS und SQLite, fuehrt optional das Kommunikations-Bootstrap-TUI aus, installiert das lokale Kleinhirn, richtet User-Services ein und startet danach den Attach-Pfad.
 - Fuer den echten Always-on-Betrieb sind `systemctl --user` und nach Moeglichkeit `loginctl enable-linger` erforderlich; das richtet `scripts/install_linux_user_services.sh` ein bzw. prueft es.
-
-Wenn das Repo spaeter auf GitHub liegt, ist der sauberste One-Liner nicht `curl | sh`, sondern ein reproduzierbarer Clone-Install:
-
-```sh
-git clone https://github.com/metric-space-ai/CTO-Agent.git cto-agent && cd cto-agent && sh scripts/install_cto_agent.sh
-```
-
-Wenn unbedingt ein Raw-One-Liner gewuenscht ist, sollte er auf einen getaggten Release oder Commit gepinnt werden, nicht auf bewegliches `main`.
 
 ## Kurzbild
 
