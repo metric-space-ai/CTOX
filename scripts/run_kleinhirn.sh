@@ -12,11 +12,42 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
+prepend_compatible_cuda_runtime() {
+  if [ "$(uname -s)" != "Linux" ]; then
+    return
+  fi
+
+  driver_cuda_major="$(nvidia-smi 2>/dev/null | sed -n 's/.*CUDA Version: \([0-9][0-9]*\)\..*/\1/p' | head -n 1)"
+  if [ -z "$driver_cuda_major" ]; then
+    return
+  fi
+
+  for candidate in \
+    "/usr/local/cuda-${driver_cuda_major}/targets/x86_64-linux/lib" \
+    "/usr/local/cuda-${driver_cuda_major}/lib64"
+  do
+    if [ ! -d "$candidate" ]; then
+      continue
+    fi
+    case ":${LD_LIBRARY_PATH:-}:" in
+      *":$candidate:"*)
+        return
+        ;;
+      *)
+        export LD_LIBRARY_PATH="$candidate${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+        return
+        ;;
+    esac
+  done
+}
+
 : "${CTO_AGENT_KLEINHIRN_MODEL:?missing CTO_AGENT_KLEINHIRN_MODEL}"
 : "${CTO_AGENT_KLEINHIRN_PORT:?missing CTO_AGENT_KLEINHIRN_PORT}"
 : "${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:=$CTO_AGENT_KLEINHIRN_MODEL}"
 : "${CTO_AGENT_KLEINHIRN_SERVER_IMPL:=mistralrs}"
 : "${CTO_AGENT_KLEINHIRN_ARCH:=}"
+
+prepend_compatible_cuda_runtime
 
 if [ -n "${CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES:-}" ]; then
   export CUDA_VISIBLE_DEVICES="$CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"
