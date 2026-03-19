@@ -52,6 +52,7 @@ pub struct AgenticRunResult {
     pub proactive_contact_validation: Option<ProactiveContactValidationDraft>,
     pub used_grosshirn: bool,
     pub fell_back_to_kleinhirn: bool,
+    pub retriable_local_failure: bool,
     pub model_usage: Option<ModelUsageMetrics>,
 }
 
@@ -81,6 +82,7 @@ impl AgenticRunResult {
             proactive_contact_validation: None,
             used_grosshirn: false,
             fell_back_to_kleinhirn: false,
+            retriable_local_failure: false,
             model_usage: None,
         }
     }
@@ -164,6 +166,7 @@ struct ModelTarget {
     adapter: String,
     brain_tier: String,
     source_label: String,
+    reasoning_effort: String,
 }
 
 #[derive(Debug, Clone)]
@@ -211,7 +214,54 @@ pub fn run_agentic_task_once(
 
     let system_prompt = build_system_prompt();
     let prompt_plan = build_prompt_plan(paths, reason, task, &system_prompt, &context_block)?;
-    match post_model_request_with_fallback(paths, &resolved, &system_prompt, &prompt_plan.user_prompt) {
+    let result = run_agentic_task_once_with_resolved_targets(
+        paths,
+        reason,
+        task,
+        &system_prompt,
+        &context_block,
+        &prompt_plan,
+        &resolved,
+    )?;
+    if let Some(recovery_targets) =
+        resolve_one_turn_grosshirn_recovery_targets(paths, &resolved, &result)?
+    {
+        let _ = record_resource_status(
+            paths,
+            "agentic_loop",
+            "grosshirn_recovery",
+            "activated",
+            &format!(
+                "Task #{} {} used one-turn grosshirn recovery after retriable local failure.",
+                task.id, task.title
+            ),
+        );
+        let recovery_plan = build_prompt_plan(paths, reason, task, &system_prompt, &context_block)?;
+        let recovered = run_agentic_task_once_with_resolved_targets(
+            paths,
+            reason,
+            task,
+            &system_prompt,
+            &context_block,
+            &recovery_plan,
+            &recovery_targets,
+        )?;
+        return Ok(annotate_one_turn_grosshirn_recovery(recovered));
+    }
+    Ok(result)
+}
+
+fn run_agentic_task_once_with_resolved_targets(
+    paths: &Paths,
+    reason: &str,
+    task: &TaskRecord,
+    system_prompt: &str,
+    context_block: &str,
+    prompt_plan: &PromptPlan,
+    resolved: &ResolvedTargets,
+) -> anyhow::Result<AgenticRunResult> {
+    let target = resolved.primary.clone();
+    match post_model_request_with_fallback(paths, resolved, system_prompt, &prompt_plan.user_prompt) {
         Ok(response) => {
             let (used_target, response) = response;
             let content = match require_model_text_output(&used_target, &response) {
@@ -226,7 +276,7 @@ pub fn run_agentic_task_once(
                         &detail,
                     )?;
                     return Ok(build_empty_text_retry_result(
-                        &resolved,
+                        resolved,
                         &used_target,
                         &response,
                         &detail,
@@ -236,6 +286,7 @@ pub fn run_agentic_task_once(
                 }
                 Err(err) => return Err(err),
             };
+            let retriable_local_failure = looks_like_incomplete_json_output(&content);
             let parsed = parse_agent_output(&content);
             let result = AgenticRunResult {
                 status: "ok".to_string(),
@@ -262,10 +313,10 @@ pub fn run_agentic_task_once(
                 used_grosshirn: used_target.brain_tier == "grosshirn",
                 fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
                     && used_target.brain_tier == "kleinhirn",
+                retriable_local_failure,
                 model_usage: extract_model_usage(&used_target, &response),
             };
-            let result =
-                normalize_grosshirn_activation_result(task, &resolved, &used_target, result);
+            let result = normalize_grosshirn_activation_result(task, resolved, &used_target, result);
             record_resource_status(
                 paths,
                 "agentic_loop",
@@ -288,7 +339,7 @@ pub fn run_agentic_task_once(
                     &detail,
                 );
                 return Ok(build_endpoint_retry_result(
-                    &resolved,
+                    resolved,
                     &target,
                     &detail,
                     "Modellendpunkt lieferte keinen auswertbaren Text; bounded Retry statt Hard-Block.",
@@ -302,13 +353,13 @@ pub fn run_agentic_task_once(
                     paths,
                     reason,
                     task,
-                    &system_prompt,
-                    &context_block,
+                    system_prompt,
+                    context_block,
                 )?;
                 match post_model_request_with_fallback(
                     paths,
-                    &resolved,
-                    &system_prompt,
+                    resolved,
+                    system_prompt,
                     &retry_plan.user_prompt,
                 ) {
                     Ok(response) => {
@@ -325,7 +376,7 @@ pub fn run_agentic_task_once(
                                     &detail,
                                 );
                                 return Ok(build_empty_text_retry_result(
-                                    &resolved,
+                                    resolved,
                                     &used_target,
                                     &response,
                                     &detail,
@@ -335,6 +386,7 @@ pub fn run_agentic_task_once(
                             }
                             Err(err) => return Err(err),
                         };
+                        let retriable_local_failure = looks_like_incomplete_json_output(&content);
                         let parsed = parse_agent_output(&content);
                         let result = AgenticRunResult {
                             status: "ok".to_string(),
@@ -363,14 +415,11 @@ pub fn run_agentic_task_once(
                             used_grosshirn: used_target.brain_tier == "grosshirn",
                             fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
                                 && used_target.brain_tier == "kleinhirn",
+                            retriable_local_failure,
                             model_usage: extract_model_usage(&used_target, &response),
                         };
-                        let result = normalize_grosshirn_activation_result(
-                            task,
-                            &resolved,
-                            &used_target,
-                            result,
-                        );
+                        let result =
+                            normalize_grosshirn_activation_result(task, resolved, &used_target, result);
                         record_resource_status(
                             paths,
                             "agentic_loop",
@@ -398,7 +447,7 @@ pub fn run_agentic_task_once(
                                 &retry_detail,
                             );
                             return Ok(build_endpoint_retry_result(
-                                &resolved,
+                                resolved,
                                 &target,
                                 &retry_detail,
                                 "Modellendpunkt lieferte keinen auswertbaren Text; Repriorisierung statt Hard-Block.",
@@ -446,6 +495,7 @@ pub fn run_agentic_task_once(
                             proactive_contact_validation: None,
                             used_grosshirn: false,
                             fell_back_to_kleinhirn: false,
+                            retriable_local_failure: false,
                             model_usage: None,
                         });
                     }
@@ -481,6 +531,7 @@ pub fn run_agentic_task_once(
                 proactive_contact_validation: None,
                 used_grosshirn: false,
                 fell_back_to_kleinhirn: false,
+                retriable_local_failure: false,
                 model_usage: None,
             })
         }
@@ -1073,6 +1124,16 @@ fn build_emergency_retry_prompt_plan(
     })
 }
 
+fn sanitize_reasoning_effort(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "minimal" => "minimal",
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        _ => "high",
+    }
+}
+
 fn build_chat_payload(model_id: &str, system_prompt: &str, user_prompt: &str) -> Value {
     serde_json::json!({
         "model": model_id,
@@ -1086,7 +1147,12 @@ fn build_chat_payload(model_id: &str, system_prompt: &str, user_prompt: &str) ->
     })
 }
 
-fn build_responses_payload(model_id: &str, system_prompt: &str, user_prompt: &str) -> Value {
+fn build_responses_payload(
+    model_id: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    reasoning_effort: &str,
+) -> Value {
     serde_json::json!({
         "model": model_id,
         "instructions": system_prompt,
@@ -1108,34 +1174,48 @@ fn build_responses_payload(model_id: &str, system_prompt: &str, user_prompt: &st
         "store": false,
         "stream": false,
         "include": [],
+        "reasoning": {
+            "effort": sanitize_reasoning_effort(reasoning_effort)
+        },
         "text": {
             "verbosity": "low"
         }
     })
 }
 
-fn build_gpt_oss_harmony_prompt(system_prompt: &str, user_prompt: &str) -> String {
+fn build_gpt_oss_harmony_prompt(
+    system_prompt: &str,
+    user_prompt: &str,
+    reasoning_effort: &str,
+) -> String {
     let current_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let reasoning_effort = sanitize_reasoning_effort(reasoning_effort);
     format!(
         "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\n\
 Knowledge cutoff: 2024-06\n\
 Current date: {current_date}\n\n\
-Reasoning: low\n\n\
+Reasoning: {reasoning_effort}\n\n\
 # Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|>\
 <|start|>developer<|message|># Instructions\n\n\
 {system_prompt}<|end|>\
 <|start|>user<|message|>{user_prompt}<|end|>\
 <|start|>assistant<|channel|>final<|message|>",
         current_date = current_date,
+        reasoning_effort = reasoning_effort,
         system_prompt = system_prompt.trim(),
         user_prompt = user_prompt.trim(),
     )
 }
 
-fn build_gpt_oss_completion_payload(model_id: &str, system_prompt: &str, user_prompt: &str) -> Value {
+fn build_gpt_oss_completion_payload(
+    model_id: &str,
+    system_prompt: &str,
+    user_prompt: &str,
+    reasoning_effort: &str,
+) -> Value {
     serde_json::json!({
         "model": model_id,
-        "prompt": build_gpt_oss_harmony_prompt(system_prompt, user_prompt),
+        "prompt": build_gpt_oss_harmony_prompt(system_prompt, user_prompt, reasoning_effort),
         "max_tokens": 384,
         "temperature": 0.0,
         "stream": false
@@ -1158,9 +1238,19 @@ fn uses_responses_adapter(target: &ModelTarget) -> bool {
 
 fn build_model_payload(target: &ModelTarget, system_prompt: &str, user_prompt: &str) -> Value {
     if uses_mistralrs_gpt_oss_completion_adapter(target) {
-        build_gpt_oss_completion_payload(&target.model_id, system_prompt, user_prompt)
+        build_gpt_oss_completion_payload(
+            &target.model_id,
+            system_prompt,
+            user_prompt,
+            &target.reasoning_effort,
+        )
     } else if uses_responses_adapter(target) {
-        build_responses_payload(&target.model_id, system_prompt, user_prompt)
+        build_responses_payload(
+            &target.model_id,
+            system_prompt,
+            user_prompt,
+            &target.reasoning_effort,
+        )
     } else {
         build_chat_payload(&target.model_id, system_prompt, user_prompt)
     }
@@ -1350,6 +1440,7 @@ fn resolve_kleinhirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
             adapter,
             brain_tier: "kleinhirn".to_string(),
             source_label: format!("local kleinhirn {}", official_label),
+            reasoning_effort: selected.reasoning_effort.clone(),
         }));
     }
 
@@ -1366,6 +1457,7 @@ fn resolve_kleinhirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
             adapter: adapter.clone(),
             brain_tier: "kleinhirn".to_string(),
             source_label: format!("local kleinhirn {}", official_label),
+            reasoning_effort: selected.reasoning_effort.clone(),
         };
         if probe_kleinhirn_endpoint(&probe_target).is_ok() {
             return Ok(Some(ModelTarget {
@@ -1375,6 +1467,7 @@ fn resolve_kleinhirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
                 adapter,
                 brain_tier: "kleinhirn".to_string(),
                 source_label: format!("local kleinhirn {}", official_label),
+                reasoning_effort: selected.reasoning_effort.clone(),
             }));
         }
     }
@@ -1458,6 +1551,7 @@ fn resolve_grosshirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
         adapter,
         brain_tier: "grosshirn".to_string(),
         source_label: format!("external grosshirn {}", default_candidate.official_label),
+        reasoning_effort: default_candidate.reasoning_effort.clone(),
     }))
 }
 
@@ -2017,6 +2111,7 @@ fn build_empty_text_retry_result(
         used_grosshirn: used_target.brain_tier == "grosshirn",
         fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
             && used_target.brain_tier == "kleinhirn",
+        retriable_local_failure: used_target.brain_tier == "kleinhirn",
         model_usage: extract_model_usage(used_target, response),
     }
 }
@@ -2053,8 +2148,53 @@ fn build_endpoint_retry_result(
         used_grosshirn: target.brain_tier == "grosshirn",
         fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
             && target.brain_tier == "kleinhirn",
+        retriable_local_failure: target.brain_tier == "kleinhirn",
         model_usage: None,
     }
+}
+
+fn resolve_one_turn_grosshirn_recovery_targets(
+    paths: &Paths,
+    resolved: &ResolvedTargets,
+    result: &AgenticRunResult,
+) -> anyhow::Result<Option<ResolvedTargets>> {
+    if !result.retriable_local_failure
+        || result.used_grosshirn
+        || result.fell_back_to_kleinhirn
+        || resolved.primary.brain_tier != "kleinhirn"
+        || resolved.fallback.is_some()
+        || !crate::runtime_db::grosshirn_boost_available(paths)
+    {
+        return Ok(None);
+    }
+    let Some(grosshirn) = resolve_grosshirn_target(paths)? else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedTargets {
+        primary: grosshirn,
+        fallback: Some(resolved.primary.clone()),
+    }))
+}
+
+fn annotate_one_turn_grosshirn_recovery(mut result: AgenticRunResult) -> AgenticRunResult {
+    let summary_suffix = " One-turn Grosshirn-Recovery wurde versucht.";
+    let note = "Kernel emergency recovery routed this task once through Grosshirn after a retriable local structured-output or empty-text failure.";
+    match result.checkpoint_summary.as_mut() {
+        Some(summary) if !summary.contains("One-turn Grosshirn-Recovery") => {
+            summary.push_str(summary_suffix);
+        }
+        None => result.checkpoint_summary = Some(summary_suffix.trim().to_string()),
+        _ => {}
+    }
+    match result.checkpoint_detail.as_mut() {
+        Some(detail) if !detail.contains(note) => {
+            detail.push_str("\n\n");
+            detail.push_str(note);
+        }
+        None => result.checkpoint_detail = Some(note.to_string()),
+        _ => {}
+    }
+    result
 }
 
 struct ParsedOutput {
@@ -3102,6 +3242,7 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             proactive_contact_validation: None,
             used_grosshirn: true,
             fell_back_to_kleinhirn: false,
+            retriable_local_failure: false,
             model_usage: None,
         };
 
@@ -3144,6 +3285,47 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
     }
 
     #[test]
+    fn gpt_oss_prompt_uses_configured_reasoning_effort() {
+        let prompt = build_gpt_oss_harmony_prompt("system", "user", "high");
+        assert!(prompt.contains("Reasoning: high"));
+    }
+
+    #[test]
+    fn retriable_local_failure_can_open_one_turn_grosshirn_recovery() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("one_turn_grosshirn_recovery");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+        write_runtime_env(&paths);
+        set_brain_access_mode(&paths, "kleinhirn_plus_grosshirn")?;
+
+        let task = synthetic_task(77);
+        let resolved = resolve_operating_targets(&paths, &task)?
+            .expect("targets should resolve with local runtime");
+        let result = build_endpoint_retry_result(
+            &resolved,
+            &resolved.primary,
+            "http 500 from model endpoint: {\"message\":\"No response received from the model.\"}",
+            "Modellendpunkt lieferte keinen auswertbaren Text; bounded Retry statt Hard-Block.",
+            "Kleinhirn-Endpunkt antwortete nicht verwertbar. Aufgabe wird erneut eingeordnet, statt hart zu blockieren.",
+        );
+        let recovery = resolve_one_turn_grosshirn_recovery_targets(&paths, &resolved, &result)?
+            .expect("grosshirn recovery targets should be available");
+        assert_eq!(recovery.primary.brain_tier, "grosshirn");
+        assert_eq!(
+            recovery.fallback.as_ref().map(|target| target.brain_tier.as_str()),
+            Some("kleinhirn")
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
     fn endpoint_retry_result_stays_retriable() {
         let resolved = ResolvedTargets {
             primary: ModelTarget {
@@ -3153,6 +3335,7 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
                 adapter: "openai".to_string(),
                 brain_tier: "kleinhirn".to_string(),
                 source_label: "local kleinhirn".to_string(),
+                reasoning_effort: "high".to_string(),
             },
             fallback: None,
         };
@@ -3166,5 +3349,6 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         assert_eq!(result.task_status.as_deref(), Some("continue"));
         assert_eq!(result.next_mode.as_deref(), Some("reprioritize"));
         assert!(result.blocked_reason.is_none());
+        assert!(result.retriable_local_failure);
     }
 }
