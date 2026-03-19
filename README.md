@@ -268,12 +268,15 @@ Aktuell wichtige Skills:
 - `browser-capability-bootstrap`: Browser-Arbeit, Trust-Grenzen und Capability-Promotion steuern
 - `communication-client-bootstrap`: Mail-/Chat-/Webhook-Clients bauen, patchen oder ersetzen
 - `cto-origin-history`: Ursprung, Zweck und ehrliche Chronik des CTO-Agenten verankern
+- `host-keyboard-operations`: direkte Owner-Keyboard-Auftraege auf dem Host ueber einen reviewed Skill- und Contract-Pfad ausfuehren
 - `homepage-bootstrap`: Homepage als erste Trust- und Kommunikationsbruecke formen
 - `owner-branding-bootstrap`: sicheren Pfad von Terminal-Bootstrap zu BIOS-Takeover und spaeterem Branding steuern
 - `self-skill-bootstrap`: neue wiederverwendbare Tools als repo-lokale Skills materialisieren
 - `specialist-model-pipeline`: wiederholte Browser-Arbeit in reviewed Spezialisten ueberfuehren
 
 Der Agent ist explizit angehalten, wiederverwendbare neue Faehigkeiten nicht nur ad hoc zu benutzen, sondern als Skill im Repo zu verankern.
+
+Direkte Host-Mutationen aus `owner_interrupt`-Aufgaben, vor allem Keyboard-/Input-Aenderungen, sollen nicht ueber freie Prompt-Improvisation laufen. Dafuer gibt es jetzt den Skill `host-keyboard-operations` plus den Contract `contracts/system/host-keyboard-capability-policy.json`.
 
 ## Kommunikations-Bootstrap
 

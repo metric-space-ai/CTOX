@@ -178,6 +178,11 @@ Der Supervisor prueft jetzt, ob ein laufender Rust-Turn fertig, abgestuerzt oder
 
 Es wird jetzt ausdruecklich festgehalten, dass der Infinity Loop nicht nur gegen Absturz, sondern auch gegen schleichendes Festbeissen gesichert werden muss.
 Der Agent bekommt dafuer eine eigene `loop-safety`-Verfassung mit Failure-Modes wie Prozessabsturz, Turn-Stall, Task-Livelock, Kontextvergiftung, Ressourcenmangel und Queue-Starvation.
+
+## 2026-03-19 - Direkte Host-Keyboard-Aufgaben ueber Skill und Contract
+
+Nachdem direkte Owner-Befehle zur Tastaturumstellung mehrfach an improvisierten Prompt-Pfaden und unzuverlaessigen Tool-Ausgaben gescheitert sind, bekommt dieser Bereich jetzt einen expliziten Repo-Skill und einen reviewed Host-Keyboard-Contract.
+Direkte Keyboard-/Input-Aenderungen sollen damit nicht mehr als freie Shell-Improvisation behandelt werden, sondern ueber einen sichtbaren Skill-, Diagnose- und Verify-Pfad laufen.
 Zusammen mit dieser Verfassung greift im Rust-Supervisor jetzt die erste echte Anti-Livelock-Regel: Wenn ein Task zu oft nur `continue` produziert oder denselben Checkpoint wiederholt, wird er nicht weiter blind fortgesetzt, sondern in Richtung `request_resources` oder harter Blockierung umgelenkt.
 
 ## 2026-03-18 - Owner zuerst, Selbsterhalt direkt danach

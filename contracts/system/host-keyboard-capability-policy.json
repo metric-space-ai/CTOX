@@ -1,0 +1,129 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Give the CTO-Agent a reviewed contract for owner-requested keyboard layout changes on the host so it does not improvise unsupported shell paths.",
+  "appliesWhen": {
+    "taskKinds": [
+      "owner_interrupt"
+    ],
+    "triggerHints": [
+      "keyboard",
+      "layout",
+      "keymap",
+      "tastatur",
+      "deutsch",
+      "german",
+      "setxkbmap",
+      "localectl",
+      "xkb",
+      "loadkeys"
+    ]
+  },
+  "executionModel": {
+    "surface": "codex_command_exec_v1",
+    "allowedToolPaths": [
+      "execCommand",
+      "execSessionAction"
+    ],
+    "requiresBoundedVerification": true,
+    "resultContract": "host_keyboard_change_result_v1"
+  },
+  "capabilities": [
+    {
+      "capabilityId": "keyboard_layout_change",
+      "goal": "Change the requested keyboard layout on the real host and verify the effective result before the task can be marked done.",
+      "inputs": {
+        "required": [
+          "layout"
+        ],
+        "optional": [
+          "variant",
+          "scope"
+        ]
+      },
+      "defaultScope": "active_session",
+      "supportedScopes": [
+        "active_session",
+        "persistent_system",
+        "both"
+      ],
+      "diagnosticOrder": [
+        "Inspect session shape before mutating anything.",
+        "Capture current session keyboard state.",
+        "Choose the mutator that matches the observed host, not the mutator you wish were available."
+      ],
+      "diagnosticCommands": [
+        [
+          "bash",
+          "-lc",
+          "printf '%s\\n' \"$XDG_SESSION_TYPE\" \"$DISPLAY\" \"$XDG_SESSION_ID\""
+        ],
+        [
+          "localectl",
+          "status"
+        ],
+        [
+          "setxkbmap",
+          "-query"
+        ]
+      ],
+      "allowedMutators": [
+        {
+          "commandTemplate": [
+            "setxkbmap",
+            "<layout>"
+          ],
+          "scope": "active_session",
+          "requiresRoot": false,
+          "notes": "Use only when the active graphical session really exposes the XKB/session path you just inspected."
+        },
+        {
+          "commandTemplate": [
+            "localectl",
+            "set-x11-keymap",
+            "<layout>"
+          ],
+          "scope": "persistent_system",
+          "requiresRoot": true,
+          "notes": "Use for persistent X11 keyboard configuration when the host path supports localectl."
+        },
+        {
+          "commandTemplate": [
+            "localectl",
+            "set-keymap",
+            "<layout>"
+          ],
+          "scope": "persistent_system",
+          "requiresRoot": true,
+          "notes": "Use for console keymap when persistent console input matters."
+        }
+      ],
+      "verificationCommands": [
+        [
+          "setxkbmap",
+          "-query"
+        ],
+        [
+          "localectl",
+          "status"
+        ]
+      ],
+      "successEvidence": [
+        "The checkpoint detail states which mutator actually ran.",
+        "The checkpoint detail includes verification output showing the requested layout.",
+        "If only session or only persistent scope changed, the checkpoint detail says so explicitly."
+      ],
+      "failureBoundaries": [
+        "If no supported mutator fits the observed host, do not fabricate one.",
+        "If the task needs privileges that are not currently available, block on that missing precondition instead of claiming completion.",
+        "If verification does not show the requested layout, the task remains in progress or blocked."
+      ],
+      "neverDo": [
+        "Never mark done without verification output.",
+        "Never treat a planned command as evidence.",
+        "Never assume the host uses the same keyboard stack as a previous machine."
+      ]
+    }
+  ],
+  "updatedAt": "2026-03-19T00:00:00+00:00"
+}
