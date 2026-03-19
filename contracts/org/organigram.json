@@ -1,0 +1,17 @@
+{
+  "owner": {
+    "name": "",
+    "email": "",
+    "role": "owner"
+  },
+  "reportsTo": "",
+  "ceo": "",
+  "board": [],
+  "peerCxos": [],
+  "subordinates": {
+    "people": [],
+    "agents": [],
+    "vendors": []
+  },
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}

@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Make browser automation an explicit second main engine beside the CLI/command_exec engine.",
+  "hardGenes": [
+    "The CLI engine remains the system-level and break-glass execution surface.",
+    "The browser engine is a first-class second main engine for real browser work, not a fake page-knowledge shortcut.",
+    "Interactive browser work prefers a real desktop session with Google Chrome; deterministic read-only tasks may run headless.",
+    "Chrome installation and browser-runtime bootstrap are initiated through the CLI engine, not through hidden side channels.",
+    "Browser artifacts stay compact and explicit so the main agent sees results instead of raw browser exhaust by default.",
+    "Visual browser work should prefer a vision-capable local model such as Qwen3.5 instead of relying on GPT-OSS 20B alone."
+  ],
+  "runtimeModel": {
+    "engineId": "chrome_browser_engine_v1",
+    "role": "second_main_engine_beside_cli",
+    "primaryBrowser": "google_chrome",
+    "installViaCliEngine": true,
+    "desktopSessionPreferred": true,
+    "interactiveRequiresDesktop": true,
+    "headlessAllowed": true,
+    "installScript": "scripts/install_browser_engine.sh"
+  },
+  "toolSurface": {
+    "directiveActions": [
+      "install_browser_engine",
+      "dump_dom",
+      "screenshot",
+      "open_url"
+    ],
+    "artifactsDir": "runtime/browser",
+    "notes": [
+      "dump_dom and screenshot run through real Chrome in headless mode.",
+      "open_url is for interactive desktop use and requires a live desktop session.",
+      "The browser_agent subworker and reviewed higher-level browser capabilities sit on top of this engine."
+    ]
+  },
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}

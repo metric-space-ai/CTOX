@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "principle": "Normal context shaping is an agentic capability. The kernel may only intervene when the next LLM call would otherwise physically fail, such as a hard prompt overflow.",
+  "agentControlsNormalContext": true,
+  "historicalResearchAllowed": true,
+  "agentMayQuestionBadCompaction": true,
+  "emergencyCompactionReservedForHardOverflow": true,
+  "normalAgentActions": [
+    "keep raw context when fidelity matters",
+    "compact context deliberately when it improves bounded focus",
+    "mix raw evidence and condensed summaries",
+    "question a suspicious summary or bad compaction result",
+    "request targeted historical research or raw retrieval"
+  ],
+  "emergencyKernelActions": [
+    "shrink only enough to avoid a guaranteed prompt crash",
+    "preserve evidence of the fallback in runtime state",
+    "push the agent to request deliberate re-expansion if important history is missing"
+  ],
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}

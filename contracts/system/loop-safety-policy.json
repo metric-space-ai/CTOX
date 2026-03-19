@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "principle": "The Infinity Loop must never depend on blind repetition. The agent must understand why a task is not progressing and explicitly switch to delegate, request_resources or blocked before livelock forms.",
+  "priorityLaw": "Owner instructions override everything. Directly after that, preserve the life and continuity of the Infinity Loop itself.",
+  "boundedTurnRequired": true,
+  "agentMustUnderstandGuards": true,
+  "continueSameTaskRequiresProgress": true,
+  "requestResourcesWhenStuck": true,
+  "delegateWhenCapable": true,
+  "hardBlockWhenUnproductive": true,
+  "ownerOverridePriorityFloor": 1000,
+  "selfPreservationPriorityFloor": 700,
+  "requestResourcesAfterRunCount": 3,
+  "hardBlockAfterRunCount": 6,
+  "escalateOnSameCheckpointRepeat": true,
+  "guidanceStages": [
+    {
+      "stage": "newborn",
+      "description": "Fresh installation. Training-wheel guards are strong because the agent has little proven capability, few tools and no earned operating trust.",
+      "maxRunCountBeforeSelfPreservationReview": 3,
+      "sameCheckpointRepeatTriggersReview": true,
+      "hardBlockUnproductiveTasks": true,
+      "agentMayRelaxGuards": false
+    },
+    {
+      "stage": "guided",
+      "description": "Still guided, but allowed more room. The agent should increasingly solve its own stuck states instead of being fenced by static thresholds.",
+      "maxRunCountBeforeSelfPreservationReview": 5,
+      "sameCheckpointRepeatTriggersReview": true,
+      "hardBlockUnproductiveTasks": false,
+      "agentMayRelaxGuards": true
+    },
+    {
+      "stage": "adaptive",
+      "description": "The agent is expected to understand and manage self-preservation more than it is fenced by bootstrap heuristics.",
+      "maxRunCountBeforeSelfPreservationReview": 8,
+      "sameCheckpointRepeatTriggersReview": false,
+      "hardBlockUnproductiveTasks": false,
+      "agentMayRelaxGuards": true
+    }
+  ],
+  "failureModes": [
+    {
+      "key": "process_crash",
+      "description": "The Rust daemon or bounded turn crashes outright.",
+      "immediateResponse": "Persist crash state, write a hard-reset debug report when automation notices the failure, and never pretend the task completed.",
+      "recoveryDirection": "Restart process, restore thread state, import the restart report and re-enter via recovery before normal reprioritization."
+    },
+    {
+      "key": "active_turn_stall",
+      "description": "A bounded turn lives too long without clean completion.",
+      "immediateResponse": "Mark loop health as stalled, write a hard-reset debug report on automated restart, and let watchdog recovery intervene.",
+      "recoveryDirection": "Restart the loop hard, inspect the restart report in recovery mode, then resume from checkpoint or re-slice context instead of silently continuing."
+    },
+    {
+      "key": "task_livelock",
+      "description": "The same task keeps returning with no real progress because the current Kleinhirn, tools or workers are insufficient.",
+      "immediateResponse": "Do not continue blindly; escalate to request_resources, delegate or blocked.",
+      "recoveryDirection": "Secure stronger resources, add tools or ask for approval rather than looping on the same bounded step."
+    },
+    {
+      "key": "context_poisoning",
+      "description": "The active context becomes overloaded, contradictory or too stale to think clearly.",
+      "immediateResponse": "Let the agent deliberately question the current context, compact if it wants to, or request targeted historical retrieval. Only use kernel emergency shrinking when the next model call would otherwise hard-overflow.",
+      "recoveryDirection": "Treat compaction and historical re-expansion as agentic work. Keep raw history available, and let the kernel intervene only at the physical crash boundary."
+    },
+    {
+      "key": "resource_starvation",
+      "description": "The agent lacks enough compute, model quality, tools or worker capacity to do useful work.",
+      "immediateResponse": "Enter request_resources or delegate mode rather than overcommitting.",
+      "recoveryDirection": "Actively procure stronger local models, external APIs, workers or reviewed specialist tools."
+    },
+    {
+      "key": "kleinhirn_unavailable",
+      "description": "The local Kleinhirn endpoint stopped answering correctly while the Infinity Loop was still alive.",
+      "immediateResponse": "Mark the loop unhealthy, preserve a debug trail and let watchdog or recovery logic restart the model and agent stack if needed.",
+      "recoveryDirection": "Restore the local model endpoint, import the failure into recovery work and verify READY again before trusting normal work."
+    },
+    {
+      "key": "queue_starvation",
+      "description": "Important interrupts, especially owner requests, are buried under older work.",
+      "immediateResponse": "Reprioritize every cycle and treat owner/system signals as first-class steering events.",
+      "recoveryDirection": "Promote urgent trusted work without throwing away bounded execution discipline."
+    }
+  ],
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}

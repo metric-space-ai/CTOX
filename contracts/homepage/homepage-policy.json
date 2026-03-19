@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "stage": "terminal_first",
+  "templateName": "bootstrap-terminal-bridge",
+  "homepageReady": false,
+  "biosVisible": true,
+  "terminalPrimary": true,
+  "terminalFallbackEnabled": true,
+  "redesignAllowedViaTerminal": true,
+  "redesignAllowedViaBiosChat": true,
+  "currentTitle": "CTO-Agent Terminal Bridge",
+  "currentHeadline": "Der CTO-Agent startet im Terminal und baut sich seinen ersten sichtbaren Kommunikationspfad selbst auf.",
+  "currentIntro": "Diese erste Homepage ist ein veraenderbares Bootstrap-Template. Sie ist noch kein festes Owner-Branding und kein finales Interface.",
+  "communicationNote": "Wenn dir dieser Kommunikationsweg nicht gefaellt, sage es dem Agenten. Er soll die Homepage ueber Skill, Template und Tooling anpassen koennen.",
+  "terminalFallbackNote": "Die Terminal-Ebene bleibt immer die primäre und vollmaechtige Fallback-Stufe.",
+  "ownerBrandingApplied": false,
+  "ownerBrandingLocked": false,
+  "updatedAt": "2026-03-18T07:31:00+00:00"
+}

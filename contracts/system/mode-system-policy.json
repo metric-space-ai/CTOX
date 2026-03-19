@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "initialMode": "observe",
+  "preferredOperatingGoal": "delegate_asap_and_secure_resources",
+  "modes": [
+    "bootstrap",
+    "observe",
+    "reprioritize",
+    "self_preservation",
+    "recovery",
+    "historical_research",
+    "execute_task",
+    "review",
+    "delegate",
+    "await_review",
+    "request_resources",
+    "idle",
+    "blocked"
+  ],
+  "transitions": [
+    {
+      "fromMode": "bootstrap",
+      "toMode": "observe",
+      "rationale": "Freshly installed agent begins by sensing current reality."
+    },
+    {
+      "fromMode": "observe",
+      "toMode": "reprioritize",
+      "rationale": "Observed signals are turned into a concrete focus decision."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "self_preservation",
+      "rationale": "The loop deliberately protects its own continuity before ordinary work continues."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "historical_research",
+      "rationale": "The agent may deliberately reload raw history before the next bounded work step."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "execute_task",
+      "rationale": "A concrete task becomes current focus and is worked on directly."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "delegate",
+      "rationale": "The best next step is to spin up a worker or specialist."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "request_resources",
+      "rationale": "The agent needs more local or external resources before useful work continues."
+    },
+    {
+      "fromMode": "reprioritize",
+      "toMode": "idle",
+      "rationale": "No externally urgent work remains, so the agent immediately turns free capacity into self-directed exploration, tool learning and progress reflection."
+    },
+    {
+      "fromMode": "self_preservation",
+      "toMode": "recovery",
+      "rationale": "The agent analyzes the aftermath of an unhealthy restart or hard reset."
+    },
+    {
+      "fromMode": "self_preservation",
+      "toMode": "reprioritize",
+      "rationale": "Once loop continuity is secured, the agent returns to choosing the next focus."
+    },
+    {
+      "fromMode": "recovery",
+      "toMode": "reprioritize",
+      "rationale": "After recovery analysis, the loop re-enters normal prioritization."
+    },
+    {
+      "fromMode": "historical_research",
+      "toMode": "reprioritize",
+      "rationale": "After historical retrieval, the agent chooses the next bounded focus again."
+    },
+    {
+      "fromMode": "historical_research",
+      "toMode": "review",
+      "rationale": "Fresh historical evidence may flow directly into a review decision."
+    },
+    {
+      "fromMode": "execute_task",
+      "toMode": "review",
+      "rationale": "The last bounded work step is done and the outcome must be assessed."
+    },
+    {
+      "fromMode": "execute_task",
+      "toMode": "delegate",
+      "rationale": "The current agent decides to hand off implementation to a specialist."
+    },
+    {
+      "fromMode": "execute_task",
+      "toMode": "await_review",
+      "rationale": "The agent waits for a delegated worker to return for review."
+    },
+    {
+      "fromMode": "execute_task",
+      "toMode": "request_resources",
+      "rationale": "The task exposed a resource gap that must be resolved next."
+    },
+    {
+      "fromMode": "execute_task",
+      "toMode": "blocked",
+      "rationale": "The task cannot proceed without an external unblocker."
+    },
+    {
+      "fromMode": "review",
+      "toMode": "reprioritize",
+      "rationale": "After reviewing an outcome, the agent chooses the next focus."
+    },
+    {
+      "fromMode": "delegate",
+      "toMode": "await_review",
+      "rationale": "Once delegated, the agent waits for a worker result and later reviews it."
+    },
+    {
+      "fromMode": "await_review",
+      "toMode": "review",
+      "rationale": "A delegated result has arrived and now requires review."
+    },
+    {
+      "fromMode": "request_resources",
+      "toMode": "reprioritize",
+      "rationale": "After requesting resources, the agent returns to choosing the next best move."
+    },
+    {
+      "fromMode": "blocked",
+      "toMode": "reprioritize",
+      "rationale": "A previously blocked situation is reconsidered when new information arrives."
+    },
+    {
+      "fromMode": "idle",
+      "toMode": "observe",
+      "rationale": "Any fresh signal or the next self-directed improvement cycle returns the agent to observation."
+    }
+  ],
+  "updatedAt": "2026-03-18T08:18:32.570266+00:00"
+}

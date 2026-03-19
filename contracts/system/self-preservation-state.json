@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "currentStage": "newborn",
+  "guardrailsEnabled": true,
+  "agentMayRelaxBootstrapGuards": false,
+  "lastHardResetAt": "2026-03-18T10:08:51.361382+00:00",
+  "lastLoopFailureAt": "2026-03-18T10:08:51.361382+00:00",
+  "successfulSelfRecoveries": 0,
+  "notes": "Unclean restart sanitized; recovery required before normal reprioritization.",
+  "updatedAt": "2026-03-18T10:08:51.361382+00:00"
+}

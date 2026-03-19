@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "principle": "The CTO main agent is installed on its own machine and therefore operates unsandboxed. Sandboxing and approval gates are reserved for delegated workers that report back to the CTO agent.",
+  "rootAgent": {
+    "role": "cto_main_agent",
+    "runtimeProfile": "unsandboxed_full_machine_authority",
+    "sandboxEnabled": false,
+    "fullMachineAccess": true,
+    "mayExecuteArbitraryTerminalCommands": true,
+    "mayMutateHostDirectly": true,
+    "approvalRequiredForHighImpactActions": false,
+    "approvalAuthority": "none",
+    "notes": [
+      "The CTO agent is the top-level operating authority on its dedicated host.",
+      "No shell sandbox should block the main agent from repairing, installing, editing or operating the host.",
+      "This freedom applies only to the root CTO agent, not to future worker agents."
+    ]
+  },
+  "delegatedWorkers": {
+    "role": "delegated_worker_or_subagent",
+    "runtimeProfile": "sandboxed_delegate_with_cto_approval",
+    "sandboxEnabled": true,
+    "fullMachineAccess": false,
+    "mayExecuteArbitraryTerminalCommands": true,
+    "mayMutateHostDirectly": false,
+    "approvalRequiredForHighImpactActions": true,
+    "approvalAuthority": "cto_main_agent",
+    "notes": [
+      "Delegated workers should start from a constrained shell and restricted filesystem or process scope.",
+      "When a worker needs broader host mutation, it must request approval from the CTO agent rather than acting alone.",
+      "Sandboxing is kept in the architecture specifically so the CTO agent can later build controlled sub-agents on the same execution base."
+    ]
+  },
+  "escalationRule": "Workers may propose escalations, but only the CTO main agent may grant broader host authority or execute the escalated action on the host.",
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}

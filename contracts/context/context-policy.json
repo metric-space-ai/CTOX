@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "defaultMode": "working",
+  "systemChannels": [
+    "terminal",
+    "attach_terminal",
+    "system_installation"
+  ],
+  "forensicTaskKinds": [
+    "root_trust",
+    "bios_freeze",
+    "owner_branding",
+    "terminal_governance",
+    "communication_governance",
+    "bios_contract",
+    "workspace_repair",
+    "specialist_model_factory",
+    "self_preservation",
+    "recovery",
+    "historical_research"
+  ],
+  "minimalTaskKinds": [
+    "bootstrap_runtime_guard",
+    "bootstrap_supervisor",
+    "resource_census"
+  ],
+  "modes": [
+    {
+      "mode": "minimal",
+      "budgetHint": 900,
+      "recentBootEntries": 1,
+      "recentBiosDialogue": 1,
+      "recentMemoryItems": 2,
+      "recentTaskCheckpoints": 1,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "working",
+      "budgetHint": 1800,
+      "recentBootEntries": 2,
+      "recentBiosDialogue": 3,
+      "recentMemoryItems": 4,
+      "recentTaskCheckpoints": 2,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "forensic",
+      "budgetHint": 3200,
+      "recentBootEntries": 4,
+      "recentBiosDialogue": 5,
+      "recentMemoryItems": 6,
+      "recentTaskCheckpoints": 4,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    }
+  ],
+  "updatedAt": "2026-03-18T08:18:32.570266+00:00"
+}

@@ -1,0 +1,124 @@
+{
+  "version": 1,
+  "status": "bootstrap_active",
+  "purpose": "Controlled release pipeline for turning repeated browser work into a reviewed specialist model or capability without training directly from raw accepted batches.",
+  "inspiredBy": [
+    "local_ai_tunes/references/tool-contracts.md",
+    "local_ai_tunes/references/dataset-crafting-meta-strategy.md"
+  ],
+  "hardGenes": [
+    "The CTO-Agent must not train from raw operational traces directly.",
+    "Accepted rows and final dataset release must stay separate artifacts.",
+    "The deployment target decides the dataset contract: tool-calling browser specialists require transcript-first rows with tools and target turn indices.",
+    "Policy bundle, reviewed capability bundle and evaluation gates must be frozen before promotion."
+  ],
+  "artifactFamilies": [
+    "task_spec",
+    "tool_bundle",
+    "policy_bundle",
+    "accepted_records",
+    "dataset_release",
+    "training_run",
+    "evaluation_report"
+  ],
+  "recipeKinds": [
+    "browser_collection",
+    "browser_action",
+    "pair_generation",
+    "evaluation"
+  ],
+  "jobKinds": [
+    "browser_collection",
+    "browser_action_test",
+    "policy_bundle_release",
+    "pair_generation_probe",
+    "pair_validation",
+    "dataset_release",
+    "training",
+    "evaluation",
+    "tool_bundle_release"
+  ],
+  "stages": [
+    {
+      "id": "task_spec",
+      "goal": "Freeze objective, scope, guardrails, reviewed capability surface and acceptance thresholds."
+    },
+    {
+      "id": "accepted_records",
+      "goal": "Collect and review repeated browser traces or accepted action transcripts without treating them as the final training dataset."
+    },
+    {
+      "id": "dataset_release",
+      "goal": "Convert accepted records into the exact runtime contract required by the deployment target."
+    },
+    {
+      "id": "training_run",
+      "goal": "Train the specialist only from the released dataset artifact and persist lineage."
+    },
+    {
+      "id": "evaluation_report",
+      "goal": "Compare the specialist against the frozen reviewed capability and decide promote, retry or reject."
+    },
+    {
+      "id": "tool_bundle_release",
+      "goal": "Promote only after the specialist or reviewed deterministic worker proves stable."
+    }
+  ],
+  "datasetContract": {
+    "runtimeTarget": "browser_tool_calling_agent",
+    "requiredFields": [
+      "messages",
+      "tools",
+      "target_turn_index"
+    ],
+    "rowRule": "Supervise the next assistant turn, not a bare JSON answer, whenever the deployment target is a browser tool-using specialist."
+  },
+  "postBatchReleaseStep": {
+    "required": true,
+    "conversions": [
+      "raw task outputs into tool-calling transcripts",
+      "accepted batch rows into train/val/test dataset release",
+      "text-only rows into browser-safe transcript rows when the deployment target is browser automation"
+    ]
+  },
+  "trainingRuntimePolicy": {
+    "browserExecution": "always through real browser runtime",
+    "browserTraining": "not in WebGPU browser runtime for this CTO-Agent path",
+    "preferredTrainingLocation": "host_or_network_runtime_outside_browser",
+    "preferredBootstrapTarget": "Qwen3.5-0.8B",
+    "note": "WebGPU browser training is treated as too inefficient for this CTO-Agent production path. The first small-model bootstrap target for repeated browser work is Qwen3.5-0.8B."
+  },
+  "experimentDiscipline": {
+    "championDefinition": "the currently released reviewed path or trained specialist artifact",
+    "challengerDefinition": "a bounded candidate change that must beat or match the champion before promotion",
+    "oneArtifactFamilyPerRound": true,
+    "preferredMutationScopes": [
+      "tool_scripts",
+      "browser_capabilities",
+      "training_rows",
+      "training_config",
+      "bundle_policy"
+    ],
+    "challengerFields": [
+      "candidate_id",
+      "hypothesis",
+      "expected_signal",
+      "mutation_scope"
+    ],
+    "comparisonPreference": "fixed_mini_suite_when_possible",
+    "decisionStates": [
+      "keep",
+      "discard",
+      "park"
+    ],
+    "simplicityBias": "equal_or_better_and_simpler_should_win"
+  },
+  "promotionGates": [
+    "canary quality stable",
+    "no dominant catastrophic failure mode",
+    "dataset release validated",
+    "reviewed capability surface frozen",
+    "evaluation beats or matches the prior path on the target repeated task"
+  ],
+  "updatedAt": "2026-03-19T00:00:00+00:00"
+}

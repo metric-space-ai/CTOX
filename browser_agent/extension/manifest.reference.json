@@ -1,0 +1,33 @@
+{
+  "name": "Local AI Tunes Reference",
+  "description": "Minimal MV3 reference for transformers.js plus ORT-WASM in an offscreen document.",
+  "version": "0.0.1",
+  "manifest_version": 3,
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "bg/service_worker.js",
+    "type": "module"
+  },
+  "permissions": [
+    "offscreen",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://huggingface.co/*",
+    "https://cdn-lfs.huggingface.co/*",
+    "https://cas-bridge.xethub.hf.co/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' https:;"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "vendor/wasm/*"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

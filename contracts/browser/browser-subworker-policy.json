@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Model the Browser Agent as an explicit delegated Chrome-extension worker under the CTO-Agent, with a local bridge, CTO-owned repair authority and a specialist-model factory path for repeated browser work.",
+  "browserAgent": {
+    "workerKind": "browser_agent",
+    "role": "delegated_browser_worker",
+    "purpose": "Run compact real-browser work inside the Chrome-extension loop, prepare coding handoffs for browser defects and open the specialist-model path when a browser task repeats.",
+    "mayRequestCtoRepair": true,
+    "mayPrepareSpecialistTraining": true,
+    "compactArtifactsOnly": true,
+    "escalationTarget": "cto_agent"
+  },
+  "repairAgent": {
+    "workerKind": "repair_agent",
+    "role": "cto_owned_workspace_repair_router",
+    "purpose": "Convert a browser-diagnosed coding handoff into an internal CTO repair task instead of outsourcing root patch authority.",
+    "mayRequestCtoRepair": true,
+    "mayPrepareSpecialistTraining": false,
+    "compactArtifactsOnly": true,
+    "escalationTarget": "cto_agent"
+  },
+  "visionRuntime": {
+    "browserTasksRequireVisionCapableModel": true,
+    "preferredLocalModelFamily": "Qwen3.5 35B A3B",
+    "preferredLocalModelId": "Qwen3.5-35B-A3B",
+    "upgradeAction": "upgrade_local_browser_vision_kleinhirn",
+    "note": "Real browser work that depends on screenshots, visual navigation or UI-state perception should prefer the vision-capable local Qwen3.5 35B runtime over GPT-OSS 20B or non-vision local alternates."
+  },
+  "specialistRuntime": {
+    "preferredSmallModel": "Qwen3.5-0.8B",
+    "datasetContract": "browser_tool_calling_transcript_v1",
+    "acceptedRecordsDir": "runtime/browser/factory/accepted-records",
+    "datasetReleaseDir": "runtime/browser/factory/dataset-releases",
+    "trainingRequestsDir": "runtime/browser/factory/training-requests",
+    "toolBundleDir": "runtime/browser/factory/tool-bundles",
+    "note": "The Browser Agent may prepare repeated-task artifacts for a Qwen3.5-0.8B specialist path from inside its Chrome-extension loop, but the CTO-Agent remains the owner of repair, promotion and final review."
+  },
+  "updatedAt": "2026-03-18T00:00:00+00:00"
+}
