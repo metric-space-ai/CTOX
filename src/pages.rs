@@ -167,6 +167,231 @@ fn layout(title: &str, body: &str) -> String {
     )
 }
 
+fn bios_vanilla_layout(title: &str, body: &str, script: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root {{
+      --bg: #001a8c;
+      --panel: #0024ad;
+      --deep: #00145f;
+      --line: #7d95ea;
+      --text: #eef3ff;
+      --muted: #b8c7ff;
+      --head: #d7d7d7;
+      --head-text: #111;
+      --accent: #ffd95e;
+    }}
+    * {{ box-sizing: border-box; }}
+    html, body {{ height: 100%; }}
+    body {{
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.4 "Courier New", monospace;
+    }}
+    a {{ color: inherit; }}
+    .bios {{
+      min-height: 100%;
+      display: grid;
+      grid-template-rows: auto auto auto 1fr auto;
+    }}
+    .bar, .foot {{
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      padding: 6px 10px;
+    }}
+    .bar {{
+      background: var(--head);
+      color: var(--head-text);
+      border-bottom: 2px solid #000;
+    }}
+    .foot {{
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+    }}
+    .top-links a {{
+      color: var(--head-text);
+      text-decoration: none;
+      margin-left: 12px;
+    }}
+    .flash {{
+      margin: 8px;
+      border: 1px solid var(--line);
+      background: #00104d;
+      color: var(--accent);
+      padding: 10px;
+    }}
+    #tabs {{
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      padding: 8px 8px 0;
+    }}
+    .tab {{
+      border: 1px solid var(--line);
+      border-bottom: 0;
+      background: #1730a5;
+      color: var(--muted);
+      padding: 6px 10px;
+      cursor: pointer;
+      font: inherit;
+    }}
+    .tab.on {{
+      background: var(--panel);
+      color: var(--text);
+    }}
+    .body {{
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      min-height: calc(100vh - 120px);
+      padding: 0 8px 8px;
+    }}
+    .left, .right {{
+      background: var(--panel);
+      border: 1px solid var(--line);
+      padding: 10px;
+      overflow: auto;
+    }}
+    .left {{
+      border-right: 0;
+    }}
+    .pane {{
+      display: none;
+    }}
+    .pane.on {{
+      display: block;
+    }}
+    fieldset {{
+      margin: 0 0 10px;
+      border: 1px solid var(--line);
+      padding: 10px;
+    }}
+    legend {{
+      padding: 0 6px;
+      color: var(--accent);
+    }}
+    label {{
+      display: block;
+      margin: 0 0 8px;
+      color: var(--muted);
+    }}
+    input, textarea, select, button {{
+      width: 100%;
+      font: inherit;
+    }}
+    input, textarea, select {{
+      margin-top: 4px;
+      padding: 6px;
+      color: var(--text);
+      background: var(--deep);
+      border: 1px solid var(--line);
+    }}
+    textarea {{
+      min-height: 82px;
+      resize: vertical;
+    }}
+    input[readonly], textarea[readonly] {{
+      opacity: 0.9;
+    }}
+    button {{
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      background: #1738cb;
+      color: var(--text);
+      cursor: pointer;
+    }}
+    .panel {{
+      background: var(--deep);
+      border: 1px solid #5b74d8;
+      padding: 10px;
+      margin-bottom: 10px;
+    }}
+    .prompt {{
+      color: var(--accent);
+      margin-bottom: 8px;
+    }}
+    .muted {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .chatlog {{
+      background: #00104d;
+      border: 1px solid var(--line);
+      padding: 8px;
+      min-height: 220px;
+      max-height: 340px;
+      overflow: auto;
+      margin-bottom: 8px;
+    }}
+    .msg {{
+      padding: 6px 0;
+      border-bottom: 1px dotted #5e79e2;
+    }}
+    .msg:last-child {{
+      border-bottom: 0;
+    }}
+    .meta {{
+      color: var(--muted);
+      font-size: 12px;
+    }}
+    .tree, .code {{
+      background: #00104d;
+      border: 1px solid var(--line);
+      padding: 10px;
+      white-space: pre-wrap;
+    }}
+    .grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      border: 1px solid #5f7ce6;
+      padding: 6px;
+      vertical-align: top;
+      text-align: left;
+    }}
+    th {{
+      font-weight: normal;
+      color: var(--muted);
+    }}
+    img {{
+      max-width: 100%;
+      border: 1px solid var(--line);
+    }}
+    @media (max-width: 900px) {{
+      .body, .grid {{
+        grid-template-columns: 1fr;
+      }}
+      .left {{
+        border-right: 1px solid var(--line);
+      }}
+    }}
+  </style>
+</head>
+<body>
+{body}
+<script>{script}</script>
+</body>
+</html>"#,
+        title = esc(title),
+        body = body,
+        script = script,
+    )
+}
+
 fn banner(message: Option<&str>) -> String {
     match message {
         Some(msg) if !msg.is_empty() => {
@@ -186,22 +411,43 @@ pub fn home_page(
     model_policy: &ModelPolicy,
     census: &SystemCensus,
     trust: &OwnerTrustSnapshot,
+    dialogue: &[BiosDialogueEntry],
     homepage_revisions: &[HomepageRevisionRecord],
     uploads: &[BiosUploadRecord],
     state: &AgentState,
     browser_state: &BrowserEngineState,
     testimony_count: usize,
 ) -> String {
-    let boot_status = if bios.frozen {
-        "BIOS_FROZEN"
-    } else {
-        "BOOTSTRAP"
-    };
+    let boot_status = if bios.frozen { "BIOS_FROZEN" } else { "BOOTSTRAP" };
     let branded_title = if homepage.owner_branding_applied && !trust.committed_owner_name.is_empty()
     {
         format!("{} for {}", homepage.current_title, trust.committed_owner_name)
     } else {
         homepage.current_title.clone()
+    };
+    let homepage_chat_speaker = if !trust.committed_owner_name.is_empty() {
+        trust.committed_owner_name.as_str()
+    } else if !organigram.owner.name.is_empty() {
+        organigram.owner.name.as_str()
+    } else {
+        "Michael Welsch"
+    };
+    let dialogue_log = if dialogue.is_empty() {
+        r#"<div class="msg"><div class="meta">system</div><div>Noch kein BIOS-Dialog vorhanden.</div></div>"#
+            .to_string()
+    } else {
+        dialogue
+            .iter()
+            .map(|entry| {
+                format!(
+                    r#"<div class="msg"><div class="meta">{created} · {speaker} · Grosshirn {grosshirn}</div><div>{message}</div></div>"#,
+                    created = esc(&entry.created_at),
+                    speaker = esc(&entry.speaker),
+                    grosshirn = if entry.used_grosshirn { "ja" } else { "nein" },
+                    message = esc(&entry.message),
+                )
+            })
+            .collect()
     };
     let revisions_rows = if homepage_revisions.is_empty() {
         r#"<tr><td colspan="5" class="muted">Noch keine Homepage-Revisionen vorhanden.</td></tr>"#
@@ -215,11 +461,7 @@ pub fn home_page(
                     esc(&revision.created_at),
                     esc(&revision.source_channel),
                     esc(&revision.title),
-                    if revision.owner_branding_applied {
-                        "ja"
-                    } else {
-                        "nein"
-                    },
+                    if revision.owner_branding_applied { "ja" } else { "nein" },
                     esc(&revision.notes),
                     esc(&revision.headline),
                 )
@@ -242,14 +484,14 @@ pub fn home_page(
         })
         .collect::<String>();
     let upload_cards = if uploads.is_empty() {
-        r#"<p class="muted">Noch keine Bilder im 1:1 Homepage-/BIOS-Chat hochgeladen.</p>"#
+        r#"<div class="panel"><div class="muted">Noch keine Bilder im 1:1 Homepage-/BIOS-Chat hochgeladen.</div></div>"#
             .to_string()
     } else {
         uploads
             .iter()
             .map(|upload| {
                 format!(
-                    r#"<div class="card"><p><strong>{speaker}</strong> via {channel} am {created}</p><p class="muted">{note}</p><p class="muted">Typ: {mime}</p><img src="{src}" alt="{alt}" style="max-width:100%; border-radius:10px; border:1px solid #d8d1c8;"></div>"#,
+                    r#"<div class="panel"><p><strong>{speaker}</strong> via {channel} am {created}</p><p class="muted">{note}</p><p class="muted">Typ: {mime}</p><p><a href="{src}">{file}</a></p><img src="{src}" alt="{alt}"></div>"#,
                     speaker = esc(&upload.speaker),
                     channel = esc(&upload.source_channel),
                     created = esc(&upload.created_at),
@@ -257,208 +499,303 @@ pub fn home_page(
                     mime = esc(&upload.mime_type),
                     src = esc_attr(&upload.public_path),
                     alt = esc_attr(&upload.file_name),
+                    file = esc(&upload.file_name),
                 )
             })
             .collect()
     };
-    layout(
+    let organigram_tree = format!(
+        "{}\n└─ Reports To: {}\n{}\n{}\n{}",
+        if organigram.owner.name.trim().is_empty() {
+            "Owner unbekannt".to_string()
+        } else {
+            organigram.owner.name.clone()
+        },
+        if organigram.reports_to.trim().is_empty() {
+            "noch offen".to_string()
+        } else {
+            organigram.reports_to.clone()
+        },
+        if organigram.board.is_empty() {
+            "   • Board: noch leer".to_string()
+        } else {
+            organigram
+                .board
+                .iter()
+                .map(|entry| format!("   • Board: {entry}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+        "   └─ CTO-Agent".to_string(),
+        if organigram.subordinates.agents.is_empty() {
+            "      └─ noch keine untergeordneten Agents".to_string()
+        } else {
+            organigram
+                .subordinates
+                .agents
+                .iter()
+                .map(|entry| format!("      └─ {entry}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        },
+    );
+    let footer_right = format!(
+        "Template {} · Phase {} · BIOS sichtbar {} · Loop {}",
+        homepage.template_name,
+        homepage.stage,
+        homepage.bios_visible,
+        state.loop_health
+    );
+    let page_body = format!(
+        r#"<div class="bios">
+  <div class="bar">
+    <div>{title}</div>
+    <div class="top-links">
+      <a href="/">Home</a>
+      <a href="/bios">BIOS</a>
+      <a href="/org">Organigramm</a>
+      <a href="/root-auth">Root Auth</a>
+      <a href="/browser">Browser</a>
+    </div>
+  </div>
+  {banner}
+  <div id="tabs">
+    <button class="tab on" data-tab="main" type="button">Main</button>
+    <button class="tab" data-tab="organigram" type="button">Organigram</button>
+    <button class="tab" data-tab="runtime" type="button">Runtime</button>
+    <button class="tab" data-tab="revisions" type="button">Revisions</button>
+    <button class="tab" data-tab="uploads" type="button">Uploads</button>
+    <button class="tab" data-tab="root" type="button">Root</button>
+  </div>
+  <div class="body">
+    <aside class="left">
+      <div id="left-main" class="pane on">
+        <form method="post" action="/homepage/update">
+          <fieldset>
+            <legend>Homepage Template</legend>
+            <input type="hidden" name="source_channel" value="terminal">
+            <label for="title">Title<input id="title" name="title" value="{raw_title}"></label>
+            <label for="headline">Headline<textarea id="headline" name="headline">{raw_headline}</textarea></label>
+            <label for="intro">Intro<textarea id="intro" name="intro">{raw_intro}</textarea></label>
+            <label for="communication_note">Communication<textarea id="communication_note" name="communication_note">{communication_note_raw}</textarea></label>
+            <label for="terminal_fallback_note">Terminal Fallback<textarea id="terminal_fallback_note" name="terminal_fallback_note">{terminal_fallback_note_raw}</textarea></label>
+            <button type="submit">Homepage-Template speichern</button>
+          </fieldset>
+        </form>
+        <fieldset>
+          <legend>Status</legend>
+          <label>Homepage State<input value="{homepage_stage}" readonly></label>
+          <label>Boot Status<input value="{boot_status}" readonly></label>
+          <label>Brain Access<input value="{brain_access}" readonly></label>
+          <label>Loop Health<input value="{loop_health}" readonly></label>
+          <label>Heartbeat<input value="{heartbeat}" readonly></label>
+        </fieldset>
+      </div>
+      <div id="left-organigram" class="pane">
+        <fieldset>
+          <legend>Organigram</legend>
+          <label>Owner<input value="{owner_name}" readonly></label>
+          <label>Reports To<input value="{reports_to}" readonly></label>
+          <label>Board<textarea readonly>{board}</textarea></label>
+          <label>Subagents<textarea readonly>{sub_agents}</textarea></label>
+        </fieldset>
+      </div>
+      <div id="left-runtime" class="pane">
+        <fieldset>
+          <legend>Runtime</legend>
+          <label>Kleinhirn<input value="{kleinhirn}" readonly></label>
+          <label>Browser Vision<input value="{browser_vision}" readonly></label>
+          <label>Browser Engine<input value="{browser_status}" readonly></label>
+          <label>Chrome<input value="{chrome_binary}" readonly></label>
+          <label>Supervisor<input value="{supervisor_status}" readonly></label>
+        </fieldset>
+        <fieldset>
+          <legend>Policy</legend>
+          <label>Template<input value="{template_name}" readonly></label>
+          <label>Homepage Ready<input value="{homepage_ready}" readonly></label>
+          <label>Redesign via Terminal<input value="{redesign_terminal}" readonly></label>
+          <label>Redesign via BIOS<input value="{redesign_bios}" readonly></label>
+        </fieldset>
+      </div>
+      <div id="left-revisions" class="pane">
+        <fieldset>
+          <legend>Current Contract</legend>
+          <label>Homepage Title<input value="{raw_title}" readonly></label>
+          <label>Headline<textarea readonly>{raw_headline}</textarea></label>
+          <label>Intro<textarea readonly>{raw_intro}</textarea></label>
+        </fieldset>
+      </div>
+      <div id="left-uploads" class="pane">
+        <form method="post" action="/bios/upload" enctype="multipart/form-data">
+          <fieldset>
+            <legend>Upload into 1:1 Chat</legend>
+            <input type="hidden" name="source_channel" value="homepage">
+            <input type="hidden" name="redirect_to" value="/">
+            <label for="homepage_upload_speaker">Speaker<input id="homepage_upload_speaker" name="speaker" value="{homepage_chat_speaker}"></label>
+            <label for="homepage_upload_note">Note<textarea id="homepage_upload_note" name="note" placeholder="Warum ist dieses Bild wichtig und was sollen wir daran besprechen?"></textarea></label>
+            <label for="homepage_upload_image">Bild<input id="homepage_upload_image" name="image" type="file" accept="image/*"></label>
+            <button type="submit">Bild in den 1:1 Chat laden</button>
+          </fieldset>
+        </form>
+      </div>
+      <div id="left-root" class="pane">
+        <form method="post" action="/homepage/branding-lock">
+          <fieldset>
+            <legend>Root / Branding</legend>
+            <label>Superpassword<input value="{root_configured}" readonly></label>
+            <label>BIOS Primary<input value="{bios_primary}" readonly></label>
+            <label>Branding Locked<input value="{branding_locked}" readonly></label>
+            <label for="branding_password">Superpassword zur Root-Verifikation<input id="branding_password" name="password" type="password"></label>
+            <button type="submit">Owner-Branding sperren</button>
+          </fieldset>
+        </form>
+      </div>
+    </aside>
+    <main class="right">
+      <div id="right-main" class="pane on">
+        <div class="panel"><div class="prompt">START HERE: CHAT WITH CTO</div><div class="muted">{communication_note}</div></div>
+        <div class="panel">
+          <table>
+            <tr><th>Homepage</th><td>{title}</td></tr>
+            <tr><th>Owner</th><td>{owner_display}</td></tr>
+            <tr><th>Terminal Fallback</th><td>{terminal_fallback_note}</td></tr>
+            <tr><th>Boot Testimony</th><td>{testimony_count}</td></tr>
+            <tr><th>Desktop / Headless</th><td>{browser_desktop} / {browser_headless}</td></tr>
+          </table>
+        </div>
+        <div class="panel">
+          <form method="post" action="/bios/chat">
+            <label for="homepage_bios_speaker">Sprecher<input id="homepage_bios_speaker" name="speaker" value="{homepage_chat_speaker}"></label>
+            <label for="homepage_bios_message">Nachricht<textarea id="homepage_bios_message" name="message" placeholder="Lass uns das bitte im 1:1 Chat auf der Homepage klaeren."></textarea></label>
+            <button type="submit">In den 1:1 BIOS-Chat wechseln</button>
+          </form>
+        </div>
+        <div class="chatlog">{dialogue_log}</div>
+      </div>
+      <div id="right-organigram" class="pane">
+        <div class="panel">
+          <div class="prompt">ORGANIGRAM PREVIEW</div>
+          <div class="tree">{organigram_tree}</div>
+        </div>
+      </div>
+      <div id="right-runtime" class="pane">
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">RUNTIME SUMMARY</div>
+            <table>
+              <tr><th>Boot</th><td>{boot_status}</td></tr>
+              <tr><th>Supervisor</th><td>{supervisor_status}</td></tr>
+              <tr><th>Loop Health</th><td>{loop_health}</td></tr>
+              <tr><th>Browser</th><td>{browser_status}</td></tr>
+              <tr><th>Heartbeat</th><td>{heartbeat}</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">GENOME / POLICY</div>
+            <div class="code">Immutable genes ({immutable_gene_count}): {immutable_gene_sample}
+
+Adaptive surfaces ({adaptive_surface_count}): {adaptive_surface_sample}</div>
+          </div>
+        </div>
+      </div>
+      <div id="right-revisions" class="pane">
+        <div class="panel">
+          <div class="prompt">HOMEPAGE REVISIONS</div>
+          <table>
+            <tr><th>Zeit</th><th>Quelle</th><th>Titel</th><th>Branding</th><th>Notiz</th></tr>
+            {revisions_rows}
+          </table>
+        </div>
+      </div>
+      <div id="right-uploads" class="pane">
+        <div class="panel"><div class="prompt">UPLOADS IM 1:1 CHAT</div></div>
+        <div class="grid">{upload_cards}</div>
+      </div>
+      <div id="right-root" class="pane">
+        <div class="panel">
+          <div class="prompt">TRUST GATES</div>
+          <table>
+            <tr><th>Aktion</th><th>Kanaele</th><th>Root</th><th>BIOS primary</th><th>Terminal only</th></tr>
+            {action_rows}
+          </table>
+        </div>
+      </div>
+    </main>
+  </div>
+  <div class="foot">
+    <div>Terminal bleibt immer Fallback. BIOS bleibt sichtbar.</div>
+    <div>{footer_right}</div>
+  </div>
+</div>"#,
+        title = esc(&branded_title),
+        banner = banner(message),
+        raw_title = esc(&homepage.current_title),
+        raw_headline = esc(&homepage.current_headline),
+        raw_intro = esc(&homepage.current_intro),
+        communication_note_raw = esc(&homepage.communication_note),
+        terminal_fallback_note_raw = esc(&homepage.terminal_fallback_note),
+        homepage_stage = esc(&homepage.stage),
+        boot_status = esc(boot_status),
+        brain_access = esc(&trust.brain_access_mode),
+        loop_health = esc(&state.loop_health),
+        heartbeat = esc(state.last_heartbeat_at.as_deref().unwrap_or("noch keiner")),
+        owner_name = esc(if organigram.owner.name.trim().is_empty() { "unbekannt" } else { &organigram.owner.name }),
+        reports_to = esc(if organigram.reports_to.trim().is_empty() { "noch offen" } else { &organigram.reports_to }),
+        board = esc(&organigram.board.join("\n")),
+        sub_agents = esc(&organigram.subordinates.agents.join("\n")),
+        kleinhirn = esc(&describe_kleinhirn_selection(model_policy, census)),
+        browser_vision = esc(&describe_browser_vision_kleinhirn_selection(model_policy, census)),
+        browser_status = esc(&browser_state.status),
+        chrome_binary = esc(browser_state.chrome_binary.as_deref().unwrap_or("nicht gefunden")),
+        supervisor_status = esc(&state.supervisor_status),
+        template_name = esc(&homepage.template_name),
+        homepage_ready = homepage.homepage_ready,
+        redesign_terminal = homepage.redesign_allowed_via_terminal,
+        redesign_bios = homepage.redesign_allowed_via_bios_chat,
+        root_configured = root_auth.configured,
+        bios_primary = trust.bios_primary_channel_confirmed,
+        branding_locked = homepage.owner_branding_locked,
+        communication_note = esc(&homepage.communication_note),
+        terminal_fallback_note = esc(&homepage.terminal_fallback_note),
+        testimony_count = testimony_count,
+        browser_desktop = browser_state.desktop_available,
+        browser_headless = browser_state.headless_ready,
+        homepage_chat_speaker = esc(homepage_chat_speaker),
+        dialogue_log = dialogue_log,
+        organigram_tree = esc(&organigram_tree),
+        immutable_gene_count = genome.immutable_genes.len(),
+        immutable_gene_sample = esc(&genome.immutable_genes.join(", ")),
+        adaptive_surface_count = genome.adaptive_surfaces.len(),
+        adaptive_surface_sample = esc(&genome.adaptive_surfaces.join(", ")),
+        revisions_rows = revisions_rows,
+        upload_cards = upload_cards,
+        action_rows = action_rows,
+        footer_right = esc(&footer_right),
+        owner_display = esc(if !trust.committed_owner_name.is_empty() {
+            &trust.committed_owner_name
+        } else if !organigram.owner.name.is_empty() {
+            &organigram.owner.name
+        } else {
+            "noch ungebunden"
+        }),
+    );
+    bios_vanilla_layout(
         &branded_title,
-        &format!(
-            r#"{banner}
-<section class="card hero">
-  <h1>{title}</h1>
-  <p>{headline}</p>
-  <p class="muted">{intro}</p>
-</section>
-<section class="grid">
-  <div class="card">
-    <h2>Status</h2>
-    <table>
-      <tr><th>Homepage-Phase</th><td>{homepage_stage}</td></tr>
-      <tr><th>Boot-Modus</th><td>{boot_status}</td></tr>
-      <tr><th>BIOS eingefroren</th><td>{bios_frozen}</td></tr>
-      <tr><th>Owner bekannt</th><td>{owner_known}</td></tr>
-      <tr><th>Superpassword gesetzt</th><td>{root_configured}</td></tr>
-      <tr><th>BIOS uebernommen</th><td>{bios_primary}</td></tr>
-      <tr><th>Owner-Branding aktiv</th><td>{branding_applied}</td></tr>
-      <tr><th>Terminal primaer</th><td>{terminal_primary}</td></tr>
-      <tr><th>Terminal fallback</th><td>{terminal_fallback}</td></tr>
-      <tr><th>Browser-Engine</th><td>{browser_status}</td></tr>
-      <tr><th>Chrome</th><td>{chrome_binary}</td></tr>
-      <tr><th>Desktop bereit</th><td>{browser_desktop}</td></tr>
-      <tr><th>Headless bereit</th><td>{browser_headless}</td></tr>
-      <tr><th>Kleinhirn</th><td>{kleinhirn}</td></tr>
-      <tr><th>Boot-Zeugnisse</th><td>{testimony_count}</td></tr>
-      <tr><th>Heartbeat</th><td>{heartbeat}</td></tr>
-    </table>
-  </div>
-  <div class="card">
-    <h2>Kommunikationspfad</h2>
-    <p>{communication_note}</p>
-    <p class="muted">{terminal_fallback_note}</p>
-  </div>
-  <div class="card">
-    <h2>Terminal zuerst</h2>
-    <p>Der Agent erwacht im Terminal. Solange die Homepage nur ein Bootstrap-Pfad ist, kann der Owner ihn dort direkt umformen.</p>
-    <pre>Michael Welsch: Dieser Kommunikationsweg gefaellt mir nicht. Mach das BIOS sichtbarer und halte das Terminal als Fallback.</pre>
-    <p class="muted">Der Always-On-Loop soll solche Terminal-Saetze aufnehmen und ueber den Homepage-Skill die Oberflaeche nachziehen.</p>
-  </div>
-  <div class="card">
-    <h2>Zweite Haupt-Engine</h2>
-    <p>Neben der CLI-Engine besitzt der CTO-Agent jetzt eine explizite Browser-Engine auf Chrome-Basis.</p>
-    <p class="muted">Installiert wird sie ueber die CLI-Ebene. Read-only Browser-Schritte koennen headless laufen, interaktive Navigation bevorzugt eine echte Desktop-Session.</p>
-  </div>
-  <div class="card">
-    <h2>Gene und Anpassung</h2>
-    <p><strong>Unveraenderliche Gene:</strong> {immutable_gene_count}</p>
-    <p class="muted">{immutable_gene_sample}</p>
-    <p><strong>Adaptive Flaechen:</strong> {adaptive_surface_count}</p>
-    <p class="muted">{adaptive_surface_sample}</p>
-  </div>
-  <div class="card">
-    <h2>Vertrauensgates</h2>
-    <table>
-      <tr><th>Aktion</th><th>Kanaele</th><th>Root</th><th>BIOS primary</th><th>Terminal only</th></tr>
-      {action_rows}
-    </table>
-  </div>
-  <div class="card">
-    <h2>Naechste Schritte</h2>
-    <ol>
-      <li>Im Terminal oder auf der Seite sagen, wie der erste Kommunikationspfad aussehen soll</li>
-      <li>Homepage-Template iterativ umbauen</li>
-      <li>BIOS-Kommunikation uebernehmen</li>
-      <li>Superpassword setzen</li>
-      <li>Erst dann Owner-Branding sperren</li>
-      <li>Danach BIOS einfrieren und geordnet weiterentwickeln</li>
-    </ol>
-  </div>
-</section>
-<section class="grid">
-  <form class="card" method="post" action="/homepage/update">
-    <h2>Homepage ueber Skill/Template anpassen</h2>
-    <p>Diese Homepage ist absichtlich nicht final. Wenn der Owner ueber das Terminal sagt, dass sie ihm nicht gefaellt, soll der Agent sie anpassen koennen.</p>
-    <label for="source_channel">Quelle der Anweisung</label>
-    <input id="source_channel" name="source_channel" value="terminal">
-    <label for="title">Titel</label>
-    <input id="title" name="title" value="{raw_title}">
-    <label for="headline">Headline</label>
-    <textarea id="headline" name="headline">{raw_headline}</textarea>
-    <label for="intro">Intro</label>
-    <textarea id="intro" name="intro">{raw_intro}</textarea>
-    <label for="communication_note">Kommunikationshinweis</label>
-    <textarea id="communication_note" name="communication_note">{communication_note_raw}</textarea>
-    <label for="terminal_fallback_note">Terminal-Fallback</label>
-    <textarea id="terminal_fallback_note" name="terminal_fallback_note">{terminal_fallback_note_raw}</textarea>
-    <button type="submit">Homepage-Template speichern</button>
-  </form>
-  <form class="card" method="post" action="/bios/chat">
-    <h2>1:1 Chat auf der Homepage</h2>
-    <p>Wenn ein Thema nicht ueber Mail, WhatsApp oder einen schwachen Kanal besprochen werden soll, kann der Agent hier in den verifizierteren 1:1 BIOS-Chat ziehen.</p>
-    <label for="homepage_bios_speaker">Sprecher</label>
-    <input id="homepage_bios_speaker" name="speaker" value="{homepage_chat_speaker}">
-    <label for="homepage_bios_message">Nachricht</label>
-    <textarea id="homepage_bios_message" name="message" placeholder="Lass uns das bitte im 1:1 Chat auf der Homepage klaeren."></textarea>
-    <button type="submit">In den 1:1 BIOS-Chat wechseln</button>
-  </form>
-  <form class="card" method="post" action="/bios/upload" enctype="multipart/form-data">
-    <h2>Bild in den 1:1 Chat laden</h2>
-    <p>Diese Homepage ist die erste komfortable Stufe ueber dem Terminal. Hier koennen Bilder in den 1:1 BIOS-Chat eingebracht werden.</p>
-    <input type="hidden" name="source_channel" value="homepage">
-    <input type="hidden" name="redirect_to" value="/">
-    <label for="homepage_upload_speaker">Sprecher</label>
-    <input id="homepage_upload_speaker" name="speaker" value="{homepage_chat_speaker}">
-    <label for="homepage_upload_note">Notiz</label>
-    <textarea id="homepage_upload_note" name="note" placeholder="Warum ist dieses Bild wichtig und was sollen wir daran besprechen?"></textarea>
-    <label for="homepage_upload_image">Bild</label>
-    <input id="homepage_upload_image" name="image" type="file" accept="image/*">
-    <button type="submit">Bild in den 1:1 Chat laden</button>
-  </form>
-  <form class="card" method="post" action="/homepage/branding-lock">
-    <h2>Owner-Branding spaeter sperren</h2>
-    <p>Branding auf den Besitzer wird erst freigegeben, wenn BIOS-Kommunikation wirklich uebernommen wurde.</p>
-    <label for="branding_password">Superpassword zur Root-Verifikation</label>
-    <input id="branding_password" name="password" type="password">
-    <button type="submit">Owner-Branding sperren</button>
-  </form>
-  <div class="card">
-    <h2>Aktive Homepage-Policies</h2>
-    <table>
-      <tr><th>Template</th><td>{template_name}</td></tr>
-      <tr><th>Homepage ready</th><td>{homepage_ready}</td></tr>
-      <tr><th>Redesign via Terminal</th><td>{redesign_terminal}</td></tr>
-      <tr><th>Redesign via BIOS-Chat</th><td>{redesign_bios}</td></tr>
-      <tr><th>BIOS sichtbar</th><td>{bios_visible}</td></tr>
-      <tr><th>Branding locked</th><td>{branding_locked}</td></tr>
-    </table>
-  </div>
-</section>
-<section class="card">
-  <h2>Bild-Uploads im 1:1 Chat</h2>
-  <div class="grid">
-    {upload_cards}
-  </div>
-</section>
-<section class="card">
-  <h2>Homepage-Revisionen</h2>
-  <table>
-    <tr><th>Zeit</th><th>Quelle</th><th>Titel</th><th>Branding</th><th>Notiz</th></tr>
-    {revisions_rows}
-  </table>
-</section>"#,
-            banner = banner(message),
-            title = esc(&branded_title),
-            headline = esc(&homepage.current_headline),
-            intro = esc(&homepage.current_intro),
-            homepage_stage = esc(&homepage.stage),
-            boot_status = esc(boot_status),
-            immutable_gene_count = genome.immutable_genes.len(),
-            immutable_gene_sample = esc(&genome.immutable_genes.join(", ")),
-            adaptive_surface_count = genome.adaptive_surfaces.len(),
-            adaptive_surface_sample = esc(&genome.adaptive_surfaces.join(", ")),
-            action_rows = action_rows,
-            bios_frozen = bios.frozen,
-            owner_known = !organigram.owner.name.is_empty(),
-            root_configured = root_auth.configured,
-            bios_primary = trust.bios_primary_channel_confirmed,
-            branding_applied = homepage.owner_branding_applied,
-            terminal_primary = homepage.terminal_primary,
-            terminal_fallback = homepage.terminal_fallback_enabled,
-            browser_status = esc(&browser_state.status),
-            chrome_binary = esc(
-                browser_state
-                    .chrome_binary
-                    .as_deref()
-                    .unwrap_or("nicht gefunden")
-            ),
-            browser_desktop = browser_state.desktop_available,
-            browser_headless = browser_state.headless_ready,
-            kleinhirn = esc(&describe_kleinhirn_selection(model_policy, census)),
-            testimony_count = testimony_count,
-            heartbeat = esc(state.last_heartbeat_at.as_deref().unwrap_or("noch keiner")),
-            communication_note = esc(&homepage.communication_note),
-            terminal_fallback_note = esc(&homepage.terminal_fallback_note),
-            raw_title = esc(&homepage.current_title),
-            homepage_chat_speaker = esc(if !trust.committed_owner_name.is_empty() {
-                &trust.committed_owner_name
-            } else if !organigram.owner.name.is_empty() {
-                &organigram.owner.name
-            } else {
-                "Michael Welsch"
-            }),
-            raw_headline = esc(&homepage.current_headline),
-            raw_intro = esc(&homepage.current_intro),
-            communication_note_raw = esc(&homepage.communication_note),
-            terminal_fallback_note_raw = esc(&homepage.terminal_fallback_note),
-            template_name = esc(&homepage.template_name),
-            homepage_ready = homepage.homepage_ready,
-            redesign_terminal = homepage.redesign_allowed_via_terminal,
-            redesign_bios = homepage.redesign_allowed_via_bios_chat,
-            bios_visible = homepage.bios_visible,
-            branding_locked = homepage.owner_branding_locked,
-            upload_cards = upload_cards,
-            revisions_rows = revisions_rows,
-        ),
+        &page_body,
+        r#"document.addEventListener("click", function (ev) {
+  const tab = ev.target.closest("[data-tab]");
+  if (!tab) return;
+  const name = tab.getAttribute("data-tab");
+  document.querySelectorAll(".tab").forEach((item) => {
+    item.classList.toggle("on", item.getAttribute("data-tab") === name);
+  });
+  document.querySelectorAll(".left .pane").forEach((item) => {
+    item.classList.toggle("on", item.id === "left-" + name);
+  });
+  document.querySelectorAll(".right .pane").forEach((item) => {
+    item.classList.toggle("on", item.id === "right-" + name);
+  });
+});"#,
     )
 }
 

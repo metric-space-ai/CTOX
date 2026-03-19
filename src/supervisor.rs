@@ -76,6 +76,7 @@ use crate::contracts::load_homepage_policy;
 use crate::contracts::load_organigram;
 use crate::contracts::now_iso;
 use crate::contracts::path_display_name;
+use crate::contracts::append_boot_entry;
 use crate::runtime_db::sync_model_resources;
 use crate::runtime_db::sync_owner_trust;
 use crate::runtime_db::sync_resources_from_census;
@@ -1782,20 +1783,13 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 &format!("Task {} finished one unified mode cycle.", task.id),
                             );
 
-                            if task.source_channel == "bios" && !output_text.trim().is_empty() {
-                                let _ = record_bios_dialogue(
+                            if !matches!(task.task_kind.as_str(), "self_review" | "worker_review") {
+                                publish_task_result_to_origin(
                                     &loop_paths,
-                                    "cto-agent",
-                                    &output_text,
-                                    task_used_grosshirn,
-                                );
-                            } else if is_owner_facing_task(&task)
-                                && !output_text.trim().is_empty()
-                                && !matches!(task.task_kind.as_str(), "self_review" | "worker_review")
-                            {
-                                let _ = record_bios_dialogue(
-                                    &loop_paths,
-                                    "cto-agent",
+                                    &task,
+                                    &task_status,
+                                    &checkpoint_summary,
+                                    &checkpoint_detail,
                                     &output_text,
                                     task_used_grosshirn,
                                 );
@@ -2795,10 +2789,84 @@ fn compact_command_failure_note(stdout: &str, stderr: &str) -> String {
     }
 }
 
+fn concise_reply_line(text: &str) -> String {
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if line.chars().count() <= 180 {
+        return line;
+    }
+    let truncated = line.chars().take(177).collect::<String>();
+    format!("{truncated}...")
+}
+
+fn derive_interrupt_reply_text(
+    output_text: &str,
+    checkpoint_summary: &str,
+    checkpoint_detail: &str,
+) -> String {
+    let candidate = if !output_text.trim().is_empty() {
+        output_text.trim()
+    } else if !checkpoint_summary.trim().is_empty() {
+        checkpoint_summary.trim()
+    } else {
+        checkpoint_detail.trim()
+    };
+    candidate.chars().take(4000).collect()
+}
+
+fn publish_task_result_to_origin(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+    task_status: &str,
+    checkpoint_summary: &str,
+    checkpoint_detail: &str,
+    output_text: &str,
+    task_used_grosshirn: bool,
+) {
+    let reply_text = derive_interrupt_reply_text(output_text, checkpoint_summary, checkpoint_detail);
+    if reply_text.trim().is_empty() {
+        return;
+    }
+
+    if let Some(interrupt_id) = task.source_interrupt_id.filter(|_| task_status != "continue") {
+        let _ = crate::runtime_db::complete_loop_interrupt(paths, interrupt_id, &reply_text);
+        let payload = serde_json::json!({
+            "interruptId": interrupt_id,
+            "sourceChannel": task.source_channel,
+            "speaker": task.speaker,
+            "taskStatus": task_status,
+            "reply": reply_text,
+        });
+        let _ = crate::runtime_db::record_agent_event(
+            paths,
+            "interrupt/replied",
+            Some(task.id),
+            &task.title,
+            &concise_reply_line(&reply_text),
+            &payload.to_string(),
+        );
+    }
+
+    if matches!(task.source_channel.as_str(), "terminal" | "attach_terminal") {
+        let _ = append_boot_entry(paths, "cto-agent", &reply_text);
+    }
+
+    if task.source_channel == "bios" || is_owner_facing_task(task) {
+        let _ = record_bios_dialogue(paths, "cto-agent", &reply_text, task_used_grosshirn);
+    }
+}
+
 fn is_owner_facing_task(task: &crate::runtime_db::TaskRecord) -> bool {
     matches!(
         task.task_kind.as_str(),
-        "root_trust"
+        "owner_interrupt"
+            | "root_trust"
             | "organigram_contract"
             | "owner_binding"
             | "bios_freeze"
@@ -4005,5 +4073,31 @@ mod tests {
         assert!(reused.0.contains("wiederverwendet"));
         assert!(reused.1.contains("already exists and is still active"));
         assert!(reused.1.contains("task297-kbd"));
+    }
+
+    #[test]
+    fn owner_interrupt_is_owner_facing_for_visible_replies() {
+        let task = crate::runtime_db::TaskRecord {
+            id: 501,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: Some(17),
+            source_channel: "attach_terminal".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Warum keine Mail?".to_string(),
+            detail: "Antworte dem Owner sichtbar.".to_string(),
+            trust_level: "system".to_string(),
+            priority_score: 1000,
+            status: "blocked".to_string(),
+            run_count: 1,
+            last_checkpoint_summary: None,
+            last_checkpoint_at: None,
+            last_output: Some("Der Mailentwurf liegt bereit.".to_string()),
+        };
+
+        assert!(is_owner_facing_task(&task));
     }
 }

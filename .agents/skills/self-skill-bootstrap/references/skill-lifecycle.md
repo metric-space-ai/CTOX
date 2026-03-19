@@ -72,6 +72,7 @@ An operations skill should usually include:
 - main commands
 - important runtime files or databases
 - interrupt or queue side effects
+- explicit Definition of Done with success evidence, blocked conditions and verification path
 - bounded verification step
 - failure handling guidance
 

@@ -1242,7 +1242,7 @@ pub fn default_homepage_policy() -> HomepagePolicy {
     HomepagePolicy {
         version: 1,
         stage: "terminal_first".to_string(),
-        template_name: "bootstrap-terminal-bridge".to_string(),
+        template_name: "homepage-bios-bridge-template".to_string(),
         homepage_ready: false,
         bios_visible: true,
         terminal_primary: true,

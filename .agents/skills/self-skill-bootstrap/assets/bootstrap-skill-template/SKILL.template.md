@@ -21,6 +21,7 @@ Read these first:
 - Keep persistence and policy contracts separate from transport or provider adapters.
 - If the resulting tool will be reused, also create or update the paired operations skill.
 - Verify with a real bounded test before declaring the bootstrap complete.
+- State an explicit Definition of Done so later turns know when the capability is really complete, still blocked or only partially advanced.
 
 ## Build pattern
 
@@ -31,6 +32,13 @@ Read these first:
 5. Persist state in the shared contract or database chosen for this capability.
 6. Add interrupt or queue hooks only through the canonical runtime bridge.
 7. Create or update the paired operations skill.
+
+## Definition of Done
+
+- The capability objective and claimed scope are explicit.
+- At least one fresh bounded verification step or artifact proves the capability works.
+- The skill records the success evidence, remaining blockers and safe failure boundaries.
+- Later turns can tell the difference between `done`, `blocked` and `continue` without guessing from tone.
 
 ## Never do
 

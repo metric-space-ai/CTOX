@@ -39,6 +39,13 @@ Read these first:
 - If the available mechanism requires privileges or a desktop session that is not actually present, checkpoint the missing precondition instead of pretending success.
 - Verify with the contract's verification commands and record the observed layout in the checkpoint detail.
 
+## Definition of Done
+
+- `done`: the requested keyboard scope was actually changed and the verification output shows the requested layout.
+- `blocked`: the exact missing precondition is named, such as privileges or absence of a target desktop/session path.
+- `continue`: one bounded diagnostic or mutation step produced new host evidence, but the requested scope is not yet verified complete.
+- The checkpoint and owner-facing reply must say which scope changed, which command actually ran and which verification output proved it.
+
 ## Never do
 
 - Never mark the task done from intent, plan text or remembered history alone.

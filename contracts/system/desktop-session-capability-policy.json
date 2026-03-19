@@ -59,6 +59,20 @@
         "DBUS_SESSION_BUS_ADDRESS when desktop IPC is needed",
         "XDG_RUNTIME_DIR when runtime-dir scoped sockets are needed"
       ],
+      "definitionOfDone": {
+        "done": [
+          "The active desktop session was identified and targeted explicitly.",
+          "Verification output shows the action ran against the recovered live desktop environment."
+        ],
+        "blocked": [
+          "The missing desktop-session precondition is explicit.",
+          "The task does not pretend GUI work happened without a live session target."
+        ],
+        "continue": [
+          "A bounded session-diagnostic or launch step produced new evidence.",
+          "The final GUI action or verification is still pending."
+        ]
+      },
       "successEvidence": [
         "The checkpoint detail states which session was targeted.",
         "The bounded command or session captured the desktop environment actually used.",

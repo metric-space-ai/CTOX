@@ -795,6 +795,10 @@ fn build_system_prompt() -> String {
         "Wenn das Kontextpaket einen installation_bootstrap enthaelt, behandle ihn als explizite fruehe Installationsvorgabe fuer Kommunikationspfad, E-Mail-Richtung und den Hinweis auf Terminal `cto` plus lokalen Dashboard-/Intranet-Pfad.",
         "Wenn das Kontextpaket verfuegbare Skills zeigt und eine Aufgabe oder Toolluecke dazu passt, lies zuerst die passende SKILL.md statt die Loesung jedes Mal neu zu improvisieren.",
         "Wenn ein owner_interrupt dir repo-lokale Operations-Skills oder reviewed System-Capability-Contracts zeigt, sind diese Pfade autoritativ. Erfinde dann keinen alternativen Shell-Workflow aus dem Bauch.",
+        "Wenn rawInclusions eine task_definition_of_done_policy oder einen reviewed Capability-Contract mit goal, successEvidence, failureBoundaries oder neverDo zeigen, richte taskStatus, reply und checkpoint strikt danach aus.",
+        "done bedeutet nur: der beanspruchte Scope ist jetzt wirklich erfuellt und du kannst frische Evidenz aus diesem Turn oder einem frisch verifizierten Artefakt nennen.",
+        "blocked bedeutet nur: eine konkrete externe Vorbedingung fehlt, du benennst sie exakt und sagst, was sie entblockt.",
+        "continue bedeutet: du hast echten bounded Fortschritt mit neuer Evidenz erzielt, aber die Aufgabe ist noch nicht fertig.",
         "Wenn du eine wiederverwendbare neue Faehigkeit, ein Tool oder einen Workflow baust, lege selbst einen neuen Repo-Skill unter .agents/skills/<slug>/SKILL.md an oder aktualisiere den passenden vorhandenen Skill.",
         "Wenn du ein Tool gebaut oder stabilisiert hast, erzeuge zusaetzlich einen Operations-Skill mit den konkreten CLI-Kommandos, Pfaden, Inputs, Outputs und Fehlergrenzen fuer spaetere Turns.",
         "Ein neuer Repo-Skill gilt fuer spaetere Turns als eingehangen, sobald seine Dateien unter .agents/skills liegen; der Kernel synchronisiert diesen Katalog beim Aufbau des naechsten Kontextpakets.",
@@ -944,6 +948,10 @@ Wenn du blockiert bist, nutze taskStatus=blocked und nextMode=blocked. \
 Wenn du den Kontext fuer falsch, zu klein, zu verdichtet oder historisch unsicher haeltst, setze contextAction und historyResearchQuery explizit, statt still zu raten. \
 Wenn das Kontextpaket availableSkills oder skillSystem zeigt, nutze relevante Repo-Skills aktiv; lies ihre SKILL.md ueber bounded Exec-Arbeit, wenn du ihre Details brauchst. \
 Wenn rawInclusions reviewed System-Capability-Contracts oder repo-lokale Operations-Skills fuer Owner-Arbeit zeigen, folge diesen Contracts und ihren Verify-Schritten statt Shell-Kommandos frei zu improvisieren. \
+Wenn rawInclusions eine task_definition_of_done_policy oder einen reviewed Capability-Contract mit goal, successEvidence, failureBoundaries oder neverDo zeigen, musst du done/blocked/continue daran ausrichten statt aus dem Bauch zu entscheiden. \
+done ist nur zulaessig, wenn der beanspruchte Scope jetzt wirklich erfuellt ist und du frische Evidenz aus diesem Turn oder einem frisch verifizierten Artefakt hast. \
+blocked ist nur zulaessig, wenn eine konkrete externe Vorbedingung fehlt und du sie plus den naechsten Unlock-Schritt klar benennst. \
+continue ist der richtige Status, wenn du echten bounded Fortschritt mit neuer Evidenz gemacht hast, aber die Aufgabe noch nicht erledigt ist. \
 Wenn du in diesem Lauf eine wiederverwendbare neue Faehigkeit oder ein neues Tool aufbaust, hinterlasse zusaetzlich einen Repo-Skill unter .agents/skills, damit spaetere Turns dieselbe Faehigkeit wiederfinden und bedienen koennen. \
 Wenn du echte mehrschrittige Terminalarbeit brauchst, bevorzuge execSessionAction mit execSessionId statt nur execCommand. \
 Nutze execSessionAction=start mit execSessionCommand, um eine Session zu oeffnen, und in spaeteren Turns execSessionAction=write/read/terminate, um sie weiterzufuehren. \

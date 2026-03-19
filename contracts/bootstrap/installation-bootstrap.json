@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "status": "unconfigured",
+  "ownerName": "",
+  "ownerContactEmail": "",
+  "ownerContactInfo": "",
+  "terminalCommand": "cto",
+  "terminalLowLevelNote": "Low-level communication remains possible through the `cto` terminal command.",
+  "dashboardNote": "The CTO-Agent is expected to expose a more comfortable local intranet/dashboard communication surface after startup.",
+  "ownerMayDropLaterViaTerminalOrDashboard": true,
+  "emailAssignmentMode": "decide_later",
+  "emailBootstrapNote": "",
+  "installerFreeText": "",
+  "updatedAt": "2026-03-19T20:27:56.284924+00:00"
+}

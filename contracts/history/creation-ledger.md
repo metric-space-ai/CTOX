@@ -494,3 +494,8 @@ Zugleich ist die Linux-Browser-Installation ehrlicher geworden: ein zusaetzliche
 
 Der alte Kleinhirn-Pfad hat GPT-OSS- und Qwen-Familien wiederholt durch denselben Multi-GPU-Schalter gejagt und damit abwechselnd Auto-Mapping, NCCL-Tensor-Parallel und GPU-Subset-Wahl regressiv vermischt.
 Jetzt steht die Strategie im Model-Policy-Contract selbst: GPT-OSS faehrt auf Mehr-GPU-Hosts ueber Auto-Device-Mapping mit deaktiviertem NCCL, waehrend Qwen3/Qwen3.5 Tensor-Parallel mit NCCL und expliziter Weltgroesse nutzt. Der Installer, der Upgrade-Pfad und `run_kleinhirn.sh` lesen dieselben Vertragsfelder statt wieder lokale Einzelfall-Heuristiken zu erfinden.
+
+## 2026-03-19 - Homepage-Bootstrap bekommt jetzt eine kanonische BIOS-Bridge-Ressource statt getrennter Design- und SQLite-Schnipsel
+
+Der Repo-Zustand war fuer spaetere Homepage-Aufbauarbeit zu diffus: ein freies BIOS-Mockup auf der einen Seite, ein separater SQLite-/Snapshot-Vertrag auf der anderen, aber kein einzelnes Skill-Artefakt, das beides zusammenhaelt.
+Jetzt buendelt `homepage-bootstrap` eine kanonische `homepage-bios-bridge-template`-Ressource samt Design-Contract und Tool-Contract. Spaetere agentische Homepage-Aufgaben sollen damit nicht mehr aus blanken Heuristiken oder generischen Landingpages starten, sondern aus einer BIOS-foermigen, SQLite-gebundenen Ausgangsbasis, die der Agent selbst weiterformen kann.

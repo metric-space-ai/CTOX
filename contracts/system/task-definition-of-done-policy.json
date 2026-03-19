@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Provide a canonical Definition of Done contract for all bounded CTO-Agent tasks so skills, capability contracts, reviews and owner-facing replies share the same completion model.",
+  "appliesWhen": {
+    "taskKinds": [
+      "*"
+    ]
+  },
+  "outcomeModel": {
+    "requiredQuestions": [
+      "What concrete objective of the current task was completed or advanced in this bounded turn?",
+      "Which exact evidence from this turn or from a freshly verified artifact supports that claim?",
+      "What remains not done or what external precondition still blocks completion?"
+    ],
+    "statuses": [
+      {
+        "status": "done",
+        "definition": "Use only when the claimed scope of the task objective is actually satisfied now.",
+        "requires": [
+          "The completed scope is explicit.",
+          "At least one concrete evidence source from this turn, a verified file, a verified database row, a verified browser artifact or a reviewed capability-contract verification step is cited.",
+          "Any remaining work is stated as out of scope instead of being silently ignored.",
+          "If a reviewed capability contract is present, its verification requirements are satisfied."
+        ],
+        "forbids": [
+          "Plans, intentions or remembered history as evidence.",
+          "Marking done before the required verification step has run.",
+          "Owner-facing certainty without a fresh evidence basis."
+        ]
+      },
+      {
+        "status": "blocked",
+        "definition": "Use only when a real missing precondition outside the current bounded turn prevents further progress.",
+        "requires": [
+          "The missing precondition is named concretely.",
+          "The checkpoint or reply states why the current turn could not satisfy that precondition itself.",
+          "The next unlock action or the responsible actor is explicit."
+        ],
+        "forbids": [
+          "Generic 'need more context' without saying which exact context is missing.",
+          "Blocking when a bounded diagnostic or verification step was still available."
+        ]
+      },
+      {
+        "status": "continue",
+        "definition": "Use when one real bounded step produced progress but the task objective is not yet done.",
+        "requires": [
+          "The bounded step that actually ran is named.",
+          "The new evidence gathered in this turn is recorded.",
+          "The next bounded step is clear."
+        ],
+        "forbids": [
+          "Blindly repeating the same failed step without new evidence.",
+          "Claiming progress when no new evidence or artifact exists."
+        ]
+      }
+    ],
+    "ownerFacingRule": "Owner-facing replies must state the current result, the evidence basis for that result and any remaining blocker or next step.",
+    "evidenceClasses": [
+      "bounded_exec_output",
+      "exec_session_output",
+      "browser_artifact",
+      "verified_runtime_file",
+      "verified_runtime_db_state",
+      "reviewed_capability_verification_output",
+      "fresh_human_confirmation_in_current_channel"
+    ],
+    "neverDo": [
+      "Never let taskStatus be decided only by tone or confidence.",
+      "Never use a reply as the sole proof of completion.",
+      "Never treat a guessed filesystem path, guessed mail draft or guessed runtime state as done-evidence."
+    ]
+  },
+  "updatedAt": "2026-03-19T00:00:00+00:00"
+}

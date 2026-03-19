@@ -2701,6 +2701,30 @@ pub fn list_open_tasks(paths: &Paths, limit: usize) -> anyhow::Result<Vec<TaskRe
     Ok(rows.filter_map(Result::ok).collect())
 }
 
+pub fn list_recent_task_outcomes(
+    paths: &Paths,
+    exclude_task_id: i64,
+    limit: usize,
+) -> anyhow::Result<Vec<TaskRecord>> {
+    let conn = open_db(paths)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, updated_at, parent_task_id, worker_job_id, source_interrupt_id, source_channel, speaker, task_kind,
+                title, detail, trust_level, priority_score, status, run_count,
+                last_checkpoint_summary, last_checkpoint_at, last_output
+         FROM tasks
+         WHERE id != ?1
+           AND COALESCE(last_output, '') <> ''
+           AND (
+                source_channel IN ('bios', 'homepage', 'terminal', 'attach_terminal')
+                OR task_kind IN ('owner_interrupt', 'channel_expansion', 'grosshirn_procurement', 'grosshirn_activation', 'model_or_resource')
+           )
+         ORDER BY updated_at DESC, id DESC
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![exclude_task_id, limit as i64], map_task_row)?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 pub fn list_queued_tasks(paths: &Paths, limit: usize) -> anyhow::Result<Vec<TaskRecord>> {
     let conn = open_db(paths)?;
     let mut stmt = conn.prepare(

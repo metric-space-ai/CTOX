@@ -1,9 +1,14 @@
+use crate::brain_runtime::GrosshirnRuntimeSnapshot;
+use crate::brain_runtime::KleinhirnRuntimeSnapshot;
+use crate::brain_runtime::load_grosshirn_runtime_snapshot;
+use crate::brain_runtime::load_kleinhirn_runtime_snapshot;
 use crate::bootstrap::handle_attach_line_detailed;
 use crate::contracts::load_bios;
 use crate::contracts::Paths;
 use crate::runtime_db::AgentEventRecord;
 use crate::runtime_db::AgentThreadRecord;
 use crate::runtime_db::AgentTurnRecord;
+use crate::runtime_db::BrainRoutingState;
 use crate::runtime_db::FocusStateRecord;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::list_agent_events_since;
@@ -11,6 +16,7 @@ use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_recent_agent_events;
 use crate::runtime_db::load_active_agent_turn;
 use crate::runtime_db::load_agent_thread;
+use crate::runtime_db::load_brain_routing_state;
 use crate::runtime_db::load_focus_state;
 use crate::runtime_db::load_latest_completed_agent_turn;
 use anyhow::Context;
@@ -78,6 +84,9 @@ struct AttachResponse {
 struct AttachUiSnapshot {
     bios_url: Option<String>,
     thread: Option<AgentThreadRecord>,
+    brain_routing: BrainRoutingState,
+    kleinhirn_runtime: Option<KleinhirnRuntimeSnapshot>,
+    grosshirn_runtime: Option<GrosshirnRuntimeSnapshot>,
     focus: Option<FocusStateRecord>,
     active_turn: Option<AgentTurnRecord>,
     last_turn: Option<AgentTurnRecord>,
@@ -326,7 +335,7 @@ fn run_attach_line_cli(paths: &Paths) -> anyhow::Result<()> {
                         seen = seen.max(event.id);
                         println!("\r{}", format_event_line(&event));
                     }
-                    print!("interrupt> ");
+                    print!("Chat to CTO: ");
                     let _ = io::stdout().flush();
                 }
                 Ok(_) => {}
@@ -341,7 +350,7 @@ fn run_attach_line_cli(paths: &Paths) -> anyhow::Result<()> {
     loop {
         {
             let _guard = display_lock.lock().expect("display lock poisoned");
-            print!("interrupt> ");
+            print!("Chat to CTO: ");
             io::stdout().flush()?;
         }
         line.clear();
@@ -576,7 +585,7 @@ impl AttachTui {
             ),
             frame_width,
         ));
-        frame_lines.push(frame_row(&self.secondary_status_line(), frame_width));
+        frame_lines.push(frame_row(&self.brain_status_line(), frame_width));
         frame_lines.push(frame_separator("Now", frame_width));
         frame_lines.extend(self.now_rows(frame_width));
         frame_lines.push(frame_separator("Next", frame_width));
@@ -586,11 +595,11 @@ impl AttachTui {
         frame_lines.push(frame_bottom(frame_width));
 
         let input_hint = if self.snapshot.active_turn.is_some() {
-            "Enter queues for next reprioritize · /status for details · Ctrl-C exit · Esc clears draft"
+            "Enter queues chat for next reprioritize · /status for details · Ctrl-C exit · Esc clears draft"
         } else {
-            "Enter sends command or interrupt · /status for details · Ctrl-C exit · Esc clears draft"
+            "Enter sends chat to CTO · /status for details · Ctrl-C exit · Esc clears draft"
         };
-        let prompt = "interrupt> ";
+        let prompt = "Chat to CTO: ";
         let (input_display, cursor_col) = input_display(&self.input, width_usize, prompt);
 
         let mut screen_lines = Vec::new();
@@ -614,7 +623,7 @@ impl AttachTui {
         width: usize,
         height: usize,
     ) -> anyhow::Result<()> {
-        let prompt = "interrupt> ";
+        let prompt = "Chat to CTO: ";
         let (input_text, cursor_col) = input_display(&self.input, width, prompt);
         let mode = self
             .snapshot
@@ -622,6 +631,8 @@ impl AttachTui {
             .as_ref()
             .map(|thread| short_mode(&thread.current_mode))
             .unwrap_or_else(|| "UNKNOWN".to_string());
+        let brain_route = brain_route_label(&self.snapshot.brain_routing.route_mode);
+        let brain_model = compact_text(&current_brain_model_label(&self.snapshot), 48);
         let active_task = self
             .snapshot
             .focus
@@ -631,9 +642,9 @@ impl AttachTui {
         let status_line = match &self.snapshot.active_turn {
             Some(turn) => {
                 let elapsed = elapsed_text(&turn.created_at).unwrap_or_else(|| "n/a".to_string());
-                format!("Working {elapsed} | {} | {}", mode, compact_text(&active_task, 72))
+                format!("Working {elapsed} | {} | {}", mode, brain_route)
             }
-            None => format!("Idle | {} | {}", mode, compact_text(&active_task, 72)),
+            None => format!("Idle | {} | {}", mode, brain_route),
         };
         let pending_count = self.pending_inputs.len();
         let latest_event = self
@@ -646,9 +657,11 @@ impl AttachTui {
         let mut lines = vec![
             "=== CTO-Agent Attach Terminal ===".to_string(),
             status_line,
-            format!("Queued Inputs: {pending_count}"),
+            format!("Model: {brain_model}"),
+            format!("Task: {}", compact_text(&active_task, 72)),
+            format!("Queued Chats: {pending_count}"),
             fit_line(&latest_event, width),
-            "Enter queues input | Ctrl-C exit | /status commands".to_string(),
+            "Enter sends chat | Ctrl-C exit | /status commands".to_string(),
             format!("{prompt}{input_text}"),
         ];
         if lines.len() > height {
@@ -694,31 +707,21 @@ impl AttachTui {
             .map(|turn| format!("turn #{}", turn.id))
             .unwrap_or_else(|| "no active turn".to_string());
         format!(
-            "{}  •  {}  •  queue {}  •  {}",
+            "{}  •  {}  •  {}  •  queue {}  •  {}",
             lifecycle.to_uppercase(),
             mode,
+            brain_route_label(&self.snapshot.brain_routing.route_mode),
             queue_depth,
             turn
         )
     }
 
-    fn secondary_status_line(&self) -> String {
-        if let Some(focus) = self.snapshot.focus.as_ref()
-            && (focus.active_task_id.is_some() || !focus.active_task_title.trim().is_empty())
-        {
-            return format!(
-                "Task {}",
-                describe_active_task(&focus.active_task_id, &focus.active_task_title)
-            );
-        }
-        if let Some(turn) = self.snapshot.active_turn.as_ref() {
-            return format!(
-                "Task #{} {}",
-                turn.task_id,
-                compact_text(&turn.task_title, 140)
-            );
-        }
-        "Task keine laufende Aufgabe".to_string()
+    fn brain_status_line(&self) -> String {
+        format!(
+            "Brain [{}]  •  Model {}",
+            brain_route_label(&self.snapshot.brain_routing.route_mode),
+            current_brain_model_label(&self.snapshot)
+        )
     }
 
     fn now_rows(&self, width: usize) -> Vec<String> {
@@ -795,7 +798,7 @@ impl AttachTui {
         } else {
             rows.push(frame_row("Noch keine bounded Turns vorhanden.", width));
             rows.push(frame_row("Sobald ein Task gestartet wird, erscheint hier der Live-Status.", width));
-            rows.push(frame_row("Typing now creates an interrupt task for the next cycle.", width));
+            rows.push(frame_row("Typing now queues chat to the CTO for the next cycle.", width));
             rows.push(frame_row("Use /status, /turns or /events for deeper inspection.", width));
         }
         rows
@@ -849,7 +852,7 @@ impl AttachTui {
             .collect::<Vec<_>>();
 
         if next_tasks.is_empty() {
-            next_tasks.push("Keine vorgemerkten Owner-Interrupts. Neue Eingaben erscheinen hier.".to_string());
+            next_tasks.push("Keine vorgemerkten Owner-Chats. Neue Eingaben erscheinen hier.".to_string());
         }
 
         for line in next_tasks {
@@ -885,6 +888,9 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
     AttachUiSnapshot {
         bios_url: bios_url(&bios.website_path),
         thread: load_agent_thread(paths).ok(),
+        brain_routing: load_brain_routing_state(paths).unwrap_or_default(),
+        kleinhirn_runtime: load_kleinhirn_runtime_snapshot(paths),
+        grosshirn_runtime: load_grosshirn_runtime_snapshot(paths),
         focus: load_focus_state(paths).ok(),
         active_turn: load_active_agent_turn(paths).ok().flatten(),
         last_turn: load_latest_completed_agent_turn(paths).ok().flatten(),
@@ -895,21 +901,27 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
 fn render_attach_banner(paths: &Paths) -> String {
     let snapshot = collect_ui_snapshot(paths);
     let mut lines = vec!["=== CTO-Agent Attach Terminal ===".to_string()];
-    if let Some(url) = snapshot.bios_url {
+    if let Some(url) = snapshot.bios_url.as_deref() {
         lines.push(format!("Kleinhirn-BIOS: {url}"));
     }
-    if let Some(thread) = snapshot.thread {
+    if let Some(thread) = snapshot.thread.as_ref() {
         lines.push(format!(
-            "Loop: lifecycle={} | mode={} | queue_depth={}",
+            "Loop: lifecycle={} | mode={} | brain={} | queue_depth={}",
             thread.lifecycle_status,
             describe_mode(&thread.current_mode),
+            brain_route_label(&snapshot.brain_routing.route_mode),
             thread.queue_depth
         ));
         if !thread.note.trim().is_empty() {
             lines.push(format!("Loop-Notiz: {}", compact_text(&thread.note, 220)));
         }
     }
-    if let Some(focus) = snapshot.focus {
+    lines.push(format!(
+        "Brain: {} | Model: {}",
+        brain_route_label(&snapshot.brain_routing.route_mode),
+        current_brain_model_label(&snapshot)
+    ));
+    if let Some(focus) = snapshot.focus.as_ref() {
         lines.push(format!(
             "Aktive Aufgabe: {}",
             describe_active_task(&focus.active_task_id, &focus.active_task_title)
@@ -918,7 +930,7 @@ fn render_attach_banner(paths: &Paths) -> String {
             lines.push(format!("Fokus: {}", compact_text(&focus.note, 220)));
         }
     }
-    if let Some(turn) = snapshot.active_turn {
+    if let Some(turn) = snapshot.active_turn.as_ref() {
         lines.push(format!(
             "Laufender Turn: turn#{} | task#{} {} | start_mode={}",
             turn.id,
@@ -936,7 +948,7 @@ fn render_attach_banner(paths: &Paths) -> String {
                 240
             )
         ));
-    } else if let Some(turn) = snapshot.last_turn {
+    } else if let Some(turn) = snapshot.last_turn.as_ref() {
         lines.push(format!(
             "Letzter Turn: turn#{} | task#{} {} | status={}",
             turn.id,
@@ -958,7 +970,7 @@ fn render_attach_banner(paths: &Paths) -> String {
         lines.push("Turn-Zusammenfassung: noch keine bounded Turns vorhanden.".to_string());
     }
     lines.push(
-        "Interrupt-Semantik: Jede freie Eingabe wird als Interrupt aufgenommen. Der laufende bounded Schritt wird erst sauber beendet; danach schaut der Agent im naechsten Repriorisierungszyklus auf die neue Eingabe.".to_string(),
+        "Chat-Verhalten: Jede freie Eingabe wird als Chat an den CTO aufgenommen. Der laufende bounded Schritt wird erst sauber beendet; danach schaut der Agent im naechsten Repriorisierungszyklus auf die neue Eingabe.".to_string(),
     );
     lines.push("Kurzbefehle: /help | /status | /turns | /events".to_string());
     lines.push("-----------------------------------".to_string());
@@ -1013,6 +1025,55 @@ fn short_mode(mode: &str) -> String {
         "recovery" => "RECOVERY".to_string(),
         "self_preservation" => "GUARD".to_string(),
         other => other.to_uppercase(),
+    }
+}
+
+fn brain_route_label(route_mode: &str) -> &'static str {
+    match route_mode {
+        "grosshirn" => "GROSSHIRN",
+        _ => "KLEINHIRN",
+    }
+}
+
+fn current_brain_model_label(snapshot: &AttachUiSnapshot) -> String {
+    if snapshot.brain_routing.route_mode == "grosshirn" {
+        return snapshot
+            .grosshirn_runtime
+            .as_ref()
+            .map(|runtime| {
+                format_model_label(runtime.official_label.as_deref(), runtime.model.as_deref())
+            })
+            .unwrap_or_else(|| "externes Modell unbekannt".to_string());
+    }
+
+    snapshot
+        .kleinhirn_runtime
+        .as_ref()
+        .map(|runtime| {
+            format_model_label(
+                runtime
+                    .official_label
+                    .as_deref()
+                    .or(runtime.policy_model.as_deref()),
+                runtime
+                    .runtime_model
+                    .as_deref()
+                    .or(runtime.policy_model.as_deref()),
+            )
+        })
+        .unwrap_or_else(|| "lokales Modell unbekannt".to_string())
+}
+
+fn format_model_label(label: Option<&str>, model_id: Option<&str>) -> String {
+    let label = label.map(str::trim).filter(|value| !value.is_empty());
+    let model_id = model_id.map(str::trim).filter(|value| !value.is_empty());
+    match (label, model_id) {
+        (Some(label), Some(model_id)) if !label.eq_ignore_ascii_case(model_id) => {
+            format!("{label} ({model_id})")
+        }
+        (Some(label), _) => label.to_string(),
+        (None, Some(model_id)) => model_id.to_string(),
+        (None, None) => "unbekannt".to_string(),
     }
 }
 
@@ -1086,6 +1147,7 @@ fn format_activity_line(event: &AgentEventRecord) -> String {
     let time = short_timestamp(&event.created_at);
     let method = match event.method.as_str() {
         "interrupt/queued" => "interrupt",
+        "interrupt/replied" => "reply",
         "turn/started" => "turn start",
         "turn/completed" => "turn done",
         "turn/interrupt" => "interrupt",
@@ -1226,6 +1288,7 @@ fn format_elapsed(duration: Duration) -> String {
 fn format_event_line(event: &AgentEventRecord) -> String {
     let method = match event.method.as_str() {
         "interrupt/queued" => "INTERRUPT queued",
+        "interrupt/replied" => "INTERRUPT reply",
         "turn/started" => "TURN start",
         "turn/completed" => "TURN done",
         "turn/interrupt" => "TURN interrupt",
@@ -1307,6 +1370,28 @@ mod tests {
                     active_task_id: Some(412),
                     queue_depth: 2,
                     note: String::new(),
+                }),
+                brain_routing: BrainRoutingState {
+                    route_mode: "kleinhirn".to_string(),
+                    boosted_task_id: None,
+                    boosted_task_title: String::new(),
+                    boost_reason: String::new(),
+                    boost_started_at: None,
+                    boost_last_used_at: None,
+                    boost_expires_at: None,
+                    cooldown_until: None,
+                    last_deactivation_reason: String::new(),
+                },
+                kleinhirn_runtime: Some(KleinhirnRuntimeSnapshot {
+                    policy_model: Some("gpt-oss-20b".to_string()),
+                    runtime_model: Some("openai/gpt-oss-20b".to_string()),
+                    official_label: Some("GPT-OSS 20B".to_string()),
+                    adapter: Some("mistralrs_gpt_oss_harmony_completion".to_string()),
+                }),
+                grosshirn_runtime: Some(GrosshirnRuntimeSnapshot {
+                    model: Some("gpt-5.4".to_string()),
+                    official_label: Some("GPT-5.4".to_string()),
+                    adapter: Some("openai_responses".to_string()),
                 }),
                 focus: Some(FocusStateRecord {
                     mode: "execute_task".to_string(),
@@ -1415,6 +1500,7 @@ mod tests {
         let headline = ui.primary_status_line();
         assert!(headline.contains("RUNNING"));
         assert!(headline.contains("EXEC"));
+        assert!(headline.contains("KLEINHIRN"));
         assert!(headline.contains("queue 2"));
         assert!(headline.contains("turn #184"));
     }
@@ -1426,7 +1512,8 @@ mod tests {
         let next_rows = ui.next_rows(120).join("\n");
         let activity_rows = ui.activity_rows(120, 8).join("\n");
 
-        assert!(ui.secondary_status_line().contains("#412 Watchdog-Regression"));
+        assert!(ui.brain_status_line().contains("Brain [KLEINHIRN]"));
+        assert!(ui.brain_status_line().contains("GPT-OSS 20B"));
         assert!(now_rows.contains("Summary  Bounded step laeuft gerade."));
         assert!(now_rows.contains("Last done  #409 Browser-Healthcheck absichern"));
         assert!(next_rows.contains("○ #413 BIOS-Link im Attach-Screen anzeigen"));
@@ -1452,5 +1539,20 @@ mod tests {
         let line = format_activity_line(&event);
         assert!(line.contains("interrupt"));
         assert!(!line.contains("turn steer"));
+    }
+
+    #[test]
+    fn interrupt_reply_events_render_with_reply_label() {
+        let event = AgentEventRecord {
+            id: 2,
+            created_at: "2026-03-18T15:10:00+00:00".to_string(),
+            method: "interrupt/replied".to_string(),
+            active_task_id: Some(413),
+            active_task_title: "Owner-Frage beantworten".to_string(),
+            body: "Der Mailentwurf liegt bereit.".to_string(),
+            payload_json: "{}".to_string(),
+        };
+        assert!(format_activity_line(&event).contains("reply"));
+        assert!(format_event_line(&event).contains("INTERRUPT reply"));
     }
 }

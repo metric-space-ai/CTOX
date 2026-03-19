@@ -108,6 +108,20 @@
           "status"
         ]
       ],
+      "definitionOfDone": {
+        "done": [
+          "The requested keyboard scope was actually changed.",
+          "Verification output in the same bounded run shows the requested layout."
+        ],
+        "blocked": [
+          "A concrete missing precondition such as privileges or missing desktop/session path is stated.",
+          "The unlock action is explicit."
+        ],
+        "continue": [
+          "A bounded diagnostic or mutation step produced new host evidence.",
+          "The requested scope is not yet verified complete."
+        ]
+      },
       "successEvidence": [
         "The checkpoint detail states which mutator actually ran.",
         "The checkpoint detail includes verification output showing the requested layout.",

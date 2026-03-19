@@ -512,11 +512,7 @@ pub fn maybe_apply_homepage_feedback(
     policy.terminal_fallback_enabled = true;
     policy.redesign_allowed_via_terminal = true;
     policy.redesign_allowed_via_bios_chat = true;
-    policy.template_name = if source_channel == "bios" {
-        "bios-shaped-bridge".to_string()
-    } else {
-        "terminal-shaped-bridge".to_string()
-    };
+    policy.template_name = "homepage-bios-bridge-template".to_string();
     policy.stage = if trust.bios_primary_channel_confirmed {
         "bios_primary_revision".to_string()
     } else {
@@ -560,13 +556,13 @@ pub fn maybe_apply_homepage_feedback(
         source_channel,
         &policy,
         &format!(
-            "homepage-bootstrap skill applied from {} feedback.",
+            "homepage-bootstrap skill applied from {} feedback using homepage-bios-bridge-template.",
             source_label
         ),
     )?;
 
     Ok(Some(format!(
-        "Homepage ueber homepage-bootstrap aus {}-Feedback nachgezogen.",
+        "Homepage ueber homepage-bootstrap aus {}-Feedback mit homepage-bios-bridge-template nachgezogen.",
         source_label
     )))
 }

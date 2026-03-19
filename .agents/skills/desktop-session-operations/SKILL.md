@@ -39,6 +39,13 @@ Read these first:
 - If the host exposes only a TTY and no real desktop session, checkpoint that missing precondition instead of fabricating GUI success.
 - Verify that the launched command saw the expected desktop env before marking the task done.
 
+## Definition of Done
+
+- `done`: the task targeted the real active desktop session and verification output shows the recovered session environment or the launched action running against it.
+- `blocked`: no active desktop session exists or the required session environment could not be recovered, and that missing precondition is stated explicitly.
+- `continue`: one bounded diagnostic or launch step produced new session evidence but the final GUI action or verification is still pending.
+- The checkpoint and reply must name the targeted session, the environment keys actually used and the verification evidence.
+
 ## Never do
 
 - Never invent `DISPLAY`, `XAUTHORITY` or DBus values without host evidence.

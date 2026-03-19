@@ -40,6 +40,7 @@ use crate::runtime_db::list_pending_proactive_contact_candidates;
 use crate::runtime_db::list_person_notes_for_person;
 use crate::runtime_db::list_person_profiles;
 use crate::runtime_db::list_recent_mail_previews_for_person;
+use crate::runtime_db::list_recent_task_outcomes;
 use crate::runtime_db::list_skills;
 use crate::runtime_db::list_task_checkpoints;
 use crate::runtime_db::list_turn_signals_for_task;
@@ -433,7 +434,9 @@ pub fn prepare_context_package(
             content: trim_chars(&bootstrap_json, 1600),
         });
     }
+    append_definition_of_done_inclusions(paths, &mut raw_inclusions);
     append_owner_operation_inclusions(paths, task, &mut raw_inclusions);
+    append_recent_owner_outcome_inclusions(paths, task, &mut raw_inclusions);
     let rationale = build_rationale(task, &mode.mode, keywords.len());
 
     let package = ContextPackage {
@@ -1086,6 +1089,61 @@ fn append_owner_operation_inclusions(
     );
 }
 
+fn append_definition_of_done_inclusions(
+    paths: &Paths,
+    raw_inclusions: &mut Vec<ContextRawInclusion>,
+) {
+    push_matching_raw_inclusions(
+        raw_inclusions,
+        "task_definition_of_done_policy",
+        paths.system_dir.clone(),
+        |path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                == Some("task-definition-of-done-policy.json")
+        },
+        1,
+        2200,
+    );
+}
+
+fn append_recent_owner_outcome_inclusions(
+    paths: &Paths,
+    task: &TaskRecord,
+    raw_inclusions: &mut Vec<ContextRawInclusion>,
+) {
+    if task.task_kind != "owner_interrupt" {
+        return;
+    }
+    let recent_outcomes = list_recent_task_outcomes(paths, task.id, 4).unwrap_or_default();
+    for outcome in recent_outcomes.into_iter().take(3) {
+        let mut content = String::new();
+        if let Some(summary) = outcome.last_checkpoint_summary.as_deref() {
+            if !summary.trim().is_empty() {
+                content.push_str("Summary: ");
+                content.push_str(summary.trim());
+            }
+        }
+        if let Some(output) = outcome.last_output.as_deref() {
+            if !output.trim().is_empty() {
+                if !content.is_empty() {
+                    content.push_str("\n\n");
+                }
+                content.push_str("Output:\n");
+                content.push_str(output.trim());
+            }
+        }
+        if content.trim().is_empty() {
+            continue;
+        }
+        raw_inclusions.push(ContextRawInclusion {
+            source_kind: "recent_task_outcome".to_string(),
+            source_ref: format!("task:{}", outcome.id),
+            content: trim_chars(&content, 1200),
+        });
+    }
+}
+
 fn push_file_raw_inclusion(
     raw_inclusions: &mut Vec<ContextRawInclusion>,
     source_kind: &str,
@@ -1374,5 +1432,65 @@ mod tests {
         assert_eq!(raw_inclusions[0].source_kind, "repo_operation_skill");
         assert_eq!(raw_inclusions[1].source_kind, "system_capability_contract");
         assert!(raw_inclusions[1].content.contains("keyboard"));
+    }
+
+    #[test]
+    fn task_definition_of_done_policy_is_included_when_present() {
+        let root = temp_root("dod_policy");
+        std::fs::write(
+            root.join("contracts/system/task-definition-of-done-policy.json"),
+            "{\"version\":1,\"purpose\":\"done\"}",
+        )
+        .unwrap();
+        let paths = Paths {
+            root: root.clone(),
+            contracts_dir: root.join("contracts"),
+            runtime_dir: root.join("runtime"),
+            uploads_dir: root.join("runtime/uploads"),
+            browser_artifacts_dir: root.join("runtime/browser"),
+            recovery_dir: root.join("runtime/recovery"),
+            history_dir: root.join("contracts/history"),
+            models_dir: root.join("contracts/models"),
+            homepage_dir: root.join("contracts/homepage"),
+            bootstrap_dir: root.join("contracts/bootstrap"),
+            context_dir: root.join("contracts/context"),
+            system_dir: root.join("contracts/system"),
+            browser_dir: root.join("contracts/browser"),
+            genome_path: root.join("contracts/genome/genome.json"),
+            bios_path: root.join("contracts/bios/bios.json"),
+            org_path: root.join("contracts/org/organigram.json"),
+            root_auth_path: root.join("contracts/root_auth/root_auth.json"),
+            model_policy_path: root.join("contracts/models/model-policy.json"),
+            homepage_policy_path: root.join("contracts/homepage/homepage-policy.json"),
+            bootstrap_task_pack_path: root.join("contracts/bootstrap/bootstrap-task-pack.json"),
+            installation_bootstrap_path: root.join("contracts/bootstrap/installation-bootstrap.json"),
+            context_policy_path: root.join("contracts/context/context-policy.json"),
+            context_governance_policy_path: root.join("contracts/context/context-governance-policy.json"),
+            mode_system_policy_path: root.join("contracts/system/mode-system-policy.json"),
+            loop_safety_policy_path: root.join("contracts/system/loop-safety-policy.json"),
+            execution_authority_policy_path: root.join("contracts/system/execution-authority-policy.json"),
+            browser_engine_policy_path: root.join("contracts/browser/browser-engine-policy.json"),
+            browser_capability_policy_path: root.join("contracts/browser/browser-capability-policy.json"),
+            browser_subworker_policy_path: root.join("contracts/browser/browser-subworker-policy.json"),
+            self_preservation_state_path: root.join("contracts/system/self-preservation-state.json"),
+            origin_story_path: root.join("contracts/history/origin-story.md"),
+            creation_ledger_path: root.join("contracts/history/creation-ledger.md"),
+            boot_log_path: root.join("runtime/boot_log.jsonl"),
+            agent_state_path: root.join("runtime/state/agent_state.json"),
+            system_census_path: root.join("runtime/state/system_census.json"),
+            browser_engine_state_path: root.join("runtime/state/browser_engine_state.json"),
+            runtime_db_path: root.join("runtime/cto_agent.db"),
+            attach_socket_path: root.join("runtime/cto-agent.sock"),
+            runtime_lock_path: root.join("runtime/cto-agent.lock"),
+            pending_hard_reset_report_path: root.join("runtime/recovery/pending-hard-reset-report.json"),
+            certs_dir: root.join("runtime/certs"),
+            tls_cert_path: root.join("runtime/certs/localhost.crt"),
+            tls_key_path: root.join("runtime/certs/localhost.key"),
+        };
+        let mut raw_inclusions = Vec::new();
+        append_definition_of_done_inclusions(&paths, &mut raw_inclusions);
+        assert_eq!(raw_inclusions.len(), 1);
+        assert_eq!(raw_inclusions[0].source_kind, "task_definition_of_done_policy");
+        assert!(raw_inclusions[0].content.contains("done"));
     }
 }

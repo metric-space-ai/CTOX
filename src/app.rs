@@ -739,6 +739,7 @@ async fn home(
     let browser_state =
         refresh_browser_engine_state(paths).unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
     let trust = load_owner_trust(paths)?;
+    let dialogue = list_bios_dialogue(paths, 12)?;
     let homepage_revisions = list_homepage_revisions(paths, 8)?;
     let uploads = list_bios_uploads(paths, 8)?;
     let testimony_count = load_boot_entries(paths).len();
@@ -752,6 +753,7 @@ async fn home(
         &model_policy,
         &census,
         &trust,
+        &dialogue,
         &homepage_revisions,
         &uploads,
         &agent_state,

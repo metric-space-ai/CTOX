@@ -1,7 +1,7 @@
 {
   "version": 1,
   "stage": "terminal_first",
-  "templateName": "bootstrap-terminal-bridge",
+  "templateName": "homepage-bios-bridge-template",
   "homepageReady": false,
   "biosVisible": true,
   "terminalPrimary": true,
