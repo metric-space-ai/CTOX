@@ -2072,19 +2072,52 @@ struct ParsedSelectionOutput {
     checkpoint_summary: String,
 }
 
-fn parse_agent_output(content: &str) -> ParsedOutput {
-    let structured_content = if let Ok(value) = serde_json::from_str::<Value>(content) {
-        Some(value)
-    } else {
-        let start = content.find('{');
-        let end = content.rfind('}');
-        match (start, end) {
-            (Some(start), Some(end)) if start < end => {
-                serde_json::from_str::<Value>(&content[start..=end]).ok()
-            }
-            _ => None,
+fn extract_first_valid_json_value(content: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(content) {
+        return Some(value);
+    }
+    for (start, ch) in content.char_indices() {
+        if ch != '{' {
+            continue;
         }
-    };
+        let mut depth = 0_i64;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (offset, current) in content[start..].char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                match current {
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match current {
+                '"' => in_string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let end = start + offset + current.len_utf8();
+                        if let Ok(value) = serde_json::from_str::<Value>(&content[start..end]) {
+                            return Some(value);
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn parse_agent_output(content: &str) -> ParsedOutput {
+    let structured_content = extract_first_valid_json_value(content);
 
     if let Some(value) = structured_content
         && let Some(object) = value.as_object()
@@ -2211,18 +2244,7 @@ fn parse_selection_output(content: &str) -> ParsedSelectionOutput {
         };
     }
 
-    let structured_content = if let Ok(value) = serde_json::from_str::<Value>(content) {
-        Some(value)
-    } else {
-        let start = content.find('{');
-        let end = content.rfind('}');
-        match (start, end) {
-            (Some(start), Some(end)) if start < end => {
-                serde_json::from_str::<Value>(&content[start..=end]).ok()
-            }
-            _ => None,
-        }
-    };
+    let structured_content = extract_first_valid_json_value(content);
 
     if let Some(value) = structured_content
         && let Some(object) = value.as_object()
@@ -2997,6 +3019,23 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())
+    }
+
+    #[test]
+    fn parse_agent_output_accepts_concatenated_json_objects() {
+        let content = concat!(
+            "{\"taskStatus\":\"in_progress\",\"nextMode\":\"execute_task\",\"checkpointSummary\":\"one\",\"execCommand\":[\"bash\",\"-lc\",\"echo hi\"]}",
+            "{\"taskStatus\":\"in_progress\",\"nextMode\":\"execute_task\",\"checkpointSummary\":\"one\",\"execCommand\":[\"bash\",\"-lc\",\"echo hi\"]}"
+        );
+        let parsed = parse_agent_output(content);
+        assert_eq!(parsed.task_status, "in_progress");
+        assert_eq!(parsed.next_mode, "execute_task");
+        let command = parsed
+            .exec_directive
+            .as_ref()
+            .map(|directive| directive.command.clone())
+            .expect("exec directive should parse");
+        assert_eq!(command, vec!["bash", "-lc", "echo hi"]);
     }
 
     #[test]

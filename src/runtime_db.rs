@@ -3119,7 +3119,9 @@ pub fn complete_review_task(
             let _ = reject_learning_candidates_for_task(paths, parent_task_id, "review_blocked");
         }
         _ => {
-            if let Some(gate_failure) = task_completion_gate_failure(paths, &parent_task) {
+            if let Some(gate_failure) =
+                task_completion_gate_failure(paths, &parent_task, Some(summary), Some(detail))
+            {
                 let gated_detail = format!(
                     "{detail}\n\nReview-Gate verweigert Abschluss:\n{gate_failure}"
                 );
@@ -3220,7 +3222,111 @@ pub fn complete_review_task(
     Ok(())
 }
 
-fn task_completion_gate_failure(paths: &Paths, task: &TaskRecord) -> Option<String> {
+fn owner_interrupt_demands_real_host_change(task: &TaskRecord) -> bool {
+    let lowered = format!("{} {}", task.title, task.detail).to_lowercase();
+    contains_any(
+        &lowered,
+        &[
+            "keyboard",
+            "tastatur",
+            "layout",
+            "deutsch",
+            "german",
+            "de/de-latin1",
+            "x11",
+            "wayland",
+            "kde",
+            "systemeinstellung",
+            "localectl",
+            "setxkbmap",
+            "xkb",
+        ],
+    )
+}
+
+fn owner_interrupt_has_real_execution_evidence(
+    task: &TaskRecord,
+    review_summary: Option<&str>,
+    review_detail: Option<&str>,
+) -> bool {
+    let evidence = [
+        task.last_checkpoint_summary.as_deref().unwrap_or(""),
+        task.last_output.as_deref().unwrap_or(""),
+        review_summary.unwrap_or(""),
+        review_detail.unwrap_or(""),
+    ]
+    .join("\n")
+    .to_lowercase();
+    if evidence.trim().is_empty() {
+        return false;
+    }
+    let unresolved = contains_any(
+        &evidence,
+        &[
+            "need targeted history",
+            "need more context",
+            "need exact",
+            "i need",
+            "missing context",
+            "lack context",
+            "bevor",
+            "before issuing",
+            "unknown",
+            "unclear",
+            "keine analyse statt umsetzung",
+            "analyse statt umsetzung",
+            "kontext fehlt",
+            "kontext",
+            "history/state",
+        ],
+    );
+    if unresolved {
+        return false;
+    }
+    let action = contains_any(
+        &evidence,
+        &[
+            "umgestellt",
+            "gestellt",
+            "geändert",
+            "geaendert",
+            "changed",
+            "set ",
+            "gesetzt",
+            "configured",
+            "konfiguriert",
+            "verified",
+            "verifiziert",
+            "setxkbmap",
+            "localectl",
+            "kwriteconfig",
+            "qdbus",
+            "xkb",
+        ],
+    );
+    let target = contains_any(
+        &evidence,
+        &[
+            "keyboard",
+            "tastatur",
+            "layout",
+            "deutsch",
+            "german",
+            "de/de-latin1",
+            "de ",
+            "layout=de",
+            "xkb",
+        ],
+    );
+    action && target
+}
+
+fn task_completion_gate_failure(
+    paths: &Paths,
+    task: &TaskRecord,
+    review_summary: Option<&str>,
+    review_detail: Option<&str>,
+) -> Option<String> {
     let bios = load_bios(paths);
     let organigram = load_organigram(paths);
     let root_auth = load_root_auth(paths);
@@ -3265,6 +3371,15 @@ fn task_completion_gate_failure(paths: &Paths, task: &TaskRecord) -> Option<Stri
         "bios_contract" => {
             if !bios.presented_on_web || bios.website_path.trim().is_empty() {
                 failures.push("BIOS wird noch nicht sauber auf der Website praesentiert.");
+            }
+        }
+        "owner_interrupt" => {
+            if owner_interrupt_demands_real_host_change(task)
+                && !owner_interrupt_has_real_execution_evidence(task, review_summary, review_detail)
+            {
+                failures.push(
+                    "Direkte Owner-Anweisung mit realer Host-Aenderung darf ohne belastbare Ausfuehrungs- und Verifikations-Evidenz nicht als erledigt gelten.",
+                );
             }
         }
         "owner_binding" => {
@@ -6972,6 +7087,101 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
                 .iter()
                 .any(|task| task.id != first.id && task.task_kind == "homepage_bridge")
         );
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn owner_interrupt_host_change_without_execution_evidence_fails_completion_gate() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("owner_interrupt_gate_fail");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let task = TaskRecord {
+            id: 501,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "bios".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Stelle jetzt das Tastaturlayout auf Deutsch um".to_string(),
+            detail: "Fuehre die Aenderung real auf dem Host aus und verifiziere sie.".to_string(),
+            trust_level: "owner_trust".to_string(),
+            priority_score: 1000,
+            status: "queued".to_string(),
+            run_count: 1,
+            last_checkpoint_summary: Some(
+                "Need targeted history/state before changing keyboard settings again.".to_string(),
+            ),
+            last_checkpoint_at: Some(now_iso()),
+            last_output: Some("I need more context before issuing another system change.".to_string()),
+        };
+
+        let failure = task_completion_gate_failure(
+            &paths,
+            &task,
+            Some("looks complete"),
+            Some("Need targeted history/state before changing keyboard settings again."),
+        )
+        .expect("owner interrupt should fail gate");
+        assert!(failure.contains("Host-Aenderung"));
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn owner_interrupt_host_change_with_execution_evidence_passes_completion_gate() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("owner_interrupt_gate_pass");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let task = TaskRecord {
+            id: 502,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "bios".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Stelle jetzt das Tastaturlayout auf Deutsch um".to_string(),
+            detail: "Fuehre die Aenderung real auf dem Host aus und verifiziere sie.".to_string(),
+            trust_level: "owner_trust".to_string(),
+            priority_score: 1000,
+            status: "queued".to_string(),
+            run_count: 1,
+            last_checkpoint_summary: Some(
+                "Keyboard layout changed to de and verified via setxkbmap/localectl.".to_string(),
+            ),
+            last_checkpoint_at: Some(now_iso()),
+            last_output: Some(
+                "Changed keyboard layout to German with setxkbmap de and verified layout=de.".to_string(),
+            ),
+        };
+
+        let failure = task_completion_gate_failure(
+            &paths,
+            &task,
+            Some("done"),
+            Some("Changed keyboard layout to German with setxkbmap de and verified layout=de."),
+        );
+        assert!(failure.is_none());
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())
