@@ -114,6 +114,7 @@ KLEINHIRN_CHAT_TEMPLATE="${CTO_AGENT_KLEINHIRN_CHAT_TEMPLATE:-}"
 KLEINHIRN_JINJA_EXPLICIT="${CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT:-}"
 KLEINHIRN_TOKENIZER_JSON="${CTO_AGENT_KLEINHIRN_TOKENIZER_JSON:-}"
 KLEINHIRN_TOPOLOGY="${CTO_AGENT_KLEINHIRN_TOPOLOGY:-}"
+KLEINHIRN_CUDA_VISIBLE_DEVICES="${CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES:-}"
 KLEINHIRN_DISABLE_NCCL="${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}"
 
 KLEINHIRN_PORT="${CTO_AGENT_KLEINHIRN_PORT:-1234}"
@@ -394,7 +395,51 @@ write_kleinhirn_env_file() {
     printf 'CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT=%s\n' "$(shell_quote "$KLEINHIRN_JINJA_EXPLICIT")"
     printf 'CTO_AGENT_KLEINHIRN_TOKENIZER_JSON=%s\n' "$(shell_quote "$KLEINHIRN_TOKENIZER_JSON")"
     printf 'CTO_AGENT_KLEINHIRN_TOPOLOGY=%s\n' "$(shell_quote "$KLEINHIRN_TOPOLOGY")"
+    printf 'CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES=%s\n' "$(shell_quote "$KLEINHIRN_CUDA_VISIBLE_DEVICES")"
   } > "$ENV_FILE"
+}
+
+preferred_cuda_visible_devices_from_census() {
+  python3 - <<'PY'
+import json
+import pathlib
+
+path = pathlib.Path("/tmp/cto_system_census.json")
+try:
+    census = json.loads(path.read_text())
+except Exception:
+    raise SystemExit(0)
+
+gpu_entries = census.get("gpus") or []
+gpu_indices = []
+for fallback_index, gpu in enumerate(gpu_entries):
+    try:
+        gpu_indices.append(int((gpu or {}).get("index", fallback_index)))
+    except Exception:
+        gpu_indices.append(fallback_index)
+
+if not gpu_indices:
+    try:
+        gpu_count = int(census.get("gpuCount") or 0)
+    except Exception:
+        gpu_count = 0
+    gpu_indices = list(range(gpu_count))
+
+gpu_indices = sorted(set(gpu_indices))
+gpu_count = len(gpu_indices)
+if gpu_count <= 1 or gpu_count & (gpu_count - 1) == 0:
+    raise SystemExit(0)
+
+visible_gpu_count = 1
+while visible_gpu_count * 2 <= gpu_count:
+    visible_gpu_count *= 2
+
+if visible_gpu_count < 2 or gpu_count < visible_gpu_count:
+    raise SystemExit(0)
+
+subset = gpu_indices[-visible_gpu_count:]
+print(",".join(str(index) for index in subset))
+PY
 }
 
 next_context_backoff_value() {
@@ -912,6 +957,13 @@ fi
 if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ -z "$KLEINHIRN_TOPOLOGY" ] && [ "$USE_MULTI_GPU_TUNED_DEVICE_LAYERS" != "1" ]; then
   KLEINHIRN_DEVICE_LAYERS=""
   KLEINHIRN_NUM_DEVICE_LAYERS=""
+fi
+
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
+  && mistralrs_uses_nccl \
+  && [ -z "$KLEINHIRN_TOPOLOGY" ] \
+  && [ -z "$KLEINHIRN_CUDA_VISIBLE_DEVICES" ]; then
+  KLEINHIRN_CUDA_VISIBLE_DEVICES="$(preferred_cuda_visible_devices_from_census || true)"
 fi
 
 if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ "$KLEINHIRN_POLICY_MODEL" = "gpt-oss-20b" ] && ! mistralrs_uses_nccl; then
