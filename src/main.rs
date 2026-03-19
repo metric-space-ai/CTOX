@@ -11,6 +11,7 @@ mod codex_text_encoding;
 mod command_exec;
 mod contracts;
 mod context_controller;
+mod desktop_session;
 mod pages;
 mod runtime_db;
 mod storage;

@@ -96,7 +96,7 @@ have_browser_agent_chrome() {
 }
 
 want_kde_desktop() {
-  case "$(printf '%s' "${CTO_AGENT_INSTALL_KDE_DESKTOP:-1}" | tr '[:upper:]' '[:lower:]')" in
+  case "$(printf '%s' "${CTO_AGENT_INSTALL_KDE_DESKTOP:-0}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off)
       return 1
       ;;
@@ -142,7 +142,7 @@ preseed_display_manager_choice() {
 
 install_kde_desktop_linux() {
   if ! want_kde_desktop; then
-    echo "Skipping KDE desktop installation (CTO_AGENT_INSTALL_KDE_DESKTOP=0)."
+    echo "Skipping optional KDE desktop installation (set CTO_AGENT_INSTALL_KDE_DESKTOP=1 to opt in)."
     return
   fi
 

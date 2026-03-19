@@ -483,3 +483,9 @@ Jetzt ist der frische Installer wieder bootstrap-faehig, vermeidet unnoetige Lin
 
 Der fruehere Agent konnte sich ueber wiederholte Builds, `mistralrs`-Installationen und Modell-Prefetches selbst in eine volle Systemplatte treiben und hatte dafuer weder einen eigenen Operations-Skill noch ein klares Storage-Signal im Kontext.
 Jetzt liegt Disk-Headroom explizit im Kontextpaket des Agenten, wird als Teil von Host-Survival benannt und bekommt einen eigenen repo-lokalen Operations-Skill fuer bounded Diagnose und sichere Aufraeumarbeit. Die inhaltliche Entscheidung bleibt beim Agenten: er soll Speicherknappheit als echte CTO-Selbsterhaltsarbeit erkennen und selbst priorisieren, statt dass der Kernel ihm starre Cleanup-Heuristiken aufzwingt.
+
+## 2026-03-19 - Browser- und Host-GUI-Arbeit zielt jetzt generisch auf die echte Desktop-Session
+
+Der erste Browser-/Host-GUI-Pfad verwechselte die `systemd --user`-Serviceumgebung mit der echten grafischen Sitzung des Owners. Dadurch konnten persistente Systemwerte schon richtig sein, waehrend live wirksame Schritte trotzdem am falschen Shell-Kontext vorbei liefen.
+Jetzt rekonstruiert ein eigener Desktop-Session-Pfad die aktive grafische Umgebung ueber `loginctl`, den Session-Leader und Prozess-Env-Fallbacks und reicht diese Umgebung generisch in bounded Exec-, Exec-Session- und Browser-Aufrufe weiter.
+Zugleich ist die Linux-Browser-Installation ehrlicher geworden: ein zusaetzlicher KDE-Desktop wird nicht mehr stillschweigend als Default nachinstalliert oder als impliziter Browser-Nebeneffekt eingeschleppt, sondern nur noch bei ausdruecklichem Opt-in.

@@ -20,6 +20,7 @@ use crate::contracts::save_homepage_policy;
 use crate::contracts::save_installation_bootstrap_state;
 use crate::contracts::save_organigram;
 use crate::contracts::InstallationBootstrapState;
+use crate::desktop_session::detect_desktop_session_env;
 use crate::command_exec::list_sessions;
 use crate::command_exec::read_session;
 use crate::command_exec::resize_session;
@@ -780,7 +781,7 @@ fn terminal_exec_start(paths: &Paths, rest: &str) -> anyhow::Result<String> {
             disable_timeout: false,
             timeout_ms: timeout_ms.map(|value| value as i64),
             cwd: Some(cwd),
-            env: None,
+            env: detect_desktop_session_env(),
             size: if tty {
                 Some(CommandExecTerminalSize {
                     rows: rows.unwrap_or(24),

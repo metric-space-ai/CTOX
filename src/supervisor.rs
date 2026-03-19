@@ -82,6 +82,7 @@ use crate::runtime_db::sync_resources_from_census;
 use crate::runtime_db::sync_skills;
 use crate::contracts::write_agent_state;
 use crate::contracts::write_census;
+use crate::desktop_session::detect_desktop_session_env;
 use crate::tooling::apply_homepage_update;
 use crate::tooling::ExecCommandDirective;
 use crate::tooling::run_bounded_command;
@@ -3223,7 +3224,7 @@ fn build_exec_start_request(
         disable_timeout: directive.timeout_ms.is_none(),
         timeout_ms: directive.timeout_ms.map(|value| value as i64),
         cwd: Some(cwd.clone()),
-        env: None,
+        env: detect_desktop_session_env(),
         size: if tty {
             Some(CommandExecTerminalSize {
                 rows: directive.rows.unwrap_or(24),

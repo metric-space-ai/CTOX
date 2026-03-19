@@ -9,6 +9,8 @@ use crate::contracts::load_model_policy;
 use crate::contracts::now_iso;
 use crate::contracts::recommended_browser_vision_kleinhirn;
 use crate::contracts::write_browser_engine_state;
+use crate::desktop_session::detect_desktop_session;
+use crate::desktop_session::detect_desktop_session_env;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::record_agent_event;
 use anyhow::Context;
@@ -61,7 +63,7 @@ pub fn inspect_browser_engine(paths: &Paths) -> BrowserEngineState {
     let chrome_version = chrome_binary
         .as_ref()
         .and_then(|path| detect_chrome_version(path.as_path()));
-    let desktop_available = detect_desktop_available();
+    let desktop_available = detect_desktop_session().is_available();
     let headless_ready = chrome_binary.is_some();
     let interactive_ready = headless_ready && desktop_available;
     let status = if chrome_binary.is_none() {
@@ -120,7 +122,7 @@ pub fn start_browser_install_session(paths: &Paths) -> anyhow::Result<String> {
             disable_timeout: false,
             timeout_ms: Some(30 * 60 * 1000),
             cwd: Some(paths.root.clone()),
-            env: None,
+            env: detect_desktop_session_env(),
             size: Some(CommandExecTerminalSize { rows: 24, cols: 100 }),
             sandbox_policy: None,
         },
@@ -145,7 +147,7 @@ pub fn start_browser_launch_session(paths: &Paths) -> anyhow::Result<String> {
             disable_timeout: false,
             timeout_ms: Some(2 * 60 * 1000),
             cwd: Some(paths.root.clone()),
-            env: None,
+            env: detect_desktop_session_env(),
             size: Some(CommandExecTerminalSize { rows: 24, cols: 100 }),
             sandbox_policy: None,
         },
@@ -252,7 +254,7 @@ pub fn run_browser_action(
             disable_timeout: false,
             timeout_ms: Some(timeout_ms),
             cwd: Some(paths.root.clone()),
-            env: None,
+            env: detect_desktop_session_env(),
             size: None,
             sandbox_policy: None,
         },
@@ -657,27 +659,6 @@ fn detect_chrome_version(path: &Path) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
-    }
-}
-
-fn detect_desktop_available() -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        true
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        std::env::var("DISPLAY").ok().filter(|value| !value.is_empty()).is_some()
-            || std::env::var("WAYLAND_DISPLAY")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .is_some()
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        false
     }
 }
 

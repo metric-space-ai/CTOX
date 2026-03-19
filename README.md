@@ -17,6 +17,8 @@ Wichtig dazu:
 - Der Einzeiler ist absichtlich **nicht** als `curl | sh` dokumentiert, damit der nachgelagerte Installer interaktiv bleibt und `install-bootstrap-tui` plus Auto-Attach nicht an einem verlorenen TTY scheitern.
 - Standardziel ist `~/cto-agent`. Das laesst sich bei Bedarf ueber `CTO_AGENT_INSTALL_DIR=/pfad` vor dem Einzeiler aendern.
 - Der Bootstrap ist fuer Linux mit `apt-get`, `sudo` und `systemd --user` ausgelegt; das ist der vorgesehene Ubuntu-24-Pfad.
+- Der Browser-Installer schaltet **nicht** mehr stillschweigend die Desktop-Umgebung um. Eine vorhandene grafische Session wird genutzt; ein zusaetzlicher KDE-Desktop wird nur noch bei explizitem `CTO_AGENT_INSTALL_KDE_DESKTOP=1` nachinstalliert.
+- Interaktive Browser- und Host-GUI-Schritte muessen gegen die aktive Desktop-Session laufen, nicht gegen die nackte systemd-Service-Umgebung. Der Runtime-Pfad bridged dafuer `DISPLAY`/`WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS` und `XDG_RUNTIME_DIR` aus der echten Session.
 
 Der repo-lokale Installationspfad bleibt:
 

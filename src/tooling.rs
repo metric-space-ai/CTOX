@@ -4,6 +4,7 @@ use crate::contracts::Paths;
 use crate::contracts::load_homepage_policy;
 use crate::contracts::now_iso;
 use crate::contracts::save_homepage_policy;
+use crate::desktop_session::detect_desktop_session_env;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::record_agent_event;
 use crate::runtime_db::record_homepage_revision;
@@ -114,7 +115,7 @@ fn run_bounded_command_via_codex(
             disable_timeout: false,
             timeout_ms: Some(timeout_ms as i64),
             cwd: Some(cwd.clone()),
-            env: None,
+            env: detect_desktop_session_env(),
             size: None,
             sandbox_policy: None,
         },
