@@ -433,7 +433,7 @@ pub fn prepare_context_package(
             content: trim_chars(&bootstrap_json, 1600),
         });
     }
-    append_host_keyboard_inclusions(paths, task, &keywords, &mut raw_inclusions);
+    append_owner_operation_inclusions(paths, task, &mut raw_inclusions);
     let rationale = build_rationale(task, &mode.mode, keywords.len());
 
     let package = ContextPackage {
@@ -1047,25 +1047,41 @@ fn build_raw_inclusions(
     raw
 }
 
-fn append_host_keyboard_inclusions(
+fn append_owner_operation_inclusions(
     paths: &Paths,
     task: &TaskRecord,
-    keywords: &HashSet<String>,
     raw_inclusions: &mut Vec<ContextRawInclusion>,
 ) {
-    if !task_requires_host_keyboard_context(task, keywords) {
+    if task.task_kind != "owner_interrupt" {
         return;
     }
-    push_file_raw_inclusion(
+    push_matching_raw_inclusions(
         raw_inclusions,
-        "repo_skill",
-        paths.root.join(".agents/skills/host-keyboard-operations/SKILL.md"),
+        "repo_operation_skill",
+        paths.root.join(".agents/skills"),
+        |path| {
+            path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
+                && path
+                    .parent()
+                    .and_then(|parent| parent.file_name())
+                    .and_then(|name| name.to_str())
+                    .map(|name| name.ends_with("-operations"))
+                    .unwrap_or(false)
+        },
+        3,
         1800,
     );
-    push_file_raw_inclusion(
+    push_matching_raw_inclusions(
         raw_inclusions,
-        "host_keyboard_contract",
-        paths.system_dir.join("host-keyboard-capability-policy.json"),
+        "system_capability_contract",
+        paths.system_dir.clone(),
+        |path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with("-capability-policy.json"))
+                .unwrap_or(false)
+        },
+        4,
         2200,
     );
 }
@@ -1086,36 +1102,38 @@ fn push_file_raw_inclusion(
     });
 }
 
-fn task_requires_host_keyboard_context(task: &TaskRecord, keywords: &HashSet<String>) -> bool {
-    if task.task_kind != "owner_interrupt" {
-        return false;
+fn push_matching_raw_inclusions(
+    raw_inclusions: &mut Vec<ContextRawInclusion>,
+    source_kind: &str,
+    root: std::path::PathBuf,
+    matcher: impl Fn(&std::path::Path) -> bool,
+    limit_files: usize,
+    limit_chars: usize,
+) {
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let Ok(children) = fs::read_dir(&path) else {
+                continue;
+            };
+            for child in children.flatten() {
+                let child_path = child.path();
+                if matcher(&child_path) {
+                    matches.push(child_path);
+                }
+            }
+        } else if matcher(&path) {
+            matches.push(path);
+        }
     }
-    let text = format!("{} {}", task.title.to_lowercase(), task.detail.to_lowercase());
-    let keyword_hit = keywords.iter().any(|keyword| {
-        matches!(
-            keyword.as_str(),
-            "keyboard"
-                | "layout"
-                | "keymap"
-                | "tastatur"
-                | "deutsch"
-                | "german"
-                | "setxkbmap"
-                | "localectl"
-                | "loadkeys"
-        )
-    });
-    keyword_hit
-        || text.contains("keyboard")
-        || text.contains("layout")
-        || text.contains("keymap")
-        || text.contains("tastatur")
-        || text.contains("deutsch")
-        || text.contains("german")
-        || text.contains("setxkbmap")
-        || text.contains("localectl")
-        || text.contains("xkb")
-        || text.contains("loadkeys")
+    matches.sort();
+    for path in matches.into_iter().take(limit_files) {
+        push_file_raw_inclusion(raw_inclusions, source_kind, path, limit_chars);
+    }
 }
 
 fn build_rationale(task: &TaskRecord, mode: &str, keyword_count: usize) -> String {
@@ -1223,17 +1241,76 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_owner_interrupt_gets_host_keyboard_context() {
+    fn owner_interrupt_gets_owner_operation_context_without_prompt_matching() {
         let task = sample_task(
-            "Bitte Tastatur auf Deutsch umstellen",
-            "Change the keyboard layout of this host to German and verify it.",
+            "Bitte fuehre den angeforderten Host-Schritt aus",
+            "Trusted owner request with no keyboard words in the prompt body.",
         );
-        let keywords = extract_keywords(&format!("{} {}", task.title, task.detail));
-        assert!(task_requires_host_keyboard_context(&task, &keywords));
+        let mut raw_inclusions = Vec::new();
+        let root = temp_root("generic_owner_ops");
+        std::fs::write(
+            root.join(".agents/skills/host-keyboard-operations/SKILL.md"),
+            "# Host Keyboard Operations\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("contracts/system/host-keyboard-capability-policy.json"),
+            "{\"version\":1,\"purpose\":\"keyboard\"}",
+        )
+        .unwrap();
+        let paths = Paths {
+            root: root.clone(),
+            contracts_dir: root.join("contracts"),
+            runtime_dir: root.join("runtime"),
+            uploads_dir: root.join("runtime/uploads"),
+            browser_artifacts_dir: root.join("runtime/browser"),
+            recovery_dir: root.join("runtime/recovery"),
+            history_dir: root.join("contracts/history"),
+            models_dir: root.join("contracts/models"),
+            homepage_dir: root.join("contracts/homepage"),
+            bootstrap_dir: root.join("contracts/bootstrap"),
+            context_dir: root.join("contracts/context"),
+            system_dir: root.join("contracts/system"),
+            browser_dir: root.join("contracts/browser"),
+            genome_path: root.join("contracts/genome/genome.json"),
+            bios_path: root.join("contracts/bios/bios.json"),
+            org_path: root.join("contracts/org/organigram.json"),
+            root_auth_path: root.join("contracts/root_auth/root_auth.json"),
+            model_policy_path: root.join("contracts/models/model-policy.json"),
+            homepage_policy_path: root.join("contracts/homepage/homepage-policy.json"),
+            bootstrap_task_pack_path: root.join("contracts/bootstrap/bootstrap-task-pack.json"),
+            installation_bootstrap_path: root.join("contracts/bootstrap/installation-bootstrap.json"),
+            context_policy_path: root.join("contracts/context/context-policy.json"),
+            context_governance_policy_path: root.join("contracts/context/context-governance-policy.json"),
+            mode_system_policy_path: root.join("contracts/system/mode-system-policy.json"),
+            loop_safety_policy_path: root.join("contracts/system/loop-safety-policy.json"),
+            execution_authority_policy_path: root.join("contracts/system/execution-authority-policy.json"),
+            browser_engine_policy_path: root.join("contracts/browser/browser-engine-policy.json"),
+            browser_capability_policy_path: root.join("contracts/browser/browser-capability-policy.json"),
+            browser_subworker_policy_path: root.join("contracts/browser/browser-subworker-policy.json"),
+            self_preservation_state_path: root.join("contracts/system/self-preservation-state.json"),
+            origin_story_path: root.join("contracts/history/origin-story.md"),
+            creation_ledger_path: root.join("contracts/history/creation-ledger.md"),
+            boot_log_path: root.join("runtime/boot_log.jsonl"),
+            agent_state_path: root.join("runtime/state/agent_state.json"),
+            system_census_path: root.join("runtime/state/system_census.json"),
+            browser_engine_state_path: root.join("runtime/state/browser_engine_state.json"),
+            runtime_db_path: root.join("runtime/cto_agent.db"),
+            attach_socket_path: root.join("runtime/cto-agent.sock"),
+            runtime_lock_path: root.join("runtime/cto-agent.lock"),
+            pending_hard_reset_report_path: root.join("runtime/recovery/pending-hard-reset-report.json"),
+            certs_dir: root.join("runtime/certs"),
+            tls_cert_path: root.join("runtime/certs/localhost.crt"),
+            tls_key_path: root.join("runtime/certs/localhost.key"),
+        };
+        append_owner_operation_inclusions(&paths, &task, &mut raw_inclusions);
+        assert_eq!(raw_inclusions.len(), 2);
+        assert_eq!(raw_inclusions[0].source_kind, "repo_operation_skill");
+        assert_eq!(raw_inclusions[1].source_kind, "system_capability_contract");
     }
 
     #[test]
-    fn host_keyboard_skill_and_contract_are_included_for_keyboard_task() {
+    fn owner_interrupt_includes_operations_skill_and_contracts() {
         let root = temp_root("raw_inclusion");
         std::fs::write(
             root.join(".agents/skills/host-keyboard-operations/SKILL.md"),
@@ -1290,13 +1367,12 @@ mod tests {
             tls_cert_path: root.join("runtime/certs/localhost.crt"),
             tls_key_path: root.join("runtime/certs/localhost.key"),
         };
-        let task = sample_task("Keyboard to German", "Use localectl or setxkbmap.");
-        let keywords = extract_keywords(&format!("{} {}", task.title, task.detail));
+        let task = sample_task("Any trusted owner action", "No specific host wording required.");
         let mut raw_inclusions = Vec::new();
-        append_host_keyboard_inclusions(&paths, &task, &keywords, &mut raw_inclusions);
+        append_owner_operation_inclusions(&paths, &task, &mut raw_inclusions);
         assert_eq!(raw_inclusions.len(), 2);
-        assert_eq!(raw_inclusions[0].source_kind, "repo_skill");
-        assert_eq!(raw_inclusions[1].source_kind, "host_keyboard_contract");
+        assert_eq!(raw_inclusions[0].source_kind, "repo_operation_skill");
+        assert_eq!(raw_inclusions[1].source_kind, "system_capability_contract");
         assert!(raw_inclusions[1].content.contains("keyboard"));
     }
 }
