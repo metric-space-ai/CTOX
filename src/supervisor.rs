@@ -2983,6 +2983,15 @@ fn apply_exec_session_directive(
                 .unwrap_or_else(|| format!("task-{}-turn-{}", task.id, turn_id));
             let cwd = resolve_exec_session_cwd(paths, directive.workdir.as_deref());
             let normalized_command = normalize_exec_session_command(&directive.command);
+            if let Some(reused) = reuse_existing_exec_session(
+                &session_id,
+                snapshot_session(&session_id)?,
+                &normalized_command,
+                &cwd,
+                directive.justification.as_deref(),
+            ) {
+                return Ok(reused);
+            }
             let mut effective_tty = directive.tty;
             let mut fallback_note = None;
             let ack = match start_session(
@@ -3114,6 +3123,31 @@ fn apply_exec_session_directive(
         }
         other => anyhow::bail!("unsupported execSessionAction: {other}"),
     }
+}
+
+fn reuse_existing_exec_session(
+    session_id: &str,
+    snapshot: Option<crate::command_exec::SessionSnapshot>,
+    requested_command: &[String],
+    cwd: &std::path::Path,
+    justification: Option<&str>,
+) -> Option<(String, String)> {
+    let snapshot = snapshot?;
+    if snapshot.status != "active" {
+        return None;
+    }
+    Some((
+        format!("Codex-Exec-Session {} wiederverwendet.", session_id),
+        format!(
+            "Exec session start skipped because the session already exists and is still active.\nSession: {}\nRequested command: {:?}\nExisting command: {:?}\nCWD: {}\nJustification: {}\nSnapshot:\n{}",
+            session_id,
+            requested_command,
+            snapshot.command,
+            cwd.display(),
+            justification.unwrap_or("none"),
+            render_exec_session_snapshot(Some(&snapshot)),
+        ),
+    ))
 }
 
 fn resolve_exec_session_cwd(paths: &Paths, requested: Option<&str>) -> PathBuf {
@@ -3939,5 +3973,36 @@ mod tests {
         assert_eq!(route.channel, "email");
         assert_eq!(route.recipient, "michael.welsch@metric-space.ai");
         assert!(route.route_note.contains("Fallback"));
+    }
+
+    #[test]
+    fn active_exec_session_start_is_reused_instead_of_erroring() {
+        let snapshot = crate::command_exec::SessionSnapshot {
+            session_id: "task297-kbd".to_string(),
+            created_at: now_iso(),
+            status: "active".to_string(),
+            cwd: "/tmp".to_string(),
+            tty: false,
+            stream_stdin: false,
+            stream_stdout_stderr: false,
+            output_bytes_cap: Some(65536),
+            command: vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+
+        let reused = reuse_existing_exec_session(
+            "task297-kbd",
+            Some(snapshot),
+            &["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
+            std::path::Path::new("/tmp"),
+            Some("reuse the active session"),
+        )
+        .expect("active session should be reused");
+
+        assert!(reused.0.contains("wiederverwendet"));
+        assert!(reused.1.contains("already exists and is still active"));
+        assert!(reused.1.contains("task297-kbd"));
     }
 }
