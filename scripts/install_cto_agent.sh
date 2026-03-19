@@ -403,6 +403,7 @@ preferred_cuda_visible_devices_from_census() {
   python3 - <<'PY'
 import json
 import pathlib
+import subprocess
 
 path = pathlib.Path("/tmp/cto_system_census.json")
 try:
@@ -437,7 +438,39 @@ while visible_gpu_count * 2 <= gpu_count:
 if visible_gpu_count < 2 or gpu_count < visible_gpu_count:
     raise SystemExit(0)
 
-subset = gpu_indices[-visible_gpu_count:]
+display_free_indices = []
+try:
+    output = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,display_active",
+            "--format=csv,noheader,nounits",
+        ],
+        text=True,
+        stderr=subprocess.DEVNULL,
+    )
+except Exception:
+    output = ""
+
+for line in output.splitlines():
+    parts = [part.strip() for part in line.split(",", 1)]
+    if len(parts) != 2:
+        continue
+    try:
+        gpu_index = int(parts[0])
+    except Exception:
+        continue
+    if gpu_index not in gpu_indices:
+        continue
+    if parts[1].lower() in {"disabled", "off", "no"}:
+        display_free_indices.append(gpu_index)
+
+display_free_indices = sorted(set(display_free_indices))
+if len(display_free_indices) >= visible_gpu_count:
+    subset = display_free_indices[:visible_gpu_count]
+else:
+    subset = gpu_indices[-visible_gpu_count:]
+
 print(",".join(str(index) for index in subset))
 PY
 }
