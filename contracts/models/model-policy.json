@@ -27,7 +27,7 @@
       "modelId": "Qwen3.5-35B-A3B",
       "runtimeModelId": "Qwen/Qwen3.5-35B-A3B",
       "officialLabel": "Qwen3.5 35B A3B",
-      "agenticAdapter": "mistralrs_gpt_oss_harmony_completion",
+      "agenticAdapter": "openai_compatible_chat",
       "reasoningEffort": "low",
       "deploymentMode": "local_or_self_hosted",
       "purpose": "vision-capable local supervisor and browser-inspection runtime when the CTO-Agent needs multimodal browser work and stronger agentic Qwen behavior on the same host",

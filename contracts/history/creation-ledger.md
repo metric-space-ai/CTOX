@@ -467,3 +467,9 @@ Jetzt modelliert der lokale Upgradepfad `CUDA_VISIBLE_DEVICES` als eigene Runtim
 
 Die BIOS-getriebenen Wechsel zwischen GPT-OSS und Qwen35 waren zuletzt nicht nur ein Modellthema, sondern auch ein Prozessproblem: `systemctl restart` liess den `mistralrs`-Baum auf der Testbox nicht immer sauber genug sterben, und genau dann liefen neue Starts gegen alte Worker oder alte GPU-Belegung.
 Jetzt stoppt der Runtime-Kern den Kleinhirn-Service vor einem Neustart explizit, wartet auf das Ende verbliebener `mistralrs serve --port 1234`-Prozesse und eskaliert notfalls bis zum harten Kill. Zusaetzlich bekommt die User-Service-Definition laengere Stop-Zeit und explizite Kill-Semantik, damit Modellwechsel weniger an schmutzigen Restprozessen haengen bleiben. Weil die grossen lokalen Modelle auf der Testbox real mehrere Minuten zum Binden brauchen koennen, wurde ausserdem das Default-Wartefenster fuer Startup-Readiness deutlich verlaengert.
+
+## 2026-03-19 - Frischer Installer und Qwen-Adapterpfad wurden von GPT-OSS entkoppelt
+
+Der frische Linux-Installationspfad war im Public Repo selbst kaputt: `install_cto_agent.sh` rief `is_gpt_oss_family` vor der Definition auf und versuchte auf Linux bei jedem Lauf blind `apt-get`, auch wenn der Host die Build-Werkzeuge schon hatte.
+Parallel war der kanonische Qwen35-Installpfad noch stellenweise mit dem GPT-OSS-Harmony-Adapter verdrahtet, obwohl Qwen im Agentenpfad als OpenAI-kompatibler Chat-Endpoint behandelt werden muss.
+Jetzt ist der frische Installer wieder bootstrap-faehig, vermeidet unnoetige Linux-Paketnachinstallationen auf vorbereiteten Hosts und fuehrt Qwen-Installationen klar ueber `openai_compatible_chat`, waehrend GPT-OSS auf seinem Harmony-Adapter bleibt.
