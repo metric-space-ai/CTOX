@@ -1274,7 +1274,15 @@ fn resolve_operating_targets(paths: &Paths, task: &TaskRecord) -> anyhow::Result
             fallback: None,
         }));
     }
-    let should_route_through_grosshirn = task_has_active_grosshirn_boost(paths, task.id);
+    let review_inherits_parent_boost = matches!(
+        task.task_kind.as_str(),
+        "self_review" | "worker_review" | "proactive_contact_review"
+    ) && task
+        .parent_task_id
+        .map(|parent_task_id| task_has_active_grosshirn_boost(paths, parent_task_id))
+        .unwrap_or(false);
+    let should_route_through_grosshirn =
+        task_has_active_grosshirn_boost(paths, task.id) || review_inherits_parent_boost;
     if should_route_through_grosshirn {
         if let Some(grosshirn) = resolve_grosshirn_target(paths)? {
             return Ok(Some(ResolvedTargets {
@@ -2949,6 +2957,43 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             .expect("targets should resolve again after cooldown");
         assert_eq!(cooled.primary.brain_tier, "kleinhirn");
         assert!(cooled.fallback.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn self_review_inherits_parent_grosshirn_boost() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("review_inherits_parent_boost");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+        write_runtime_env(&paths);
+        set_brain_access_mode(&paths, "kleinhirn_plus_grosshirn")?;
+
+        let mut review_task = synthetic_task(43);
+        review_task.task_kind = "self_review".to_string();
+        review_task.parent_task_id = Some(42);
+        review_task.title = "Task #42 vor Abschluss selbst reviewen".to_string();
+
+        let local = resolve_operating_targets(&paths, &review_task)?
+            .expect("targets should resolve before boost");
+        assert_eq!(local.primary.brain_tier, "kleinhirn");
+
+        arm_task_grosshirn_boost(&paths, 42, "Homepage absichern", "review inheritance", 1120)?;
+        let boosted = resolve_operating_targets(&paths, &review_task)?
+            .expect("review should inherit parent boost");
+        assert_eq!(boosted.primary.brain_tier, "grosshirn");
+        assert_eq!(
+            boosted.fallback.as_ref().map(|target| target.brain_tier.as_str()),
+            Some("kleinhirn")
+        );
+
+        release_task_grosshirn_boost(&paths, 42, "parent task done")?;
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())

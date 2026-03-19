@@ -1116,7 +1116,11 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                             brain_target_task_id,
                                             brain_target_title,
                                         );
-                                        if task_status != "blocked" {
+                                        if task.task_kind == "grosshirn_activation"
+                                            && (task_used_grosshirn || task_fell_back_to_kleinhirn)
+                                        {
+                                            task_status = "done".to_string();
+                                        } else if task_status != "blocked" && task_status != "done" {
                                             task_status = "continue".to_string();
                                         }
                                         normalized_next_mode = "reprioritize".to_string();
@@ -1132,7 +1136,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                             brain_directive.target_model.as_deref().unwrap_or("not supplied"),
                                             brain_directive.note.as_deref().unwrap_or("none"),
                                         );
-                                        if task_status != "blocked" {
+                                        if task_status != "blocked" && task_status != "done" {
                                             task_status = "continue".to_string();
                                         }
                                         normalized_next_mode = "request_resources".to_string();
@@ -1307,6 +1311,10 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                     crate::brain_runtime::local_kleinhirn_upgrade_available(
                                         &loop_paths,
                                     );
+                                let grosshirn_available =
+                                    crate::runtime_db::grosshirn_boost_available(&loop_paths);
+                                let grosshirn_configured =
+                                    grosshirn_runtime_configured(&loop_paths);
                                 let grosshirn_candidates = if policy.grosshirn_candidates.is_empty() {
                                     "none configured".to_string()
                                 } else {
@@ -1344,6 +1352,88 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                         checkpoint_summary
                                     );
                                     task_status = "continue".to_string();
+                                    normalized_next_mode = "reprioritize".to_string();
+                                } else if grosshirn_available {
+                                    let boost_note =
+                                        "Grosshirn ist bereits freigeschaltet und konfiguriert; derselbe Task wird jetzt darueber statt ueber neue Beschaffung weitergefuehrt.";
+                                    match arm_task_grosshirn_boost(
+                                        &loop_paths,
+                                        task.id,
+                                        &task.title,
+                                        boost_note,
+                                        1120,
+                                    ) {
+                                        Ok(_) => {
+                                            checkpoint_summary = format!(
+                                                "{} Vorhandenes Grosshirn wird fuer denselben Task statt neuer Beschaffung benutzt.",
+                                                checkpoint_summary
+                                            );
+                                            checkpoint_detail = format!(
+                                                "{checkpoint_detail}\n\nBereits verfuegbares Grosshirn wird direkt auf Task #{task_id} {title} gelenkt, statt weitere Beschaffungsschleifen zu erzeugen.\nBrain-Access-Modus: {brain_mode}\nAktuell lokal empfohlenes Kleinhirn: {kleinhirn}\nGrosshirn-Kandidaten: {grosshirn_candidates}\nBoost-Notiz: {boost_note}",
+                                                checkpoint_detail = checkpoint_detail,
+                                                task_id = task.id,
+                                                title = task.title,
+                                                brain_mode = trust.brain_access_mode,
+                                                kleinhirn = crate::contracts::describe_kleinhirn_selection(
+                                                    &policy,
+                                                    &census,
+                                                ),
+                                                grosshirn_candidates = grosshirn_candidates,
+                                                boost_note = boost_note,
+                                            );
+                                            if task_status != "blocked" {
+                                                task_status = "continue".to_string();
+                                            }
+                                            normalized_next_mode = "reprioritize".to_string();
+                                        }
+                                        Err(err) => {
+                                            checkpoint_summary = format!(
+                                                "{} Vorhandenes Grosshirn sollte statt Beschaffung benutzt werden, aber der Boost liess sich nicht setzen.",
+                                                checkpoint_summary
+                                            );
+                                            checkpoint_detail = format!(
+                                                "{checkpoint_detail}\n\nGrosshirn-Boost konnte fuer Task #{task_id} {title} nicht gesetzt werden: {err}",
+                                                checkpoint_detail = checkpoint_detail,
+                                                task_id = task.id,
+                                                title = task.title,
+                                                err = err,
+                                            );
+                                            if task_status != "blocked" {
+                                                task_status = "continue".to_string();
+                                            }
+                                            normalized_next_mode = "reprioritize".to_string();
+                                        }
+                                    }
+                                } else if trust.brain_access_mode != "kleinhirn_plus_grosshirn"
+                                    && grosshirn_configured
+                                {
+                                    let activation_detail = format!(
+                                        "Die Aufgabe #{task_id} ({title}) hat request_resources angefordert, aber in der Runtime liegt bereits eine Grosshirn-Konfiguration.\n\nGrund:\n{checkpoint_detail}\n\nAktueller Brain-Access-Modus: {brain_mode}\nAktuell lokal empfohlenes Kleinhirn: {kleinhirn}\nMoegliche Grosshirn-Kandidaten: {grosshirn_candidates}\n\nNaechster bounded Schritt:\n1. Aktiviere zuerst den bereits vorbereiteten Grosshirn-Zugang sauber im Brain-Access.\n2. Nutze danach denselben Infinity Loop mit Grosshirn plus lokalem Fallback.\n3. Erzeuge keine neue Beschaffungsschleife fuer bereits vorhandene Credentials.",
+                                        task_id = task.id,
+                                        title = task.title,
+                                        checkpoint_detail = checkpoint_detail,
+                                        brain_mode = trust.brain_access_mode,
+                                        kleinhirn = crate::contracts::describe_kleinhirn_selection(
+                                            &policy,
+                                            &census,
+                                        ),
+                                        grosshirn_candidates = grosshirn_candidates,
+                                    );
+                                    let _ = crate::runtime_db::enqueue_internal_task(
+                                        &loop_paths,
+                                        Some(task.id),
+                                        "grosshirn_activation",
+                                        "Grosshirn-Modus aktivieren und verifizieren",
+                                        &activation_detail,
+                                        865,
+                                    );
+                                    checkpoint_summary = format!(
+                                        "{} Grosshirn-Aktivierung statt neuer Beschaffung wurde eingereiht.",
+                                        checkpoint_summary
+                                    );
+                                    if task_status != "blocked" {
+                                        task_status = "continue".to_string();
+                                    }
                                     normalized_next_mode = "reprioritize".to_string();
                                 } else {
                                     let procurement_detail = format!(
@@ -1556,6 +1646,20 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                             );
                                         }
                                     }
+                                }
+                            } else if normalized_next_mode == "review"
+                                && task_status == "continue"
+                            {
+                                if let Err(err) = emit_self_review_task(
+                                    &loop_paths,
+                                    &task,
+                                    &checkpoint_summary,
+                                    &checkpoint_detail,
+                                    Some(&output_text),
+                                ) {
+                                    eprintln!("failed to emit self-review task for {task_id}: {err}");
+                                } else {
+                                    task_status = "done".to_string();
                                 }
                             } else if next_mode == "delegate" {
                                 let contract = result.delegate_contract.clone().unwrap_or_else(|| {
@@ -1946,23 +2050,35 @@ fn assess_task_stuck_risk(
         .find(|stage| stage.stage == current_stage)
         .or_else(|| loop_safety.guidance_stages.first())?;
 
-    let repeated_same_summary = stage_policy.same_checkpoint_repeat_triggers_review
-        && task
-            .last_checkpoint_summary
-            .as_ref()
-            .map(|previous| previous.trim() == checkpoint_summary.trim())
-            .unwrap_or(false);
+    let same_summary = task
+        .last_checkpoint_summary
+        .as_ref()
+        .map(|previous| previous.trim() == checkpoint_summary.trim())
+        .unwrap_or(false);
+    let repeated_same_summary =
+        stage_policy.same_checkpoint_repeat_triggers_review && same_summary;
+    let repeated_bounded_machine_step = same_summary
+        && (checkpoint_summary.contains("Bounded command-exec ausgefuehrt:")
+            || checkpoint_summary.contains("Exec-Session-Aktion")
+            || checkpoint_detail.contains("Bounded exec result:")
+            || checkpoint_detail.contains("Exec session result:"));
 
-    if repeated_same_summary
+    if repeated_bounded_machine_step
+        || repeated_same_summary
         || task.run_count >= stage_policy.max_run_count_before_self_preservation_review
     {
         let local_kleinhirn_decision_task = task.task_kind == "model_or_resource";
-        let reason = if repeated_same_summary {
+        let owner_interrupt_task = task.task_kind == "owner_interrupt";
+        let reason = if repeated_bounded_machine_step {
+            "Dieselbe bounded Maschinenaktion wiederholt sich ohne neuen Erkenntnisgewinn."
+        } else if repeated_same_summary {
             "Die letzte bounded Antwort wiederholt denselben Checkpoint ohne neue Bewegung."
         } else {
             "Die Aufgabe hat fuer die aktuelle Reifestufe zu viele bounded Versuche verbraucht."
         };
         let next_mode = if local_kleinhirn_decision_task {
+            "review".to_string()
+        } else if owner_interrupt_task || repeated_bounded_machine_step {
             "review".to_string()
         } else if loop_safety.request_resources_when_stuck {
             "request_resources".to_string()
@@ -3454,6 +3570,7 @@ fn detect_total_memory_gb() -> Option<u64> {
 mod tests {
     use super::*;
     use crate::app::init_only;
+    use crate::contracts::default_loop_safety_policy;
     use crate::runtime_db::list_queued_tasks;
     use rusqlite::Connection;
     use std::collections::HashSet;
@@ -3737,6 +3854,55 @@ mod tests {
             "Lokales Review dreht sich im Kreis.",
             false,
         ));
+    }
+
+    #[test]
+    fn repeated_bounded_owner_interrupt_exec_stays_in_review_instead_of_requesting_resources() {
+        let loop_safety = default_loop_safety_policy();
+        let task = crate::runtime_db::TaskRecord {
+            id: 138,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "bios".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Kurzer Repo-Ueberblick".to_string(),
+            detail: "Nutze genau einen kurzen bounded command-exec mit kleinem stdout.".to_string(),
+            trust_level: "owner_trust".to_string(),
+            priority_score: 1040,
+            status: "active".to_string(),
+            run_count: 12,
+            last_checkpoint_summary: Some(
+                "Executed single bounded command to list repository root contents. Bounded command-exec ausgefuehrt: [\"ls\", \"-1\"]"
+                    .to_string(),
+            ),
+            last_checkpoint_at: Some(now_iso()),
+            last_output: Some(
+                "Executed `ls -1` in repository root. Output: README.md".to_string(),
+            ),
+        };
+
+        let escalation = assess_task_stuck_risk(
+            &task,
+            &loop_safety,
+            "adaptive",
+            "Executed single bounded command to list repository root contents. Bounded command-exec ausgefuehrt: [\"ls\", \"-1\"]",
+            "Bounded exec result:\nCommand: [\"ls\", \"-1\"]\nSTDOUT:\nREADME.md",
+            "continue",
+            "reprioritize",
+        )
+        .expect("repeated bounded exec should escalate");
+
+        assert_eq!(escalation.task_status, "continue");
+        assert_eq!(escalation.next_mode, "review");
+        assert!(
+            escalation
+                .checkpoint_summary
+                .contains("Dieselbe bounded Maschinenaktion")
+        );
     }
 
     #[test]

@@ -5,6 +5,12 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 CFT_ROOT="$ROOT/runtime/chrome-for-testing"
 CFT_BINARY="$CFT_ROOT/chrome-linux64/chrome"
 
+if [ "$(uname -s)" = "Linux" ]; then
+  export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
+  export NEEDRESTART_MODE="${NEEDRESTART_MODE:-a}"
+  export APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-none}"
+fi
+
 have_command() {
   command -v "$1" >/dev/null 2>&1
 }
@@ -19,10 +25,51 @@ run_sudo() {
     exit 1
   fi
   if [ -n "${CTO_AGENT_SUDO_PASSWORD:-}" ]; then
-    printf '%s\n' "$CTO_AGENT_SUDO_PASSWORD" | sudo -S "$@"
+    printf '%s\n' "$CTO_AGENT_SUDO_PASSWORD" | sudo -S env \
+      DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-}" \
+      NEEDRESTART_MODE="${NEEDRESTART_MODE:-}" \
+      APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-}" \
+      "$@"
   else
-    sudo "$@"
+    sudo env \
+      DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-}" \
+      NEEDRESTART_MODE="${NEEDRESTART_MODE:-}" \
+      APT_LISTCHANGES_FRONTEND="${APT_LISTCHANGES_FRONTEND:-}" \
+      "$@"
   fi
+}
+
+google_chrome_apt_lists_present() {
+  ls /etc/apt/sources.list.d/google-chrome*.list >/dev/null 2>&1
+}
+
+disable_google_chrome_apt_lists() {
+  for source_list in /etc/apt/sources.list.d/google-chrome*.list; do
+    [ -f "$source_list" ] || continue
+    echo "Disabling stale Google Chrome apt source: $source_list"
+    run_sudo mv "$source_list" "$source_list.disabled"
+  done
+}
+
+apt_update_with_retry() {
+  tmp_log="$(mktemp /tmp/cto-browser-apt-update.XXXXXX)"
+  if run_sudo apt-get update >"$tmp_log" 2>&1; then
+    cat "$tmp_log"
+    rm -f "$tmp_log"
+    return 0
+  fi
+
+  cat "$tmp_log" >&2
+  if google_chrome_apt_lists_present && grep -Eqi 'google|dl\.google\.com|chrome' "$tmp_log"; then
+    echo "apt-get update failed against a stale Google Chrome source; disabling it and retrying." >&2
+    disable_google_chrome_apt_lists
+    rm -f "$tmp_log"
+    run_sudo apt-get update
+    return $?
+  fi
+
+  rm -f "$tmp_log"
+  return 1
 }
 
 have_chrome() {
@@ -59,6 +106,40 @@ want_kde_desktop() {
   esac
 }
 
+installed_display_manager() {
+  if [ -f /etc/X11/default-display-manager ]; then
+    basename "$(cat /etc/X11/default-display-manager 2>/dev/null || true)"
+    return
+  fi
+  if dpkg-query -W -f='${Status}' gdm3 2>/dev/null | grep -q 'install ok installed'; then
+    printf '%s\n' "gdm3"
+    return
+  fi
+  if dpkg-query -W -f='${Status}' sddm 2>/dev/null | grep -q 'install ok installed'; then
+    printf '%s\n' "sddm"
+    return
+  fi
+}
+
+preseed_display_manager_choice() {
+  if ! have_command debconf-set-selections; then
+    return
+  fi
+
+  display_manager="$(installed_display_manager || true)"
+  if [ -z "$display_manager" ] && want_kde_desktop; then
+    display_manager="sddm"
+  fi
+  if [ -z "$display_manager" ]; then
+    return
+  fi
+
+  seed_file="$(mktemp /tmp/cto-display-manager.XXXXXX)"
+  printf '%s %s %s %s\n' "$display_manager" "shared/default-x-display-manager" "select" "$display_manager" >"$seed_file"
+  run_sudo sh -c 'debconf-set-selections < "$1"' sh "$seed_file"
+  rm -f "$seed_file"
+}
+
 install_kde_desktop_linux() {
   if ! want_kde_desktop; then
     echo "Skipping KDE desktop installation (CTO_AGENT_INSTALL_KDE_DESKTOP=0)."
@@ -73,6 +154,7 @@ install_kde_desktop_linux() {
   fi
 
   echo "Installing KDE desktop runtime for browser agent..."
+  preseed_display_manager_choice
   run_sudo apt-get install -y \
     $kde_packages \
     konsole \
@@ -155,9 +237,8 @@ case "$os" in
       echo "Linux installer currently supports apt-get based hosts only." >&2
       exit 1
     fi
-    export DEBIAN_FRONTEND=noninteractive
     echo "Installing Linux prerequisites for browser engine..."
-    run_sudo apt-get update
+    apt_update_with_retry
     run_sudo apt-get install -y \
       ca-certificates \
       curl \

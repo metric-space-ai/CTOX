@@ -913,6 +913,14 @@ fn future_iso_after(secs: i64) -> String {
     (Utc::now() + ChronoDuration::seconds(secs)).to_rfc3339()
 }
 
+fn recent_past_iso(secs: i64) -> String {
+    (Utc::now() - ChronoDuration::seconds(secs)).to_rfc3339()
+}
+
+fn blocked_internal_task_reuse_window_secs() -> i64 {
+    1800
+}
+
 fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -3294,17 +3302,26 @@ fn task_completion_gate_failure(paths: &Paths, task: &TaskRecord) -> Option<Stri
             }
         }
         "grosshirn_procurement" => {
-            if trust.brain_access_mode != "kleinhirn_plus_grosshirn"
-                && !crate::brain_runtime::grosshirn_runtime_configured(paths)
-            {
+            let grosshirn_configured = crate::brain_runtime::grosshirn_runtime_configured(paths);
+            if trust.brain_access_mode == "kleinhirn_plus_grosshirn" || grosshirn_configured {
+                failures.push(
+                    "Grosshirn ist bereits freigeschaltet oder konfiguriert; Beschaffung ist kein offener Bedarf mehr.",
+                );
+            } else {
                 failures.push("Es gibt noch keinen freigegebenen oder konfigurierten Grosshirn-Zugang.");
             }
         }
         "grosshirn_activation" => {
+            let grosshirn_configured = crate::brain_runtime::grosshirn_runtime_configured(paths);
+            if trust.brain_access_mode == "kleinhirn_plus_grosshirn" && grosshirn_configured {
+                failures.push(
+                    "Grosshirn-Modus ist bereits freigeschaltet und konfiguriert.",
+                );
+            }
             if trust.brain_access_mode != "kleinhirn_plus_grosshirn" {
                 failures.push("Brain-Access steht noch nicht auf kleinhirn_plus_grosshirn.");
             }
-            if !crate::brain_runtime::grosshirn_runtime_configured(paths) {
+            if !grosshirn_configured {
                 failures.push("Grosshirn-Credentials oder Runtime-Konfiguration fehlen noch.");
             }
         }
@@ -4998,6 +5015,32 @@ pub fn enqueue_internal_task(
                 .ok_or_else(|| anyhow::anyhow!("failed to reload deduped internal task {task_id}"));
         }
     }
+    {
+        let blocked_cutoff = recent_past_iso(blocked_internal_task_reuse_window_secs());
+        let existing_id = conn
+            .query_row(
+                "SELECT id
+                 FROM tasks
+                 WHERE task_kind = ?1
+                   AND source_channel = 'system_guard'
+                   AND status = 'blocked'
+                   AND updated_at >= ?3
+                   AND (
+                        (parent_task_id IS NULL AND ?2 IS NULL)
+                        OR parent_task_id = ?2
+                   )
+                 ORDER BY priority_score DESC, id DESC
+                 LIMIT 1",
+                params![task_kind, parent_task_id, blocked_cutoff],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(task_id) = existing_id {
+            return load_task_by_id(paths, task_id)?.ok_or_else(|| {
+                anyhow::anyhow!("failed to reload recently blocked internal task {task_id}")
+            });
+        }
+    }
     let created_at = now_iso();
     conn.execute(
         "INSERT INTO tasks(
@@ -5318,9 +5361,6 @@ fn classify_task_kind(message: &str) -> String {
             "switch",
             "aktivier",
             "aktiviere",
-            "nutze",
-            "benutze",
-            "verwende",
             "konfigurier",
             "konfiguriere",
         ],
@@ -5338,18 +5378,32 @@ fn classify_task_kind(message: &str) -> String {
                 "switch",
                 "aktivier",
                 "aktiviere",
-                "nutze",
-                "benutze",
-                "verwende",
             ],
         )
     {
         return "local_model_switch".to_string();
     }
+    if contains_any(
+        &lowered,
+        &[
+            "execcommand",
+            "execsession",
+            "command-exec",
+            "repo",
+            "readme",
+            "bericht",
+            "report",
+        ],
+    ) {
+        return "owner_interrupt".to_string();
+    }
     if contains_any(&lowered, &["homepage", "startseite", "webseite", "bios", "sichtbar", "branding"]) {
         return "homepage_bridge".to_string();
     }
-    if contains_any(&lowered, &["superpassword", "root", "passwort"]) {
+    if contains_any(
+        &lowered,
+        &["superpassword", "root-auth", "root auth", "root-trust", "root trust", "passwort"],
+    ) {
         return "root_trust".to_string();
     }
     if contains_any(&lowered, &["modell", "kleinhirn", "grosshirn", "großhirn", "qwen", "gpt-oss"]) {
@@ -6768,6 +6822,14 @@ mod tests {
     }
 
     #[test]
+    fn repo_root_instruction_is_not_misclassified_as_root_trust() {
+        let task_kind = classify_task_kind(
+            "Dringende Chefanweisung: Der Repo-Root wurde bereits erfolgreich gelesen. Wiederhole ls -1 nicht. Lies stattdessen den Anfang der README.",
+        );
+        assert_eq!(task_kind, "owner_interrupt");
+    }
+
+    #[test]
     fn owner_speaker_gets_owner_override_even_without_owner_name() {
         let score = compute_priority_score(
             &default_loop_safety_policy(),
@@ -6860,6 +6922,56 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         let parent = load_task_by_id(&paths, 77)?.expect("parent task");
         assert_eq!(parent.status, "queued");
         assert!(!task_has_active_grosshirn_boost(&paths, 77));
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn enqueue_internal_task_reuses_recently_blocked_system_guard_task() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("blocked_internal_task_reuse");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let first = enqueue_internal_task(
+            &paths,
+            None,
+            "homepage_bridge",
+            "Homepage und BIOS absichern",
+            "Erste Pflichtaufgabe.",
+            880,
+        )?;
+        block_task(
+            &paths,
+            first.id,
+            "Browser-Verifikation fehlt noch.",
+            "Die Browser-Artefakte fehlen noch.",
+            None,
+        )?;
+
+        let reused = enqueue_internal_task(
+            &paths,
+            None,
+            "homepage_bridge",
+            "Homepage und BIOS absichern",
+            "Dieselbe Pflichtaufgabe darf nicht sofort als Duplikat gespawnt werden.",
+            880,
+        )?;
+
+        assert_eq!(reused.id, first.id);
+        assert_eq!(reused.status, "blocked");
+
+        let queued = list_queued_tasks(&paths, 32)?;
+        assert!(
+            !queued
+                .iter()
+                .any(|task| task.id != first.id && task.task_kind == "homepage_bridge")
+        );
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())

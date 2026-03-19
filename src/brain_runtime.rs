@@ -29,6 +29,13 @@ pub struct KleinhirnRuntimeSnapshot {
     pub adapter: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GrosshirnRuntimeSnapshot {
+    pub model: Option<String>,
+    pub official_label: Option<String>,
+    pub adapter: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct KleinhirnUpgradeOutcome {
     pub changed: bool,
@@ -111,6 +118,38 @@ pub fn load_kleinhirn_runtime_snapshot(paths: &Paths) -> Option<KleinhirnRuntime
         runtime_model: env_map.get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL").cloned(),
         official_label: env_map.get("CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL").cloned(),
         adapter: env_map.get("CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER").cloned(),
+    })
+}
+
+pub fn load_grosshirn_runtime_snapshot(paths: &Paths) -> Option<GrosshirnRuntimeSnapshot> {
+    let env_map = load_kleinhirn_env_map(paths).ok()?;
+    let policy = load_model_policy(paths);
+    let model = runtime_env_value("CTO_AGENT_GROSSHIRN_MODEL", &env_map).or_else(|| {
+        policy
+            .grosshirn_candidates
+            .first()
+            .map(|candidate| candidate.model_id.clone())
+    });
+    let official_label = model.as_deref().and_then(|needle| {
+        policy.grosshirn_candidates.iter().find_map(|candidate| {
+            if candidate.model_id.eq_ignore_ascii_case(needle)
+                || candidate
+                    .runtime_model_id
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case(needle))
+                    .unwrap_or(false)
+                || candidate.official_label.eq_ignore_ascii_case(needle)
+            {
+                Some(candidate.official_label.clone())
+            } else {
+                None
+            }
+        })
+    });
+    Some(GrosshirnRuntimeSnapshot {
+        model,
+        official_label,
+        adapter: runtime_env_value("CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER", &env_map),
     })
 }
 
@@ -591,23 +630,8 @@ fn mistralrs_build_supports_feature(feature: &str) -> bool {
 }
 
 fn installed_mistralrs_features() -> Vec<String> {
-    cargo_installed_features_for("mistralrs-cli").unwrap_or_else(|| {
-        let Some(binary) = resolve_mistralrs_binary() else {
-            return Vec::new();
-        };
-        let output = Command::new(binary)
-            .arg("doctor")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output();
-        let Ok(output) = output else {
-            return Vec::new();
-        };
-        if !output.status.success() {
-            return Vec::new();
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_mistralrs_doctor_build_features(&stdout)
+    explicit_mistralrs_features_override().unwrap_or_else(|| {
+        cargo_installed_features_for("mistralrs-cli").unwrap_or_default()
     })
 }
 
@@ -622,55 +646,51 @@ fn cargo_installed_features_for(crate_name: &str) -> Option<Vec<String>> {
     let raw = fs::read_to_string(path).ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
     let installs = parsed.get("installs")?.as_object()?;
-    installs
-        .iter()
-        .find(|(key, _)| key.starts_with(crate_name))
-        .and_then(|(_, value)| value.get("features"))
-        .and_then(|features| features.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
-                .collect::<Vec<_>>()
-        })
+    installs.iter().fold(None, |_, (key, value)| {
+        if !key.starts_with(crate_name) {
+            return None;
+        }
+        let features = value
+            .get("features")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                    .collect::<Vec<_>>()
+            })?;
+        Some(features)
+    })
 }
 
-fn resolve_mistralrs_binary() -> Option<String> {
-    if let Ok(path) = std::env::var("CTO_AGENT_MISTRALRS_BINARY") {
-        let trimmed = path.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    let output = Command::new("sh")
-        .arg("-lc")
-        .arg("command -v mistralrs || printf '%s' \"$HOME/.cargo/bin/mistralrs\"")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if resolved.is_empty() {
+fn explicit_mistralrs_features_override() -> Option<Vec<String>> {
+    let raw = std::env::var("CTO_AGENT_MISTRALRS_FEATURES")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())?;
+    let parsed = parse_mistralrs_feature_list(&raw);
+    if parsed.is_empty() {
         None
     } else {
-        Some(resolved)
+        Some(parsed)
     }
 }
 
-fn parse_mistralrs_doctor_build_features(doctor_output: &str) -> Vec<String> {
-    doctor_output
-        .lines()
-        .find_map(|line| line.split_once("Build features:"))
-        .map(|(_, value)| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
+fn parse_mistralrs_feature_list(raw: &str) -> Vec<String> {
+    let mut features = Vec::new();
+    for item in raw
+        .split(|ch: char| ch == ',' || ch.is_whitespace())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+    {
+        if !features
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(item))
+        {
+            features.push(item.to_string());
+        }
+    }
+    features
 }
 
 fn apply_selected_model_to_env(
@@ -715,20 +735,7 @@ fn apply_selected_model_to_env(
             .unwrap_or_else(default_adapter_for_model),
     );
 
-    let tune = census
-        .model_tune_candidates
-        .as_ref()
-        .and_then(|items| {
-            items.iter().find(|candidate| {
-                candidate.status.eq_ignore_ascii_case("supported")
-                    && (candidate.model_id.eq_ignore_ascii_case(&selected.model_id)
-                        || selected
-                            .runtime_model_id
-                            .as_deref()
-                            .map(|value| candidate.model_id.eq_ignore_ascii_case(value))
-                            .unwrap_or(false))
-            })
-        });
+    let tune = supported_model_tune_candidate(selected, census);
     let reliable_layout_tune =
         tune.filter(|candidate| candidate.max_context_tokens.unwrap_or(0) > 0);
     match tune.and_then(|candidate| candidate.recommended_isq.clone()) {
@@ -945,28 +952,20 @@ fn build_startup_calibration_candidates(
     selected: &BrainModel,
     census: &crate::contracts::SystemCensus,
 ) -> Vec<StartupCalibrationCandidate> {
-    let tune = census
-        .model_tune_candidates
-        .as_ref()
-        .and_then(|items| {
-            items.iter().find(|candidate| {
-                candidate.status.eq_ignore_ascii_case("supported")
-                    && (candidate.model_id.eq_ignore_ascii_case(&selected.model_id)
-                        || selected
-                            .runtime_model_id
-                            .as_deref()
-                            .map(|value| candidate.model_id.eq_ignore_ascii_case(value))
-                            .unwrap_or(false))
-            })
-        });
+    let tune = supported_model_tune_candidate(selected, census);
     let tuned_max_context = tune.and_then(|candidate| candidate.max_context_tokens);
     let multi_gpu_auto_tp = prefers_multi_gpu_auto_mapping(selected, census);
+    let multi_gpu_context_backoff = multi_gpu_auto_tp
+        || (census.gpu_count.unwrap_or(0) > 1
+            && is_gpt_oss_family(selected)
+            && !mistralrs_build_supports_feature("nccl")
+            && supported_tuned_device_layers(selected, census).is_some());
     let paged_attn_permitted = !matches!(
         selected.startup_paged_attn_mode.as_deref(),
         Some("off")
     );
 
-    if multi_gpu_auto_tp {
+    if multi_gpu_context_backoff {
         let bootstrap_cap = multi_gpu_bootstrap_max_seq_len(selected);
         let mut lengths = Vec::new();
         if let Some(tuned) = tuned_max_context.filter(|value| *value > 0) {
@@ -1014,7 +1013,7 @@ fn build_startup_calibration_candidates(
                 } else {
                     Some("off".to_string())
                 },
-                force_auto_device_mapping: true,
+                force_auto_device_mapping: multi_gpu_auto_tp,
             })
             .collect();
     }
@@ -1067,11 +1066,40 @@ fn is_gpt_oss_family(selected: &BrainModel) -> bool {
     runtime_model.contains("gpt-oss") || policy_model.contains("gpt-oss")
 }
 
+fn supported_model_tune_candidate<'a>(
+    selected: &BrainModel,
+    census: &'a crate::contracts::SystemCensus,
+) -> Option<&'a crate::contracts::ModelTuneCandidate> {
+    census.model_tune_candidates.as_ref().and_then(|items| {
+        items.iter().find(|candidate| {
+            candidate.status.eq_ignore_ascii_case("supported")
+                && (candidate.model_id.eq_ignore_ascii_case(&selected.model_id)
+                    || selected
+                        .runtime_model_id
+                        .as_deref()
+                        .map(|value| candidate.model_id.eq_ignore_ascii_case(value))
+                        .unwrap_or(false))
+        })
+    })
+}
+
+fn supported_tuned_device_layers<'a>(
+    selected: &BrainModel,
+    census: &'a crate::contracts::SystemCensus,
+) -> Option<&'a str> {
+    supported_model_tune_candidate(selected, census)
+        .and_then(|candidate| candidate.device_layers_cli.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn should_disable_nccl(
     selected: &BrainModel,
     census: &crate::contracts::SystemCensus,
 ) -> bool {
-    census.gpu_count.unwrap_or(0) > 1 && is_gpt_oss_family(selected)
+    census.gpu_count.unwrap_or(0) > 1
+        && is_gpt_oss_family(selected)
+        && !mistralrs_build_supports_feature("nccl")
 }
 
 fn prefers_multi_gpu_auto_mapping(
@@ -1084,6 +1112,12 @@ fn prefers_multi_gpu_auto_mapping(
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
+    if is_gpt_oss_family(selected)
+        && !mistralrs_build_supports_feature("nccl")
+        && supported_tuned_device_layers(selected, census).is_some()
+    {
+        return false;
+    }
     gpu_count > 1 && !topology_override_present
 }
 
@@ -1641,7 +1675,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_gpu_gpt_oss_calibration_uses_auto_mapping_without_paged_attn() {
+    fn multi_gpu_gpt_oss_calibration_uses_context_backoff_with_tuned_layout() {
         let selected = gpt_oss_model();
         let census = SystemCensus {
             gpu_count: Some(5),
@@ -1660,14 +1694,15 @@ mod tests {
         let candidates = build_startup_calibration_candidates(&selected, &census);
         assert!(candidates.len() >= 4);
         assert_eq!(candidates[0].max_seq_len, Some(131_072));
+        assert_eq!(candidates[1].max_seq_len, Some(65_536));
         assert_eq!(candidates[0].pa_context_len, None);
         assert_eq!(candidates[0].pa_cache_type, None);
         assert_eq!(candidates[0].paged_attn_mode.as_deref(), Some("off"));
-        assert!(candidates.iter().all(|item| item.force_auto_device_mapping));
+        assert!(candidates.iter().all(|item| !item.force_auto_device_mapping));
     }
 
     #[test]
-    fn multi_gpu_gpt_oss_env_prefers_subset_and_clears_manual_layout() {
+    fn multi_gpu_gpt_oss_env_uses_tuned_manual_layout() {
         let selected = gpt_oss_model();
         let census = SystemCensus {
             gpu_count: Some(5),
@@ -1718,15 +1753,15 @@ mod tests {
         apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
 
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES").map(String::as_str),
-            Some("1,2,3,4")
-        );
-        assert_eq!(
             env_map.get("CTO_AGENT_KLEINHIRN_DISABLE_NCCL").map(String::as_str),
             Some("1")
         );
-        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS"));
+        assert_eq!(
+            env_map.get("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS").map(String::as_str),
+            Some("0:21;1:3")
+        );
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS"));
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
         assert_eq!(
             env_map.get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE").map(String::as_str),
             Some("off")
@@ -2065,10 +2100,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_mistralrs_build_features_from_doctor_output() {
-        let features = parse_mistralrs_doctor_build_features(
-            "Mistral.rs Installation\n-----------------------\n[INFO] Build features: cuda, flash-attn, nccl\n",
-        );
+    fn parses_mistralrs_feature_list_from_env_style_override() {
+        let features = parse_mistralrs_feature_list("cuda flash-attn, nccl");
         assert_eq!(features, vec!["cuda", "flash-attn", "nccl"]);
     }
 

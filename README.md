@@ -28,6 +28,14 @@ sh scripts/install_cto_agent.sh
 - Er baut den Rust-Host, initialisiert Contracts, TLS und SQLite, fuehrt optional das Kommunikations-Bootstrap-TUI aus, installiert das lokale Kleinhirn, richtet User-Services ein und startet danach den Attach-Pfad.
 - Fuer den echten Always-on-Betrieb sind `systemctl --user` und nach Moeglichkeit `loginctl enable-linger` erforderlich; das richtet `scripts/install_linux_user_services.sh` ein bzw. prueft es.
 
+### HARD WARNING: mistral.rs Multi-GPU Guardrails
+
+- **Verlass dich nicht auf `mistralrs doctor`, um NCCL oder Tensor-Parallel faehig/nicht faehig zu entscheiden.** Die aktuelle `doctor`-Ausgabe zeigt die Distributed-Backends nicht zuverlaessig an. Fuer Install- und Runtime-Entscheidungen zaehlen die Cargo-Install-Metadaten in `~/.cargo/.crates2.json` oder ein expliziter Override.
+- **Nie wieder Install- oder Runtime-Entscheidungen auf Basis von `mistralrs doctor`:** Wenn `doctor` kein NCCL anzeigt, bedeutet das nicht, dass der Build kein NCCL hat. Tensor-Parallel fuer Multi-GPU-GPT-OSS muss ueber echte Build-Metadaten und echte Hosttests beurteilt werden.
+- Wenn der Host GPT-OSS auf mehreren CUDA-GPUs fahren soll, ist der bevorzugte Pfad **Tensor Parallel mit NCCL**. `device-layers` plus `CTO_AGENT_KLEINHIRN_DISABLE_NCCL=1` ist nur der Fallback fuer Hosts ohne funktionierendes NCCL.
+- Der Installer persistiert die erwarteten mistral.rs-Features jetzt als `CTO_AGENT_MISTRALRS_FEATURES` in `runtime/kleinhirn.env`. Fuer manuelle Starts oder Sonderfaelle darfst du das explizit pinnen, z. B. `CTO_AGENT_MISTRALRS_FEATURES='cuda flash-attn nccl'`.
+- Fuer `openai/gpt-oss-20b` bleibt `PagedAttention` aus. Das ist kein Tuning-Bauchgefuehl, sondern eine Modellgrenze im Upstream von `mistral.rs`.
+
 ## Kurzbild
 
 - Der Agent startet terminal-born, baut aber sofort eine lokale HTTPS-Control-Plane mit BIOS, Root-Auth, History, Browser-, Model- und Census-Seiten auf.
