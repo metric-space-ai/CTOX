@@ -49,12 +49,8 @@ is_gpt_oss_family() {
 }
 
 REQUESTED_KLEINHIRN_PROFILE="$(resolve_kleinhirn_profile)"
-KLEINHIRN_PROFILE="gpt_oss"
+KLEINHIRN_PROFILE="$REQUESTED_KLEINHIRN_PROFILE"
 PROFILE_PINNED=1
-
-if [ "$REQUESTED_KLEINHIRN_PROFILE" != "$KLEINHIRN_PROFILE" ]; then
-  echo "[policy] Initial installation stays on GPT-OSS 20B; requested profile ${REQUESTED_KLEINHIRN_PROFILE} can only be applied later through a runtime self-upgrade."
-fi
 
 selected_matches_profile() {
   case "$KLEINHIRN_PROFILE" in
@@ -75,9 +71,9 @@ selected_matches_profile() {
 
 case "$KLEINHIRN_PROFILE" in
   qwen35)
-    KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-Qwen3.5-0.8B}"
-    KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-Qwen/Qwen3.5-0.8B}"
-    KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-Qwen3.5 0.8B}"
+    KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-Qwen3.5-35B-A3B}"
+    KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-Qwen/Qwen3.5-35B-A3B}"
+    KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-Qwen3.5 35B A3B}"
     KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-openai_compatible_chat}"
     KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-131072}"
     KLEINHIRN_DISABLE_PAGED_ATTN="${CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN:-0}"
@@ -115,6 +111,10 @@ KLEINHIRN_JINJA_EXPLICIT="${CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT:-}"
 KLEINHIRN_TOKENIZER_JSON="${CTO_AGENT_KLEINHIRN_TOKENIZER_JSON:-}"
 KLEINHIRN_TOPOLOGY="${CTO_AGENT_KLEINHIRN_TOPOLOGY:-}"
 KLEINHIRN_CUDA_VISIBLE_DEVICES="${CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES:-}"
+KLEINHIRN_MULTI_GPU_MODE="${CTO_AGENT_KLEINHIRN_MULTI_GPU_MODE:-}"
+KLEINHIRN_TENSOR_PARALLEL_BACKEND="${CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND:-}"
+KLEINHIRN_VISIBLE_GPU_POLICY="${CTO_AGENT_KLEINHIRN_VISIBLE_GPU_POLICY:-}"
+KLEINHIRN_MN_LOCAL_WORLD_SIZE="${CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE:-}"
 KLEINHIRN_DISABLE_NCCL="${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}"
 
 KLEINHIRN_PORT="${CTO_AGENT_KLEINHIRN_PORT:-1234}"
@@ -329,6 +329,9 @@ for key, value in [
     ("SELECTED_JINJA_EXPLICIT", selected.get("startupJinjaExplicitPath") or ""),
     ("SELECTED_TOKENIZER_JSON", selected.get("startupTokenizerJsonPath") or ""),
     ("SELECTED_TOPOLOGY", selected.get("startupTopologyPath") or ""),
+    ("SELECTED_MULTI_GPU_MODE", selected.get("startupMultiGpuMode") or ""),
+    ("SELECTED_TENSOR_PARALLEL_BACKEND", selected.get("startupTensorParallelBackend") or ""),
+    ("SELECTED_VISIBLE_GPU_POLICY", selected.get("startupVisibleGpuPolicy") or ""),
     ("SELECTED_PREFER_AUTO_DEVICE_MAPPING", "1" if selected.get("preferAutoDeviceMapping") else "0"),
 ]:
     print(f"{key}={shlex.quote(value)}")
@@ -396,6 +399,10 @@ write_kleinhirn_env_file() {
     printf 'CTO_AGENT_KLEINHIRN_TOKENIZER_JSON=%s\n' "$(shell_quote "$KLEINHIRN_TOKENIZER_JSON")"
     printf 'CTO_AGENT_KLEINHIRN_TOPOLOGY=%s\n' "$(shell_quote "$KLEINHIRN_TOPOLOGY")"
     printf 'CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES=%s\n' "$(shell_quote "$KLEINHIRN_CUDA_VISIBLE_DEVICES")"
+    printf 'CTO_AGENT_KLEINHIRN_MULTI_GPU_MODE=%s\n' "$(shell_quote "$KLEINHIRN_MULTI_GPU_MODE")"
+    printf 'CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND=%s\n' "$(shell_quote "$KLEINHIRN_TENSOR_PARALLEL_BACKEND")"
+    printf 'CTO_AGENT_KLEINHIRN_VISIBLE_GPU_POLICY=%s\n' "$(shell_quote "$KLEINHIRN_VISIBLE_GPU_POLICY")"
+    printf 'CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE=%s\n' "$(shell_quote "$KLEINHIRN_MN_LOCAL_WORLD_SIZE")"
   } > "$ENV_FILE"
 }
 
@@ -473,6 +480,87 @@ else:
 
 print(",".join(str(index) for index in subset))
 PY
+}
+
+count_csv_items() {
+  raw="${1:-}"
+  if [ -z "$raw" ]; then
+    printf '%s\n' "0"
+    return
+  fi
+  printf '%s\n' "$raw" | awk -F',' '{
+    count = 0
+    for (i = 1; i <= NF; i += 1) {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $i)
+      if ($i != "") {
+        count += 1
+      }
+    }
+    print count
+  }'
+}
+
+resolve_multi_gpu_mode() {
+  if [ -n "${KLEINHIRN_MULTI_GPU_MODE:-}" ]; then
+    printf '%s\n' "$KLEINHIRN_MULTI_GPU_MODE"
+    return
+  fi
+  if is_gpt_oss_family; then
+    printf '%s\n' "auto_device_map"
+    return
+  fi
+  if [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING:-0}" = "1" ]; then
+    printf '%s\n' "auto_device_map"
+    return
+  fi
+  printf '%s\n' "tensor_parallel"
+}
+
+resolve_tensor_parallel_backend() {
+  if [ -n "${KLEINHIRN_TENSOR_PARALLEL_BACKEND:-}" ]; then
+    printf '%s\n' "$KLEINHIRN_TENSOR_PARALLEL_BACKEND"
+    return
+  fi
+  if [ "$(resolve_multi_gpu_mode)" = "tensor_parallel" ] && ! is_gpt_oss_family; then
+    printf '%s\n' "nccl"
+    return
+  fi
+  printf '%s\n' "disabled"
+}
+
+resolve_visible_gpu_policy() {
+  if [ -n "${KLEINHIRN_VISIBLE_GPU_POLICY:-}" ]; then
+    printf '%s\n' "$KLEINHIRN_VISIBLE_GPU_POLICY"
+    return
+  fi
+  if [ "$(resolve_multi_gpu_mode)" = "tensor_parallel" ]; then
+    printf '%s\n' "largest_power_of_two_prefer_display_free"
+    return
+  fi
+  printf '%s\n' "all"
+}
+
+resolve_mn_local_world_size() {
+  visible_devices="${1:-}"
+  gpu_count="${2:-0}"
+
+  if [ -n "$visible_devices" ]; then
+    count_csv_items "$visible_devices"
+    return
+  fi
+
+  case "$gpu_count" in
+    ''|*[!0-9]*)
+      printf '%s\n' ""
+      ;;
+    *)
+      if [ "$gpu_count" -gt 1 ]; then
+        printf '%s\n' "$gpu_count"
+      else
+        printf '%s\n' ""
+      fi
+      ;;
+  esac
 }
 
 next_context_backoff_value() {
@@ -884,15 +972,6 @@ if [ "$PROFILE_PINNED" = "1" ] && [ -n "${SELECTED_POLICY_MODEL:-}" ] && ! selec
   APPLY_SELECTED_MODEL=0
   echo "[5/10] Ignore mismatched recommended model ${SELECTED_POLICY_MODEL} because CTO_AGENT_KLEINHIRN_PROFILE=${KLEINHIRN_PROFILE} is pinned"
 fi
-USE_MULTI_GPU_TUNED_DEVICE_LAYERS=0
-if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
-  && is_gpt_oss_family \
-  && ! mistralrs_uses_nccl \
-  && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] \
-  && [ -z "$KLEINHIRN_TOPOLOGY" ] \
-  && [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING:-0}" != "1" ]; then
-  USE_MULTI_GPU_TUNED_DEVICE_LAYERS=1
-fi
 
 if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ -n "${SELECTED_POLICY_MODEL:-}" ]; then
   KLEINHIRN_POLICY_MODEL="$SELECTED_POLICY_MODEL"
@@ -936,20 +1015,24 @@ fi
 if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ -n "${SELECTED_TOPOLOGY:-}" ]; then
   KLEINHIRN_TOPOLOGY="$SELECTED_TOPOLOGY"
 fi
+if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ -n "${SELECTED_MULTI_GPU_MODE:-}" ]; then
+  KLEINHIRN_MULTI_GPU_MODE="$SELECTED_MULTI_GPU_MODE"
+fi
+if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ -n "${SELECTED_TENSOR_PARALLEL_BACKEND:-}" ]; then
+  KLEINHIRN_TENSOR_PARALLEL_BACKEND="$SELECTED_TENSOR_PARALLEL_BACKEND"
+fi
+if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ -n "${SELECTED_VISIBLE_GPU_POLICY:-}" ]; then
+  KLEINHIRN_VISIBLE_GPU_POLICY="$SELECTED_VISIBLE_GPU_POLICY"
+fi
 
 eval "$(apply_runtime_tune_defaults || true)"
-if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
-  && is_gpt_oss_family \
-  && ! mistralrs_uses_nccl \
-  && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] \
-  && [ -z "$KLEINHIRN_TOPOLOGY" ] \
-  && [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING:-0}" != "1" ]; then
-  USE_MULTI_GPU_TUNED_DEVICE_LAYERS=1
-fi
+KLEINHIRN_MULTI_GPU_MODE="$(resolve_multi_gpu_mode)"
+KLEINHIRN_TENSOR_PARALLEL_BACKEND="$(resolve_tensor_parallel_backend)"
+KLEINHIRN_VISIBLE_GPU_POLICY="$(resolve_visible_gpu_policy)"
 if [ -z "$KLEINHIRN_ISQ" ] && [ -n "${RECOMMENDED_ISQ:-}" ]; then
   KLEINHIRN_ISQ="$(printf '%s' "$RECOMMENDED_ISQ" | tr '[:upper:]' '[:lower:]')"
 fi
-if [ -z "$KLEINHIRN_DEVICE_LAYERS" ] && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] && { [ "${CENSUS_GPU_COUNT:-0}" -le 1 ] || [ "$USE_MULTI_GPU_TUNED_DEVICE_LAYERS" = "1" ]; }; then
+if [ -z "$KLEINHIRN_DEVICE_LAYERS" ] && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] && [ "${CENSUS_GPU_COUNT:-0}" -le 1 ]; then
   KLEINHIRN_DEVICE_LAYERS="$RECOMMENDED_DEVICE_LAYERS"
 fi
 if [ -n "${RECOMMENDED_MAX_CONTEXT_TOKENS:-}" ]; then
@@ -970,14 +1053,10 @@ if [ -z "$KLEINHIRN_MAX_BATCH_SIZE" ]; then
   KLEINHIRN_MAX_BATCH_SIZE="1"
 fi
 
-if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING:-0}" = "1" ] && [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ]; then
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ "$KLEINHIRN_MULTI_GPU_MODE" = "auto_device_map" ]; then
   if [ -z "$KLEINHIRN_TOPOLOGY" ]; then
     KLEINHIRN_DEVICE_LAYERS=""
     KLEINHIRN_NUM_DEVICE_LAYERS=""
-  fi
-  KLEINHIRN_PAGED_ATTN_MODE="on"
-  if [ -z "$KLEINHIRN_PA_CACHE_TYPE" ]; then
-    KLEINHIRN_PA_CACHE_TYPE="f8e4m3"
   fi
   if [ -z "$KLEINHIRN_MAX_SEQ_LEN" ] && [ -n "${RECOMMENDED_MAX_CONTEXT_TOKENS:-}" ]; then
     KLEINHIRN_MAX_SEQ_LEN="$RECOMMENDED_MAX_CONTEXT_TOKENS"
@@ -987,20 +1066,30 @@ if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING
   fi
 fi
 
-if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ -z "$KLEINHIRN_TOPOLOGY" ] && [ "$USE_MULTI_GPU_TUNED_DEVICE_LAYERS" != "1" ]; then
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ -z "$KLEINHIRN_TOPOLOGY" ] && [ "$KLEINHIRN_MULTI_GPU_MODE" != "manual_device_layers" ]; then
   KLEINHIRN_DEVICE_LAYERS=""
   KLEINHIRN_NUM_DEVICE_LAYERS=""
 fi
 
+KLEINHIRN_MN_LOCAL_WORLD_SIZE=""
 if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
-  && mistralrs_uses_nccl \
-  && [ -z "$KLEINHIRN_TOPOLOGY" ] \
-  && [ -z "$KLEINHIRN_CUDA_VISIBLE_DEVICES" ]; then
-  KLEINHIRN_CUDA_VISIBLE_DEVICES="$(preferred_cuda_visible_devices_from_census || true)"
+  && [ "$KLEINHIRN_MULTI_GPU_MODE" = "tensor_parallel" ] \
+  && [ "$KLEINHIRN_TENSOR_PARALLEL_BACKEND" = "nccl" ]; then
+  if [ "$KLEINHIRN_VISIBLE_GPU_POLICY" = "largest_power_of_two_prefer_display_free" ] \
+    && [ -z "$KLEINHIRN_TOPOLOGY" ] \
+    && [ -z "$KLEINHIRN_CUDA_VISIBLE_DEVICES" ]; then
+    KLEINHIRN_CUDA_VISIBLE_DEVICES="$(preferred_cuda_visible_devices_from_census || true)"
+  fi
+  KLEINHIRN_MN_LOCAL_WORLD_SIZE="$(resolve_mn_local_world_size "$KLEINHIRN_CUDA_VISIBLE_DEVICES" "${CENSUS_GPU_COUNT:-0}")"
 fi
 
-if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ "$KLEINHIRN_POLICY_MODEL" = "gpt-oss-20b" ] && ! mistralrs_uses_nccl; then
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ "$KLEINHIRN_MULTI_GPU_MODE" = "auto_device_map" ]; then
   KLEINHIRN_DISABLE_NCCL="1"
+  KLEINHIRN_MN_LOCAL_WORLD_SIZE=""
+elif [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
+  && [ "$KLEINHIRN_MULTI_GPU_MODE" = "tensor_parallel" ] \
+  && [ "$KLEINHIRN_TENSOR_PARALLEL_BACKEND" = "nccl" ]; then
+  KLEINHIRN_DISABLE_NCCL=""
 elif [ -z "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}" ]; then
   KLEINHIRN_DISABLE_NCCL=""
 fi

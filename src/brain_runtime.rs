@@ -421,7 +421,7 @@ fn apply_selected_kleinhirn_upgrade(
     selected: &BrainModel,
     census: &crate::contracts::SystemCensus,
 ) -> anyhow::Result<KleinhirnUpgradeOutcome> {
-    if selected.prefer_auto_device_mapping
+    if uses_multi_gpu_tensor_parallel_nccl(selected, census)
         && census.gpu_count.unwrap_or(0) > 1
         && selected
             .startup_topology_path
@@ -734,6 +734,18 @@ fn apply_selected_model_to_env(
             .clone()
             .unwrap_or_else(default_adapter_for_model),
     );
+    env_map.insert(
+        "CTO_AGENT_KLEINHIRN_MULTI_GPU_MODE".to_string(),
+        selected_multi_gpu_mode(selected).to_string(),
+    );
+    env_map.insert(
+        "CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND".to_string(),
+        selected_tensor_parallel_backend(selected).to_string(),
+    );
+    env_map.insert(
+        "CTO_AGENT_KLEINHIRN_VISIBLE_GPU_POLICY".to_string(),
+        selected_visible_gpu_policy(selected).to_string(),
+    );
 
     let tune = supported_model_tune_candidate(selected, census);
     let reliable_layout_tune =
@@ -769,6 +781,7 @@ fn apply_selected_model_to_env(
     }
 
     let prefer_multi_gpu_auto_mapping = prefers_multi_gpu_auto_mapping(selected, census);
+    let use_tensor_parallel_nccl = uses_multi_gpu_tensor_parallel_nccl(selected, census);
 
     match selected.startup_device_layers_cli.as_deref() {
         _ if selected
@@ -790,8 +803,8 @@ fn apply_selected_model_to_env(
             env_map.remove("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS");
         }
         _ if prefer_multi_gpu_auto_mapping
-            || calibration.force_auto_device_mapping
-            || selected.prefer_auto_device_mapping =>
+            || use_tensor_parallel_nccl
+            || calibration.force_auto_device_mapping =>
         {
             env_map.remove("CTO_AGENT_KLEINHIRN_TOPOLOGY");
             env_map.remove("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS");
@@ -918,6 +931,17 @@ fn apply_selected_model_to_env(
             env_map.remove("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES");
         }
     }
+    match preferred_mn_local_world_size(selected, census, calibration) {
+        Some(value) if value > 1 => {
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE".to_string(),
+                value.to_string(),
+            );
+        }
+        _ => {
+            env_map.remove("CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE");
+        }
+    }
 }
 
 fn kleinhirn_transition_state_path(paths: &Paths) -> std::path::PathBuf {
@@ -954,12 +978,9 @@ fn build_startup_calibration_candidates(
 ) -> Vec<StartupCalibrationCandidate> {
     let tune = supported_model_tune_candidate(selected, census);
     let tuned_max_context = tune.and_then(|candidate| candidate.max_context_tokens);
-    let multi_gpu_auto_tp = prefers_multi_gpu_auto_mapping(selected, census);
-    let multi_gpu_context_backoff = multi_gpu_auto_tp
-        || (census.gpu_count.unwrap_or(0) > 1
-            && is_gpt_oss_family(selected)
-            && !mistralrs_build_supports_feature("nccl")
-            && supported_tuned_device_layers(selected, census).is_some());
+    let multi_gpu_auto_mapping = prefers_multi_gpu_auto_mapping(selected, census);
+    let multi_gpu_tensor_parallel = uses_multi_gpu_tensor_parallel_nccl(selected, census);
+    let multi_gpu_context_backoff = multi_gpu_auto_mapping || multi_gpu_tensor_parallel;
     let paged_attn_permitted = !matches!(
         selected.startup_paged_attn_mode.as_deref(),
         Some("off")
@@ -1013,7 +1034,7 @@ fn build_startup_calibration_candidates(
                 } else {
                     Some("off".to_string())
                 },
-                force_auto_device_mapping: multi_gpu_auto_tp,
+                force_auto_device_mapping: multi_gpu_auto_mapping,
             })
             .collect();
     }
@@ -1028,7 +1049,7 @@ fn build_startup_calibration_candidates(
     {
         (Some(policy_cap), Some(seq_cap)) => Some(policy_cap.min(seq_cap)),
         (Some(policy_cap), None) => Some(policy_cap),
-        (None, Some(seq_cap)) if selected.prefer_auto_device_mapping => Some(seq_cap),
+        (None, Some(seq_cap)) if multi_gpu_auto_mapping => Some(seq_cap),
         _ => None,
     };
 
@@ -1038,7 +1059,7 @@ fn build_startup_calibration_candidates(
         pa_context_len: effective_pa_context_len,
         pa_cache_type: selected.startup_pa_cache_type.clone(),
         paged_attn_mode: selected.startup_paged_attn_mode.clone(),
-        force_auto_device_mapping: selected.prefer_auto_device_mapping,
+        force_auto_device_mapping: multi_gpu_auto_mapping,
     }]
 }
 
@@ -1093,13 +1114,69 @@ fn supported_tuned_device_layers<'a>(
         .filter(|value| !value.is_empty())
 }
 
+fn selected_multi_gpu_mode(selected: &BrainModel) -> &str {
+    selected
+        .startup_multi_gpu_mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if is_gpt_oss_family(selected) {
+                "auto_device_map"
+            } else if selected.prefer_auto_device_mapping {
+                "auto_device_map"
+            } else {
+                "tensor_parallel"
+            }
+        })
+}
+
+fn selected_tensor_parallel_backend(selected: &BrainModel) -> &str {
+    selected
+        .startup_tensor_parallel_backend
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if selected_multi_gpu_mode(selected) == "tensor_parallel" && !is_gpt_oss_family(selected)
+            {
+                "nccl"
+            } else {
+                "disabled"
+            }
+        })
+}
+
+fn selected_visible_gpu_policy(selected: &BrainModel) -> &str {
+    selected
+        .startup_visible_gpu_policy
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            if selected_multi_gpu_mode(selected) == "tensor_parallel" {
+                "largest_power_of_two_prefer_display_free"
+            } else {
+                "all"
+            }
+        })
+}
+
+fn uses_multi_gpu_tensor_parallel_nccl(
+    selected: &BrainModel,
+    census: &crate::contracts::SystemCensus,
+) -> bool {
+    census.gpu_count.unwrap_or(0) > 1
+        && selected_multi_gpu_mode(selected) == "tensor_parallel"
+        && selected_tensor_parallel_backend(selected) == "nccl"
+}
+
 fn should_disable_nccl(
     selected: &BrainModel,
     census: &crate::contracts::SystemCensus,
 ) -> bool {
     census.gpu_count.unwrap_or(0) > 1
-        && is_gpt_oss_family(selected)
-        && !mistralrs_build_supports_feature("nccl")
+        && selected_tensor_parallel_backend(selected) != "nccl"
 }
 
 fn prefers_multi_gpu_auto_mapping(
@@ -1112,13 +1189,9 @@ fn prefers_multi_gpu_auto_mapping(
         .as_deref()
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
-    if is_gpt_oss_family(selected)
-        && !mistralrs_build_supports_feature("nccl")
-        && supported_tuned_device_layers(selected, census).is_some()
-    {
-        return false;
-    }
-    gpu_count > 1 && !topology_override_present
+    gpu_count > 1
+        && !topology_override_present
+        && selected_multi_gpu_mode(selected) == "auto_device_map"
 }
 
 fn preferred_cuda_visible_devices(
@@ -1126,10 +1199,40 @@ fn preferred_cuda_visible_devices(
     census: &crate::contracts::SystemCensus,
     _calibration: &StartupCalibrationCandidate,
 ) -> Option<String> {
-    if !prefers_multi_gpu_auto_mapping(selected, census) {
+    if !uses_multi_gpu_tensor_parallel_nccl(selected, census) {
+        return None;
+    }
+    if selected_visible_gpu_policy(selected) != "largest_power_of_two_prefer_display_free" {
         return None;
     }
     power_of_two_cuda_visible_device_subset(census)
+}
+
+fn preferred_mn_local_world_size(
+    selected: &BrainModel,
+    census: &crate::contracts::SystemCensus,
+    calibration: &StartupCalibrationCandidate,
+) -> Option<usize> {
+    if !uses_multi_gpu_tensor_parallel_nccl(selected, census) {
+        return None;
+    }
+    let visible = preferred_cuda_visible_devices(selected, census, calibration);
+    if let Some(value) = visible.as_deref() {
+        let count = value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .count();
+        if count > 1 {
+            return Some(count);
+        }
+    }
+    let gpu_count = census.gpu_count.unwrap_or(0);
+    if gpu_count > 1 {
+        Some(gpu_count)
+    } else {
+        None
+    }
 }
 
 fn largest_power_of_two_not_exceeding(value: usize) -> Option<usize> {
@@ -1199,6 +1302,10 @@ fn kleinhirn_runtime_env_matches_target(
         "CTO_AGENT_KLEINHIRN_ISQ",
         "CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN",
         "CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES",
+        "CTO_AGENT_KLEINHIRN_MULTI_GPU_MODE",
+        "CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND",
+        "CTO_AGENT_KLEINHIRN_VISIBLE_GPU_POLICY",
+        "CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE",
         "CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN",
         "CTO_AGENT_KLEINHIRN_DISABLE_NCCL",
     ];
@@ -1455,7 +1562,7 @@ fn shell_quote(value: &str) -> String {
 
 fn profile_name_for_model(model_id: &str) -> String {
     let lowered = model_id.to_lowercase();
-    if lowered.contains("qwen3.5") {
+    if lowered.contains("qwen") {
         "qwen35".to_string()
     } else {
         "gpt_oss".to_string()
@@ -1552,7 +1659,10 @@ mod tests {
             startup_tokenizer_json_path: None,
             startup_topology_path: None,
             startup_device_layers_cli: None,
-            prefer_auto_device_mapping: true,
+            startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
+            startup_tensor_parallel_backend: Some("nccl".to_string()),
+            startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
+            prefer_auto_device_mapping: false,
         }
     }
 
@@ -1584,6 +1694,9 @@ mod tests {
             startup_tokenizer_json_path: None,
             startup_topology_path: None,
             startup_device_layers_cli: None,
+            startup_multi_gpu_mode: Some("auto_device_map".to_string()),
+            startup_tensor_parallel_backend: Some("disabled".to_string()),
+            startup_visible_gpu_policy: Some("all".to_string()),
             prefer_auto_device_mapping: false,
         }
     }
@@ -1616,7 +1729,7 @@ mod tests {
         assert_eq!(candidates[0].pa_cache_type.as_deref(), Some("f8e4m3"));
         assert_eq!(candidates[1].max_seq_len, Some(65_536));
         assert_eq!(candidates.last().and_then(|item| item.max_seq_len), Some(4_096));
-        assert!(candidates.iter().all(|item| item.force_auto_device_mapping));
+        assert!(candidates.iter().all(|item| !item.force_auto_device_mapping));
         assert!(candidates
             .iter()
             .all(|item| item.paged_attn_mode.as_deref() == Some("on")));
@@ -1670,6 +1783,18 @@ mod tests {
             env_map.get("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN").map(String::as_str),
             Some("131072")
         );
+        assert_eq!(
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES")
+                .map(String::as_str),
+            Some("1,2,3,4")
+        );
+        assert_eq!(
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE")
+                .map(String::as_str),
+            Some("4")
+        );
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS"));
     }
@@ -1698,7 +1823,7 @@ mod tests {
         assert_eq!(candidates[0].pa_context_len, None);
         assert_eq!(candidates[0].pa_cache_type, None);
         assert_eq!(candidates[0].paged_attn_mode.as_deref(), Some("off"));
-        assert!(candidates.iter().all(|item| !item.force_auto_device_mapping));
+        assert!(candidates.iter().all(|item| item.force_auto_device_mapping));
     }
 
     #[test]
@@ -1757,11 +1882,15 @@ mod tests {
             Some("1")
         );
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS").map(String::as_str),
-            Some("0:21;1:3")
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_MULTI_GPU_MODE")
+                .map(String::as_str),
+            Some("auto_device_map")
         );
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE"));
         assert_eq!(
             env_map.get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE").map(String::as_str),
             Some("off")
@@ -2028,6 +2157,9 @@ mod tests {
             startup_tokenizer_json_path: None,
             startup_topology_path: None,
             startup_device_layers_cli: None,
+            startup_multi_gpu_mode: Some("auto_device_map".to_string()),
+            startup_tensor_parallel_backend: Some("disabled".to_string()),
+            startup_visible_gpu_policy: Some("all".to_string()),
             prefer_auto_device_mapping: false,
         };
         let census = SystemCensus {

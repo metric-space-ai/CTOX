@@ -31,6 +31,9 @@ GPT_OSS_20B = {
     "startupMaxBatchSize": 1,
     "startupMaxSeqLen": 131072,
     "startupPagedAttnMode": "off",
+    "startupMultiGpuMode": "auto_device_map",
+    "startupTensorParallelBackend": "disabled",
+    "startupVisibleGpuPolicy": "all",
 }
 
 QWEN35_0_8B = {
@@ -55,7 +58,10 @@ QWEN35_0_8B = {
     "startupPaContextLen": 4096,
     "startupPaCacheType": "f8e4m3",
     "startupPagedAttnMode": "auto",
-    "preferAutoDeviceMapping": True,
+    "startupMultiGpuMode": "tensor_parallel",
+    "startupTensorParallelBackend": "nccl",
+    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+    "preferAutoDeviceMapping": False,
 }
 
 QWEN35_2B = {
@@ -80,7 +86,10 @@ QWEN35_2B = {
     "startupPaContextLen": 6144,
     "startupPaCacheType": "f8e4m3",
     "startupPagedAttnMode": "auto",
-    "preferAutoDeviceMapping": True,
+    "startupMultiGpuMode": "tensor_parallel",
+    "startupTensorParallelBackend": "nccl",
+    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+    "preferAutoDeviceMapping": False,
 }
 
 QWEN35_4B = {
@@ -105,7 +114,10 @@ QWEN35_4B = {
     "startupPaContextLen": 131072,
     "startupPaCacheType": "f8e4m3",
     "startupPagedAttnMode": "auto",
-    "preferAutoDeviceMapping": True,
+    "startupMultiGpuMode": "tensor_parallel",
+    "startupTensorParallelBackend": "nccl",
+    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+    "preferAutoDeviceMapping": False,
 }
 
 QWEN35_35B_A3B = {
@@ -130,7 +142,10 @@ QWEN35_35B_A3B = {
     "startupPaContextLen": 131072,
     "startupPaCacheType": "f8e4m3",
     "startupPagedAttnMode": "auto",
-    "preferAutoDeviceMapping": True,
+    "startupMultiGpuMode": "tensor_parallel",
+    "startupTensorParallelBackend": "nccl",
+    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+    "preferAutoDeviceMapping": False,
 }
 
 INSTALL_ALTERNATIVES = [
@@ -167,7 +182,10 @@ UPGRADE_CANDIDATES = [
         "startupPaContextLen": 8192,
         "startupPaCacheType": "f8e4m3",
         "startupPagedAttnMode": "auto",
-        "preferAutoDeviceMapping": True,
+        "startupMultiGpuMode": "auto_device_map",
+        "startupTensorParallelBackend": "disabled",
+        "startupVisibleGpuPolicy": "all",
+        "preferAutoDeviceMapping": False,
     },
     {
         "role": "kleinhirn_upgrade_candidate",
@@ -191,7 +209,10 @@ UPGRADE_CANDIDATES = [
         "startupPaContextLen": 8192,
         "startupPaCacheType": "f8e4m3",
         "startupPagedAttnMode": "auto",
-        "preferAutoDeviceMapping": True,
+        "startupMultiGpuMode": "tensor_parallel",
+        "startupTensorParallelBackend": "nccl",
+        "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+        "preferAutoDeviceMapping": False,
     },
 ]
 
@@ -263,8 +284,8 @@ def main() -> int:
 
     profile = normalize_profile_name(args.profile)
     if profile == "qwen35":
-        selected = deepcopy(QWEN35_0_8B)
-        install_alternatives = deepcopy(QWEN35_FAMILY[1:])
+        selected = deepcopy(QWEN35_35B_A3B)
+        install_alternatives = deepcopy(QWEN35_FAMILY[:-1])
     else:
         selected = deepcopy(GPT_OSS_20B)
         install_alternatives = deepcopy(INSTALL_ALTERNATIVES)

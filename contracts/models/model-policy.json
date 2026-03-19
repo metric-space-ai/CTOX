@@ -18,7 +18,10 @@
     "startupMaxSeqs": 1,
     "startupMaxBatchSize": 1,
     "startupMaxSeqLen": 131072,
-    "startupPagedAttnMode": "off"
+    "startupPagedAttnMode": "off",
+    "startupMultiGpuMode": "auto_device_map",
+    "startupTensorParallelBackend": "disabled",
+    "startupVisibleGpuPolicy": "all"
   },
   "kleinhirnInstallAlternatives": [
     {
@@ -43,7 +46,10 @@
       "startupPaContextLen": 131072,
       "startupPaCacheType": "f8e4m3",
       "startupPagedAttnMode": "auto",
-      "preferAutoDeviceMapping": true
+      "startupMultiGpuMode": "tensor_parallel",
+      "startupTensorParallelBackend": "nccl",
+      "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+      "preferAutoDeviceMapping": false
     }
   ],
   "kleinhirnUpgradeAllowed": true,
@@ -71,7 +77,10 @@
       "startupPaContextLen": 8192,
       "startupPaCacheType": "f8e4m3",
       "startupPagedAttnMode": "auto",
-      "preferAutoDeviceMapping": true
+      "startupMultiGpuMode": "auto_device_map",
+      "startupTensorParallelBackend": "disabled",
+      "startupVisibleGpuPolicy": "all",
+      "preferAutoDeviceMapping": false
     },
     {
       "role": "kleinhirn_upgrade_candidate",
@@ -95,7 +104,10 @@
       "startupPaContextLen": 8192,
       "startupPaCacheType": "f8e4m3",
       "startupPagedAttnMode": "auto",
-      "preferAutoDeviceMapping": true
+      "startupMultiGpuMode": "tensor_parallel",
+      "startupTensorParallelBackend": "nccl",
+      "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
+      "preferAutoDeviceMapping": false
     }
   ],
   "grosshirnCandidates": [

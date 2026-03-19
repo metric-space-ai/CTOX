@@ -61,6 +61,12 @@ else
   unset MISTRALRS_NO_NCCL
 fi
 
+if [ -n "${CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE:-}" ]; then
+  export MISTRALRS_MN_LOCAL_WORLD_SIZE="$CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE"
+else
+  unset MISTRALRS_MN_LOCAL_WORLD_SIZE
+fi
+
 set -- "$HOME/.cargo/bin/mistralrs" serve \
   --port "$CTO_AGENT_KLEINHIRN_PORT"
 

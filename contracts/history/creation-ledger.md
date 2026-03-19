@@ -489,3 +489,8 @@ Jetzt liegt Disk-Headroom explizit im Kontextpaket des Agenten, wird als Teil vo
 Der erste Browser-/Host-GUI-Pfad verwechselte die `systemd --user`-Serviceumgebung mit der echten grafischen Sitzung des Owners. Dadurch konnten persistente Systemwerte schon richtig sein, waehrend live wirksame Schritte trotzdem am falschen Shell-Kontext vorbei liefen.
 Jetzt rekonstruiert ein eigener Desktop-Session-Pfad die aktive grafische Umgebung ueber `loginctl`, den Session-Leader und Prozess-Env-Fallbacks und reicht diese Umgebung generisch in bounded Exec-, Exec-Session- und Browser-Aufrufe weiter.
 Zugleich ist die Linux-Browser-Installation ehrlicher geworden: ein zusaetzlicher KDE-Desktop wird nicht mehr stillschweigend als Default nachinstalliert oder als impliziter Browser-Nebeneffekt eingeschleppt, sondern nur noch bei ausdruecklichem Opt-in.
+
+## 2026-03-19 - Modellfamilien bekommen explizite Multi-GPU-Vertraege statt globalem NCCL-Raten
+
+Der alte Kleinhirn-Pfad hat GPT-OSS- und Qwen-Familien wiederholt durch denselben Multi-GPU-Schalter gejagt und damit abwechselnd Auto-Mapping, NCCL-Tensor-Parallel und GPU-Subset-Wahl regressiv vermischt.
+Jetzt steht die Strategie im Model-Policy-Contract selbst: GPT-OSS faehrt auf Mehr-GPU-Hosts ueber Auto-Device-Mapping mit deaktiviertem NCCL, waehrend Qwen3/Qwen3.5 Tensor-Parallel mit NCCL und expliziter Weltgroesse nutzt. Der Installer, der Upgrade-Pfad und `run_kleinhirn.sh` lesen dieselben Vertragsfelder statt wieder lokale Einzelfall-Heuristiken zu erfinden.

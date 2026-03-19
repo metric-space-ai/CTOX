@@ -444,6 +444,12 @@ pub struct BrainModel {
     #[serde(default)]
     pub startup_device_layers_cli: Option<String>,
     #[serde(default)]
+    pub startup_multi_gpu_mode: Option<String>,
+    #[serde(default)]
+    pub startup_tensor_parallel_backend: Option<String>,
+    #[serde(default)]
+    pub startup_visible_gpu_policy: Option<String>,
+    #[serde(default)]
     pub prefer_auto_device_mapping: bool,
 }
 
@@ -1053,6 +1059,9 @@ pub fn default_model_policy() -> ModelPolicy {
         startup_tokenizer_json_path: None,
         startup_topology_path: None,
         startup_device_layers_cli: None,
+        startup_multi_gpu_mode: Some("auto_device_map".to_string()),
+        startup_tensor_parallel_backend: Some("disabled".to_string()),
+        startup_visible_gpu_policy: Some("all".to_string()),
         prefer_auto_device_mapping: false,
     };
     let qwen35_35b_a3b = BrainModel {
@@ -1082,7 +1091,10 @@ pub fn default_model_policy() -> ModelPolicy {
         startup_tokenizer_json_path: None,
         startup_topology_path: None,
         startup_device_layers_cli: None,
-        prefer_auto_device_mapping: true,
+        startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
+        startup_tensor_parallel_backend: Some("nccl".to_string()),
+        startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
+        prefer_auto_device_mapping: false,
     };
     ModelPolicy {
         version: 1,
@@ -1118,7 +1130,10 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tokenizer_json_path: None,
                 startup_topology_path: None,
                 startup_device_layers_cli: None,
-                prefer_auto_device_mapping: true,
+                startup_multi_gpu_mode: Some("auto_device_map".to_string()),
+                startup_tensor_parallel_backend: Some("disabled".to_string()),
+                startup_visible_gpu_policy: Some("all".to_string()),
+                prefer_auto_device_mapping: false,
             },
             BrainModel {
                 role: "kleinhirn_upgrade_candidate".to_string(),
@@ -1147,7 +1162,10 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tokenizer_json_path: None,
                 startup_topology_path: None,
                 startup_device_layers_cli: None,
-                prefer_auto_device_mapping: true,
+                startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
+                startup_tensor_parallel_backend: Some("nccl".to_string()),
+                startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
+                prefer_auto_device_mapping: false,
             },
         ],
         grosshirn_candidates: vec![
@@ -1178,6 +1196,9 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tokenizer_json_path: None,
                 startup_topology_path: None,
                 startup_device_layers_cli: None,
+                startup_multi_gpu_mode: None,
+                startup_tensor_parallel_backend: None,
+                startup_visible_gpu_policy: None,
                 prefer_auto_device_mapping: false,
             },
             BrainModel {
@@ -1207,6 +1228,9 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tokenizer_json_path: None,
                 startup_topology_path: None,
                 startup_device_layers_cli: None,
+                startup_multi_gpu_mode: None,
+                startup_tensor_parallel_backend: None,
+                startup_visible_gpu_policy: None,
                 prefer_auto_device_mapping: false,
             },
         ],
@@ -2782,7 +2806,10 @@ mod tests {
             startup_tokenizer_json_path: None,
             startup_topology_path: None,
             startup_device_layers_cli: None,
-            prefer_auto_device_mapping: true,
+            startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
+            startup_tensor_parallel_backend: Some("nccl".to_string()),
+            startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
+            prefer_auto_device_mapping: false,
         }
     }
 

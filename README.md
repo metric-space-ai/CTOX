@@ -33,8 +33,11 @@ sh scripts/install_cto_agent.sh
 ### HARD WARNING: mistral.rs Multi-GPU Guardrails
 
 - **Verlass dich nicht auf `mistralrs doctor`, um NCCL oder Tensor-Parallel faehig/nicht faehig zu entscheiden.** Die aktuelle `doctor`-Ausgabe zeigt die Distributed-Backends nicht zuverlaessig an. Fuer Install- und Runtime-Entscheidungen zaehlen die Cargo-Install-Metadaten in `~/.cargo/.crates2.json` oder ein expliziter Override.
-- **Nie wieder Install- oder Runtime-Entscheidungen auf Basis von `mistralrs doctor`:** Wenn `doctor` kein NCCL anzeigt, bedeutet das nicht, dass der Build kein NCCL hat. Tensor-Parallel fuer Multi-GPU-GPT-OSS muss ueber echte Build-Metadaten und echte Hosttests beurteilt werden.
-- Wenn der Host GPT-OSS auf mehreren CUDA-GPUs fahren soll, ist der bevorzugte Pfad **Tensor Parallel mit NCCL**. `device-layers` plus `CTO_AGENT_KLEINHIRN_DISABLE_NCCL=1` ist nur der Fallback fuer Hosts ohne funktionierendes NCCL.
+- **Nie wieder Install- oder Runtime-Entscheidungen auf Basis von `mistralrs doctor`:** Wenn `doctor` kein NCCL anzeigt, bedeutet das nicht, dass der Build kein NCCL hat. Die Entscheidung muss aus dem Modellvertrag plus echten Build-Metadaten kommen.
+- Die Multi-GPU-Strategie ist jetzt **modellfamiliengebunden** und liegt im Model-Policy-Contract:
+  - `gpt-oss` auf Mehr-GPU-Hosts: `startupMultiGpuMode=auto_device_map`, `startupTensorParallelBackend=disabled`, also `MISTRALRS_NO_NCCL=1`
+  - `Qwen3`/`Qwen3.5` auf Mehr-GPU-Hosts: `startupMultiGpuMode=tensor_parallel`, `startupTensorParallelBackend=nccl`
+- Fuer NCCL/Tensor-Parallel nutzt der Installer bei nicht-potentiellen GPU-Zahlen automatisch die groesste Zweierpotenz-Teilmenge und bevorzugt dabei display-freie Karten.
 - Der Installer persistiert die erwarteten mistral.rs-Features jetzt als `CTO_AGENT_MISTRALRS_FEATURES` in `runtime/kleinhirn.env`. Fuer manuelle Starts oder Sonderfaelle darfst du das explizit pinnen, z. B. `CTO_AGENT_MISTRALRS_FEATURES='cuda flash-attn nccl'`.
 - Fuer `openai/gpt-oss-20b` bleibt `PagedAttention` aus. Das ist kein Tuning-Bauchgefuehl, sondern eine Modellgrenze im Upstream von `mistral.rs`.
 
