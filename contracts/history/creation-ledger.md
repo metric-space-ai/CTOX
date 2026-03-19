@@ -450,3 +450,20 @@ Jetzt bleibt dieser Fall im lokalen Review- und Upgrade-Pfad. Wiederholte leere 
 
 Die Browser-Capability- und Specialist-Pipeline durfte bisher in einem Lauf zu frei gleichzeitig an Skripten, Capabilities, Datensaetzen und Training drehen.
 Jetzt wird die Experiment-Disziplin klarer: der veroeffentlichte reviewed Pfad gilt als Champion, neue Kandidaten sollen moeglichst als Challenger gegen feste Mini-Suiten antreten, pro Runde nur eine Artefaktfamilie veraendern und anschliessend explizit als keep, discard oder park protokolliert werden.
+
+## 2026-03-19 - Multi-GPU-Qwen braucht NCCL als echte Runtime-Voraussetzung
+
+Der fruehere Install- und Upgradepfad hat auf Mehr-GPU-Hosts blind auf `mistral.rs` Auto-Mapping vertraut, aber den Binary nur mit `cuda flash-attn` gebaut.
+Dadurch wirkte der Qwen35-Pfad logisch verfuegbar, obwohl dem Host der eigentliche NCCL-Tensor-Parallel-Build fehlte und die Laufzeit deshalb nicht sauber ueber alle Karten skaliert hat.
+Jetzt zieht der Installer auf Linux-Mehr-GPU-Hosts NCCL-Pakete nach, erkennt `libnccl` als Build-Feature und erzwingt einen `mistralrs`-Rebuild, wenn der vorhandene Binary die benoetigten Features noch nicht mitbringt.
+
+## 2026-03-19 - Nicht-potenzielle GPU-Zahlen werden fuer NCCL automatisch auf tragfaehige Teilmengen reduziert
+
+Auf der 5x-A4500-Testbox war NCCL nach dem Rebuild endlich aktiv, scheiterte dann aber korrekt an `world_size = 5`, weil dieser Backend-Pfad nur Zweierpotenzen akzeptiert.
+Die Rohressourcen waren also nicht das Problem; der Kleinhirn-Kernel zeigte dem Runtime-Binary schlicht alle 5 GPUs statt automatisch eine gueltige Teilmenge.
+Jetzt modelliert der lokale Upgradepfad `CUDA_VISIBLE_DEVICES` als eigene Runtime-Variable, beschraenkt NCCL-Auto-TP-Starts bei 3, 5, 6 oder 7 GPUs auf die groesste erste Zweierpotenz-Teilmenge und bricht den "gleiches Modell, also nichts tun"-Kurzschluss auf, wenn genau diese Runtime-Konfiguration noch fehlt.
+
+## 2026-03-19 - Modellwechsel stoppen den lokalen Mistral-Server jetzt haerter vor dem Neustart
+
+Die BIOS-getriebenen Wechsel zwischen GPT-OSS und Qwen35 waren zuletzt nicht nur ein Modellthema, sondern auch ein Prozessproblem: `systemctl restart` liess den `mistralrs`-Baum auf der Testbox nicht immer sauber genug sterben, und genau dann liefen neue Starts gegen alte Worker oder alte GPU-Belegung.
+Jetzt stoppt der Runtime-Kern den Kleinhirn-Service vor einem Neustart explizit, wartet auf das Ende verbliebener `mistralrs serve --port 1234`-Prozesse und eskaliert notfalls bis zum harten Kill. Zusaetzlich bekommt die User-Service-Definition laengere Stop-Zeit und explizite Kill-Semantik, damit Modellwechsel weniger an schmutzigen Restprozessen haengen bleiben. Weil die grossen lokalen Modelle auf der Testbox real mehrere Minuten zum Binden brauchen koennen, wurde ausserdem das Default-Wartefenster fuer Startup-Readiness deutlich verlaengert.

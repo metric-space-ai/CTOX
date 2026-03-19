@@ -54,7 +54,11 @@ EnvironmentFile=$ROOT/runtime/kleinhirn.env
 ExecStart=$ROOT/scripts/run_kleinhirn.sh
 Restart=always
 RestartSec=5
-TimeoutStopSec=20
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+TimeoutStopSec=120
 
 [Install]
 WantedBy=default.target
@@ -64,7 +68,7 @@ cat > "$SERVICE_DIR/cto-agent.service" <<EOF
 [Unit]
 Description=CTO-Agent Control Plane
 After=cto-kleinhirn.service
-Requires=cto-kleinhirn.service
+Wants=cto-kleinhirn.service
 StartLimitIntervalSec=0
 
 [Service]

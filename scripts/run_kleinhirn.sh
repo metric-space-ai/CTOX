@@ -18,6 +18,18 @@ fi
 : "${CTO_AGENT_KLEINHIRN_SERVER_IMPL:=mistralrs}"
 : "${CTO_AGENT_KLEINHIRN_ARCH:=}"
 
+if [ -n "${CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES:-}" ]; then
+  export CUDA_VISIBLE_DEVICES="$CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"
+else
+  unset CUDA_VISIBLE_DEVICES
+fi
+
+if [ "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-0}" = "1" ]; then
+  export MISTRALRS_NO_NCCL=1
+else
+  unset MISTRALRS_NO_NCCL
+fi
+
 set -- "$HOME/.cargo/bin/mistralrs" serve \
   --port "$CTO_AGENT_KLEINHIRN_PORT"
 

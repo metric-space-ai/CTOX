@@ -5,6 +5,7 @@ use crate::agentic::probe_kleinhirn_health;
 use crate::agentic::should_run_agentic_loop;
 use crate::brain_runtime::apply_recommended_browser_vision_kleinhirn_upgrade;
 use crate::brain_runtime::apply_targeted_kleinhirn_upgrade;
+use crate::brain_runtime::extract_requested_local_kleinhirn_model;
 use crate::brain_runtime::grosshirn_runtime_configured;
 use crate::brain_runtime::local_kleinhirn_upgrade_available;
 use crate::brain_runtime::prepare_grosshirn_activation_from_message;
@@ -35,6 +36,7 @@ use crate::runtime_db::load_latest_completed_agent_turn;
 use crate::runtime_db::load_owner_trust;
 use crate::runtime_db::load_proactive_contact_candidate_by_dispatch_task;
 use crate::runtime_db::load_task_by_id;
+use crate::runtime_db::latest_open_task_by_kind;
 use crate::runtime_db::record_bios_dialogue;
 use crate::runtime_db::record_brain_usage_event;
 use crate::runtime_db::record_homepage_revision;
@@ -294,6 +296,99 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                 }
 
                 let task = task.expect("checked above");
+                if task.task_kind == "local_model_switch" {
+                    if let Ok(Some(newer_task)) = latest_open_task_by_kind(&paths, "local_model_switch")
+                        && newer_task.id > task.id
+                    {
+                        let summary = format!(
+                            "Lokaler Modellwechsel wurde von neuerem Owner-/BIOS-Wunsch #{} supersediert.",
+                            newer_task.id
+                        );
+                        let detail = format!(
+                            "Task #{} sollte {} umsetzen, aber Task #{} fordert inzwischen einen neueren lokalen Modellwechsel an.\n\nAlter Detailtext:\n{}\n\nNeuer Detailtext:\n{}",
+                            task.id,
+                            extract_requested_local_kleinhirn_model(&task.detail)
+                                .unwrap_or_else(|| "auto".to_string()),
+                            newer_task.id,
+                            task.detail,
+                            newer_task.detail,
+                        );
+                        let _ = complete_task(&paths, task.id, &summary, &detail, None);
+                        let _ = set_agent_mode(
+                            &paths,
+                            "reprioritize",
+                            None,
+                            "",
+                            "Neuerer lokaler Modellwechsel hat einen aelteren Switch supersediert.",
+                        );
+                        continue;
+                    }
+                    let _ = set_agent_mode(
+                        &paths,
+                        "execute_task",
+                        Some(task.id),
+                        &task.title,
+                        &format!(
+                            "Task {} entered deterministic local model switch mode.",
+                            task.id
+                        ),
+                    );
+                    let requested_target = extract_requested_local_kleinhirn_model(&task.detail);
+                    match apply_targeted_kleinhirn_upgrade(&paths, requested_target.as_deref()) {
+                        Ok(outcome) => {
+                            let detail = format!(
+                                "Expliziter Owner-/BIOS-Modellwechsel wurde kernel-seitig ausgefuehrt.\nRequested target: {}\nChanged: {}\nRestarted: {}\nPrevious runtime: {}\nCurrent runtime: {}\nSummary: {}",
+                                requested_target.as_deref().unwrap_or("auto"),
+                                outcome.changed,
+                                outcome.restarted,
+                                outcome.previous_runtime_model.as_deref().unwrap_or("unknown"),
+                                outcome.current_runtime_model.as_deref().unwrap_or("unknown"),
+                                outcome.summary,
+                            );
+                            let _ = record_memory(
+                                &paths,
+                                "brain_runtime",
+                                "Lokaler Kleinhirn-Modellwechsel ausgefuehrt",
+                                &detail,
+                                "local_model_switch",
+                            );
+                            if let Err(err) = complete_task(
+                                &paths,
+                                task.id,
+                                &outcome.summary,
+                                &detail,
+                                outcome.current_runtime_model.as_deref(),
+                            ) {
+                                eprintln!(
+                                    "failed to complete deterministic local model switch task {}: {err}",
+                                    task.id
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            let detail = err.to_string();
+                            let _ = register_loop_incident(
+                                &paths,
+                                "local_model_switch_failure",
+                                "high",
+                                "Deterministic local model switch failed.",
+                                &detail,
+                                Some(task.id),
+                                None,
+                                false,
+                                true,
+                            );
+                            let _ = block_task(
+                                &paths,
+                                task.id,
+                                "Lokaler Kleinhirn-Modellwechsel ist fehlgeschlagen.",
+                                &detail,
+                                None,
+                            );
+                        }
+                    }
+                    continue;
+                }
                 if task.task_kind == "grosshirn_activation" {
                     match prepare_grosshirn_activation_from_message(&paths, &task.detail) {
                         Ok(outcome) => {
@@ -550,7 +645,12 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 &checkpoint_detail,
                                 local_kleinhirn_upgrade_available(&loop_paths),
                             ) {
-                                match apply_targeted_kleinhirn_upgrade(&loop_paths, None) {
+                                let requested_target =
+                                    extract_requested_local_kleinhirn_model(&task.detail);
+                                match apply_targeted_kleinhirn_upgrade(
+                                    &loop_paths,
+                                    requested_target.as_deref(),
+                                ) {
                                     Ok(outcome) => {
                                         checkpoint_summary = format!(
                                             "{} {}",
@@ -1098,9 +1198,13 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                         }
                                     }
                                 } else if brain_directive.action.eq_ignore_ascii_case("upgrade_local_kleinhirn") {
+                                    let requested_target = brain_directive
+                                        .target_model
+                                        .clone()
+                                        .or_else(|| extract_requested_local_kleinhirn_model(&task.detail));
                                     match apply_targeted_kleinhirn_upgrade(
                                         &loop_paths,
-                                        brain_directive.target_model.as_deref(),
+                                        requested_target.as_deref(),
                                     ) {
                                         Ok(outcome) => {
                                             checkpoint_summary = format!(
@@ -1111,7 +1215,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                                 "{}\n\nLocal kleinhirn runtime action:\nAction: {}\nTarget model hint: {}\nNote: {}\nChanged: {}\nRestarted: {}\nPrevious runtime: {}\nCurrent runtime: {}",
                                                 checkpoint_detail,
                                                 brain_directive.action,
-                                                brain_directive.target_model.as_deref().unwrap_or("not supplied"),
+                                                requested_target.as_deref().unwrap_or("not supplied"),
                                                 brain_directive.note.as_deref().unwrap_or("none"),
                                                 outcome.changed,
                                                 outcome.restarted,

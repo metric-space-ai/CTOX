@@ -31,13 +31,18 @@ class ConfigureModelPolicyTests(unittest.TestCase):
         policy = self.run_script("gpt_oss")
         self.assertEqual(policy["kleinhirn"]["modelId"], "gpt-oss-20b")
         self.assertEqual(policy["kleinhirn"]["runtimeModelId"], "openai/gpt-oss-20b")
-        self.assertEqual(policy["kleinhirn"]["agenticAdapter"], "openai_compatible_chat")
+        self.assertEqual(
+            policy["kleinhirn"]["agenticAdapter"],
+            "mistralrs_gpt_oss_harmony_completion",
+        )
         self.assertEqual(policy["kleinhirn"]["startupMaxSeqs"], 1)
         self.assertEqual(policy["kleinhirn"]["startupMaxBatchSize"], 1)
-        self.assertEqual(policy["kleinhirn"]["startupMaxSeqLen"], 8192)
+        self.assertEqual(policy["kleinhirn"]["startupMaxSeqLen"], 131072)
         self.assertEqual(policy["kleinhirn"]["startupPagedAttnMode"], "off")
         self.assertEqual(policy["kleinhirnInstallAlternatives"][0]["modelId"], "Qwen3.5-35B-A3B")
         self.assertTrue(policy["kleinhirnInstallAlternatives"][0]["supportsVision"])
+        self.assertEqual(policy["kleinhirnInstallAlternatives"][0]["startupMaxSeqLen"], 131072)
+        self.assertEqual(policy["kleinhirnInstallAlternatives"][0]["startupPaContextLen"], 131072)
         self.assertEqual(policy["kleinhirnInstallAlternatives"][0]["startupPaCacheType"], "f8e4m3")
 
     def test_sets_qwen35_profile(self) -> None:

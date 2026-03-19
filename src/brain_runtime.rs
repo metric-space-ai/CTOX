@@ -8,6 +8,7 @@ use crate::contracts::recommended_kleinhirn;
 use crate::contracts::BrainModel;
 use crate::contracts::Paths;
 use anyhow::Context;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
 use std::fs::File;
@@ -15,6 +16,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::process::Command;
 use std::process::Stdio;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 #[derive(Debug, Clone, Default)]
 pub struct KleinhirnRuntimeSnapshot {
@@ -51,6 +55,8 @@ struct StartupCalibrationCandidate {
     paged_attn_mode: Option<String>,
     force_auto_device_mapping: bool,
 }
+
+const KLEINHIRN_TRANSITION_GRACE_SECS: u64 = 600;
 
 pub fn load_kleinhirn_runtime_snapshot(paths: &Paths) -> Option<KleinhirnRuntimeSnapshot> {
     let env_map = load_kleinhirn_env_map(paths).ok()?;
@@ -224,6 +230,25 @@ pub fn prepare_grosshirn_activation_from_message(
     })
 }
 
+pub fn extract_requested_local_kleinhirn_model(message: &str) -> Option<String> {
+    let lowered = message.to_lowercase();
+    if lowered.contains("qwen3.5-35b-a3b")
+        || lowered.contains("qwen 3.5 35b")
+        || lowered.contains("qwen3.5 35b")
+        || lowered.contains("qwen35")
+    {
+        return Some("Qwen3.5-35B-A3B".to_string());
+    }
+    if lowered.contains("gpt-oss-20b")
+        || lowered.contains("gpt oss 20b")
+        || lowered.contains("gpt-oss")
+        || lowered.contains("gpt oss")
+    {
+        return Some("gpt-oss-20b".to_string());
+    }
+    None
+}
+
 pub fn apply_recommended_kleinhirn_upgrade(
     paths: &Paths,
 ) -> anyhow::Result<KleinhirnUpgradeOutcome> {
@@ -270,6 +295,24 @@ fn apply_selected_kleinhirn_upgrade(
     selected: &BrainModel,
     census: &crate::contracts::SystemCensus,
 ) -> anyhow::Result<KleinhirnUpgradeOutcome> {
+    if selected.prefer_auto_device_mapping
+        && census.gpu_count.unwrap_or(0) > 1
+        && selected
+            .startup_topology_path
+            .as_deref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        && !mistralrs_build_supports_feature("nccl")
+    {
+        anyhow::bail!(
+            "local kleinhirn upgrade to {} requires a mistralrs build with nccl for multi-GPU tensor parallelism; current build does not expose nccl",
+            selected
+                .runtime_model_id
+                .as_deref()
+                .unwrap_or(selected.model_id.as_str())
+        );
+    }
+
     let selected_runtime = selected
         .runtime_model_id
         .clone()
@@ -284,9 +327,21 @@ fn apply_selected_kleinhirn_upgrade(
         official_label: env_map.get("CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL").cloned(),
         adapter: env_map.get("CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER").cloned(),
     };
+    let startup_candidates = build_startup_calibration_candidates(selected, census);
+    let runtime_env_aligned = startup_candidates
+        .first()
+        .map(|candidate| {
+            let mut desired_env_map = env_map.clone();
+            apply_selected_model_to_env(&mut desired_env_map, selected, census, candidate);
+            kleinhirn_runtime_env_matches_target(&env_map, &desired_env_map)
+        })
+        .unwrap_or(true);
+    let runtime_ready = enforce_kleinhirn_ready(paths).is_ok();
 
     if previous.runtime_model.as_deref() == Some(selected_runtime.as_str())
         && previous.policy_model.as_deref() == Some(selected.model_id.as_str())
+        && runtime_env_aligned
+        && runtime_ready
     {
         return Ok(KleinhirnUpgradeOutcome {
             changed: false,
@@ -300,8 +355,17 @@ fn apply_selected_kleinhirn_upgrade(
         });
     }
 
-    prefetch_selected_model_snapshot(selected)?;
-    let startup_candidates = build_startup_calibration_candidates(selected, census);
+    write_kleinhirn_transition_state(
+        paths,
+        "local_model_switch",
+        &selected_runtime,
+        KLEINHIRN_TRANSITION_GRACE_SECS,
+    )?;
+
+    if let Err(err) = prefetch_selected_model_snapshot(selected) {
+        clear_kleinhirn_transition_state(paths);
+        return Err(err);
+    }
     let mut failures = Vec::new();
 
     for candidate in &startup_candidates {
@@ -315,6 +379,7 @@ fn apply_selected_kleinhirn_upgrade(
 
         match upgrade_result {
             Ok(()) => {
+                clear_kleinhirn_transition_state(paths);
                 let context_note = candidate
                     .max_seq_len
                     .map(|value| format!(" maxSeqLen={value}"))
@@ -351,6 +416,7 @@ fn apply_selected_kleinhirn_upgrade(
         .and_then(|_| enforce_kleinhirn_ready(paths))
         .err()
         .map(|rollback| rollback.to_string());
+    clear_kleinhirn_transition_state(paths);
     match rollback_error {
         Some(rollback) => anyhow::bail!(
             "local kleinhirn upgrade to {} failed across {} startup candidates: {}; rollback also failed: {}",
@@ -403,6 +469,95 @@ snapshot_download(repo_id=repo_id, resume_download=True)
     Ok(())
 }
 
+fn mistralrs_build_supports_feature(feature: &str) -> bool {
+    installed_mistralrs_features()
+        .iter()
+        .any(|item| item.eq_ignore_ascii_case(feature))
+}
+
+fn installed_mistralrs_features() -> Vec<String> {
+    cargo_installed_features_for("mistralrs-cli").unwrap_or_else(|| {
+        let Some(binary) = resolve_mistralrs_binary() else {
+            return Vec::new();
+        };
+        let output = Command::new(binary)
+            .arg("doctor")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output();
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_mistralrs_doctor_build_features(&stdout)
+    })
+}
+
+fn cargo_installed_features_for(crate_name: &str) -> Option<Vec<String>> {
+    let cargo_home = std::env::var("CARGO_HOME").ok().filter(|value| !value.trim().is_empty()).map(std::path::PathBuf::from).or_else(|| {
+        std::env::var("HOME")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .map(|path| path.join(".cargo"))
+    })?;
+    let path = cargo_home.join(".crates2.json");
+    let raw = fs::read_to_string(path).ok()?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    let installs = parsed.get("installs")?.as_object()?;
+    installs
+        .iter()
+        .find(|(key, _)| key.starts_with(crate_name))
+        .and_then(|(_, value)| value.get("features"))
+        .and_then(|features| features.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Vec<_>>()
+        })
+}
+
+fn resolve_mistralrs_binary() -> Option<String> {
+    if let Ok(path) = std::env::var("CTO_AGENT_MISTRALRS_BINARY") {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    let output = Command::new("sh")
+        .arg("-lc")
+        .arg("command -v mistralrs || printf '%s' \"$HOME/.cargo/bin/mistralrs\"")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if resolved.is_empty() {
+        None
+    } else {
+        Some(resolved)
+    }
+}
+
+fn parse_mistralrs_doctor_build_features(doctor_output: &str) -> Vec<String> {
+    doctor_output
+        .lines()
+        .find_map(|line| line.split_once("Build features:"))
+        .map(|(_, value)| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 fn apply_selected_model_to_env(
     env_map: &mut BTreeMap<String, String>,
     selected: &BrainModel,
@@ -429,6 +584,14 @@ fn apply_selected_model_to_env(
         "CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL".to_string(),
         selected.official_label.clone(),
     );
+    if is_gpt_oss_family(selected) {
+        env_map.insert(
+            "CTO_AGENT_KLEINHIRN_ARCH".to_string(),
+            "gpt_oss".to_string(),
+        );
+    } else {
+        env_map.remove("CTO_AGENT_KLEINHIRN_ARCH");
+    }
     env_map.insert(
         "CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER".to_string(),
         selected
@@ -483,6 +646,8 @@ fn apply_selected_model_to_env(
         }
     }
 
+    let prefer_multi_gpu_auto_mapping = prefers_multi_gpu_auto_mapping(selected, census);
+
     match selected.startup_device_layers_cli.as_deref() {
         _ if selected
             .startup_topology_path
@@ -502,17 +667,20 @@ fn apply_selected_model_to_env(
             env_map.remove("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS");
             env_map.remove("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS");
         }
+        _ if prefer_multi_gpu_auto_mapping
+            || calibration.force_auto_device_mapping
+            || selected.prefer_auto_device_mapping =>
+        {
+            env_map.remove("CTO_AGENT_KLEINHIRN_TOPOLOGY");
+            env_map.remove("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS");
+            env_map.remove("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS");
+        }
         Some(value) if !value.trim().is_empty() => {
             env_map.insert(
                 "CTO_AGENT_KLEINHIRN_DEVICE_LAYERS".to_string(),
                 value.trim().to_string(),
             );
             env_map.remove("CTO_AGENT_KLEINHIRN_TOPOLOGY");
-            env_map.remove("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS");
-        }
-        _ if calibration.force_auto_device_mapping || selected.prefer_auto_device_mapping => {
-            env_map.remove("CTO_AGENT_KLEINHIRN_TOPOLOGY");
-            env_map.remove("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS");
             env_map.remove("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS");
         }
         _ => {
@@ -609,6 +777,53 @@ fn apply_selected_model_to_env(
     env_map.remove("CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN");
     env_map.remove("CTO_AGENT_KLEINHIRN_PA_GPU_MEM");
     env_map.remove("CTO_AGENT_KLEINHIRN_PA_GPU_MEM_USAGE");
+    if should_disable_nccl(selected, census) {
+        env_map.insert(
+            "CTO_AGENT_KLEINHIRN_DISABLE_NCCL".to_string(),
+            "1".to_string(),
+        );
+    } else {
+        env_map.remove("CTO_AGENT_KLEINHIRN_DISABLE_NCCL");
+    }
+    match preferred_cuda_visible_devices(selected, census, calibration) {
+        Some(value) if !value.trim().is_empty() => {
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES".to_string(),
+                value,
+            );
+        }
+        _ => {
+            env_map.remove("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES");
+        }
+    }
+}
+
+fn kleinhirn_transition_state_path(paths: &Paths) -> std::path::PathBuf {
+    paths.runtime_dir.join("state/kleinhirn-transition.env")
+}
+
+fn write_kleinhirn_transition_state(
+    paths: &Paths,
+    reason: &str,
+    target_model: &str,
+    grace_secs: u64,
+) -> anyhow::Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_else(|_| Duration::from_secs(0))
+        .as_secs();
+    let deadline = now.saturating_add(grace_secs);
+    let path = kleinhirn_transition_state_path(paths);
+    let text = format!(
+        "CTO_AGENT_KLEINHIRN_TRANSITION_REASON='{reason}'\nCTO_AGENT_KLEINHIRN_TRANSITION_TARGET='{target_model}'\nCTO_AGENT_KLEINHIRN_TRANSITION_DEADLINE_EPOCH='{deadline}'\n"
+    );
+    fs::write(&path, text)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn clear_kleinhirn_transition_state(paths: &Paths) {
+    let _ = fs::remove_file(kleinhirn_transition_state_path(paths));
 }
 
 fn build_startup_calibration_candidates(
@@ -630,8 +845,11 @@ fn build_startup_calibration_candidates(
             })
         });
     let tuned_max_context = tune.and_then(|candidate| candidate.max_context_tokens);
-    let multi_gpu_auto_tp =
-        selected.prefer_auto_device_mapping && census.gpu_count.unwrap_or(0) > 1;
+    let multi_gpu_auto_tp = prefers_multi_gpu_auto_mapping(selected, census);
+    let paged_attn_permitted = !matches!(
+        selected.startup_paged_attn_mode.as_deref(),
+        Some("off")
+    );
 
     if multi_gpu_auto_tp {
         let bootstrap_cap = multi_gpu_bootstrap_max_seq_len(selected);
@@ -663,12 +881,24 @@ fn build_startup_calibration_candidates(
             .map(|length| StartupCalibrationCandidate {
                 max_batch_size: selected.startup_max_batch_size.or(Some(1)),
                 max_seq_len: Some(length),
-                pa_context_len: Some(length),
-                pa_cache_type: selected
-                    .startup_pa_cache_type
-                    .clone()
-                    .or_else(|| Some("f8e4m3".to_string())),
-                paged_attn_mode: Some("on".to_string()),
+                pa_context_len: if paged_attn_permitted {
+                    Some(length)
+                } else {
+                    None
+                },
+                pa_cache_type: if paged_attn_permitted {
+                    selected
+                        .startup_pa_cache_type
+                        .clone()
+                        .or_else(|| Some("f8e4m3".to_string()))
+                } else {
+                    None
+                },
+                paged_attn_mode: if paged_attn_permitted {
+                    Some("on".to_string())
+                } else {
+                    Some("off".to_string())
+                },
                 force_auto_device_mapping: true,
             })
             .collect();
@@ -712,19 +942,239 @@ fn multi_gpu_bootstrap_max_seq_len(selected: &BrainModel) -> Option<u64> {
     None
 }
 
+fn is_gpt_oss_family(selected: &BrainModel) -> bool {
+    let runtime_model = selected
+        .runtime_model_id
+        .as_deref()
+        .unwrap_or(selected.model_id.as_str())
+        .to_ascii_lowercase();
+    let policy_model = selected.model_id.to_ascii_lowercase();
+    runtime_model.contains("gpt-oss") || policy_model.contains("gpt-oss")
+}
+
+fn should_disable_nccl(
+    selected: &BrainModel,
+    census: &crate::contracts::SystemCensus,
+) -> bool {
+    census.gpu_count.unwrap_or(0) > 1 && is_gpt_oss_family(selected)
+}
+
+fn prefers_multi_gpu_auto_mapping(
+    selected: &BrainModel,
+    census: &crate::contracts::SystemCensus,
+) -> bool {
+    let gpu_count = census.gpu_count.unwrap_or(0);
+    let topology_override_present = selected
+        .startup_topology_path
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    gpu_count > 1 && !topology_override_present
+}
+
+fn preferred_cuda_visible_devices(
+    selected: &BrainModel,
+    census: &crate::contracts::SystemCensus,
+    _calibration: &StartupCalibrationCandidate,
+) -> Option<String> {
+    if !prefers_multi_gpu_auto_mapping(selected, census) {
+        return None;
+    }
+    power_of_two_cuda_visible_device_subset(census)
+}
+
+fn largest_power_of_two_not_exceeding(value: usize) -> Option<usize> {
+    if value < 2 {
+        return None;
+    }
+    let exponent = usize::BITS - 1 - value.leading_zeros();
+    Some(1usize << exponent)
+}
+
+fn power_of_two_cuda_visible_device_subset(
+    census: &crate::contracts::SystemCensus,
+) -> Option<String> {
+    let gpu_count = census.gpu_count.unwrap_or(0);
+    if gpu_count <= 1 || gpu_count.is_power_of_two() {
+        return None;
+    }
+    let visible_gpu_count = largest_power_of_two_not_exceeding(gpu_count)?;
+    if visible_gpu_count < 2 {
+        return None;
+    }
+    let mut gpu_indices = census
+        .gpus
+        .as_ref()
+        .map(|items| items.iter().map(|gpu| gpu.index).collect::<Vec<_>>())
+        .unwrap_or_else(|| (0..gpu_count).collect::<Vec<_>>());
+    gpu_indices.sort_unstable();
+    gpu_indices.dedup();
+    if gpu_indices.len() < visible_gpu_count {
+        return None;
+    }
+    let start_index = gpu_indices.len().saturating_sub(visible_gpu_count);
+    Some(
+        gpu_indices
+            .into_iter()
+            .skip(start_index)
+            .take(visible_gpu_count)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+fn kleinhirn_runtime_env_matches_target(
+    current: &BTreeMap<String, String>,
+    desired: &BTreeMap<String, String>,
+) -> bool {
+    const RUNTIME_KEYS: &[&str] = &[
+        "CTO_AGENT_KLEINHIRN_PROFILE",
+        "CTO_AGENT_KLEINHIRN_MODEL",
+        "CTO_AGENT_KLEINHIRN_RUNTIME_MODEL",
+        "CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL",
+        "CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER",
+        "CTO_AGENT_KLEINHIRN_MAX_SEQS",
+        "CTO_AGENT_KLEINHIRN_MAX_BATCH_SIZE",
+        "CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS",
+        "CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE",
+        "CTO_AGENT_KLEINHIRN_DEVICE_LAYERS",
+        "CTO_AGENT_KLEINHIRN_TOPOLOGY",
+        "CTO_AGENT_KLEINHIRN_PA_GPU_MEM",
+        "CTO_AGENT_KLEINHIRN_PA_GPU_MEM_USAGE",
+        "CTO_AGENT_KLEINHIRN_PA_CTXT_LEN",
+        "CTO_AGENT_KLEINHIRN_PA_CACHE_TYPE",
+        "CTO_AGENT_KLEINHIRN_CHAT_TEMPLATE",
+        "CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT",
+        "CTO_AGENT_KLEINHIRN_TOKENIZER_JSON",
+        "CTO_AGENT_KLEINHIRN_ISQ",
+        "CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN",
+        "CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES",
+        "CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN",
+        "CTO_AGENT_KLEINHIRN_DISABLE_NCCL",
+    ];
+    RUNTIME_KEYS
+        .iter()
+        .all(|key| current.get(*key) == desired.get(*key))
+}
+
 fn restart_kleinhirn_runtime(paths: &Paths) -> anyhow::Result<()> {
-    if try_restart_with_systemd() {
+    if try_restart_with_systemd(paths)? {
         return Ok(());
     }
     try_restart_with_local_script(paths)
 }
 
-fn try_restart_with_systemd() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "restart", "cto-kleinhirn.service"])
+fn try_restart_with_systemd(paths: &Paths) -> anyhow::Result<bool> {
+    let Ok(status) = Command::new("systemctl")
+        .args(["--user", "is-enabled", "cto-kleinhirn.service"])
         .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    else {
+        return Ok(false);
+    };
+    if !status.success() {
+        return Ok(false);
+    }
+
+    let port = load_kleinhirn_env_map(paths)
+        .ok()
+        .and_then(|env_map| {
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_PORT")
+                .and_then(|raw| raw.trim().parse::<u16>().ok())
+        })
+        .unwrap_or(1234);
+
+    let _ = Command::new("systemctl")
+        .args([
+            "--user",
+            "kill",
+            "--kill-who=all",
+            "--signal=SIGTERM",
+            "cto-kleinhirn.service",
+        ])
+        .status();
+    let stop_status = Command::new("systemctl")
+        .args(["--user", "stop", "cto-kleinhirn.service"])
+        .status()
+        .context("failed to stop cto-kleinhirn.service via systemd")?;
+    if !stop_status.success() {
+        anyhow::bail!("systemd stop for cto-kleinhirn.service failed");
+    }
+
+    wait_for_kleinhirn_shutdown(port, Duration::from_secs(45))?;
+
+    let start_status = Command::new("systemctl")
+        .args(["--user", "start", "cto-kleinhirn.service"])
+        .status()
+        .context("failed to start cto-kleinhirn.service via systemd")?;
+    if !start_status.success() {
+        anyhow::bail!("systemd start for cto-kleinhirn.service failed");
+    }
+
+    Ok(true)
+}
+
+fn wait_for_kleinhirn_shutdown(port: u16, timeout: Duration) -> anyhow::Result<()> {
+    let started = std::time::Instant::now();
+    let mut escalated = false;
+    loop {
+        let stale_pids = stale_kleinhirn_server_pids(port)?;
+        if stale_pids.is_empty() {
+            return Ok(());
+        }
+
+        if started.elapsed() >= timeout {
+            anyhow::bail!(
+                "timed out waiting for stale kleinhirn mistralrs processes to stop on port {}: {:?}",
+                port,
+                stale_pids
+            );
+        }
+
+        if !escalated && started.elapsed() >= Duration::from_secs(10) {
+            for pid in &stale_pids {
+                let _ = Command::new("kill")
+                    .args(["-KILL", &pid.to_string()])
+                    .status();
+            }
+            escalated = true;
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn stale_kleinhirn_server_pids(port: u16) -> anyhow::Result<Vec<i32>> {
+    let output = Command::new("ps")
+        .args(["-Ao", "pid=,command="])
+        .output()
+        .context("failed to inspect running processes for stale kleinhirn servers")?;
+    if !output.status.success() {
+        anyhow::bail!("ps -Ao pid=,command= failed while inspecting stale kleinhirn servers");
+    }
+    Ok(parse_kleinhirn_server_pids_from_ps_output(
+        &String::from_utf8_lossy(&output.stdout),
+        port,
+    ))
+}
+
+fn parse_kleinhirn_server_pids_from_ps_output(output: &str, port: u16) -> Vec<i32> {
+    let port_flag = format!("--port {}", port);
+    output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let (pid_text, command) = trimmed.split_once(' ')?;
+            if !command.contains("mistralrs")
+                || !command.contains("serve")
+                || !command.contains(&port_flag)
+            {
+                return None;
+            }
+            pid_text.parse::<i32>().ok()
+        })
+        .collect()
 }
 
 fn try_restart_with_local_script(paths: &Paths) -> anyhow::Result<()> {
@@ -957,6 +1407,38 @@ mod tests {
         }
     }
 
+    fn gpt_oss_model() -> BrainModel {
+        BrainModel {
+            role: "kleinhirn".to_string(),
+            provider: "openai".to_string(),
+            model_id: "gpt-oss-20b".to_string(),
+            runtime_model_id: Some("openai/gpt-oss-20b".to_string()),
+            official_label: "GPT-OSS 20B".to_string(),
+            agentic_adapter: Some("openai_compatible_chat".to_string()),
+            reasoning_effort: "low".to_string(),
+            deployment_mode: "local_or_self_hosted".to_string(),
+            purpose: "always-on".to_string(),
+            supports_vision: false,
+            min_cpu_threads: Some(8),
+            min_memory_gb: Some(16),
+            min_gpu_count: Some(1),
+            min_total_gpu_memory_gb: Some(12),
+            min_single_gpu_memory_gb: Some(12),
+            startup_max_seqs: Some(1),
+            startup_max_batch_size: Some(1),
+            startup_max_seq_len: Some(131_072),
+            startup_pa_context_len: None,
+            startup_pa_cache_type: None,
+            startup_paged_attn_mode: Some("off".to_string()),
+            startup_chat_template_path: None,
+            startup_jinja_explicit_path: None,
+            startup_tokenizer_json_path: None,
+            startup_topology_path: None,
+            startup_device_layers_cli: None,
+            prefer_auto_device_mapping: false,
+        }
+    }
+
     #[test]
     fn multi_gpu_auto_tp_calibration_uses_descending_contexts() {
         let _guard = env_lock().lock().expect("test env lock poisoned");
@@ -1044,6 +1526,99 @@ mod tests {
     }
 
     #[test]
+    fn multi_gpu_gpt_oss_calibration_uses_auto_mapping_without_paged_attn() {
+        let selected = gpt_oss_model();
+        let census = SystemCensus {
+            gpu_count: Some(5),
+            model_tune_candidates: Some(vec![ModelTuneCandidate {
+                model_id: "openai/gpt-oss-20b".to_string(),
+                official_label: "GPT-OSS 20B".to_string(),
+                status: "supported".to_string(),
+                recommended_isq: Some("Q6K".to_string()),
+                device_layers_cli: Some("0:21;1:3".to_string()),
+                max_context_tokens: Some(131_072),
+                note: None,
+            }]),
+            ..Default::default()
+        };
+
+        let candidates = build_startup_calibration_candidates(&selected, &census);
+        assert!(candidates.len() >= 4);
+        assert_eq!(candidates[0].max_seq_len, Some(131_072));
+        assert_eq!(candidates[0].pa_context_len, None);
+        assert_eq!(candidates[0].pa_cache_type, None);
+        assert_eq!(candidates[0].paged_attn_mode.as_deref(), Some("off"));
+        assert!(candidates.iter().all(|item| item.force_auto_device_mapping));
+    }
+
+    #[test]
+    fn multi_gpu_gpt_oss_env_prefers_subset_and_clears_manual_layout() {
+        let selected = gpt_oss_model();
+        let census = SystemCensus {
+            gpu_count: Some(5),
+            gpus: Some(vec![
+                crate::contracts::GpuDevice {
+                    index: 0,
+                    name: "GPU0".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 1,
+                    name: "GPU1".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 2,
+                    name: "GPU2".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 3,
+                    name: "GPU3".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 4,
+                    name: "GPU4".to_string(),
+                    memory_total_mb: 20480,
+                },
+            ]),
+            model_tune_candidates: Some(vec![ModelTuneCandidate {
+                model_id: "openai/gpt-oss-20b".to_string(),
+                official_label: "GPT-OSS 20B".to_string(),
+                status: "supported".to_string(),
+                recommended_isq: Some("Q6K".to_string()),
+                device_layers_cli: Some("0:21;1:3".to_string()),
+                max_context_tokens: Some(131_072),
+                note: None,
+            }]),
+            ..Default::default()
+        };
+        let calibration = build_startup_calibration_candidates(&selected, &census)
+            .into_iter()
+            .next()
+            .expect("calibration candidate");
+        let mut env_map = BTreeMap::new();
+
+        apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
+
+        assert_eq!(
+            env_map.get("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES").map(String::as_str),
+            Some("1,2,3,4")
+        );
+        assert_eq!(
+            env_map.get("CTO_AGENT_KLEINHIRN_DISABLE_NCCL").map(String::as_str),
+            Some("1")
+        );
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS"));
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS"));
+        assert_eq!(
+            env_map.get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE").map(String::as_str),
+            Some("off")
+        );
+    }
+
+    #[test]
     fn multi_gpu_bootstrap_cap_can_be_overridden_by_env() {
         let _guard = env_lock().lock().expect("test env lock poisoned");
         unsafe {
@@ -1099,8 +1674,179 @@ mod tests {
             env_map.get("CTO_AGENT_KLEINHIRN_TOPOLOGY").map(String::as_str),
             Some("/tmp/qwen35-topology.json")
         );
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_DEVICE_LAYERS"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS"));
+    }
+
+    #[test]
+    fn power_of_two_multi_gpu_auto_tp_keeps_all_gpus_visible() {
+        let selected = qwen35_model();
+        let census = SystemCensus {
+            gpu_count: Some(4),
+            gpus: Some(vec![
+                crate::contracts::GpuDevice {
+                    index: 0,
+                    name: "GPU0".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 1,
+                    name: "GPU1".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 2,
+                    name: "GPU2".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 3,
+                    name: "GPU3".to_string(),
+                    memory_total_mb: 20480,
+                },
+            ]),
+            ..Default::default()
+        };
+        let calibration = StartupCalibrationCandidate {
+            max_batch_size: Some(1),
+            max_seq_len: Some(65_536),
+            pa_context_len: Some(65_536),
+            pa_cache_type: Some("f8e4m3".to_string()),
+            paged_attn_mode: Some("on".to_string()),
+            force_auto_device_mapping: true,
+        };
+        let mut env_map = BTreeMap::new();
+
+        apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
+
+        assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
+    }
+
+    #[test]
+    fn non_power_of_two_gpu_count_uses_largest_power_of_two_subset() {
+        let census = SystemCensus {
+            gpu_count: Some(5),
+            gpus: Some(vec![
+                crate::contracts::GpuDevice {
+                    index: 0,
+                    name: "GPU0".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 1,
+                    name: "GPU1".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 2,
+                    name: "GPU2".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 3,
+                    name: "GPU3".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 4,
+                    name: "GPU4".to_string(),
+                    memory_total_mb: 20480,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            power_of_two_cuda_visible_device_subset(&census).as_deref(),
+            Some("1,2,3,4")
+        );
+    }
+
+    #[test]
+    fn non_power_of_two_subset_prefers_leaving_cuda_zero_free() {
+        let census = SystemCensus {
+            gpu_count: Some(3),
+            gpus: Some(vec![
+                crate::contracts::GpuDevice {
+                    index: 0,
+                    name: "GPU0".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 1,
+                    name: "GPU1".to_string(),
+                    memory_total_mb: 20480,
+                },
+                crate::contracts::GpuDevice {
+                    index: 2,
+                    name: "GPU2".to_string(),
+                    memory_total_mb: 20480,
+                },
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            power_of_two_cuda_visible_device_subset(&census).as_deref(),
+            Some("1,2")
+        );
+    }
+
+    #[test]
+    fn extracts_requested_local_kleinhirn_model_from_owner_text() {
+        assert_eq!(
+            extract_requested_local_kleinhirn_model(
+                "Wechsle dein Kleinhirn jetzt lokal auf Qwen3.5-35B-A3B."
+            )
+            .as_deref(),
+            Some("Qwen3.5-35B-A3B")
+        );
+        assert_eq!(
+            extract_requested_local_kleinhirn_model(
+                "Schalte bitte wieder auf GPT-OSS 20B zurueck."
+            )
+            .as_deref(),
+            Some("gpt-oss-20b")
+        );
+    }
+
+    #[test]
+    fn parses_only_matching_kleinhirn_server_pids_for_port() {
+        let output = "\
+  101 /home/ninja/.cargo/bin/mistralrs serve --port 1234 --max-seqs 1\n\
+  202 /home/ninja/.cargo/bin/mistralrs serve --port 5555 --max-seqs 1\n\
+  303 python3 other_script.py\n\
+  404 mistralrs launcher serve --port 1234\n";
+
+        assert_eq!(
+            parse_kleinhirn_server_pids_from_ps_output(output, 1234),
+            vec![101, 404]
+        );
+        assert_eq!(
+            parse_kleinhirn_server_pids_from_ps_output(output, 5555),
+            vec![202]
+        );
+    }
+
+    #[test]
+    fn runtime_env_drift_on_cuda_visible_devices_breaks_alignment() {
+        let mut current = BTreeMap::new();
+        let mut desired = BTreeMap::new();
+        current.insert(
+            "CTO_AGENT_KLEINHIRN_MODEL".to_string(),
+            "Qwen3.5-35B-A3B".to_string(),
+        );
+        desired.insert(
+            "CTO_AGENT_KLEINHIRN_MODEL".to_string(),
+            "Qwen3.5-35B-A3B".to_string(),
+        );
+        desired.insert(
+            "CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES".to_string(),
+            "0,1,2,3".to_string(),
+        );
+
+        assert!(!kleinhirn_runtime_env_matches_target(&current, &desired));
     }
 
     #[test]
@@ -1201,6 +1947,34 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())
+    }
+
+    #[test]
+    fn parses_mistralrs_build_features_from_doctor_output() {
+        let features = parse_mistralrs_doctor_build_features(
+            "Mistral.rs Installation\n-----------------------\n[INFO] Build features: cuda, flash-attn, nccl\n",
+        );
+        assert_eq!(features, vec!["cuda", "flash-attn", "nccl"]);
+    }
+
+    #[test]
+    fn parses_mistralrs_features_from_cargo_metadata() {
+        let json = r#"{"installs":{"mistralrs-cli 0.7.1-alpha.1 (git+https://example.invalid)":{"features":["cuda","flash-attn","nccl"]}}}"#;
+        let parsed: Value = serde_json::from_str(json).expect("valid json");
+        let installs = parsed
+            .get("installs")
+            .and_then(Value::as_object)
+            .expect("installs object");
+        let features = installs
+            .iter()
+            .find(|(key, _)| key.starts_with("mistralrs-cli"))
+            .and_then(|(_, value)| value.get("features"))
+            .and_then(Value::as_array)
+            .expect("features array")
+            .iter()
+            .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(features, vec!["cuda", "flash-attn", "nccl"]);
     }
 
     #[test]

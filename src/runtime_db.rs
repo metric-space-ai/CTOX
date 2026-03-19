@@ -2725,6 +2725,27 @@ pub fn load_active_task(paths: &Paths) -> anyhow::Result<Option<TaskRecord>> {
     .map_err(Into::into)
 }
 
+pub fn latest_open_task_by_kind(
+    paths: &Paths,
+    task_kind: &str,
+) -> anyhow::Result<Option<TaskRecord>> {
+    let conn = open_db(paths)?;
+    conn.query_row(
+        "SELECT id, created_at, updated_at, parent_task_id, worker_job_id, source_interrupt_id, source_channel, speaker, task_kind,
+                title, detail, trust_level, priority_score, status, run_count,
+                last_checkpoint_summary, last_checkpoint_at, last_output
+         FROM tasks
+         WHERE task_kind = ?1
+           AND status IN ('queued', 'active', 'await_review')
+         ORDER BY id DESC
+         LIMIT 1",
+        params![task_kind],
+        map_task_row,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 pub fn activate_selected_task(paths: &Paths, task_id: i64) -> anyhow::Result<Option<TaskRecord>> {
     let conn = open_db(paths)?;
     let status = conn
@@ -5306,6 +5327,25 @@ fn classify_task_kind(message: &str) -> String {
     ) {
         return "grosshirn_activation".to_string();
     }
+    if crate::brain_runtime::extract_requested_local_kleinhirn_model(message).is_some()
+        && contains_any(
+            &lowered,
+            &[
+                "wechsel",
+                "wechsle",
+                "umschalten",
+                "schalte",
+                "switch",
+                "aktivier",
+                "aktiviere",
+                "nutze",
+                "benutze",
+                "verwende",
+            ],
+        )
+    {
+        return "local_model_switch".to_string();
+    }
     if contains_any(&lowered, &["homepage", "startseite", "webseite", "bios", "sichtbar", "branding"]) {
         return "homepage_bridge".to_string();
     }
@@ -5444,6 +5484,7 @@ fn compute_priority_score(
 fn build_task_title(task_kind: &str, message: &str) -> String {
     let canned = match task_kind {
         "self_preservation" => Some("Selbsterhalt des Infinity Loop absichern"),
+        "local_model_switch" => Some("Lokalen Kleinhirn-Modellwechsel ausfuehren"),
         "homepage_bridge" => Some("Homepage-/BIOS-Bruecke ueberarbeiten"),
         "root_trust" => Some("Root-Trust und Superpassword kalibrieren"),
         "grosshirn_activation" => Some("Grosshirn-Modus aktivieren und konfigurieren"),
@@ -6717,6 +6758,13 @@ mod tests {
             "Wechsle jetzt auf GPT-5.4 als Grosshirn und konfiguriere den OpenAI API Token fuer den Moduswechsel.",
         );
         assert_eq!(task_kind, "grosshirn_activation");
+    }
+
+    #[test]
+    fn explicit_bios_local_model_switch_is_classified_separately() {
+        let task_kind =
+            classify_task_kind("Wechsle jetzt lokal auf Qwen3.5-35B-A3B als Kleinhirn.");
+        assert_eq!(task_kind, "local_model_switch");
     }
 
     #[test]

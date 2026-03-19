@@ -28,6 +28,7 @@ use crate::command_exec::terminate_session;
 use crate::command_exec::write_session;
 use crate::runtime_db::load_owner_trust;
 use crate::runtime_db::enqueue_loop_interrupt;
+use crate::runtime_db::load_active_task;
 use crate::runtime_db::load_agent_thread;
 use crate::runtime_db::ingest_pending_loop_interrupts;
 use crate::runtime_db::list_worker_jobs;
@@ -53,6 +54,7 @@ use codex_app_server_protocol::CommandExecResizeParams;
 use codex_app_server_protocol::CommandExecTerminalSize;
 use codex_app_server_protocol::CommandExecTerminateParams;
 use codex_app_server_protocol::CommandExecWriteParams;
+use std::process::Command;
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -1262,6 +1264,7 @@ pub fn queue_channel_interrupt(
     let interrupt_id = enqueue_loop_interrupt(paths, source_channel, speaker, message)?;
     let task = queue_loop_interrupt_as_task(paths, interrupt_id)?
         .ok_or_else(|| anyhow::anyhow!("interrupt {interrupt_id} could not be queued"))?;
+    let active_task = load_active_task(paths)?;
     let focus = load_focus_state(paths)?;
     let open_tasks = list_open_tasks(paths, 3)?;
     let next_titles = open_tasks
@@ -1277,10 +1280,30 @@ pub fn queue_channel_interrupt(
     if let Some(note) = signal_note {
         parts.push(note);
     }
-    parts.push(
-        "Der Agent bricht den laufenden bounded Schritt nicht hart ab, sondern bringt ihn erst sauber bis zur naechsten sicheren Turn-Grenze zu Ende."
-            .to_string(),
-    );
+    let preempted_local_model_switch = task.task_kind == "local_model_switch"
+        && active_task
+            .as_ref()
+            .map(|value| value.task_kind == "local_model_switch" && value.id != task.id)
+            .unwrap_or(false);
+    if preempted_local_model_switch {
+        if request_control_plane_restart_for_model_switch_preemption() {
+            parts.push(
+                "Ein aelterer lokaler Modellwechsel lief noch. Der Control-Plane-Prozess wurde fuer einen sauberen Requeue-/Supersede-Zyklus neu angestossen."
+                    .to_string(),
+            );
+        } else {
+            parts.push(
+                "Ein aelterer lokaler Modellwechsel lief noch. Der neue Switch wurde vorgemerkt, aber der Neustart zur sofortigen Praeemption konnte nicht direkt ausgelöst werden."
+                    .to_string(),
+            );
+        }
+    }
+    if !preempted_local_model_switch {
+        parts.push(
+            "Der Agent bricht den laufenden bounded Schritt nicht hart ab, sondern bringt ihn erst sauber bis zur naechsten sicheren Turn-Grenze zu Ende."
+                .to_string(),
+        );
+    }
     parts.push(
         "Danach zieht das einheitliche Modussystem diese Eingabe im naechsten Repriorisierungszyklus vor."
             .to_string(),
@@ -1302,4 +1325,12 @@ pub fn queue_channel_interrupt(
         queued_task_id: Some(task.id),
         queued_task_title: Some(task.title.clone()),
     })
+}
+
+fn request_control_plane_restart_for_model_switch_preemption() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "restart", "cto-agent.service"])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }

@@ -69,24 +69,28 @@ case "$KLEINHIRN_PROFILE" in
     KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-Qwen3.5-0.8B}"
     KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-Qwen/Qwen3.5-0.8B}"
     KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-Qwen3.5 0.8B}"
-    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-openai_compatible_chat}"
-    KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-8192}"
+    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-mistralrs_gpt_oss_harmony_completion}"
+    KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-131072}"
     KLEINHIRN_DISABLE_PAGED_ATTN="${CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN:-0}"
-    KLEINHIRN_PA_CTXT_LEN="${CTO_AGENT_KLEINHIRN_PA_CTXT_LEN:-4096}"
+    KLEINHIRN_PA_CTXT_LEN="${CTO_AGENT_KLEINHIRN_PA_CTXT_LEN:-131072}"
     KLEINHIRN_PAGED_ATTN_MODE="${CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE:-auto}"
     ;;
   *)
     KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-gpt-oss-20b}"
     KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-openai/gpt-oss-20b}"
     KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-GPT-OSS 20B}"
-    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-openai_compatible_chat}"
-    KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-8192}"
+    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-mistralrs_gpt_oss_harmony_completion}"
+    KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-131072}"
     KLEINHIRN_DISABLE_PAGED_ATTN="${CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN:-0}"
     KLEINHIRN_PAGED_ATTN_MODE="${CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE:-off}"
     ;;
 esac
 
-KLEINHIRN_ARCH="${CTO_AGENT_KLEINHIRN_ARCH:-}"
+if is_gpt_oss_family; then
+  KLEINHIRN_ARCH="${CTO_AGENT_KLEINHIRN_ARCH:-gpt_oss}"
+else
+  KLEINHIRN_ARCH="${CTO_AGENT_KLEINHIRN_ARCH:-}"
+fi
 KLEINHIRN_NUM_DEVICE_LAYERS="${CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS:-}"
 KLEINHIRN_MAX_SEQS="${CTO_AGENT_KLEINHIRN_MAX_SEQS:-}"
 KLEINHIRN_MAX_BATCH_SIZE="${CTO_AGENT_KLEINHIRN_MAX_BATCH_SIZE:-}"
@@ -101,8 +105,10 @@ KLEINHIRN_CHAT_TEMPLATE="${CTO_AGENT_KLEINHIRN_CHAT_TEMPLATE:-}"
 KLEINHIRN_JINJA_EXPLICIT="${CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT:-}"
 KLEINHIRN_TOKENIZER_JSON="${CTO_AGENT_KLEINHIRN_TOKENIZER_JSON:-}"
 KLEINHIRN_TOPOLOGY="${CTO_AGENT_KLEINHIRN_TOPOLOGY:-}"
+KLEINHIRN_DISABLE_NCCL="${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}"
 
 KLEINHIRN_PORT="${CTO_AGENT_KLEINHIRN_PORT:-1234}"
+KLEINHIRN_STARTUP_WAIT_SECS="${CTO_AGENT_KLEINHIRN_STARTUP_WAIT_SECS:-900}"
 KLEINHIRN_BASE_URL="http://127.0.0.1:${KLEINHIRN_PORT}/v1"
 KLEINHIRN_LOG_DIR="$ROOT/runtime/logs"
 KLEINHIRN_LOG="$KLEINHIRN_LOG_DIR/kleinhirn.log"
@@ -113,6 +119,21 @@ READY_URL="https://127.0.0.1:8443/readyz"
 HEARTBEAT_FILE="$ROOT/runtime/state/agent_state.json"
 CARGO_TARGET_DIR="${CTO_AGENT_MISTRALRS_TARGET_DIR:-$ROOT/runtime/build/mistralrs}"
 
+detect_gpu_count() {
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    printf '%s\n' "0"
+    return
+  fi
+  nvidia-smi --query-gpu=index --format=csv,noheader 2>/dev/null | awk 'NF {count += 1} END {print count + 0}'
+}
+
+nccl_packages_available() {
+  if ! command -v apt-cache >/dev/null 2>&1; then
+    return 1
+  fi
+  apt-cache policy libnccl2 2>/dev/null | grep -q 'Candidate:'
+}
+
 detect_mistralrs_features() {
   if [ -n "${CTO_AGENT_MISTRALRS_FEATURES:-}" ]; then
     printf '%s\n' "$CTO_AGENT_MISTRALRS_FEATURES"
@@ -120,6 +141,9 @@ detect_mistralrs_features() {
   fi
 
   features="cuda flash-attn"
+  if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libnccl'; then
+    features="$features nccl"
+  fi
   if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libcudnn'; then
     features="$features cudnn"
   fi
@@ -127,6 +151,34 @@ detect_mistralrs_features() {
 }
 
 MISTRALRS_FEATURES="$(detect_mistralrs_features)"
+
+installed_mistralrs_features() {
+  if ! command -v mistralrs >/dev/null 2>&1; then
+    return
+  fi
+  mistralrs doctor 2>/dev/null | sed -n 's/.*Build features: //p' | head -n 1
+}
+
+mistralrs_features_satisfy_required() {
+  required="$1"
+  installed="$(installed_mistralrs_features || true)"
+  if [ -z "$installed" ]; then
+    return 1
+  fi
+  OLD_IFS="${IFS:- }"
+  IFS=' '
+  for feature in $required; do
+    case "$installed" in
+      *"$feature"*) ;;
+      *)
+        IFS="$OLD_IFS"
+        return 1
+        ;;
+    esac
+  done
+  IFS="$OLD_IFS"
+  return 0
+}
 
 apply_runtime_tune_defaults() {
   if ! command -v mistralrs >/dev/null 2>&1; then
@@ -257,6 +309,7 @@ run_sudo() {
 
 if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
   echo "[prep] Install Linux build prerequisites"
+  GPU_COUNT="$(detect_gpu_count)"
   run_sudo apt-get update
   run_sudo apt-get install -y \
     build-essential \
@@ -270,6 +323,10 @@ if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1 && command 
     nodejs \
     npm \
     sqlite3
+  if [ "$GPU_COUNT" -gt 1 ] && nccl_packages_available; then
+    echo "[prep] Install NCCL for multi-GPU mistral.rs tensor parallelism"
+    run_sudo apt-get install -y libnccl2 libnccl-dev
+  fi
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -324,11 +381,18 @@ python3 "$ROOT/scripts/configure_model_policy.py" \
   --profile "$KLEINHIRN_PROFILE"
 
 echo "[4/10] Install selected Kleinhirn runtime"
+REINSTALL_MISTRALRS=0
 if ! command -v mistralrs >/dev/null 2>&1; then
+  REINSTALL_MISTRALRS=1
+elif ! mistralrs_features_satisfy_required "$MISTRALRS_FEATURES"; then
+  REINSTALL_MISTRALRS=1
+fi
+if [ "$REINSTALL_MISTRALRS" = "1" ]; then
   echo "Using mistralrs features: $MISTRALRS_FEATURES"
   CARGO_TARGET_DIR="$CARGO_TARGET_DIR" cargo install --locked \
     --git https://github.com/EricLBuehler/mistral.rs.git \
     mistralrs-cli \
+    --force \
     --features "$MISTRALRS_FEATURES"
 fi
 if ! command -v mistralrs >/dev/null 2>&1; then
@@ -395,7 +459,7 @@ eval "$(apply_runtime_tune_defaults || true)"
 if [ -z "$KLEINHIRN_ISQ" ] && [ -n "${RECOMMENDED_ISQ:-}" ]; then
   KLEINHIRN_ISQ="$(printf '%s' "$RECOMMENDED_ISQ" | tr '[:upper:]' '[:lower:]')"
 fi
-if [ -z "$KLEINHIRN_DEVICE_LAYERS" ] && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ]; then
+if [ -z "$KLEINHIRN_DEVICE_LAYERS" ] && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] && [ "${CENSUS_GPU_COUNT:-0}" -le 1 ]; then
   KLEINHIRN_DEVICE_LAYERS="$RECOMMENDED_DEVICE_LAYERS"
 fi
 if [ -n "${RECOMMENDED_MAX_CONTEXT_TOKENS:-}" ]; then
@@ -433,6 +497,17 @@ if [ "$APPLY_SELECTED_MODEL" = "1" ] && [ "${SELECTED_PREFER_AUTO_DEVICE_MAPPING
   fi
 fi
 
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ -z "$KLEINHIRN_TOPOLOGY" ]; then
+  KLEINHIRN_DEVICE_LAYERS=""
+  KLEINHIRN_NUM_DEVICE_LAYERS=""
+fi
+
+if [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] && [ "$KLEINHIRN_POLICY_MODEL" = "gpt-oss-20b" ]; then
+  KLEINHIRN_DISABLE_NCCL="1"
+elif [ -z "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}" ]; then
+  KLEINHIRN_DISABLE_NCCL=""
+fi
+
 echo "[6/10] Write Kleinhirn environment"
 {
   printf 'CTO_AGENT_KLEINHIRN_BASE_URL=%s\n' "$(shell_quote "$KLEINHIRN_BASE_URL")"
@@ -445,6 +520,7 @@ echo "[6/10] Write Kleinhirn environment"
   printf 'CTO_AGENT_KLEINHIRN_SERVER_IMPL=%s\n' "$(shell_quote "$KLEINHIRN_SERVER_IMPL")"
   printf 'CTO_AGENT_KLEINHIRN_ARCH=%s\n' "$(shell_quote "$KLEINHIRN_ARCH")"
   printf 'CTO_AGENT_KLEINHIRN_PORT=%s\n' "$(shell_quote "$KLEINHIRN_PORT")"
+  printf 'CTO_AGENT_KLEINHIRN_STARTUP_WAIT_SECS=%s\n' "$(shell_quote "$KLEINHIRN_STARTUP_WAIT_SECS")"
   printf 'CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN=%s\n' "$(shell_quote "$KLEINHIRN_MAX_SEQ_LEN")"
   printf 'CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN=%s\n' "$(shell_quote "$KLEINHIRN_DISABLE_PAGED_ATTN")"
   printf 'CTO_AGENT_KLEINHIRN_NUM_DEVICE_LAYERS=%s\n' "$(shell_quote "$KLEINHIRN_NUM_DEVICE_LAYERS")"
@@ -456,6 +532,7 @@ echo "[6/10] Write Kleinhirn environment"
   printf 'CTO_AGENT_KLEINHIRN_PA_CACHE_TYPE=%s\n' "$(shell_quote "$KLEINHIRN_PA_CACHE_TYPE")"
   printf 'CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE=%s\n' "$(shell_quote "$KLEINHIRN_PAGED_ATTN_MODE")"
   printf 'CTO_AGENT_KLEINHIRN_DEVICE_LAYERS=%s\n' "$(shell_quote "$KLEINHIRN_DEVICE_LAYERS")"
+  printf 'CTO_AGENT_KLEINHIRN_DISABLE_NCCL=%s\n' "$(shell_quote "$KLEINHIRN_DISABLE_NCCL")"
   printf 'CTO_AGENT_KLEINHIRN_ISQ=%s\n' "$(shell_quote "$KLEINHIRN_ISQ")"
   printf 'CTO_AGENT_KLEINHIRN_CHAT_TEMPLATE=%s\n' "$(shell_quote "$KLEINHIRN_CHAT_TEMPLATE")"
   printf 'CTO_AGENT_KLEINHIRN_JINJA_EXPLICIT=%s\n' "$(shell_quote "$KLEINHIRN_JINJA_EXPLICIT")"

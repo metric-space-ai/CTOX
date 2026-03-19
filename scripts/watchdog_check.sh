@@ -15,6 +15,7 @@ fi
 LOG_DIR="$ROOT/runtime/logs"
 LOG_FILE="$LOG_DIR/watchdog.log"
 HEALTH_URL="${CTO_AGENT_WATCHDOG_URL:-https://127.0.0.1:8443/readyz}"
+TRANSITION_FILE="$ROOT/runtime/state/kleinhirn-transition.env"
 mkdir -p "$LOG_DIR"
 
 timestamp() {
@@ -24,6 +25,23 @@ timestamp() {
 log_line() {
   printf '[%s] %s\n' "$(timestamp)" "$1" >> "$LOG_FILE"
 }
+
+if [ -f "$TRANSITION_FILE" ]; then
+  set +u
+  # shellcheck disable=SC1090
+  . "$TRANSITION_FILE"
+  set -u
+  NOW_EPOCH="$(date -u +%s)"
+  DEADLINE_EPOCH="${CTO_AGENT_KLEINHIRN_TRANSITION_DEADLINE_EPOCH:-0}"
+  if [ "$DEADLINE_EPOCH" -gt "$NOW_EPOCH" ]; then
+    if systemctl --user is-active cto-kleinhirn.service >/dev/null 2>&1; then
+      log_line "Skipping watchdog restart during active kleinhirn transition toward ${CTO_AGENT_KLEINHIRN_TRANSITION_TARGET:-unknown}"
+      exit 0
+    fi
+  else
+    rm -f "$TRANSITION_FILE" >/dev/null 2>&1 || true
+  fi
+fi
 
 if curl -k -fsS "$HEALTH_URL" >/dev/null 2>&1; then
   exit 0

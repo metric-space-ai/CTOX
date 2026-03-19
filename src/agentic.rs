@@ -714,7 +714,7 @@ pub fn wait_for_kleinhirn_startup_ready(paths: &Paths) -> anyhow::Result<()> {
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
         .filter(|value| *value >= 1)
-        .unwrap_or(300);
+        .unwrap_or(900);
     let poll_interval_ms = std::env::var("CTO_AGENT_KLEINHIRN_STARTUP_POLL_MS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())

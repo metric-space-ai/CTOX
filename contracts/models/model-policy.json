@@ -6,7 +6,7 @@
     "modelId": "gpt-oss-20b",
     "runtimeModelId": "openai/gpt-oss-20b",
     "officialLabel": "GPT-OSS 20B",
-    "agenticAdapter": "openai_compatible_chat",
+    "agenticAdapter": "mistralrs_gpt_oss_harmony_completion",
     "reasoningEffort": "low",
     "deploymentMode": "local_or_self_hosted",
     "purpose": "always-on low-latency control, bootstrap discipline, supervision, prioritization, summaries",
@@ -17,7 +17,7 @@
     "minSingleGpuMemoryGb": 12,
     "startupMaxSeqs": 1,
     "startupMaxBatchSize": 1,
-    "startupMaxSeqLen": 8192,
+    "startupMaxSeqLen": 131072,
     "startupPagedAttnMode": "off"
   },
   "kleinhirnInstallAlternatives": [
@@ -27,7 +27,7 @@
       "modelId": "Qwen3.5-35B-A3B",
       "runtimeModelId": "Qwen/Qwen3.5-35B-A3B",
       "officialLabel": "Qwen3.5 35B A3B",
-      "agenticAdapter": "openai_compatible_chat",
+      "agenticAdapter": "mistralrs_gpt_oss_harmony_completion",
       "reasoningEffort": "low",
       "deploymentMode": "local_or_self_hosted",
       "purpose": "vision-capable local supervisor and browser-inspection runtime when the CTO-Agent needs multimodal browser work and stronger agentic Qwen behavior on the same host",
@@ -39,8 +39,8 @@
       "minSingleGpuMemoryGb": 12,
       "startupMaxSeqs": 1,
       "startupMaxBatchSize": 1,
-      "startupMaxSeqLen": 8192,
-      "startupPaContextLen": 8192,
+      "startupMaxSeqLen": 131072,
+      "startupPaContextLen": 131072,
       "startupPaCacheType": "f8e4m3",
       "startupPagedAttnMode": "auto",
       "preferAutoDeviceMapping": true

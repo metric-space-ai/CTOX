@@ -1,5 +1,4 @@
 use crate::attach::spawn_attach_server;
-use crate::agentic::wait_for_kleinhirn_startup_ready;
 use crate::browser_agent_bridge::browser_agent_bridge_port;
 use crate::browser_agent_bridge::browser_agent_runtime_config;
 use crate::browser_agent_bridge::complete_browser_agent_job;
@@ -247,7 +246,6 @@ pub async fn run() -> anyhow::Result<()> {
     let paths = Paths::discover()?;
     let _runtime_lock = acquire_runtime_lock(&paths)?;
     initialize_runtime(&paths)?;
-    wait_for_kleinhirn_startup_ready(&paths)?;
     let _ = activate_startup_recovery(&paths)?;
 
     let started_at = Instant::now();
@@ -557,6 +555,33 @@ async fn readyz(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     health_response(&state.paths, true)
 }
 
+#[derive(Debug, Clone)]
+struct KleinhirnTransitionState {
+    deadline_epoch: i64,
+}
+
+fn load_kleinhirn_transition_state(paths: &Paths) -> Option<KleinhirnTransitionState> {
+    let path = paths.runtime_dir.join("state/kleinhirn-transition.env");
+    let text = fs::read_to_string(path).ok()?;
+    let mut deadline_epoch = None;
+    for line in text.lines() {
+        let (key, value) = line.split_once('=')?;
+        let parsed = value.trim().trim_matches('\'').trim_matches('"');
+        if key.trim() == "CTO_AGENT_KLEINHIRN_TRANSITION_DEADLINE_EPOCH" {
+            deadline_epoch = parsed.parse::<i64>().ok();
+        }
+    }
+    deadline_epoch.map(|deadline_epoch| KleinhirnTransitionState { deadline_epoch })
+}
+
+fn kleinhirn_transition_active(paths: &Paths) -> bool {
+    let Some(state) = load_kleinhirn_transition_state(paths) else {
+        return false;
+    };
+    let now = chrono::Utc::now().timestamp();
+    now <= state.deadline_epoch
+}
+
 fn health_response(paths: &Paths, require_ready: bool) -> (StatusCode, String) {
     let report = evaluate_runtime_health(paths, require_ready);
     let status = if report.status == "ok" {
@@ -578,6 +603,7 @@ fn evaluate_runtime_health(paths: &Paths, require_ready: bool) -> HealthReport {
     let resources = list_resources(paths, 256).unwrap_or_default();
     let heartbeat_stale_secs = parse_env_i64("CTO_AGENT_HEARTBEAT_STALE_SECS", 20);
     let turn_stale_secs = parse_env_i64("CTO_AGENT_ACTIVE_TURN_STALE_SECS", 300);
+    let transition_active = kleinhirn_transition_active(paths);
     let mut reasons = Vec::new();
 
     if state.supervisor_status != "running" {
@@ -588,17 +614,19 @@ fn evaluate_runtime_health(paths: &Paths, require_ready: bool) -> HealthReport {
     }
 
     match state.last_heartbeat_at.as_deref().and_then(seconds_since_iso) {
-        Some(age) if age > heartbeat_stale_secs => reasons.push(format!(
+        Some(age) if age > heartbeat_stale_secs && !transition_active => reasons.push(format!(
             "supervisor heartbeat stale for {}s (limit {}s)",
             age, heartbeat_stale_secs
         )),
         Some(_) => {}
-        None => reasons.push("missing supervisor heartbeat".to_string()),
+        None if !transition_active => reasons.push("missing supervisor heartbeat".to_string()),
+        None => {}
     }
 
     if let Some(turn) = active_turn.as_ref()
         && let Some(age) = seconds_since_iso(&turn.created_at)
         && age > turn_stale_secs
+        && !transition_active
     {
         reasons.push(format!(
             "active turn {} for task {} has been running {}s (limit {}s)",
@@ -612,9 +640,13 @@ fn evaluate_runtime_health(paths: &Paths, require_ready: bool) -> HealthReport {
         .cloned();
 
     let base_reasons = reasons.clone();
-    let is_ready = base_reasons.is_empty()
-        && matches!(agentic_status.as_ref(), Some(status) if status.status == "ok");
-    if require_ready && !is_ready {
+    let is_ready = if transition_active {
+        base_reasons.is_empty()
+    } else {
+        base_reasons.is_empty()
+            && matches!(agentic_status.as_ref(), Some(status) if status.status == "ok")
+    };
+    if require_ready && !is_ready && !transition_active {
         match agentic_status.as_ref() {
             Some(status) => reasons.push(format!(
                 "agentic loop is not ready (status={}, detail={})",
