@@ -39,6 +39,13 @@ resolve_kleinhirn_profile() {
   esac
 }
 
+is_gpt_oss_family() {
+  case "$(printf '%s\n%s' "${KLEINHIRN_POLICY_MODEL:-}" "${KLEINHIRN_RUNTIME_MODEL:-}" | tr '[:upper:]' '[:lower:]')" in
+    *gpt-oss*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 REQUESTED_KLEINHIRN_PROFILE="$(resolve_kleinhirn_profile)"
 KLEINHIRN_PROFILE="gpt_oss"
 PROFILE_PINNED=1
@@ -132,6 +139,13 @@ nccl_packages_available() {
     return 1
   fi
   apt-cache policy libnccl2 2>/dev/null | grep -q 'Candidate:'
+}
+
+nccl_runtime_missing() {
+  if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libnccl'; then
+    return 1
+  fi
+  return 0
 }
 
 detect_mistralrs_features() {
@@ -307,23 +321,43 @@ run_sudo() {
   fi
 }
 
+linux_build_prereqs_missing() {
+  command -v cc >/dev/null 2>&1 || return 0
+  command -v make >/dev/null 2>&1 || return 0
+  command -v pkg-config >/dev/null 2>&1 || return 0
+  command -v cmake >/dev/null 2>&1 || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  command -v git >/dev/null 2>&1 || return 0
+  command -v node >/dev/null 2>&1 || return 0
+  command -v npm >/dev/null 2>&1 || return 0
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  command -v ninja >/dev/null 2>&1 || command -v ninja-build >/dev/null 2>&1 || return 0
+  pkg-config --exists openssl >/dev/null 2>&1 || return 0
+  return 1
+}
+
 if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
-  echo "[prep] Install Linux build prerequisites"
   GPU_COUNT="$(detect_gpu_count)"
-  run_sudo apt-get update
-  run_sudo apt-get install -y \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    cmake \
-    ninja-build \
-    python3-venv \
-    curl \
-    git \
-    nodejs \
-    npm \
-    sqlite3
-  if [ "$GPU_COUNT" -gt 1 ] && nccl_packages_available; then
+  if linux_build_prereqs_missing; then
+    echo "[prep] Install Linux build prerequisites"
+    run_sudo apt-get update
+    run_sudo apt-get install -y \
+      build-essential \
+      pkg-config \
+      libssl-dev \
+      cmake \
+      ninja-build \
+      python3-venv \
+      curl \
+      git \
+      nodejs \
+      npm \
+      sqlite3
+  else
+    echo "[prep] Linux build prerequisites already present"
+  fi
+  if [ "$GPU_COUNT" -gt 1 ] && nccl_packages_available && nccl_runtime_missing; then
     echo "[prep] Install NCCL for multi-GPU mistral.rs tensor parallelism"
     run_sudo apt-get install -y libnccl2 libnccl-dev
   fi
