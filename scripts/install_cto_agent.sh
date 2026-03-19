@@ -454,28 +454,7 @@ run_sudo() {
 }
 
 version_ge() {
-  awk -v lhs="$1" -v rhs="$2" '
-    function part(value, index,    count, pieces) {
-      count = split(value, pieces, /\./)
-      if (index > count) {
-        return 0
-      }
-      return pieces[index] + 0
-    }
-    BEGIN {
-      for (i = 1; i <= 4; i += 1) {
-        left = part(lhs, i)
-        right = part(rhs, i)
-        if (left > right) {
-          exit 0
-        }
-        if (left < right) {
-          exit 1
-        }
-      }
-      exit 0
-    }
-  '
+  [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n 1)" = "$2" ]
 }
 
 ensure_modern_rust_toolchain() {
@@ -946,7 +925,7 @@ write_kleinhirn_env_file
 
 echo "[7/10] Install browser runtime (KDE/Chrome/extension)"
 CTO_AGENT_SUDO_PASSWORD="${CTO_AGENT_SUDO_PASSWORD:-}" \
-  CTO_AGENT_INSTALL_KDE_DESKTOP="${CTO_AGENT_INSTALL_KDE_DESKTOP:-1}" \
+  CTO_AGENT_INSTALL_KDE_DESKTOP="${CTO_AGENT_INSTALL_KDE_DESKTOP:-0}" \
   sh "$ROOT/scripts/install_browser_engine.sh"
 
 echo "[8/10] Install and start Linux user services"
