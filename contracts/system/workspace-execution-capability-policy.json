@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Give the CTO-Agent a reviewed contract for repo-local implementation and verification work so code-task turns stay grounded in real workspace evidence instead of free-form progress claims.",
+  "appliesWhen": {
+    "taskKinds": [
+      "owner_interrupt",
+      "workspace_repair",
+      "tool_exploration"
+    ],
+    "triggerHints": [
+      "workspace",
+      "repo",
+      "repository",
+      "codebase",
+      "implementation",
+      "implement",
+      "patch",
+      "fix",
+      "cmake",
+      "cpp",
+      "c++",
+      "build",
+      "test"
+    ]
+  },
+  "executionModel": {
+    "surface": "codex_command_exec_v1",
+    "allowedToolPaths": [
+      "execCommand",
+      "execSessionAction"
+    ],
+    "requiresBoundedVerification": true,
+    "resultContract": "workspace_execution_result_v1"
+  },
+  "capabilities": [
+    {
+      "capabilityId": "repo_local_workspace_progress",
+      "goal": "Advance repo-local implementation through real file inspection, edits, builds, or tests while keeping every claimed result tied to same-turn machine evidence.",
+      "inputs": {
+        "required": [
+          "task objective"
+        ],
+        "optional": [
+          "active file",
+          "build target",
+          "verification command",
+          "exec session id"
+        ]
+      },
+      "diagnosticOrder": [
+        "Inspect the current workspace state before repeating an edit or build step.",
+        "Prefer continuing an existing exec session for multi-step work.",
+        "If verified workspace-anchor evidence already exists and more than one shell interaction is still expected, reuse or start a task-bound exec session before another broad repo scan.",
+        "If the bounded machine step would require literal multi-line shell or script content, prefer exec-session writes or smaller one-line bounded steps instead of forcing multi-line content into one-shot JSON.",
+        "Run the smallest relevant verification step after a real code change."
+      ],
+      "definitionOfDone": {
+        "done": [
+          "The requested repo-local scope is complete now.",
+          "The same bounded run includes fresh machine evidence for the claimed file/build/test result."
+        ],
+        "blocked": [
+          "A concrete missing precondition is stated, such as missing context, missing dependency, or missing permissions.",
+          "The unlock action is explicit."
+        ],
+        "continue": [
+          "A bounded workspace inspection, edit, or verification step produced new evidence.",
+          "The task is still incomplete but the next step is now better grounded.",
+          "The same substantive task stays in execute mode across turns unless a real boundary was reached."
+        ]
+      },
+      "successEvidence": [
+        "Checkpoint detail names the file, command, session, diff, build output, or test output that actually ran.",
+        "If code was edited, the checkpoint detail says what changed in the workspace.",
+        "If a build or test was claimed, the checkpoint detail includes same-turn machine evidence for that result.",
+        "If a verified workspace anchor already existed before the turn, the next bounded step either reused/started session continuity or named the exact missing fact that justified not doing so.",
+        "If an exec session was claimed, the same turn actually returned `execSessionAction` and the machine path succeeded."
+      ],
+      "failureBoundaries": [
+        "If the workspace context is too thin, reload narrow task history or inspect the repo instead of inventing the next edit.",
+        "If the previous bounded machine step already identified workdir or target-file anchors, continue from that verified anchor instead of restarting with a generic 'context missing' claim.",
+        "If verified workspace-anchor evidence already exists for substantive repo work, another broad repo scan or broad history reload is invalid unless the exact missing fact is named first.",
+        "A prose claim that an exec session was opened does not count as session continuity; only a real `execSessionAction` path does.",
+        "Literal multi-line heredocs or script bodies inside `execCommand` are invalid because they break the control JSON and drop the machine path.",
+        "Do not bounce a substantive repo task back to reprioritization just because one bounded step finished; keep the same task active until a real boundary exists.",
+        "If no machine step ran, the checkpoint may describe planning or inspection, but not claimed code/build/test completion.",
+        "If verification fails or a file is missing, keep the task in progress or blocked instead of claiming success."
+      ],
+      "neverDo": [
+        "Never claim file edits, builds, tests, commits, or runtime behavior without same-turn machine evidence.",
+        "Never treat a planned edit or remembered repo state as verification.",
+        "Never discard a verified workspace anchor from the previous bounded machine step and then pretend the repo surface is unknown again.",
+        "Never replay the same workspace edit blindly when current workspace inspection is still missing.",
+        "Never claim that an exec session exists or was opened unless the same turn actually returned a matching `execSessionAction`.",
+        "Never choose another broad repo scan as the next bounded step after a verified workspace anchor already exists, unless the exact missing fact is stated explicitly.",
+        "Never encode raw multi-line shell or script bodies directly into `execCommand` JSON."
+      ]
+    }
+  ],
+  "updatedAt": "2026-03-20T00:00:00+00:00"
+}

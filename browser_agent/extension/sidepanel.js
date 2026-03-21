@@ -3313,30 +3313,30 @@ function getAgentOperationCounts(operations = []) {
 function describeAgentOperationMilestone(operations = []) {
   const counts = getAgentOperationCounts(operations);
   if (counts.add && !counts.update && !counts.delete) {
-    return `${formatCount(counts.add)} ${counts.add === 1 ? "Trainingsbeispiel" : "Trainingsbeispiele"} hinzugefuegt`;
+    return `${formatCount(counts.add)} ${counts.add === 1 ? "training sample" : "training samples"} added`;
   }
   if (counts.update && !counts.add && !counts.delete) {
-    return `${formatCount(counts.update)} ${counts.update === 1 ? "Trainingsbeispiel" : "Trainingsbeispiele"} aktualisiert`;
+    return `${formatCount(counts.update)} ${counts.update === 1 ? "training sample" : "training samples"} updated`;
   }
   if (counts.delete && !counts.add && !counts.update) {
-    return `${formatCount(counts.delete)} ${counts.delete === 1 ? "Trainingsbeispiel" : "Trainingsbeispiele"} entfernt`;
+    return `${formatCount(counts.delete)} ${counts.delete === 1 ? "training sample" : "training samples"} removed`;
   }
   const summary = summarizeAgentOperationCounts(operations);
-  return summary ? `Trainingsdaten ueberarbeitet (${summary})` : "Trainingsdaten ueberarbeitet";
+  return summary ? `Training data revised (${summary})` : "Training data revised";
 }
 
 function describeAgentOperationMilestoneDetail(operations = []) {
   const counts = getAgentOperationCounts(operations);
   if (counts.add && !counts.update && !counts.delete) {
-    return "Der Agent hat neue Trainingsbeispiele fuer diese Faehigkeit angelegt.";
+    return "The agent created new training samples for this capability.";
   }
   if (counts.update && !counts.add && !counts.delete) {
-    return "Der Agent hat bestehende Trainingsbeispiele fuer diese Faehigkeit verbessert.";
+    return "The agent improved existing training samples for this capability.";
   }
   if (counts.delete && !counts.add && !counts.update) {
-    return "Der Agent hat ungeeignete Trainingsbeispiele entfernt.";
+    return "The agent removed unsuitable training samples.";
   }
-  return "Der Agent hat die lokalen Trainingsdaten fuer diese Faehigkeit ueberarbeitet.";
+  return "The agent revised the local training data for this capability.";
 }
 
 function deriveAgentMatchingSignals(plan, prompt, samples = []) {
@@ -3344,12 +3344,12 @@ function deriveAgentMatchingSignals(plan, prompt, samples = []) {
   const meta = getTrainingDataMeta(samples);
   const signals = [];
   if (samples.length) {
-    signals.push(`${formatCount(samples.length)} lokale Seed-Zeilen standen als Referenz bereit.`);
+    signals.push(`${formatCount(samples.length)} local seed rows were available as reference.`);
   } else {
-    signals.push("Es waren noch keine lokalen Seed-Zeilen vorhanden.");
+    signals.push("No local seed rows were available yet.");
   }
   if (meta.readySamples > 0) {
-    signals.push(`${formatCount(meta.readySamples)} Zeilen waren bereits trainingsbereit.`);
+    signals.push(`${formatCount(meta.readySamples)} rows were already training-ready.`);
   }
   const toolingLabel = getCraftingAgentToolingLabel(plan?.craft || null);
   if (toolingLabel) {
@@ -3357,10 +3357,10 @@ function deriveAgentMatchingSignals(plan, prompt, samples = []) {
   }
   const operationSummary = summarizeAgentOperationCounts(operations);
   if (operationSummary) {
-    signals.push(`Geplant wurden ${operationSummary}.`);
+    signals.push(`Planned: ${operationSummary}.`);
   }
   if (/browser|markiert|ausgew[aä]hlt|eingabefeld/i.test(String(prompt || ""))) {
-    signals.push("Der Brief deutet auf eine browserbezogene Transformationsaufgabe hin.");
+    signals.push("The brief points to a browser-related transformation task.");
   }
   return signals.slice(0, 6);
 }
@@ -3372,20 +3372,20 @@ function deriveAgentQuestions(plan, prompt, samples = []) {
   const questions = [];
   if (!samples.length) {
     questions.push({
-      question: "Gib ein erstes konkretes prompt-to-JSON Seed-Beispiel an.",
-      reason: "Ohne Seed-Zeile fehlt dem Agenten eine verlässliche Referenz für weitere Trainingsdaten.",
+      question: "Provide a first concrete prompt-to-JSON seed example.",
+      reason: "Without a seed row, the agent lacks a reliable reference for additional training data.",
     });
   }
   if (!Array.isArray(plan?.operations) || !plan.operations.length) {
     questions.push({
-      question: "Welche stabile JSON-Zielstruktur soll dieser Craft ausgeben?",
-      reason: "Aus dem aktuellen Brief ließ sich noch keine belastbare Output-Struktur ableiten.",
+      question: "Which stable JSON target structure should this craft produce?",
+      reason: "The current brief does not define a reliable output structure yet.",
     });
   }
   if (/browser|markiert|ausgew[aä]hlt|eingabefeld/i.test(String(prompt || "")) && !samples.length) {
     questions.push({
-      question: "Welche Browser-Selektion oder welches Quellfeld soll im Trainings-JSON explizit beschrieben werden?",
-      reason: "Die Anfrage erwähnt Browser-Kontext, aber noch keine konkrete Datenstruktur.",
+      question: "Which browser selection or source field should be described explicitly in the training JSON?",
+      reason: "The request mentions browser context, but it does not define a concrete data structure yet.",
     });
   }
   return normalizeAgentQuestions(questions).slice(0, 4);
@@ -3412,11 +3412,11 @@ function deriveAgentProvenance(plan, samples = []) {
     return {
       title:
         type === "add"
-          ? "Neue Seed-Zeile geplant"
+          ? "New seed row planned"
           : type === "delete"
-            ? `Bereinigung ${sampleId || "einer Zeile"}`
-            : `Überarbeitung ${sampleId || "einer Zeile"}`,
-      detail: reason || "Operation aus dem strukturierten Agentenplan übernommen.",
+            ? `Cleanup ${sampleId || "of one row"}`
+            : `Revision ${sampleId || "of one row"}`,
+      detail: reason || "Operation adopted from the structured agent plan.",
       kind: "operation",
       sampleId,
       operationType: ["add", "update", "delete"].includes(type) ? type : "",
@@ -3429,8 +3429,8 @@ function deriveAgentProvenance(plan, samples = []) {
 
   if (!entries.length && samples.length) {
     entries.push({
-      title: "Lokale Datensatzsicht geprüft",
-      detail: `${formatCount(samples.length)} vorhandene Zeilen wurden als Kontext für den Agentenplan berücksichtigt.`,
+      title: "Local dataset view inspected",
+      detail: `${formatCount(samples.length)} existing rows were considered as context for the agent plan.`,
       kind: "sample",
       sampleId: "",
       operationType: "",
@@ -3447,13 +3447,13 @@ function normalizeAgentPlanResult(plan, prompt, samples = []) {
   const report = normalizeAgentReport(plan?.report, {
     objective: trimText(prompt || "", 180),
     currentState: operations.length
-      ? `Der Agent hat ${operationSummary} aus ${formatCount(samples.length)} sichtbaren Seed-Zeilen abgeleitet.`
+      ? `The agent derived ${operationSummary} from ${formatCount(samples.length)} visible seed rows.`
       : samples.length
-        ? `Der Agent hat ${formatCount(samples.length)} sichtbare Seed-Zeilen geprüft, aber noch keinen belastbaren Edit-Plan gefunden.`
-        : "Der Agent startet ohne lokale Seed-Zeilen und muss die Zielstruktur erst absichern.",
+        ? `The agent inspected ${formatCount(samples.length)} visible seed rows but has not found a reliable edit plan yet.`
+        : "The agent is starting without local seed rows and must establish the target structure first.",
     nextAction: operations.length
-      ? `Die geplanten Trainingsdaten-Änderungen übernehmen und im Datensatz-View prüfen.`
-      : "Offene Fragen beantworten oder ein konkretes Seed-Beispiel ergänzen.",
+      ? "Apply the planned training-data changes and inspect them in the dataset view."
+      : "Answer the open questions or add a concrete seed example.",
   });
   if (!report.matchingSignals.length) {
     report.matchingSignals = deriveAgentMatchingSignals(plan, prompt, samples);
@@ -5523,7 +5523,7 @@ function renderTrainingDataView(craft) {
           <div class="detail-eyebrow">Dataset workspace</div>
           <h1 class="training-data-title">${escapeHtml(craft.name)}</h1>
           <p class="training-data-copy">
-            Pflege hier die prompt-to-JSON Samples fuer dieses Craft. Die erste Grammatik- und Stil-Korrektur kann ein Demo-Case sein, aber die Struktur bleibt generisch fuer andere Aufgaben.
+            Maintain the prompt-to-JSON samples for this craft here. The first grammar and style correction can be a demo case, but the structure should remain generic for other tasks.
           </p>
         </div>
         <div class="training-data-hero-actions">
@@ -7110,7 +7110,7 @@ function renderHoverExamplePopover(examples) {
                 .join("")}
             </div>
           `
-          : `<div class="prompt-hover-example">${escapeHtml(normalizedExamples[0] || "Kein Beispiel vorhanden.")}</div>`
+          : `<div class="prompt-hover-example">${escapeHtml(normalizedExamples[0] || "No example available.")}</div>`
       }
     </div>
   `;
@@ -7606,37 +7606,37 @@ function deriveDefaultCraftInputExamples(craft, mode = getCraftInputMode(craft),
   if (!craftUsesTextInputFromMode(mode)) {
     if (intent.translation) {
       return [
-        "Markierten Text im Browser direkt übersetzen.",
-        "Ausgewählten Absatz inplace ins Deutsche umstellen.",
-        "Aktives Eingabefeld mit der übersetzten Version ersetzen.",
+        "Translate the selected text directly in the browser.",
+        "Convert the selected paragraph in place to English.",
+        "Replace the active input field with the translated version.",
       ];
     }
     if (intent.correction) {
       return [
-        "Markierten Text direkt korrigieren und ersetzen.",
-        "Ausgewählten Absatz stilistisch glätten.",
-        "Aktives Eingabefeld mit der verbesserten Version überschreiben.",
+        "Correct the selected text directly and replace it.",
+        "Smooth the style of the selected paragraph.",
+        "Overwrite the active input field with the improved version.",
       ];
     }
     return [
-      "Markierte Passage direkt im Browser überarbeiten.",
-      "Aktuellen Kontext ohne zusätzliche Texteingabe anwenden.",
-      "Die Faehigkeit direkt auf Auswahl oder Fokus ausfuehren.",
+      "Revise the selected passage directly in the browser.",
+      "Apply the current context without extra text input.",
+      "Run the capability directly against the selection or focus target.",
     ];
   }
 
   if (intent.translation) {
     return [
-      "Übersetze diesen Absatz in klares Deutsch.",
-      "Formuliere diese Nachricht auf Englisch um.",
-      "Schreibe den markierten Text in einfacher Sprache neu.",
+      "Translate this paragraph into clear English.",
+      "Rewrite this message in German.",
+      "Rewrite the selected text in plain language.",
     ];
   }
   if (intent.correction) {
     return [
-      "Korrigiere Rechtschreibung und Grammatik in diesem Absatz.",
-      "Formuliere diese Mail kürzer und freundlicher.",
-      "Verbessere Stil und Klarheit, aber behalte den Sinn bei.",
+      "Correct spelling and grammar in this paragraph.",
+      "Make this email shorter and friendlier.",
+      "Improve style and clarity while preserving the meaning.",
     ];
   }
   if (intent.extraction) {
@@ -7647,9 +7647,9 @@ function deriveDefaultCraftInputExamples(craft, mode = getCraftInputMode(craft),
     ];
   }
   return [
-    "Fasse den Inhalt in drei Punkten zusammen.",
-    "Schreibe den Text klarer und kürzer um.",
-    "Ordne die Eingabe in die definierte Struktur ein.",
+    "Summarize the content in three bullet points.",
+    "Rewrite the text more clearly and concisely.",
+    "Map the input into the defined structure.",
   ];
 }
 
@@ -9831,15 +9831,15 @@ function applyAgentUseSurfaceSuggestion(craft, useSurface) {
   if (!changed) return "";
   touchCraft(craft);
   const modeLabel = nextMode === "selection"
-    ? "Browser-Auswahl ohne Freitext"
+    ? "browser selection without free text"
     : nextMode === "current_tab"
-      ? "aktuelle Seite ohne Freitext"
+      ? "current page without free text"
       : nextMode === "context_only"
-        ? "fester Kontext ohne Freitext"
+        ? "fixed context without free text"
         : nextMode === "mixed"
-          ? "Kontext plus Text"
-          : "Freitext";
-  return `Use-Surface aktualisiert: ${modeLabel}${nextExamples.length ? ` · ${formatCount(nextExamples.length)} Beispiele` : ""}.`;
+          ? "context plus text"
+          : "free text";
+  return `Use surface updated: ${modeLabel}${nextExamples.length ? ` · ${formatCount(nextExamples.length)} examples` : ""}.`;
 }
 
 function incrementCraftSpend(craftId, usage) {
@@ -11043,23 +11043,23 @@ async function buildProofreadWorkspaceTrainingFixture() {
     id: DEV_PROOFREAD_WORKSPACE_CRAFT_ID,
     name: DEV_PROOFREAD_WORKSPACE_CRAFT_NAME,
     nameSource: "user",
-    summary: "Korrigiere markierten oder fokussierten deutschen Text sowie Clipboard-Text minimal-invasiv und schreibe ihn direkt zurueck.",
+    summary: "Correct selected, focused, or clipboard-sourced German text with minimal edits and write it back directly.",
     accuracy: 0.84,
     tools: ["read_active_text_target", "replace_active_text_target"],
     tooling: { ready: 2, total: 2 },
     useStatus: "ready",
     inputMode: "mixed",
-    inputHint: "Wenn eine Auswahl existiert, hat sie Prioritaet vor dem fokussierten Eingabefeld, danach vor der Zwischenablage.",
+    inputHint: "If a selection exists, it takes priority over the focused input field, then over the clipboard.",
     inputExamples: [
-      "Korrigiere den aktuell markierten deutschen Text direkt an Ort und Stelle.",
-      "Lies den Text im fokussierten Eingabefeld, korrigiere ihn und ersetze ihn direkt.",
-      "Hole den kopierten Text aus der Zwischenablage, korrigiere ihn und schreibe die komplette Fassung zurueck.",
+      "Correct the currently selected German text directly in place.",
+      "Read the text in the focused input field, correct it, and replace it directly.",
+      "Read the copied text from the clipboard, correct it, and write the full version back.",
     ],
-    actionLabel: "Text korrigieren",
+    actionLabel: "Correct text",
     tokenSpend: 0,
     costUsd: 0,
     inputPlaceholder:
-      "Wenn ich einen Text markiert habe, ein Eingabefenster selektiert habe, oder etwas in der Zwischenablage kopiert habe (in der Reihenfolge von der Prio), dann soll der Text auf Rechtschreibung und Grammatik ueberarbeitet und in-place ausgetauscht werden.",
+      "If I selected text, selected an input field, or copied something to the clipboard, the text should be revised for spelling and grammar and replaced in place in that priority order.",
     stage: "Pilot",
     targetSlot: "target",
     accuracyFloor: "0.80",
@@ -11068,13 +11068,13 @@ async function buildProofreadWorkspaceTrainingFixture() {
     datasetRows: trainingSamples.length,
     openGaps: 2,
     agentPrompt:
-      "Wenn ich einen Text markiert habe, ein Eingabefenster selektiert habe, oder etwas in der Zwischenablage kopiert habe, dann lies den Text in genau dieser Prioritaetsreihenfolge mit read_active_text_target, korrigiere Rechtschreibung und Grammatik minimal-invasiv und schreibe den vollstaendigen korrigierten Text mit replace_active_text_target in-place zurueck.",
+      "If I selected text, selected an input field, or copied text to the clipboard, read the text in exactly that priority order with read_active_text_target, correct spelling and grammar with minimal changes, and write the full corrected text back in place with replace_active_text_target.",
     metricsReady: true,
     starterMode: "task_craft",
     starterModelName: "Qwen/Qwen3.5-0.8B",
     coverageGaps: [
-      "HTML- und Tabellenfragmente sollten spaeter noch mit mehr realen Browser-Samples angereichert werden.",
-      "Die Proofread-Smoke-Daten trainieren aktuell nur SFT und noch keine spaetere Preference-Stufe.",
+      "HTML and table fragments should later be enriched with more real browser samples.",
+      "The proofread smoke data currently trains only SFT and not a later preference stage.",
     ],
     navigatorRecords: [
       {
@@ -11224,9 +11224,9 @@ async function buildProofreadWorkspaceTrainingFixture() {
     policySpec: {
       ...basePolicyPayload.policySpec,
       objective:
-        "Wenn eine Selektion, ein fokussiertes Eingabefeld oder Clipboard-Text vorhanden ist, korrigiere den deutschen Text minimal-invasiv auf Rechtschreibung und Grammatik und schreibe ihn in-place zurueck.",
+        "If a selection, focused input field, or clipboard text is present, correct the German text with minimal spelling and grammar edits and write it back in place.",
       bundleSkill:
-        "Nutze immer zuerst read_active_text_target, damit die Prioritaetsreihenfolge selection -> focused_editable -> clipboard eingehalten wird. Bewahre Inhalt, Reihenfolge und Format so weit wie moeglich. Antworte nicht nur mit dem Text, sondern schreibe ihn mit replace_active_text_target vollstaendig zurueck.",
+        "Always use read_active_text_target first so the priority order selection -> focused_editable -> clipboard is respected. Preserve content, order, and format as much as possible. Do not only answer with the text; write it back completely with replace_active_text_target.",
       allowedTools: [...rawCraft.tools],
       completionSignals: [
         "active_text_resolved",

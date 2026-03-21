@@ -30,17 +30,17 @@ impl DesktopSessionInfo {
             self.dbus_session_bus_address.as_deref(),
         );
         push_env(&mut env, "XDG_RUNTIME_DIR", self.xdg_runtime_dir.as_deref());
-        push_env(&mut env, "XDG_SESSION_TYPE", self.xdg_session_type.as_deref());
+        push_env(
+            &mut env,
+            "XDG_SESSION_TYPE",
+            self.xdg_session_type.as_deref(),
+        );
         push_env(
             &mut env,
             "XDG_CURRENT_DESKTOP",
             self.xdg_current_desktop.as_deref(),
         );
-        if env.is_empty() {
-            None
-        } else {
-            Some(env)
-        }
+        if env.is_empty() { None } else { Some(env) }
     }
 
     fn merge_missing(&mut self, other: DesktopSessionInfo) {
@@ -336,7 +336,10 @@ fn load_proc_session_env(pid: u32) -> DesktopSessionInfo {
     DesktopSessionInfo {
         display: env.get("DISPLAY").cloned(),
         wayland_display: env.get("WAYLAND_DISPLAY").cloned(),
-        xauthority: env.get("XAUTHORITY").cloned().filter(|value| Path::new(value).is_file()),
+        xauthority: env
+            .get("XAUTHORITY")
+            .cloned()
+            .filter(|value| Path::new(value).is_file()),
         dbus_session_bus_address: env.get("DBUS_SESSION_BUS_ADDRESS").cloned(),
         xdg_runtime_dir: env
             .get("XDG_RUNTIME_DIR")
@@ -416,7 +419,10 @@ fn current_uid_string() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn current_username() -> Option<String> {
-    if let Some(value) = std::env::var("USER").ok().filter(|value| !value.trim().is_empty()) {
+    if let Some(value) = std::env::var("USER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
         return Some(value);
     }
     let output = Command::new("id").arg("-un").output().ok()?;
@@ -430,7 +436,10 @@ fn current_username() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn non_empty_env(key: &str) -> Option<String> {
-    std::env::var(key).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 #[cfg(target_os = "linux")]
@@ -467,10 +476,7 @@ mod tests {
             env.get("XAUTHORITY"),
             Some(&Some("/home/test/.Xauthority".to_string()))
         );
-        assert_eq!(
-            env.get("XDG_SESSION_TYPE"),
-            Some(&Some("x11".to_string()))
-        );
+        assert_eq!(env.get("XDG_SESSION_TYPE"), Some(&Some("x11".to_string())));
         assert!(!env.contains_key("WAYLAND_DISPLAY"));
         assert!(!env.contains_key("DBUS_SESSION_BUS_ADDRESS"));
     }
@@ -501,7 +507,10 @@ mod tests {
             env.get("DBUS_SESSION_BUS_ADDRESS").map(String::as_str),
             Some("unix:path=/run/user/1000/bus")
         );
-        assert_eq!(env.get("XDG_CURRENT_DESKTOP").map(String::as_str), Some("KDE"));
+        assert_eq!(
+            env.get("XDG_CURRENT_DESKTOP").map(String::as_str),
+            Some("KDE")
+        );
     }
 
     #[cfg(target_os = "linux")]

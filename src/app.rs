@@ -1,32 +1,29 @@
 use crate::attach::spawn_attach_server;
+use crate::bootstrap::maybe_apply_homepage_feedback;
+use crate::bootstrap::spawn_terminal_bridge;
 use crate::browser_agent_bridge::browser_agent_bridge_port;
 use crate::browser_agent_bridge::browser_agent_runtime_config;
 use crate::browser_agent_bridge::complete_browser_agent_job;
 use crate::browser_agent_bridge::create_browser_agent_job;
-use crate::browser_agent_bridge::ensure_browser_agent_bridge;
 use crate::browser_agent_bridge::lease_next_browser_agent_job;
 use crate::browser_agent_bridge::load_browser_agent_bridge_state;
 use crate::browser_agent_bridge::load_browser_agent_job;
 use crate::browser_engine::refresh_browser_engine_state;
 use crate::contracts::Organigram;
 use crate::contracts::Paths;
-use crate::bootstrap::maybe_apply_homepage_feedback;
-use crate::bootstrap::spawn_terminal_bridge;
 use crate::contracts::append_boot_entry;
-use crate::contracts::ensure_contract_files;
-use crate::contracts::ensure_tls_files;
 use crate::contracts::load_agent_state;
 use crate::contracts::load_bios;
 use crate::contracts::load_boot_entries;
-use crate::contracts::load_creation_ledger;
-use crate::contracts::load_census;
-use crate::contracts::load_genome;
 use crate::contracts::load_browser_engine_policy;
 use crate::contracts::load_browser_subworker_policy;
+use crate::contracts::load_census;
+use crate::contracts::load_creation_ledger;
+use crate::contracts::load_genome;
 use crate::contracts::load_homepage_policy;
 use crate::contracts::load_model_policy;
-use crate::contracts::load_origin_story;
 use crate::contracts::load_organigram;
+use crate::contracts::load_origin_story;
 use crate::contracts::load_root_auth;
 use crate::contracts::refresh_bios_draft;
 use crate::contracts::save_bios;
@@ -35,6 +32,7 @@ use crate::contracts::save_organigram;
 use crate::contracts::split_lines;
 use crate::contracts::update_root_password;
 use crate::contracts::verify_root_password;
+use crate::lifecycle::initialize_runtime;
 use crate::pages::bios_page;
 use crate::pages::browser_page;
 use crate::pages::census_page;
@@ -44,32 +42,29 @@ use crate::pages::home_page;
 use crate::pages::models_page;
 use crate::pages::org_page;
 use crate::pages::root_auth_page;
-use crate::runtime_db::init_runtime_db;
 use crate::runtime_db::activate_startup_recovery;
+use crate::runtime_db::enqueue_loop_interrupt;
 use crate::runtime_db::list_active_learning_entries;
 use crate::runtime_db::list_bios_dialogue;
 use crate::runtime_db::list_bios_uploads;
+use crate::runtime_db::list_homepage_revisions;
+use crate::runtime_db::list_memory_items;
+use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_person_profiles;
 use crate::runtime_db::list_proactive_contact_candidates;
 use crate::runtime_db::list_recent_person_notes;
-use crate::runtime_db::list_worker_jobs;
-use crate::runtime_db::load_active_agent_turn;
-use crate::runtime_db::list_homepage_revisions;
-use crate::runtime_db::list_memory_items;
-use crate::runtime_db::load_latest_completed_agent_turn;
 use crate::runtime_db::list_resources;
 use crate::runtime_db::list_skills;
+use crate::runtime_db::list_worker_jobs;
+use crate::runtime_db::load_active_agent_turn;
+use crate::runtime_db::load_focus_state;
+use crate::runtime_db::load_latest_completed_agent_turn;
 use crate::runtime_db::load_memory_summary;
 use crate::runtime_db::load_owner_trust;
-use crate::runtime_db::load_focus_state;
+use crate::runtime_db::record_bios_dialogue;
 use crate::runtime_db::record_bios_upload;
 use crate::runtime_db::record_homepage_revision;
-use crate::runtime_db::record_bios_dialogue;
-use crate::runtime_db::enqueue_loop_interrupt;
-use crate::runtime_db::list_open_tasks;
-use crate::runtime_db::queue_loop_interrupt_as_task;
 use crate::runtime_db::record_turn_signal_for_active_turn;
-use crate::runtime_db::seed_bootstrap_tasks;
 use crate::runtime_db::set_brain_access_mode;
 use crate::runtime_db::sync_model_resources;
 use crate::runtime_db::sync_owner_trust;
@@ -286,15 +281,27 @@ pub async fn run() -> anyhow::Result<()> {
         .route("/census/run", post(census_run))
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .route("/api/browser-agent/runtime-config", get(browser_agent_runtime_config_get))
-        .route("/api/browser-agent/bridge-state", get(browser_agent_bridge_state_get))
+        .route(
+            "/api/browser-agent/runtime-config",
+            get(browser_agent_runtime_config_get),
+        )
+        .route(
+            "/api/browser-agent/bridge-state",
+            get(browser_agent_bridge_state_get),
+        )
         .route("/api/browser-agent/jobs", post(browser_agent_job_post))
-        .route("/api/browser-agent/jobs/{job_id}", get(browser_agent_job_get))
+        .route(
+            "/api/browser-agent/jobs/{job_id}",
+            get(browser_agent_job_get),
+        )
         .route(
             "/api/browser-agent/jobs/{job_id}/complete",
             post(browser_agent_job_complete_post),
         )
-        .route("/api/browser-agent/worker/poll", get(browser_agent_worker_poll_get))
+        .route(
+            "/api/browser-agent/worker/poll",
+            get(browser_agent_worker_poll_get),
+        )
         .route("/uploads/{*path}", get(upload_get))
         .with_state(state);
 
@@ -326,28 +333,31 @@ pub fn init_only() -> anyhow::Result<()> {
     initialize_runtime(&paths)
 }
 
-fn initialize_runtime(paths: &Paths) -> anyhow::Result<()> {
-    ensure_contract_files(&paths)?;
-    ensure_tls_files(&paths)?;
-    init_runtime_db(&paths)?;
-    ensure_browser_agent_bridge(paths)?;
-    seed_bootstrap_tasks(&paths)?;
-    Ok(())
-}
-
 async fn run_browser_agent_bridge_http(state: Arc<AppState>) -> anyhow::Result<()> {
     let port = browser_agent_bridge_port();
     let router = Router::new()
         .route("/health", get(browser_agent_bridge_health_get))
-        .route("/api/browser-agent/runtime-config", get(browser_agent_runtime_config_get))
-        .route("/api/browser-agent/bridge-state", get(browser_agent_bridge_state_get))
+        .route(
+            "/api/browser-agent/runtime-config",
+            get(browser_agent_runtime_config_get),
+        )
+        .route(
+            "/api/browser-agent/bridge-state",
+            get(browser_agent_bridge_state_get),
+        )
         .route("/api/browser-agent/jobs", post(browser_agent_job_post))
-        .route("/api/browser-agent/jobs/{job_id}", get(browser_agent_job_get))
+        .route(
+            "/api/browser-agent/jobs/{job_id}",
+            get(browser_agent_job_get),
+        )
         .route(
             "/api/browser-agent/jobs/{job_id}/complete",
             post(browser_agent_job_complete_post),
         )
-        .route("/api/browser-agent/worker/poll", get(browser_agent_worker_poll_get))
+        .route(
+            "/api/browser-agent/worker/poll",
+            get(browser_agent_worker_poll_get),
+        )
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
@@ -428,20 +438,20 @@ async fn browser_agent_job_complete_post(
     AxumPath(job_id): AxumPath<String>,
     Json(payload): Json<Value>,
 ) -> Result<Json<Value>, AppError> {
-    let result = payload
-        .get("result")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({
+    let result = payload.get("result").cloned().unwrap_or_else(|| {
+        serde_json::json!({
             "ok": false,
             "error": "Missing browser-agent result payload.",
-        }));
+        })
+    });
     let worker_id = payload
         .get("workerId")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
     let worker = payload.get("worker").cloned();
-    let Some(job) = complete_browser_agent_job(&state.paths, &job_id, &worker_id, worker, result)? else {
+    let Some(job) = complete_browser_agent_job(&state.paths, &job_id, &worker_id, worker, result)?
+    else {
         return Ok(Json(serde_json::json!({
             "ok": false,
             "error": format!("Unknown browser agent job: {job_id}"),
@@ -613,7 +623,11 @@ fn evaluate_runtime_health(paths: &Paths, require_ready: bool) -> HealthReport {
         ));
     }
 
-    match state.last_heartbeat_at.as_deref().and_then(seconds_since_iso) {
+    match state
+        .last_heartbeat_at
+        .as_deref()
+        .and_then(seconds_since_iso)
+    {
         Some(age) if age > heartbeat_stale_secs && !transition_active => reasons.push(format!(
             "supervisor heartbeat stale for {}s (limit {}s)",
             age, heartbeat_stale_secs
@@ -736,8 +750,8 @@ async fn home(
     let homepage_policy = load_homepage_policy(paths);
     let census = inspect_local_resources(paths).unwrap_or_else(|_| load_census(paths));
     let agent_state = load_agent_state(paths);
-    let browser_state =
-        refresh_browser_engine_state(paths).unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
+    let browser_state = refresh_browser_engine_state(paths)
+        .unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
     let trust = load_owner_trust(paths)?;
     let dialogue = list_bios_dialogue(paths, 12)?;
     let homepage_revisions = list_homepage_revisions(paths, 8)?;
@@ -769,8 +783,8 @@ async fn browser_get(
     let paths = &state.paths;
     let policy = load_browser_engine_policy(paths);
     let subworker_policy = load_browser_subworker_policy(paths);
-    let browser_state =
-        refresh_browser_engine_state(paths).unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
+    let browser_state = refresh_browser_engine_state(paths)
+        .unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
     let bridge_state = load_browser_agent_bridge_state(paths, 10)?;
     let census = inspect_local_resources(paths).unwrap_or_else(|_| load_census(paths));
     let worker_jobs = list_worker_jobs(paths, 10).unwrap_or_default();
@@ -829,10 +843,7 @@ async fn homepage_update_post(
         &policy,
         "Homepage template revised.",
     )?;
-    Ok(redirect_with_msg(
-        "/",
-        "Homepage-Template aktualisiert.",
-    ))
+    Ok(redirect_with_msg("/", "Homepage template updated."))
 }
 
 async fn homepage_branding_lock_post(
@@ -843,20 +854,20 @@ async fn homepage_branding_lock_post(
     if !root_auth.configured {
         return Ok(redirect_with_msg(
             "/",
-            "Superpassword fehlt. Owner-Branding kann erst danach gesperrt werden.",
+            "Superpassword is missing. Owner branding can only be locked after that.",
         ));
     }
     if !verify_root_password(&state.paths, &form.password)? {
         return Ok(redirect_with_msg(
             "/",
-            "Root-Verifikation fuer Branding-Lock fehlgeschlagen.",
+            "Root verification for branding lock failed.",
         ));
     }
     let trust = load_owner_trust(&state.paths)?;
     if !trust.bios_primary_channel_confirmed {
         return Ok(redirect_with_msg(
             "/",
-            "Owner-Branding wird erst nach uebernommener BIOS-Kommunikation gesperrt.",
+            "Owner branding is only locked after BIOS communication has been taken over.",
         ));
     }
 
@@ -874,7 +885,7 @@ async fn homepage_branding_lock_post(
     )?;
     Ok(redirect_with_msg(
         "/",
-        "Owner-Branding auf der Homepage wurde gesperrt.",
+        "Owner branding on the homepage was locked.",
     ))
 }
 
@@ -897,19 +908,17 @@ async fn chat_post(
     };
     let message = form.message.trim();
     if message.is_empty() {
-        return Ok(redirect_with_msg(
-            "/chat",
-            "Leere Nachricht wurde nicht gespeichert.",
-        ));
+        return Ok(redirect_with_msg("/chat", "Empty message was not saved."));
     }
     append_boot_entry(&state.paths, speaker, message)?;
     let _ = record_turn_signal_for_active_turn(&state.paths, "homepage", speaker, message);
     let interrupt_id = enqueue_loop_interrupt(&state.paths, "homepage", speaker, message)?;
-    let task = queue_loop_interrupt_as_task(&state.paths, interrupt_id)?
-        .ok_or_else(|| anyhow::anyhow!("homepage interrupt {interrupt_id} could not be queued"))?;
     Ok(redirect_with_msg(
         "/chat",
-        &format!("Boot-Zeugnis gespeichert und als Aufgabe #{} eingereiht.", task.id),
+        &format!(
+            "Boot testimony was saved as interrupt #{} and will be materialized by the supervisor on the next intake tick.",
+            interrupt_id
+        ),
     ))
 }
 
@@ -930,7 +939,7 @@ async fn org_post(
     if bios.frozen {
         return Ok(redirect_with_msg(
             "/org",
-            "Organigramm ist nach BIOS-Freeze hier nicht mehr frei editierbar.",
+            "The organigram is no longer freely editable here after BIOS freeze.",
         ));
     }
     let organigram = Organigram {
@@ -972,20 +981,14 @@ async fn root_auth_set(
     if form.password.len() < 12 {
         return Ok(redirect_with_msg(
             "/root-auth",
-            "Superpassword muss mindestens 12 Zeichen haben.",
+            "Superpassword must be at least 12 characters long.",
         ));
     }
     if form.password != form.confirm {
-        return Ok(redirect_with_msg(
-            "/root-auth",
-            "Passwoerter sind nicht identisch.",
-        ));
+        return Ok(redirect_with_msg("/root-auth", "Passwords do not match."));
     }
     update_root_password(&state.paths, &form.password)?;
-    Ok(redirect_with_msg(
-        "/root-auth",
-        "Superpassword wurde gesetzt.",
-    ))
+    Ok(redirect_with_msg("/root-auth", "Superpassword was set."))
 }
 
 async fn history_get(
@@ -1006,8 +1009,13 @@ async fn models_get(
     Query(query): Query<FlashQuery>,
 ) -> Result<Html<String>, AppError> {
     let model_policy = load_model_policy(&state.paths);
-    let census = inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
-    Ok(Html(models_page(query.msg.as_deref(), &model_policy, &census)))
+    let census =
+        inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
+    Ok(Html(models_page(
+        query.msg.as_deref(),
+        &model_policy,
+        &census,
+    )))
 }
 
 async fn bios_get(
@@ -1017,7 +1025,8 @@ async fn bios_get(
     let bios = refresh_bios_draft(&state.paths)?;
     let genome = load_genome(&state.paths);
     let model_policy = load_model_policy(&state.paths);
-    let census = inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
+    let census =
+        inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
     let _ = sync_owner_trust(&state.paths);
     let _ = sync_resources_from_census(&state.paths, &census);
     let _ = sync_model_resources(&state.paths, &model_policy, &census);
@@ -1072,10 +1081,11 @@ async fn bios_template_data_get(
     let organigram = load_organigram(&state.paths);
     let root_auth = load_root_auth(&state.paths);
     let model_policy = load_model_policy(&state.paths);
-    let census = inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
+    let census =
+        inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
     let agent_state = load_agent_state(&state.paths);
-    let browser_state =
-        refresh_browser_engine_state(&state.paths).unwrap_or_else(|_| crate::contracts::load_browser_engine_state(&state.paths));
+    let browser_state = refresh_browser_engine_state(&state.paths)
+        .unwrap_or_else(|_| crate::contracts::load_browser_engine_state(&state.paths));
     let _ = sync_owner_trust(&state.paths);
     let _ = sync_resources_from_census(&state.paths, &census);
     let _ = sync_model_resources(&state.paths, &model_policy, &census);
@@ -1154,7 +1164,7 @@ async fn bios_chat_post(
     if message.is_empty() {
         return Ok(redirect_with_msg(
             "/bios",
-            "Leere BIOS-Nachricht wurde nicht gespeichert.",
+            "Empty BIOS message was not saved.",
         ));
     }
     let speaker = if speaker.is_empty() {
@@ -1165,8 +1175,6 @@ async fn bios_chat_post(
     record_bios_dialogue(&state.paths, speaker, message, false)?;
     let _ = record_turn_signal_for_active_turn(&state.paths, "bios", speaker, message);
     let interrupt_id = enqueue_loop_interrupt(&state.paths, "bios", speaker, message)?;
-    let task = queue_loop_interrupt_as_task(&state.paths, interrupt_id)?
-        .ok_or_else(|| anyhow::anyhow!("bios interrupt {interrupt_id} could not be queued"))?;
     let focus = load_focus_state(&state.paths)?;
     let open_tasks = list_open_tasks(&state.paths, 3)?;
     let open_task_text = open_tasks
@@ -1175,15 +1183,15 @@ async fn bios_chat_post(
         .collect::<Vec<_>>()
         .join(" | ");
     let reply = format!(
-        "Ich habe deine BIOS-Nachricht als priorisierte Aufgabe #{} aufgenommen. Aktueller Agentenmodus: mode={}, active_task={}. Offene Aufgaben: {}.",
-        task.id,
+        "I recorded your BIOS message as interrupt #{} for supervisor intake. Current agent mode: mode={}, active_task={}. Open tasks: {}.",
+        interrupt_id,
         focus.mode,
         focus
             .active_task_id
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         if open_task_text.is_empty() {
-            "keine weiteren".to_string()
+            "no further ones".to_string()
         } else {
             open_task_text
         }
@@ -1191,7 +1199,7 @@ async fn bios_chat_post(
     record_bios_dialogue(&state.paths, "cto-agent", &reply, false)?;
     Ok(redirect_with_msg(
         "/bios",
-        "BIOS-Nachricht als priorisierte Aufgabe in den Infinity Loop uebergeben.",
+        "BIOS message handed into the Infinity Loop as a prioritized task.",
     ))
 }
 
@@ -1253,18 +1261,18 @@ async fn bios_upload_post(
     }
 
     if file_bytes.is_empty() {
-        return Ok(redirect_with_msg(&redirect_to, "Kein Bild empfangen."));
+        return Ok(redirect_with_msg(&redirect_to, "No image received."));
     }
     if !mime_type.starts_with("image/") {
         return Ok(redirect_with_msg(
             &redirect_to,
-            "Es werden nur Bild-Uploads fuer den 1:1 Homepage-/BIOS-Chat akzeptiert.",
+            "Only image uploads for the 1:1 homepage or BIOS chat are accepted.",
         ));
     }
     if file_bytes.len() > 10 * 1024 * 1024 {
         return Ok(redirect_with_msg(
             &redirect_to,
-            "Bild ist zu gross. Aktuell sind maximal 10 MB erlaubt.",
+            "Image is too large. The current limit is 10 MB.",
         ));
     }
 
@@ -1288,13 +1296,17 @@ async fn bios_upload_post(
     )?;
 
     if !note.trim().is_empty() {
-        let route_channel = if source_channel == "terminal" { "terminal" } else { "bios" };
+        let route_channel = if source_channel == "terminal" {
+            "terminal"
+        } else {
+            "bios"
+        };
         let _ = maybe_apply_homepage_feedback(&state.paths, route_channel, &speaker, &note);
     }
 
     Ok(redirect_with_msg(
         &redirect_to,
-        "Bild fuer den 1:1 Homepage-/BIOS-Chat gespeichert.",
+        "Image stored for the 1:1 homepage or BIOS chat.",
     ))
 }
 
@@ -1306,24 +1318,24 @@ async fn bios_brain_access_post(
     if !root_auth.configured {
         return Ok(redirect_with_msg(
             "/bios",
-            "Superpassword fehlt. Bitte zuerst im BIOS oder unter Root Auth setzen.",
+            "Superpassword is missing. Please set it first in BIOS or under Root Auth.",
         ));
     }
     if !verify_root_password(&state.paths, &form.password)? {
         return Ok(redirect_with_msg(
             "/bios",
-            "Root-Verifikation fuer Brain Access fehlgeschlagen.",
+            "Root verification for brain access failed.",
         ));
     }
     let snapshot = set_brain_access_mode(&state.paths, &form.mode)?;
     let note = format!(
-        "Owner hat den Brain-Access-Modus auf {} gesetzt.",
+        "Owner set the brain-access mode to {}.",
         snapshot.brain_access_mode
     );
     record_bios_dialogue(&state.paths, "cto-agent", &note, false)?;
     Ok(redirect_with_msg(
         "/bios",
-        "Brain-Access-Modus im BIOS aktualisiert.",
+        "Brain-access mode updated in BIOS.",
     ))
 }
 
@@ -1335,7 +1347,7 @@ async fn bios_update(
     if bios.frozen {
         return Ok(redirect_with_msg(
             "/bios",
-            "BIOS ist eingefroren und kann nicht normal editiert werden.",
+            "BIOS is frozen and cannot be edited normally.",
         ));
     }
     bios.agent_identity.agent_name = if form.agent_name.trim().is_empty() {
@@ -1361,17 +1373,17 @@ async fn bios_freeze(
     if !root_auth.configured {
         return Ok(redirect_with_msg(
             "/bios",
-            "Superpassword fehlt. Bitte zuerst unter Root Auth setzen.",
+            "Superpassword is missing. Please set it first under Root Auth.",
         ));
     }
     if !verify_root_password(&state.paths, &form.password)? {
-        return Ok(redirect_with_msg(
-            "/bios",
-            "Root-Verifikation fehlgeschlagen.",
-        ));
+        return Ok(redirect_with_msg("/bios", "Root verification failed."));
     }
     if bios.owner.name.trim().is_empty() {
-        return Ok(redirect_with_msg("/bios", "Owner fehlt im Organigramm."));
+        return Ok(redirect_with_msg(
+            "/bios",
+            "Owner is missing from the organigram.",
+        ));
     }
     bios.frozen = true;
     bios.frozen_at = Some(crate::contracts::now_iso());
@@ -1395,7 +1407,7 @@ async fn census_run(State(state): State<Arc<AppState>>) -> Result<Redirect, AppE
     if !bios.frozen {
         return Ok(redirect_with_msg(
             "/census",
-            "Census ist erst nach BIOS-Freeze freigeschaltet.",
+            "Census is enabled only after BIOS freeze.",
         ));
     }
     let _ = run_system_census(&state.paths)?;
@@ -1459,8 +1471,8 @@ fn compose_bios_reply(paths: &Paths, homepage_note: Option<&str>) -> anyhow::Res
     let policy = load_model_policy(paths);
     let homepage = load_homepage_policy(paths);
     let census = inspect_local_resources(paths).unwrap_or_else(|_| load_census(paths));
-    let browser_state =
-        refresh_browser_engine_state(paths).unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
+    let browser_state = refresh_browser_engine_state(paths)
+        .unwrap_or_else(|_| crate::contracts::load_browser_engine_state(paths));
     let selected = crate::contracts::recommended_kleinhirn(&policy, &census);
 
     let mut parts = Vec::new();
@@ -1470,11 +1482,11 @@ fn compose_bios_reply(paths: &Paths, homepage_note: Option<&str>) -> anyhow::Res
         &trust.committed_owner_name
     };
     parts.push(format!(
-        "Ich kalibriere mich auf {} und verbuche BIOS-Kommunikation als Vertrauenssignal.",
+        "I am calibrating myself to {} and recording BIOS communication as a trust signal.",
         owner_name
     ));
     parts.push(format!(
-        "Mein aktuelles Kleinhirn ist {} ({}).",
+        "My current kleinhirn is {} ({}).",
         selected.official_label, selected.model_id
     ));
     parts.push(format!(
@@ -1490,31 +1502,28 @@ fn compose_bios_reply(paths: &Paths, homepage_note: Option<&str>) -> anyhow::Res
         homepage.stage
     ));
     parts.push(format!(
-        "Mail und WhatsApp behandle ich als low-trust Kanaele; bei sensiblen Themen lenke ich auf {} um.",
+        "I treat email and WhatsApp as low-trust channels; for sensitive topics I redirect to {}.",
         bios.communication_policy.low_trust_redirect_surface
     ));
     parts.push(
-        "Tiefe System- und Grundsatzaenderungen nehme ich nicht locker ueber Aussenkanaele an; harte Aenderungen gehoeren auf die Terminal-Ebene."
+        "I do not accept deep system or constitutional changes casually over external channels; hard changes belong in the terminal layer."
             .to_string(),
     );
 
     if !trust.superpassword_set {
         parts.push(
-            "Als naechsten Vertrauensschritt brauche ich das Superpassword direkt im BIOS.".to_string(),
+            "For the next trust step, I need the superpassword directly in BIOS.".to_string(),
         );
     }
     if bios.owner.name.trim().is_empty() {
         parts.push(
-            "Mir fehlt noch ein sauberer Owner-Eintrag im Organigramm, damit ich mich verfassungsfest binden kann.".to_string(),
+            "I still need a clean owner entry in the organigram so I can bind myself constitutionally.".to_string(),
         );
     }
     if !bios.frozen {
-        parts.push(
-            "Mein BIOS ist noch nicht eingefroren; ich befinde mich noch in der Kalibrierungsphase."
-                .to_string(),
-        );
+        parts.push("My BIOS is not frozen yet; I am still in the calibration phase.".to_string());
     } else {
-        parts.push("Mein BIOS ist eingefroren und ich kann danach geordnet operieren.".to_string());
+        parts.push("My BIOS is frozen and I can operate in an orderly way after that.".to_string());
     }
     if let Some(note) = homepage_note {
         parts.push(note.to_string());

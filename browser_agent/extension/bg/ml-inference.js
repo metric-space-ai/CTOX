@@ -1,4 +1,4 @@
-// bg/ml-inference.js – finale Version mit Qwen-Embeddings + Florence2
+// bg/ml-inference.js - final version with Qwen embeddings + Florence2
 
 import "../shared/craft-sync.js";
 import { createPeerComputeBus } from "../shared/peer_compute_bus.mjs";
@@ -65,7 +65,7 @@ if (env.backends?.onnx?.wasm) {
   env.backends.onnx.wasm.proxy = false;
 }
 
-// ⬇️ ONNX-Loglevel runterdrehen (Warnungen weg, nur noch Errors)
+// Lower the ONNX log level so warnings stay quiet and only errors remain.
 if (env.backends?.onnx) {
   // ONNX.env.logLevel -> 'verbose' | 'info' | 'warning' | 'error' | 'fatal'
   env.backends.onnx.logLevel = "error";
@@ -3610,7 +3610,7 @@ if (msg.type === "OFFSCREEN_EMBED_TEXT") {
       const embedding = await handleEmbedText(msg.text || "");
       console.log("[offscreen] embedding length:", embedding?.length);
 
-      // HIER: in normales Array konvertieren, bevor es über die Message API geht
+      // Convert to a plain array before sending it across the message API.
       const serializableEmbedding =
         embedding && typeof embedding.length === "number"
           ? Array.from(embedding)

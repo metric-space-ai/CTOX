@@ -86,24 +86,19 @@ pub fn advance_browser_subworkers(
             Ok(outcome) => outcome,
             Err(err) => WorkerExecutionOutcome {
                 result_summary: format!(
-                    "Worker {} konnte {} nicht sauber abschliessen",
+                    "Worker {} could not complete {} cleanly",
                     job.worker_kind, job.contract_title
                 ),
                 result_detail: format!(
-                    "Der Worker-Lauf ist fehlgeschlagen und braucht Review.\n\nVertrag: {}\nFehler: {}",
-                    job.contract_detail,
-                    err
+                    "The worker run failed and needs review.\n\nContract: {}\nError: {}",
+                    job.contract_detail, err
                 ),
                 artifact_paths: Vec::new(),
                 spawned_task_ids: Vec::new(),
             },
         };
-        let review_task = emit_worker_review_task(
-            paths,
-            &job,
-            &outcome.result_summary,
-            &outcome.result_detail,
-        )?;
+        let review_task =
+            emit_worker_review_task(paths, &job, &outcome.result_summary, &outcome.result_detail)?;
         let updated = finalize_worker_job_for_review(
             paths,
             job.id,
@@ -117,7 +112,7 @@ pub fn advance_browser_subworkers(
             Some(updated.parent_task_id),
             &updated.parent_task_title,
             &format!(
-                "Worker-Job {} ({}) wurde ausgefuehrt und als Review zurueckgestellt.",
+                "Worker job {} ({}) ran and was queued back for review.",
                 updated.id, updated.worker_kind
             ),
             &serde_json::to_string(&json!({
@@ -134,7 +129,10 @@ pub fn advance_browser_subworkers(
     Ok(completed)
 }
 
-fn execute_worker_job(paths: &Paths, job: &WorkerJobRecord) -> anyhow::Result<WorkerExecutionOutcome> {
+fn execute_worker_job(
+    paths: &Paths,
+    job: &WorkerJobRecord,
+) -> anyhow::Result<WorkerExecutionOutcome> {
     match job.worker_kind.as_str() {
         "browser_agent" => execute_browser_agent_job(paths, job),
         "repair_agent" => execute_repair_agent_job(paths, job),
@@ -142,10 +140,8 @@ fn execute_worker_job(paths: &Paths, job: &WorkerJobRecord) -> anyhow::Result<Wo
         other => Ok(WorkerExecutionOutcome {
             result_summary: format!("Worker {} hat einen generischen Vertrag abgelegt", other),
             result_detail: format!(
-                "Fuer den Worker-Kind `{}` ist noch kein spezieller Executor hinterlegt.\n\nContract Title: {}\nContract Detail:\n{}\n\nBitte im Review entscheiden, ob der Vertrag auf browser_agent, repair_agent oder specialist_worker umgestellt werden soll.",
-                other,
-                job.contract_title,
-                job.contract_detail
+                "No specialized executor is wired yet for worker kind `{}`.\n\nContract Title: {}\nContract Detail:\n{}\n\nDecide in review whether the contract should be switched to `browser_agent`, `repair_agent`, or `specialist_worker`.",
+                other, job.contract_title, job.contract_detail
             ),
             artifact_paths: Vec::new(),
             spawned_task_ids: Vec::new(),
@@ -174,28 +170,21 @@ fn execute_browser_agent_job(
     let mut action_error: Option<String> = None;
     let mut repair_requested_by_extension = false;
 
-    let bridge_request = build_browser_agent_bridge_request(
-        paths,
-        job,
-        &contract,
-        &objective,
-        &capability_title,
-    );
+    let bridge_request =
+        build_browser_agent_bridge_request(paths, job, &contract, &objective, &capability_title);
     let bridge_request_path = artifact_dir.join("browser-agent-request.json");
     save_json(&bridge_request_path, &bridge_request)?;
     artifact_paths.push(bridge_request_path.display().to_string());
 
     let bridge_job = create_browser_agent_job(paths, bridge_request.clone())?;
     detail_blocks.push(format!(
-        "Browser-Agent-Bridge-Job `{}` wurde fuer die Chrome-Extension eingereiht.",
+        "Browser-agent bridge job `{}` was queued for the Chrome extension.",
         bridge_job.job_id
     ));
 
     let bridge_timeout_ms = contract.timeout_ms.unwrap_or(120_000);
     match wait_for_browser_agent_job(paths, &bridge_job.job_id, bridge_timeout_ms)? {
-        Some(bridge_result)
-            if matches!(bridge_result.status.as_str(), "completed" | "failed") =>
-        {
+        Some(bridge_result) if matches!(bridge_result.status.as_str(), "completed" | "failed") => {
             let result_artifact_path = artifact_dir.join("browser-agent-result.json");
             save_json(&result_artifact_path, &bridge_result)?;
             artifact_paths.push(result_artifact_path.display().to_string());
@@ -258,9 +247,7 @@ fn execute_browser_agent_job(
             ));
         }
         None => {
-            detail_blocks.push(
-                "Browser-Agent-Bridge-Job konnte nicht wieder geladen werden.".to_string(),
-            );
+            detail_blocks.push("Browser-agent bridge job could not be reloaded.".to_string());
             action_error = Some("browser agent bridge job vanished".to_string());
         }
     }
@@ -281,22 +268,18 @@ fn execute_browser_agent_job(
         artifact_paths.push(repair_task.1.clone());
         spawned_task_ids.push(repair_task.0);
         detail_blocks.push(format!(
-            "CTO-Repair-Task #{} wurde fuer Browserdiagnose eingereiht.",
+            "CTO repair task #{} was queued for browser diagnosis.",
             repair_task.0
         ));
     }
 
     if contract.repeated_task || contract.train_specialist_model {
-        let accepted_record_path = resolve_root_relative_path(
-            paths,
-            &policy.specialist_runtime.accepted_records_dir,
-        )
-        .join(format!("job-{}-accepted-record.json", job.id));
-        let training_request_path = resolve_root_relative_path(
-            paths,
-            &policy.specialist_runtime.training_requests_dir,
-        )
-        .join(format!("job-{}-training-request.json", job.id));
+        let accepted_record_path =
+            resolve_root_relative_path(paths, &policy.specialist_runtime.accepted_records_dir)
+                .join(format!("job-{}-accepted-record.json", job.id));
+        let training_request_path =
+            resolve_root_relative_path(paths, &policy.specialist_runtime.training_requests_dir)
+                .join(format!("job-{}-training-request.json", job.id));
         let specialist_task = queue_specialist_factory_request(
             paths,
             job,
@@ -313,12 +296,16 @@ fn execute_browser_agent_job(
         artifact_paths.push(specialist_task.2.clone());
         spawned_task_ids.push(specialist_task.0);
         detail_blocks.push(format!(
-            "Specialist-Fabrik-Task #{} fuer wiederkehrende Browserfaehigkeit eingereiht.",
+            "Specialist-factory task #{} was queued for recurring browser capability.",
             specialist_task.0
         ));
     }
 
-    if let Some(note) = contract.note.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(note) = contract
+        .note
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         detail_blocks.push(format!("Notiz: {}", note.trim()));
     }
 
@@ -326,8 +313,16 @@ fn execute_browser_agent_job(
         result_summary: format!(
             "Browser-Agent hat `{}` bearbeitet{}{}",
             objective,
-            if spawned_task_ids.is_empty() { "" } else { " und Folgearbeit erzeugt" },
-            if action_error.is_some() { " (mit Fehlerdiagnose)" } else { "" },
+            if spawned_task_ids.is_empty() {
+                ""
+            } else {
+                " und Folgearbeit erzeugt"
+            },
+            if action_error.is_some() {
+                " (mit Fehlerdiagnose)"
+            } else {
+                ""
+            },
         ),
         result_detail: format!(
             "Browser-Agent Policy: {}\n\nObjective: {}\nCapability: {}\nTarget URL: {}\n\n{}",
@@ -359,14 +354,14 @@ fn execute_repair_agent_job(
     )?;
     Ok(WorkerExecutionOutcome {
         result_summary: format!(
-            "Repair-Agent hat Repair-Handoff fuer `{}` an den CTO-Agenten uebergeben",
+            "Repair agent handed a repair handoff for `{}` back to the CTO-Agent",
             contract
                 .objective
                 .as_deref()
                 .unwrap_or(job.contract_title.as_str())
         ),
         result_detail: format!(
-            "Der Repair-Agent hat keine Root-Patches selbst ausgefuehrt, sondern CTO-eigene Reparaturarbeit eingereiht.\n\nWorkspace Repair Task: #{}\nHandoff Artifact: {}",
+            "The repair agent did not apply root patches itself, but queued CTO-owned repair work instead.\n\nWorkspace Repair Task: #{}\nHandoff Artifact: {}",
             repair_task.0, repair_task.1
         ),
         artifact_paths: vec![repair_task.1],
@@ -388,16 +383,12 @@ fn execute_specialist_worker_job(
         .capability_title
         .clone()
         .unwrap_or_else(|| "browser_capability".to_string());
-    let accepted_record_path = resolve_root_relative_path(
-        paths,
-        &policy.specialist_runtime.accepted_records_dir,
-    )
-    .join(format!("job-{}-accepted-record.json", job.id));
-    let training_request_path = resolve_root_relative_path(
-        paths,
-        &policy.specialist_runtime.training_requests_dir,
-    )
-    .join(format!("job-{}-training-request.json", job.id));
+    let accepted_record_path =
+        resolve_root_relative_path(paths, &policy.specialist_runtime.accepted_records_dir)
+            .join(format!("job-{}-accepted-record.json", job.id));
+    let training_request_path =
+        resolve_root_relative_path(paths, &policy.specialist_runtime.training_requests_dir)
+            .join(format!("job-{}-training-request.json", job.id));
     let specialist_task = queue_specialist_factory_request(
         paths,
         job,
@@ -418,11 +409,11 @@ fn execute_specialist_worker_job(
     )?;
     Ok(WorkerExecutionOutcome {
         result_summary: format!(
-            "Specialist-Worker hat eine Trainingsanfrage fuer `{}` vorbereitet",
+            "Specialist worker prepared a training request for `{}`",
             objective
         ),
         result_detail: format!(
-            "Ein kontrollierter Specialist-Fabrik-Pfad wurde eingereiht.\n\nFactory Task: #{}\nAccepted Record: {}\nTraining Request: {}\nTarget Model: {}",
+            "A controlled specialist-factory path was queued.\n\nFactory Task: #{}\nAccepted Record: {}\nTraining Request: {}\nTarget Model: {}",
             specialist_task.0,
             specialist_task.1,
             specialist_task.2,
@@ -484,7 +475,7 @@ fn queue_workspace_repair_from_contract(
         paths,
         Some(job.parent_task_id),
         "workspace_repair",
-        &format!("Browser-Repair fuer {}", short_label(&objective, 72)),
+        &format!("Browser repair for {}", short_label(&objective, 72)),
         &detail,
         930,
     )?;
@@ -545,7 +536,7 @@ fn queue_specialist_factory_request(
         paths,
         Some(job.parent_task_id),
         "specialist_model_factory",
-        &format!("Browser-Specialist fuer {}", short_label(objective, 72)),
+        &format!("Browser specialist for {}", short_label(objective, 72)),
         &detail,
         760,
     )?;
@@ -556,7 +547,10 @@ fn queue_specialist_factory_request(
     ))
 }
 
-fn load_parent_task_or_fallback(paths: &Paths, job: &WorkerJobRecord) -> anyhow::Result<TaskRecord> {
+fn load_parent_task_or_fallback(
+    paths: &Paths,
+    job: &WorkerJobRecord,
+) -> anyhow::Result<TaskRecord> {
     if let Some(task) = load_task_by_id(paths, job.parent_task_id)? {
         return Ok(task);
     }
@@ -605,17 +599,20 @@ fn build_browser_agent_bridge_request(
         .or_else(|| {
             if contract.repeated_task || contract.train_specialist_model {
                 Some("browser_capability_craft".to_string())
-            } else if contract.code.as_deref().map(str::trim).filter(|value| !value.is_empty()).is_some() {
+            } else if contract
+                .code
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some()
+            {
                 Some("browser_action_test".to_string())
             } else {
                 Some("browser_collection".to_string())
             }
         })
         .unwrap_or_else(|| "browser_collection".to_string());
-    let mut runtime_config = contract
-        .runtime_config
-        .clone()
-        .unwrap_or_else(|| json!({}));
+    let mut runtime_config = contract.runtime_config.clone().unwrap_or_else(|| json!({}));
     if let Some(object) = runtime_config.as_object_mut() {
         if let Some(url) = contract
             .target_url
@@ -642,11 +639,7 @@ fn build_browser_agent_bridge_request(
                 .or_insert_with(|| Value::String(code.trim().to_string()));
         }
         if let Some(spec) = contract.browser_action.as_ref() {
-            if let Some(action_url) = spec
-                .url
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-            {
+            if let Some(action_url) = spec.url.as_deref().filter(|value| !value.trim().is_empty()) {
                 object
                     .entry("url".to_string())
                     .or_insert_with(|| Value::String(action_url.trim().to_string()));
@@ -711,8 +704,7 @@ fn ensure_job_artifact_dir(paths: &Paths, job: &WorkerJobRecord) -> anyhow::Resu
         .browser_artifacts_dir
         .join("worker-jobs")
         .join(format!("job-{}", job.id));
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     Ok(dir)
 }
 
@@ -738,7 +730,10 @@ fn merge_worker_browser_contract(
 ) -> WorkerBrowserContract {
     WorkerBrowserContract {
         objective: overlay.objective.clone().or_else(|| base.objective.clone()),
-        target_url: overlay.target_url.clone().or_else(|| base.target_url.clone()),
+        target_url: overlay
+            .target_url
+            .clone()
+            .or_else(|| base.target_url.clone()),
         capability_title: overlay
             .capability_title
             .clone()
@@ -746,7 +741,10 @@ fn merge_worker_browser_contract(
         repeated_task: overlay.repeated_task || base.repeated_task,
         train_specialist_model: overlay.train_specialist_model || base.train_specialist_model,
         request_repair: overlay.request_repair || base.request_repair,
-        bridge_kind: overlay.bridge_kind.clone().or_else(|| base.bridge_kind.clone()),
+        bridge_kind: overlay
+            .bridge_kind
+            .clone()
+            .or_else(|| base.bridge_kind.clone()),
         browser_action: overlay
             .browser_action
             .clone()
@@ -770,7 +768,10 @@ fn merge_worker_browser_contract(
             .failing_tool
             .clone()
             .or_else(|| base.failing_tool.clone()),
-        error_text: overlay.error_text.clone().or_else(|| base.error_text.clone()),
+        error_text: overlay
+            .error_text
+            .clone()
+            .or_else(|| base.error_text.clone()),
         patch_targets: if overlay.patch_targets.is_empty() {
             base.patch_targets.clone()
         } else {

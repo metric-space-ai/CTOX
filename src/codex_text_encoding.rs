@@ -3,9 +3,7 @@ use encoding_rs::Encoding;
 use encoding_rs::IBM866;
 use encoding_rs::WINDOWS_1252;
 
-const WINDOWS_1252_PUNCT_BYTES: [u8; 8] = [
-    0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x99,
-];
+const WINDOWS_1252_PUNCT_BYTES: [u8; 8] = [0x91, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x99];
 
 pub fn bytes_to_string_smart(bytes: &[u8]) -> String {
     if bytes.is_empty() {

@@ -26,6 +26,7 @@ use codex_utils_pty::TerminalSize;
 use codex_utils_pty::spawn_pipe_process;
 use codex_utils_pty::spawn_pipe_process_no_stdin;
 use codex_utils_pty::spawn_pty_process;
+use serde_json::json;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
@@ -34,8 +35,8 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
-use tokio::sync::mpsc;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -162,6 +163,52 @@ pub fn run_one_shot_command(
     run_async(COMMAND_EXEC_MANAGER.run_one_shot(paths.clone(), request))
 }
 
+pub fn run_installation_smoke(paths: &Paths) -> anyhow::Result<String> {
+    let process_id = format!("install-command-exec-smoke-{}", now_iso().replace(':', "-"));
+    let result = run_one_shot_command(
+        paths,
+        CommandExecParams {
+            command: vec![
+                "/bin/sh".to_string(),
+                "-lc".to_string(),
+                "printf 'command_exec_ready\\n'".to_string(),
+            ],
+            process_id: Some(process_id),
+            tty: false,
+            stream_stdin: false,
+            stream_stdout_stderr: false,
+            output_bytes_cap: Some(4096),
+            disable_output_cap: false,
+            disable_timeout: false,
+            timeout_ms: Some(DEFAULT_EXEC_COMMAND_TIMEOUT_MS as i64),
+            cwd: Some(paths.root.clone()),
+            env: None,
+            size: None,
+            sandbox_policy: None,
+        },
+    )?;
+    let snapshot = result.snapshot;
+    let stdout = snapshot.stdout.trim().to_string();
+    let stderr = snapshot.stderr.trim().to_string();
+    if snapshot.exit_code != Some(0) {
+        anyhow::bail!(
+            "command_exec smoke exited with {:?}; stdout={} stderr={}",
+            snapshot.exit_code,
+            stdout,
+            stderr
+        );
+    }
+    if stdout != "command_exec_ready" {
+        anyhow::bail!("command_exec smoke returned unexpected stdout={stdout} stderr={stderr}");
+    }
+    Ok(serde_json::to_string_pretty(&json!({
+        "ok": true,
+        "stdout": stdout,
+        "cwd": snapshot.cwd,
+        "sessionId": snapshot.session_id,
+    }))?)
+}
+
 impl CommandExecManager {
     async fn start(&self, paths: Paths, request: CommandExecParams) -> anyhow::Result<String> {
         let CommandExecParams {
@@ -193,16 +240,13 @@ impl CommandExecManager {
             anyhow::bail!("command/exec cannot set both timeoutMs and disableTimeout");
         }
         if process_id.is_none() && (tty || stream_stdin || stream_stdout_stderr) {
-            anyhow::bail!(
-                "command/exec tty or streaming requires a client-supplied processId"
-            );
+            anyhow::bail!("command/exec tty or streaming requires a client-supplied processId");
         }
 
         let timeout_ms = match timeout_ms {
-            Some(value) => Some(
-                u64::try_from(value)
-                    .with_context(|| format!("command/exec timeoutMs must be non-negative, got {value}"))?,
-            ),
+            Some(value) => Some(u64::try_from(value).with_context(|| {
+                format!("command/exec timeoutMs must be non-negative, got {value}")
+            })?),
             None => None,
         };
         let output_bytes_cap = if disable_output_cap {
@@ -211,8 +255,9 @@ impl CommandExecManager {
             Some(output_bytes_cap.unwrap_or(DEFAULT_OUTPUT_BYTES_CAP))
         };
 
-        let session_id = process_id
-            .unwrap_or_else(|| format!("exec-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1));
+        let session_id = process_id.unwrap_or_else(|| {
+            format!("exec-{}", self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
+        });
         let cwd = cwd.unwrap_or_else(|| paths.root.clone());
         let stream_stdin = tty || stream_stdin;
         let stream_stdout_stderr = tty || stream_stdout_stderr;
@@ -231,10 +276,9 @@ impl CommandExecManager {
                 cwd.as_path(),
                 &env,
                 &None,
-                terminal_size_from_protocol(size.unwrap_or(CommandExecTerminalSize {
-                    rows: 24,
-                    cols: 80,
-                }))?,
+                terminal_size_from_protocol(
+                    size.unwrap_or(CommandExecTerminalSize { rows: 24, cols: 80 }),
+                )?,
             )
             .await
         } else if stream_stdin {
@@ -329,7 +373,11 @@ impl CommandExecManager {
         Ok(format!("exec session write sent: {session_id}"))
     }
 
-    async fn resize(&self, paths: Paths, request: CommandExecResizeParams) -> anyhow::Result<String> {
+    async fn resize(
+        &self,
+        paths: Paths,
+        request: CommandExecResizeParams,
+    ) -> anyhow::Result<String> {
         let session_id = request.process_id.clone();
         self.send_control(
             paths,
@@ -405,10 +453,7 @@ impl CommandExecManager {
         let sessions = self.sessions.lock().await;
         let mut snapshots = Vec::new();
         for (session_id, session) in sessions.iter() {
-            snapshots.push(snapshot_from_managed_session(
-                session_id.clone(),
-                session,
-            ));
+            snapshots.push(snapshot_from_managed_session(session_id.clone(), session));
         }
         snapshots.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(snapshots)
@@ -596,7 +641,8 @@ async fn run_session(
                                     cap_reached,
                                 );
                             }
-                        } else if !stdout_cap_reached {
+                        }
+                        if !stdout_cap_reached {
                             append_limited(&shared.stdout, capped_chunk);
                         }
                         if cap_reached {
@@ -625,7 +671,8 @@ async fn run_session(
                                     cap_reached,
                                 );
                             }
-                        } else if !stderr_cap_reached {
+                        }
+                        if !stderr_cap_reached {
                             append_limited(&shared.stderr, capped_chunk);
                         }
                         if cap_reached {
@@ -751,10 +798,7 @@ async fn handle_write(
     Ok(())
 }
 
-fn snapshot_from_managed_session(
-    session_id: String,
-    session: &ManagedSession,
-) -> SessionSnapshot {
+fn snapshot_from_managed_session(session_id: String, session: &ManagedSession) -> SessionSnapshot {
     snapshot_from_managed_session_with_limit(session_id, session, Some(8_000))
 }
 
@@ -794,7 +838,12 @@ fn snapshot_from_managed_session_with_limit(
         stream_stdout_stderr: session.stream_stdout_stderr,
         output_bytes_cap: session.output_bytes_cap,
         command: session.command.clone(),
-        exit_code: session.shared.exit_code.lock().ok().and_then(|value| *value),
+        exit_code: session
+            .shared
+            .exit_code
+            .lock()
+            .ok()
+            .and_then(|value| *value),
         stdout: output_char_limit
             .map(|limit| trim_output(&stdout, limit))
             .unwrap_or(stdout),
@@ -894,12 +943,19 @@ fn emit_output_delta(
         "exec/outputDelta",
         None,
         "",
-        &format!("{} bytes on {:?} for exec session {}", chunk.len(), stream, session_id),
+        &format!(
+            "{} bytes on {:?} for exec session {}",
+            chunk.len(),
+            stream,
+            session_id
+        ),
         &serde_json::to_string(&notification).unwrap_or_else(|_| "{}".to_string()),
     );
 }
 
-pub(crate) fn terminal_size_from_protocol(size: CommandExecTerminalSize) -> anyhow::Result<TerminalSize> {
+pub(crate) fn terminal_size_from_protocol(
+    size: CommandExecTerminalSize,
+) -> anyhow::Result<TerminalSize> {
     if size.rows == 0 || size.cols == 0 {
         anyhow::bail!("command/exec size rows and cols must be greater than 0");
     }
@@ -943,5 +999,41 @@ fn trim_output(value: &str, max_chars: usize) -> String {
         value.to_string()
     } else {
         value.chars().take(max_chars).collect::<String>() + "..."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn managed_session_for_test(
+        shared: Arc<SessionShared>,
+        stream_stdout_stderr: bool,
+    ) -> ManagedSession {
+        ManagedSession {
+            created_at: "2026-03-20T00:00:00Z".to_string(),
+            cwd: "/workspace".to_string(),
+            tty: false,
+            stream_stdin: true,
+            stream_stdout_stderr,
+            output_bytes_cap: Some(4096),
+            command: vec!["/bin/sh".to_string()],
+            shared,
+            control_tx: None,
+        }
+    }
+
+    #[test]
+    fn snapshot_keeps_buffered_output_for_streaming_sessions() {
+        let shared = Arc::new(SessionShared::new());
+        append_limited(&shared.stdout, b"build ok\n");
+        append_limited(&shared.stderr, b"warning: sample\n");
+        let session = managed_session_for_test(shared, true);
+
+        let snapshot = snapshot_from_managed_session("task-37-turn-351".to_string(), &session);
+
+        assert!(snapshot.stream_stdout_stderr);
+        assert!(snapshot.stdout.contains("build ok"));
+        assert!(snapshot.stderr.contains("warning: sample"));
     }
 }

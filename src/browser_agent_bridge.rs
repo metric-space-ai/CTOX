@@ -109,8 +109,7 @@ pub fn ensure_browser_agent_bridge(paths: &Paths) -> anyhow::Result<()> {
         bridge_jobs_dir(paths),
         bridge_workers_dir(paths),
     ] {
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create {}", dir.display()))?;
+        fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     }
     Ok(())
 }
@@ -153,8 +152,8 @@ pub fn load_browser_agent_job(
     if !path.exists() {
         return Ok(None);
     }
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let job = serde_json::from_str::<BrowserAgentJobRecord>(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(Some(job))
@@ -212,10 +211,7 @@ pub fn lease_next_browser_agent_job(
         extension_version: extension_version.unwrap_or("").trim().to_string(),
         updated_at: now_iso(),
     };
-    save_json(
-        &bridge_worker_path(paths, &worker.worker_id),
-        &worker,
-    )?;
+    save_json(&bridge_worker_path(paths, &worker.worker_id), &worker)?;
 
     let mut jobs = load_all_jobs_locked(paths)?;
     jobs.sort_by(|left, right| left.created_at.cmp(&right.created_at));
@@ -255,11 +251,7 @@ pub fn complete_browser_agent_job(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    job.status = if result
-        .get("ok")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
+    job.status = if result.get("ok").and_then(Value::as_bool).unwrap_or(true) {
         "completed".to_string()
     } else {
         "failed".to_string()
@@ -371,7 +363,10 @@ fn reclaim_expired_leases_locked(paths: &Paths) -> anyhow::Result<()> {
         }
         let leased_at = parse_timestamp(&job.leased_at);
         let expired = leased_at
-            .map(|timestamp| now.signed_duration_since(timestamp).num_milliseconds() > DEFAULT_BROWSER_AGENT_LEASE_MS)
+            .map(|timestamp| {
+                now.signed_duration_since(timestamp).num_milliseconds()
+                    > DEFAULT_BROWSER_AGENT_LEASE_MS
+            })
             .unwrap_or(true);
         if !expired {
             continue;
@@ -413,7 +408,8 @@ fn load_all_jobs_locked(paths: &Paths) -> anyhow::Result<Vec<BrowserAgentJobReco
 }
 
 fn load_all_workers_locked(paths: &Paths) -> anyhow::Result<Vec<BrowserAgentWorkerRecord>> {
-    let mut workers = load_records_from_dir::<BrowserAgentWorkerRecord>(&bridge_workers_dir(paths))?;
+    let mut workers =
+        load_records_from_dir::<BrowserAgentWorkerRecord>(&bridge_workers_dir(paths))?;
     workers.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(workers)
 }
@@ -426,9 +422,7 @@ where
         return Ok(Vec::new());
     }
     let mut records = Vec::new();
-    for entry in fs::read_dir(dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?
-    {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
@@ -526,6 +520,8 @@ mod tests {
             bootstrap_task_pack_path: bootstrap_dir.join("bootstrap-task-pack.json"),
             installation_bootstrap_path: bootstrap_dir.join("installation-bootstrap.json"),
             context_policy_path: context_dir.join("context-policy.json"),
+            context_optimization_policy_path: context_dir.join("context-optimization-policy.json"),
+            context_query_tool_contract_path: context_dir.join("context-query-tool-contract.json"),
             context_governance_policy_path: context_dir.join("context-governance-policy.json"),
             mode_system_policy_path: system_dir.join("mode-system-policy.json"),
             loop_safety_policy_path: system_dir.join("loop-safety-policy.json"),
@@ -543,7 +539,8 @@ mod tests {
             runtime_db_path: runtime_dir.join("cto_agent.db"),
             attach_socket_path: runtime_dir.join("cto-agent-test.sock"),
             runtime_lock_path: runtime_dir.join("cto-agent.lock"),
-            pending_hard_reset_report_path: runtime_dir.join("recovery/pending-hard-reset-report.json"),
+            pending_hard_reset_report_path: runtime_dir
+                .join("recovery/pending-hard-reset-report.json"),
             certs_dir: certs_dir.clone(),
             tls_cert_path: certs_dir.join("tls-cert.pem"),
             tls_key_path: certs_dir.join("tls-key.pem"),
@@ -583,7 +580,9 @@ mod tests {
             Some("openai>openai/gpt-oss-20b")
         );
         assert_eq!(
-            config.get("preferredVisionModelRef").and_then(Value::as_str),
+            config
+                .get("preferredVisionModelRef")
+                .and_then(Value::as_str),
             Some("custom_openai>Qwen/Qwen3.5-35B-A3B")
         );
         assert_eq!(

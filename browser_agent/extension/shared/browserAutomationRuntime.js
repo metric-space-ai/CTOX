@@ -119,11 +119,11 @@ async function callOpenAiCompatibleVisionInspector({
 } = {}) {
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
   if (!normalizedBaseUrl) {
-    throw new Error(`Vision base URL fehlt fuer Provider ${providerId || "custom_openai"}.`);
+    throw new Error(`Vision base URL is missing for provider ${providerId || "custom_openai"}.`);
   }
   const normalizedModel = asString(model).trim();
   if (!normalizedModel) {
-    throw new Error(`Vision model fehlt fuer Provider ${providerId || "custom_openai"}.`);
+    throw new Error(`Vision model is missing for provider ${providerId || "custom_openai"}.`);
   }
   const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
     method: "POST",
@@ -163,7 +163,7 @@ async function callOpenAiCompatibleVisionInspector({
     payload = await response.json();
   } catch (error) {
     throw new Error(
-      `Vision runtime ${providerId || "custom_openai"} lieferte kein gueltiges JSON: ${asString(error?.message || error)}`,
+      `Vision runtime ${providerId || "custom_openai"} returned invalid JSON: ${asString(error?.message || error)}`,
     );
   }
 
@@ -172,12 +172,12 @@ async function callOpenAiCompatibleVisionInspector({
       asString(payload?.error?.message) ||
       asString(payload?.error) ||
       `${response.status} ${response.statusText}`;
-    throw new Error(`Vision runtime ${providerId || "custom_openai"} fehlgeschlagen: ${detail}`);
+    throw new Error(`Vision runtime ${providerId || "custom_openai"} failed: ${detail}`);
   }
 
   const text = extractOpenAiCompatibleResponseText(payload);
   if (!text) {
-    throw new Error(`Vision runtime ${providerId || "custom_openai"} gab keinen Text zurueck.`);
+    throw new Error(`Vision runtime ${providerId || "custom_openai"} returned no text.`);
   }
   return text;
 }
@@ -453,18 +453,18 @@ export async function askBrowserVisionInspector({
   const imageH = Number(imageMeta?.height || 0);
 
   const prompt = [
-    "Du bist ein visueller Browser-Inspector.",
-    "Analysiere den aktuell SICHTBAREN Viewport fuer einen Browser-Automationslauf.",
-    "Antworte AUSSCHLIESSLICH als JSON mit folgendem Schema:",
+    "You are a visual browser inspector.",
+    "Analyze the currently VISIBLE viewport for a browser automation run.",
+    "Reply ONLY as JSON with the following schema:",
     '{"answer":"string","completion_assessment":{"status":"not_started|in_progress|blocked|complete","reason":"string"},"observations":["string"],"ui_targets":[{"selector_hint":"string","text":"string","role":"string","action":"click|type|scroll|wait|ignore","reason":"string","confidence":0,"x_css":0,"y_css":0,"bbox_css":{"x":0,"y":0,"width":0,"height":0},"x_img":0,"y_img":0,"bbox_img":{"x":0,"y":0,"width":0,"height":0}}],"blockers":["string"],"qa_checks":[{"name":"string","status":"pass|fail|unknown","evidence":"string"}],"next_actions":["string"]}',
-    "Koordinaten-Regel: x_css/y_css sind IMMER CSS-Pixel relativ zum sichtbaren Viewport.",
-    "Optional zusaetzlich x_img/y_img + bbox_img in Screenshot-Pixeln liefern.",
-    "Liefere nur UI-Ziele, die sichtbar und fuer den naechsten Schritt realistisch nutzbar sind.",
-    "Wenn die Aufgabe im sichtbaren Zustand bereits erfuellt wirkt, completion_assessment.status='complete' setzen und passende qa_checks liefern.",
-    "Overlay-, Modal-, Cookie- oder Login-Blocker explizit in blockers nennen.",
-    "Kein Markdown. Kein Fliesstext ausserhalb JSON.",
-    `Frage: ${asString(question || "Beschreibe den sichtbaren UI-Zustand und relevante Blocker.")}`,
-    `Seitenkontext: ${asString(pageContext?.title || "")} | ${asString(pageContext?.url || "")}`,
+    "Coordinate rule: x_css/y_css are ALWAYS CSS pixels relative to the visible viewport.",
+    "Optionally also provide x_img/y_img + bbox_img in screenshot pixels.",
+    "Return only UI targets that are visible and realistically usable for the next step.",
+    "If the task already appears fulfilled in the visible state, set completion_assessment.status='complete' and provide suitable qa_checks.",
+    "Name overlay, modal, cookie, or login blockers explicitly in blockers.",
+    "No Markdown. No prose outside JSON.",
+    `Question: ${asString(question || "Describe the visible UI state and relevant blockers.")}`,
+    `Page context: ${asString(pageContext?.title || "")} | ${asString(pageContext?.url || "")}`,
     `Viewport (CSS): width=${viewportW}, height=${viewportH}, dpr=${viewportDpr}`,
     `Screenshot (Pixel): width=${imageW}, height=${imageH}`,
   ].join("\n");
@@ -597,7 +597,7 @@ export async function ensureRestrictedBrowserTab(runtime = {}, {
 
   const numericTabId = Number(tab?.id || 0);
   if (!Number.isFinite(numericTabId) || numericTabId <= 0) {
-    throw new Error("Konnte keinen Browser-Tab fuer das Portal oeffnen.");
+    throw new Error("Could not open a browser tab for the portal.");
   }
 
   const tabUrlOrPending = asString(tab?.url || tab?.pendingUrl || "");

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -114,7 +114,7 @@
           <div class="panel" id="main-summary"></div>
           <div class="panel">
             <div class="chatlog" id="chat-log"></div>
-            <div class="send"><input id="chat-input" placeholder="Nachricht an den CTO ..."><button id="chat-send" type="button">Send</button></div>
+            <div class="send"><input id="chat-input" placeholder="Message to the CTO ..."><button id="chat-send" type="button">Send</button></div>
           </div>
         </div>
 
@@ -145,7 +145,7 @@
         </div>
       </main>
     </div>
-    <div class="foot"><div>Minimaler Kern.</div><div>Tabs oben · Eingaben links · Kernansicht rechts</div></div>
+    <div class="foot"><div>Minimal core.</div><div>Tabs on top · inputs on the left · core view on the right</div></div>
   </div>
 
   <script>
@@ -158,8 +158,8 @@
       secrets: { lines: "CTO_AGENT_PORT=8443\nCTO_AGENT_ROOT=/Users/.../CTO-Agent\nOPENAI_API_KEY=sk-example-123456\nBROWSER_AGENT_BRIDGE_PORT=12751" },
       root: { password: "configured", branding: "off", freeze: "draft" },
       chat: [
-        { who: "system", text: "Chatte hier zuerst mit dem CTO." },
-        { who: "owner", text: "Ich will eine minimale BIOS-Homepage mit Chat, Organigram und Agent-Inspektion." }
+        { who: "system", text: "Start by chatting with the CTO here." },
+        { who: "owner", text: "I want a minimal BIOS homepage with chat, organigram, and agent inspection." }
       ],
       agents: {
         cto: { name: "CTO-Agent", role: "root_agent", model: "gpt-oss-20b", tools: "command_exec\ninterrupt_queue\nhomepage_builder", contracts: "execution_authority_policy\nloop_safety_policy\nhomepage_policy", skills: "cto-origin-history\nopenai-docs" },

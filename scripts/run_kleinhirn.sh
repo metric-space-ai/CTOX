@@ -46,6 +46,11 @@ prepend_compatible_cuda_runtime() {
 : "${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:=$CTO_AGENT_KLEINHIRN_MODEL}"
 : "${CTO_AGENT_KLEINHIRN_SERVER_IMPL:=mistralrs}"
 : "${CTO_AGENT_KLEINHIRN_ARCH:=}"
+: "${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:=1}"
+: "${CTO_AGENT_CONTEXT_EMBEDDING_PORT:=1235}"
+: "${CTO_AGENT_CONTEXT_EMBEDDING_MODEL:=Qwen/Qwen3-Embedding-0.6B}"
+: "${CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL:=$CTO_AGENT_CONTEXT_EMBEDDING_MODEL}"
+: "${CTO_AGENT_CONTEXT_EMBEDDING_MAX_BATCH_SIZE:=12}"
 
 prepend_compatible_cuda_runtime
 
@@ -143,4 +148,39 @@ if [ -n "${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-}" ]; then
   set -- "$@" --max-seq-len "$CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN"
 fi
 
-exec "$@"
+EMBED_PID=""
+
+start_context_embedding_server() {
+  case "$(printf '%s' "${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:-1}" | tr '[:upper:]' '[:lower:]')" in
+    0|false|no|off)
+      return 0
+      ;;
+  esac
+  if [ -z "${CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL:-}" ]; then
+    return 0
+  fi
+  "$HOME/.cargo/bin/mistralrs" serve \
+    --port "$CTO_AGENT_CONTEXT_EMBEDDING_PORT" \
+    --max-seqs "$CTO_AGENT_CONTEXT_EMBEDDING_MAX_BATCH_SIZE" \
+    --max-batch-size "$CTO_AGENT_CONTEXT_EMBEDDING_MAX_BATCH_SIZE" \
+    -m "$CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL" &
+  EMBED_PID=$!
+}
+
+cleanup_children() {
+  if [ -n "${EMBED_PID:-}" ]; then
+    kill "$EMBED_PID" >/dev/null 2>&1 || true
+    wait "$EMBED_PID" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup_children EXIT INT TERM
+
+start_context_embedding_server
+
+"$@" &
+MAIN_PID=$!
+wait "$MAIN_PID"
+MAIN_STATUS=$?
+cleanup_children
+exit "$MAIN_STATUS"

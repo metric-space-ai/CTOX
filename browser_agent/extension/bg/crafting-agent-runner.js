@@ -787,18 +787,18 @@ function finalOutputHasLimitationNote(finalOutput) {
 
 function describeToolActionForUser(action) {
   const normalized = asText(action);
-  if (normalized === "run_agentic_smoke") return "der Funktionstest";
-  if (normalized === "run_capability_eval") return "die kleine Testreihe";
-  if (normalized === "generate_training_batch") return "die Batch-Erzeugung der Trainingsdaten";
-  if (normalized === "save_tool_scripts") return "das Speichern der Tool-Skripte";
-  if (normalized === "save_browser_capabilities") return "das Speichern der Browser-Funktionen";
-  if (normalized === "record_experiment_decision") return "die Experiment-Entscheidung";
-  if (normalized === "request_codex_repair") return "das Starten des lokalen Codex-Repair-Laufs";
-  if (normalized === "get_codex_repair_status") return "die Abfrage des lokalen Codex-Repair-Laufs";
-  if (normalized === "browser_action") return "ein Browser-Schritt";
-  if (normalized === "browser_inspect") return "die Browser-Pruefung";
-  if (normalized === "playwright_ctx") return "das Browser-Skript";
-  return normalized ? `das Werkzeug ${normalized}` : "ein benoetigtes Werkzeug";
+  if (normalized === "run_agentic_smoke") return "the smoke test";
+  if (normalized === "run_capability_eval") return "the mini eval suite";
+  if (normalized === "generate_training_batch") return "training-batch generation";
+  if (normalized === "save_tool_scripts") return "saving the tool scripts";
+  if (normalized === "save_browser_capabilities") return "saving the browser capabilities";
+  if (normalized === "record_experiment_decision") return "recording the experiment decision";
+  if (normalized === "request_codex_repair") return "starting the local Codex repair run";
+  if (normalized === "get_codex_repair_status") return "checking the local Codex repair run";
+  if (normalized === "browser_action") return "a browser step";
+  if (normalized === "browser_inspect") return "browser inspection";
+  if (normalized === "playwright_ctx") return "the browser script";
+  return normalized ? `the ${normalized} tool` : "a required tool";
 }
 
 function detectDevelopmentToolingBlocker(run, finalOutput) {
@@ -818,33 +818,33 @@ function detectDevelopmentToolingBlocker(run, finalOutput) {
     ) {
       return {
         currentState:
-          "Der Lauf stoppt hier, weil der Funktionstest die gespeicherte Funktion noch nicht ueber den vorgesehenen Pfad benutzt hat.",
+          "The run stops here because the smoke test has not used the saved function through the intended path yet.",
         nextAction:
-          "Pruefe die Capability-Auswahl und den Werkzeugvertrag, behebe den Pfad und starte danach denselben Test erneut.",
+          "Inspect the capability selection and tool contract, fix the path, then rerun the same test.",
       };
     }
     if (action === "run_capability_eval" && !ok) {
       return {
         currentState:
-          "Der Lauf stoppt hier, weil die gespeicherte Funktion die kleine Testreihe noch nicht besteht.",
+          "The run stops here because the saved function does not pass the mini eval suite yet.",
         nextAction:
-          "Pruefe die Funktionswahl und den Werkzeugvertrag, behebe den Fehler und fuehre danach dieselben Prueffaelle erneut aus.",
+          "Inspect the function choice and tool contract, fix the failure, then rerun the same eval cases.",
       };
     }
     if (!ok) {
       return {
-        currentState: `Der Lauf stoppt hier, weil ${describeToolActionForUser(action)} im aktuellen Durchgang fehlgeschlagen ist.`,
+        currentState: `The run stops here because ${describeToolActionForUser(action)} failed in the current pass.`,
         nextAction:
-          "Behebe zuerst das betroffene Werkzeug oder den Werkzeugvertrag und starte danach einen neuen Testlauf.",
+          "Fix the affected tool or tool contract first, then start a new validation run.",
       };
     }
   }
   if (finalOutputHasLimitationNote(finalOutput)) {
     return {
       currentState:
-        "Der Lauf stoppt hier, weil ein benoetigter Werkzeugpfad noch fehlt oder noch nicht freigegeben ist.",
+        "The run stops here because a required tool path is still missing or not approved yet.",
       nextAction:
-        "Erweitere oder korrigiere zuerst den Werkzeugpfad und pruefe ihn danach erneut, bevor weitere Daten oder Training folgen.",
+        "Extend or repair the tool path first and validate it again before adding more data or training.",
     };
   }
   return null;
@@ -871,17 +871,17 @@ function detectRecoverableValidationIteration(run, finalOutput) {
     ) {
       return {
         currentState:
-          "Der letzte Funktionstest ist fehlgeschlagen. Das ist noch normale Iterationsarbeit am lokalen Skript- und Funktionspfad.",
+          "The last smoke test failed. This is still normal iteration work on the local script and capability path.",
         nextAction:
-          "Pruefe zuerst gespeichertes Bundle und Quellcode, unterscheide zwischen eigenem Artefaktfehler und echtem Laufzeitdefekt, ueberarbeite dann Skript oder Ablauf und teste im selben Lauf erneut.",
+          "Check the saved bundle and source first, separate artifact mistakes from real runtime faults, then revise the script or flow and test again in the same run.",
       };
     }
     if (action === "run_capability_eval" && !ok) {
       return {
         currentState:
-          "Die letzte kleine Testreihe ist fehlgeschlagen. Das ist noch normale Iterationsarbeit am lokalen Skript- und Funktionspfad.",
+          "The last mini eval suite failed. This is still normal iteration work on the local script and capability path.",
         nextAction:
-          "Pruefe zuerst gespeichertes Bundle und Quellcode, unterscheide zwischen eigenem Artefaktfehler und echtem Laufzeitdefekt, ueberarbeite dann Skript oder Ablauf und fuehre dieselben Faelle im selben Lauf erneut aus.",
+          "Check the saved bundle and source first, separate artifact mistakes from real runtime faults, then revise the script or flow and rerun the same cases in the same run.",
       };
     }
     return null;
@@ -1031,10 +1031,10 @@ function describeLocalQwenRuntimeFailure(errorText = "", errorDetail = null) {
     ...collectStructuredErrorTexts(errorDetail),
   ].join(" ").toLowerCase();
   if (/local_qwen_vision_pixel_budget_exceeded|safe browser screenshot budget|numeric runtime code 9468408|memory access out of bounds|out of bounds/.test(haystack)) {
-    return "Der lokale Qwen-Visionpfad verarbeitet Browser-Screenshots mit einem zu grossen Pixelbudget fuer den WebGPU-Plan.";
+    return "The local Qwen vision path is processing browser screenshots with a pixel budget that is too large for the WebGPU plan.";
   }
   if (/local_qwen|qwen|onnx|webgpu|ortrun|offscreen/.test(haystack)) {
-    return "Der lokale Qwen-Offscreen-Pfad bricht in der WebGPU-/ONNX-Ausfuehrung ab.";
+    return "The local Qwen offscreen path is failing during WebGPU/ONNX execution.";
   }
   return asText(errorText);
 }
@@ -1050,15 +1050,15 @@ function summarizeLocalQwenTrainingStartFailure(errorText = "", errorDetail = nu
     ? detail.availableRuntimeModelIds.map((value) => asText(value)).filter(Boolean)
     : [];
   return {
-    summary: "Lokales Browser-LoRA-Training ist fuer dieses Qwen-Paket nicht verfuegbar.",
+    summary: "Local browser LoRA training is not available for this Qwen package.",
     currentState: expectedRelativePath
-      ? `Dem Workspace fehlt ${expectedRelativePath}.`
+      ? `${expectedRelativePath} is missing from the workspace.`
       : runtimeModelId
-        ? `Dem Workspace fehlt das Trainingsmanifest fuer ${runtimeModelId}.`
-        : "Dem Workspace fehlt das paketierte Trainingsmanifest.",
+        ? `The training manifest for ${runtimeModelId} is missing from the workspace.`
+        : "The packaged training manifest is missing from the workspace.",
     nextAction: availableRuntimeModelIds.length
-      ? `Packe das Trainingsmanifest plus ONNX-Trainingsartefakte fuer ${runtimeModelId} oder nutze ein paketiertes Modell wie ${availableRuntimeModelIds[0]}.`
-      : "Packe das Trainingsmanifest plus die zugehoerigen ONNX-Trainingsartefakte fuer dieses Modell.",
+      ? `Package the training manifest and ONNX training artifacts for ${runtimeModelId}, or use a packaged model such as ${availableRuntimeModelIds[0]}.`
+      : "Package the training manifest and matching ONNX training artifacts for this model.",
     error: asText(errorText),
   };
 }
@@ -1913,30 +1913,30 @@ function formatGermanCount(count, singular, plural) {
 function describeOperationMilestone(operations = []) {
   const counts = getOperationCounts(operations);
   if (counts.add && !counts.update && !counts.delete) {
-    return `${formatGermanCount(counts.add, "Trainingsbeispiel", "Trainingsbeispiele")} hinzugefuegt`;
+    return `${formatGermanCount(counts.add, "training sample", "training samples")} added`;
   }
   if (counts.update && !counts.add && !counts.delete) {
-    return `${formatGermanCount(counts.update, "Trainingsbeispiel", "Trainingsbeispiele")} aktualisiert`;
+    return `${formatGermanCount(counts.update, "training sample", "training samples")} updated`;
   }
   if (counts.delete && !counts.add && !counts.update) {
-    return `${formatGermanCount(counts.delete, "Trainingsbeispiel", "Trainingsbeispiele")} entfernt`;
+    return `${formatGermanCount(counts.delete, "training sample", "training samples")} removed`;
   }
   const summary = summarizeOperationCounts(operations);
-  return summary ? `Trainingsdaten ueberarbeitet (${summary})` : "Trainingsdaten ueberarbeitet";
+  return summary ? `Training data revised (${summary})` : "Training data revised";
 }
 
 function describeOperationMilestoneDetail(operations = []) {
   const counts = getOperationCounts(operations);
   if (counts.add && !counts.update && !counts.delete) {
-    return "Der Agent hat neue Trainingsbeispiele fuer diese Faehigkeit angelegt.";
+    return "The agent created new training samples for this capability.";
   }
   if (counts.update && !counts.add && !counts.delete) {
-    return "Der Agent hat bestehende Trainingsbeispiele fuer diese Faehigkeit verbessert.";
+    return "The agent improved existing training samples for this capability.";
   }
   if (counts.delete && !counts.add && !counts.update) {
-    return "Der Agent hat ungeeignete Trainingsbeispiele aus dem lokalen Datensatz entfernt.";
+    return "The agent removed unsuitable training samples from the local dataset.";
   }
-  return "Der Agent hat die lokalen Trainingsdaten fuer diese Faehigkeit ueberarbeitet.";
+  return "The agent revised the local training data for this capability.";
 }
 
 function summarizeProvenanceLinks(items = [], limit = 3) {
@@ -2180,11 +2180,11 @@ function buildToolExecutionFailureResult(action, error) {
     errorDetail: errorInfo.detail,
     errorStack: errorInfo.stack,
     report: {
-      currentState: `${describeToolActionForUser(action)} ist fehlgeschlagen: ${trimText(message, 220)}`,
+      currentState: `${describeToolActionForUser(action)} failed: ${trimText(message, 220)}`,
       nextAction:
         action === "workspace_code_dive"
-          ? "Nutze die bereits sichtbaren Fehler- und Laufzeitdaten weiter oder wiederhole die Diagnose spaeter."
-          : "Untersuche zuerst den betroffenen Werkzeugpfad oder fuehre danach eine Quellcode-Diagnose aus.",
+          ? "Use the already visible error and runtime data, or repeat the diagnosis later."
+          : "Inspect the affected tool path first or run a source-code diagnosis next.",
       matchingSignals: [trimText(message, 180)].filter(Boolean),
     },
     provenance: [],
@@ -2701,9 +2701,9 @@ function buildDefaultReport(run, fallback = {}) {
   return normalizeReport(run.report, {
     objective: trimText(run.brief, 180),
     currentState: sampleCount
-      ? `${sampleCount} lokale Trainingszeilen stehen als Kontext bereit.`
-      : "Es liegen noch keine lokalen Trainingszeilen für diesen Craft vor.",
-    nextAction: fallback.nextAction || "Warte auf den nächsten Agentenschritt.",
+      ? `${sampleCount} local training rows are available as context.`
+      : "No local training rows exist for this craft yet.",
+    nextAction: fallback.nextAction || "Wait for the next agent step.",
     matchingSignals: run.report?.matchingSignals || [],
   });
 }
@@ -3530,7 +3530,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   const hypotheses = [];
   if (/referenceerror[^.\n]*is not defined|is not defined|runtime injection|execute binding|tool script mapping|aufrufbare funktion|injizierte laufzeit|tool script entrypoint/.test(haystack)) {
     hypotheses.push({
-      summary: "Die gespeicherten Tool-Skripte werden nicht unter dem erwarteten Funktionsnamen oder Entrypoint in die injizierte Browser-Laufzeit eingebunden. Dadurch ist read_active_text_target im execute-Skript nicht definiert.",
+      summary: "The saved tool scripts are not being bound into the injected browser runtime under the expected function name or entrypoint. That leaves read_active_text_target undefined in the execute script.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/craft-use-runner.js`,
@@ -3542,7 +3542,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/modeltransform|model transform|pre\/execute\/post null|empty scripts|entrypoint|tool script wiring|capability scripts|reviewed runtime path/.test(haystack)) {
     hypotheses.push({
-      summary: "Der reviewed Capability-Pfad ist verdrahtet, aber die gespeicherten Tool-Skripte werden nicht in echte pre/execute/post-Laufzeitteile ueberfuehrt. Dadurch faellt der Pfad auf modelTransform statt auf die JavaScript-Toolskripte zurueck.",
+      summary: "The reviewed capability path is wired, but the saved tool scripts are not being materialized into real pre/execute/post runtime sections. The path falls back to modelTransform instead of the JavaScript tool scripts.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/craft-use-runner.js`,
@@ -3553,7 +3553,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/module is not defined|module\.exports|exports is not defined|commonjs|script format/.test(haystack)) {
     hypotheses.push({
-      summary: "Der reviewed Tool-Script-Pfad mischt ein CommonJS-Exportmuster in eine direkte Browser-Skriptausfuehrung, in der module nicht existiert.",
+      summary: "The reviewed tool-script path mixes a CommonJS export pattern into direct browser script execution, where module does not exist.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/craft-use-runner.js`,
@@ -3564,7 +3564,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/runtime\.callbuiltin is not a function|runtime\.respond is not a function|callbuiltin is not a function|respond is not a function/.test(haystack)) {
     hypotheses.push({
-      summary: "Die injizierte reviewed Tool-Runtime uebergibt dem gespeicherten Tool-Skript keinen passenden Runtime-Adapter mit callBuiltin oder respond.",
+      summary: "The injected reviewed tool runtime is not passing a compatible runtime adapter with callBuiltin or respond into the saved tool script.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/craft-use-runner.js`,
@@ -3575,7 +3575,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/memory access out of bounds|out of bounds/.test(haystack) && /browser_inspect|vision|local_qwen|qwen/.test(haystack)) {
     hypotheses.push({
-      summary: "Der lokale Qwen-Visionpfad verarbeitet Browser-Screenshots mit einem zu grossen Pixelbudget fuer den WebGPU-Plan.",
+      summary: "The local Qwen vision path is processing browser screenshots with a pixel budget that is too large for the WebGPU plan.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/ml-inference.js`,
@@ -3586,7 +3586,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/local_qwen|qwen|onnx|webgpu|ortrun|offscreen/.test(haystack)) {
     hypotheses.push({
-      summary: "Der lokale Qwen-Offscreen-Pfad bricht in der WebGPU-/ONNX-Ausfuehrung ab.",
+      summary: "The local Qwen offscreen path is failing during WebGPU/ONNX execution.",
       confidence: "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/ml-inference.js`,
@@ -3595,7 +3595,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
       ],
     });
     hypotheses.push({
-      summary: "Die lokale Qwen-Anfrage wird ueber den falschen Modell- oder Laufzeitpfad an die Offscreen-Runtime uebergeben.",
+      summary: "The local Qwen request is being routed to the offscreen runtime through the wrong model or runtime path.",
       confidence: "medium",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/llm.js`,
@@ -3605,7 +3605,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (/run_agentic_smoke|reviewed capability|active text|clipboard|focused editable/.test(haystack)) {
     hypotheses.push({
-      summary: "Der reviewed Capability-Pfad oder sein aktiver Textvertrag wird zwar gespeichert, aber im Smoke nicht stabil ausgefuehrt.",
+      summary: "The reviewed capability path or its active-text contract is saved, but it is not being executed reliably in the smoke run.",
       confidence: hypotheses.length ? "medium" : "high",
       evidence: [
         `${WORKSPACE_REPO_ROOT}/bg/crafting-agent-runner.js`,
@@ -3616,7 +3616,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   }
   if (!hypotheses.length) {
     hypotheses.push({
-      summary: "Der Blocker sitzt wahrscheinlich im lokalen Runner- oder Modellpfad der Extension und nicht in der Craft-UI selbst.",
+      summary: "The blocker is probably in the extension's local runner or model path, not in the craft UI itself.",
       confidence: "medium",
       evidence: uniqueTextList(
         (Array.isArray(selectedFiles) ? selectedFiles : []).map((entry) => entry?.path),
@@ -3627,7 +3627,7 @@ function buildWorkspaceRootCauseHypotheses(args = {}, selectedFiles = [], heuris
   return {
     hypotheses: hypotheses.slice(0, 4),
     bestHypothesis: hypotheses[0] || {
-      summary: "Der lokale Laufzeitpfad der Extension sollte zuerst technisch eingegrenzt werden.",
+      summary: "The extension's local runtime path should be narrowed down technically first.",
       confidence: "medium",
       evidence: heuristics?.suggestedExecutionPath || [],
     },
@@ -3649,7 +3649,7 @@ function buildWorkspacePatchTargets(selectedFiles = [], bestHypothesis = null) {
         (
           index === 0 && bestHypothesis?.summary
             ? bestHypothesis.summary
-            : `Relevant fuer ${asText(entry?.subsystem || "den betroffenen Laufzeitpfad")}.`
+            : `Relevant to ${asText(entry?.subsystem || "the affected runtime path")}.`
         ),
       confidence: index === 0 ? "high" : index < 3 ? "medium" : "low",
     }));
@@ -3776,8 +3776,8 @@ async function executeWorkspaceCodeDiveTool(run, args = {}) {
   return {
     ok: Boolean(selectedFiles.length),
     summary: selectedFiles.length
-      ? `Quellcode-Diagnose eingegrenzt: ${patchTargets.slice(0, 3).map((entry) => entry.path.split("/").slice(-2).join("/")).join(", ")}`
-      : "Quellcode-Diagnose konnte keine relevanten Dateien eingrenzen.",
+      ? `Source-code diagnosis narrowed down: ${patchTargets.slice(0, 3).map((entry) => entry.path.split("/").slice(-2).join("/")).join(", ")}`
+      : "Source-code diagnosis could not narrow down relevant files.",
     data: {
       query: {
         problem: asText(args.problem),
@@ -3797,11 +3797,11 @@ async function executeWorkspaceCodeDiveTool(run, args = {}) {
     },
     report: {
       currentState: selectedFiles.length
-        ? `Der Blocker wirkt wie ein konkreter Defekt im lokalen Extension-Codepfad. Die wichtigsten Dateien wurden fuer einen Patch eingegrenzt.`
-        : "Der Blocker laesst sich noch nicht sauber auf konkrete Extension-Dateien eingrenzen.",
+        ? "The blocker looks like a concrete defect in the local extension code path. The key files have been narrowed down for a patch."
+        : "The blocker cannot yet be narrowed down cleanly to specific extension files.",
       nextAction: selectedFiles.length
-        ? "Gib die Patch-Hinweise an einen Coding-Agenten weiter und pruefe danach denselben Smoke- oder Eval-Pfad erneut."
-        : "Ergaenze den Fehlerkontext oder wiederhole den Lauf mit mehr technischen Signalen, bevor du einen Coding-Agenten startest.",
+        ? "Hand the patch hints to a coding agent and then rerun the same smoke or eval path."
+        : "Add more error context or repeat the run with stronger technical signals before you start a coding agent.",
       matchingSignals: [
         ...suspectedSubsystems,
         ...patchTargets.slice(0, 2).map((entry) => entry.path),
@@ -3809,8 +3809,8 @@ async function executeWorkspaceCodeDiveTool(run, args = {}) {
     },
     provenance: selectedFiles.length
       ? [
-          {
-            title: "Quellcode-Diagnose eingegrenzt",
+        {
+            title: "Source-code diagnosis narrowed down",
             detail: trimText(
               patchTargets
                 .slice(0, 3)
@@ -3839,9 +3839,9 @@ function buildBrowserToolBootstrapResult(run, args = {}, toolLabel = "Browser to
     },
     report: {
       currentState:
-        "Kein aktiver HTTP(S)-Tab oder Ziel-URL verfuegbar. Fuer generische Auswahl-, Fokus- oder Zwischenablage-Flows kann der Agent trotzdem Seed-Zeilen entwerfen.",
+        "No active HTTP(S) tab or target URL is available. For generic selection, focus, or clipboard flows, the agent can still draft seed rows.",
       nextAction:
-        "Nutze jetzt draft_training_changes und leite portable Multi-Turn-Trainingszeilen aus dem generischen Active-Text-Tool-Contract ab.",
+        "Use draft_training_changes now and derive portable multi-turn training rows from the generic active-text tool contract.",
       matchingSignals: [
         "Portable contract: read_active_text_target -> replace_active_text_target",
         "Selection/focused-field/clipboard flow without extra free-text input",
@@ -4389,22 +4389,22 @@ function buildSelectionBootstrapTemplate(mode = "rewrite") {
       : "You are a browser-safe writing assistant.";
   const userText =
     safeMode === "translation"
-      ? "Bitte uebersetze den aktiven Text direkt und ersetze die Auswahl, das fokussierte Eingabefeld oder die Zwischenablage inplace."
+      ? "Translate the active text directly and replace the selection, focused field, or clipboard content in place."
       : safeMode === "correction"
-        ? "Bitte korrigiere den aktiven deutschen Text direkt und ersetze die Auswahl, das fokussierte Eingabefeld oder die Zwischenablage inplace."
-        : "Bitte ueberarbeite den aktiven Text direkt und ersetze die Auswahl, das fokussierte Eingabefeld oder die Zwischenablage inplace.";
+        ? "Correct the active German text directly and replace the selection, focused field, or clipboard content in place."
+        : "Revise the active text directly and replace the selection, focused field, or clipboard content in place.";
   const sourceText =
     safeMode === "translation"
       ? "This are two short sentence with a mistake."
       : safeMode === "correction"
-        ? "Das ist ein fehlerhafter satz."
-        : "Dieser Text kann klarer formuliert werden.";
+        ? "This is an sentence with a mistake."
+        : "This text can be phrased more clearly.";
   const targetText =
     safeMode === "translation"
-      ? "Dies sind zwei kurze Saetze mit einem Fehler."
+      ? "These are two short sentences with a mistake."
       : safeMode === "correction"
-        ? "Das ist ein fehlerhafter Satz."
-        : "Dieser Text laesst sich klarer formulieren.";
+        ? "This is a sentence with a mistake."
+        : "This text is phrased more clearly.";
   return {
     messages: [
       { role: "system", content: systemText },
@@ -4797,19 +4797,19 @@ async function ensurePreparedActiveTextValidationFixture(run, args = {}) {
   return cloneJson(run.browserValidationFixture, {});
 }
 
-function buildPreparedActiveTextValidationFixtureResult(run, toolLabel = "Agentischer Smoke", args = {}) {
+function buildPreparedActiveTextValidationFixtureResult(run, toolLabel = "Agentic smoke", args = {}) {
   const assessment = assessPreparedActiveTextValidationFixture(run, args);
   if (!assessment.required || assessment.ready) return null;
 
   const missingSignals = [
-    assessment.activeTabUrl ? "" : "kein aktiver HTTP(S)-Tab",
-    assessment.hasScenarioSetup || assessment.hasPreparedFixture ? "" : "kein vorbereitetes Eingabefeld oder keine markierte Teststelle",
-    assessment.hasVisibleVerification ? "" : "keine sichtbare Pruefung des Testzustands",
+    assessment.activeTabUrl ? "" : "no active HTTP(S) tab",
+    assessment.hasScenarioSetup || assessment.hasPreparedFixture ? "" : "no prepared input field or visible selection target",
+    assessment.hasVisibleVerification ? "" : "no visible validation of the test state",
   ].filter(Boolean);
 
   return {
     ok: false,
-    summary: `${asText(toolLabel) || "Der Testlauf"} wurde uebersprungen, weil fuer diese direkte Textkorrektur noch kein vorbereiteter Testfall im Browser vorliegt.`,
+    summary: `${asText(toolLabel) || "The validation run"} was skipped because no prepared browser test case exists yet for this direct text correction.`,
     error: "Missing prepared browser validation fixture.",
     errorDetail: {
       reason: "missing_prepared_browser_validation_fixture",
@@ -4820,9 +4820,9 @@ function buildPreparedActiveTextValidationFixtureResult(run, toolLabel = "Agenti
     },
     report: {
       currentState:
-        "Die direkte Textkorrektur wurde noch nicht gegen einen echten vorbereiteten Browserzustand geprueft.",
+        "The direct text correction has not been validated against a real prepared browser state yet.",
       nextAction:
-        "Oeffne oder aktiviere zuerst einen HTTP(S)-Tab. Richte dort mit browser_action oder playwright_ctx einen kurzen Testtext in einem Eingabefeld oder als sichtbare Auswahl ein, pruefe den Zustand mit browser_inspect und starte danach denselben Test erneut.",
+        "Open or activate an HTTP(S) tab first. Use browser_action or playwright_ctx to place a short test string into an input field or visible selection, confirm the state with browser_inspect, then rerun the same test.",
       matchingSignals: [
         assessment.activeTabUrl,
         ...missingSignals,
@@ -5341,8 +5341,8 @@ async function executeInspectTrainingDataTool(run) {
     },
     report: {
       currentState: meta.totalSamples
-        ? `${meta.totalSamples} lokale Trainingszeilen sind sichtbar, davon ${meta.readySamples} trainingsbereit.`
-        : "Noch keine lokalen Trainingszeilen vorhanden.",
+        ? `${meta.totalSamples} local training rows are visible, and ${meta.readySamples} are training-ready.`
+        : "No local training rows exist yet.",
     },
     provenance: [],
   };
@@ -6021,7 +6021,7 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
   if (!craftId) {
     return {
       ok: false,
-      summary: "Batch-Trainingsdaten konnten nicht erzeugt werden, weil keine Craft-ID verfuegbar ist.",
+      summary: "Batch training data could not be generated because no craft ID is available.",
       error: "Missing craftId.",
       errorDetail: {
         reason: "missing_craft_id",
@@ -6035,7 +6035,7 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
   if (!request.seedRecords.length) {
     return {
       ok: false,
-      summary: "Batch-Trainingsdaten konnten nicht erzeugt werden, weil keine belastbaren Seed-Daten vorlagen.",
+      summary: "Batch training data could not be generated because no reliable seed data was available.",
       error: "Missing seed records.",
       errorDetail: {
         reason: "missing_seed_records",
@@ -6053,13 +6053,13 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
   } catch (error) {
     return {
       ok: false,
-      summary: "Der lokale Batch-Generator fuer Trainingsdaten ist nicht erreichbar.",
+      summary: "The local training-batch generator is unavailable.",
       error: asText(error?.message || error) || "Local training bridge unavailable.",
       errorDetail: cloneStructuredErrorDetail(error && typeof error === "object" && "detail" in error ? error.detail : null),
       errorStack: readStructuredErrorStack(error),
       report: {
-        currentState: "Der lokale Batch-Generator konnte nicht erreicht werden.",
-        nextAction: "Starte den lokalen Bridge-Prozess oder pruefe, ob http://127.0.0.1:8765 verfuegbar ist.",
+        currentState: "The local batch generator could not be reached.",
+        nextAction: "Start the local bridge process or check whether http://127.0.0.1:8765 is available.",
       },
       provenance: [],
     };
@@ -6097,8 +6097,8 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
   return {
     ok: true,
     summary: mergeResult.addedCount
-      ? `Batch-Generator lieferte ${totalRows} Trainingszeilen; ${mergeResult.addedCount} wurden lokal uebernommen.`
-      : `Batch-Generator lieferte ${totalRows} Trainingszeilen, aber keine neue Zeile wurde zusaetzlich uebernommen.`,
+      ? `The batch generator produced ${totalRows} training rows; ${mergeResult.addedCount} were imported locally.`
+      : `The batch generator produced ${totalRows} training rows, but no additional new row was imported.`,
     data: {
       generatedRows: totalRows,
       importedRows: mergeResult.addedCount,
@@ -6116,11 +6116,11 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
     },
     report: {
       currentState: mergeResult.addedCount
-        ? `${mergeResult.addedCount} neue Trainingszeilen wurden ueber den lokalen Batch-Generator aus der bestehenden Evidenz erzeugt und gespeichert.`
-        : "Der lokale Batch-Generator hat keine neue unterscheidbare Trainingszeile geliefert.",
+        ? `${mergeResult.addedCount} new training rows were generated from existing evidence and saved via the local batch generator.`
+        : "The local batch generator did not produce a distinct new training row.",
       nextAction: mergeResult.addedCount
-        ? "Pruefe die aktualisierten Trainingsdaten oder starte danach einen Trainingslauf."
-        : "Wenn die Batch-Ausgabe zu nah am Bestand lag, verfeinere zuerst die reviewed Capabilities, Seeds oder das Objective.",
+        ? "Inspect the updated training data or start a training run next."
+        : "If the batch output stayed too close to the current data, refine the reviewed capabilities, seeds, or objective first.",
       matchingSignals: [
         `${totalRows} erzeugt`,
         `${mergeResult.addedCount} importiert`,
@@ -6129,7 +6129,7 @@ async function executeGenerateTrainingBatchTool(run, args = {}) {
     },
     provenance: normalizeProvenance([
       {
-        title: "Batch-Trainingsdaten erzeugt",
+        title: "Batch training data generated",
         detail: trimText(
           `${mergeResult.addedCount}/${totalRows || 0} neue Zeilen · ${request.jobKind} · ${request.seedRecords.length} Seeds`,
           220,
@@ -6173,14 +6173,14 @@ async function executeRequestCodexRepairTool(run, args = {}) {
   if (!asText(request.prompt)) {
     return {
       ok: false,
-      summary: "Der lokale Codex-Repair-Lauf konnte nicht gestartet werden, weil noch keine patchfaehige Workspace-Diagnose vorliegt.",
+      summary: "The local Codex repair run could not be started because no patchable workspace diagnosis exists yet.",
       error: "Missing coding handoff prompt.",
       errorDetail: {
         reason: "missing_coding_handoff_prompt",
       },
       report: {
-        currentState: "Es gibt noch keinen belastbaren Patch-Handoff fuer den lokalen Codex-Repair-Lauf.",
-        nextAction: "Führe zuerst workspace_code_dive aus oder liefere einen expliziten Patch-Prompt.",
+        currentState: "There is no reliable patch handoff for the local Codex repair run yet.",
+        nextAction: "Run workspace_code_dive first or provide an explicit patch prompt.",
       },
     };
   }
@@ -6195,13 +6195,13 @@ async function executeRequestCodexRepairTool(run, args = {}) {
   } catch (error) {
     return {
       ok: false,
-      summary: "Der lokale Codex-Repair-Service ist nicht erreichbar.",
+      summary: "The local Codex repair service is unreachable.",
       error: asText(error?.message || error) || "Local Codex repair bridge unavailable.",
       errorDetail: cloneStructuredErrorDetail(error && typeof error === "object" && "detail" in error ? error.detail : null),
       errorStack: readStructuredErrorStack(error),
       report: {
-        currentState: "Der lokale Codex-Repair-Service konnte nicht erreicht werden.",
-        nextAction: "Starte den Python-Repair-Service und pruefe danach erneut, ob der lokale Bridge-Pfad verfuegbar ist.",
+        currentState: "The local Codex repair service could not be reached.",
+        nextAction: "Start the Python repair service and then check again whether the local bridge path is available.",
       },
       provenance: [],
     };
@@ -6212,18 +6212,18 @@ async function executeRequestCodexRepairTool(run, args = {}) {
   return {
     ok: Boolean(jobId),
     summary: jobId
-      ? "Der lokale Codex-Repair-Lauf wurde gestartet."
-      : "Der lokale Codex-Repair-Lauf konnte nicht bestaetigt werden.",
+      ? "The local Codex repair run was started."
+      : "The local Codex repair run could not be confirmed.",
     data: {
       job: job ? cloneJson(job, null) : null,
     },
     report: {
       currentState: jobId
-        ? "Ein lokaler Codex-Repair-Lauf patcht jetzt den Workspace auf Basis der eingegrenzten Diagnose."
-        : "Der lokale Codex-Repair-Lauf hat keine gueltige Job-ID zurueckgegeben.",
+        ? "A local Codex repair run is now patching the workspace based on the narrowed diagnosis."
+        : "The local Codex repair run returned no valid job ID.",
       nextAction: jobId
-        ? "Frage den Job-Status ab und pruefe nach erfolgreichem Abschluss denselben Smoke- oder Eval-Pfad erneut."
-        : "Pruefe den lokalen Repair-Service und starte den Repair-Lauf danach erneut.",
+        ? "Query the job status and, after successful completion, rerun the same smoke or eval path."
+        : "Check the local repair service and then start the repair run again.",
       matchingSignals: [
         jobId ? `Repair-Job ${jobId}` : "",
         asText(job?.status),
@@ -6231,7 +6231,7 @@ async function executeRequestCodexRepairTool(run, args = {}) {
     },
     provenance: normalizeProvenance(jobId ? [
       {
-        title: "Lokalen Codex-Repair-Lauf gestartet",
+        title: "Started local Codex repair run",
         detail: trimText(`${jobId} · ${asText(job?.status || "queued")} · ${asText(job?.cwd)}`, 220),
         kind: "operation",
       },
@@ -6246,14 +6246,14 @@ async function executeGetCodexRepairStatusTool(run, args = {}) {
   if (!jobId) {
     return {
       ok: false,
-      summary: "Der lokale Codex-Repair-Status konnte nicht abgefragt werden, weil noch keine Job-ID bekannt ist.",
+      summary: "The local Codex repair status could not be queried because no job ID is known yet.",
       error: "Missing Codex repair job id.",
       errorDetail: {
         reason: "missing_codex_repair_job_id",
       },
       report: {
-        currentState: "Es ist noch kein lokaler Codex-Repair-Job registriert.",
-        nextAction: "Starte zuerst request_codex_repair oder gib eine explizite Job-ID an.",
+        currentState: "No local Codex repair job is registered yet.",
+        nextAction: "Start request_codex_repair first or provide an explicit job ID.",
       },
     };
   }
@@ -6273,32 +6273,32 @@ async function executeGetCodexRepairStatusTool(run, args = {}) {
       if (/timed out/i.test(errorMessage)) {
         return {
           ok: true,
-          summary: "Der lokale Codex-Repair-Lauf laeuft noch.",
+          summary: "The local Codex repair run is still running.",
           data: {
             job: {
               jobId,
               status: "running",
-              summary: "Die lokale Statusabfrage antwortet gerade nicht; der Repair-Lauf wird beim naechsten Poll erneut geprueft.",
+              summary: "The local status query is not responding right now; the repair run will be checked again on the next poll.",
             },
           },
           report: {
             currentState:
-              "Die lokale Statusabfrage antwortet gerade nicht. Der Codex-Repair-Lauf wird vorlaeufig als laufend behandelt.",
+              "The local status query is not responding right now. The Codex repair run is being treated as still running for now.",
             nextAction:
-              "Warte auf den naechsten Status-Poll; danach wird derselbe Laufzeitpfad automatisch fortgesetzt oder sauber als fehlgeschlagen markiert.",
+              "Wait for the next status poll; afterward the same runtime path will automatically continue or be marked cleanly as failed.",
             matchingSignals: [jobId, "Statusabfrage-Timeout"],
           },
         };
       }
       return {
         ok: false,
-        summary: "Der lokale Codex-Repair-Status konnte nicht gelesen werden.",
+        summary: "The local Codex repair status could not be read.",
         error: asText(error?.message || error) || "Local Codex repair status unavailable.",
         errorDetail: cloneStructuredErrorDetail(error && typeof error === "object" && "detail" in error ? error.detail : null),
         errorStack: readStructuredErrorStack(error),
         report: {
-          currentState: "Der lokale Codex-Repair-Service antwortet nicht auf die Statusabfrage.",
-          nextAction: "Pruefe den Repair-Service oder starte den Job danach erneut.",
+          currentState: "The local Codex repair service is not responding to the status query.",
+          nextAction: "Check the repair service or restart the job afterward.",
         },
       };
     }
@@ -6310,24 +6310,24 @@ async function executeGetCodexRepairStatusTool(run, args = {}) {
       return {
         ok: !failed,
         summary: completed
-          ? "Der lokale Codex-Repair-Lauf ist abgeschlossen."
+          ? "The local Codex repair run is complete."
           : failed
-            ? "Der lokale Codex-Repair-Lauf ist fehlgeschlagen."
-            : "Der lokale Codex-Repair-Lauf laeuft noch.",
+            ? "The local Codex repair run failed."
+            : "The local Codex repair run is still running.",
         data: {
           job: job ? cloneJson(job, null) : null,
         },
         report: {
           currentState: completed
-            ? "Der lokale Codex-Repair-Lauf hat den Workspace aktualisiert."
+            ? "The local Codex repair run updated the workspace."
             : failed
-              ? "Der lokale Codex-Repair-Lauf ist mit einem Fehler beendet worden."
-              : "Der lokale Codex-Repair-Lauf arbeitet noch am Workspace-Patch.",
+              ? "The local Codex repair run ended with an error."
+              : "The local Codex repair run is still working on the workspace patch.",
           nextAction: completed
-            ? "Lade das aktualisierte Artefakt neu und pruefe danach denselben Smoke- oder Eval-Pfad erneut."
+            ? "Reload the updated artifact and then rerun the same smoke or eval path."
             : failed
-              ? "Pruefe die Rueckmeldung des Repair-Laufs und entscheide dann, ob ein neuer Repair-Versuch oder ein manueller Patch noetig ist."
-              : "Warte weiter auf den Job oder poll den Status spaeter erneut.",
+              ? "Review the repair-run feedback and then decide whether another repair attempt or a manual patch is needed."
+              : "Keep waiting for the job or poll the status again later.",
           matchingSignals: [
             jobId,
             asText(job?.status),
@@ -6336,7 +6336,7 @@ async function executeGetCodexRepairStatusTool(run, args = {}) {
         },
         provenance: normalizeProvenance(completed ? [
           {
-            title: "Lokaler Codex-Repair-Lauf abgeschlossen",
+            title: "Local Codex repair run completed",
             detail: trimText(`${jobId} · ${asText(job?.status)} · ${asText(job?.summary || job?.lastMessage)}`, 220),
             kind: "operation",
           },
@@ -6398,12 +6398,12 @@ async function maybeRunAutomaticCodexRepair(run, finalOutput = null, effectiveSt
       nextStatus: "continue",
       reportOverride: {
         currentState:
-          "Der lokale Codex-Repair-Lauf arbeitet noch am Workspace-Patch.",
+          "The local Codex repair run is still working on the workspace patch.",
         nextAction:
-          "Warte weiter auf den Job oder poll den Status spaeter erneut.",
+          "Keep waiting for the job or poll the status again later.",
       },
       responseText:
-        "Der lokale Codex-Repair-Lauf arbeitet noch am Workspace-Patch.",
+        "The local Codex repair run is still working on the workspace patch.",
     };
   }
   const lastFailureReason = asText(run?.lastToolFailure?.errorDetail?.reason).toLowerCase();
@@ -6456,10 +6456,10 @@ async function maybeRunAutomaticCodexRepair(run, finalOutput = null, effectiveSt
       reportOverride: {
         currentState:
           asText(requestResult?.report?.currentState) ||
-          "Der lokale Codex-Repair-Lauf konnte nicht gestartet werden.",
+          "The local Codex repair run could not be started.",
         nextAction:
           asText(requestResult?.report?.nextAction) ||
-          "Pruefe den Python-Repair-Service und starte den Repair-Lauf danach erneut.",
+          "Check the Python repair service and then start the repair run again.",
       },
       responseText: asText(requestResult?.summary || requestResult?.error),
     };
@@ -6500,9 +6500,9 @@ async function maybeRunAutomaticCodexRepair(run, finalOutput = null, effectiveSt
       requestExtensionReload: true,
       reportOverride: {
         currentState:
-          "Der lokale Codex-Repair-Lauf hat den Workspace aktualisiert. Der Agent prueft jetzt denselben Laufzeitpfad erneut.",
+          "The local Codex repair run updated the workspace. The agent now checks the same runtime path again.",
         nextAction:
-          "Fuehre denselben Smoke-, Eval- oder Speicherpfad jetzt im selben Run erneut aus.",
+          "Run the same smoke, eval, or storage path again now in the same run.",
       },
       responseText: asText(statusJob?.summary || statusJob?.lastMessage || statusResult?.summary),
     };
@@ -6513,9 +6513,9 @@ async function maybeRunAutomaticCodexRepair(run, finalOutput = null, effectiveSt
       nextStatus: "continue",
       reportOverride: {
         currentState:
-          "Ein lokaler Codex-Repair-Lauf patcht gerade den Workspace. Nach Abschluss setzt der Agent denselben Validierungspfad fort.",
+          "A local Codex repair run is patching the workspace right now. After it completes, the agent will continue the same validation path.",
         nextAction:
-          "Warte auf den Repair-Abschluss; danach wird derselbe Smoke-, Eval- oder Speicherpfad erneut gestartet.",
+          "Wait for repair completion; afterward the same smoke, eval, or storage path will be started again.",
       },
       responseText: asText(statusJob?.summary || statusJob?.lastMessage || statusResult?.summary),
     };
@@ -6527,10 +6527,10 @@ async function maybeRunAutomaticCodexRepair(run, finalOutput = null, effectiveSt
     reportOverride: {
       currentState:
         asText(statusResult?.report?.currentState) ||
-        "Der lokale Codex-Repair-Lauf ist fehlgeschlagen.",
+        "The local Codex repair run failed.",
       nextAction:
         asText(statusResult?.report?.nextAction) ||
-        "Pruefe die Rueckmeldung des Repair-Laufs und entscheide dann, ob ein weiterer Repair-Versuch oder ein manueller Patch noetig ist.",
+        "Review the repair-run feedback and then decide whether another repair attempt or a manual patch is needed.",
     },
     responseText: asText(statusJob?.summary || statusJob?.lastMessage || statusResult?.summary || statusResult?.error),
   };
@@ -6562,8 +6562,8 @@ async function maybeAdvancePendingCodexRepair(run) {
     clearPendingCodexRepair(run);
     run.workspaceCodeDive = null;
     setRunReport(run, run.report, {
-      currentState: "Der lokale Codex-Repair-Lauf ist abgeschlossen. Der Agent prueft nun denselben Laufzeitpfad erneut.",
-      nextAction: "Fuehre denselben Smoke-, Eval- oder Speicherpfad jetzt erneut aus.",
+      currentState: "The local Codex repair run is complete. The agent is now checking the same runtime path again.",
+      nextAction: "Run the same smoke, eval, or storage path again now.",
     });
     run.responseText = asText(job?.summary || job?.lastMessage || statusResult?.summary || run.responseText);
     return { pending: false, completed: true };
@@ -6574,7 +6574,7 @@ async function maybeAdvancePendingCodexRepair(run) {
     const message =
       asText(statusResult?.report?.currentState) ||
       asText(statusResult?.summary || statusResult?.error) ||
-      "Der lokale Codex-Repair-Lauf ist fehlgeschlagen.";
+      "The local Codex repair run failed.";
     run.status = "blocked";
     run.phase = "blocked";
     run.finalStatus = "blocked";
@@ -6585,7 +6585,7 @@ async function maybeAdvancePendingCodexRepair(run) {
       currentState: message,
       nextAction:
         asText(statusResult?.report?.nextAction) ||
-        "Pruefe die Rueckmeldung des Repair-Laufs und entscheide dann, ob ein manueller Patch oder ein neuer Repair-Versuch noetig ist.",
+        "Review the repair-run feedback and then decide whether a manual patch or a new repair attempt is needed.",
     });
     pushRunLog(run, "error", message);
     return { pending: false, blocked: true };
@@ -6593,9 +6593,9 @@ async function maybeAdvancePendingCodexRepair(run) {
 
   setRunReport(run, run.report, {
     currentState:
-      "Ein lokaler Codex-Repair-Lauf patcht weiter den Workspace. Der Agent wartet auf den Abschluss.",
+      "A local Codex repair run continues patching the workspace. The agent is waiting for completion.",
     nextAction:
-      "Warte auf den Repair-Abschluss; danach setzt derselbe Run den Smoke-, Eval- oder Speicherpfad fort.",
+      "Wait for repair completion; afterward the same run will continue the smoke, eval, or storage path.",
   });
   run.responseText = asText(job?.summary || job?.lastMessage || statusResult?.summary || run.responseText);
   return { pending: true, waiting: true };
@@ -6632,8 +6632,8 @@ async function scheduleExtensionReloadForAutoRepair(run, state = null) {
   run.completedAt = "";
   run.error = "";
   setRunReport(run, run.report, {
-    currentState: "Die Extension wird nach dem lokalen Codex-Repair neu geladen.",
-    nextAction: "Nach dem Reload setzt derselbe Agent-Run den vorherigen Validierungspfad automatisch fort.",
+    currentState: "The extension is being reloaded after the local Codex repair.",
+    nextAction: "After reload, the same agent run will automatically continue the previous validation path.",
   });
   emitDevObservabilityEvent(run, "extension_reload_requested", {
     run: buildRunObservabilitySnapshot(run),
@@ -6670,10 +6670,10 @@ export async function resumePendingCraftingReloadRuns() {
       run.pendingApprovalCallId = "";
       run.pendingUserAnswersByCallId = {};
       setRunReport(run, run.report, {
-        currentState: "Die neu geladene Extension setzt den Agent-Run nach dem lokalen Codex-Repair fort.",
-        nextAction: "Der vorherige Smoke-, Eval- oder Speicherpfad wird jetzt erneut ausgefuehrt.",
+        currentState: "The reloaded extension is resuming the agent run after the local Codex repair.",
+        nextAction: "The previous smoke, eval, or save path is now being executed again.",
       });
-      pushRunLog(run, "info", "Extension-Reload erkannt. Derselbe Agent-Run wird jetzt automatisch fortgesetzt.");
+      pushRunLog(run, "info", "Extension reload detected. The same agent run is now resuming automatically.");
       emitDevObservabilityEvent(run, "extension_reload_resumed", {
         run: buildRunObservabilitySnapshot(run),
         reason: asText(reloadResume.reason),
@@ -6845,8 +6845,8 @@ async function executeWebSearchTool(run, args = {}, executionOptions = {}) {
         text: providerSearch.text || "",
       },
       report: {
-        currentState: `Die Websuche hat ${results.length} oeffentliche Kandidatenquellen fuer den Craft gefunden.`,
-        nextAction: "Nutze browser_tabs zum Oeffnen des besten Kandidaten oder gehe direkt zu browser_inspect/browser_action, wenn die Quelle schon klar ist.",
+        currentState: `Web search found ${results.length} public candidate sources for the craft.`,
+        nextAction: "Use browser_tabs to open the best candidate, or go directly to browser_inspect/browser_action if the source is already clear.",
         matchingSignals: results.slice(0, 3).map((entry) => `${entry.title} · ${entry.url}`),
       },
       provenance: buildResearchMilestoneProvenance(query, results),
@@ -6896,8 +6896,8 @@ async function executeWebSearchTool(run, args = {}, executionOptions = {}) {
       backend: "duckduckgo_html",
     },
     report: {
-      currentState: `Die Websuche hat ${results.length} oeffentliche Kandidatenquellen fuer den Craft gefunden.`,
-      nextAction: "Nutze browser_tabs zum Oeffnen des besten Kandidaten oder gehe direkt zu browser_inspect/browser_action, wenn die Quelle schon klar ist.",
+      currentState: `Web search found ${results.length} public candidate sources for the craft.`,
+      nextAction: "Use browser_tabs to open the best candidate, or go directly to browser_inspect/browser_action if the source is already clear.",
       matchingSignals: results.slice(0, 3).map((entry) => `${entry.title} · ${entry.url}`),
     },
     provenance: buildResearchMilestoneProvenance(query, results),
@@ -6968,12 +6968,12 @@ async function executeBrowserInspectTool(run, args = {}, executionOptions = {}) 
     report: {
       currentState:
         result?.ok !== false
-          ? `Browser-Inspect hat ${uiTargets.length} sichtbare UI-Ziele identifiziert.`
-          : "Browser-Inspect konnte den sichtbaren Zustand nicht sicher lesen.",
+          ? `Browser inspect identified ${uiTargets.length} visible UI targets.`
+          : "Browser inspect could not read the visible state reliably.",
       nextAction:
         result?.ok !== false
-          ? "Fuehre browser_action nur fuer einen klar begruendeten sichtbaren Schritt aus oder nutze playwright_ctx fuer deterministische DOM-Arbeit."
-          : "Pruefe Tab-Kontext, Ziel-URL oder wechsle auf browser_tabs, bevor du weitere Browser-Schritte planst.",
+          ? "Use browser_action only for a clearly justified visible step or use playwright_ctx for deterministic DOM work."
+          : "Check tab context, target URL, or switch to browser_tabs before planning more browser steps.",
       matchingSignals: [
         ...uiTargets.slice(0, 2).map((entry) => trimText([entry.text, entry.role, entry.selector_hint].filter(Boolean).join(" · "), 160)),
         ...blockers.slice(0, 1).map((entry) => trimText(entry, 160)),
@@ -7053,12 +7053,12 @@ async function executeBrowserActionTool(run, args = {}, executionOptions = {}) {
     report: {
       currentState:
         result?.ok !== false
-          ? `Browser-Action ${asText(args.action || result?.data?.action || "step")} wurde im aktiven Tab ausgefuehrt.`
-          : "Browser-Action ist fehlgeschlagen.",
+          ? `Browser action ${asText(args.action || result?.data?.action || "step")} was executed in the active tab.`
+          : "Browser action failed.",
       nextAction:
         result?.ok !== false
-          ? "Wenn der sichtbare Zustand sich geaendert hat, nutze browser_inspect erneut oder wechsle auf playwright_ctx fuer deterministische Folgeschritte."
-          : "Nutze browser_inspect, um den sichtbaren Zustand vor dem naechsten Klick- oder Eingabeschritt neu zu lesen.",
+          ? "If the visible state changed, run browser_inspect again or switch to playwright_ctx for deterministic follow-up steps."
+          : "Use browser_inspect to reread the visible state before the next click or input step.",
       matchingSignals: [
         trimText(asText(result?.data?.title || result?.data?.url), 180),
       ].filter(Boolean),
@@ -7094,8 +7094,8 @@ async function executeBrowserTabsTool(run, args = {}) {
           currentTabId: Number(runtime.currentTabId || 0) || null,
         },
         report: {
-          currentState: `${tabs.length} HTTP(S)-Tabs sind verfuegbar.`,
-          nextAction: "Aktiviere den passenden Tab oder oeffne eine Ziel-URL, bevor du browser_inspect oder browser_action verwendest.",
+          currentState: `${tabs.length} HTTP(S) tabs are available.`,
+          nextAction: "Activate the correct tab or open a target URL before using browser_inspect or browser_action.",
           matchingSignals: tabs.slice(0, 3).map((entry) => trimText([entry.title, entry.url].filter(Boolean).join(" · "), 180)),
         },
         provenance: [],
@@ -7113,8 +7113,8 @@ async function executeBrowserTabsTool(run, args = {}) {
               tab: currentTab,
             },
             report: {
-              currentState: "Ein aktueller HTTP(S)-Tab ist verfuegbar.",
-              nextAction: "Nutze browser_inspect, browser_action oder playwright_ctx auf diesem Tab.",
+              currentState: "A current HTTP(S) tab is available.",
+              nextAction: "Use browser_inspect, browser_action, or playwright_ctx on this tab.",
               matchingSignals: [trimText([currentTab.title, currentTab.url].filter(Boolean).join(" · "), 180)],
             },
             provenance: [],
@@ -7180,9 +7180,9 @@ async function executeBrowserTabsTool(run, args = {}) {
         },
         report: {
           currentState: context
-            ? "Ein Browser-Tab wurde geoeffnet."
-            : "Ein Browser-Tab wurde geoeffnet. Lies den sichtbaren Zustand als Naechstes direkt aus.",
-          nextAction: "Nutze browser_inspect, um den sichtbaren Zustand dieses Tabs zu lesen.",
+            ? "A browser tab was opened."
+            : "A browser tab was opened. Read the visible state next.",
+          nextAction: "Use browser_inspect to read the visible state of this tab.",
           matchingSignals: context
             ? [trimText([context.title, context.url].filter(Boolean).join(" · "), 180)]
             : [trimText(url, 180)],
@@ -7237,8 +7237,8 @@ async function executeBrowserTabsTool(run, args = {}) {
           contextResolved: !!context,
         },
         report: {
-          currentState: context ? "Der Ziel-Tab ist jetzt aktiv." : "Der Ziel-Tab wurde aktiviert.",
-          nextAction: "Nutze browser_inspect oder browser_action auf diesem Tab.",
+          currentState: context ? "The target tab is now active." : "The target tab was activated.",
+          nextAction: "Use browser_inspect or browser_action on this tab.",
           matchingSignals: context ? [trimText([context.title, context.url].filter(Boolean).join(" · "), 180)] : [],
         },
         provenance: [],
@@ -7273,10 +7273,10 @@ async function executeBrowserTabsTool(run, args = {}) {
           currentTab,
         },
         report: {
-          currentState: `Tab ${tabId} wurde geschlossen.`,
+          currentState: `Tab ${tabId} was closed.`,
           nextAction: currentTab
-            ? "Nutze den verbleibenden aktuellen Tab weiter oder oeffne einen neuen Tab."
-            : "Es ist kein aktueller HTTP(S)-Tab mehr verfuegbar. Oeffne einen neuen Tab oder arbeite mit generischem Bootstrap weiter.",
+            ? "Continue using the remaining current tab or open a new tab."
+            : "No current HTTP(S) tab is available anymore. Open a new tab or continue with generic bootstrap work.",
           matchingSignals: currentTab ? [trimText([currentTab.title, currentTab.url].filter(Boolean).join(" · "), 180)] : [],
         },
         provenance: [],
@@ -7363,12 +7363,12 @@ async function executePlaywrightCtxTool(run, args = {}, executionOptions = {}) {
     report: {
       currentState:
         result?.ok !== false
-          ? "Playwright-CTX wurde im aktuellen Tab ausgefuehrt."
-          : "Playwright-CTX ist fehlgeschlagen.",
+          ? "Playwright CTX was executed in the current tab."
+          : "Playwright CTX failed.",
       nextAction:
         result?.ok !== false
-          ? "Nutze browser_inspect fuer eine sichtbare Verifikation oder leite direkt Trainingsdaten aus dem strukturierten Ergebnis ab."
-          : "Pruefe den Tab-Kontext oder vereinfache den Code vor dem naechsten Playwright-CTX-Lauf.",
+          ? "Use browser_inspect for visible verification or derive training data directly from the structured result."
+          : "Check tab context or simplify the code before the next Playwright CTX run.",
       matchingSignals: [
         trimText(asText(result?.data?.raw_preview || result?.data?.title || result?.data?.url), 180),
       ].filter(Boolean),
@@ -7445,15 +7445,15 @@ async function executeInspectBundleSnapshotTool(run) {
   const summary = bundle?.summary && typeof bundle.summary === "object" ? bundle.summary : {};
   return {
     ok: true,
-    summary: `Bundle-Snapshot geladen: ${Number(summary.sampleCount || 0)} Samples, ${Number(summary.toolScriptCount || 0)} Tool-Skripte, ${Number(summary.browserCapabilityCount || 0)} Browser-Funktionen.`,
+    summary: `Bundle snapshot loaded: ${Number(summary.sampleCount || 0)} samples, ${Number(summary.toolScriptCount || 0)} tool scripts, ${Number(summary.browserCapabilityCount || 0)} browser functions.`,
     data: summarizeBundleSnapshotData(bundle),
     report: {
-      currentState: `Bundle-Snapshot geladen: ${Number(summary.toolScriptCount || 0)} Tool-Skripte und ${Number(summary.browserCapabilityCount || 0)} Browser-Funktionen sind lokal verfuegbar.`,
-      nextAction: "Speichere Tool-Skripte oder Browser-Funktionen, bevor du den agentischen Smoke startest.",
+      currentState: `Bundle snapshot loaded: ${Number(summary.toolScriptCount || 0)} tool scripts and ${Number(summary.browserCapabilityCount || 0)} browser functions are locally available.`,
+      nextAction: "Save tool scripts or browser functions before starting the agentic smoke.",
       matchingSignals: [
-        `${Number(summary.sampleCount || 0)} Trainings-Samples`,
-        `${Number(summary.toolScriptCount || 0)} Tool-Skripte`,
-        `${Number(summary.browserCapabilityCount || 0)} Browser-Funktionen`,
+        `${Number(summary.sampleCount || 0)} training samples`,
+        `${Number(summary.toolScriptCount || 0)} tool scripts`,
+        `${Number(summary.browserCapabilityCount || 0)} browser functions`,
       ],
     },
     provenance: [],
@@ -7465,7 +7465,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
   if (!craftId) {
     return {
       ok: false,
-      summary: "Tool-Skripte konnten nicht gespeichert werden, weil keine Craft-ID verfuegbar ist.",
+      summary: "Tool scripts could not be saved because no craft ID is available.",
       error: "Missing craftId.",
       errorDetail: {
         reason: "missing_craft_id",
@@ -7475,7 +7475,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
   if (!craftSync?.putLocalArtifact) {
     return {
       ok: false,
-      summary: "Tool-Skripte konnten nicht gespeichert werden, weil der lokale Artifact-Store nicht verfuegbar ist.",
+      summary: "Tool scripts could not be saved because the local artifact store is unavailable.",
       error: "Local artifact store unavailable.",
       errorDetail: {
         reason: "local_artifact_store_unavailable",
@@ -7542,7 +7542,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
       if (!compiledBrowserCapabilitiesPayload.ok) {
         browserRuntimeStatus =
           compiledBrowserCapabilitiesPayload.error ||
-          "Browser-Funktionspaket konnte nicht neu veroeffentlicht werden.";
+          "Browser function package could not be republished.";
       } else {
         await craftSync.putLocalArtifact({
           id: getBrowserCapabilityBundleArtifactId(craftId),
@@ -7564,7 +7564,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
 
     return {
       ok: true,
-      summary: `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} Tool-Skripte lokal gespeichert.`,
+      summary: `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} tool scripts saved locally.`,
       data: {
         artifactId: asText(record?.id) || getToolScriptsArtifactId(craftId),
         payload,
@@ -7573,11 +7573,11 @@ async function executeSaveToolScriptsTool(run, args = {}) {
       },
       report: {
         currentState: browserRuntimeRepublished
-          ? `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} Tool-Skripte sind gespeichert und das Browser-Funktionspaket wurde neu veroeffentlicht.`
-          : `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} Tool-Skripte sind jetzt lokal gespeichert.`,
+          ? `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} tool scripts are saved and the browser function package was republished.`
+          : `${Array.isArray(payload?.scripts) ? payload.scripts.length : 0} tool scripts are now saved locally.`,
         nextAction: browserRuntimeStatus
-          ? "Pruefe und speichere als Naechstes die Browser-Funktionen erneut, damit das Runtime-Paket wieder gueltig ist."
-          : "Speichere als Naechstes die Browser-Funktionen oder starte direkt den agentischen Smoke.",
+          ? "Review and save the browser functions again next so the runtime package becomes valid again."
+          : "Save the browser functions next or start the agentic smoke directly.",
         matchingSignals: (Array.isArray(payload?.scripts) ? payload.scripts : [])
           .slice(0, 3)
           .map((entry) => asText(entry?.name))
@@ -7585,7 +7585,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
       },
       provenance: [
         {
-          title: "Tool-Skripte gespeichert",
+          title: "Tool scripts saved",
           detail: trimText(
             (Array.isArray(payload?.scripts) ? payload.scripts : [])
               .slice(0, 3)
@@ -7598,7 +7598,7 @@ async function executeSaveToolScriptsTool(run, args = {}) {
         },
         browserRuntimeStatus
           ? {
-              title: "Browser-Funktionspaket nicht republished",
+              title: "Browser function package not republished",
               detail: trimText(browserRuntimeStatus, 240),
               kind: "constraint",
             }
@@ -7613,7 +7613,7 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
   if (!craftId) {
     return {
       ok: false,
-      summary: "Browser-Funktionen konnten nicht gespeichert werden, weil keine Craft-ID verfuegbar ist.",
+      summary: "Browser functions could not be saved because no craft ID is available.",
       error: "Missing craftId.",
       errorDetail: {
         reason: "missing_craft_id",
@@ -7623,7 +7623,7 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
   if (!craftSync?.putLocalArtifact) {
     return {
       ok: false,
-      summary: "Browser-Funktionen konnten nicht gespeichert werden, weil der lokale Artifact-Store nicht verfuegbar ist.",
+      summary: "Browser functions could not be saved because the local artifact store is unavailable.",
       error: "Local artifact store unavailable.",
       errorDetail: {
         reason: "local_artifact_store_unavailable",
@@ -7675,7 +7675,7 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
 
     return {
       ok: true,
-      summary: `${Array.isArray(payload?.capabilities) ? payload.capabilities.length : 0} gepruefte Browser-Funktionen lokal gespeichert.`,
+      summary: `${Array.isArray(payload?.capabilities) ? payload.capabilities.length : 0} reviewed browser functions saved locally.`,
       data: {
         artifactId: asText(record?.id) || getBrowserCapabilityBundleArtifactId(craftId),
         payload,
@@ -7683,15 +7683,15 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
         updatedAt: asText(record?.updatedAt),
       },
       report: {
-        currentState: `${Array.isArray(payload?.capabilities) ? payload.capabilities.length : 0} Browser-Funktionen stehen jetzt im lokalen Bundle bereit.`,
+        currentState: `${Array.isArray(payload?.capabilities) ? payload.capabilities.length : 0} browser functions are now available in the local bundle.`,
         nextAction: requiresPreparedActiveTextValidationFixture(run, {
           objective: (Array.isArray(payload?.capabilities) ? payload.capabilities : [])
             .map((entry) => asText(entry?.name || entry?.description || entry?.toolName))
             .filter(Boolean)
             .join(" "),
         })
-          ? "Richte jetzt zuerst in einem HTTP(S)-Tab einen kurzen Testtext als Auswahl oder in einem Eingabefeld ein, pruefe den sichtbaren Zustand mit browser_inspect und starte danach run_agentic_smoke."
-          : "Pruefe den Tab Browser Functions oder starte run_agentic_smoke, um den Runtime-Pfad zu testen.",
+          ? "First set up a short test text as a selection or in an input field in an HTTP(S) tab, inspect the visible state with browser_inspect, and then start run_agentic_smoke."
+          : "Inspect the Browser Functions tab or start run_agentic_smoke to test the runtime path.",
         matchingSignals: (Array.isArray(payload?.capabilities) ? payload.capabilities : [])
           .slice(0, 3)
           .map((entry) => asText(entry?.name || entry?.id))
@@ -7699,7 +7699,7 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
       },
       provenance: [
         {
-          title: "Browser-Funktionen gespeichert",
+          title: "Browser functions saved",
           detail: trimText(
             (Array.isArray(payload?.capabilities) ? payload.capabilities : [])
               .slice(0, 3)
@@ -7717,12 +7717,12 @@ async function executeSaveBrowserCapabilitiesTool(run, args = {}) {
 
 async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {}) {
   const signal = executionOptions?.signal || null;
-  pushRunLog(run, "info", "Agentischer Smoke wartet auf offene Artefakt-Schreibvorgaenge.");
+  pushRunLog(run, "info", "Agentic smoke is waiting for open artifact writes.");
   updateSmokeDebug("run_agentic_smoke:wait_artifacts:start", {
     craftId: asText(run?.craftId || run?.craft?.id),
   });
   await waitForCraftArtifactWrites(run?.craftId || run?.craft?.id);
-  pushRunLog(run, "info", "Agentischer Smoke hat die Artefakt-Barriere passiert.");
+  pushRunLog(run, "info", "Agentic smoke passed the artifact barrier.");
   updateSmokeDebug("run_agentic_smoke:wait_artifacts:done", {
     craftId: asText(run?.craftId || run?.craft?.id),
   });
@@ -7730,30 +7730,30 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
   if (!prompt) {
     return {
       ok: false,
-      summary: "Agentischer Smoke wurde uebersprungen, weil kein Prompt vorlag.",
+      summary: "Agentic smoke was skipped because no prompt was provided.",
       error: "Missing smoke prompt.",
       errorDetail: {
         reason: "missing_smoke_prompt",
       },
     };
   }
-  pushRunLog(run, "info", "Agentischer Smoke bereitet den Active-Text-Testzustand vor.");
+  pushRunLog(run, "info", "Agentic smoke is preparing the active-text validation fixture.");
   updateSmokeDebug("run_agentic_smoke:prepare_fixture:start", {
     craftId: asText(run?.craftId || run?.craft?.id),
   });
   await ensurePreparedActiveTextValidationFixture(run, args).catch(() => null);
-  pushRunLog(run, "info", "Agentischer Smoke hat den Active-Text-Testzustand vorbereitet.");
+  pushRunLog(run, "info", "Agentic smoke prepared the active-text validation fixture.");
   updateSmokeDebug("run_agentic_smoke:prepare_fixture:done", {
     fixturePrepared: run?.browserValidationFixture?.prepared === true,
     tabId: Number(run?.browserValidationFixture?.tabId || 0),
     activeTabUrl: asText(run?.browserValidationFixture?.activeTabUrl),
   });
-  const validationFixture = buildPreparedActiveTextValidationFixtureResult(run, "Agentischer Smoke", args);
+  const validationFixture = buildPreparedActiveTextValidationFixtureResult(run, "Agentic Smoke", args);
   if (validationFixture) {
     return validationFixture;
   }
 
-  pushRunLog(run, "info", "Agentischer Smoke startet jetzt runCraftUse ueber den reviewed Runtime-Pfad.");
+  pushRunLog(run, "info", "Agentic smoke is now starting runCraftUse through the reviewed runtime path.");
   updateSmokeDebug("run_agentic_smoke:capability_eval:start", {
     craftId: asText(run?.craftId || run?.craft?.id),
   });
@@ -7774,12 +7774,12 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
   if (failed) {
     const errorText =
       describeLocalQwenRuntimeFailure(
-        asText(evaluation.error) || "Agentischer Smoke ist im reviewed Runtime-Pfad fehlgeschlagen.",
+        asText(evaluation.error) || "Agentic smoke failed on the reviewed runtime path.",
         evaluation.errorDetail,
-      ) || "Agentischer Smoke ist im reviewed Runtime-Pfad fehlgeschlagen.";
+      ) || "Agentic smoke failed on the reviewed runtime path.";
     return {
       ok: false,
-      summary: `Agentischer Smoke fehlgeschlagen: ${trimText(errorText, 220)}`,
+      summary: `Agentic smoke failed: ${trimText(errorText, 220)}`,
       error: errorText,
       errorDetail: evaluation.errorDetail && typeof evaluation.errorDetail === "object"
         ? cloneJson(evaluation.errorDetail, null)
@@ -7795,8 +7795,8 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
         underlyingFailingTool: asText(evaluation.underlyingFailingTool),
       },
       report: {
-        currentState: `Der agentische Smoke ist im reviewed Runtime-Pfad fehlgeschlagen: ${trimText(errorText, 220)}`,
-        nextAction: "Behebe zuerst den betroffenen reviewed Tool- oder Skriptpfad und starte danach denselben Smoke erneut.",
+        currentState: `Agentic smoke failed on the reviewed runtime path: ${trimText(errorText, 220)}`,
+        nextAction: "Fix the affected reviewed tool or script path first and then restart the same smoke.",
         matchingSignals: [
           asText(evaluation.underlyingFailingTool),
           trimText(errorText, 180),
@@ -7809,8 +7809,8 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
   return {
     ok: usedReviewedCapability && evaluation.finalStatus.toLowerCase() !== "failed",
     summary: usedReviewedCapability
-      ? `Agentischer Smoke abgeschlossen: ${evaluation.capabilityNames.join(", ")}`
-      : "Agentischer Smoke lief, aber es wurde keine reviewed Capability verwendet.",
+      ? `Agentic smoke completed: ${evaluation.capabilityNames.join(", ")}`
+      : "Agentic smoke ran, but no reviewed capability was used.",
     data: {
       run: evaluation.run,
       stepCount: evaluation.stepCount,
@@ -7822,11 +7822,11 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
     },
     report: {
       currentState: usedReviewedCapability
-        ? `Der agentische Smoke hat ${evaluation.capabilityNames.join(", ")} ueber den reviewed Runtime-Pfad verwendet.`
-        : "Der agentische Smoke hat keinen reviewed Capability-Call ausgefuehrt.",
+        ? `Agentic smoke used ${evaluation.capabilityNames.join(", ")} through the reviewed runtime path.`
+        : "Agentic smoke did not execute any reviewed capability call.",
       nextAction: usedReviewedCapability
-        ? "Wenn das Verhalten passt, leite jetzt Trainingsdaten daraus ab, starte run_capability_eval oder beginne einen Trainingslauf."
-        : "Pruefe Tool-Skripte und Browser-Funktionen, bevor du Training startest.",
+        ? "If the behavior is correct, derive training data from it now, start run_capability_eval, or begin a training run."
+        : "Review tool scripts and browser functions before starting training.",
       matchingSignals: [
         ...evaluation.capabilityNames,
         trimText(evaluation.text, 180),
@@ -7835,7 +7835,7 @@ async function executeRunAgenticSmokeTool(run, args = {}, executionOptions = {})
     provenance: usedReviewedCapability
       ? [
           {
-            title: "Agentischer Smoke bestaetigt",
+            title: "Agentic smoke confirmed",
             detail: trimText(evaluation.capabilityNames.join(" | "), 220),
             kind: "sample",
           },
@@ -7896,7 +7896,7 @@ function buildSupervisorToolTimeoutResult(action, timeoutMs = 0) {
   const timedOutAction = asText(action);
   return {
     ok: false,
-    summary: `${userLabel} hat nach ${durationLabel} keine Rueckmeldung geliefert.`,
+    summary: `${userLabel} did not respond after ${durationLabel}.`,
     error: `${userLabel} timed out after ${durationLabel}.`,
     errorDetail: {
       reason: "supervisor_tool_timeout",
@@ -7908,11 +7908,11 @@ function buildSupervisorToolTimeoutResult(action, timeoutMs = 0) {
       underlyingFailingTool: timedOutAction,
     },
     report: {
-      currentState: `${userLabel} haengt oder antwortet nach ${durationLabel} nicht mehr.`,
+      currentState: `${userLabel} is hanging or no longer responding after ${durationLabel}.`,
       nextAction:
         timedOutAction === "run_agentic_smoke" || timedOutAction === "run_capability_eval"
-          ? "Pruefe den reviewed Runtime-Pfad und die Modell- oder Browser-Aufrufe, behebe den Blocker und starte danach denselben Test erneut."
-          : "Untersuche zuerst den haengenden Werkzeugpfad und starte danach denselben Schritt erneut.",
+          ? "Inspect the reviewed runtime path and the model or browser calls, fix the blocker, then rerun the same test."
+          : "Inspect the hanging tool path first, then rerun the same step.",
       matchingSignals: [`${timedOutAction} timeout`, durationLabel].filter(Boolean),
     },
     provenance: [],
@@ -7985,7 +7985,7 @@ async function runCapabilityEvalCase(run, args = {}) {
   const snapshot = await readCraftBundleSnapshot(run.craft);
   const bundle = createBundleFromSnapshot(run.craft, snapshot, args.bundleOverride);
   const prompt = asText(args.prompt || run.brief);
-  pushRunLog(run, "info", "runCraftUse wird fuer den reviewed Smoke aufgerufen.");
+  pushRunLog(run, "info", "runCraftUse is being invoked for the reviewed smoke path.");
   const smokeRun = await runCraftUse({
     craft: {
       ...(run.craft && typeof run.craft === "object" ? cloneJson(run.craft, {}) : {}),
@@ -8106,14 +8106,14 @@ async function executeRunCapabilityEvalTool(run, args = {}, executionOptions = {
   if (!cases.length) {
     return {
       ok: false,
-      summary: "Capability-Eval wurde uebersprungen, weil keine Testfaelle vorlagen.",
+      summary: "Capability eval was skipped because no test cases were provided.",
       error: "Missing eval cases.",
       errorDetail: {
         reason: "missing_eval_cases",
       },
     };
   }
-  pushRunLog(run, "info", "Capability-Eval bereitet den Active-Text-Testzustand vor.");
+  pushRunLog(run, "info", "Capability eval is preparing the active-text test state.");
   await ensurePreparedActiveTextValidationFixture(run, {
     ...args,
     objective: cases[0]?.prompt || run?.brief,
@@ -8190,15 +8190,15 @@ async function executeRunCapabilityEvalTool(run, args = {}, executionOptions = {
     ok: passedCount === results.length,
     summary:
       passedCount === results.length
-        ? `Capability-Eval bestanden: ${passedCount}/${results.length} Faelle.`
-        : `Capability-Eval unvollstaendig: ${passedCount}/${results.length} Faelle bestanden.`,
+        ? `Capability eval passed: ${passedCount}/${results.length} cases.`
+        : `Capability eval incomplete: ${passedCount}/${results.length} cases passed.`,
     error:
       passedCount === results.length
         ? ""
         : describeLocalQwenRuntimeFailure(
-            asText(primaryFailure?.error) || `Capability-Eval hat ${failedCases.length} offene oder fehlerhafte Faelle.`,
+            asText(primaryFailure?.error) || `Capability eval still has ${failedCases.length} open or failing cases.`,
             primaryFailure?.errorDetail || null,
-          ) || `Capability-Eval hat ${failedCases.length} offene oder fehlerhafte Faelle.`,
+          ) || `Capability eval still has ${failedCases.length} open or failing cases.`,
     errorDetail:
       passedCount === results.length
         ? null
@@ -8221,22 +8221,22 @@ async function executeRunCapabilityEvalTool(run, args = {}, executionOptions = {
     report: {
       currentState:
         passedCount === results.length
-          ? `Die Capability hat alle ${results.length} Testfaelle ueber den reviewed Runtime-Pfad bestanden.`
-          : `${failedCases.length} von ${results.length} Testfaellen sind noch offen oder fehlerhaft.`,
+          ? `The capability passed all ${results.length} test cases through the reviewed runtime path.`
+          : `${failedCases.length} of ${results.length} test cases are still open or failing.`,
       nextAction:
         passedCount === results.length
-          ? "Nutze diese Faelle als Referenz fuer Training oder starte direkt den Trainingslauf."
-          : "Ueberarbeite die Tools, die Capability oder die Trainingsdaten und pruefe dieselben Faelle erneut.",
+          ? "Use these cases as training references or start the training run directly."
+          : "Revise the tools, the capability, or the training data and rerun the same cases.",
       matchingSignals: [
         ...capabilityNames,
-        ...failedCases.slice(0, 2).map((entry) => `Fall ${entry.index}: ${entry.finalStatus || "ohne Status"}`),
+        ...failedCases.slice(0, 2).map((entry) => `Case ${entry.index}: ${entry.finalStatus || "no status"}`),
       ].filter(Boolean).slice(0, 4),
     },
     provenance: capabilityNames.length
       ? [
           {
-            title: "Capability manuell geprueft",
-            detail: trimText(`${passedCount}/${results.length} Faelle · ${capabilityNames.join(" | ")}`, 220),
+            title: "Capability manually validated",
+            detail: trimText(`${passedCount}/${results.length} cases · ${capabilityNames.join(" | ")}`, 220),
             kind: passedCount === results.length ? "sample" : "constraint",
           },
         ]
@@ -8254,7 +8254,7 @@ async function executeStartTrainingRunTool(run, args = {}) {
   if (!resolvedDatasetPayload) {
     return {
       ok: false,
-      summary: "Lokaler Trainingslauf konnte nicht gestartet werden, weil fuer diesen Craft noch keine validen nativen Qwen-Trainingszeilen vorliegen.",
+      summary: "The local training run could not start because this craft does not have valid native Qwen training rows yet.",
       error: "Missing craft training dataset.",
       errorDetail: {
         reason: "missing_craft_training_dataset",
@@ -8279,7 +8279,7 @@ async function executeStartTrainingRunTool(run, args = {}) {
     );
     return {
       ok: false,
-      summary: asText(trainingFailure?.summary) || "Lokaler Trainingslauf konnte nicht gestartet werden.",
+      summary: asText(trainingFailure?.summary) || "The local training run could not be started.",
       error: asText(trainingFailure?.error) || asText(response?.error) || "Training start failed.",
       errorDetail,
       errorStack: readStructuredErrorStack(response),
@@ -8297,13 +8297,13 @@ async function executeStartTrainingRunTool(run, args = {}) {
   }
   return {
     ok: true,
-    summary: `Lokaler Trainingslauf gestartet: ${asText(response.run.jobId)}`,
+    summary: `Local training run started: ${asText(response.run.jobId)}`,
     data: {
       run: response.run,
     },
     report: {
-      currentState: "Der lokale Trainingslauf wurde an die Offscreen-Runtime uebergeben.",
-      nextAction: "Pruefe den Run mit get_training_run_status, bis er abgeschlossen oder fehlgeschlagen ist.",
+      currentState: "The local training run was handed off to the offscreen runtime.",
+      nextAction: "Check the run with get_training_run_status until it completes or fails.",
       matchingSignals: [
         asText(response.run.jobId),
         asText(response.run.phaseLabel || response.run.phase),
@@ -8324,7 +8324,7 @@ async function executeRecordExperimentDecisionTool(run, args = {}) {
   if (!normalized || !["keep", "discard", "park"].includes(normalized.decision)) {
     return {
       ok: false,
-      summary: "Die Experiment-Entscheidung konnte nicht gespeichert werden, weil candidateId oder decision fehlt.",
+      summary: "The experiment decision could not be saved because candidateId or decision is missing.",
       error: "Missing experiment candidateId or final decision.",
       errorDetail: {
         reason: "missing_experiment_decision_fields",
@@ -8333,13 +8333,13 @@ async function executeRecordExperimentDecisionTool(run, args = {}) {
   }
   const decisionLabel =
     normalized.decision === "keep"
-      ? "behalten"
+      ? "kept"
       : normalized.decision === "discard"
-        ? "verworfen"
-        : "geparkt";
+        ? "discarded"
+        : "parked";
   const summary =
     asText(args.summary) ||
-    `Experiment ${normalized.candidateId} wurde als ${decisionLabel} protokolliert.`;
+    `Experiment ${normalized.candidateId} was recorded as ${decisionLabel}.`;
   const ledgerEntry = appendRunExperimentLedger(run, {
     ...normalized,
     action: "record_experiment_decision",
@@ -8359,13 +8359,13 @@ async function executeRecordExperimentDecisionTool(run, args = {}) {
       entry: ledgerEntry,
     },
     report: {
-      currentState: `Experiment ${normalized.candidateId} ist jetzt als ${decisionLabel} markiert.`,
+      currentState: `Experiment ${normalized.candidateId} is now marked as ${decisionLabel}.`,
       nextAction:
         normalized.decision === "keep"
-          ? "Nutze den staerkeren Challenger jetzt als neue Referenz oder promotion-reifen Stand."
+          ? "Use the stronger challenger now as the new reference or promotion-ready baseline."
           : normalized.decision === "discard"
-            ? "Bleibe beim bisherigen Champion und pruefe nur dann einen neuen Challenger, wenn eine neue Hypothese vorliegt."
-            : "Lasse den Champion aktiv und pruefe spaeter mit derselben Mini-Suite, ob der geparkte Challenger belastbarer wird.",
+            ? "Stay with the current champion and only try a new challenger when there is a new hypothesis."
+            : "Keep the champion active and check later with the same mini suite whether the parked challenger becomes more reliable.",
       matchingSignals: uniqueTextList([
         normalized.candidateId,
         normalized.compareAgainst,
@@ -8379,7 +8379,7 @@ async function executeRecordExperimentDecisionTool(run, args = {}) {
         title: `Experiment ${decisionLabel}`,
         detail: trimText([
           normalized.candidateId,
-          normalized.compareAgainst ? `gegen ${normalized.compareAgainst}` : "",
+          normalized.compareAgainst ? `against ${normalized.compareAgainst}` : "",
           normalized.hypothesis,
           normalized.rationale,
         ].filter(Boolean).join(" · "), 220),
@@ -8466,7 +8466,7 @@ async function executeGetTrainingRunStatusTool(_run, args = {}) {
   if (!jobId) {
     return {
       ok: false,
-      summary: "Trainingsstatus konnte nicht gelesen werden, weil keine Job-ID vorlag.",
+      summary: "Training status could not be read because no job ID was available.",
       error: "Missing jobId.",
       errorDetail: {
         reason: "missing_job_id",
@@ -8488,7 +8488,7 @@ async function executeGetTrainingRunStatusTool(_run, args = {}) {
     if (!response?.ok || !response?.run) {
       return {
         ok: false,
-        summary: `Trainingsstatus fuer ${jobId} konnte nicht gelesen werden.`,
+        summary: `Training status for ${jobId} could not be read.`,
         error: asText(response?.error) || "Training status failed.",
         errorDetail: cloneStructuredErrorDetail(response?.errorDetail),
         errorStack: readStructuredErrorStack(response),
@@ -8516,7 +8516,7 @@ async function executeGetTrainingRunStatusTool(_run, args = {}) {
 
   return {
     ok: true,
-    summary: `Trainingsstatus ${jobId}: ${asText(response.run.status)} / ${asText(response.run.phaseLabel || response.run.phase)}`,
+    summary: `Training status ${jobId}: ${asText(response.run.status)} / ${asText(response.run.phaseLabel || response.run.phase)}`,
     data: {
       run: response.run,
       pollAttempts: attempts,
@@ -8525,16 +8525,16 @@ async function executeGetTrainingRunStatusTool(_run, args = {}) {
       estimatedRemainingMs,
     },
     report: {
-      currentState: `Trainingslauf ${jobId} ist aktuell ${asText(response.run.status)}.`,
+      currentState: `Training run ${jobId} is currently ${asText(response.run.status)}.`,
       nextAction:
         asText(response.run.status).toLowerCase() === "completed"
-          ? "Pruefe das gespeicherte Bundle oder starte run_capability_eval mit mehreren Faellen."
+          ? "Inspect the saved bundle or start run_capability_eval with multiple cases."
           : asText(response.run.status).toLowerCase() === "failed"
-            ? "Pruefe den Fehler und starte den Lauf nur nach einer gezielten Korrektur erneut."
-            : `Warte ${formatWaitDurationMs(pollAfterMs) || "kurz"} und pruefe den Status erneut.`,
+            ? "Inspect the failure and only restart the run after a targeted fix."
+            : `Wait ${formatWaitDurationMs(pollAfterMs) || "briefly"} and check the status again.`,
       matchingSignals: [
         asText(response.run.phaseLabel || response.run.phase),
-        `${Number(response.run.completedSamples || 0)}/${Number(response.run.totalSamples || 0)} Schritte`,
+        `${Number(response.run.completedSamples || 0)}/${Number(response.run.totalSamples || 0)} steps`,
         estimatedRemainingMs > 0 ? `ETA ${formatWaitDurationMs(estimatedRemainingMs)}` : "",
       ],
     },
@@ -8556,17 +8556,17 @@ function buildFinalDecisionLogMessage(status, report, fallbackText = "") {
   const currentState = trimText(asText(report?.currentState || fallbackText), 220);
   if (status === "continue") {
     return currentState
-      ? `Agent laeuft mit einem weiteren Durchgang weiter: ${currentState}`
-      : "Agent laeuft mit einem weiteren Durchgang weiter.";
+      ? `Agent continues with another pass: ${currentState}`
+      : "Agent continues with another pass.";
   }
   if (status === "blocked") {
     return currentState
-      ? `Agent stoppt hier wegen eines Blockers: ${currentState}`
-      : "Agent stoppt hier wegen eines Blockers.";
+      ? `Agent stops here because of a blocker: ${currentState}`
+      : "Agent stops here because of a blocker.";
   }
   return currentState
-    ? `Agent stoppt nach diesem Durchgang: ${currentState}`
-    : "Agent stoppt nach diesem Durchgang.";
+    ? `Agent stops after this pass: ${currentState}`
+    : "Agent stops after this pass.";
 }
 
 function didRunToolSucceed(run, action = "") {
@@ -8644,7 +8644,7 @@ async function startTrainingRunWithLogging(run, args = {}) {
   pushRunLog(
     run,
     result?.ok === false ? "error" : "success",
-    `start_training_run: ${asText(result?.summary || result?.error || "Trainingslauf verarbeitet.")}`,
+    `start_training_run: ${asText(result?.summary || result?.error || "Training run processed.")}`,
     {
       kind: "tool",
       toolName: "start_training_run",
@@ -8677,7 +8677,7 @@ async function generateTrainingBatchWithLogging(run, args = {}) {
   pushRunLog(
     run,
     result?.ok === false ? "error" : "success",
-    `generate_training_batch: ${asText(result?.summary || result?.error || "Trainingsdaten erweitert.")}`,
+    `generate_training_batch: ${asText(result?.summary || result?.error || "Training data expanded.")}`,
     {
       kind: "tool",
       toolName: "generate_training_batch",
@@ -8723,11 +8723,11 @@ async function maybeForceTrainingContinuation(run, effectiveStatus = "") {
   if (asText(run?.latestTrainingJobId)) {
     return {
       nextStatus: "continue",
-      responseText: "Der reviewed Runtime-Pfad ist bestaetigt. Der Trainingslauf laeuft bereits weiter.",
+      responseText: "The reviewed runtime path is confirmed. The training run is already continuing.",
       reportOverride: {
-        currentState: "Der reviewed Runtime-Pfad ist bestaetigt und ein lokaler Trainingslauf ist bereits aktiv.",
+        currentState: "The reviewed runtime path is confirmed and a local training run is already active.",
         nextAction:
-          "Pruefe den Run mit get_training_run_status, bis ein trainiertes Artefakt entstanden oder ein echter Trainingsfehler sichtbar ist.",
+          "Check the run with get_training_run_status until a trained artifact appears or a real training error becomes visible.",
       },
     };
   }
@@ -8739,18 +8739,18 @@ async function maybeForceTrainingContinuation(run, effectiveStatus = "") {
       nextStatus: "blocked",
       responseText: asText(result?.error || result?.summary),
       reportOverride: {
-        currentState: `Der reviewed Runtime-Pfad ist bestaetigt, aber der Trainingslauf konnte nicht gestartet werden: ${trimText(asText(result?.error || result?.summary), 220)}`,
-        nextAction: "Behebe zuerst den lokalen Trainingspfad und starte danach denselben Trainingslauf erneut.",
+        currentState: `The reviewed runtime path is confirmed, but the training run could not be started: ${trimText(asText(result?.error || result?.summary), 220)}`,
+        nextAction: "Fix the local training path first, then restart the same training run.",
       },
     };
   }
   return {
     nextStatus: "continue",
-    responseText: "Der reviewed Runtime-Pfad ist bestaetigt. Der lokale Trainingslauf wurde jetzt gestartet.",
+    responseText: "The reviewed runtime path is confirmed. The local training run has now started.",
     reportOverride: {
-      currentState: "Der reviewed Runtime-Pfad ist bestaetigt und der lokale Trainingslauf wurde gestartet.",
+      currentState: "The reviewed runtime path is confirmed and the local training run has started.",
       nextAction:
-        "Pruefe den Run mit get_training_run_status, bis ein trainiertes Artefakt entstanden oder ein echter Trainingsfehler sichtbar ist.",
+        "Check the run with get_training_run_status until a trained artifact appears or a real training error becomes visible.",
     },
   };
 }
@@ -8770,8 +8770,8 @@ async function maybeForceDatasetGrowthContinuation(run, effectiveStatus = "") {
       nextStatus: "blocked",
       responseText: asText(batchResult?.error || batchResult?.summary),
       reportOverride: {
-        currentState: `Die Faehigkeit funktioniert bereits, aber die Trainingsbasis konnte nicht automatisch vergroessert werden: ${trimText(asText(batchResult?.error || batchResult?.summary), 220)}`,
-        nextAction: "Behebe zuerst den lokalen Batch-Generator oder die Seed-Evidenz und starte danach denselben Ausbau erneut.",
+        currentState: `The capability already works, but the training base could not be expanded automatically: ${trimText(asText(batchResult?.error || batchResult?.summary), 220)}`,
+        nextAction: "Fix the local batch generator or the seed evidence first, then retry the same expansion.",
       },
     };
   }
@@ -8784,11 +8784,11 @@ async function maybeForceDatasetGrowthContinuation(run, effectiveStatus = "") {
     promotedCount = promoted.promotedCount;
     if (promotedCount > 0) {
       run.samples = await writeTrainingSamplesForCraft(run.craftId, promoted.samples);
-      pushRunLog(run, "info", `${promotedCount} bestehende Trainingszeilen wurden auf ready gesetzt.`);
+      pushRunLog(run, "info", `${promotedCount} existing training rows were promoted to ready.`);
       pushRunProvenance(run, [
         {
-          title: "Trainingszeilen auf ready gesetzt",
-          detail: `${promotedCount} vorhandene Zeilen wurden nach erfolgreichem Smoke/Eval automatisch trainingsbereit markiert.`,
+          title: "Training rows promoted to ready",
+          detail: `${promotedCount} existing rows were automatically marked training-ready after successful smoke/eval validation.`,
           kind: "operation",
           operationType: "update",
         },
@@ -8804,10 +8804,10 @@ async function maybeForceDatasetGrowthContinuation(run, effectiveStatus = "") {
   if (asText(run?.latestTrainingJobId)) {
     return {
       nextStatus: "continue",
-      responseText: "Die Trainingsbasis wurde erweitert. Der bestehende Trainingslauf soll jetzt weiter beobachtet werden.",
+      responseText: "The training base was expanded. The existing training run should now continue to be monitored.",
       reportOverride: {
-        currentState: `Die Trainingsbasis wurde vergroessert (${importedRows} neue ready-Zeilen, ${promotedCount} automatische ready-Promotionen).`,
-        nextAction: "Pruefe den laufenden Trainingsjob mit get_training_run_status und aktualisiere danach die Maturity anhand des staerkeren Datensatzes.",
+        currentState: `The training base was expanded (${importedRows} new ready rows, ${promotedCount} automatic ready promotions).`,
+        nextAction: "Check the running training job with get_training_run_status and then update maturity based on the stronger dataset.",
       },
     };
   }
@@ -8820,18 +8820,18 @@ async function maybeForceDatasetGrowthContinuation(run, effectiveStatus = "") {
       nextStatus: "blocked",
       responseText: asText(trainingResult?.error || trainingResult?.summary),
       reportOverride: {
-        currentState: `Die Trainingsbasis wurde vergroessert, aber der neue Trainingslauf konnte nicht gestartet werden: ${trimText(asText(trainingResult?.error || trainingResult?.summary), 220)}`,
-        nextAction: "Behebe den lokalen Trainingspfad und starte danach denselben Ausbau mit Retraining erneut.",
+        currentState: `The training base was expanded, but the new training run could not be started: ${trimText(asText(trainingResult?.error || trainingResult?.summary), 220)}`,
+        nextAction: "Fix the local training path and then retry the same expansion with retraining.",
       },
     };
   }
 
   return {
     nextStatus: "continue",
-    responseText: "Die Trainingsbasis war noch zu duenn. Neue ready-Zeilen wurden erzeugt und ein neuer Trainingslauf wurde gestartet.",
+    responseText: "The training base was still too thin. New ready rows were generated and a new training run was started.",
     reportOverride: {
-      currentState: `Die Trainingsbasis wurde vergroessert (${importedRows} neue ready-Zeilen, ${promotedCount} automatische ready-Promotionen) und der lokale Trainingslauf wurde neu gestartet.`,
-      nextAction: "Pruefe den Trainingsjob mit get_training_run_status und aktualisiere danach die Maturity auf Basis des staerkeren Datensatzes.",
+      currentState: `The training base was expanded (${importedRows} new ready rows, ${promotedCount} automatic ready promotions) and the local training run was restarted.`,
+      nextAction: "Check the training job with get_training_run_status and then update maturity based on the stronger dataset.",
     },
   };
 }
@@ -8863,8 +8863,8 @@ async function executeDraftTrainingChangesTool(run, args = {}) {
         errorDetail: errorInfo.detail,
         errorStack: errorInfo.stack,
         report: normalizeReport(run.report, {
-          currentState: "Der Trainingsdaten-Planer ist fehlgeschlagen.",
-          nextAction: "Pruefe den Modellpfad oder starte den Run mit praeziserem Kontext erneut.",
+          currentState: "The training-data planner failed.",
+          nextAction: "Inspect the model path or restart the run with more precise context.",
         }),
       };
     }
@@ -8899,8 +8899,8 @@ async function executeDraftTrainingChangesTool(run, args = {}) {
         errorDetail: fallbackInfo.detail || serializeErrorDetail({ fallbackReason }),
         errorStack: fallbackInfo.stack,
         report: normalizeReport(run.report, {
-          currentState: "Der Trainingsdaten-Planer konnte keinen gueltigen strukturierten Entwurf erzeugen.",
-          nextAction: "Verfeinere den Craft-Text oder pruefe den Modell-Provider, bevor du den Run erneut startest.",
+          currentState: "The training-data planner could not produce a valid structured draft.",
+          nextAction: "Refine the craft text or inspect the model provider before restarting the run.",
         }),
       };
     }
@@ -8935,11 +8935,11 @@ async function executeDraftTrainingChangesTool(run, args = {}) {
     report: normalizeReport(draft.report, {
       objective: trimText(asText(args.objective) || run.brief, 180),
       currentState: operations.length
-        ? `Der Agent hat ${summarizeOperationCounts(operations)} auf Basis der sichtbaren Trainingsdaten abgeleitet.`
-        : "Der Agent hat noch keinen belastbaren Edit-Plan fuer die Trainingsdaten abgeleitet.",
+        ? `The agent derived ${summarizeOperationCounts(operations)} from the visible training data.`
+        : "The agent has not derived a reliable edit plan for the training data yet.",
       nextAction: operations.length
-        ? "Pruefe die live aktualisierten Trainingsdaten im separaten View."
-        : "Falls noch Evidenz fehlt, nutze Websuche, Browser-Inspect/Action oder Playwright-CTX vor dem naechsten Planlauf.",
+        ? "Inspect the live-updated training data in the separate view."
+        : "If evidence is still missing, use web search, browser inspect/action, or Playwright CTX before the next planning pass.",
     }),
     maturity: await resolveRunMaturity(run, draft.maturity, run.maturity),
     questions: mergeQuestionsWithAnswers(draft.openQuestions, run.previousQuestions),
@@ -10214,27 +10214,27 @@ async function applyFinalOutputToRun(run, rawFinalOutput, state = null) {
     pushRunLog(
       run,
       "warn",
-      "Entwicklungsmodus: Der Lauf wird bei fehlenden oder fehlerhaften Werkzeugpfaden nicht mit Umwegen fortgesetzt.",
+      "Development mode: the run will not continue through workarounds when tool paths are missing or broken.",
     );
   }
   if (recoverableIteration && effectiveStatus === "continue" && finalOutput.status !== "continue") {
     pushRunLog(
       run,
       "info",
-      "Entwicklungsmodus: Ein fehlgeschlagener Testlauf des eigenen Skriptpfads wird als normale Iteration fortgesetzt.",
+      "Development mode: a failed validation run of the internal script path is treated as normal iteration.",
     );
   }
   if (nextActionText && (!toolingBlocker && !recoverableIteration || autoRepair?.reportOverride)) {
-    pushRunLog(run, "info", `Naechster vorgeschlagener Schritt: ${nextActionText}`);
+    pushRunLog(run, "info", `Next suggested step: ${nextActionText}`);
   } else if (toolingBlocker?.nextAction) {
-    pushRunLog(run, "info", `Naechster vorgeschlagener Schritt: ${trimText(toolingBlocker.nextAction, 220)}`);
+    pushRunLog(run, "info", `Next suggested step: ${trimText(toolingBlocker.nextAction, 220)}`);
   } else if (recoverableIteration?.nextAction) {
-    pushRunLog(run, "info", `Naechster vorgeschlagener Schritt: ${trimText(recoverableIteration.nextAction, 220)}`);
+    pushRunLog(run, "info", `Next suggested step: ${trimText(recoverableIteration.nextAction, 220)}`);
   } else if (effectiveStatus !== "continue" && finalOutputHasLimitationNote(finalOutput)) {
     pushRunLog(
       run,
       "warn",
-      "Der Lauf stoppt mit einer bekannten Einschraenkung: Ein angeforderter Teil bleibt offen, weil dafuer kein freigegebener Toolpfad vorliegt.",
+      "The run stops with a known limitation: one requested part remains open because no approved tool path exists for it.",
     );
   }
   if (effectiveStatus === "continue") {

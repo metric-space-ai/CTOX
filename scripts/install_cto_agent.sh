@@ -120,6 +120,15 @@ KLEINHIRN_DISABLE_NCCL="${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}"
 KLEINHIRN_PORT="${CTO_AGENT_KLEINHIRN_PORT:-1234}"
 KLEINHIRN_STARTUP_WAIT_SECS="${CTO_AGENT_KLEINHIRN_STARTUP_WAIT_SECS:-900}"
 KLEINHIRN_BASE_URL="http://127.0.0.1:${KLEINHIRN_PORT}/v1"
+CONTEXT_EMBEDDING_ENABLED="${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:-1}"
+CONTEXT_EMBEDDING_MODEL="${CTO_AGENT_CONTEXT_EMBEDDING_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+CONTEXT_EMBEDDING_RUNTIME_MODEL="${CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL:-$CONTEXT_EMBEDDING_MODEL}"
+CONTEXT_EMBEDDING_PORT="${CTO_AGENT_CONTEXT_EMBEDDING_PORT:-1235}"
+CONTEXT_EMBEDDING_BASE_URL="${CTO_AGENT_CONTEXT_EMBEDDING_BASE_URL:-http://127.0.0.1:${CONTEXT_EMBEDDING_PORT}/v1}"
+CONTEXT_EMBEDDING_API_KEY="${CTO_AGENT_CONTEXT_EMBEDDING_API_KEY:-local-context-embedding}"
+CONTEXT_EMBEDDING_MAX_BATCH_SIZE="${CTO_AGENT_CONTEXT_EMBEDDING_MAX_BATCH_SIZE:-12}"
+CONTEXT_EMBEDDING_CHUNK_CHARS="${CTO_AGENT_CONTEXT_EMBEDDING_CHUNK_CHARS:-900}"
+CONTEXT_EMBEDDING_CHUNK_OVERLAP="${CTO_AGENT_CONTEXT_EMBEDDING_CHUNK_OVERLAP:-120}"
 KLEINHIRN_LOG_DIR="$ROOT/runtime/logs"
 KLEINHIRN_LOG="$KLEINHIRN_LOG_DIR/kleinhirn.log"
 KLEINHIRN_PID_FILE="$ROOT/runtime/kleinhirn.pid"
@@ -128,6 +137,18 @@ HEALTH_URL="https://127.0.0.1:8443/healthz"
 READY_URL="https://127.0.0.1:8443/readyz"
 HEARTBEAT_FILE="$ROOT/runtime/state/agent_state.json"
 CARGO_TARGET_DIR="${CTO_AGENT_MISTRALRS_TARGET_DIR:-$ROOT/runtime/build/mistralrs}"
+CTO_EMAIL_ADDRESS="${CTO_EMAIL_ADDRESS:-}"
+CTO_EMAIL_PASSWORD="${CTO_EMAIL_PASSWORD:-}"
+CTO_EMAIL_IMAP_HOST="${CTO_EMAIL_IMAP_HOST:-}"
+CTO_EMAIL_IMAP_PORT="${CTO_EMAIL_IMAP_PORT:-}"
+CTO_EMAIL_SMTP_HOST="${CTO_EMAIL_SMTP_HOST:-}"
+CTO_EMAIL_SMTP_PORT="${CTO_EMAIL_SMTP_PORT:-}"
+CTO_AGENT_EMAIL_SYNC_LIMIT="${CTO_AGENT_EMAIL_SYNC_LIMIT:-}"
+CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-}"
+CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-}"
+CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-}"
+CTO_AGENT_GROSSHIRN_BASE_URL="${CTO_AGENT_GROSSHIRN_BASE_URL:-}"
+CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-}"
 
 detect_gpu_count() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -367,6 +388,91 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+read_runtime_env_file_value() {
+  key="$1"
+  if [ ! -f "$ENV_FILE" ]; then
+    return 0
+  fi
+  ENV_FILE_PATH="$ENV_FILE" ENV_KEY="$key" sh -c '
+    [ -f "$ENV_FILE_PATH" ] || exit 0
+    # shellcheck disable=SC1090
+    . "$ENV_FILE_PATH"
+    eval "printf %s \"\${$ENV_KEY-}\""
+  '
+}
+
+adopt_existing_runtime_mail_env() {
+  existing_address="$(read_runtime_env_file_value CTO_EMAIL_ADDRESS || true)"
+  existing_password="$(read_runtime_env_file_value CTO_EMAIL_PASSWORD || true)"
+  existing_imap_host="$(read_runtime_env_file_value CTO_EMAIL_IMAP_HOST || true)"
+  existing_imap_port="$(read_runtime_env_file_value CTO_EMAIL_IMAP_PORT || true)"
+  existing_smtp_host="$(read_runtime_env_file_value CTO_EMAIL_SMTP_HOST || true)"
+  existing_smtp_port="$(read_runtime_env_file_value CTO_EMAIL_SMTP_PORT || true)"
+  existing_sync_limit="$(read_runtime_env_file_value CTO_AGENT_EMAIL_SYNC_LIMIT || true)"
+  existing_grosshirn_api_key="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_API_KEY || true)"
+  existing_grosshirn_model="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_MODEL || true)"
+  existing_grosshirn_adapter="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER || true)"
+  existing_grosshirn_base_url="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_BASE_URL || true)"
+  existing_grosshirn_reasoning="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_REASONING || true)"
+
+  CTO_EMAIL_ADDRESS="${CTO_EMAIL_ADDRESS:-$existing_address}"
+  CTO_EMAIL_PASSWORD="${CTO_EMAIL_PASSWORD:-$existing_password}"
+  CTO_EMAIL_IMAP_HOST="${CTO_EMAIL_IMAP_HOST:-${existing_imap_host:-imap.one.com}}"
+  CTO_EMAIL_IMAP_PORT="${CTO_EMAIL_IMAP_PORT:-${existing_imap_port:-993}}"
+  CTO_EMAIL_SMTP_HOST="${CTO_EMAIL_SMTP_HOST:-${existing_smtp_host:-send.one.com}}"
+  CTO_EMAIL_SMTP_PORT="${CTO_EMAIL_SMTP_PORT:-${existing_smtp_port:-465}}"
+  CTO_AGENT_EMAIL_SYNC_LIMIT="${CTO_AGENT_EMAIL_SYNC_LIMIT:-${existing_sync_limit:-20}}"
+  CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-$existing_grosshirn_api_key}"
+  CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-${existing_grosshirn_model:-gpt-5.4}}"
+  CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-${existing_grosshirn_adapter:-openai_responses}}"
+  CTO_AGENT_GROSSHIRN_BASE_URL="${CTO_AGENT_GROSSHIRN_BASE_URL:-${existing_grosshirn_base_url:-https://api.openai.com/v1}}"
+  CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-${existing_grosshirn_reasoning:-medium}}"
+}
+
+ensure_mail_and_cli_bootstrap_assets() {
+  for required in \
+    "$ROOT/scripts/communication_mail_cli.mjs" \
+    "$ROOT/scripts/communication_schema.sql" \
+    "$ROOT/.agents/skills/codex-command-exec-operations/SKILL.md" \
+    "$ROOT/contracts/system/codex-command-exec-capability-policy.json" \
+    "$ROOT/.agents/skills/workspace-execution-operations/SKILL.md" \
+    "$ROOT/contracts/system/workspace-execution-capability-policy.json"
+  do
+    if [ ! -f "$required" ]; then
+      echo "Required bootstrap asset is missing: $required" >&2
+      exit 1
+    fi
+  done
+}
+
+initialize_communication_runtime_store() {
+  sqlite3 "$ROOT/runtime/cto_agent.db" < "$ROOT/scripts/communication_schema.sql"
+}
+
+smoke_check_mail_bootstrap() {
+  node "$ROOT/scripts/communication_mail_cli.mjs" \
+    list \
+    --db "$ROOT/runtime/cto_agent.db" \
+    --limit 1 >/tmp/cto_mail_bootstrap_list.out
+
+  if [ -n "$CTO_EMAIL_ADDRESS" ] && [ -n "$CTO_EMAIL_PASSWORD" ]; then
+    CTO_EMAIL_ADDRESS="$CTO_EMAIL_ADDRESS" \
+      CTO_EMAIL_PASSWORD="$CTO_EMAIL_PASSWORD" \
+      node "$ROOT/scripts/communication_mail_cli.mjs" \
+        sync \
+        --db "$ROOT/runtime/cto_agent.db" \
+        --imap-host "$CTO_EMAIL_IMAP_HOST" \
+        --imap-port "$CTO_EMAIL_IMAP_PORT" \
+        --folder INBOX \
+        --limit 1 \
+        --emit-interrupts false >/tmp/cto_mail_bootstrap_sync.out
+  fi
+}
+
+smoke_check_cli_tooling() {
+  "$ROOT/target/release/cto-agent" command-exec-smoke >/tmp/cto_command_exec_smoke.out
+}
+
 write_kleinhirn_env_file() {
   {
     printf 'CTO_AGENT_KLEINHIRN_BASE_URL=%s\n' "$(shell_quote "$KLEINHIRN_BASE_URL")"
@@ -403,6 +509,27 @@ write_kleinhirn_env_file() {
     printf 'CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND=%s\n' "$(shell_quote "$KLEINHIRN_TENSOR_PARALLEL_BACKEND")"
     printf 'CTO_AGENT_KLEINHIRN_VISIBLE_GPU_POLICY=%s\n' "$(shell_quote "$KLEINHIRN_VISIBLE_GPU_POLICY")"
     printf 'CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE=%s\n' "$(shell_quote "$KLEINHIRN_MN_LOCAL_WORLD_SIZE")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_ENABLED=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_ENABLED")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_MODEL=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_MODEL")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_RUNTIME_MODEL")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_PORT=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_PORT")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_BASE_URL=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_BASE_URL")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_API_KEY=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_API_KEY")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_MAX_BATCH_SIZE=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_MAX_BATCH_SIZE")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_CHUNK_CHARS=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_CHUNK_CHARS")"
+    printf 'CTO_AGENT_CONTEXT_EMBEDDING_CHUNK_OVERLAP=%s\n' "$(shell_quote "$CONTEXT_EMBEDDING_CHUNK_OVERLAP")"
+    printf 'CTO_EMAIL_ADDRESS=%s\n' "$(shell_quote "$CTO_EMAIL_ADDRESS")"
+    printf 'CTO_EMAIL_PASSWORD=%s\n' "$(shell_quote "$CTO_EMAIL_PASSWORD")"
+    printf 'CTO_EMAIL_IMAP_HOST=%s\n' "$(shell_quote "$CTO_EMAIL_IMAP_HOST")"
+    printf 'CTO_EMAIL_IMAP_PORT=%s\n' "$(shell_quote "$CTO_EMAIL_IMAP_PORT")"
+    printf 'CTO_EMAIL_SMTP_HOST=%s\n' "$(shell_quote "$CTO_EMAIL_SMTP_HOST")"
+    printf 'CTO_EMAIL_SMTP_PORT=%s\n' "$(shell_quote "$CTO_EMAIL_SMTP_PORT")"
+    printf 'CTO_AGENT_EMAIL_SYNC_LIMIT=%s\n' "$(shell_quote "$CTO_AGENT_EMAIL_SYNC_LIMIT")"
+    printf 'CTO_AGENT_GROSSHIRN_API_KEY=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_API_KEY")"
+    printf 'CTO_AGENT_GROSSHIRN_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_MODEL")"
+    printf 'CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER")"
+    printf 'CTO_AGENT_GROSSHIRN_BASE_URL=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_BASE_URL")"
+    printf 'CTO_AGENT_GROSSHIRN_REASONING=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_REASONING")"
   } > "$ENV_FILE"
 }
 
@@ -904,7 +1031,10 @@ if ! command -v pkg-config >/dev/null 2>&1; then
 fi
 
 mkdir -p "$ROOT/runtime" "$KLEINHIRN_LOG_DIR"
+adopt_existing_runtime_mail_env
+ensure_mail_and_cli_bootstrap_assets
 chmod +x \
+  "$ROOT/scripts/communication_mail_cli.mjs" \
   "$ROOT/scripts/install_cto_agent.sh" \
   "$ROOT/scripts/install_browser_engine.sh" \
   "$ROOT/scripts/install_browser_agent_extension.sh" \
@@ -928,6 +1058,9 @@ cargo build --release
 
 echo "[2/10] Initialize contracts, TLS and SQLite"
 "$ROOT/target/release/cto-agent" --init-only
+initialize_communication_runtime_store
+smoke_check_cli_tooling
+smoke_check_mail_bootstrap
 
 if [ -t 0 ] && [ -t 1 ] && [ "${CTO_AGENT_SKIP_INSTALL_TUI:-0}" != "1" ]; then
   echo "[3/10] Run installation communication bootstrap TUI"
@@ -1170,6 +1303,8 @@ echo "[10/10] Wait for always-on loop and heartbeat"
 i=1
 while [ "$i" -le 60 ]; do
   if curl -k -fsS "$READY_URL" >/tmp/cto_health.out 2>/dev/null; then
+    "$HOME/.local/bin/cto-agent" status >/tmp/cto_cli_wrapper_status.out
+    "$HOME/.local/bin/cto-mail" list --db "$ROOT/runtime/cto_agent.db" --limit 1 >/tmp/cto_mail_wrapper_status.out
     if [ "$(uname -s)" = "Linux" ] && [ "${CTO_AGENT_START_BROWSER_AGENT_CHROME:-1}" = "1" ]; then
       echo "Starting Chrome with Browser-Agent extension..."
       CTO_AGENT_WAIT_FOR_BROWSER_AGENT_BRIDGE=1 \

@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "status": "active",
+  "purpose": "Bind repo and terminal work to the real Codex command_exec lifecycle so exec-session continuity, reads, writes, and one-shot commands stay grounded in actual machine execution.",
+  "appliesWhen": {
+    "taskKinds": [
+      "owner_interrupt",
+      "workspace_repair",
+      "tool_exploration"
+    ],
+    "triggerHints": [
+      "command_exec",
+      "exec session",
+      "execsession",
+      "execcommand",
+      "codex",
+      "shell",
+      "terminal",
+      "workspace",
+      "repo",
+      "build",
+      "test",
+      "compile",
+      "c++",
+      "cmake"
+    ]
+  },
+  "executionModel": {
+    "surface": "codex_command_exec_v1",
+    "sharedEngine": true,
+    "toolPaths": [
+      "execCommand",
+      "execSessionAction"
+    ],
+    "resultContract": "codex_command_exec_result_v1"
+  },
+  "capabilities": [
+    {
+      "capabilityId": "codex_command_exec_lifecycle",
+      "goal": "Use the real Codex command_exec engine correctly for one-shot shell work and persistent exec-session work without inventing session continuity or machine results.",
+      "lifecycle": {
+        "oneShot": [
+          "Use `execCommand` for a single non-interactive bounded shell step.",
+          "Keep every `execCommand` array item JSON-safe and single-line; raw literal newlines, heredocs, and embedded multi-line script bodies do not belong inside `execCommand`."
+        ],
+        "session": [
+          "Use `execSessionAction=start` to open a persistent session.",
+          "Use `execSessionAction=write` to send bytes to stdin.",
+          "Use `execSessionAction=read` only to retrieve the buffered snapshot that already exists.",
+          "Use `execSessionAction=terminate` to close the session.",
+          "If the bounded shell work needs multiple lines or script content, default to `execSessionAction=start` plus `write` instead of forcing that content into `execCommand`."
+        ]
+      },
+      "successEvidence": [
+        "If a session was claimed, the same turn actually returned `execSessionAction` and the machine path succeeded.",
+        "If `read` was used, the checkpoint detail reflects buffered stdout/stderr from the real session snapshot, not an imagined command result.",
+        "If `write` was used, the checkpoint detail identifies what input was sent and which session received it.",
+        "If `execCommand` was used, the checkpoint detail names the actual command, cwd, and result.",
+        "Control JSON stayed valid; machine work was not lost to malformed multi-line string output."
+      ],
+      "failureBoundaries": [
+        "A prose claim that a session exists does not count as session continuity.",
+        "Repeated `read` on the same empty session snapshot is not progress.",
+        "If `read` stays empty, diagnose the prior `write`, newline, shell state, or missing output instead of rereading forever.",
+        "If a session id is missing or dead, either reuse a visible real session or start a new one.",
+        "If no machine path ran, the turn may only claim planning or inspection.",
+        "Malformed JSON caused by raw multi-line command strings is a contract failure; switch to exec-session writes or smaller one-line bounded commands."
+      ],
+      "neverDo": [
+        "Never claim an exec session was opened unless the same turn actually returned `execSessionAction=start`.",
+        "Never treat `execSessionAction=read` as if it executed a command.",
+        "Never invent vanity session ids when no such real session is visible.",
+        "Never persist build, test, edit, or runtime claims without matching command_exec evidence.",
+        "Never loop on empty `read` output without an intervening state change.",
+        "Never place heredocs or raw multi-line script bodies directly into `execCommand` JSON strings."
+      ]
+    }
+  ],
+  "updatedAt": "2026-03-20T00:00:00+00:00"
+}

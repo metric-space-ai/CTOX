@@ -1,12 +1,12 @@
 use crate::agentic::enforce_kleinhirn_ready;
 use crate::agentic::wait_for_kleinhirn_startup_ready;
-use crate::contracts::load_census;
+use crate::contracts::BrainModel;
+use crate::contracts::Paths;
 use crate::contracts::find_local_kleinhirn_candidate;
+use crate::contracts::load_census;
 use crate::contracts::load_model_policy;
 use crate::contracts::recommended_browser_vision_kleinhirn;
 use crate::contracts::recommended_kleinhirn;
-use crate::contracts::BrainModel;
-use crate::contracts::Paths;
 use anyhow::Context;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -165,14 +165,41 @@ pub fn attempt_kleinhirn_runtime_repair(paths: &Paths) -> anyhow::Result<String>
         .clone()
         .unwrap_or_else(|| runtime_model.clone());
 
-    restart_kleinhirn_runtime(paths)
+    let direct_restart = restart_kleinhirn_runtime(paths)
         .and_then(|_| wait_for_kleinhirn_startup_ready(paths))
-        .and_then(|_| enforce_kleinhirn_ready(paths))?;
+        .and_then(|_| enforce_kleinhirn_ready(paths));
 
-    Ok(format!(
-        "Kernel self-repair restarted the local kleinhirn runtime and restored READY for {} ({}).",
-        label, runtime_model
-    ))
+    if direct_restart.is_ok() {
+        return Ok(format!(
+            "Kernel self-repair restarted the local kleinhirn runtime and restored READY for {} ({}).",
+            label, runtime_model
+        ));
+    }
+
+    let direct_error = direct_restart
+        .err()
+        .map(|err| err.to_string())
+        .unwrap_or_else(|| "unknown kleinhirn restart failure".to_string());
+    let policy = load_model_policy(paths);
+    let census = load_census(paths);
+    let baseline = &policy.kleinhirn;
+    match apply_selected_kleinhirn_upgrade(paths, baseline, &census) {
+        Ok(outcome) => Ok(format!(
+            "Kernel self-repair could not restore the current kleinhirn runtime {} ({}): {}. It downgraded to the baseline local kleinhirn instead. {}",
+            label, runtime_model, direct_error, outcome.summary
+        )),
+        Err(downgrade_err) => anyhow::bail!(
+            "kernel self-repair could not restore the current kleinhirn runtime {} ({}): {}. Fallback to baseline local kleinhirn {} also failed: {}",
+            label,
+            runtime_model,
+            direct_error,
+            baseline
+                .runtime_model_id
+                .as_deref()
+                .unwrap_or(baseline.model_id.as_str()),
+            downgrade_err
+        ),
+    }
 }
 
 pub fn inspect_runtime_disk_headroom(paths: &Paths) -> anyhow::Result<RuntimeDiskHeadroomStatus> {
@@ -326,23 +353,23 @@ pub fn prepare_grosshirn_activation_from_message(
     let summary = if configured {
         if api_key_from_message {
             format!(
-                "Grosshirn-Aktivierung vorbereitet: API-Credential aus Owner-Signal uebernommen, Zielmodell {} gesetzt und Runtime-Konfiguration aktualisiert.",
+                "Grosshirn activation prepared: imported API credential from the owner signal, set target model {}, and updated runtime configuration.",
                 target_model
             )
         } else if changed {
             format!(
-                "Grosshirn-Aktivierung vorbereitet: bestehende Runtime-Credentials und Zielmodell {} wurden fuer den naechsten bounded Schritt vereinheitlicht.",
+                "Grosshirn activation prepared: existing runtime credentials and target model {} were normalized for the next bounded step.",
                 target_model
             )
         } else {
             format!(
-                "Grosshirn-Aktivierung vorbereitet: Credentials und Zielmodell {} waren bereits in der Runtime vorhanden.",
+                "Grosshirn activation prepared: credentials and target model {} were already present in runtime.",
                 target_model
             )
         }
     } else {
         format!(
-            "Grosshirn-Aktivierung erkannt, aber noch ohne API-Credential. Zielmodell {} wurde vorgemerkt; der naechste bounded Schritt muss fehlende Credentials explizit einfordern.",
+            "Grosshirn activation was detected, but no API credential is available yet. Target model {} was noted; the next bounded step must request the missing credentials explicitly.",
             target_model
         )
     };
@@ -473,7 +500,7 @@ fn apply_selected_kleinhirn_upgrade(
             changed: false,
             restarted: false,
             summary: format!(
-                "Lokales Kleinhirn laeuft bereits auf {} ({})",
+                "Local kleinhirn is already running on {} ({})",
                 selected.official_label, selected_runtime
             ),
             previous_runtime_model: previous.runtime_model.clone(),
@@ -514,7 +541,7 @@ fn apply_selected_kleinhirn_upgrade(
                     changed: true,
                     restarted: true,
                     summary: format!(
-                        "Lokales Kleinhirn auf {} ({}) umgestellt und erfolgreich neu gestartet.{}",
+                        "Local kleinhirn switched to {} ({}) and restarted successfully.{}",
                         selected.official_label, selected_runtime, context_note
                     ),
                     previous_runtime_model: previous.runtime_model,
@@ -583,7 +610,12 @@ snapshot_download(repo_id=repo_id, resume_download=True)
         .arg(&runtime_model)
         .env("HF_HUB_DISABLE_PROGRESS_BARS", "1")
         .status()
-        .with_context(|| format!("failed to start Hugging Face prefetch for {}", runtime_model))?;
+        .with_context(|| {
+            format!(
+                "failed to start Hugging Face prefetch for {}",
+                runtime_model
+            )
+        })?;
 
     if !status.success() {
         anyhow::bail!(
@@ -630,18 +662,21 @@ fn mistralrs_build_supports_feature(feature: &str) -> bool {
 }
 
 fn installed_mistralrs_features() -> Vec<String> {
-    explicit_mistralrs_features_override().unwrap_or_else(|| {
-        cargo_installed_features_for("mistralrs-cli").unwrap_or_default()
-    })
+    explicit_mistralrs_features_override()
+        .unwrap_or_else(|| cargo_installed_features_for("mistralrs-cli").unwrap_or_default())
 }
 
 fn cargo_installed_features_for(crate_name: &str) -> Option<Vec<String>> {
-    let cargo_home = std::env::var("CARGO_HOME").ok().filter(|value| !value.trim().is_empty()).map(std::path::PathBuf::from).or_else(|| {
-        std::env::var("HOME")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .map(|path| path.join(".cargo"))
-    })?;
+    let cargo_home = std::env::var("CARGO_HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(std::path::PathBuf::from)
+                .map(|path| path.join(".cargo"))
+        })?;
     let path = cargo_home.join(".crates2.json");
     let raw = fs::read_to_string(path).ok()?;
     let parsed: Value = serde_json::from_str(&raw).ok()?;
@@ -761,7 +796,10 @@ fn apply_selected_model_to_env(
 
     match selected.startup_max_seqs {
         Some(value) if value > 0 => {
-            env_map.insert("CTO_AGENT_KLEINHIRN_MAX_SEQS".to_string(), value.to_string());
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_MAX_SEQS".to_string(),
+                value.to_string(),
+            );
         }
         _ => {
             env_map.remove("CTO_AGENT_KLEINHIRN_MAX_SEQS");
@@ -833,7 +871,10 @@ fn apply_selected_model_to_env(
 
     match calibration.max_seq_len {
         Some(value) if value > 0 => {
-            env_map.insert("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN".to_string(), value.to_string());
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN".to_string(),
+                value.to_string(),
+            );
         }
         _ => {
             env_map.remove("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN");
@@ -842,7 +883,10 @@ fn apply_selected_model_to_env(
 
     match calibration.pa_context_len {
         Some(value) if value > 0 => {
-            env_map.insert("CTO_AGENT_KLEINHIRN_PA_CTXT_LEN".to_string(), value.to_string());
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_PA_CTXT_LEN".to_string(),
+                value.to_string(),
+            );
         }
         _ => {
             env_map.remove("CTO_AGENT_KLEINHIRN_PA_CTXT_LEN");
@@ -963,8 +1007,7 @@ fn write_kleinhirn_transition_state(
     let text = format!(
         "CTO_AGENT_KLEINHIRN_TRANSITION_REASON='{reason}'\nCTO_AGENT_KLEINHIRN_TRANSITION_TARGET='{target_model}'\nCTO_AGENT_KLEINHIRN_TRANSITION_DEADLINE_EPOCH='{deadline}'\n"
     );
-    fs::write(&path, text)
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    fs::write(&path, text).with_context(|| format!("failed to write {}", path.display()))?;
     Ok(())
 }
 
@@ -981,10 +1024,7 @@ fn build_startup_calibration_candidates(
     let multi_gpu_auto_mapping = prefers_multi_gpu_auto_mapping(selected, census);
     let multi_gpu_tensor_parallel = uses_multi_gpu_tensor_parallel_nccl(selected, census);
     let multi_gpu_context_backoff = multi_gpu_auto_mapping || multi_gpu_tensor_parallel;
-    let paged_attn_permitted = !matches!(
-        selected.startup_paged_attn_mode.as_deref(),
-        Some("off")
-    );
+    let paged_attn_permitted = !matches!(selected.startup_paged_attn_mode.as_deref(), Some("off"));
 
     if multi_gpu_context_backoff {
         let bootstrap_cap = multi_gpu_bootstrap_max_seq_len(selected);
@@ -993,13 +1033,23 @@ fn build_startup_calibration_candidates(
             lengths.push(bootstrap_cap.map(|cap| tuned.min(cap)).unwrap_or(tuned));
         }
         if let Some(policy_cap) = selected.startup_max_seq_len.filter(|value| *value > 0) {
-            lengths.push(bootstrap_cap.map(|cap| policy_cap.min(cap)).unwrap_or(policy_cap));
+            lengths.push(
+                bootstrap_cap
+                    .map(|cap| policy_cap.min(cap))
+                    .unwrap_or(policy_cap),
+            );
         }
         if let Some(policy_cap) = selected.startup_pa_context_len.filter(|value| *value > 0) {
-            lengths.push(bootstrap_cap.map(|cap| policy_cap.min(cap)).unwrap_or(policy_cap));
+            lengths.push(
+                bootstrap_cap
+                    .map(|cap| policy_cap.min(cap))
+                    .unwrap_or(policy_cap),
+            );
         }
         for fallback in [131_072_u64, 65_536, 32_768, 16_384, 8_192, 4_096] {
-            if tuned_max_context.map(|limit| fallback <= limit).unwrap_or(true)
+            if tuned_max_context
+                .map(|limit| fallback <= limit)
+                .unwrap_or(true)
                 && bootstrap_cap.map(|cap| fallback <= cap).unwrap_or(true)
             {
                 lengths.push(fallback);
@@ -1045,8 +1095,10 @@ fn build_startup_calibration_candidates(
         (None, Some(tuned)) if tuned > 0 => Some(tuned),
         _ => None,
     };
-    let effective_pa_context_len = match (selected.startup_pa_context_len, effective_startup_max_seq_len)
-    {
+    let effective_pa_context_len = match (
+        selected.startup_pa_context_len,
+        effective_startup_max_seq_len,
+    ) {
         (Some(policy_cap), Some(seq_cap)) => Some(policy_cap.min(seq_cap)),
         (Some(policy_cap), None) => Some(policy_cap),
         (None, Some(seq_cap)) if multi_gpu_auto_mapping => Some(seq_cap),
@@ -1138,7 +1190,8 @@ fn selected_tensor_parallel_backend(selected: &BrainModel) -> &str {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| {
-            if selected_multi_gpu_mode(selected) == "tensor_parallel" && !is_gpt_oss_family(selected)
+            if selected_multi_gpu_mode(selected) == "tensor_parallel"
+                && !is_gpt_oss_family(selected)
             {
                 "nccl"
             } else {
@@ -1171,12 +1224,8 @@ fn uses_multi_gpu_tensor_parallel_nccl(
         && selected_tensor_parallel_backend(selected) == "nccl"
 }
 
-fn should_disable_nccl(
-    selected: &BrainModel,
-    census: &crate::contracts::SystemCensus,
-) -> bool {
-    census.gpu_count.unwrap_or(0) > 1
-        && selected_tensor_parallel_backend(selected) != "nccl"
+fn should_disable_nccl(selected: &BrainModel, census: &crate::contracts::SystemCensus) -> bool {
+    census.gpu_count.unwrap_or(0) > 1 && selected_tensor_parallel_backend(selected) != "nccl"
 }
 
 fn prefers_multi_gpu_auto_mapping(
@@ -1228,11 +1277,7 @@ fn preferred_mn_local_world_size(
         }
     }
     let gpu_count = census.gpu_count.unwrap_or(0);
-    if gpu_count > 1 {
-        Some(gpu_count)
-    } else {
-        None
-    }
+    if gpu_count > 1 { Some(gpu_count) } else { None }
 }
 
 fn largest_power_of_two_not_exceeding(value: usize) -> Option<usize> {
@@ -1441,7 +1486,10 @@ fn try_restart_with_local_script(paths: &Paths) -> anyhow::Result<()> {
     if let Ok(existing) = fs::read_to_string(&pid_path)
         && let Ok(pid) = existing.trim().parse::<i32>()
     {
-        let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
     }
 
     let log_path = runtime_dir.join("logs/kleinhirn.log");
@@ -1528,7 +1576,10 @@ fn unquote_env_value(value: &str) -> String {
     }
 }
 
-fn write_kleinhirn_env(path: &std::path::Path, env_map: &BTreeMap<String, String>) -> anyhow::Result<()> {
+fn write_kleinhirn_env(
+    path: &std::path::Path,
+    env_map: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
     let mut rendered = String::new();
     for (key, value) in env_map {
         rendered.push_str(key);
@@ -1551,8 +1602,7 @@ fn write_raw_env(path: &std::path::Path, text: &str) -> anyhow::Result<()> {
         .with_context(|| format!("failed to write {}", tmp_path.display()))?;
     file.flush()
         .with_context(|| format!("failed to flush {}", tmp_path.display()))?;
-    fs::rename(&tmp_path, path)
-        .with_context(|| format!("failed to replace {}", path.display()))?;
+    fs::rename(&tmp_path, path).with_context(|| format!("failed to replace {}", path.display()))?;
     Ok(())
 }
 
@@ -1578,6 +1628,18 @@ fn load_kleinhirn_env_map(paths: &Paths) -> anyhow::Result<BTreeMap<String, Stri
     let text = fs::read_to_string(&env_path)
         .with_context(|| format!("failed to read {}", env_path.display()))?;
     Ok(parse_env_file(&text))
+}
+
+pub(crate) fn load_runtime_env_map(paths: &Paths) -> anyhow::Result<BTreeMap<String, String>> {
+    load_kleinhirn_env_map(paths)
+}
+
+pub(crate) fn save_runtime_env_map(
+    paths: &Paths,
+    env_map: &BTreeMap<String, String>,
+) -> anyhow::Result<()> {
+    let env_path = paths.root.join("runtime/kleinhirn.env");
+    write_kleinhirn_env(&env_path, env_map)
 }
 
 #[cfg(test)]
@@ -1661,7 +1723,9 @@ mod tests {
             startup_device_layers_cli: None,
             startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
             startup_tensor_parallel_backend: Some("nccl".to_string()),
-            startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
+            startup_visible_gpu_policy: Some(
+                "largest_power_of_two_prefer_display_free".to_string(),
+            ),
             prefer_auto_device_mapping: false,
         }
     }
@@ -1728,11 +1792,20 @@ mod tests {
         assert_eq!(candidates[0].max_batch_size, Some(1));
         assert_eq!(candidates[0].pa_cache_type.as_deref(), Some("f8e4m3"));
         assert_eq!(candidates[1].max_seq_len, Some(65_536));
-        assert_eq!(candidates.last().and_then(|item| item.max_seq_len), Some(4_096));
-        assert!(candidates.iter().all(|item| !item.force_auto_device_mapping));
-        assert!(candidates
-            .iter()
-            .all(|item| item.paged_attn_mode.as_deref() == Some("on")));
+        assert_eq!(
+            candidates.last().and_then(|item| item.max_seq_len),
+            Some(4_096)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|item| !item.force_auto_device_mapping)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|item| item.paged_attn_mode.as_deref() == Some("on"))
+        );
     }
 
     #[test]
@@ -1764,7 +1837,9 @@ mod tests {
         apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
 
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE").map(String::as_str),
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE")
+                .map(String::as_str),
             Some("on")
         );
         assert_eq!(
@@ -1780,7 +1855,9 @@ mod tests {
             Some("f8e4m3")
         );
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN").map(String::as_str),
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN")
+                .map(String::as_str),
             Some("131072")
         );
         assert_eq!(
@@ -1878,7 +1955,9 @@ mod tests {
         apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
 
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_DISABLE_NCCL").map(String::as_str),
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_DISABLE_NCCL")
+                .map(String::as_str),
             Some("1")
         );
         assert_eq!(
@@ -1892,7 +1971,9 @@ mod tests {
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE"));
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE").map(String::as_str),
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE")
+                .map(String::as_str),
             Some("off")
         );
     }
@@ -1950,7 +2031,9 @@ mod tests {
         apply_selected_model_to_env(&mut env_map, &selected, &census, &calibration);
 
         assert_eq!(
-            env_map.get("CTO_AGENT_KLEINHIRN_TOPOLOGY").map(String::as_str),
+            env_map
+                .get("CTO_AGENT_KLEINHIRN_TOPOLOGY")
+                .map(String::as_str),
             Some("/tmp/qwen35-topology.json")
         );
         assert!(!env_map.contains_key("CTO_AGENT_KLEINHIRN_CUDA_VISIBLE_DEVICES"));
@@ -2076,7 +2159,7 @@ mod tests {
     fn extracts_requested_local_kleinhirn_model_from_owner_text() {
         assert_eq!(
             extract_requested_local_kleinhirn_model(
-                "Wechsle dein Kleinhirn jetzt lokal auf Qwen3.5-35B-A3B."
+                "Switch your local kleinhirn to Qwen3.5-35B-A3B now."
             )
             .as_deref(),
             Some("Qwen3.5-35B-A3B")
@@ -2195,7 +2278,7 @@ mod tests {
         let paths = Paths::discover()?;
         let outcome = prepare_grosshirn_activation_from_message(
             &paths,
-            "Wechsle jetzt auf GPT-5.4 als Grosshirn. Nutze diesen API-Token: sk-proj-test-token-abcdefghijklmnopqrstuvwxyz123456",
+            "Switch to GPT-5.4 as grosshirn now. Use this API token: sk-proj-test-token-abcdefghijklmnopqrstuvwxyz123456",
         )?;
         let env_text = std::fs::read_to_string(root.join("runtime/kleinhirn.env"))?;
 
@@ -2271,7 +2354,7 @@ mod tests {
 
         let outcome = prepare_grosshirn_activation_from_message(
             &paths,
-            "Wechsle jetzt auf GPT-5.4 als Grosshirn mit OpenAI.",
+            "Switch to GPT-5.4 as grosshirn with OpenAI now.",
         )?;
         let env_text = std::fs::read_to_string(root.join("runtime/kleinhirn.env"))?;
 

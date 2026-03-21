@@ -3,8 +3,8 @@ use crate::command_exec::run_one_shot_command;
 use crate::command_exec::start_session;
 use crate::contracts::BrowserEngineState;
 use crate::contracts::Paths;
-use crate::contracts::load_census;
 use crate::contracts::load_browser_engine_policy;
+use crate::contracts::load_census;
 use crate::contracts::load_model_policy;
 use crate::contracts::now_iso;
 use crate::contracts::recommended_browser_vision_kleinhirn;
@@ -105,10 +105,7 @@ pub fn browser_status_text(paths: &Paths) -> anyhow::Result<String> {
 }
 
 pub fn start_browser_install_session(paths: &Paths) -> anyhow::Result<String> {
-    let session_id = format!(
-        "browser-install-{}",
-        chrono::Utc::now().timestamp_millis()
-    );
+    let session_id = format!("browser-install-{}", chrono::Utc::now().timestamp_millis());
     start_session(
         paths,
         CommandExecParams {
@@ -123,17 +120,17 @@ pub fn start_browser_install_session(paths: &Paths) -> anyhow::Result<String> {
             timeout_ms: Some(30 * 60 * 1000),
             cwd: Some(paths.root.clone()),
             env: detect_desktop_session_env(),
-            size: Some(CommandExecTerminalSize { rows: 24, cols: 100 }),
+            size: Some(CommandExecTerminalSize {
+                rows: 24,
+                cols: 100,
+            }),
             sandbox_policy: None,
         },
     )
 }
 
 pub fn start_browser_launch_session(paths: &Paths) -> anyhow::Result<String> {
-    let session_id = format!(
-        "browser-launch-{}",
-        chrono::Utc::now().timestamp_millis()
-    );
+    let session_id = format!("browser-launch-{}", chrono::Utc::now().timestamp_millis());
     start_session(
         paths,
         CommandExecParams {
@@ -148,7 +145,10 @@ pub fn start_browser_launch_session(paths: &Paths) -> anyhow::Result<String> {
             timeout_ms: Some(2 * 60 * 1000),
             cwd: Some(paths.root.clone()),
             env: detect_desktop_session_env(),
-            size: Some(CommandExecTerminalSize { rows: 24, cols: 100 }),
+            size: Some(CommandExecTerminalSize {
+                rows: 24,
+                cols: 100,
+            }),
             sandbox_policy: None,
         },
     )
@@ -172,7 +172,11 @@ pub fn run_browser_action(
             let url = require_url(directive)?;
             let binary = require_chrome_binary(&initial_state)?;
             (
-                headless_command(binary, directive.wait_ms, vec!["--dump-dom".to_string(), url]),
+                headless_command(
+                    binary,
+                    directive.wait_ms,
+                    vec!["--dump-dom".to_string(), url],
+                ),
                 None,
             )
         }
@@ -235,7 +239,10 @@ pub fn run_browser_action(
     );
     let timeout_ms = if matches!(
         action,
-        "install_browser_engine" | "install_chrome" | "launch_browser_agent" | "launch_browser_agent_chrome"
+        "install_browser_engine"
+            | "install_chrome"
+            | "launch_browser_agent"
+            | "launch_browser_agent_chrome"
     ) {
         30 * 60 * 1000
     } else {
@@ -277,10 +284,7 @@ pub fn run_browser_action(
             Ok(report) => {
                 stdout = format!(
                     "{}\n\nVision summary:\n{}\nScreenshot: {}\nReport: {}",
-                    stdout,
-                    report.summary,
-                    report.screenshot_path,
-                    report.report_path
+                    stdout, report.summary, report.screenshot_path, report.report_path
                 )
                 .trim()
                 .to_string();
@@ -345,7 +349,8 @@ fn require_chrome_binary(state: &BrowserEngineState) -> anyhow::Result<String> {
 fn install_command(paths: &Paths) -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
-        paths.root
+        paths
+            .root
             .join("scripts/install_browser_engine.sh")
             .display()
             .to_string(),
@@ -355,7 +360,8 @@ fn install_command(paths: &Paths) -> Vec<String> {
 fn launch_command(paths: &Paths) -> Vec<String> {
     vec![
         "/bin/sh".to_string(),
-        paths.root
+        paths
+            .root
             .join("scripts/launch_browser_agent_chrome.sh")
             .display()
             .to_string(),
@@ -377,10 +383,7 @@ fn headless_command(binary: String, wait_ms: Option<u64>, mut args: Vec<String>)
     command
 }
 
-fn interactive_open_command(
-    state: &BrowserEngineState,
-    url: &str,
-) -> anyhow::Result<Vec<String>> {
+fn interactive_open_command(state: &BrowserEngineState, url: &str) -> anyhow::Result<Vec<String>> {
     #[cfg(target_os = "macos")]
     {
         let _ = state;
@@ -414,9 +417,12 @@ fn resolve_artifact_path(
                 paths.root.join(path)
             }
         }
-        None => paths
-            .browser_artifacts_dir
-            .join(format!("{}-{}.{}", prefix, chrono::Utc::now().timestamp_millis(), extension)),
+        None => paths.browser_artifacts_dir.join(format!(
+            "{}-{}.{}",
+            prefix,
+            chrono::Utc::now().timestamp_millis(),
+            extension
+        )),
     };
     if let Some(parent) = candidate.parent() {
         fs::create_dir_all(parent)
@@ -438,8 +444,9 @@ fn inspect_screenshot_with_local_vision(
 ) -> anyhow::Result<VisualInspectionReport> {
     let policy = load_model_policy(paths);
     let census = load_census(paths);
-    let selected = recommended_browser_vision_kleinhirn(&policy, &census)
-        .ok_or_else(|| anyhow::anyhow!("no supported browser-vision kleinhirn candidate available"))?;
+    let selected = recommended_browser_vision_kleinhirn(&policy, &census).ok_or_else(|| {
+        anyhow::anyhow!("no supported browser-vision kleinhirn candidate is available")
+    })?;
     let selected_runtime = selected
         .runtime_model_id
         .clone()
@@ -449,7 +456,7 @@ fn inspect_screenshot_with_local_vision(
         || current.policy_model.as_deref() != Some(selected.model_id.as_str())
     {
         anyhow::bail!(
-            "browser vision requires the local Qwen3.5 runtime first; request brainAction=upgrade_local_browser_vision_kleinhirn before inspect_visual (active runtime: {}, required runtime: {})",
+            "Browser vision requires the local Qwen3.5 runtime first; request `brainAction=upgrade_local_browser_vision_kleinhirn` before `inspect_visual` (active runtime: {}, required runtime: {}).",
             current.runtime_model.as_deref().unwrap_or("unknown"),
             selected_runtime
         );
@@ -479,11 +486,11 @@ fn inspect_screenshot_with_local_vision(
         .question
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("Beschreibe den sichtbaren UI-Zustand, nenne Blocker und bewerte, ob die Aufgabe bereits erfuellt ist.");
+        .unwrap_or("Describe the visible UI state, name blockers, and assess whether the task is already complete.");
     let prompt = [
-        "Du bist ein visueller Browser-Inspector fuer den CTO-Agenten.",
-        "Analysiere den sichtbaren Screenshot der aktuellen Seite.",
-        "Antworte ausschliesslich als JSON mit Feldern answer, completion_assessment, observations, blockers, qa_checks und next_actions.",
+        "You are a visual browser inspector for the CTO-Agent.",
+        "Analyze the visible screenshot of the current page.",
+        "Respond strictly as JSON with the fields `answer`, `completion_assessment`, `observations`, `blockers`, `qa_checks`, and `next_actions`.",
         "completion_assessment.status darf nur not_started, in_progress, blocked oder complete sein.",
         "Kein Markdown. Kein Fliesstext ausserhalb des JSON.",
         &format!("Frage: {}", question.trim()),
@@ -513,7 +520,10 @@ fn inspect_screenshot_with_local_vision(
         "stream": false
     });
     let response = Client::new()
-        .post(format!("{}/chat/completions", base_url.trim_end_matches('/')))
+        .post(format!(
+            "{}/chat/completions",
+            base_url.trim_end_matches('/')
+        ))
         .bearer_auth(api_key)
         .json(&request_body)
         .send()
@@ -599,7 +609,11 @@ fn load_runtime_env_map(
         };
         values.insert(
             key.trim().to_string(),
-            raw_value.trim().trim_matches('"').trim_matches('\'').to_string(),
+            raw_value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string(),
         );
     }
     Ok(values)

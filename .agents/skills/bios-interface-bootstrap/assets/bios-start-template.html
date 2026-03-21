@@ -557,8 +557,8 @@
         },
         "homepage": {
           "currentTitle": "CTO-Agent Terminal Bridge",
-          "currentHeadline": "Der CTO-Agent startet im Terminal und baut seinen ersten sichtbaren Kommunikationspfad.",
-          "currentIntro": "Dieses Template ist Startpunkt, nicht Endzustand.",
+          "currentHeadline": "The CTO-Agent starts in the terminal and builds its first visible communication path.",
+          "currentIntro": "This template is a starting point, not an end state.",
           "ownerBrandingLocked": false,
           "terminalFallbackEnabled": true,
           "biosVisible": true
@@ -604,16 +604,16 @@
           { "id": 481, "title": "homepage bridge refinement", "status": "queued", "priorityScore": 80 }
         ],
         "dialogue": [
-          { "createdAt": "2026-03-19T08:58:10+00:00", "speaker": "owner", "message": "Ich will eine erkennbare BIOS-Oberflaeche mit stabilem Starttemplate." },
-          { "createdAt": "2026-03-19T08:58:30+00:00", "speaker": "cto-agent", "message": "Ich richte die BIOS-Oberflaeche auf ein wiederverwendbares Starttemplate aus." }
+          { "createdAt": "2026-03-19T08:58:10+00:00", "speaker": "owner", "message": "I want a recognizable BIOS surface with a stable starter template." },
+          { "createdAt": "2026-03-19T08:58:30+00:00", "speaker": "cto-agent", "message": "I am aligning the BIOS surface to a reusable starter template." }
         ],
         "uploads": [],
         "memorySummary": {
-          "ownerCalibration": "Der Owner will klare, veraenderbare BIOS-Flaechen statt jedes Mal ein komplett neues Interface.",
-          "learningWorkingSet": "Behalte BIOS sichtbar und terminal-first.",
-          "learningOperational": "SQLite ist fuer den Laufzeitstatus der primaere Feed.",
-          "learningGeneral": "Starttemplates reduzieren Installationsstreuung.",
-          "learningNegative": "Keine hartcodierten Mockup-Werte in die Live-UI uebernehmen."
+          "ownerCalibration": "The owner wants clear, editable BIOS surfaces instead of a completely new interface every time.",
+          "learningWorkingSet": "Keep BIOS visible and terminal-first.",
+          "learningOperational": "SQLite is the primary feed for runtime state.",
+          "learningGeneral": "Starter templates reduce installation drift.",
+          "learningNegative": "Do not copy hardcoded mockup values into the live UI."
         },
         "memoryItems": [
           { "createdAt": "2026-03-19T08:50:00+00:00", "kind": "owner_preference", "summary": "Stable BIOS shell", "detail": "Tabs oben, Rail links, Workspace rechts", "source": "bios", "important": true }
@@ -670,7 +670,7 @@
 
     function recordsTable(columns, rows) {
       if (!rows || !rows.length) {
-        return '<div class="empty">Keine Eintraege vorhanden.</div>';
+        return '<div class="empty">No entries available.</div>';
       }
       const head = columns.map((column) => `<th>${esc(column.label)}</th>`).join("");
       const body = rows.map((row) => `<tr>${
@@ -680,7 +680,7 @@
     }
 
     function chatLog(entries) {
-      if (!entries || !entries.length) return '<div class="empty">Noch kein BIOS-Dialog.</div>';
+      if (!entries || !entries.length) return '<div class="empty">No BIOS dialogue yet.</div>';
       return entries.map((entry) => `
         <div class="message">
           <div class="message-meta">${esc(entry.createdAt || entry.created_at || "n/a")} · ${esc(entry.speaker || "unknown")}</div>
@@ -835,10 +835,10 @@
 
       $("field-chat-speaker").value = trust.committedOwnerName || bios.owner?.name || "Michael Welsch";
       $("chat-rules").textContent = [
-        "Terminal bleibt harter Fallback.",
-        "BIOS-Chat ist die bevorzugte 1:1 Vertrauensflaeche.",
-        "Bild-Uploads gehoeren in denselben Chat-Verlauf.",
-        "Kritik am Interface darf spaetere BIOS-Umbauten ausloesen."
+        "Terminal remains the hard fallback.",
+        "BIOS chat is the preferred 1:1 trust surface.",
+        "Image uploads belong in the same chat history.",
+        "Criticism of the interface may trigger later BIOS rewires."
       ].join("\n");
 
       $("field-owner-calibration").value = memorySummary.ownerCalibration || "";
@@ -850,7 +850,7 @@
       $("field-freeze").value = bios.frozen ? "frozen" : "draft";
 
       $("hero-title").textContent = homepage.currentHeadline || "BIOS Start Template";
-      $("hero-intro").textContent = homepage.currentIntro || "Dieses Template ist ein stabiler Ausgangspunkt fuer spaetere Owner-Anpassungen.";
+      $("hero-intro").textContent = homepage.currentIntro || "This template is a stable starting point for later owner adjustments.";
       $("hero-status").innerHTML = [
         `BIOS ${bios.frozen ? "frozen" : "draft"}`,
         `Trust ${trust.ownerCommitmentScore ?? 0}/100`,

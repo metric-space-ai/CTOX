@@ -27,31 +27,71 @@
   "modes": [
     {
       "mode": "minimal",
-      "budgetHint": 900,
+      "budgetHint": 1400,
       "recentBootEntries": 1,
-      "recentBiosDialogue": 1,
-      "recentMemoryItems": 2,
-      "recentTaskCheckpoints": 1,
-      "includeOwnerSummary": true,
-      "includeRawTaskDetail": true
-    },
-    {
-      "mode": "working",
-      "budgetHint": 1800,
-      "recentBootEntries": 2,
-      "recentBiosDialogue": 3,
-      "recentMemoryItems": 4,
+      "recentBiosDialogue": 2,
+      "recentMemoryItems": 3,
       "recentTaskCheckpoints": 2,
       "includeOwnerSummary": true,
       "includeRawTaskDetail": true
     },
     {
-      "mode": "forensic",
+      "mode": "working",
       "budgetHint": 3200,
-      "recentBootEntries": 4,
+      "recentBootEntries": 3,
       "recentBiosDialogue": 5,
-      "recentMemoryItems": 6,
+      "recentMemoryItems": 8,
       "recentTaskCheckpoints": 4,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "preparation",
+      "budgetHint": 4800,
+      "recentBootEntries": 4,
+      "recentBiosDialogue": 6,
+      "recentMemoryItems": 10,
+      "recentTaskCheckpoints": 6,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "preparation_query",
+      "budgetHint": 2200,
+      "recentBootEntries": 2,
+      "recentBiosDialogue": 3,
+      "recentMemoryItems": 4,
+      "recentTaskCheckpoints": 4,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "preparation_rewrite",
+      "budgetHint": 3200,
+      "recentBootEntries": 3,
+      "recentBiosDialogue": 4,
+      "recentMemoryItems": 6,
+      "recentTaskCheckpoints": 5,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "preparation_review",
+      "budgetHint": 2600,
+      "recentBootEntries": 2,
+      "recentBiosDialogue": 3,
+      "recentMemoryItems": 4,
+      "recentTaskCheckpoints": 6,
+      "includeOwnerSummary": true,
+      "includeRawTaskDetail": true
+    },
+    {
+      "mode": "forensic",
+      "budgetHint": 5600,
+      "recentBootEntries": 5,
+      "recentBiosDialogue": 7,
+      "recentMemoryItems": 12,
+      "recentTaskCheckpoints": 8,
       "includeOwnerSummary": true,
       "includeRawTaskDetail": true
     }

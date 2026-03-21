@@ -57,6 +57,24 @@
       }
     ],
     "ownerFacingRule": "Owner-facing replies must state the current result, the evidence basis for that result and any remaining blocker or next step.",
+    "installationToolValidationRule": {
+      "appliesWhenTaskKinds": [
+        "bootstrap_runtime_guard",
+        "tool_exploration",
+        "installation_bootstrap",
+        "channel_expansion"
+      ],
+      "principle": "Fresh installation and early tool bootstrap do not count as done just because services started or binaries exist. The claimed tool surface must be proven with fresh bounded smoke evidence.",
+      "requires": [
+        "At least one fresh smoke example or equivalent bounded verification step for each tool surface that is claimed to work.",
+        "A clear list of which surfaces passed, failed, or remain untested.",
+        "If the context includes `installation_tool_smoke_resource`, prefer those canonical examples over inventing an ad-hoc matrix."
+      ],
+      "forbids": [
+        "Treating build logs, package installation, or `systemctl is-active` as the sole proof that browser, exec-session, attach, or communication tooling works end-to-end.",
+        "Claiming a surface is ready when it was only installed, not exercised."
+      ]
+    },
     "evidenceClasses": [
       "bounded_exec_output",
       "exec_session_output",
@@ -64,12 +82,14 @@
       "verified_runtime_file",
       "verified_runtime_db_state",
       "reviewed_capability_verification_output",
-      "fresh_human_confirmation_in_current_channel"
+      "fresh_human_confirmation_in_current_channel",
+      "tool_smoke_output"
     ],
     "neverDo": [
       "Never let taskStatus be decided only by tone or confidence.",
       "Never use a reply as the sole proof of completion.",
-      "Never treat a guessed filesystem path, guessed mail draft or guessed runtime state as done-evidence."
+      "Never treat a guessed filesystem path, guessed mail draft or guessed runtime state as done-evidence.",
+      "Never treat install logs alone as proof that a tool surface is operational."
     ]
   },
   "updatedAt": "2026-03-19T00:00:00+00:00"

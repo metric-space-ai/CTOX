@@ -123,6 +123,20 @@ exec "$ROOT/scripts/run_control_plane.sh" attach "\$@"
 EOF
 chmod +x "$BIN_DIR/cto"
 
+cat > "$BIN_DIR/cto-mail" <<EOF
+#!/bin/sh
+ROOT="$ROOT"
+ENV_FILE="\$ROOT/runtime/kleinhirn.env"
+if [ -f "\$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "\$ENV_FILE"
+  set +a
+fi
+exec node "\$ROOT/scripts/communication_mail_cli.mjs" "\$@"
+EOF
+chmod +x "$BIN_DIR/cto-mail"
+
 systemctl --user daemon-reload
 chmod +x "$ROOT/scripts/watchdog_check.sh" >/dev/null 2>&1 || true
 systemctl --user enable cto-kleinhirn.service cto-agent.service cto-agent-watchdog.timer

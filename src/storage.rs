@@ -32,10 +32,7 @@ where
     }
 
     let text = serde_json::to_string_pretty(payload)?;
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        std::process::id()
-    ));
+    let tmp_path = path.with_extension(format!("{}.tmp", std::process::id()));
     fs::write(&tmp_path, format!("{text}\n"))
         .with_context(|| format!("failed to write temporary file for {}", path.display()))?;
     fs::rename(&tmp_path, path)

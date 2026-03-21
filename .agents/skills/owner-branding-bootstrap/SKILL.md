@@ -1,6 +1,6 @@
 ---
 name: owner-branding-bootstrap
-description: Use when the CTO-Agent kleinhirn must drive the path from terminal bootstrap to homepage BIOS takeover and finally lock owner branding only after the trust prerequisites are satisfied.
+description: Use when the CTO-Agent must drive the path from terminal bootstrap to homepage BIOS takeover and finally lock owner branding only after the trust prerequisites are satisfied.
 ---
 
 # Owner Branding Bootstrap

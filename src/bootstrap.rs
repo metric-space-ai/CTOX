@@ -6,12 +6,19 @@ use crate::browser_engine::browser_status_text;
 use crate::browser_engine::run_browser_action;
 use crate::browser_engine::start_browser_install_session;
 use crate::browser_engine::start_browser_launch_session;
+use crate::command_exec::list_sessions;
+use crate::command_exec::read_session;
+use crate::command_exec::resize_session;
+use crate::command_exec::start_session;
+use crate::command_exec::terminate_session;
+use crate::command_exec::write_session;
+use crate::contracts::InstallationBootstrapState;
 use crate::contracts::Paths;
 use crate::contracts::append_boot_entry;
 use crate::contracts::default_homepage_policy;
-use crate::contracts::load_installation_bootstrap_state;
 use crate::contracts::load_bios;
 use crate::contracts::load_homepage_policy;
+use crate::contracts::load_installation_bootstrap_state;
 use crate::contracts::load_model_policy;
 use crate::contracts::load_organigram;
 use crate::contracts::now_iso;
@@ -19,33 +26,28 @@ use crate::contracts::recommended_kleinhirn;
 use crate::contracts::save_homepage_policy;
 use crate::contracts::save_installation_bootstrap_state;
 use crate::contracts::save_organigram;
-use crate::contracts::InstallationBootstrapState;
+use crate::context_controller::ContextCompactionTrigger;
+use crate::context_controller::prepare_context_package_with_trigger;
 use crate::desktop_session::detect_desktop_session_env;
-use crate::command_exec::list_sessions;
-use crate::command_exec::read_session;
-use crate::command_exec::resize_session;
-use crate::command_exec::start_session;
-use crate::command_exec::terminate_session;
-use crate::command_exec::write_session;
-use crate::runtime_db::load_owner_trust;
-use crate::runtime_db::enqueue_loop_interrupt;
-use crate::runtime_db::load_active_task;
-use crate::runtime_db::load_agent_thread;
-use crate::runtime_db::ingest_pending_loop_interrupts;
-use crate::runtime_db::list_worker_jobs;
-use crate::runtime_db::list_open_tasks;
-use crate::runtime_db::list_recent_loop_incidents;
-use crate::runtime_db::list_recent_turn_signals;
-use crate::runtime_db::list_recent_agent_turns;
-use crate::runtime_db::record_memory;
-use crate::runtime_db::record_homepage_revision;
-use crate::runtime_db::record_terminal_feedback;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::enqueue_internal_task;
-use crate::runtime_db::load_focus_state;
-use crate::runtime_db::queue_loop_interrupt_as_task;
-use crate::runtime_db::record_turn_signal_for_active_turn;
+use crate::runtime_db::enqueue_loop_interrupt;
+use crate::runtime_db::ingest_pending_loop_interrupts;
+use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_recent_agent_events;
+use crate::runtime_db::list_recent_agent_turns;
+use crate::runtime_db::list_recent_loop_incidents;
+use crate::runtime_db::list_recent_turn_signals;
+use crate::runtime_db::list_worker_jobs;
+use crate::runtime_db::load_agent_thread;
+use crate::runtime_db::load_focus_state;
+use crate::runtime_db::load_owner_trust;
+use crate::runtime_db::load_task_by_id;
+use crate::runtime_db::record_homepage_revision;
+use crate::runtime_db::record_memory;
+use crate::runtime_db::record_terminal_feedback;
+use crate::runtime_db::record_turn_signal_for_active_turn;
+use crate::runtime_db::queue_loop_interrupt_as_task;
 use crate::supervisor::inspect_local_resources;
 use anyhow::Context;
 use base64::Engine;
@@ -55,7 +57,6 @@ use codex_app_server_protocol::CommandExecResizeParams;
 use codex_app_server_protocol::CommandExecTerminalSize;
 use codex_app_server_protocol::CommandExecTerminateParams;
 use codex_app_server_protocol::CommandExecWriteParams;
-use std::process::Command;
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -136,21 +137,27 @@ pub fn run_install_bootstrap_tui(paths: &Paths) -> anyhow::Result<()> {
     let mut state = load_installation_bootstrap_state(paths);
     print_install_bootstrap_intro(&state);
 
-    let owner_name = prompt_line("Owner-Name", state.owner_name.trim())?;
-    let owner_contact_email = prompt_line("Owner-Kontakt-E-Mail", state.owner_contact_email.trim())?;
+    let owner_name = prompt_line("Owner Name", state.owner_name.trim())?;
+    let owner_contact_email = prompt_line("Owner Contact Email", state.owner_contact_email.trim())?;
     let owner_contact_info = prompt_multiline(
-        "Optional: Weitere Owner-Kontaktinfos oder Hinweise.\nMehrere Zeilen sind moeglich. Leere Zeile beendet die Eingabe.",
+        "Optional: additional owner contact details or notes.\nMultiple lines are allowed. An empty line ends input.",
         &state.owner_contact_info,
     )?;
     let email_mode = prompt_email_assignment_mode(&state.email_assignment_mode)?;
     let email_prompt = match email_mode.as_str() {
-        "assigned_now" => "Gib jetzt alle Freitext-Infos zum zugewiesenen E-Mail-Postfach ein.\nBeispiele: Adresse, Anbieter, IMAP/SMTP-Hosts, Zugang, Regeln, Ansprechpartner.\nMehrere Zeilen sind moeglich. Leere Zeile beendet die Eingabe.",
-        "self_procure" => "Beschreibe, wie der CTO-Agent sich selbst ein E-Mail-Postfach besorgen soll.\nBeispiele: bevorzugter Anbieter, Domain, Constraints, Budget, Freigaben, Ansprechpartner.\nMehrere Zeilen sind moeglich. Leere Zeile beendet die Eingabe.",
-        _ => "Optional: Gib Freitext-Hinweise zur spaeteren E-Mail-Einrichtung oder zu Kommunikationswuenschen ein.\nMehrere Zeilen sind moeglich. Leere Zeile beendet die Eingabe.",
+        "assigned_now" => {
+            "Enter all free-form details for the assigned email mailbox now.\nExamples: address, provider, IMAP/SMTP hosts, access, rules, contacts.\nMultiple lines are allowed. An empty line ends input."
+        }
+        "self_procure" => {
+            "Describe how the CTO-Agent should procure an email mailbox itself.\nExamples: preferred provider, domain, constraints, budget, approvals, contacts.\nMultiple lines are allowed. An empty line ends input."
+        }
+        _ => {
+            "Optional: enter free-form notes about later email setup or communication preferences.\nMultiple lines are allowed. An empty line ends input."
+        }
     };
     let email_note = prompt_multiline(email_prompt, &state.email_bootstrap_note)?;
     let installer_free_text = prompt_multiline(
-        "Optional: Weitere Startup-Infos fuer die fruehe Kommunikation, das Dashboard oder die ersten Kontakte.\nMehrere Zeilen sind moeglich. Leere Zeile beendet die Eingabe.",
+        "Optional: additional startup notes for early communication, the dashboard, or first contacts.\nMultiple lines are allowed. An empty line ends input.",
         &state.installer_free_text,
     )?;
 
@@ -172,7 +179,7 @@ pub fn run_install_bootstrap_tui(paths: &Paths) -> anyhow::Result<()> {
         paths,
         "installer",
         &format!(
-            "Kommunikations-Bootstrap erfasst. Terminalbefehl: {}. E-Mail-Modus: {}. Weitere Details liegen im Installation-Bootstrap-Contract.",
+            "Communication bootstrap captured. Terminal command: {}. Email mode: {}. Further details are stored in the installation bootstrap contract.",
             state.terminal_command,
             installation_email_mode_label(&state.email_assignment_mode),
         ),
@@ -181,7 +188,7 @@ pub fn run_install_bootstrap_tui(paths: &Paths) -> anyhow::Result<()> {
         paths,
         "installation_bootstrap",
         &format!(
-            "Installations-Kommunikationsbriefing erfasst ({})",
+            "Installation communication briefing captured ({})",
             installation_email_mode_label(&state.email_assignment_mode)
         ),
         &detail,
@@ -191,18 +198,18 @@ pub fn run_install_bootstrap_tui(paths: &Paths) -> anyhow::Result<()> {
         paths,
         None,
         "installation_bootstrap",
-        "Installations-Kommunikationsbriefing auswerten",
+        "Evaluate installation communication briefing",
         &detail,
         installation_bootstrap_priority(&state.email_assignment_mode),
     );
 
     println!();
-    println!("Kommunikations-Bootstrap gespeichert.");
+    println!("Communication bootstrap saved.");
     if !state.owner_name.trim().is_empty() || !state.owner_contact_email.trim().is_empty() {
         println!(
             "Owner: {} {}",
             if state.owner_name.trim().is_empty() {
-                "(ohne Namen)".to_string()
+                "(without name)".to_string()
             } else {
                 state.owner_name.trim().to_string()
             },
@@ -213,49 +220,55 @@ pub fn run_install_bootstrap_tui(paths: &Paths) -> anyhow::Result<()> {
             }
         );
     }
-    println!("Terminal low-level: {} -> startet die direkte CTO-Kommunikation.", state.terminal_command);
-    println!("Komfortpfad: lokale Dashboard-/Intranet-Seite unter der CTO-Control-Plane.");
-    println!("E-Mail-Modus: {}", installation_email_mode_label(&state.email_assignment_mode));
+    println!(
+        "Terminal low-level: {} -> starts direct CTO communication.",
+        state.terminal_command
+    );
+    println!("Comfort path: local dashboard or intranet page under the CTO control plane.");
+    println!(
+        "Email mode: {}",
+        installation_email_mode_label(&state.email_assignment_mode)
+    );
     if !state.email_bootstrap_note.trim().is_empty() {
-        println!("E-Mail-Hinweise wurden gespeichert.");
+        println!("Email notes were saved.");
     }
     if !state.installer_free_text.trim().is_empty() {
-        println!("Weitere Startup-Hinweise wurden gespeichert.");
+        println!("Additional startup notes were saved.");
     }
-    println!("Spaetere Ergaenzungen bleiben ueber Terminal und Dashboard moeglich.");
+    println!("Later additions remain possible through the terminal and dashboard.");
     Ok(())
 }
 
 fn print_install_bootstrap_intro(state: &InstallationBootstrapState) {
     println!();
-    println!("CTO-Agent Installations-Bootstrap");
+    println!("CTO-Agent Installation Bootstrap");
     println!("--------------------------------");
     println!(
-        "Low-level-Kommunikation bleibt immer ueber den Terminalbefehl `{}` moeglich.",
+        "Low-level communication always remains possible through the terminal command `{}`.",
         state.terminal_command
     );
     println!(
-        "Parallel wird der CTO-Agent normalerweise eine lokale Intranet-/Dashboard-Seite fuer komfortablere Kommunikation bereitstellen."
+        "In parallel, the CTO-Agent will usually provide a local intranet or dashboard page for more comfortable communication."
     );
     println!(
-        "Wenn E-Mail spaeter sinnvoll ist, kann der Besitzer jetzt schon Freitext-Infos droppen oder sie spaeter im Terminal bzw. Dashboard nachreichen."
+        "If email becomes useful later, the owner can already drop free-form notes now or add them later in the terminal or dashboard."
     );
     println!();
 }
 
 fn prompt_email_assignment_mode(current: &str) -> anyhow::Result<String> {
     loop {
-        println!("Wie soll der CTO-Agent mit E-Mail starten?");
-        println!("  1) Ihm wird jetzt ein Postfach zugewiesen");
-        println!("  2) Er soll sich spaeter selbst ein Postfach besorgen");
-        println!("  3) Spaeter entscheiden / vorerst ohne E-Mail starten");
+        println!("How should the CTO-Agent start with email?");
+        println!("  1) A mailbox is assigned now");
+        println!("  2) It should procure a mailbox later by itself");
+        println!("  3) Decide later / start without email for now");
         let default_choice = match current {
             "assigned_now" => "1",
             "self_procure" => "2",
             _ => "3",
         };
         let raw = prompt_line(
-            &format!("Auswahl [default {}]", default_choice),
+            &format!("Choice [default {}]", default_choice),
             default_choice,
         )?;
         let normalized = raw.trim().to_lowercase();
@@ -268,7 +281,7 @@ fn prompt_email_assignment_mode(current: &str) -> anyhow::Result<String> {
         if let Some(mode) = mode {
             return Ok(mode.to_string());
         }
-        println!("Bitte 1, 2 oder 3 eingeben.");
+        println!("Please enter 1, 2, or 3.");
     }
 }
 
@@ -291,9 +304,9 @@ fn prompt_multiline(prompt: &str, existing: &str) -> anyhow::Result<String> {
     println!();
     println!("{prompt}");
     if !existing.trim().is_empty() {
-        println!("Vorhandener Wert:");
+        println!("Current value:");
         println!("{}", existing.trim());
-        println!("Leere erste Zeile behaelt den vorhandenen Wert.");
+        println!("An empty first line keeps the current value.");
     }
     let mut lines = Vec::new();
     loop {
@@ -315,9 +328,9 @@ fn prompt_multiline(prompt: &str, existing: &str) -> anyhow::Result<String> {
 
 fn installation_email_mode_label(mode: &str) -> &'static str {
     match mode {
-        "assigned_now" => "Postfach wird zugewiesen",
-        "self_procure" => "Agent soll Postfach selbst besorgen",
-        _ => "Spaeter entscheiden / vorerst ohne E-Mail",
+        "assigned_now" => "Mailbox will be assigned",
+        "self_procure" => "Agent should procure a mailbox itself",
+        _ => "Decide later / without email for now",
     }
 }
 
@@ -331,19 +344,19 @@ fn installation_bootstrap_priority(mode: &str) -> i64 {
 
 fn installation_bootstrap_detail(state: &InstallationBootstrapState) -> String {
     format!(
-        "Installations-Kommunikationsbriefing. Interpretiere dies als fruehe Startup-Direktive fuer Kommunikation und Kontaktaufbau. Owner: {} <{}>. Weitere Owner-Kontaktinfos: {}. Terminal low-level command: `{}`. Dashboard/Intranet: {}. E-Mail-Modus: {}. E-Mail-Hinweise: {}. Weitere Installer-Hinweise: {}. Wenn ein Postfach direkt zugewiesen wurde, sollst du pruefen, ob du dir mit Skill und Template einen passenden Kommunikationsclient bauen kannst, den Mailzugang herstellen und nach bounded Verifikation eine Testmail schreiben. Der Owner darf spaeter weitere Angaben ueber Terminal oder Dashboard nachreichen.",
+        "Installation communication briefing. Interpret this as an early startup directive for communication and contact bootstrapping. Owner: {} <{}>. Additional owner contact details: {}. Terminal low-level command: `{}`. Dashboard/Intranet: {}. Email mode: {}. Email notes: {}. Additional installer notes: {}. If a mailbox was assigned directly, you should check whether you can build a suitable communication client with a skill and template, establish mail access, and send a test email after bounded verification. The owner may provide additional details later through the terminal or dashboard.",
         if state.owner_name.trim().is_empty() {
-            "unbekannt".to_string()
+            "unknown".to_string()
         } else {
             state.owner_name.trim().to_string()
         },
         if state.owner_contact_email.trim().is_empty() {
-            "keine".to_string()
+            "none".to_string()
         } else {
             state.owner_contact_email.trim().to_string()
         },
         if state.owner_contact_info.trim().is_empty() {
-            "keine".to_string()
+            "none".to_string()
         } else {
             state.owner_contact_info.trim().to_string()
         },
@@ -351,12 +364,12 @@ fn installation_bootstrap_detail(state: &InstallationBootstrapState) -> String {
         state.dashboard_note,
         installation_email_mode_label(&state.email_assignment_mode),
         if state.email_bootstrap_note.trim().is_empty() {
-            "keine".to_string()
+            "none".to_string()
         } else {
             state.email_bootstrap_note.trim().to_string()
         },
         if state.installer_free_text.trim().is_empty() {
-            "keine".to_string()
+            "none".to_string()
         } else {
             state.installer_free_text.trim().to_string()
         },
@@ -391,14 +404,16 @@ fn apply_installation_bootstrap_homepage_defaults(
     let mut policy = load_homepage_policy(paths);
     let default_policy = default_homepage_policy();
 
-    if policy.current_intro.trim().is_empty() || policy.current_intro == default_policy.current_intro {
-        policy.current_intro = "Die erste Kommunikation kann immer ueber `cto` im Terminal beginnen. Parallel soll diese lokale Control-Plane zur komfortableren Intranet-Oberflaeche ausgebaut werden.".to_string();
+    if policy.current_intro.trim().is_empty()
+        || policy.current_intro == default_policy.current_intro
+    {
+        policy.current_intro = "Initial communication can always start through `cto` in the terminal. In parallel, this local control plane should grow into the more comfortable intranet surface.".to_string();
     }
     if policy.communication_note.trim().is_empty()
         || policy.communication_note == default_policy.communication_note
     {
         policy.communication_note = format!(
-            "Low-level-Kommunikation geht immer ueber `{}`. Die lokale Dashboard-/Intranet-Seite soll der komfortablere Kanal werden. E-Mail-Startmodus: {}. Weitere Angaben koennen jetzt oder spaeter im Terminal und Dashboard nachgereicht werden.",
+            "Low-level communication always runs through `{}`. The local dashboard or intranet page should become the more comfortable channel. Email startup mode: {}. Additional details can be added now or later through the terminal and dashboard.",
             state.terminal_command,
             installation_email_mode_label(&state.email_assignment_mode)
         );
@@ -407,7 +422,7 @@ fn apply_installation_bootstrap_homepage_defaults(
         || policy.terminal_fallback_note == default_policy.terminal_fallback_note
     {
         policy.terminal_fallback_note = format!(
-            "Wenn Homepage oder E-Mail noch nicht traegt, bleibt `{}` im Terminal die primaere Vollzugriffsebene.",
+            "If the homepage or email path is not ready yet, `{}` in the terminal remains the primary full-access layer.",
             state.terminal_command
         );
     }
@@ -532,16 +547,16 @@ pub fn maybe_apply_homepage_feedback(
 
     policy.current_headline = build_homepage_headline(source_label, message);
     policy.current_intro = format!(
-        "Letzter Gestaltungsimpuls von {}: {}",
+        "Latest design signal from {}: {}",
         speaker.trim(),
         summarize_feedback(message, 220)
     );
     policy.communication_note = format!(
-        "Diese Oberflaeche wird gerade ueber {}-Feedback aufgebaut. Wenn sie noch nicht passt, darf der CTO-Agent sie weiter ueber Skill, Template und Chat umformen.",
+        "This surface is currently being shaped through {} feedback. If it does not fit yet, the CTO-Agent may keep reshaping it through skill, template, and chat.",
         source_label
     );
     policy.terminal_fallback_note =
-        "Wenn die Homepage nicht traegt, bleibt das laufende Terminal die primaere Vollzugriffsebene."
+        "If the homepage is not carrying the interaction yet, the live terminal remains the primary full-access layer."
             .to_string();
 
     if !trust.bios_primary_channel_confirmed {
@@ -562,7 +577,7 @@ pub fn maybe_apply_homepage_feedback(
     )?;
 
     Ok(Some(format!(
-        "Homepage ueber homepage-bootstrap aus {}-Feedback mit homepage-bios-bridge-template nachgezogen.",
+        "Homepage refreshed through `homepage-bootstrap` from {} feedback with `homepage-bios-bridge-template`.",
         source_label
     )))
 }
@@ -617,13 +632,13 @@ fn build_homepage_headline(source_label: &str, message: &str) -> String {
     let lowered = normalize_text(message);
     if lowered.contains("sichtbar") || lowered.contains("bios") {
         return format!(
-            "Diese Homepage wird nach {} so umgebaut, dass das BIOS sichtbar und die Kommunikationsrichtung klar wird.",
+            "This homepage will be rebuilt after {} so that BIOS stays visible and the communication direction becomes clear.",
             source_label
         );
     }
     if lowered.contains("vertrauen") || lowered.contains("trust") {
         return format!(
-            "Diese Homepage wird nach {} neu auf Vertrauen, Klarheit und Root-of-Trust kalibriert.",
+            "This homepage will be recalibrated after {} for trust, clarity, and root of trust.",
             source_label
         );
     }
@@ -633,13 +648,13 @@ fn build_homepage_headline(source_label: &str, message: &str) -> String {
         || lowered.contains("umgestalten")
     {
         return format!(
-            "Diese Homepage wird nach {} neu aufgebaut und bleibt absichtlich veraenderbar.",
+            "This homepage will be rebuilt after {} and remain intentionally changeable.",
             source_label
         );
     }
 
     format!(
-        "Diese Homepage reagiert auf {} und bleibt ein veraenderbarer erster Kommunikationspfad.",
+        "This homepage reacts to {} and remains a changeable first communication path.",
         source_label
     )
 }
@@ -663,33 +678,33 @@ fn normalize_text(value: &str) -> String {
 fn help_text() -> String {
     [
         "CTO-Agent infinity loop terminal",
-        "  /status               zeigt Bootstrap-, BIOS- und Homepage-Status",
-        "  /thread               zeigt den persistierten Main-Thread-Zustand",
-        "  /signals              zeigt die letzten Turn-Steer-/Interruptsignale",
-        "  /incidents            zeigt die letzten Loop-Incidents und Recovery-Faelle",
-        "  /events               zeigt die letzten Agentenereignisse",
-        "  /turns                zeigt die letzten bounded Agent-Turns",
-        "  /exec-sessions        zeigt codex-backed Exec-Sessions",
-        "  /exec-start ...       startet eine codex-backed Exec-Session",
-        "  /exec-write ...       schreibt in stdin einer Exec-Session",
-        "  /exec-resize ...      resized eine PTY-Exec-Session",
-        "  /exec-read ...        zeigt gepuffertes stdout/stderr einer Exec-Session",
-        "  /exec-terminate ...   beendet eine Exec-Session",
-        "  /browser-status       zeigt Status der expliziten Browser-Engine",
-        "  /browser-workers      zeigt Browser-/Repair-/Specialist-Worker-Jobs",
-        "  /browser-bridge       zeigt Status der Chrome-Extension-Bridge",
-        "  /browser-extension-path  zeigt den entkoppelten Extension-Workspace",
-        "  /browser-install      startet den Chrome-/Browser-Installer ueber die CLI-Engine",
-        "  /browser-launch       startet Chrome mit der Browser-Agent-Extension im Desktop",
-        "  /browser-dom URL      liest eine Seite ueber Chrome headless aus",
-        "  /browser-shot URL [DATEI]  erstellt einen Screenshot ueber Chrome headless",
-        "  /browser-open URL     oeffnet eine URL interaktiv in Chrome",
-        "  /help                 zeigt diese Hilfe",
-        "  Michael Welsch: ...   wird als Interrupt in den laufenden Always-on-Loop eingespeist",
-        "                        der aktuelle bounded Schritt wird nicht hart abgebrochen,",
-        "                        sondern erst sauber beendet und dann neu priorisiert",
-        "Beispiel:",
-        "  Michael Welsch: Dieser Kommunikationsweg gefaellt mir nicht. Mach das BIOS sichtbarer und halte das Terminal als Fallback.",
+        "  /status               shows bootstrap, BIOS, and homepage status",
+        "  /thread               shows the persisted main-thread state",
+        "  /signals              shows the latest turn steer/interrupt signals",
+        "  /incidents            shows the latest loop incidents and recovery cases",
+        "  /events               shows the latest agent events",
+        "  /turns                shows the latest bounded agent turns",
+        "  /exec-sessions        shows codex-backed exec sessions",
+        "  /exec-start ...       starts a codex-backed exec session",
+        "  /exec-write ...       writes to an exec session's stdin",
+        "  /exec-resize ...      resizes a PTY exec session",
+        "  /exec-read ...        shows buffered stdout/stderr from an exec session",
+        "  /exec-terminate ...   terminates an exec session",
+        "  /browser-status       shows status of the explicit browser engine",
+        "  /browser-workers      shows browser/repair/specialist worker jobs",
+        "  /browser-bridge       shows status of the Chrome extension bridge",
+        "  /browser-extension-path  shows the decoupled extension workspace",
+        "  /browser-install      starts the Chrome/browser installer through the CLI engine",
+        "  /browser-launch       starts Chrome with the browser-agent extension on the desktop",
+        "  /browser-dom URL      reads a page through headless Chrome",
+        "  /browser-shot URL [FILE]  creates a screenshot through headless Chrome",
+        "  /browser-open URL     opens a URL interactively in Chrome",
+        "  /help                 shows this help",
+        "  Michael Welsch: ...   is injected as an interrupt into the running always-on loop",
+        "                        the current bounded step is not hard-aborted,",
+        "                        but is finished cleanly and then reprioritized",
+        "Example:",
+        "  Michael Welsch: I do not like this communication path. Make the BIOS more visible and keep the terminal as fallback.",
         "  /exec-start --id shell --tty /bin/bash",
     ]
     .join("\n")
@@ -727,15 +742,21 @@ fn terminal_exec_start(paths: &Paths, rest: &str) -> anyhow::Result<String> {
             "--stdin" => stream_stdin = true,
             "--timeout-ms" => {
                 index += 1;
-                timeout_ms = tokens.get(index).and_then(|value| value.parse::<u64>().ok());
+                timeout_ms = tokens
+                    .get(index)
+                    .and_then(|value| value.parse::<u64>().ok());
             }
             "--rows" => {
                 index += 1;
-                rows = tokens.get(index).and_then(|value| value.parse::<u16>().ok());
+                rows = tokens
+                    .get(index)
+                    .and_then(|value| value.parse::<u16>().ok());
             }
             "--cols" => {
                 index += 1;
-                cols = tokens.get(index).and_then(|value| value.parse::<u16>().ok());
+                cols = tokens
+                    .get(index)
+                    .and_then(|value| value.parse::<u16>().ok());
             }
             _ => {
                 command.extend_from_slice(&tokens[index..]);
@@ -851,7 +872,7 @@ fn terminal_thread(paths: &Paths) -> anyhow::Result<String> {
 fn terminal_signals(paths: &Paths) -> anyhow::Result<String> {
     let signals = list_recent_turn_signals(paths, 12)?;
     if signals.is_empty() {
-        return Ok("Keine Turn-Signale vorhanden.".to_string());
+        return Ok("No turn signals available.".to_string());
     }
     Ok(signals
         .into_iter()
@@ -881,7 +902,7 @@ fn terminal_signals(paths: &Paths) -> anyhow::Result<String> {
 fn terminal_events(paths: &Paths) -> anyhow::Result<String> {
     let events = list_recent_agent_events(paths, 12)?;
     if events.is_empty() {
-        return Ok("Keine Agentenereignisse vorhanden.".to_string());
+        return Ok("No agent events available.".to_string());
     }
     Ok(events
         .into_iter()
@@ -903,7 +924,7 @@ fn terminal_events(paths: &Paths) -> anyhow::Result<String> {
 fn terminal_incidents(paths: &Paths) -> anyhow::Result<String> {
     let incidents = list_recent_loop_incidents(paths, 12)?;
     if incidents.is_empty() {
-        return Ok("Keine Loop-Incidents vorhanden.".to_string());
+        return Ok("No loop incidents available.".to_string());
     }
     Ok(incidents
         .into_iter()
@@ -930,7 +951,7 @@ fn terminal_incidents(paths: &Paths) -> anyhow::Result<String> {
 fn terminal_turns(paths: &Paths) -> anyhow::Result<String> {
     let turns = list_recent_agent_turns(paths, 10)?;
     if turns.is_empty() {
-        return Ok("Keine Agent-Turns vorhanden.".to_string());
+        return Ok("No agent turns available.".to_string());
     }
     Ok(turns
         .into_iter()
@@ -976,7 +997,11 @@ fn terminal_status(paths: &Paths) -> anyhow::Result<String> {
 
     Ok(format!(
         "status={}; homepage_stage={}; homepage_ready={}; bios_primary={}; branding_locked={}; owner={}; committed_owner={}; kleinhirn={} ({}); browser_status={}; chrome_binary={}; browser_desktop={}; browser_headless={}; agent_mode={}; active_task={}; queue_depth={}; next_task={}",
-        if bios.frozen { "bios_frozen" } else { "bootstrap" },
+        if bios.frozen {
+            "bios_frozen"
+        } else {
+            "bootstrap"
+        },
         homepage.stage,
         homepage.homepage_ready,
         trust.bios_primary_channel_confirmed,
@@ -1088,7 +1113,7 @@ fn terminal_browser_open(paths: &Paths, rest: &str) -> anyhow::Result<String> {
 fn terminal_browser_workers(paths: &Paths) -> anyhow::Result<String> {
     let jobs = list_worker_jobs(paths, 10)?;
     if jobs.is_empty() {
-        return Ok("Keine Browser-/Repair-Worker-Jobs vorhanden.".to_string());
+        return Ok("No browser/repair worker jobs are available.".to_string());
     }
     Ok(jobs
         .iter()
@@ -1100,7 +1125,9 @@ fn terminal_browser_workers(paths: &Paths) -> anyhow::Result<String> {
                 job.status,
                 job.contract_title,
                 job.completed_at.as_deref().unwrap_or("-"),
-                job.result_summary.as_deref().unwrap_or(job.request_note.as_str()),
+                job.result_summary
+                    .as_deref()
+                    .unwrap_or(job.request_note.as_str()),
             )
         })
         .collect::<Vec<_>>()
@@ -1196,12 +1223,10 @@ pub fn queue_interrupt(
     let signal_note = record_turn_signal_for_active_turn(paths, source_channel, speaker, message)?
         .map(|signal| {
             format!(
-                "Signal {} wurde am laufenden Thread als {} vermerkt.",
+                "Signal {} was recorded on the running thread as {}.",
                 signal.id, signal.signal_kind
             )
         });
-    let task = queue_loop_interrupt_as_task(paths, interrupt_id)?
-        .ok_or_else(|| anyhow::anyhow!("interrupt {interrupt_id} could not be queued"))?;
     let focus = load_focus_state(paths)?;
     let open_tasks = list_open_tasks(paths, 3)?;
     let next_titles = open_tasks
@@ -1209,11 +1234,50 @@ pub fn queue_interrupt(
         .map(|task| format!("#{} {}", task.id, task.title))
         .collect::<Vec<_>>()
         .join(" | ");
+    let queued_task = if source_channel == "attach_terminal" {
+        queue_loop_interrupt_as_task(paths, interrupt_id)?
+    } else {
+        None
+    };
+    let mut compaction_notes = Vec::new();
+    if let Some(active_task_id) = focus.active_task_id {
+        if let Ok(Some(active_task)) = load_task_by_id(paths, active_task_id) {
+            if prepare_context_package_with_trigger(
+                paths,
+                &active_task,
+                ContextCompactionTrigger::Interrupt,
+            )
+            .is_ok()
+            {
+                compaction_notes.push(format!(
+                    "Interrupt compaction refreshed the running task context for #{} {}.",
+                    active_task.id, active_task.title
+                ));
+            }
+        }
+    }
+    if let Some(task) = queued_task.as_ref() {
+        if prepare_context_package_with_trigger(paths, task, ContextCompactionTrigger::Interrupt)
+            .is_ok()
+        {
+            compaction_notes.push(format!(
+                "Interrupt compaction prepared the new task packet for #{} {}.",
+                task.id, task.title
+            ));
+        }
+    }
 
-    let mut parts = vec![format!(
-        "Interrupt von {} als Aufgabe #{} aufgenommen: {}.",
-        speaker, task.id, task.title
-    )];
+    let mut parts = vec![if let Some(task) = queued_task.as_ref() {
+        format!(
+            "Interrupt #{} from {} was recorded and immediately materialized as task #{} ({}).",
+            interrupt_id, speaker, task.id, task.title
+        )
+    } else {
+        format!(
+            "Interrupt #{} from {} was recorded. The supervisor will materialize it into the task queue on the next intake tick.",
+            interrupt_id, speaker
+        )
+    }];
     if let Some(note) = trust_note {
         parts.push(note);
     }
@@ -1221,13 +1285,14 @@ pub fn queue_interrupt(
         parts.push(note);
     }
     parts.push(format!(
-        "Der Agent bricht den laufenden bounded Schritt nicht hart ab, sondern bringt ihn erst sauber bis zur naechsten sicheren Turn-Grenze zu Ende."
+        "The agent does not hard-abort the running bounded step, but finishes it cleanly up to the next safe turn boundary."
     ));
     parts.push(format!(
-        "Danach zieht das einheitliche Modussystem diese Eingabe im naechsten Repriorisierungszyklus vor."
+        "After that, the unified mode system prioritizes this input in the next reprioritization cycle."
     ));
+    parts.extend(compaction_notes);
     parts.push(format!(
-        "Aktueller Agentenmodus: mode={}; active_task={}; queue_depth={}.",
+        "Current agent mode: mode={}; active_task={}; queue_depth={}.",
         focus.mode,
         focus
             .active_task_id
@@ -1236,12 +1301,12 @@ pub fn queue_interrupt(
         focus.queue_depth
     ));
     if !next_titles.is_empty() {
-        parts.push(format!("Naechste offene Aufgaben: {}.", next_titles));
+        parts.push(format!("Next open tasks: {}.", next_titles));
     }
     Ok(AttachLineOutcome {
         output: parts.join(" "),
-        queued_task_id: Some(task.id),
-        queued_task_title: Some(task.title.clone()),
+        queued_task_id: queued_task.as_ref().map(|task| task.id),
+        queued_task_title: queued_task.as_ref().map(|task| task.title.clone()),
     })
 }
 
@@ -1254,14 +1319,11 @@ pub fn queue_channel_interrupt(
     let signal_note = record_turn_signal_for_active_turn(paths, source_channel, speaker, message)?
         .map(|signal| {
             format!(
-                "Signal {} wurde am laufenden Thread als {} vermerkt.",
+                "Signal {} was recorded on the running thread as {}.",
                 signal.id, signal.signal_kind
             )
         });
     let interrupt_id = enqueue_loop_interrupt(paths, source_channel, speaker, message)?;
-    let task = queue_loop_interrupt_as_task(paths, interrupt_id)?
-        .ok_or_else(|| anyhow::anyhow!("interrupt {interrupt_id} could not be queued"))?;
-    let active_task = load_active_task(paths)?;
     let focus = load_focus_state(paths)?;
     let open_tasks = list_open_tasks(paths, 3)?;
     let next_titles = open_tasks
@@ -1271,42 +1333,22 @@ pub fn queue_channel_interrupt(
         .join(" | ");
 
     let mut parts = vec![format!(
-        "Interrupt von {} ueber {} als Aufgabe #{} aufgenommen: {}.",
-        speaker, source_channel, task.id, task.title
+        "Interrupt #{} from {} via {} was recorded. The supervisor will materialize it into the task queue on the next intake tick.",
+        interrupt_id, speaker, source_channel
     )];
     if let Some(note) = signal_note {
         parts.push(note);
     }
-    let preempted_local_model_switch = task.task_kind == "local_model_switch"
-        && active_task
-            .as_ref()
-            .map(|value| value.task_kind == "local_model_switch" && value.id != task.id)
-            .unwrap_or(false);
-    if preempted_local_model_switch {
-        if request_control_plane_restart_for_model_switch_preemption() {
-            parts.push(
-                "Ein aelterer lokaler Modellwechsel lief noch. Der Control-Plane-Prozess wurde fuer einen sauberen Requeue-/Supersede-Zyklus neu angestossen."
-                    .to_string(),
-            );
-        } else {
-            parts.push(
-                "Ein aelterer lokaler Modellwechsel lief noch. Der neue Switch wurde vorgemerkt, aber der Neustart zur sofortigen Praeemption konnte nicht direkt ausgelöst werden."
-                    .to_string(),
-            );
-        }
-    }
-    if !preempted_local_model_switch {
-        parts.push(
-            "Der Agent bricht den laufenden bounded Schritt nicht hart ab, sondern bringt ihn erst sauber bis zur naechsten sicheren Turn-Grenze zu Ende."
-                .to_string(),
-        );
-    }
     parts.push(
-        "Danach zieht das einheitliche Modussystem diese Eingabe im naechsten Repriorisierungszyklus vor."
+        "The agent does not hard-abort the running bounded step, but finishes it cleanly up to the next safe turn boundary."
+            .to_string(),
+    );
+    parts.push(
+        "After that, the unified mode system prioritizes this input in the next reprioritization cycle."
             .to_string(),
     );
     parts.push(format!(
-        "Aktueller Agentenmodus: mode={}; active_task={}; queue_depth={}.",
+        "Current agent mode: mode={}; active_task={}; queue_depth={}.",
         focus.mode,
         focus
             .active_task_id
@@ -1315,19 +1357,11 @@ pub fn queue_channel_interrupt(
         focus.queue_depth
     ));
     if !next_titles.is_empty() {
-        parts.push(format!("Naechste offene Aufgaben: {}.", next_titles));
+        parts.push(format!("Next open tasks: {}.", next_titles));
     }
     Ok(AttachLineOutcome {
         output: parts.join(" "),
-        queued_task_id: Some(task.id),
-        queued_task_title: Some(task.title.clone()),
+        queued_task_id: None,
+        queued_task_title: None,
     })
-}
-
-fn request_control_plane_restart_for_model_switch_preemption() -> bool {
-    Command::new("systemctl")
-        .args(["--user", "restart", "cto-agent.service"])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }

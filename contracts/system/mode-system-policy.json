@@ -1,7 +1,7 @@
 {
   "version": 1,
   "initialMode": "observe",
-  "preferredOperatingGoal": "delegate_asap_and_secure_resources",
+  "preferredOperatingGoal": "finish_current_task_with_verified_progress",
   "modes": [
     "bootstrap",
     "observe",

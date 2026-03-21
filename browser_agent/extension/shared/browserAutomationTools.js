@@ -365,7 +365,7 @@ function resolveViewportCoordinates({
   const inputX = Number(x);
   const inputY = Number(y);
   if (!Number.isFinite(inputX) || !Number.isFinite(inputY) || inputX < 0 || inputY < 0) {
-    throw new Error(`${actionLabel}: x/y fehlen oder sind ungültig.`);
+    throw new Error(`${actionLabel}: x/y are missing or invalid.`);
   }
   const width = Number(viewportWidth);
   const height = Number(viewportHeight);
@@ -383,14 +383,14 @@ function resolveViewportCoordinates({
     const imgW = Number(imageWidth);
     const imgH = Number(imageHeight);
     if (!Number.isFinite(imgW) || !Number.isFinite(imgH) || imgW <= 0 || imgH <= 0) {
-      throw new Error(`${actionLabel}: imageWidth/imageHeight fehlen für coordSpace='image_px'.`);
+      throw new Error(`${actionLabel}: imageWidth/imageHeight are missing for coordSpace='image_px'.`);
     }
     resolvedX = (inputX * width) / imgW;
     resolvedY = (inputY * height) / imgH;
   }
 
   if (!Number.isFinite(resolvedX) || !Number.isFinite(resolvedY)) {
-    throw new Error(`${actionLabel}: Koordinaten konnten nicht auf den Viewport aufgelöst werden.`);
+    throw new Error(`${actionLabel}: coordinates could not be resolved to the viewport.`);
   }
 
   const clampedX = clamp(Math.round(resolvedX), 0, Math.max(0, Math.round(width) - 1));
@@ -925,7 +925,7 @@ export async function toolRunBrowserNativeAction(tabId, {
         const wheelDeltaX = Number(deltaX);
         const wheelDeltaY = Number(deltaY);
         if (!Number.isFinite(wheelDeltaX) || !Number.isFinite(wheelDeltaY) || (Math.abs(wheelDeltaX) < 0.001 && Math.abs(wheelDeltaY) < 0.001)) {
-          throw new Error("scroll: deltaX/deltaY fehlen oder sind ungültig.");
+          throw new Error("scroll: deltaX/deltaY are missing or invalid.");
         }
         await page.mouse.wheel(wheelDeltaX, wheelDeltaY);
         resultData = {

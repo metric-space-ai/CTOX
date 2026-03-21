@@ -1,21 +1,57 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { once } from "node:events";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
-import { connect as tlsConnect } from "node:tls";
-import { fileURLToPath } from "node:url";
+import * as childProcess from "child_process";
+import * as crypto from "crypto";
+import * as events from "events";
+import * as fs from "fs";
+import * as path from "path";
+import * as tls from "tls";
+import * as url from "url";
+
+const execFileSync = childProcess.execFileSync;
+const once = events.once;
+const mkdir = fs.promises.mkdir;
+const readFile = fs.promises.readFile;
+const writeFile = fs.promises.writeFile;
+const dirname = path.dirname;
+const join = path.join;
+const resolve = path.resolve;
+const tlsConnect = tls.connect;
+const fileURLToPath = url.fileURLToPath;
+const randomUUID = crypto.randomUUID
+  ? function randomUuidCompat() {
+      return crypto.randomUUID();
+    }
+  : function randomUuidCompat() {
+      const bytes = crypto.randomBytes(16);
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = bytes.toString("hex");
+      return [
+        hex.slice(0, 8),
+        hex.slice(8, 12),
+        hex.slice(12, 16),
+        hex.slice(16, 20),
+        hex.slice(20, 32),
+      ].join("-");
+    };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+function defaultAgentBinary() {
+  if (process.env.CTO_AGENT_BINARY) return process.env.CTO_AGENT_BINARY;
+  const releasePath = resolve(process.cwd(), "target/release/cto-agent");
+  if (fs.existsSync(releasePath)) return releasePath;
+  return resolve(process.cwd(), "target/debug/cto-agent");
+}
+
 const DEFAULTS = {
   channel: "email",
   provider: "one.com",
   db: resolve(process.cwd(), "runtime/cto_agent.db"),
   rawDir: resolve(process.cwd(), "runtime/communication/raw"),
   schema: join(__dirname, "communication_schema.sql"),
-  agentBinary: process.env.CTO_AGENT_BINARY || resolve(process.cwd(), "target/debug/cto-agent"),
+  agentBinary: defaultAgentBinary(),
   imapHost: "imap.one.com",
   imapPort: 993,
   smtpHost: "send.one.com",
@@ -57,14 +93,14 @@ function parseJsonOutput(text) {
 }
 
 function toBool(value) {
-  const normalized = String(value ?? "")
+  const normalized = String(value == null ? "" : value)
     .trim()
     .toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 function runSql(dbPath, sql, { json = false } = {}) {
-  const input = `${json ? ".mode json\n" : ""}${sql.trim().endsWith(";") ? sql.trim() : `${sql.trim()};`}\n`;
+  const input = `.timeout 5000\n${json ? ".mode json\n" : ""}${sql.trim().endsWith(";") ? sql.trim() : `${sql.trim()};`}\n`;
   return execFileSync("sqlite3", [dbPath], {
     input,
     encoding: "utf8",
@@ -117,14 +153,14 @@ function parseHeaders(headerText) {
 
 function extractAddress(token = "") {
   const bracket = token.match(/<([^>]+)>/);
-  if (bracket?.[1]) return bracket[1].trim().toLowerCase();
+  if (bracket && bracket[1]) return bracket[1].trim().toLowerCase();
   const naked = token.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-  return naked?.[0]?.trim().toLowerCase() || "";
+  return (naked && naked[0] ? naked[0].trim().toLowerCase() : "") || "";
 }
 
 function extractDisplayName(token = "") {
   const bracket = token.match(/^(.*)<[^>]+>/);
-  if (bracket?.[1]) return decodeMimeHeader(bracket[1].replace(/"/g, "").trim());
+  if (bracket && bracket[1]) return decodeMimeHeader(bracket[1].replace(/"/g, "").trim());
   return "";
 }
 
@@ -144,15 +180,125 @@ function previewText(input = "") {
   return String(input || "").replace(/\s+/g, " ").trim().slice(0, 280);
 }
 
+function decodeQuotedPrintable(input = "") {
+  const normalized = String(input || "")
+    .replace(/=\r?\n/g, "")
+    .replace(/=([0-9A-Fa-f]{2})/g, (_match, hex) =>
+      String.fromCharCode(Number.parseInt(hex, 16))
+    );
+  return Buffer.from(normalized, "binary").toString("utf8");
+}
+
+function decodeBase64Body(input = "") {
+  let sanitized = String(input || "").replace(/[^A-Za-z0-9+/=]/g, "");
+  while (sanitized.length % 4 === 1) {
+    sanitized = sanitized.slice(0, -1);
+  }
+  if (!sanitized) return "";
+  sanitized += "=".repeat((4 - (sanitized.length % 4)) % 4);
+  return Buffer.from(sanitized, "base64").toString("utf8");
+}
+
+function decodeTransferEncodedBody(body = "", transferEncoding = "") {
+  const normalizedEncoding = String(transferEncoding || "").trim().toLowerCase();
+  if (normalizedEncoding === "base64") {
+    return decodeBase64Body(body);
+  }
+  if (normalizedEncoding === "quoted-printable") {
+    return decodeQuotedPrintable(body);
+  }
+  return String(body || "");
+}
+
+function stripHtml(input = "") {
+  return String(input || "")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&#39;/gi, "'")
+    .replace(/&quot;/gi, "\"")
+    .replace(/\r/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function boundaryFromContentType(contentType = "") {
+  const match = String(contentType || "").match(/boundary="?([^";]+)"?/i);
+  return match && match[1] ? match[1] : "";
+}
+
+function splitMultipartBody(body = "", boundary = "") {
+  if (!boundary) return [];
+  const normalized = String(body || "").replace(/\r\n/g, "\n");
+  const marker = `--${boundary}`;
+  return normalized
+    .split(marker)
+    .slice(1)
+    .map((segment) => segment.replace(/^\n/, "").replace(/\n$/, ""))
+    .filter((segment) => segment && !segment.startsWith("--"));
+}
+
+function parseMimeEntity(rawText) {
+  const separator = String(rawText || "").search(/\r?\n\r?\n/);
+  const headerText = separator === -1 ? String(rawText || "") : String(rawText || "").slice(0, separator);
+  const body = separator === -1 ? "" : String(rawText || "").slice(separator).replace(/^\r?\n\r?\n/, "");
+  const headers = parseHeaders(headerText);
+  const contentType = headers["content-type"] || "text/plain; charset=utf-8";
+  const contentDisposition = headers["content-disposition"] || "";
+  const transferEncoding = headers["content-transfer-encoding"] || "";
+  const mediaType = String(contentType).split(";")[0].trim().toLowerCase();
+
+  if (mediaType.startsWith("multipart/")) {
+    const boundary = boundaryFromContentType(contentType);
+    let bodyText = "";
+    let bodyHtml = "";
+    let hasAttachments = /attachment/i.test(contentDisposition);
+    for (const part of splitMultipartBody(body, boundary)) {
+      const parsed = parseMimeEntity(part);
+      if (!bodyText && parsed.bodyText) bodyText = parsed.bodyText;
+      if (!bodyHtml && parsed.bodyHtml) bodyHtml = parsed.bodyHtml;
+      hasAttachments = hasAttachments || parsed.hasAttachments;
+    }
+    if (!bodyText && bodyHtml) {
+      bodyText = stripHtml(bodyHtml);
+    }
+    return { headers, bodyText: bodyText.trim(), bodyHtml, hasAttachments };
+  }
+
+  const decodedBody = decodeTransferEncodedBody(body, transferEncoding);
+  const hasAttachments = /attachment/i.test(contentDisposition);
+  if (mediaType === "text/html") {
+    return {
+      headers,
+      bodyText: stripHtml(decodedBody),
+      bodyHtml: decodedBody,
+      hasAttachments,
+    };
+  }
+  return {
+    headers,
+    bodyText: decodedBody.trim(),
+    bodyHtml: "",
+    hasAttachments,
+  };
+}
+
 function parseRfc822(rawBuffer) {
   const rawText = rawBuffer.toString("utf8");
   const separator = rawText.search(/\r?\n\r?\n/);
   const headerText = separator === -1 ? rawText : rawText.slice(0, separator);
-  const bodyText = separator === -1 ? "" : rawText.slice(separator).replace(/^\r?\n\r?\n/, "");
   const headers = parseHeaders(headerText);
+  const parsedEntity = parseMimeEntity(rawText);
   return {
     headers,
-    bodyText,
+    bodyText: parsedEntity.bodyText,
+    bodyHtml: parsedEntity.bodyHtml,
     subject: headers.subject || "(ohne Betreff)",
     fromHeader: headers.from || "",
     toHeader: headers.to || "",
@@ -161,7 +307,10 @@ function parseRfc822(rawBuffer) {
     references: headers.references || "",
     inReplyTo: headers["in-reply-to"] || "",
     sentAt: headers.date || "",
-    hasAttachments: /content-disposition:\s*attachment/i.test(rawText) || /multipart\/mixed/i.test(rawText),
+    hasAttachments:
+      parsedEntity.hasAttachments ||
+      /content-disposition:\s*attachment/i.test(rawText) ||
+      /multipart\/mixed/i.test(rawText),
   };
 }
 
@@ -285,7 +434,7 @@ function messageExists(dbPath, messageKey) {
     LIMIT 1
     `
   );
-  return !!row?.message_key;
+  return !!(row && row.message_key);
 }
 
 function refreshThread(dbPath, threadKey) {
@@ -341,8 +490,8 @@ function refreshThread(dbPath, threadKey) {
       ${sqlValue(JSON.stringify(participants))},
       ${sqlValue(latest.message_key || "")},
       ${sqlValue(latest.external_created_at || nowIso())},
-      ${sqlValue(Number(counts?.message_count || 0))},
-      ${sqlValue(Number(counts?.unread_count || 0))},
+      ${sqlValue(Number((counts && counts.message_count) || 0))},
+      ${sqlValue(Number((counts && counts.unread_count) || 0))},
       ${sqlValue("{}")},
       ${sqlValue(nowIso())}
     FROM communication_messages
@@ -548,7 +697,7 @@ class ImapClient {
   async searchAllUids() {
     const response = await this.command("UID SEARCH ALL");
     const match = response.text.match(/\* SEARCH ?([0-9 ]*)/);
-    return String(match?.[1] || "")
+    return String((match && match[1]) || "")
       .trim()
       .split(/\s+/)
       .filter(Boolean);
@@ -558,7 +707,7 @@ class ImapClient {
     const response = await this.command(`UID FETCH ${uid} (UID FLAGS RFC822)`);
     const { prefix, literal } = extractFetchLiteral(response.buffer);
     const flagsMatch = prefix.match(/FLAGS \(([^)]*)\)/i);
-    const flags = String(flagsMatch?.[1] || "")
+    const flags = String((flagsMatch && flagsMatch[1]) || "")
       .split(/\s+/)
       .map((value) => value.trim())
       .filter(Boolean);
@@ -786,7 +935,8 @@ async function sendMail(options) {
   });
 
   const smtp = new SmtpClient(options);
-  const messageId = `<${randomUUID()}@${options.email.split("@").at(-1)}>`;
+  const emailParts = options.email.split("@");
+  const messageId = `<${randomUUID()}@${emailParts[emailParts.length - 1]}>`;
   try {
     await smtp.connect();
     await smtp.login(options.email, options.password);
@@ -874,7 +1024,7 @@ async function syncMail(options) {
         subject: parsed.subject,
         preview,
         bodyText: parsed.bodyText,
-        bodyHtml: "",
+        bodyHtml: parsed.bodyHtml || "",
         rawPayloadRef,
         trustLevel: options.trustLevel,
         status: "received",
@@ -949,7 +1099,7 @@ async function syncMail(options) {
       ok: false,
       fetchedCount,
       storedCount,
-      errorText: String(error?.message || error),
+      errorText: String((error && error.message) || error),
       metadataJson: JSON.stringify({ adapter: "js-mail-template" }),
     });
     throw error;
@@ -999,7 +1149,16 @@ async function main() {
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
-main().catch((error) => {
-  process.stdout.write(`${JSON.stringify({ ok: false, error: String(error?.message || error) }, null, 2)}\n`);
-  process.exitCode = 1;
-});
+export { decodeTransferEncodedBody, main, parseMimeEntity, parseRfc822, previewText, stripHtml };
+
+const executedPath = process.argv[1] ? resolve(process.argv[1]) : "";
+const currentModulePath = fileURLToPath(import.meta.url);
+
+if (executedPath === currentModulePath) {
+  main().catch((error) => {
+    process.stdout.write(
+      `${JSON.stringify({ ok: false, error: String((error && error.message) || error) }, null, 2)}\n`
+    );
+    process.exitCode = 1;
+  });
+}

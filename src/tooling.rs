@@ -44,6 +44,35 @@ pub struct HomepageUpdateDirective {
     pub terminal_fallback_note: Option<String>,
 }
 
+fn command_uses_reviewed_mail_adapter(command: &[String]) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    let joined = command.join(" ").to_lowercase();
+    joined.contains("communication_mail_cli.mjs")
+}
+
+fn command_looks_like_raw_mail_transport(command: &[String]) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    let joined = command.join(" ").to_lowercase();
+    (joined.contains("smtplib")
+        || joined.contains("send.one.com")
+        || joined.contains("imap.one.com")
+        || joined.contains("smtp.")
+        || joined.contains("imap.")
+        || joined.contains("mail_sent"))
+        && !command_uses_reviewed_mail_adapter(command)
+}
+
+fn outbound_mail_must_use_reviewed_adapter(task: &TaskRecord, command: &[String]) -> bool {
+    matches!(
+        task.task_kind.as_str(),
+        "owner_interrupt" | "communication_governance" | "proactive_contact_dispatch"
+    ) && command_looks_like_raw_mail_transport(command)
+}
+
 pub fn run_bounded_command(
     paths: &Paths,
     task: &TaskRecord,
@@ -51,6 +80,11 @@ pub fn run_bounded_command(
 ) -> anyhow::Result<ExecCommandResult> {
     if directive.command.is_empty() {
         anyhow::bail!("execCommand must not be empty");
+    }
+    if outbound_mail_must_use_reviewed_adapter(task, &directive.command) {
+        anyhow::bail!(
+            "Outbound mail must use the reviewed JS adapter at scripts/communication_mail_cli.mjs instead of a raw SMTP shell command."
+        );
     }
 
     let timeout_ms = directive.timeout_ms.unwrap_or(15_000).clamp(500, 120_000);
@@ -179,7 +213,10 @@ pub fn apply_homepage_update(
             paths,
             source,
             &policy,
-            &format!("homepage mutated directly by bounded agent run for task {}", task.id),
+            &format!(
+                "homepage mutated directly by bounded agent run for task {}",
+                task.id
+            ),
         )?;
         let _ = record_agent_event(
             paths,
@@ -223,4 +260,63 @@ fn trim_output(value: &str, max_chars: usize) -> String {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_smtp_mail_command_is_detected() {
+        let command = vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import smtplib; print('MAIL_SENT')".to_string(),
+        ];
+        assert!(command_looks_like_raw_mail_transport(&command));
+        assert!(!command_uses_reviewed_mail_adapter(&command));
+    }
+
+    #[test]
+    fn reviewed_js_mail_adapter_is_not_treated_as_raw_smtp() {
+        let command = vec![
+            "node".to_string(),
+            "scripts/communication_mail_cli.mjs".to_string(),
+            "send".to_string(),
+            "--to".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        ];
+        assert!(command_uses_reviewed_mail_adapter(&command));
+        assert!(!command_looks_like_raw_mail_transport(&command));
+    }
+
+    #[test]
+    fn owner_interrupt_mail_task_requires_reviewed_mail_adapter() {
+        let task = TaskRecord {
+            id: 75,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: Some(1),
+            source_channel: "bios".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Schreibe eine Test-E-Mail".to_string(),
+            detail: "Sende genau eine Mail sichtbar an den Owner.".to_string(),
+            trust_level: "owner".to_string(),
+            priority_score: 1000,
+            status: "active".to_string(),
+            run_count: 1,
+            last_checkpoint_summary: None,
+            last_checkpoint_at: None,
+            last_output: None,
+        };
+        let command = vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "import smtplib; print('MAIL_SENT')".to_string(),
+        ];
+        assert!(outbound_mail_must_use_reviewed_adapter(&task, &command));
+    }
 }

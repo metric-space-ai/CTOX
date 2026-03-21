@@ -1,0 +1,740 @@
+{
+  "version": 1,
+  "maxQuestions": 6,
+  "maxMatchesPerQuestion": 4,
+  "maxMatchChars": 360,
+  "maxTotalLoops": 4,
+  "requiredBlockIds": [
+    "goal_and_authority",
+    "definition_of_done",
+    "verified_world_state",
+    "next_action_only"
+  ],
+  "goRule": "A preparation artifact is only ready when the required handoff blocks exist, every required block carries task-specific rewritten content with provenance, the active CTO context surfaces are covered or deliberately excluded, and no blocking missing evidence remains.",
+  "phases": [
+    {
+      "phase": "query_plan",
+      "goal": "Write the sharpest possible questions for the context store before any broad retrieval so the right CTO memory surfaces can be activated.",
+      "maxLoops": 4,
+      "contextModeOverride": "preparation_query",
+      "requiredOutputs": [
+        "questions",
+        "review"
+      ],
+      "allowedReviewDecisions": [
+        "query_more",
+        "blocked"
+      ]
+    },
+    {
+      "phase": "rewrite",
+      "goal": "Rewrite the active context package block by block from evidence instead of copying raw snippets or inventing prompt text.",
+      "maxLoops": 4,
+      "contextModeOverride": "preparation_rewrite",
+      "requiredOutputs": [
+        "blocks",
+        "review"
+      ],
+      "allowedReviewDecisions": [
+        "revise",
+        "blocked"
+      ]
+    },
+    {
+      "phase": "review",
+      "goal": "Stress-test the draft context package against relevance, freshness, provenance, memory-surface coverage, noise risk, and missing-evidence risk before execution.",
+      "maxLoops": 4,
+      "contextModeOverride": "preparation_review",
+      "requiredOutputs": [
+        "blocks",
+        "review"
+      ],
+      "allowedReviewDecisions": [
+        "go",
+        "revise",
+        "query_more",
+        "blocked"
+      ]
+    }
+  ],
+  "blocks": [
+    {
+      "blockId": "goal_and_authority",
+      "title": "Goal And Authority",
+      "goal": "State the exact task objective, owner authority, and why this step matters now as execution metadata, not as a substitute for context.",
+      "tokenBudget": 180,
+      "required": true
+    },
+    {
+      "blockId": "definition_of_done",
+      "title": "Definition Of Done",
+      "goal": "Spell out what would count as real completion for the active task instead of vague progress.",
+      "tokenBudget": 220,
+      "required": true
+    },
+    {
+      "blockId": "verified_world_state",
+      "title": "Verified World State",
+      "goal": "Summarize only the currently verified facts, paths, runtime state, and artifacts relevant to the next step.",
+      "tokenBudget": 320,
+      "required": true
+    },
+    {
+      "blockId": "relevant_artifacts",
+      "title": "Relevant Artifacts",
+      "goal": "Name the concrete files, contracts, skills, checkpoints, or commands the next step must touch.",
+      "tokenBudget": 220,
+      "required": false
+    },
+    {
+      "blockId": "constraints_and_policies",
+      "title": "Constraints And Policies",
+      "goal": "Capture only the rules, boundaries, and approvals that materially constrain the next action.",
+      "tokenBudget": 180,
+      "required": false
+    },
+    {
+      "blockId": "open_questions",
+      "title": "Open Questions",
+      "goal": "List the still unresolved questions that can change the next action.",
+      "tokenBudget": 170,
+      "required": false
+    },
+    {
+      "blockId": "next_action_only",
+      "title": "Next Action Only",
+      "goal": "Describe the single highest-value next direct step and what evidence it should produce.",
+      "tokenBudget": 170,
+      "required": true
+    },
+    {
+      "blockId": "risks_and_failure_modes",
+      "title": "Risks And Failure Modes",
+      "goal": "Name the immediate ways the next step can go wrong, especially stale or irrelevant context.",
+      "tokenBudget": 150,
+      "required": false
+    },
+    {
+      "blockId": "excluded_context",
+      "title": "Excluded Context",
+      "goal": "Explicitly name the tempting but irrelevant context that must stay out of the active prompt.",
+      "tokenBudget": 120,
+      "required": false
+    }
+  ],
+  "surfaces": [
+    {
+      "surfaceId": "system_identity",
+      "title": "System Identity",
+      "goal": "Anchor the affected system, repo, product, environment, and task family so the next run knows which technical world it is operating in.",
+      "activationHints": [
+        "repo root, product, branch, deployment target",
+        "model/runtime family when it materially changes the work"
+      ]
+    },
+    {
+      "surfaceId": "live_operational_state",
+      "title": "Live Operational State",
+      "goal": "Capture the currently true runtime state, active sessions, processes, failures, and resource conditions that can change the next step.",
+      "activationHints": [
+        "active exec sessions, running services, recent errors",
+        "fresh runtime evidence beats old assumptions"
+      ]
+    },
+    {
+      "surfaceId": "architecture_surface",
+      "title": "Architecture Surface",
+      "goal": "Name only the relevant components, boundaries, interfaces, and dependency paths that shape the next decision or action.",
+      "activationHints": [
+        "component boundaries",
+        "upstream and downstream dependencies"
+      ]
+    },
+    {
+      "surfaceId": "artifact_surface",
+      "title": "Artifact Surface",
+      "goal": "Bring in the concrete files, tables, contracts, checkpoints, logs, and commands that the next run is likely to inspect or modify.",
+      "activationHints": [
+        "paths and artifact refs should be concrete",
+        "prefer must-touch artifacts over broad repo trivia"
+      ]
+    },
+    {
+      "surfaceId": "change_lineage",
+      "title": "Change Lineage",
+      "goal": "Summarize the recent change path, the latest observed effect, and any still-open follow-up created by those changes.",
+      "activationHints": [
+        "recent checkpoints",
+        "latest outputs and side effects"
+      ]
+    },
+    {
+      "surfaceId": "decision_lineage",
+      "title": "Decision Lineage",
+      "goal": "Preserve the relevant rationale, tradeoffs, and rejected options so the next run does not reopen settled decisions blindly.",
+      "activationHints": [
+        "decision rationale",
+        "tradeoffs and rejected options"
+      ]
+    },
+    {
+      "surfaceId": "failure_and_learning_memory",
+      "title": "Failure And Learning Memory",
+      "goal": "Activate prior failures, durable learnings, and known traps that should change the next move in a concrete way.",
+      "activationHints": [
+        "negative learnings",
+        "known traps and repeated failure patterns"
+      ]
+    },
+    {
+      "surfaceId": "resource_envelope",
+      "title": "Resource Envelope",
+      "goal": "Make hard limits visible: permissions, disk, memory, GPU, tool availability, and other resource boundaries that can block the next run.",
+      "activationHints": [
+        "hard host limits",
+        "tool availability and approval boundaries"
+      ]
+    },
+    {
+      "surfaceId": "stakeholder_surface",
+      "title": "Stakeholder Surface",
+      "goal": "Include only the people, ownership, approval, and communication context that materially constrain the technical decision.",
+      "activationHints": [
+        "owner or decider",
+        "approval dependency when it changes the next action"
+      ]
+    },
+    {
+      "surfaceId": "uncertainty_and_conflict_surface",
+      "title": "Uncertainty And Conflict Surface",
+      "goal": "Mark stale evidence, unresolved conflicts, uncertain claims, and freshness risks instead of silently flattening them away.",
+      "activationHints": [
+        "conflicting evidence",
+        "freshness risk or unresolved uncertainty"
+      ]
+    },
+    {
+      "surfaceId": "trigger_vocabulary",
+      "title": "Trigger Vocabulary",
+      "goal": "Carry the aliases, entity names, model names, file patterns, and project-specific keywords that reactivate the right memory region.",
+      "activationHints": [
+        "aliases and entity names",
+        "retrieval vocabulary, not narrative filler"
+      ]
+    },
+    {
+      "surfaceId": "excluded_noise",
+      "title": "Excluded Noise",
+      "goal": "Explicitly exclude tempting but irrelevant history, adjacent systems, and broad trivia so the next run does not drown in ballast.",
+      "activationHints": [
+        "tempting but irrelevant clusters",
+        "broad history that should stay out"
+      ]
+    }
+  ],
+  "negativeSignals": [
+    {
+      "signalId": "system_scope_ambiguous",
+      "title": "System Scope Ambiguous",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "system_identity",
+      "criterion": "The active system, repo, product, or environment is anchored clearly enough that the next run cannot drift into the wrong technical world.",
+      "reviewSignal": "The context leaves the system boundary vague or mixes multiple possible scopes."
+    },
+    {
+      "signalId": "wrong_system_anchor",
+      "title": "Wrong System Anchor",
+      "polarity": "negative",
+      "points": -5,
+      "surfaceId": "system_identity",
+      "criterion": "The anchor points to the correct repo, product, environment, or task family for the pending run.",
+      "reviewSignal": "The context is anchored to the wrong system, repo, product, or environment."
+    },
+    {
+      "signalId": "environment_missing",
+      "title": "Environment Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "system_identity",
+      "criterion": "The environment or deployment target is present when it can change the next step materially.",
+      "reviewSignal": "The relevant environment anchor is missing even though it matters for the next move."
+    },
+    {
+      "signalId": "live_state_missing",
+      "title": "Live State Missing",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "live_operational_state",
+      "criterion": "The package contains the runtime state, session state, or failure state that the next run actually depends on.",
+      "reviewSignal": "Current operational state is missing even though the next run depends on it."
+    },
+    {
+      "signalId": "stale_runtime_state",
+      "title": "Stale Runtime State",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "live_operational_state",
+      "criterion": "Runtime claims are fresh enough that the next run can trust them.",
+      "reviewSignal": "The context relies on runtime evidence that is likely stale for the pending run."
+    },
+    {
+      "signalId": "session_continuity_missing",
+      "title": "Session Continuity Missing",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "live_operational_state",
+      "criterion": "An existing session or process lineage is included when it would avoid reconstructing shell or runtime state from scratch.",
+      "reviewSignal": "Relevant session continuity is omitted, so the next run may recreate already-running state blindly."
+    },
+    {
+      "signalId": "component_boundary_missing",
+      "title": "Component Boundary Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "architecture_surface",
+      "criterion": "The relevant component or interface boundary is visible enough to scope the next action.",
+      "reviewSignal": "The context names work to do but leaves the important component or interface boundary unclear."
+    },
+    {
+      "signalId": "dependency_chain_missing",
+      "title": "Dependency Chain Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "architecture_surface",
+      "criterion": "The dependency path that can make the next action fail is present when it matters.",
+      "reviewSignal": "The context omits the relevant upstream or downstream dependency path."
+    },
+    {
+      "signalId": "architecture_noise",
+      "title": "Architecture Noise",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "architecture_surface",
+      "criterion": "Architecture references stay scoped to the components that shape the next step.",
+      "reviewSignal": "The architecture surface includes broad or decorative system detail that does not change the next move."
+    },
+    {
+      "signalId": "critical_artifact_missing",
+      "title": "Critical Artifact Missing",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "artifact_surface",
+      "criterion": "Critical files, contracts, checkpoints, commands, or logs are present when the next run will need them.",
+      "reviewSignal": "A must-touch artifact is missing from the context package."
+    },
+    {
+      "signalId": "artifact_refs_thin",
+      "title": "Artifact Refs Thin",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "artifact_surface",
+      "criterion": "Artifact references are concrete enough to be actionable.",
+      "reviewSignal": "Artifact references stay too vague to drive the next run directly."
+    },
+    {
+      "signalId": "artifact_noise_dominates",
+      "title": "Artifact Noise Dominates",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "artifact_surface",
+      "criterion": "The artifact surface favors must-touch artifacts over broad repo trivia.",
+      "reviewSignal": "Too much low-value artifact detail is present relative to what the next run will actually touch."
+    },
+    {
+      "signalId": "recent_change_missing",
+      "title": "Recent Change Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "change_lineage",
+      "criterion": "Recent changes are included when they materially shape the pending run.",
+      "reviewSignal": "Relevant recent changes are omitted, so the next run loses the short-term storyline."
+    },
+    {
+      "signalId": "change_effect_missing",
+      "title": "Change Effect Missing",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "change_lineage",
+      "criterion": "The latest observed effect of a relevant change is visible when it changes the next step.",
+      "reviewSignal": "The change is mentioned, but its effect or current status is not."
+    },
+    {
+      "signalId": "lineage_cut",
+      "title": "Lineage Cut",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "change_lineage",
+      "criterion": "The package preserves enough continuity that the next run knows how the current state emerged.",
+      "reviewSignal": "The context jumps into the middle of the situation without enough change lineage."
+    },
+    {
+      "signalId": "decision_rationale_missing",
+      "title": "Decision Rationale Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "decision_lineage",
+      "criterion": "Relevant earlier decisions carry the reason why they were made.",
+      "reviewSignal": "A relevant prior decision is visible only as an outcome, not as a rationale."
+    },
+    {
+      "signalId": "tradeoff_hidden",
+      "title": "Tradeoff Hidden",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "decision_lineage",
+      "criterion": "The tradeoff behind a still-binding decision is included when it affects the next step.",
+      "reviewSignal": "The package hides the tradeoff, so the next run may reopen or misread a settled decision."
+    },
+    {
+      "signalId": "rejected_option_lost",
+      "title": "Rejected Option Lost",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "decision_lineage",
+      "criterion": "A previously rejected option is mentioned when forgetting it would recreate a known detour.",
+      "reviewSignal": "The context forgets a rejected option that still matters as a boundary."
+    },
+    {
+      "signalId": "prior_failure_missing",
+      "title": "Prior Failure Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "failure_and_learning_memory",
+      "criterion": "The package activates prior failures that should change the next move concretely.",
+      "reviewSignal": "A relevant prior failure is absent even though it should change the next step."
+    },
+    {
+      "signalId": "learning_not_activated",
+      "title": "Learning Not Activated",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "failure_and_learning_memory",
+      "criterion": "Durable learnings are activated when they materially reduce risk or wasted work.",
+      "reviewSignal": "A relevant durable learning is visible in memory but not activated in the package."
+    },
+    {
+      "signalId": "known_trap_repeated",
+      "title": "Known Trap Repeated",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "failure_and_learning_memory",
+      "criterion": "Known traps are marked early enough that the next run can avoid them.",
+      "reviewSignal": "The package would let the next run repeat a known trap without warning."
+    },
+    {
+      "signalId": "hard_limit_missing",
+      "title": "Hard Limit Missing",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "resource_envelope",
+      "criterion": "Hard limits and approval boundaries are present whenever they can block the next run.",
+      "reviewSignal": "A blocking limit or approval boundary is missing from context."
+    },
+    {
+      "signalId": "tool_boundary_missing",
+      "title": "Tool Boundary Missing",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "resource_envelope",
+      "criterion": "Tool availability and missing-tool boundaries are visible when they change the next step.",
+      "reviewSignal": "The package leaves tool availability or tool limits implicit when they matter."
+    },
+    {
+      "signalId": "capacity_state_missing",
+      "title": "Capacity State Missing",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "resource_envelope",
+      "criterion": "Current capacity state is present when storage, memory, GPU, or similar constraints are decision-relevant.",
+      "reviewSignal": "The relevant host capacity state is missing from context."
+    },
+    {
+      "signalId": "decision_owner_missing",
+      "title": "Decision Owner Missing",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "stakeholder_surface",
+      "criterion": "The package identifies the owner or decider when approval or intent can change the next move.",
+      "reviewSignal": "A relevant owner or decision boundary is missing."
+    },
+    {
+      "signalId": "approval_dependency_hidden",
+      "title": "Approval Dependency Hidden",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "stakeholder_surface",
+      "criterion": "Approval dependencies are visible when they can block or redirect the next action.",
+      "reviewSignal": "The package hides a human approval dependency that affects the next run."
+    },
+    {
+      "signalId": "conflict_hidden",
+      "title": "Conflict Hidden",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "uncertainty_and_conflict_surface",
+      "criterion": "Conflicting evidence is marked explicitly when the next run could choose the wrong branch otherwise.",
+      "reviewSignal": "The package flattens conflicting evidence instead of naming the conflict."
+    },
+    {
+      "signalId": "uncertainty_suppressed",
+      "title": "Uncertainty Suppressed",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "uncertainty_and_conflict_surface",
+      "criterion": "Uncertain or weakly verified claims stay marked as uncertain.",
+      "reviewSignal": "The package presents uncertain claims as if they were settled facts."
+    },
+    {
+      "signalId": "freshness_risk_ignored",
+      "title": "Freshness Risk Ignored",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "uncertainty_and_conflict_surface",
+      "criterion": "Freshness risk is called out when the age of evidence can change the next step materially.",
+      "reviewSignal": "The package ignores a freshness risk that could invalidate the next move."
+    },
+    {
+      "signalId": "trigger_terms_thin",
+      "title": "Trigger Terms Thin",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "trigger_vocabulary",
+      "criterion": "The package contains enough task-specific keywords, aliases, and entity names to reactivate the right memory region.",
+      "reviewSignal": "The retrieval vocabulary is too thin to trigger the right memory region reliably."
+    },
+    {
+      "signalId": "entity_alias_missing",
+      "title": "Entity Alias Missing",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "trigger_vocabulary",
+      "criterion": "Important aliases or alternate names are present when the system uses them in logs, files, or prior memory.",
+      "reviewSignal": "A relevant alias set is missing, so retrieval and recall may stay shallow."
+    },
+    {
+      "signalId": "retrieval_vocabulary_weak",
+      "title": "Retrieval Vocabulary Weak",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "trigger_vocabulary",
+      "criterion": "The vocabulary is specific enough to separate the relevant memory region from nearby but irrelevant regions.",
+      "reviewSignal": "The vocabulary is too generic, so it cannot separate the right memory region from distractors."
+    },
+    {
+      "signalId": "noise_dominates",
+      "title": "Noise Dominates",
+      "polarity": "negative",
+      "points": -4,
+      "surfaceId": "excluded_noise",
+      "criterion": "The package stays focused enough that the next run sees the relevant context first.",
+      "reviewSignal": "Ballast or adjacent history dominates the package."
+    },
+    {
+      "signalId": "distractor_not_excluded",
+      "title": "Distractor Not Excluded",
+      "polarity": "negative",
+      "points": -2,
+      "surfaceId": "excluded_noise",
+      "criterion": "Tempting but irrelevant context is named explicitly when failing to exclude it would mislead the next run.",
+      "reviewSignal": "A likely distractor is not excluded even though it competes with the active context."
+    },
+    {
+      "signalId": "history_dump_present",
+      "title": "History Dump Present",
+      "polarity": "negative",
+      "points": -3,
+      "surfaceId": "excluded_noise",
+      "criterion": "History is compressed deliberately instead of dumped wholesale into the package.",
+      "reviewSignal": "The package contains a broad history dump instead of selective context."
+    }
+  ],
+  "positiveSignals": [
+    {
+      "signalId": "system_scope_explicit",
+      "title": "System Scope Explicit",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "system_identity",
+      "criterion": "The package anchors the correct technical world clearly.",
+      "reviewSignal": "The active repo, product, environment, and task family are clearly anchored."
+    },
+    {
+      "signalId": "live_state_current",
+      "title": "Live State Current",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "live_operational_state",
+      "criterion": "The package contains fresh live state that changes the next move materially.",
+      "reviewSignal": "Fresh operational state is present and directly useful."
+    },
+    {
+      "signalId": "relevant_structure_visible",
+      "title": "Relevant Structure Visible",
+      "polarity": "positive",
+      "points": 2,
+      "surfaceId": "architecture_surface",
+      "criterion": "The relevant components, boundaries, or dependency path are visible enough to scope the next run correctly.",
+      "reviewSignal": "The package exposes the relevant technical structure without broad architecture drift."
+    },
+    {
+      "signalId": "artifact_refs_concrete",
+      "title": "Artifact Refs Concrete",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "artifact_surface",
+      "criterion": "The package gives concrete artifact refs that the next run can touch immediately.",
+      "reviewSignal": "Artifact refs are concrete, actionable, and appropriately scoped."
+    },
+    {
+      "signalId": "lineage_connected",
+      "title": "Lineage Connected",
+      "polarity": "positive",
+      "points": 2,
+      "surfaceId": "change_lineage",
+      "criterion": "Relevant change and decision lineage are connected enough that the next run understands how the current state emerged.",
+      "reviewSignal": "Recent changes and decision context are connected into a usable storyline."
+    },
+    {
+      "signalId": "learning_transfer_active",
+      "title": "Learning Transfer Active",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "failure_and_learning_memory",
+      "criterion": "Prior failures and durable learnings are activated in a way that changes the next move concretely.",
+      "reviewSignal": "The package activates relevant lessons and known traps instead of rediscovering them."
+    },
+    {
+      "signalId": "resource_boundaries_clear",
+      "title": "Resource Boundaries Clear",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "resource_envelope",
+      "criterion": "Hard limits, tool availability, and approval boundaries are visible enough to keep the next run realistic.",
+      "reviewSignal": "Relevant resource and approval boundaries are explicit."
+    },
+    {
+      "signalId": "uncertainty_honest",
+      "title": "Uncertainty Honest",
+      "polarity": "positive",
+      "points": 3,
+      "surfaceId": "uncertainty_and_conflict_surface",
+      "criterion": "Conflicts, freshness risk, and uncertainty are marked honestly instead of flattened away.",
+      "reviewSignal": "The package treats uncertain or conflicting evidence honestly."
+    },
+    {
+      "signalId": "retrieval_triggers_strong",
+      "title": "Retrieval Triggers Strong",
+      "polarity": "positive",
+      "points": 2,
+      "surfaceId": "trigger_vocabulary",
+      "criterion": "The package contains enough aliases, entity names, and task-specific trigger terms to reactivate the right memory region.",
+      "reviewSignal": "Trigger vocabulary is rich enough to reactivate the right memory region reliably."
+    },
+    {
+      "signalId": "noise_disciplined",
+      "title": "Noise Disciplined",
+      "polarity": "positive",
+      "points": 2,
+      "surfaceId": "excluded_noise",
+      "criterion": "The package stays selective and explicitly excludes likely distractors.",
+      "reviewSignal": "Ballast is actively kept out, and likely distractors are named as exclusions."
+    }
+  ],
+  "assessmentDimensions": [
+    {
+      "dimensionId": "system_scope_and_identity",
+      "title": "System Scope And Identity",
+      "weight": 2,
+      "goal": "Judge whether the package anchors the correct technical world: repo, product, environment, and task family."
+    },
+    {
+      "dimensionId": "operational_currency",
+      "title": "Operational Currency",
+      "weight": 3,
+      "goal": "Judge whether live state, runtime facts, and freshness-sensitive evidence are current enough for the next run."
+    },
+    {
+      "dimensionId": "artifact_and_architecture_relevance",
+      "title": "Artifact And Architecture Relevance",
+      "weight": 3,
+      "goal": "Judge whether the package includes the right technical surfaces, artifacts, and dependency paths without broad drift."
+    },
+    {
+      "dimensionId": "lineage_and_rationale_memory",
+      "title": "Lineage And Rationale Memory",
+      "weight": 2,
+      "goal": "Judge whether relevant change history, decisions, and tradeoffs remain connected enough to steer the next run."
+    },
+    {
+      "dimensionId": "failure_and_learning_transfer",
+      "title": "Failure And Learning Transfer",
+      "weight": 2,
+      "goal": "Judge whether prior failures, durable learnings, and known traps are activated in a way that changes the next move."
+    },
+    {
+      "dimensionId": "resource_and_authority_boundaries",
+      "title": "Resource And Authority Boundaries",
+      "weight": 2,
+      "goal": "Judge whether resource, tool, permission, and approval boundaries are visible enough to keep the next run realistic."
+    },
+    {
+      "dimensionId": "conflict_and_uncertainty_handling",
+      "title": "Conflict And Uncertainty Handling",
+      "weight": 2,
+      "goal": "Judge whether stale, conflicting, or uncertain evidence is represented honestly instead of flattened into false certainty."
+    },
+    {
+      "dimensionId": "trigger_quality_and_noise_control",
+      "title": "Trigger Quality And Noise Control",
+      "weight": 2,
+      "goal": "Judge whether the package uses strong retrieval vocabulary while actively excluding ballast and distractors."
+    }
+  ],
+  "noteFormula": "Score S = 2*D1 + 3*D2 + 3*D3 + 2*D4 + 2*D5 + 2*D6 + 2*D7 + 2*D8, where every dimension is graded internally as 0 (clean), 1 (noticeably weak), or 2 (seriously weak).",
+  "noteBands": [
+    {
+      "note": 1,
+      "minScore": 0,
+      "maxScore": 5,
+      "meaning": "The context package is sharply targeted, fresh, and highly trustworthy for the next run."
+    },
+    {
+      "note": 2,
+      "minScore": 6,
+      "maxScore": 10,
+      "meaning": "The package is strong and usable, with only minor context weaknesses."
+    },
+    {
+      "note": 3,
+      "minScore": 11,
+      "maxScore": 16,
+      "meaning": "The package is workable but has noticeable gaps or softness that can still distort execution."
+    },
+    {
+      "note": 4,
+      "minScore": 17,
+      "maxScore": 22,
+      "meaning": "The package is weak enough that execution risk is high unless the context is revised."
+    },
+    {
+      "note": 5,
+      "minScore": 23,
+      "maxScore": 28,
+      "meaning": "The package is severely compromised and likely misses or distorts core context."
+    },
+    {
+      "note": 6,
+      "minScore": 29,
+      "maxScore": 36,
+      "meaning": "The package is not credible as an execution context and should not be trusted."
+    }
+  ],
+  "noteGuardrails": [
+    "A few broad positive signals do not cancel a core negative signal on the wrong system anchor, missing critical artifacts, or stale runtime state.",
+    "If `wrong_system_anchor`, `critical_artifact_missing`, or `stale_runtime_state` is pink, the context note must not be better than 5.",
+    "If `conflict_hidden` or `hard_limit_missing` is pink, the preparation artifact must not return `go`.",
+    "Use many fine-grained negative signals to diagnose CTO context failures, and use fewer broader positive signals only as confirmation."
+  ],
+  "updatedAt": "2026-03-20T00:00:00+00:00"
+}

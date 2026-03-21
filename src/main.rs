@@ -1,17 +1,18 @@
-mod attach;
 mod agentic;
 mod app;
+mod attach;
+mod bootstrap;
 mod brain_runtime;
 mod browser_agent_bridge;
 mod browser_engine;
 mod browser_subworkers;
-mod bootstrap;
 mod codex_head_tail_buffer;
 mod codex_text_encoding;
 mod command_exec;
-mod contracts;
 mod context_controller;
+mod contracts;
 mod desktop_session;
+mod lifecycle;
 mod pages;
 mod runtime_db;
 mod storage;
@@ -51,6 +52,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&census)?);
             return Ok(());
         }
+        Some("command-exec-smoke") => {
+            let paths = contracts::Paths::discover()?;
+            let output = command_exec::run_installation_smoke(&paths)?;
+            println!("{output}");
+            return Ok(());
+        }
         Some("recommend-kleinhirn") => {
             let paths = contracts::Paths::discover()?;
             let policy = contracts::load_model_policy(&paths);
@@ -71,13 +78,16 @@ async fn main() -> anyhow::Result<()> {
             let paths = contracts::Paths::discover()?;
             let target = args.get(1).map(String::as_str);
             let outcome = brain_runtime::apply_targeted_kleinhirn_upgrade(&paths, target)?;
-            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                "changed": outcome.changed,
-                "restarted": outcome.restarted,
-                "summary": outcome.summary,
-                "previousRuntimeModel": outcome.previous_runtime_model,
-                "currentRuntimeModel": outcome.current_runtime_model,
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "changed": outcome.changed,
+                    "restarted": outcome.restarted,
+                    "summary": outcome.summary,
+                    "previousRuntimeModel": outcome.previous_runtime_model,
+                    "currentRuntimeModel": outcome.current_runtime_model,
+                }))?
+            );
             return Ok(());
         }
         Some("hard-reset-report") => {

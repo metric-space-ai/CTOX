@@ -1,85 +1,85 @@
 # CTO-Agent
 
-Ein always-on CTO-Agent, der als Rust-Control-Plane auf einem eigenen Host lebt, sich zuerst verfassungs- und vertrauensfaehig macht und erst danach in normale CTO-Operation uebergeht.
+An always-on CTO-Agent that lives as a Rust control plane on its own host, first makes itself constitutionally and trust ready, and only then moves into normal CTO operation.
 
-Diese README beschreibt den aktuellen Implementierungsstand des Repos, nicht nur die Gruendungsidee. Der Agent ist bereits als laufendes System modelliert: mit sichtbarer BIOS-Oberflaeche, Supervisor-Loop, SQLite-Runtime, Skills, Browser-Bridge, Mail-Pfad, Lernpfad und personenbezogenem Gedaechtnis.
+This README describes the current implementation state of the repository, not just the founding idea. The agent is already modeled as a running system: with a visible BIOS surface, supervisor loop, SQLite runtime, skills, browser bridge, mail path, learning path, and person-level memory.
 
 ## Installation
 
-Fuer eine Ubuntu-24-Konsole gibt es jetzt einen echten Einzeiler, der den CTO-Agent in `~/cto-agent` klont oder aktualisiert, den Linux-Installer startet, die User-Services einrichtet und danach automatisch in den Attach-/Infinity-Loop wechselt:
+For an Ubuntu 24 console there is now a real one-liner that clones or updates the CTO-Agent into `~/cto-agent`, starts the Linux installer, sets up user services, and then automatically enters the attach / Infinity Loop:
 
 ```sh
 bash -lc "$(curl -fsSL https://raw.githubusercontent.com/metric-space-ai/CTO-Agent/main/scripts/install_cto_agent_remote.sh)"
 ```
 
-Wichtig dazu:
+Important notes:
 
-- Der Einzeiler ist absichtlich **nicht** als `curl | sh` dokumentiert, damit der nachgelagerte Installer interaktiv bleibt und `install-bootstrap-tui` plus Auto-Attach nicht an einem verlorenen TTY scheitern.
-- Standardziel ist `~/cto-agent`. Das laesst sich bei Bedarf ueber `CTO_AGENT_INSTALL_DIR=/pfad` vor dem Einzeiler aendern.
-- Der Bootstrap ist fuer Linux mit `apt-get`, `sudo` und `systemd --user` ausgelegt; das ist der vorgesehene Ubuntu-24-Pfad.
-- Der Browser-Installer schaltet **nicht** mehr stillschweigend die Desktop-Umgebung um. Eine vorhandene grafische Session wird genutzt; ein zusaetzlicher KDE-Desktop wird nur noch bei explizitem `CTO_AGENT_INSTALL_KDE_DESKTOP=1` nachinstalliert.
-- Interaktive Browser- und Host-GUI-Schritte muessen gegen die aktive Desktop-Session laufen, nicht gegen die nackte systemd-Service-Umgebung. Der Runtime-Pfad bridged dafuer `DISPLAY`/`WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS` und `XDG_RUNTIME_DIR` aus der echten Session.
+- The one-liner is intentionally **not** documented as `curl | sh`, so the downstream installer can remain interactive and `install-bootstrap-tui` plus auto-attach do not fail due to a lost TTY.
+- The default target is `~/cto-agent`. You can change it by setting `CTO_AGENT_INSTALL_DIR=/path` before running the one-liner.
+- The bootstrap path is designed for Linux with `apt-get`, `sudo`, and `systemd --user`; that is the intended Ubuntu 24 path.
+- The browser installer no longer mutates the desktop environment silently. It uses an existing graphical session; an additional KDE desktop is installed only with explicit `CTO_AGENT_INSTALL_KDE_DESKTOP=1`.
+- Interactive browser and host-GUI steps must run against the active desktop session, not against the bare systemd service environment. The runtime path bridges `DISPLAY` / `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, and `XDG_RUNTIME_DIR` from the real session.
 
-Der repo-lokale Installationspfad bleibt:
+The repo-local installation path remains:
 
 ```sh
 sh scripts/install_cto_agent.sh
 ```
 
-- Dieser Installer ist aktuell auf einen Linux-Host mit `systemd --user` als Always-on-Ziel ausgelegt.
-- Er baut den Rust-Host, initialisiert Contracts, TLS und SQLite, fuehrt optional das Kommunikations-Bootstrap-TUI aus, installiert das lokale Kleinhirn, richtet User-Services ein und startet danach den Attach-Pfad.
-- Fuer den echten Always-on-Betrieb sind `systemctl --user` und nach Moeglichkeit `loginctl enable-linger` erforderlich; das richtet `scripts/install_linux_user_services.sh` ein bzw. prueft es.
+- This installer currently targets a Linux host with `systemd --user` as the always-on runtime.
+- It builds the Rust host, initializes contracts, TLS, and SQLite, optionally runs the communication bootstrap TUI, installs the local kleinhirn, configures user services, and then starts the attach path.
+- For true always-on operation, `systemctl --user` and ideally `loginctl enable-linger` are required; `scripts/install_linux_user_services.sh` configures or verifies that.
 
 ### HARD WARNING: mistral.rs Multi-GPU Guardrails
 
-- **Verlass dich nicht auf `mistralrs doctor`, um NCCL oder Tensor-Parallel faehig/nicht faehig zu entscheiden.** Die aktuelle `doctor`-Ausgabe zeigt die Distributed-Backends nicht zuverlaessig an. Fuer Install- und Runtime-Entscheidungen zaehlen die Cargo-Install-Metadaten in `~/.cargo/.crates2.json` oder ein expliziter Override.
-- **Nie wieder Install- oder Runtime-Entscheidungen auf Basis von `mistralrs doctor`:** Wenn `doctor` kein NCCL anzeigt, bedeutet das nicht, dass der Build kein NCCL hat. Die Entscheidung muss aus dem Modellvertrag plus echten Build-Metadaten kommen.
-- Die Multi-GPU-Strategie ist jetzt **modellfamiliengebunden** und liegt im Model-Policy-Contract:
+- **Do not rely on `mistralrs doctor` to decide whether NCCL or tensor parallelism is available.** The current `doctor` output does not report distributed backends reliably. Installation and runtime decisions must use Cargo install metadata from `~/.cargo/.crates2.json` or an explicit override.
+- **Never make installation or runtime decisions from `mistralrs doctor`:** if `doctor` does not show NCCL, that does not prove the build lacks NCCL. The decision must come from the model contract plus real build metadata.
+- The multi-GPU strategy is now **model-family specific** and lives in the model-policy contract:
   - `gpt-oss` auf Mehr-GPU-Hosts: `startupMultiGpuMode=auto_device_map`, `startupTensorParallelBackend=disabled`, also `MISTRALRS_NO_NCCL=1`
   - `Qwen3`/`Qwen3.5` auf Mehr-GPU-Hosts: `startupMultiGpuMode=tensor_parallel`, `startupTensorParallelBackend=nccl`
-- Fuer NCCL/Tensor-Parallel nutzt der Installer bei nicht-potentiellen GPU-Zahlen automatisch die groesste Zweierpotenz-Teilmenge und bevorzugt dabei display-freie Karten.
-- Der Installer persistiert die erwarteten mistral.rs-Features jetzt als `CTO_AGENT_MISTRALRS_FEATURES` in `runtime/kleinhirn.env`. Fuer manuelle Starts oder Sonderfaelle darfst du das explizit pinnen, z. B. `CTO_AGENT_MISTRALRS_FEATURES='cuda flash-attn nccl'`.
-- Fuer `openai/gpt-oss-20b` bleibt `PagedAttention` aus. Das ist kein Tuning-Bauchgefuehl, sondern eine Modellgrenze im Upstream von `mistral.rs`.
+- For NCCL / tensor parallelism, the installer automatically picks the largest power-of-two subset on non-power-of-two GPU counts and prefers display-free cards.
+- The installer now persists the expected `mistral.rs` features as `CTO_AGENT_MISTRALRS_FEATURES` in `runtime/kleinhirn.env`. For manual starts or special cases you may pin that explicitly, for example `CTO_AGENT_MISTRALRS_FEATURES='cuda flash-attn nccl'`.
+- `PagedAttention` stays off for `openai/gpt-oss-20b`. That is not intuition-based tuning; it is an upstream model boundary in `mistral.rs`.
 
-## Kurzbild
+## Quick Picture
 
-- Der Agent startet terminal-born, baut aber sofort eine lokale HTTPS-Control-Plane mit BIOS, Root-Auth, History, Browser-, Model- und Census-Seiten auf.
-- Verbindliche Wahrheit liegt in `contracts/`; live operative Wahrheit liegt in `runtime/cto_agent.db`.
-- Das Hauptgehirn fuer den Always-on-Betrieb ist ein lokales Kleinhirn. Grosshirn ist ein optionaler, taskgebundener Boost und nicht der Default.
-- Der Hauptagent ist auf seinem dedizierten Host bewusst unsandboxed. Delegierte Worker bleiben sandboxed und muessen fuer groessere Eingriffe zum CTO-Agenten eskalieren.
-- Der Agent arbeitet in bounded Turns, bewertet Ergebnisse ueber Review-Schritte, lernt in SQLite und haelt verdichtete Learnings dauerhaft im Arbeitskontext verfuegbar.
-- Idle bedeutet nicht schlafen, sondern selbstgesteuerte Verbesserung: Umgebung verstehen, Tools pruefen, Fortschritt reflektieren, Personenbeziehungen pflegen, Ressourcenluecken erkennen.
+- The agent starts terminal-born, but immediately builds a local HTTPS control plane with BIOS, root-auth, history, browser, model, and census pages.
+- Binding truth lives in `contracts/`; live operational truth lives in `runtime/cto_agent.db`.
+- The main brain for always-on operation is a local kleinhirn. Grosshirn is an optional task-bound boost, not the default.
+- The main agent intentionally runs unsandboxed on its dedicated host. Delegated workers remain sandboxed and must escalate to the CTO-Agent for larger interventions.
+- The agent works in bounded turns, evaluates outcomes through review steps, learns in SQLite, and keeps condensed learnings available in its working context.
+- Idle does not mean sleeping. It means self-directed improvement: understanding the environment, testing tools, reflecting on progress, maintaining human relationships, and spotting resource gaps.
 
-## Verfassungsmodell
+## Constitutional Model
 
-Der CTO-Agent ist bewusst mehrschichtig gebaut. Nicht alles ist gleich veraenderbar.
+The CTO-Agent is deliberately layered. Not everything is equally mutable.
 
-- `contracts/genome/genome.json` ist die angeborene Entwicklungsrichtung. Dort stehen tiefe Gene wie `owner_instruction_is_absolute_top_priority`, `idle_means_self_directed_improvement`, `delegate_recurring_work` und `never_self_rewrite_constitution`.
-- `contracts/bios/bios.json` ist die einsatzspezifische Verfassung. Das BIOS ist sichtbar auf der Website, nicht nur internes Prompt-Material.
-- `contracts/org/organigram.json` modelliert die Struktur ueber, neben und unter dem CTO-Agenten.
-- `contracts/root_auth/root_auth.json` und die geschuetzte Root-Auth-Form bilden den Root-of-Trust. Das Superpassword darf nur ueber die Webseite gesetzt werden.
-- `contracts/history/origin-story.md` und `contracts/history/creation-ledger.md` halten Ursprung und materielle Architektur-/Governance-Wechsel ehrlich fest.
-- Weitere Policies in `contracts/` steuern Kontext, Modusuebergaenge, Loop-Sicherheit, Execution Authority, Browser-Arbeit, Spezialisten-Pipeline, Homepage-Verhalten und Selbstschutz.
+- `contracts/genome/genome.json` is the innate development direction. It holds deep genes such as `owner_instruction_is_absolute_top_priority`, `idle_means_self_directed_improvement`, `delegate_recurring_work`, and `never_self_rewrite_constitution`.
+- `contracts/bios/bios.json` is the deployment-specific constitution. The BIOS is visible on the website, not just internal prompt material.
+- `contracts/org/organigram.json` models the structure above, beside, and below the CTO-Agent.
+- `contracts/root_auth/root_auth.json` and the protected root-auth form define the root of trust. The superpassword may only be set through the website.
+- `contracts/history/origin-story.md` and `contracts/history/creation-ledger.md` record origin and material architecture/governance shifts honestly.
+- Additional policies in `contracts/` steer context, mode transitions, loop safety, execution authority, browser work, the specialist pipeline, homepage behavior, and self-protection.
 
-Wichtige bindende Regeln:
+Important binding rules:
 
-- BIOS-Freeze blockiert normale BIOS-Mutation.
-- Low-trust Kanaele wie E-Mail oder WhatsApp duerfen kein Root-Trust setzen und kein Owner-Branding locken.
-- Terminal bleibt die systemnahe Fallback-Oberflaeche.
-- Owner Branding ist erst nach BIOS-basierter Vertrauensuebernahme erlaubt.
-- Der CTO darf die Struktur unter sich gestalten, aber nicht seine eigene Autoritaet nach oben umschreiben.
+- BIOS freeze blocks normal BIOS mutation.
+- Low-trust channels such as email or WhatsApp may not set root trust or lock owner branding.
+- The terminal remains the system-adjacent fallback surface.
+- Owner branding is allowed only after BIOS-based trust takeover.
+- The CTO may shape the structure beneath itself, but may not rewrite the authority above itself.
 
-## Betriebsmodell
+## Operating Model
 
-Der Kern des Systems ist eine Infinity Loop mit bounded agentic turns.
+The core of the system is an Infinity Loop with bounded agentic turns.
 
 1. `src/app.rs` initialisiert Contracts, TLS, SQLite, Browser-Bridge und Bootstrap-Tasks.
-2. `src/supervisor.rs` fuehrt den Heartbeat: Interrupts ingestieren, Queue priorisieren, Pflichten erzeugen, watchdoggen, bounded Turns starten, Reviews erzeugen, Worker vorantreiben.
-3. `src/agentic.rs` baut den Task-Kontext, waehlt den Brain-Route, fuehrt den LLM-Schritt aus und normalisiert strukturierte Ausgaben.
-4. `src/runtime_db.rs` persistiert Tasks, Turns, Checkpoints, Learnings, Personengeraeste, Ressourcen, Skills, Browser-Jobs, Events und Summaries.
-5. `src/context_controller.rs` verdichtet genau den Arbeitskontext, den der naechste bounded Turn sehen soll.
+2. `src/supervisor.rs` runs the heartbeat: ingests interrupts, prioritizes the queue, creates duties, watches the loop, launches bounded turns, creates reviews, and advances workers.
+3. `src/agentic.rs` builds task context, chooses the brain route, executes the LLM step, and normalizes structured output.
+4. `src/runtime_db.rs` persists tasks, turns, checkpoints, learnings, person traces, resources, skills, browser jobs, events, and summaries.
+5. `src/context_controller.rs` condenses exactly the working context the next bounded turn should see and now also emits a compact-controller bridge block for progress review, reprioritization, and model routing at each compaction boundary.
 
-Der Supervisor haelt dabei bestimmte CTO-Pflichten immer am Leben:
+The supervisor keeps certain CTO duties alive at all times:
 
 - `homepage_bridge`
 - `root_trust`
@@ -89,26 +89,26 @@ Der Supervisor haelt dabei bestimmte CTO-Pflichten immer am Leben:
 - `model_or_resource`
 - je nach Lage auch `grosshirn_activation` oder `grosshirn_procurement`
 
-Wenn die normale Queue leer ist, erzeugt der Loop zudem selbstgesteuerte Idle-Arbeit wie:
+When the normal queue is empty, the loop also generates self-directed idle work such as:
 
 - `environment_discovery`
 - `tool_exploration`
 - `progress_reflection`
 - `person_relationship_review`
 
-Der Agent arbeitet also nicht als freies Dauergespraech, sondern als Schleife aus:
+So the agent does not work as a free-running conversation, but as a loop of:
 
-- beobachten
-- priorisieren
-- bounded ausfuehren
-- reviewen
-- delegieren oder fortsetzen
-- blockieren oder Ressourcen anfordern
-- im Leerlauf selbstgesteuert verbessern
+- observe
+- prioritize
+- execute in a bounded way
+- review
+- delegate or continue
+- block or request resources
+- improve itself during idle time
 
-## Modi und Sicherheitslogik
+## Modes and Safety Logic
 
-Das Modussystem ist explizit in `contracts/system/mode-system-policy.json` modelliert. Wichtige Modi sind:
+The mode system is modeled explicitly in `contracts/system/mode-system-policy.json`. Important modes are:
 
 - `bootstrap`
 - `observe`
@@ -124,31 +124,38 @@ Das Modussystem ist explizit in `contracts/system/mode-system-policy.json` model
 - `idle`
 - `blocked`
 
-Die Loop-Safety-Policy erzwingt dabei:
+The loop-safety policy enforces:
 
-- bounded turns statt blindem Dauerdenken
-- Fortschrittspflicht bei Wiederaufnahme desselben Tasks
-- Delegation oder Ressourcenanforderung statt Livelock
-- harte Behandlung von Stall, Crash, Queue-Starvation und Context-Poisoning
-- Self-Preservation-Stufen `newborn`, `guided`, `adaptive`
+- bounded turns instead of blind continuous thinking
+- progress as a requirement when resuming the same task
+- delegation or resource requests instead of livelock
+- hard handling of stall, crash, queue starvation, and context poisoning
+- self-preservation stages `newborn`, `guided`, `adaptive`
 
-Wichtig: Die Autonomie ist absichtlich nicht rein deterministisch. Der Supervisor erzeugt Pflichten, Reviews und Sicherheitsgrenzen deterministisch, aber das Modell entscheidet innerhalb dieser Grenzen selbst ueber Lernwuertigkeit, Delegation, Kontextbedarf, Grosshirn-Anforderung, Skill-Bedarf und proaktive Vorschlaege.
+Important: the autonomy is intentionally not purely deterministic. The supervisor creates duties, reviews, and safety boundaries deterministically, but the model decides within those boundaries about learn-worthiness, delegation, context need, grosshirn requests, skill need, and proactive suggestions.
 
-## Runtime-Oberflaechen
+## Runtime Surfaces
 
-Der CTO-Agent hat mehrere echte Bedienflaechen:
+The CTO-Agent has several real operating surfaces:
 
-- Terminal-Bridge fuer direkte Eingabe wie `Speaker: Nachricht` oder Kommandos wie `/status`.
-- Attach-Socket und Attach-TUI fuer Live-Einblick in Thread, Fokus, Tasks und Event-Stream.
-- Lokale HTTPS-Control-Plane mit Seiten fuer Home, Bootstrap-Chat, BIOS, Organigramm, Root-Auth, History, Browser, Models und Census.
-- Kanal-Interrupt-Pfad fuer externe Eingaben aus Mail oder spaeteren Channel-Integrationen.
-- Python-basierter, bewusst hackbarer Mail-Client in `scripts/cto_mail_client.py`.
+- Terminal bridge for direct input such as `Speaker: message` or commands like `/status`.
+- Attach socket and attach TUI for live insight into thread, focus, tasks, token usage, active model, and the ASCII owner chat surface.
+- Local HTTPS control plane with pages for home, bootstrap chat, BIOS, organigram, root-auth, history, browser, models, and census.
+- Channel-interrupt path for external input from mail or later channel integrations.
+- A Python-based, intentionally hackable mail client in `scripts/cto_mail_client.py`.
 
-Die Website ist kein Marketing-Shell. Sie ist die sichtbare Betriebsoberflaeche fuer Bootstrap, Trust, BIOS, Root-Auth und spaetere Runtime-Transparenz.
+The attach TUI is no longer just a passive log viewer. It now acts as a real owner chat surface:
 
-## SQLite als operatives Rueckgrat
+- the first free-form TUI chat message enters the shared interrupt path
+- interrupt compaction immediately refreshes the running workstream and the new queued chat task
+- idle chat absence lets the loop fall back into normal task work
+- a settings page in the same TUI lets the owner store mail credentials, API keys, model slots, and contact details
 
-Die live operative Wahrheit liegt in `runtime/cto_agent.db`. Wichtige Bereiche:
+The website is not a marketing shell. It is the visible operating surface for bootstrap, trust, BIOS, root-auth, and later runtime transparency.
+
+## SQLite as the Operational Backbone
+
+Live operational truth lives in `runtime/cto_agent.db`. Important areas:
 
 - Task- und Turn-System: `tasks`, `task_checkpoints`, `focus_state`, `agent_threads`, `agent_turns`, `turn_signals`, `agent_events`, `loop_incidents`
 - Vertrauens- und BIOS-Naehe: `bios_dialogue`, `owner_trust`, `homepage_revisions`, `bios_uploads`
@@ -159,62 +166,62 @@ Die live operative Wahrheit liegt in `runtime/cto_agent.db`. Wichtige Bereiche:
 - Brain-Routing und Kosten: `brain_routing_state`, `brain_usage_events`
 - Browser-/Worker-nahe Runtime: `worker_jobs` sowie Dateibruecken unter `runtime/browser-agent-bridge/`
 
-Das ist kein Write-and-forget-Tagebuch. Die Runtime erzeugt verdichtete Summaries, die spaeter wieder aktiv in den Arbeitskontext eingeblendet werden.
+This is not a write-and-forget diary. The runtime produces condensed summaries that are later re-injected into the working context.
 
-## Gedaechtnis und Lernpfad
+## Memory and Learning Path
 
-Der Agent hat zwei Ebenen von Erinnerung:
+The agent has two levels of memory:
 
 - `memory_items` und `memory_summaries` fuer allgemeine operative Verdichtung
 - `learning_entries` fuer aktiviertes, wiederverwendbares Lernen
 
-Der Lernpfad ist hierarchisch aufgebaut:
+The learning path is hierarchical:
 
-- `operational` fuer taegliche Betriebsregeln und laufrelevante Einsichten
-- `general` fuer breitere Erkenntnisse
-- `negative` fuer Dinge, die nicht funktionieren, Konflikte oder riskante Fehlmuster
+- `operational` for daily operating rules and run-relevant insights
+- `general` for broader insights
+- `negative` for things that do not work, conflicts, or risky failure patterns
 
-Jeder Learning-Eintrag traegt unter anderem:
+Each learning entry carries, among other things:
 
-- Summary
-- Applicability
-- Confidence
-- Salience
-- Status wie `candidate` oder `active`
-- Recall-Metadaten
+- summary
+- applicability
+- confidence
+- salience
+- status such as `candidate` or `active`
+- recall metadata
 
-Die wichtige Mechanik:
+Important mechanics:
 
-- Das Modell kann in bounded Turns neue Learnings vorschlagen.
-- Der Supervisor persistiert diese erst als Kandidat oder aktiviert sie direkt im Review-/Blocking-Kontext.
-- `runtime_db` baut daraus Arbeitsgedaechtnis-Summaries wie `learning_working_set`, `learning_operational`, `learning_general` und `learning_negative`.
-- `context_controller` zieht diese High-Level-Summaries bei spaeteren Tasks wieder in den Kontext.
-- Relevante Detail-Learnings werden taskbezogen nachgeladen und beim Einblenden als recalled markiert.
+- The model can propose new learnings in bounded turns.
+- The supervisor first persists them as candidates or activates them directly in review or blocking context.
+- `runtime_db` builds working-memory summaries such as `learning_working_set`, `learning_operational`, `learning_general`, and `learning_negative`.
+- `context_controller` pulls those high-level summaries back into later tasks.
+- Relevant detail learnings are reloaded task-by-task and marked as recalled when surfaced.
 
-Dadurch merkt sich der Agent sein Gelerntes dauerhaft auf zwei Ebenen: als knappe immer verfuegbare Verdichtung und als nachlesbare SQLite-Details.
+This lets the agent remember what it has learned on two persistent levels: as a compact always-available condensation and as readable SQLite detail.
 
-## Personenpfad und Kommunikationsgedaechtnis
+## People Path and Communication Memory
 
-Ein eigener Personenpfad sorgt dafuer, dass der CTO fruehere Gespraeche nicht einfach vergisst.
+A dedicated people path ensures the CTO does not simply forget previous conversations.
 
-- Interaktionen koennen automatisch in `person_profiles` und `person_notes` landen.
-- Pro Person gibt es Verdichtungen fuer `conversation_memory_summary` und `notebook_summary`.
-- Relevante Mail-Previews koennen pro Person in den Kontext gezogen werden.
-- Learnings koennen in den Personenpfad rueckgekoppelt werden.
-- `people_working_set` haelt eine verdichtete High-Level-Sicht fuer den Alltag bereit.
+- Interactions can automatically land in `person_profiles` and `person_notes`.
+- Each person gets condensations for `conversation_memory_summary` and `notebook_summary`.
+- Relevant mail previews can be pulled into context per person.
+- Learnings can be fed back into the people path.
+- `people_working_set` keeps a condensed high-level view available for daily operation.
 
-Damit ist die Personenebene ebenfalls zweistufig:
+That makes the people layer two-tier as well:
 
-- sofort verfuegbare knappe Personen-Erinnerung
-- tieferes nachlesbares Notebook in SQLite
+- immediately available compact person memory
+- deeper readable notebook data in SQLite
 
-Das ist bewusst wichtig fuer Owner-, Stakeholder- und Team-Beziehungen.
+This is intentionally important for owner, stakeholder, and team relationships.
 
-## Proaktive Kontakte
+## Proactive Contacts
 
-Der Agent kann proaktiv mit Personen umgehen, aber nicht blind.
+The agent can interact with people proactively, but not blindly.
 
-Der aktuelle Pfad ist:
+The current path is:
 
 1. Der Agent erkennt aus Idle- oder Arbeitssignalen einen sinnvollen Kontaktanlass.
 2. Das Modell kann einen `proactiveContactDraft` erzeugen.
@@ -222,95 +229,95 @@ Der aktuelle Pfad ist:
 4. Ein interner Review-Task validiert Sinn, Konflikte und Formulierung.
 5. Wenn verfuegbar, wird fuer diese Validierung taskgebunden Grosshirn verwendet.
 6. Nach Freigabe erzeugt der Supervisor autonom einen Dispatch-Task.
-7. Der Dispatch versendet aktuell ueber den vorhandenen Mail-Pfad und schreibt das Ergebnis wieder in Personen- und Gespraechsspur zurueck.
+7. The dispatch currently sends through the existing mail path and writes the result back into the people and conversation trails.
 
-Es gibt also keinen menschlichen Pflicht-Freigabeschritt mehr, aber es gibt einen internen Sicherheits- und Interessenkonflikt-Gate.
+So there is no longer a mandatory human approval step, but there is still an internal safety and conflict-of-interest gate.
 
-## Kleinhirn, Grosshirn und Browser-Vision
+## Kleinhirn, Grosshirn, and Browser Vision
 
-Die Brain-Architektur ist bewusst asymmetrisch.
+The brain architecture is deliberately asymmetric.
 
 - Default-Kleinhirn ist laut Model-Policy `gpt-oss-20b`.
 - Als kanonischer lokaler Vision-/Browser-Pfad ist `Qwen3.5-35B-A3B` vorgesehen.
 - Lokale Upgrades duerfen empfohlen und angewendet werden, wenn der Host deutlich mehr Ressourcen hergibt.
 - Grosshirn ist kein globaler Schalter, sondern ein taskgebundener temporaerer Boost.
 
-Wichtige Routing-Regeln:
+Important routing rules:
 
-- Lokal ist Standard.
-- Grosshirn wird nur genutzt, wenn Brain-Access vorhanden ist und fuer genau diesen Task ein Boost aktiv ist.
-- Der Agent kann einen temporaeren Grosshirn-Boost selbst beantragen.
-- Nach Abschluss, Blockierung, Fehler oder TTL faellt der Route automatisch wieder auf Kleinhirn zurueck.
-- Fuer screenshot- oder UI-wahrnehmungslastige Browser-Aufgaben soll zuerst ein vision-faehiges lokales Kleinhirn bevorzugt werden, bevor externer Grosshirn-Konsum normalisiert wird.
+- Local is the default.
+- Grosshirn is used only when brain access exists and a boost is active for that exact task.
+- The agent may request a temporary grosshirn boost itself.
+- After completion, blocking, failure, or TTL expiry, routing automatically falls back to kleinhirn.
+- For screenshot-heavy or UI-perception-heavy browser tasks, a vision-capable local kleinhirn should be preferred before normalizing external grosshirn consumption.
 
-## Browser-Arbeit und Spezialisten
+## Browser Work and Specialists
 
-Browser-Arbeit ist ein eigener Architekturpfad und nicht einfach "der Hauptagent klickt blind herum".
+Browser work is its own architectural path, not just "the main agent clicking around blindly."
 
-- Reale Browser-Arbeit laeuft ueber `src/browser_engine.rs`, `src/browser_agent_bridge.rs`, `src/browser_subworkers.rs` und `browser_agent/extension/`.
-- Der Browser-Agent ist eine entkoppelte Chrome-Extension mit eigener lokaler Job-Bridge.
-- Das kuratierte 0.8B-ONNX-Artifaktset der Extension liegt ausgelagert auf Hugging Face unter `metricspace/Qwen3.5-0.8B-ONNX-browser-agent`.
-- Die Hauptidee ist transcript-first: Der CTO-Agent soll kompakte Ergebnisse sehen, nicht rohe Browser-Spuren ungefiltert verschlucken.
-- Wiederkehrende Browser-Arbeit soll in reviewed capabilities, deterministische Worker oder kleine Spezialmodelle uebergehen.
+- Real browser work runs through `src/browser_engine.rs`, `src/browser_agent_bridge.rs`, `src/browser_subworkers.rs`, and `browser_agent/extension/`.
+- The browser agent is a decoupled Chrome extension with its own local job bridge.
+- The curated 0.8B ONNX artifact set for the extension is hosted on Hugging Face as `metricspace/Qwen3.5-0.8B-ONNX-browser-agent`.
+- The core idea is transcript-first: the CTO-Agent should see compact results, not swallow raw browser traces unfiltered.
+- Repeated browser work should move into reviewed capabilities, deterministic workers, or small specialist models.
 
-Die Spezialisten-Pipeline ist absichtlich streng:
+The specialist pipeline is intentionally strict:
 
-- nicht direkt aus rohen Operationstraces trainieren
-- akzeptierte Records und Dataset-Release getrennt halten
-- Policy-, Tool- und Capability-Surface einfrieren
-- erst dann trainieren und evaluieren
-- erst nach Bestehen der Gates promoten
+- do not train directly from raw operation traces
+- keep accepted records and dataset release separate
+- freeze the policy, tool, and capability surface
+- only then train and evaluate
+- promote only after the gates are passed
 
-Der erste kleine Browser-Spezialist ist laut Pipeline auf `Qwen3.5-0.8B` als Bootstrap-Ziel gedacht, nicht auf browserseitiges WebGPU-Training.
+According to the pipeline, the first small browser specialist targets `Qwen3.5-0.8B` as a bootstrap goal, not browser-side WebGPU training.
 
 ## Skills
 
-Repo-lokale Skills liegen unter `.agents/skills/` und werden bei spaeteren Kontextpaketen automatisch neu gescannt. Sie sind ein echtes Runtime-Feature, kein statischer Kommentar.
+Repo-local skills live under `.agents/skills/` and are automatically rescanned for later context packages. They are a real runtime feature, not a static comment.
 
-Aktuell wichtige Skills:
+Currently important skills:
 
-- `bios-interface-bootstrap`: BIOS-Oberflaeche aus stabiler Template- und SQLite-Basis aufbauen oder umbauen
-- `browser-capability-bootstrap`: Browser-Arbeit, Trust-Grenzen und Capability-Promotion steuern
-- `communication-client-bootstrap`: Mail-/Chat-/Webhook-Clients bauen, patchen oder ersetzen
-- `cto-origin-history`: Ursprung, Zweck und ehrliche Chronik des CTO-Agenten verankern
-- `host-keyboard-operations`: direkte Owner-Keyboard-Auftraege auf dem Host ueber einen reviewed Skill- und Contract-Pfad ausfuehren
-- `homepage-bootstrap`: Homepage als erste Trust- und Kommunikationsbruecke formen
-- `owner-branding-bootstrap`: sicheren Pfad von Terminal-Bootstrap zu BIOS-Takeover und spaeterem Branding steuern
-- `self-skill-bootstrap`: neue wiederverwendbare Tools als repo-lokale Skills materialisieren
-- `specialist-model-pipeline`: wiederholte Browser-Arbeit in reviewed Spezialisten ueberfuehren
+- `bios-interface-bootstrap`: build or rewire the BIOS surface from a stable template and SQLite base
+- `browser-capability-bootstrap`: govern browser work, trust boundaries, and capability promotion
+- `communication-client-bootstrap`: build, patch, or replace mail, chat, or webhook clients
+- `cto-origin-history`: anchor the CTO-Agent's origin, purpose, and honest chronicle
+- `host-keyboard-operations`: execute direct owner keyboard requests on the host through a reviewed skill and contract path
+- `homepage-bootstrap`: shape the homepage as the first trust and communication bridge
+- `owner-branding-bootstrap`: steer the safe path from terminal bootstrap to BIOS takeover and later branding
+- `self-skill-bootstrap`: materialize new reusable tools as repo-local skills
+- `specialist-model-pipeline`: move repeated browser work into reviewed specialists
 
-Der Agent ist explizit angehalten, wiederverwendbare neue Faehigkeiten nicht nur ad hoc zu benutzen, sondern als Skill im Repo zu verankern.
+The agent is explicitly expected not just to use reusable new capabilities ad hoc, but to anchor them as skills in the repo.
 
-Direkte Host-Mutationen aus `owner_interrupt`-Aufgaben, vor allem Keyboard-/Input-Aenderungen, sollen nicht ueber freie Prompt-Improvisation laufen. Dafuer gibt es jetzt den Skill `host-keyboard-operations` plus den Contract `contracts/system/host-keyboard-capability-policy.json`.
+Direct host mutations from `owner_interrupt` tasks, especially keyboard or input changes, should not run through free-form prompt improvisation. That is why the repo now includes the `host-keyboard-operations` skill plus the contract `contracts/system/host-keyboard-capability-policy.json`.
 
-## Kommunikations-Bootstrap
+## Communication Bootstrap
 
-`src/bootstrap.rs` modelliert eine eigene Installationsaufnahme fuer Owner- und Mail-Kontext.
+`src/bootstrap.rs` models a dedicated installation intake for owner and mail context.
 
-- `install-bootstrap-tui` sammelt Owner-Namen, Kontaktweg, Mail-Zuweisung und Freitext-Hinweise.
-- Daraus werden Homepage-, Memory- und Task-Seeds erzeugt.
-- Der Agent kann mit zugewiesenem Postfach den Kommunikationspfad selbst aufbauen oder bei fragilen Clients selbst patchen.
-- Der vorhandene Mail-Client ist Python-basiert und absichtlich leicht zu modifizieren.
+- `install-bootstrap-tui` collects owner name, contact path, mail assignment, and free-form notes.
+- From that it generates homepage, memory, and task seeds.
+- With an assigned mailbox the agent can build its own communication path or patch fragile clients itself.
+- The existing mail client is Python-based and intentionally easy to modify.
 
-Das Repo ist also schon auf echte Kommunikationsautonomie ausgelegt, nicht nur auf eine spaeere externe Integration.
+So the repo is already shaped for real communication autonomy, not just a later external integration.
 
-## Kontextaufbau
+## Context Construction
 
-`src/context_controller.rs` stellt den Arbeitskontext fuer jeden bounded Turn zusammen. Dazu gehoeren unter anderem:
+`src/context_controller.rs` assembles the working context for each bounded turn. That includes:
 
-- Modus, Fokus, Queue-Tiefe und Checkpoints
-- Ausfuehrungsautoritaet und Loop-Safety
-- Brain-Zugangsstatus, Kosten und Upgrade-Hinweise
+- mode, focus, queue depth, and checkpoints
+- execution authority and loop safety
+- brain access status, cost, and upgrade hints
 - Owner-Kalibrierung
-- Learning-Working-Set und relevante Detail-Learnings
-- People-Working-Set, relevante Personen, Notizen und Mail-Previews
-- Skills, Exec-Sessions und rohe Einschlussfragmente
+- learning working set and relevant detail learnings
+- people working set, relevant people, notes, and mail previews
+- skills, exec sessions, and raw inclusion fragments
 
-Normaler Kontextzuschnitt ist agentisch. Der Kernel soll nur bei physischem Overflow minimal schrumpfen.
+Normal context shaping is agentic. The kernel should shrink only minimally at physical overflow boundaries.
 
-## Wichtige CLI-Pfade
+## Important CLI Paths
 
-Beispiele fuer den lokalen Betrieb:
+Examples for local operation:
 
 ```sh
 cargo run --release
@@ -331,33 +338,33 @@ cargo run -- recommend-browser-vision-kleinhirn
 cargo run -- upgrade-kleinhirn
 ```
 
-Wichtige Startdateien:
+Important entry files:
 
-- `src/main.rs` fuer CLI-Einstieg
-- `src/app.rs` fuer Runtime-Initialisierung und Web-Routen
-- `src/supervisor.rs` fuer Heartbeat und bounded Task-Loop
-- `src/runtime_db.rs` fuer SQLite-Schema und operative Persistenz
-- `src/agentic.rs` fuer LLM-Orchestrierung
+- `src/main.rs` for CLI entry
+- `src/app.rs` for runtime initialization and web routes
+- `src/supervisor.rs` for heartbeat and the bounded task loop
+- `src/runtime_db.rs` for SQLite schema and operational persistence
+- `src/agentic.rs` for LLM orchestration
 
-## Repo-Map
+## Repo Map
 
-- `src/app.rs`: Web-Control-Plane, Runtime-Init, HTTP-Routen, BIOS-Seitenintegration
-- `src/contracts.rs`: kanonische Vertragsmodelle, Default-Policies, Pfadauflosung, Auswahl von Kleinhirn/Browser-Vision-Modellen
-- `src/supervisor.rs`: Heartbeat, Task-Auswahl, Watchdogs, Reviews, Delegation, Dispatch, Idle-Pflichten
-- `src/runtime_db.rs`: SQLite-Schema, Tasks, Memory, Learnings, Personenpfad, Skills, Events, Brain-Routing
-- `src/context_controller.rs`: Arbeitskontext-Aufbau fuer bounded Turns
-- `src/brain_runtime.rs`: lokale Model-Runtime, Upgrade-Pfade, Grosshirn-Vorbereitung
-- `src/browser_engine.rs`: deterministische Browser-Aktionen und Browser-Status
-- `src/browser_agent_bridge.rs`: lokale Job-Bridge zwischen Rust-Supervisor und Browser-Agent
-- `src/browser_subworkers.rs`: Browser-Worker-Lifecycle
-- `src/bootstrap.rs`: Installations-Bootstrap, Terminal-Bridge, Eingangsnormalisierung
-- `src/attach.rs`: Attach-Socket und TUI
-- `.agents/skills/`: repo-lokale Skills
-- `contracts/`: verfassungsartige Wahrheit
-- `contracts/history/`: Ursprung und ehrliche Chronik
-- `browser_agent/`: entkoppelter Browser-Agent
-- `scripts/`: operative Hilfsskripte wie Mail-Client und Browser-Setup
+- `src/app.rs`: web control plane, runtime init, HTTP routes, BIOS page integration
+- `src/contracts.rs`: canonical contract models, default policies, path resolution, kleinhirn and browser-vision model selection
+- `src/supervisor.rs`: heartbeat, task selection, watchdogs, reviews, delegation, dispatch, idle duties
+- `src/runtime_db.rs`: SQLite schema, tasks, memory, learnings, people path, skills, events, brain routing
+- `src/context_controller.rs`: working-context construction for bounded turns
+- `src/brain_runtime.rs`: local model runtime, upgrade paths, grosshirn preparation
+- `src/browser_engine.rs`: deterministic browser actions and browser status
+- `src/browser_agent_bridge.rs`: local job bridge between the Rust supervisor and browser agent
+- `src/browser_subworkers.rs`: browser worker lifecycle
+- `src/bootstrap.rs`: installation bootstrap, terminal bridge, input normalization
+- `src/attach.rs`: attach socket and TUI
+- `.agents/skills/`: repo-local skills
+- `contracts/`: constitutional truth
+- `contracts/history/`: origin and honest chronicle
+- `browser_agent/`: decoupled browser agent
+- `scripts/`: operational helper scripts such as the mail client and browser setup
 
-## Designkern in einem Satz
+## Design Core in One Sentence
 
-Der CTO-Agent ist kein einzelner Prompt, sondern ein verfassungsgebundener, SQLite-gestuetzter, bounded arbeitender CTO-Kern mit sichtbarer BIOS-Oberflaeche, taskgebundenem Brain-Routing, selbstverankernden Skills, aktivem Lernpfad und einem wachsenden Netzwerk aus Browser-, Kommunikations- und Spezialistenpfaden.
+The CTO-Agent is not a single prompt but a constitution-bound, SQLite-backed, bounded-working CTO core with a visible BIOS surface, task-bound brain routing, self-anchoring skills, an active learning path, and a growing network of browser, communication, and specialist paths.
