@@ -12,8 +12,11 @@ use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
 use std::fs;
+use std::net::SocketAddr;
+use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
+use url::Url;
 
 const PASSWORD_ITERATIONS: u32 = 200_000;
 
@@ -170,6 +173,101 @@ impl Paths {
 fn short_runtime_socket_key(root: &Path) -> String {
     let digest = Sha256::digest(root.display().to_string().as_bytes());
     encode(digest)[..16].to_string()
+}
+
+pub fn control_plane_port() -> u16 {
+    std::env::var("CTO_AGENT_PORT")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u16>().ok())
+        .unwrap_or(8443)
+}
+
+pub fn control_plane_bind_host() -> String {
+    std::env::var("CTO_AGENT_BIND_HOST")
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|raw| !raw.is_empty())
+        .unwrap_or_else(|| "127.0.0.1".to_string())
+}
+
+pub fn control_plane_public_base_url() -> String {
+    if let Some(raw) = std::env::var("CTO_AGENT_PUBLIC_BASE_URL")
+        .ok()
+        .map(|raw| raw.trim().trim_end_matches('/').to_string())
+        .filter(|raw| !raw.is_empty())
+    {
+        return raw;
+    }
+
+    let bind_host = control_plane_bind_host();
+    let display_host = if is_unspecified_bind_host(&bind_host) {
+        "127.0.0.1"
+    } else {
+        bind_host.as_str()
+    };
+    format!(
+        "https://{}:{}",
+        format_host_for_url(display_host),
+        control_plane_port()
+    )
+}
+
+pub fn control_plane_socket_addr() -> anyhow::Result<SocketAddr> {
+    let bind_host = control_plane_bind_host();
+    (bind_host.as_str(), control_plane_port())
+        .to_socket_addrs()
+        .with_context(|| {
+            format!(
+                "failed to resolve CTO-Agent bind host {}:{}",
+                bind_host,
+                control_plane_port()
+            )
+        })?
+        .next()
+        .context("no socket address resolved for CTO-Agent control plane bind host")
+}
+
+fn format_host_for_url(host: &str) -> String {
+    if host.contains(':') && !host.starts_with('[') && !host.ends_with(']') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn is_unspecified_bind_host(host: &str) -> bool {
+    matches!(host.trim(), "" | "*" | "0.0.0.0" | "::" | "[::]")
+}
+
+fn push_tls_alt_name(names: &mut Vec<String>, value: &str) {
+    let trimmed = value.trim().trim_start_matches('[').trim_end_matches(']');
+    if trimmed.is_empty() || is_unspecified_bind_host(trimmed) {
+        return;
+    }
+    if !names.iter().any(|existing| existing == trimmed) {
+        names.push(trimmed.to_string());
+    }
+}
+
+fn desired_tls_alt_names() -> Vec<String> {
+    let mut names = Vec::new();
+    push_tls_alt_name(&mut names, "localhost");
+    push_tls_alt_name(&mut names, "127.0.0.1");
+    push_tls_alt_name(&mut names, &control_plane_bind_host());
+
+    if let Ok(parsed) = Url::parse(&control_plane_public_base_url()) {
+        if let Some(host) = parsed.host_str() {
+            push_tls_alt_name(&mut names, host);
+        }
+    }
+
+    if let Ok(extra) = std::env::var("CTO_AGENT_TLS_ALT_NAMES") {
+        for value in extra.split(',') {
+            push_tls_alt_name(&mut names, value);
+        }
+    }
+
+    names
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3533,15 +3631,25 @@ pub fn write_tls_files(paths: &Paths, cert_pem: &str, key_pem: &str) -> anyhow::
 }
 
 pub fn ensure_tls_files(paths: &Paths) -> anyhow::Result<()> {
-    if paths.tls_cert_path.exists() && paths.tls_key_path.exists() {
+    let alt_names_path = paths.certs_dir.join("localhost.names");
+    let desired_alt_names = desired_tls_alt_names();
+    let desired_manifest = desired_alt_names.join("\n");
+    let current_manifest = fs::read_to_string(&alt_names_path).unwrap_or_default();
+    let needs_regeneration = !paths.tls_cert_path.exists()
+        || !paths.tls_key_path.exists()
+        || current_manifest.trim() != desired_manifest;
+
+    if !needs_regeneration {
         return Ok(());
     }
 
-    let cert =
-        rcgen::generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])?;
+    let cert = rcgen::generate_simple_self_signed(desired_alt_names)?;
     let cert_pem = cert.cert.pem();
     let key_pem = cert.signing_key.serialize_pem();
-    write_tls_files(paths, &cert_pem, &key_pem)
+    write_tls_files(paths, &cert_pem, &key_pem)?;
+    fs::write(&alt_names_path, format!("{desired_manifest}\n"))
+        .with_context(|| format!("failed to write {}", alt_names_path.display()))?;
+    Ok(())
 }
 
 pub fn path_display_name(path: &Path) -> String {

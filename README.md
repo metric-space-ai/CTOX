@@ -17,6 +17,7 @@ Important notes:
 - The one-liner is intentionally **not** documented as `curl | sh`, so the downstream installer can remain interactive and `install-bootstrap-tui` plus auto-attach do not fail due to a lost TTY.
 - The default target is `~/cto-agent`. You can change it by setting `CTO_AGENT_INSTALL_DIR=/path` before running the one-liner.
 - If the target path already contains a dirty checkout or other non-empty content, the remote bootstrap now stops the running user services, moves the old path aside into a timestamped `*-backup-*` directory, and then performs a fresh clone instead of hard-failing on `git pull --ff-only`.
+- If you want to open the BIOS from another machine over your VPN, set `CTO_AGENT_BIND_HOST=0.0.0.0` and `CTO_AGENT_PUBLIC_BASE_URL=https://<vpn-ip>:8443` before install or re-install. The TLS cert now includes the host from that public base URL automatically; optional extra SANs can be added through `CTO_AGENT_TLS_ALT_NAMES`.
 - The bootstrap path is designed for Linux with `apt-get`, `sudo`, and `systemd --user`; that is the intended Ubuntu 24 path.
 - The browser installer no longer mutates the desktop environment silently. It uses an existing graphical session; an additional KDE desktop is installed only with explicit `CTO_AGENT_INSTALL_KDE_DESKTOP=1`.
 - Interactive browser and host-GUI steps must run against the active desktop session, not against the bare systemd service environment. The runtime path bridges `DISPLAY` / `WAYLAND_DISPLAY`, `XAUTHORITY`, `DBUS_SESSION_BUS_ADDRESS`, and `XDG_RUNTIME_DIR` from the real session.

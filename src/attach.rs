@@ -6,6 +6,7 @@ use crate::brain_runtime::load_kleinhirn_runtime_snapshot;
 use crate::brain_runtime::load_runtime_env_map;
 use crate::brain_runtime::save_runtime_env_map;
 use crate::contracts::BootEntry;
+use crate::contracts::control_plane_public_base_url;
 use crate::contracts::InstallationBootstrapState;
 use crate::contracts::Organigram;
 use crate::contracts::Paths;
@@ -59,7 +60,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::env;
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -1970,16 +1970,16 @@ fn bios_url(website_path: &str) -> Option<String> {
     if path.starts_with("http://") || path.starts_with("https://") {
         return Some(path.to_string());
     }
-    let port = env::var("CTO_AGENT_PORT")
-        .ok()
-        .and_then(|raw| raw.parse::<u16>().ok())
-        .unwrap_or(8443);
     let normalized_path = if path.starts_with('/') {
         path.to_string()
     } else {
         format!("/{path}")
     };
-    Some(format!("https://127.0.0.1:{port}{normalized_path}"))
+    Some(format!(
+        "{}{}",
+        control_plane_public_base_url(),
+        normalized_path
+    ))
 }
 
 fn perform_attach_factory_reset(paths: &Paths) -> anyhow::Result<()> {

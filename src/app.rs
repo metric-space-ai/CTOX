@@ -12,6 +12,8 @@ use crate::browser_engine::refresh_browser_engine_state;
 use crate::contracts::Organigram;
 use crate::contracts::Paths;
 use crate::contracts::append_boot_entry;
+use crate::contracts::control_plane_public_base_url;
+use crate::contracts::control_plane_socket_addr;
 use crate::contracts::load_agent_state;
 use crate::contracts::load_bios;
 use crate::contracts::load_boot_entries;
@@ -96,7 +98,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Read;
 use std::io::Write;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -308,14 +309,11 @@ pub async fn run() -> anyhow::Result<()> {
     let config = RustlsConfig::from_pem_file(&paths.tls_cert_path, &paths.tls_key_path)
         .await
         .context("failed to load rustls config")?;
-    let port = std::env::var("CTO_AGENT_PORT")
-        .ok()
-        .and_then(|raw| raw.parse::<u16>().ok())
-        .unwrap_or(8443);
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = control_plane_socket_addr()?;
+    let public_base_url = control_plane_public_base_url();
     println!(
-        "CTO-Agent control plane listening on https://127.0.0.1:{}",
-        port
+        "CTO-Agent control plane listening on {}",
+        public_base_url
     );
     println!(
         "CTO-Agent attach terminal available via {}",
