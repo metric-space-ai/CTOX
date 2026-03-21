@@ -174,9 +174,36 @@ fn short_runtime_socket_key(root: &Path) -> String {
     encode(digest)[..16].to_string()
 }
 
+fn runtime_env_file_value(key: &str) -> Option<String> {
+    let root = std::env::var("CTO_AGENT_ROOT")
+        .map(PathBuf::from)
+        .ok()
+        .or_else(|| std::env::current_dir().ok())?;
+    let env_path = root.join("runtime/kleinhirn.env");
+    let text = fs::read_to_string(env_path).ok()?;
+    text.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            return None;
+        }
+        let (found_key, raw_value) = trimmed.split_once('=')?;
+        if found_key.trim() != key {
+            return None;
+        }
+        let value = raw_value
+            .trim()
+            .trim_matches('\'')
+            .trim_matches('"')
+            .trim()
+            .to_string();
+        if value.is_empty() { None } else { Some(value) }
+    })
+}
+
 pub fn control_plane_port() -> u16 {
     std::env::var("CTO_AGENT_PORT")
         .ok()
+        .or_else(|| runtime_env_file_value("CTO_AGENT_PORT"))
         .and_then(|raw| raw.trim().parse::<u16>().ok())
         .unwrap_or(8443)
 }
@@ -184,6 +211,7 @@ pub fn control_plane_port() -> u16 {
 pub fn control_plane_bind_host() -> String {
     std::env::var("CTO_AGENT_BIND_HOST")
         .ok()
+        .or_else(|| runtime_env_file_value("CTO_AGENT_BIND_HOST"))
         .map(|raw| raw.trim().to_string())
         .filter(|raw| !raw.is_empty())
         .unwrap_or_else(|| "127.0.0.1".to_string())
@@ -192,6 +220,7 @@ pub fn control_plane_bind_host() -> String {
 pub fn control_plane_public_base_url() -> String {
     if let Some(raw) = std::env::var("CTO_AGENT_PUBLIC_BASE_URL")
         .ok()
+        .or_else(|| runtime_env_file_value("CTO_AGENT_PUBLIC_BASE_URL"))
         .map(|raw| raw.trim().trim_end_matches('/').to_string())
         .filter(|raw| !raw.is_empty())
     {
@@ -1305,116 +1334,83 @@ pub fn default_model_policy() -> ModelPolicy {
         startup_visible_gpu_policy: Some("all".to_string()),
         prefer_auto_device_mapping: false,
     };
-    let qwen35_35b_a3b = BrainModel {
-        role: "kleinhirn_install_alternative".to_string(),
-        provider: "qwen".to_string(),
-        model_id: "Qwen3.5-35B-A3B".to_string(),
-        runtime_model_id: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
-        official_label: "Qwen3.5 35B A3B".to_string(),
-        agentic_adapter: Some("openai_compatible_chat".to_string()),
-        reasoning_effort: "high".to_string(),
-        deployment_mode: "local_or_self_hosted".to_string(),
-        purpose: "vision-capable local supervisor and browser-inspection runtime when the CTO-Agent needs multimodal browser work and stronger agentic Qwen behavior on the same host".to_string(),
-        supports_vision: true,
-        min_cpu_threads: Some(16),
-        min_memory_gb: Some(48),
-        min_gpu_count: Some(3),
-        min_total_gpu_memory_gb: Some(48),
-        min_single_gpu_memory_gb: Some(12),
-        startup_max_seqs: Some(1),
-        startup_max_batch_size: Some(1),
-        startup_max_seq_len: Some(131_072),
-        startup_pa_context_len: Some(131_072),
-        startup_pa_cache_type: Some("f8e4m3".to_string()),
-        startup_paged_attn_mode: Some("auto".to_string()),
-        startup_chat_template_path: None,
-        startup_jinja_explicit_path: None,
-        startup_tokenizer_json_path: None,
-        startup_topology_path: None,
-        startup_device_layers_cli: None,
-        startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
-        startup_tensor_parallel_backend: Some("nccl".to_string()),
-        startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
-        prefer_auto_device_mapping: false,
-    };
     ModelPolicy {
         version: 1,
         kleinhirn: gpt_oss_20b.clone(),
-        kleinhirn_install_alternatives: vec![qwen35_35b_a3b.clone()],
+        kleinhirn_install_alternatives: Vec::new(),
         kleinhirn_upgrade_allowed: true,
         kleinhirn_upgrade_independent_from_grosshirn: true,
-        kleinhirn_upgrade_candidates: vec![
-            BrainModel {
-                role: "kleinhirn_upgrade_candidate".to_string(),
-                provider: "openai".to_string(),
-                model_id: "gpt-oss-120b".to_string(),
-                runtime_model_id: Some("openai/gpt-oss-120b".to_string()),
-                official_label: "GPT-OSS 120B".to_string(),
-                agentic_adapter: Some("mistralrs_gpt_oss_harmony_completion".to_string()),
-                reasoning_effort: "high".to_string(),
-                deployment_mode: "local_high_capacity_or_self_hosted".to_string(),
-                purpose: "stronger local supervisor brain when the host has materially more CPU and memory".to_string(),
-                supports_vision: false,
-                min_cpu_threads: Some(24),
-                min_memory_gb: Some(96),
-                min_gpu_count: Some(4),
-                min_total_gpu_memory_gb: Some(72),
-                min_single_gpu_memory_gb: Some(16),
-                startup_max_seqs: Some(1),
-                startup_max_batch_size: Some(1),
-                startup_max_seq_len: Some(8192),
-                startup_pa_context_len: Some(8192),
-                startup_pa_cache_type: Some("f8e4m3".to_string()),
-                startup_paged_attn_mode: Some("auto".to_string()),
-                startup_chat_template_path: None,
-                startup_jinja_explicit_path: None,
-                startup_tokenizer_json_path: None,
-                startup_topology_path: None,
-                startup_device_layers_cli: None,
-                startup_multi_gpu_mode: Some("auto_device_map".to_string()),
-                startup_tensor_parallel_backend: Some("disabled".to_string()),
-                startup_visible_gpu_policy: Some("all".to_string()),
-                prefer_auto_device_mapping: false,
-            },
-            BrainModel {
-                role: "kleinhirn_upgrade_candidate".to_string(),
-                provider: "qwen".to_string(),
-                model_id: "Qwen3-235B-A22B".to_string(),
-                runtime_model_id: Some("Qwen/Qwen3-235B-A22B".to_string()),
-                official_label: "Qwen3 235B A22B".to_string(),
-                agentic_adapter: Some("openai_compatible_chat".to_string()),
-                reasoning_effort: "high".to_string(),
-                deployment_mode: "local_high_capacity_or_self_hosted".to_string(),
-                purpose: "stronger local Qwen supervisor brain when the host can carry a materially larger officially supported local mixture model".to_string(),
-                supports_vision: false,
-                min_cpu_threads: Some(24),
-                min_memory_gb: Some(96),
-                min_gpu_count: Some(4),
-                min_total_gpu_memory_gb: Some(72),
-                min_single_gpu_memory_gb: Some(16),
-                startup_max_seqs: Some(1),
-                startup_max_batch_size: Some(1),
-                startup_max_seq_len: Some(8192),
-                startup_pa_context_len: Some(8192),
-                startup_pa_cache_type: Some("f8e4m3".to_string()),
-                startup_paged_attn_mode: Some("auto".to_string()),
-                startup_chat_template_path: None,
-                startup_jinja_explicit_path: None,
-                startup_tokenizer_json_path: None,
-                startup_topology_path: None,
-                startup_device_layers_cli: None,
-                startup_multi_gpu_mode: Some("tensor_parallel".to_string()),
-                startup_tensor_parallel_backend: Some("nccl".to_string()),
-                startup_visible_gpu_policy: Some("largest_power_of_two_prefer_display_free".to_string()),
-                prefer_auto_device_mapping: false,
-            },
-        ],
+        kleinhirn_upgrade_candidates: Vec::new(),
         grosshirn_candidates: vec![
             BrainModel {
                 role: "grosshirn_candidate".to_string(),
                 provider: "openai".to_string(),
+                model_id: "gpt-5.4-nano".to_string(),
+                runtime_model_id: Some("openai/gpt-5.4-nano".to_string()),
+                official_label: "GPT-5.4 Nano".to_string(),
+                agentic_adapter: Some("openai_responses".to_string()),
+                reasoning_effort: "low".to_string(),
+                deployment_mode: "external_api".to_string(),
+                purpose: "small external model for the lightest approved grosshirn routing path".to_string(),
+                supports_vision: true,
+                min_cpu_threads: None,
+                min_memory_gb: None,
+                min_gpu_count: None,
+                min_total_gpu_memory_gb: None,
+                min_single_gpu_memory_gb: None,
+                startup_max_seqs: None,
+                startup_max_batch_size: None,
+                startup_max_seq_len: None,
+                startup_pa_context_len: None,
+                startup_pa_cache_type: None,
+                startup_paged_attn_mode: None,
+                startup_chat_template_path: None,
+                startup_jinja_explicit_path: None,
+                startup_tokenizer_json_path: None,
+                startup_topology_path: None,
+                startup_device_layers_cli: None,
+                startup_multi_gpu_mode: None,
+                startup_tensor_parallel_backend: None,
+                startup_visible_gpu_policy: None,
+                prefer_auto_device_mapping: false,
+            },
+            BrainModel {
+                role: "grosshirn_candidate".to_string(),
+                provider: "openai".to_string(),
+                model_id: "gpt-5.4-mini".to_string(),
+                runtime_model_id: Some("openai/gpt-5.4-mini".to_string()),
+                official_label: "GPT-5.4 Mini".to_string(),
+                agentic_adapter: Some("openai_responses".to_string()),
+                reasoning_effort: "medium".to_string(),
+                deployment_mode: "external_api".to_string(),
+                purpose: "approved medium external model for heavier reasoning when GPT-OSS 20B is no longer sufficient".to_string(),
+                supports_vision: true,
+                min_cpu_threads: None,
+                min_memory_gb: None,
+                min_gpu_count: None,
+                min_total_gpu_memory_gb: None,
+                min_single_gpu_memory_gb: None,
+                startup_max_seqs: None,
+                startup_max_batch_size: None,
+                startup_max_seq_len: None,
+                startup_pa_context_len: None,
+                startup_pa_cache_type: None,
+                startup_paged_attn_mode: None,
+                startup_chat_template_path: None,
+                startup_jinja_explicit_path: None,
+                startup_tokenizer_json_path: None,
+                startup_topology_path: None,
+                startup_device_layers_cli: None,
+                startup_multi_gpu_mode: None,
+                startup_tensor_parallel_backend: None,
+                startup_visible_gpu_policy: None,
+                prefer_auto_device_mapping: false,
+            },
+            BrainModel {
+                role: "grosshirn_candidate".to_string(),
+                provider: "openai".to_string(),
                 model_id: "gpt-5.4".to_string(),
-                runtime_model_id: Some("gpt-5.4".to_string()),
+                runtime_model_id: Some("openai/gpt-5.4".to_string()),
                 official_label: "GPT-5.4".to_string(),
                 agentic_adapter: Some("openai_responses".to_string()),
                 reasoning_effort: "high".to_string(),
@@ -1441,39 +1437,6 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tensor_parallel_backend: None,
                 startup_visible_gpu_policy: None,
                 prefer_auto_device_mapping: false,
-            },
-            BrainModel {
-                role: "grosshirn_candidate".to_string(),
-                provider: "openai".to_string(),
-                model_id: "gpt-5.4-pro".to_string(),
-                runtime_model_id: Some("gpt-5.4-pro".to_string()),
-                official_label: "GPT-5.4 Pro".to_string(),
-                agentic_adapter: Some("openai_responses".to_string()),
-                reasoning_effort: "high".to_string(),
-                deployment_mode: "external_api".to_string(),
-                purpose: "maximum external grosshirn for the hardest professional work once the owner explicitly grants higher-cost reasoning".to_string(),
-                supports_vision: true,
-                min_cpu_threads: None,
-                min_memory_gb: None,
-                min_gpu_count: None,
-                min_total_gpu_memory_gb: None,
-                min_single_gpu_memory_gb: None,
-                startup_max_seqs: None,
-                startup_max_batch_size: None,
-                startup_max_seq_len: None,
-                startup_pa_context_len: None,
-                startup_pa_cache_type: None,
-                startup_paged_attn_mode: None,
-                startup_chat_template_path: None,
-                startup_jinja_explicit_path: None,
-                startup_tokenizer_json_path: None,
-                startup_topology_path: None,
-                startup_device_layers_cli: None,
-                startup_multi_gpu_mode: None,
-                startup_tensor_parallel_backend: None,
-                startup_visible_gpu_policy: None,
-                prefer_auto_device_mapping: false,
-            },
         ],
         updated_at: now_iso(),
     }
@@ -1605,11 +1568,11 @@ pub fn default_browser_subworker_policy() -> BrowserSubworkerPolicy {
             escalation_target: "cto_agent".to_string(),
         },
         vision_runtime: BrowserVisionRuntimePolicy {
-            browser_tasks_require_vision_capable_model: true,
-            preferred_local_model_family: "Qwen3.5 35B A3B".to_string(),
-            preferred_local_model_id: "Qwen3.5-35B-A3B".to_string(),
+            browser_tasks_require_vision_capable_model: false,
+            preferred_local_model_family: "GPT-OSS 20B".to_string(),
+            preferred_local_model_id: "gpt-oss-20b".to_string(),
             upgrade_action: "upgrade_local_browser_vision_kleinhirn".to_string(),
-            note: "Real browser work that depends on screenshots, visual navigation or UI-state perception should prefer the vision-capable local Qwen3.5 35B runtime over GPT-OSS 20B or non-vision local alternates.".to_string(),
+            note: "There is currently no separately authorized local vision kleinhirn beyond GPT-OSS 20B. Browser work must stay bounded, artifact-driven, and if truly necessary escalate through the approved GPT-5.4 family instead of silently switching to an unapproved local model.".to_string(),
         },
         specialist_runtime: BrowserSpecialistRuntimePolicy {
             preferred_small_model: "Qwen3.5-0.8B".to_string(),
@@ -4055,18 +4018,11 @@ pub fn normalize_runtime_model_choice(raw: &str) -> String {
         return String::new();
     }
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered.starts_with("openai/gpt-") && !lowered.starts_with("openai/gpt-oss-") {
-        return trimmed
-            .strip_prefix("openai/")
-            .or_else(|| trimmed.strip_prefix("OpenAI/"))
-            .unwrap_or(trimmed)
-            .to_string();
-    }
     match lowered.as_str() {
-        "gpt-oss-20b" => "openai/gpt-oss-20b".to_string(),
-        "gpt-oss-120b" => "openai/gpt-oss-120b".to_string(),
-        "qwen3.5-35b-a3b" | "qwen/qwen3.5-35b-a3b" => "Qwen/Qwen3.5-35B-A3B".to_string(),
-        "qwen3-235b-a22b" | "qwen/qwen3-235b-a22b" => "Qwen/Qwen3-235B-A22B".to_string(),
+        "gpt-oss-20b" | "openai/gpt-oss-20b" => "openai/gpt-oss-20b".to_string(),
+        "gpt-5.4-nano" | "openai/gpt-5.4-nano" => "openai/gpt-5.4-nano".to_string(),
+        "gpt-5.4-mini" | "openai/gpt-5.4-mini" => "openai/gpt-5.4-mini".to_string(),
+        "gpt-5.4" | "openai/gpt-5.4" => "openai/gpt-5.4".to_string(),
         _ => trimmed.to_string(),
     }
 }
@@ -4106,6 +4062,74 @@ fn find_model_tune_candidate<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_test_root(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "cto_agent_contracts_{label}_{}_{}",
+            std::process::id(),
+            nanos
+        ))
+    }
+
+    struct EnvGuard {
+        root: Option<std::ffi::OsString>,
+        public_base_url: Option<std::ffi::OsString>,
+        bind_host: Option<std::ffi::OsString>,
+        port: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_cto_root(root: &std::path::Path) -> Self {
+            let guard = Self {
+                root: std::env::var_os("CTO_AGENT_ROOT"),
+                public_base_url: std::env::var_os("CTO_AGENT_PUBLIC_BASE_URL"),
+                bind_host: std::env::var_os("CTO_AGENT_BIND_HOST"),
+                port: std::env::var_os("CTO_AGENT_PORT"),
+            };
+            unsafe {
+                std::env::set_var("CTO_AGENT_ROOT", root);
+                std::env::remove_var("CTO_AGENT_PUBLIC_BASE_URL");
+                std::env::remove_var("CTO_AGENT_BIND_HOST");
+                std::env::remove_var("CTO_AGENT_PORT");
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.root.as_ref() {
+                    Some(value) => std::env::set_var("CTO_AGENT_ROOT", value),
+                    None => std::env::remove_var("CTO_AGENT_ROOT"),
+                }
+                match self.public_base_url.as_ref() {
+                    Some(value) => std::env::set_var("CTO_AGENT_PUBLIC_BASE_URL", value),
+                    None => std::env::remove_var("CTO_AGENT_PUBLIC_BASE_URL"),
+                }
+                match self.bind_host.as_ref() {
+                    Some(value) => std::env::set_var("CTO_AGENT_BIND_HOST", value),
+                    None => std::env::remove_var("CTO_AGENT_BIND_HOST"),
+                }
+                match self.port.as_ref() {
+                    Some(value) => std::env::set_var("CTO_AGENT_PORT", value),
+                    None => std::env::remove_var("CTO_AGENT_PORT"),
+                }
+            }
+        }
+    }
 
     fn gpu_census() -> SystemCensus {
         SystemCensus {
@@ -4116,6 +4140,26 @@ mod tests {
             max_single_gpu_memory_gb: Some(20),
             ..SystemCensus::default()
         }
+    }
+
+    #[test]
+    fn control_plane_public_base_url_falls_back_to_runtime_env_file() {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("public-base-url");
+        std::fs::create_dir_all(root.join("runtime")).expect("create runtime dir");
+        std::fs::write(
+            root.join("runtime/kleinhirn.env"),
+            "CTO_AGENT_PUBLIC_BASE_URL=https://100.96.1.7:8443\nCTO_AGENT_BIND_HOST=0.0.0.0\nCTO_AGENT_PORT=8443\n",
+        )
+        .expect("write runtime env");
+        let _env = EnvGuard::set_cto_root(&root);
+
+        assert_eq!(
+            control_plane_public_base_url(),
+            "https://100.96.1.7:8443"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     fn qwen35_model(
@@ -4218,26 +4262,23 @@ mod tests {
     }
 
     #[test]
-    fn recommended_kleinhirn_prefers_operating_upgrade_before_base() {
+    fn recommended_kleinhirn_defaults_to_gpt_oss_20b() {
         let policy = default_model_policy();
         let selected = recommended_kleinhirn(&policy, &gpu_census());
-        assert_eq!(selected.model_id, "Qwen3.5-35B-A3B");
+        assert_eq!(selected.model_id, "gpt-oss-20b");
     }
 
     #[test]
-    fn recommended_browser_vision_kleinhirn_prefers_qwen35() {
+    fn recommended_browser_vision_kleinhirn_is_none_without_authorized_vision_local_model() {
         let policy = default_model_policy();
-        let selected = recommended_browser_vision_kleinhirn(&policy, &gpu_census())
-            .expect("a vision-capable candidate should be available");
-        assert_eq!(selected.model_id, "Qwen3.5-35B-A3B");
+        assert!(recommended_browser_vision_kleinhirn(&policy, &gpu_census()).is_none());
     }
 
     #[test]
-    fn recommended_kleinhirn_does_not_auto_jump_to_high_capacity_candidate() {
+    fn recommended_kleinhirn_does_not_auto_jump_to_removed_legacy_candidates() {
         let policy = default_model_policy();
         let selected = recommended_kleinhirn(&policy, &gpu_census());
-        assert_ne!(selected.model_id, "gpt-oss-120b");
-        assert_ne!(selected.model_id, "Qwen3-235B-A22B");
+        assert_eq!(selected.model_id, "gpt-oss-20b");
     }
 
     #[test]
@@ -4293,29 +4334,33 @@ mod tests {
     }
 
     #[test]
-    fn find_local_kleinhirn_candidate_matches_runtime_or_label() {
+    fn find_local_kleinhirn_candidate_matches_authorized_runtime_or_label() {
         let policy = default_model_policy();
         assert_eq!(
-            find_local_kleinhirn_candidate(&policy, "Qwen/Qwen3-235B-A22B")
+            find_local_kleinhirn_candidate(&policy, "GPT-OSS 20B")
                 .map(|candidate| candidate.model_id.as_str()),
-            Some("Qwen3-235B-A22B")
+            Some("gpt-oss-20b")
         );
         assert_eq!(
-            find_local_kleinhirn_candidate(&policy, "GPT-OSS 20B")
+            find_local_kleinhirn_candidate(&policy, "openai/gpt-oss-20b")
                 .map(|candidate| candidate.model_id.as_str()),
             Some("gpt-oss-20b")
         );
     }
 
     #[test]
-    fn normalize_runtime_model_choice_strips_external_openai_prefix() {
+    fn normalize_runtime_model_choice_keeps_authorized_openai_prefixes() {
         assert_eq!(
             normalize_runtime_model_choice("openai/gpt-5.4-mini"),
-            "gpt-5.4-mini"
+            "openai/gpt-5.4-mini"
         );
         assert_eq!(
-            normalize_runtime_model_choice("openai/gpt-4.5"),
-            "gpt-4.5"
+            normalize_runtime_model_choice("gpt-5.4"),
+            "openai/gpt-5.4"
+        );
+        assert_eq!(
+            normalize_runtime_model_choice("gpt-5.4-nano"),
+            "openai/gpt-5.4-nano"
         );
         assert_eq!(
             normalize_runtime_model_choice("openai/gpt-oss-20b"),

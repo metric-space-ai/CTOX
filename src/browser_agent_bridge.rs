@@ -583,11 +583,11 @@ mod tests {
             config
                 .get("preferredVisionModelRef")
                 .and_then(Value::as_str),
-            Some("custom_openai>Qwen/Qwen3.5-35B-A3B")
+            Some("custom_openai>openai/gpt-oss-20b")
         );
         assert_eq!(
             config.get("visionModelRef").and_then(Value::as_str),
-            Some("custom_openai>Qwen/Qwen3.5-35B-A3B")
+            Some("custom_openai>openai/gpt-oss-20b")
         );
         let _ = fs::remove_dir_all(root);
     }

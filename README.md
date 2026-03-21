@@ -151,7 +151,7 @@ The attach TUI is no longer just a passive log viewer. It now acts as a real own
 - the first free-form TUI chat message enters the shared interrupt path
 - interrupt compaction immediately refreshes the running workstream and the new queued chat task
 - idle chat absence lets the loop fall back into normal task work
-- inline mail setup is accepted in chat with structured fields such as `email: ... password: ... [imap host: ...] [smtp host: ...]`; the password is redacted before the interrupt is echoed into the visible chat trail
+- TUI chat and BIOS chat are treated as raw text surfaces; they do not deterministically parse slash commands, `Speaker:` prefixes, inline credentials, or keyword-based task routing out of chat content
 - a settings page in the same TUI lets the owner store mail credentials, API keys, contact details, the active local/runtime model, the default grosshirn model, and the three separate compact-routing slots
 
 The website is not a marketing shell. It is the visible operating surface for bootstrap, trust, BIOS, root-auth, and later runtime transparency.

@@ -1462,11 +1462,14 @@ pub fn record_bios_dialogue(
             params![speaker.trim(), committed_owner_name, created_at],
         )?;
 
-        let summary = summarize_for_memory(message);
         conn.execute(
             "INSERT INTO memory_items(created_at, kind, summary, detail, source, important)
              VALUES(?1, 'owner_calibration', ?2, ?3, 'bios_chat', 1)",
-            params![now_iso(), summary, message.trim()],
+            params![
+                now_iso(),
+                "Owner BIOS chat message received.",
+                message.trim()
+            ],
         )?;
         refresh_owner_memory_summary_with_conn(&conn)?;
     }
@@ -1548,6 +1551,65 @@ pub fn record_terminal_feedback(
     Ok(Some(format!(
         "Owner terminal contact registered. Commitment is now {}/100.",
         trust.owner_commitment_score
+    )))
+}
+
+pub fn record_owner_chat_contact(
+    paths: &Paths,
+    source_channel: &str,
+    speaker: &str,
+) -> anyhow::Result<Option<String>> {
+    let bios = load_bios(paths);
+    if !is_owner_message(speaker, &bios.owner.name) {
+        return Ok(None);
+    }
+
+    let conn = open_db(paths)?;
+    let created_at = now_iso();
+    let existing = load_owner_trust_row(&conn)?.unwrap_or_default();
+    let owner_name = if bios.owner.name.trim().is_empty() {
+        existing.owner_name.clone()
+    } else {
+        bios.owner.name.trim().to_string()
+    };
+
+    conn.execute(
+        "UPDATE owner_trust
+         SET owner_contact_established = 1,
+             owner_name = CASE WHEN owner_name = '' THEN ?1 ELSE owner_name END,
+             last_owner_dialogue_at = ?2
+         WHERE singleton = 1",
+        params![
+            if owner_name.is_empty() {
+                speaker.trim()
+            } else {
+                owner_name.as_str()
+            },
+            created_at
+        ],
+    )?;
+
+    let source_label = match source_channel {
+        "attach_terminal" => "TUI chat",
+        "bios" => "BIOS chat",
+        _ => "chat",
+    };
+    conn.execute(
+        "INSERT INTO memory_items(created_at, kind, summary, detail, source, important)
+         VALUES(?1, 'owner_calibration', ?2, ?3, ?4, 1)",
+        params![
+            now_iso(),
+            format!("Owner contact established via {source_label}."),
+            format!("Owner contact established via {source_label}."),
+            source_channel,
+        ],
+    )?;
+    refresh_owner_memory_summary_with_conn(&conn)?;
+    let trust = sync_owner_trust(paths)?;
+
+    Ok(Some(format!(
+        "Owner {} registered. Commitment is now {}/100.",
+        source_label, trust.owner_commitment_score
     )))
 }
 
@@ -6476,6 +6538,10 @@ fn classify_interrupt_task_kind(
     speaker: &str,
     message: &str,
 ) -> String {
+    if deterministic_chat_parsing_disabled(source_channel) {
+        return "owner_interrupt".to_string();
+    }
+
     let direct_terminal_surface = matches!(source_channel, "terminal" | "attach_terminal");
     let owner_signal = is_owner_message(speaker, owner_name);
     let trusted_owner_surface = matches!(source_channel, "bios" | "homepage") && owner_signal;
@@ -6556,6 +6622,10 @@ fn classify_turn_signal_kind(
     speaker: &str,
     message: &str,
 ) -> String {
+    if deterministic_chat_parsing_disabled(source_channel) {
+        return "interrupt".to_string();
+    }
+
     let lowered = message.to_lowercase();
     let owner_signal = is_owner_message(speaker, owner_name);
     let urgent = contains_any(
@@ -6602,6 +6672,22 @@ fn compute_priority_score(
         "whatsapp" => 60,
         _ => 40,
     };
+
+    if deterministic_chat_parsing_disabled(source_channel) {
+        if grosshirn_activation {
+            score += 180;
+        }
+        if is_self_preservation_task_kind(task_kind) {
+            score = score.max(loop_safety.self_preservation_priority_floor);
+        }
+        if owner_override {
+            score = score.max(loop_safety.owner_override_priority_floor);
+            if grosshirn_activation {
+                score = score.max(loop_safety.owner_override_priority_floor + 180);
+            }
+        }
+        return score;
+    }
 
     let lowered = message.to_lowercase();
     if contains_any(
@@ -6685,10 +6771,17 @@ fn build_task_title(task_kind: &str, message: &str) -> String {
 }
 
 fn build_interrupt_task_title(source_channel: &str, task_kind: &str, message: &str) -> String {
-    if source_channel == "attach_terminal" && task_kind == "owner_interrupt" {
+    if source_channel == "attach_terminal" {
         return "Chatten".to_string();
     }
+    if source_channel == "bios" {
+        return "BIOS-Chat".to_string();
+    }
     build_task_title(task_kind, message)
+}
+
+fn deterministic_chat_parsing_disabled(source_channel: &str) -> bool {
+    matches!(source_channel, "attach_terminal" | "bios")
 }
 
 fn is_self_preservation_task_kind(task_kind: &str) -> bool {
@@ -7997,6 +8090,7 @@ mod tests {
             load_loop_interrupt_by_id(&paths, interrupt_id)?.expect("interrupt should still exist");
 
         assert_eq!(task_reload.source_interrupt_id, Some(interrupt_id));
+        assert_eq!(task_reload.title, "BIOS-Chat");
         assert_eq!(interrupt.status, "queued");
         assert!(
             interrupt
@@ -8575,6 +8669,50 @@ mod tests {
             "Stop self-preservation meta unless the loop is actually unhealthy and read the repo now.",
         );
         assert_eq!(task_kind, "owner_interrupt");
+    }
+
+    #[test]
+    fn bios_chat_interrupt_is_not_reclassified_from_chat_content() {
+        let task_kind = classify_interrupt_task_kind(
+            "Michael Welsch",
+            "bios",
+            "Michael Welsch",
+            "Wechsle jetzt auf GPT-5.4 und konfiguriere sofort den API Key.",
+        );
+        assert_eq!(task_kind, "owner_interrupt");
+    }
+
+    #[test]
+    fn bios_chat_signal_kind_does_not_scan_message_keywords() {
+        let signal_kind = classify_turn_signal_kind(
+            "Michael Welsch",
+            "bios",
+            "Michael Welsch",
+            "Das ist nicht dringend, nicht kritisch und trotzdem nur ein normaler BIOS-Chat.",
+        );
+        assert_eq!(signal_kind, "interrupt");
+    }
+
+    #[test]
+    fn attach_chat_priority_ignores_urgency_keywords() {
+        let loop_safety = default_loop_safety_policy();
+        let calm = compute_priority_score(
+            &loop_safety,
+            "Michael Welsch",
+            "owner_interrupt",
+            "attach_terminal",
+            "Michael Welsch",
+            "Bitte schaue spaeter drauf.",
+        );
+        let urgent = compute_priority_score(
+            &loop_safety,
+            "Michael Welsch",
+            "owner_interrupt",
+            "attach_terminal",
+            "Michael Welsch",
+            "Bitte jetzt sofort dringend kritisch anschauen.",
+        );
+        assert_eq!(urgent, calm);
     }
 
     #[test]

@@ -90,21 +90,18 @@ const FACTORY_RESET_CONFIRM_WINDOW_SECS: u64 = 3;
 const CHAT_HISTORY_LIMIT: usize = 14;
 const CHAT_IDLE_SECS: u64 = 180;
 
-const SIMPLE_MODEL_OPTIONS: &[&str] = &[
-    "openai/gpt-oss-20b",
-    "Qwen/Qwen3.5-35B-A3B",
-    "gpt-4.5-nano",
+const GPT_OSS_MODEL: &str = "openai/gpt-oss-20b";
+const AUTHORIZED_MODEL_OPTIONS: &[&str] = &[
+    GPT_OSS_MODEL,
+    "openai/gpt-5.4-nano",
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.4",
 ];
-const MEDIUM_MODEL_OPTIONS: &[&str] = &[
-    "openai/gpt-oss-120b",
-    "Qwen/Qwen3-235B-A22B",
-    "gpt-4.5-mini",
-    "gpt-5.4-mini",
-];
-const RED_MODEL_OPTIONS: &[&str] = &["gpt-4.5", "gpt-5.4", "gpt-5.4-pro"];
-const LOCAL_MODEL_OPTIONS: &[&str] = &["openai/gpt-oss-20b", "Qwen/Qwen3.5-35B-A3B"];
-const GROSSHIRN_MODEL_OPTIONS: &[&str] =
-    &["gpt-4.5", "gpt-4.5-mini", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-pro"];
+const SIMPLE_MODEL_OPTIONS: &[&str] = AUTHORIZED_MODEL_OPTIONS;
+const MEDIUM_MODEL_OPTIONS: &[&str] = AUTHORIZED_MODEL_OPTIONS;
+const RED_MODEL_OPTIONS: &[&str] = AUTHORIZED_MODEL_OPTIONS;
+const LOCAL_MODEL_OPTIONS: &[&str] = &[GPT_OSS_MODEL];
+const GROSSHIRN_MODEL_OPTIONS: &[&str] = AUTHORIZED_MODEL_OPTIONS;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AttachRequest {
@@ -151,7 +148,7 @@ struct SettingsItem {
     label: &'static str,
     value: String,
     secret: bool,
-    choices: &'static [&'static str],
+    choices: Vec<&'static str>,
     help: &'static str,
 }
 
@@ -672,7 +669,7 @@ impl AttachTui {
         if item.choices.is_empty() {
             return;
         }
-        let choices = item.choices;
+        let choices = item.choices.as_slice();
         let current_index = choices
             .iter()
             .position(|choice| choice.eq_ignore_ascii_case(item.value.trim()))
@@ -720,32 +717,27 @@ impl AttachTui {
         }
 
         let response = send_attach_request(paths, &trimmed)?;
-        if trimmed.starts_with('/') {
-            self.push_local_notice("cmd", &trimmed);
-            self.push_local_notice("ack", first_visible_line(&response.output));
+        let visible_input = owner_visible_input_echo(&trimmed);
+        self.push_local_notice("you", &visible_input);
+        self.pending_inputs.push(PendingInputItem {
+            task_id: response.queued_task_id,
+            task_title: response
+                .queued_task_title
+                .clone()
+                .unwrap_or_else(|| visible_input.clone()),
+            message: visible_input.clone(),
+            status: PendingInputStatus::Queued,
+            completed_at: None,
+            seen_open: false,
+        });
+        if let Some(task_id) = response.queued_task_id {
+            let task_title = response
+                .queued_task_title
+                .clone()
+                .unwrap_or_else(|| visible_input.clone());
+            self.push_local_notice("queued", &format!("#{task_id} {task_title}"));
         } else {
-            let visible_input = owner_visible_input_echo(&trimmed);
-            self.push_local_notice("you", &visible_input);
-            self.pending_inputs.push(PendingInputItem {
-                task_id: response.queued_task_id,
-                task_title: response
-                    .queued_task_title
-                    .clone()
-                    .unwrap_or_else(|| visible_input.clone()),
-                message: visible_input.clone(),
-                status: PendingInputStatus::Queued,
-                completed_at: None,
-                seen_open: false,
-            });
-            if let Some(task_id) = response.queued_task_id {
-                let task_title = response
-                    .queued_task_title
-                    .clone()
-                    .unwrap_or_else(|| visible_input.clone());
-                self.push_local_notice("queued", &format!("#{task_id} {task_title}"));
-            } else {
-                self.push_local_notice("ack", first_visible_line(&response.output));
-            }
+            self.push_local_notice("ack", first_visible_line(&response.output));
         }
 
         self.chat_input.clear();
@@ -957,9 +949,9 @@ impl AttachTui {
         frame_lines.push(frame_bottom(frame_width));
 
         let input_hint = if self.snapshot.active_turn.is_some() {
-            "Tab Settings · Enter queues chat interrupt for the next safe boundary · Mail setup inline: email: ... password: ... · Ctrl-P reset · Ctrl-C exit"
+            "Tab Settings · Enter queues raw chat for the next safe boundary · Use Settings for mail and API keys · Ctrl-P reset · Ctrl-C exit"
         } else {
-            "Tab Settings · Enter sends chat now · Mail setup inline: email: ... password: ... · Ctrl-P reset · Ctrl-C exit"
+            "Tab Settings · Enter sends raw chat now · Use Settings for mail and API keys · Ctrl-P reset · Ctrl-C exit"
         };
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
@@ -1313,6 +1305,14 @@ impl AttachTui {
             return "No field selected.".to_string();
         };
         let mut line = item.help.to_string();
+        if matches!(
+            item.key,
+            "grosshirn_model" | "simple_model" | "medium_model" | "red_model"
+        ) && item.choices.len() == 1
+            && item.choices.first().copied() == Some(GPT_OSS_MODEL)
+        {
+            line.push_str(" External OpenAI models unlock after setting an OpenAI Key or Grosshirn Key.");
+        }
         if !item.choices.is_empty() {
             line.push_str(" Options: ");
             line.push_str(&item.choices.join(" | "));
@@ -1661,6 +1661,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
     let organigram = load_organigram(paths);
     let installation = load_installation_bootstrap_state(paths);
     let env_map = load_runtime_env_map(paths).unwrap_or_default();
+    let external_model_access = has_external_model_access(&env_map);
 
     let owner_name = first_non_empty(&[
         organigram.owner.name.as_str(),
@@ -1674,28 +1675,32 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
         .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
         .cloned()
         .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
-        .map(|value| normalize_runtime_model_choice(&value))
-        .unwrap_or_else(|| LOCAL_MODEL_OPTIONS[0].to_string());
-    let grosshirn_model = env_map
-        .get("CTO_AGENT_GROSSHIRN_MODEL")
-        .cloned()
-        .map(|value| normalize_runtime_model_choice(&value))
-        .unwrap_or_else(|| GROSSHIRN_MODEL_OPTIONS[0].to_string());
-    let simple_model = env_map
-        .get("CTO_AGENT_COMPACT_SIMPLE_MODEL")
-        .cloned()
-        .map(|value| normalize_runtime_model_choice(&value))
-        .unwrap_or_else(|| SIMPLE_MODEL_OPTIONS[0].to_string());
-    let medium_model = env_map
-        .get("CTO_AGENT_COMPACT_MEDIUM_MODEL")
-        .cloned()
-        .map(|value| normalize_runtime_model_choice(&value))
-        .unwrap_or_else(|| MEDIUM_MODEL_OPTIONS[0].to_string());
-    let red_model = env_map
-        .get("CTO_AGENT_COMPACT_RED_MODEL")
-        .cloned()
-        .map(|value| normalize_runtime_model_choice(&value))
-        .unwrap_or_else(|| RED_MODEL_OPTIONS[0].to_string());
+        .map(|value| clamp_model_choice("kleinhirn_model", Some(&value), external_model_access))
+        .unwrap_or_else(|| clamp_model_choice("kleinhirn_model", None, external_model_access));
+    let grosshirn_model = clamp_model_choice(
+        "grosshirn_model",
+        env_map.get("CTO_AGENT_GROSSHIRN_MODEL").map(String::as_str),
+        external_model_access,
+    );
+    let simple_model = clamp_model_choice(
+        "simple_model",
+        env_map
+            .get("CTO_AGENT_COMPACT_SIMPLE_MODEL")
+            .map(String::as_str),
+        external_model_access,
+    );
+    let medium_model = clamp_model_choice(
+        "medium_model",
+        env_map
+            .get("CTO_AGENT_COMPACT_MEDIUM_MODEL")
+            .map(String::as_str),
+        external_model_access,
+    );
+    let red_model = clamp_model_choice(
+        "red_model",
+        env_map.get("CTO_AGENT_COMPACT_RED_MODEL").map(String::as_str),
+        external_model_access,
+    );
 
     vec![
         SettingsItem {
@@ -1703,7 +1708,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Name",
             value: owner_name,
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Human owner name used for chat labeling and trust-aware routing.",
         },
         SettingsItem {
@@ -1711,7 +1716,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Email",
             value: owner_email,
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Primary owner email address.",
         },
         SettingsItem {
@@ -1719,7 +1724,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Reach",
             value: installation.owner_contact_info,
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "How the owner can be reached beyond mail, for example phone, Signal, calendar or assistant notes.",
         },
         SettingsItem {
@@ -1730,7 +1735,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Mailbox address used by the CTO-Agent mail interrupt bridge.",
         },
         SettingsItem {
@@ -1741,7 +1746,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: true,
-            choices: &[],
+            choices: Vec::new(),
             help: "Mailbox password or app password.",
         },
         SettingsItem {
@@ -1752,7 +1757,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Incoming IMAP host.",
         },
         SettingsItem {
@@ -1763,7 +1768,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Incoming IMAP port, for example 993.",
         },
         SettingsItem {
@@ -1774,7 +1779,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Outgoing SMTP host.",
         },
         SettingsItem {
@@ -1785,7 +1790,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
-            choices: &[],
+            choices: Vec::new(),
             help: "Outgoing SMTP port, for example 465 or 587.",
         },
         SettingsItem {
@@ -1793,7 +1798,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "OpenAI Key",
             value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
             secret: true,
-            choices: &[],
+            choices: Vec::new(),
             help: "Generic OpenAI-compatible API key fallback.",
         },
         SettingsItem {
@@ -1804,7 +1809,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: true,
-            choices: &[],
+            choices: Vec::new(),
             help: "Dedicated API key for external grosshirn routing.",
         },
         SettingsItem {
@@ -1812,7 +1817,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Local Runtime",
             value: kleinhirn_model,
             secret: false,
-            choices: LOCAL_MODEL_OPTIONS,
+            choices: model_choices_for_setting("kleinhirn_model", external_model_access),
             help: "The actively running local kleinhirn runtime. Saving this field switches the local runtime instead of only changing compact slots.",
         },
         SettingsItem {
@@ -1820,7 +1825,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Grosshirn Model",
             value: grosshirn_model,
             secret: false,
-            choices: GROSSHIRN_MODEL_OPTIONS,
+            choices: model_choices_for_setting("grosshirn_model", external_model_access),
             help: "Default external model used when the loop routes through grosshirn.",
         },
         SettingsItem {
@@ -1828,7 +1833,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Simple Model",
             value: simple_model,
             secret: false,
-            choices: SIMPLE_MODEL_OPTIONS,
+            choices: model_choices_for_setting("simple_model", external_model_access),
             help: "Compact slot chosen after compaction when progress remains strong. This is not the same thing as the active local runtime above.",
         },
         SettingsItem {
@@ -1836,7 +1841,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Medium Model",
             value: medium_model,
             secret: false,
-            choices: MEDIUM_MODEL_OPTIONS,
+            choices: model_choices_for_setting("medium_model", external_model_access),
             help: "Compact slot chosen when compaction grades the progress as unstable or average.",
         },
         SettingsItem {
@@ -1844,7 +1849,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Red Model",
             value: red_model,
             secret: false,
-            choices: RED_MODEL_OPTIONS,
+            choices: model_choices_for_setting("red_model", external_model_access),
             help: "Compact escalation slot chosen when compaction grades the progress as red.",
         },
     ]
@@ -1889,7 +1894,7 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
                 upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_API_KEY", &value)
             }
             "kleinhirn_model" => {
-                requested_local_model = Some(normalize_runtime_model_choice(&value));
+                requested_local_model = Some(value);
             }
             "grosshirn_model" => upsert_env_value(
                 &mut env_map,
@@ -1914,6 +1919,37 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
             _ => {}
         }
     }
+
+    let external_model_access = has_external_model_access(&env_map);
+    requested_local_model = Some(clamp_model_choice(
+        "kleinhirn_model",
+        requested_local_model.as_deref(),
+        external_model_access,
+    ));
+    clamp_persisted_model_choice(
+        &mut env_map,
+        "CTO_AGENT_GROSSHIRN_MODEL",
+        "grosshirn_model",
+        external_model_access,
+    );
+    clamp_persisted_model_choice(
+        &mut env_map,
+        "CTO_AGENT_COMPACT_SIMPLE_MODEL",
+        "simple_model",
+        external_model_access,
+    );
+    clamp_persisted_model_choice(
+        &mut env_map,
+        "CTO_AGENT_COMPACT_MEDIUM_MODEL",
+        "medium_model",
+        external_model_access,
+    );
+    clamp_persisted_model_choice(
+        &mut env_map,
+        "CTO_AGENT_COMPACT_RED_MODEL",
+        "red_model",
+        external_model_access,
+    );
 
     if saw_mail_address {
         installation.email_assignment_mode = "assigned_now".to_string();
@@ -1950,6 +1986,100 @@ fn first_non_empty(values: &[&str]) -> String {
         .find(|value| !value.is_empty())
         .unwrap_or("")
         .to_string()
+}
+
+fn has_external_model_access(env_map: &BTreeMap<String, String>) -> bool {
+    ["OPENAI_API_KEY", "CTO_AGENT_GROSSHIRN_API_KEY"]
+        .iter()
+        .filter_map(|key| env_map.get(*key))
+        .any(|value| !value.trim().is_empty())
+}
+
+fn model_choices_for_setting(setting_key: &str, external_model_access: bool) -> Vec<&'static str> {
+    match setting_key {
+        "kleinhirn_model" => LOCAL_MODEL_OPTIONS.to_vec(),
+        "grosshirn_model" => {
+            if external_model_access {
+                GROSSHIRN_MODEL_OPTIONS.to_vec()
+            } else {
+                LOCAL_MODEL_OPTIONS.to_vec()
+            }
+        }
+        "simple_model" => {
+            if external_model_access {
+                SIMPLE_MODEL_OPTIONS.to_vec()
+            } else {
+                LOCAL_MODEL_OPTIONS.to_vec()
+            }
+        }
+        "medium_model" => {
+            if external_model_access {
+                MEDIUM_MODEL_OPTIONS.to_vec()
+            } else {
+                LOCAL_MODEL_OPTIONS.to_vec()
+            }
+        }
+        "red_model" => {
+            if external_model_access {
+                RED_MODEL_OPTIONS.to_vec()
+            } else {
+                LOCAL_MODEL_OPTIONS.to_vec()
+            }
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn default_model_choice_for_setting(
+    setting_key: &str,
+    external_model_access: bool,
+) -> &'static str {
+    if !external_model_access {
+        return GPT_OSS_MODEL;
+    }
+    match setting_key {
+        "kleinhirn_model" => GPT_OSS_MODEL,
+        "grosshirn_model" => "openai/gpt-5.4",
+        "simple_model" => GPT_OSS_MODEL,
+        "medium_model" => "openai/gpt-5.4-mini",
+        "red_model" => "openai/gpt-5.4",
+        _ => GPT_OSS_MODEL,
+    }
+}
+
+fn clamp_model_choice(
+    setting_key: &str,
+    raw_value: Option<&str>,
+    external_model_access: bool,
+) -> String {
+    let choices = model_choices_for_setting(setting_key, external_model_access);
+    let default_choice = default_model_choice_for_setting(setting_key, external_model_access);
+    let Some(raw_value) = raw_value else {
+        return default_choice.to_string();
+    };
+    let normalized = normalize_runtime_model_choice(raw_value);
+    if choices
+        .iter()
+        .any(|choice| choice.eq_ignore_ascii_case(&normalized))
+    {
+        normalized
+    } else {
+        default_choice.to_string()
+    }
+}
+
+fn clamp_persisted_model_choice(
+    env_map: &mut BTreeMap<String, String>,
+    env_key: &str,
+    setting_key: &str,
+    external_model_access: bool,
+) {
+    let clamped = clamp_model_choice(
+        setting_key,
+        env_map.get(env_key).map(String::as_str),
+        external_model_access,
+    );
+    upsert_env_value(env_map, env_key, &clamped);
 }
 
 fn upsert_env_value(env_map: &mut BTreeMap<String, String>, key: &str, value: &str) {
@@ -2061,52 +2191,7 @@ fn is_owner_visible_chat_text(message: &str) -> bool {
 }
 
 fn owner_visible_input_echo(message: &str) -> String {
-    let trimmed = message.trim();
-    if !looks_like_mail_secret_input(trimmed) {
-        return trimmed.to_string();
-    }
-    match first_email_address_in_text(trimmed) {
-        Some(address) => format!(
-            "Mail credentials supplied for {} via chat. Password redacted.",
-            address
-        ),
-        None => "Mail credentials supplied via chat. Password redacted.".to_string(),
-    }
-}
-
-fn looks_like_mail_secret_input(message: &str) -> bool {
-    let lowered = message.to_ascii_lowercase();
-    lowered.contains("password:")
-        || lowered.contains("password=")
-        || lowered.contains("passwort:")
-        || lowered.contains("passwort=")
-        || lowered.contains("pw:")
-        || lowered.contains("pw=")
-        || lowered.contains("cto_email_password")
-}
-
-fn first_email_address_in_text(message: &str) -> Option<String> {
-    for token in message.split(|ch: char| {
-        ch.is_whitespace()
-            || matches!(ch, ',' | ';' | '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'')
-    }) {
-        let candidate = token
-            .trim()
-            .trim_matches('.')
-            .trim_matches(':')
-            .trim_matches('=')
-            .trim_matches('/')
-            .trim_matches('\\');
-        if candidate.contains('@') && candidate.split('@').count() == 2 {
-            let mut parts = candidate.split('@');
-            let local = parts.next().unwrap_or_default();
-            let domain = parts.next().unwrap_or_default();
-            if !local.is_empty() && domain.contains('.') {
-                return Some(candidate.to_ascii_lowercase());
-            }
-        }
-    }
-    None
+    message.trim().to_string()
 }
 
 fn owner_matches_snapshot(snapshot: &AttachUiSnapshot, speaker: &str) -> bool {
@@ -2944,7 +3029,7 @@ mod tests {
                     label: "Owner Name",
                     value: "Michael Welsch".to_string(),
                     secret: false,
-                    choices: &[],
+                    choices: Vec::new(),
                     help: "Owner identity.",
                 },
                 SettingsItem {
@@ -2952,7 +3037,7 @@ mod tests {
                     label: "Simple Model",
                     value: "openai/gpt-oss-20b".to_string(),
                     secret: false,
-                    choices: SIMPLE_MODEL_OPTIONS,
+                    choices: SIMPLE_MODEL_OPTIONS.to_vec(),
                     help: "Simple slot.",
                 },
             ],
@@ -2981,6 +3066,43 @@ mod tests {
         assert_eq!(
             cursor_col,
             "Chat to CTO: owner: \\n line two".chars().count()
+        );
+    }
+
+    #[test]
+    fn model_setting_choices_collapse_without_external_key() {
+        let env_map = BTreeMap::new();
+        assert!(!has_external_model_access(&env_map));
+        assert_eq!(
+            model_choices_for_setting("simple_model", false),
+            vec![GPT_OSS_MODEL]
+        );
+        assert_eq!(
+            model_choices_for_setting("grosshirn_model", false),
+            vec![GPT_OSS_MODEL]
+        );
+        assert_eq!(
+            clamp_model_choice("red_model", Some("openai/gpt-5.4"), false),
+            GPT_OSS_MODEL
+        );
+    }
+
+    #[test]
+    fn model_setting_choices_unlock_with_external_key() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
+        assert!(has_external_model_access(&env_map));
+        assert_eq!(
+            model_choices_for_setting("medium_model", true),
+            MEDIUM_MODEL_OPTIONS.to_vec()
+        );
+        assert_eq!(
+            default_model_choice_for_setting("medium_model", true),
+            "openai/gpt-5.4-mini"
+        );
+        assert_eq!(
+            clamp_model_choice("red_model", Some("openai/gpt-5.4"), true),
+            "openai/gpt-5.4"
         );
     }
 
@@ -3076,16 +3198,15 @@ mod tests {
     }
 
     #[test]
-    fn owner_visible_input_echo_redacts_mail_credentials() {
+    fn owner_visible_input_echo_keeps_chat_input_raw() {
         let line = owner_visible_input_echo(
             "email: cto1@metric-space.ai password: supersecret imap host: imap.one.com",
         );
 
         assert_eq!(
             line,
-            "Mail credentials supplied for cto1@metric-space.ai via chat. Password redacted."
+            "email: cto1@metric-space.ai password: supersecret imap host: imap.one.com"
         );
-        assert!(!line.contains("supersecret"));
     }
 
     #[test]

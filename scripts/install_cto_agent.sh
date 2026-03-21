@@ -71,14 +71,13 @@ selected_matches_profile() {
 
 case "$KLEINHIRN_PROFILE" in
   qwen35)
-    KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-Qwen3.5-35B-A3B}"
-    KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-Qwen/Qwen3.5-35B-A3B}"
-    KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-Qwen3.5 35B A3B}"
-    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-openai_compatible_chat}"
+    KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-gpt-oss-20b}"
+    KLEINHIRN_RUNTIME_MODEL="${CTO_AGENT_KLEINHIRN_RUNTIME_MODEL:-openai/gpt-oss-20b}"
+    KLEINHIRN_OFFICIAL_LABEL="${CTO_AGENT_KLEINHIRN_OFFICIAL_LABEL:-GPT-OSS 20B}"
+    KLEINHIRN_AGENTIC_ADAPTER="${CTO_AGENT_KLEINHIRN_AGENTIC_ADAPTER:-mistralrs_gpt_oss_harmony_completion}"
     KLEINHIRN_MAX_SEQ_LEN="${CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN:-131072}"
     KLEINHIRN_DISABLE_PAGED_ATTN="${CTO_AGENT_KLEINHIRN_DISABLE_PAGED_ATTN:-0}"
-    KLEINHIRN_PA_CTXT_LEN="${CTO_AGENT_KLEINHIRN_PA_CTXT_LEN:-131072}"
-    KLEINHIRN_PAGED_ATTN_MODE="${CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE:-auto}"
+    KLEINHIRN_PAGED_ATTN_MODE="${CTO_AGENT_KLEINHIRN_PAGED_ATTN_MODE:-off}"
     ;;
   *)
     KLEINHIRN_POLICY_MODEL="${CTO_AGENT_KLEINHIRN_POLICY_MODEL:-gpt-oss-20b}"
@@ -398,17 +397,17 @@ shell_quote() {
 normalize_compact_model_value() {
   value="$(printf '%s' "$1" | sed 's#^[[:space:]]*##; s#[[:space:]]*$##')"
   case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
-    gpt-oss-20b)
+    gpt-oss-20b|openai/gpt-oss-20b)
       printf '%s\n' "openai/gpt-oss-20b"
       ;;
-    gpt-oss-120b)
-      printf '%s\n' "openai/gpt-oss-120b"
+    gpt-5.4-nano|openai/gpt-5.4-nano)
+      printf '%s\n' "openai/gpt-5.4-nano"
       ;;
-    qwen3.5-35b-a3b|qwen/qwen3.5-35b-a3b)
-      printf '%s\n' "Qwen/Qwen3.5-35B-A3B"
+    gpt-5.4-mini|openai/gpt-5.4-mini)
+      printf '%s\n' "openai/gpt-5.4-mini"
       ;;
-    qwen3-235b-a22b|qwen/qwen3-235b-a22b)
-      printf '%s\n' "Qwen/Qwen3-235B-A22B"
+    gpt-5.4|openai/gpt-5.4)
+      printf '%s\n' "openai/gpt-5.4"
       ;;
     *)
       printf '%s\n' "$value"
@@ -455,7 +454,7 @@ adopt_existing_runtime_mail_env() {
   CTO_EMAIL_SMTP_PORT="${CTO_EMAIL_SMTP_PORT:-${existing_smtp_port:-465}}"
   CTO_AGENT_EMAIL_SYNC_LIMIT="${CTO_AGENT_EMAIL_SYNC_LIMIT:-${existing_sync_limit:-20}}"
   CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-$existing_grosshirn_api_key}"
-  CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-${existing_grosshirn_model:-gpt-5.4}}"
+  CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-${existing_grosshirn_model:-openai/gpt-5.4}}"
   CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-${existing_grosshirn_adapter:-openai_responses}}"
   CTO_AGENT_GROSSHIRN_BASE_URL="${CTO_AGENT_GROSSHIRN_BASE_URL:-${existing_grosshirn_base_url:-https://api.openai.com/v1}}"
   CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-${existing_grosshirn_reasoning:-medium}}"
@@ -1271,8 +1270,8 @@ elif [ -z "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}" ]; then
 fi
 
 CTO_AGENT_COMPACT_SIMPLE_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_SIMPLE_MODEL:-$KLEINHIRN_RUNTIME_MODEL}")"
-CTO_AGENT_COMPACT_MEDIUM_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_MEDIUM_MODEL:-openai/gpt-oss-120b}")"
-CTO_AGENT_COMPACT_RED_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_RED_MODEL:-${CTO_AGENT_GROSSHIRN_MODEL:-gpt-5.4}}")"
+CTO_AGENT_COMPACT_MEDIUM_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_MEDIUM_MODEL:-openai/gpt-5.4-mini}")"
+CTO_AGENT_COMPACT_RED_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_RED_MODEL:-${CTO_AGENT_GROSSHIRN_MODEL:-openai/gpt-5.4}}")"
 
 echo "[6/10] Write Kleinhirn environment"
 write_kleinhirn_env_file

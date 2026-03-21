@@ -46,6 +46,7 @@ use crate::runtime_db::load_focus_state;
 use crate::runtime_db::load_owner_trust;
 use crate::runtime_db::load_task_by_id;
 use crate::runtime_db::record_homepage_revision;
+use crate::runtime_db::record_owner_chat_contact;
 use crate::runtime_db::record_memory;
 use crate::runtime_db::record_terminal_feedback;
 use crate::runtime_db::record_turn_signal_for_active_turn;
@@ -113,7 +114,14 @@ pub fn handle_attach_line(paths: &Paths, line: &str) -> anyhow::Result<String> {
 }
 
 pub fn handle_attach_line_detailed(paths: &Paths, line: &str) -> anyhow::Result<AttachLineOutcome> {
-    handle_input_line(paths, line, "attach_terminal")
+    let message = line.trim();
+    if message.is_empty() {
+        return Ok(AttachLineOutcome::text(String::new()));
+    }
+
+    let speaker = default_attach_chat_speaker(paths);
+    let interrupt_id = enqueue_loop_interrupt(paths, "attach_terminal", &speaker, message)?;
+    queue_interrupt(paths, interrupt_id, "attach_terminal", &speaker, message)
 }
 
 pub struct AttachLineOutcome {
@@ -650,7 +658,7 @@ fn maybe_capture_inline_mail_credentials(
     speaker: &str,
     message: &str,
 ) -> anyhow::Result<Option<InlineMailCapture>> {
-    if !matches!(source_channel, "terminal" | "attach_terminal") {
+    if source_channel != "terminal" {
         return Ok(None);
     }
     if message.trim().is_empty() {
@@ -709,6 +717,25 @@ fn maybe_capture_inline_mail_credentials(
             parsed.address
         ),
     }))
+}
+
+fn default_attach_chat_speaker(paths: &Paths) -> String {
+    let bios = load_bios(paths);
+    if !bios.owner.name.trim().is_empty() {
+        return bios.owner.name.trim().to_string();
+    }
+
+    let organigram = load_organigram(paths);
+    if !organigram.owner.name.trim().is_empty() {
+        return organigram.owner.name.trim().to_string();
+    }
+
+    let installation = load_installation_bootstrap_state(paths);
+    if !installation.owner_name.trim().is_empty() {
+        return installation.owner_name.trim().to_string();
+    }
+
+    "Michael Welsch".to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1522,7 +1549,11 @@ pub fn queue_interrupt(
     message: &str,
 ) -> anyhow::Result<AttachLineOutcome> {
     append_boot_entry(paths, speaker, message)?;
-    let trust_note = record_terminal_feedback(paths, speaker, message)?;
+    let trust_note = if source_channel == "attach_terminal" {
+        record_owner_chat_contact(paths, source_channel, speaker)?
+    } else {
+        record_terminal_feedback(paths, speaker, message)?
+    };
     let signal_note = record_turn_signal_for_active_turn(paths, source_channel, speaker, message)?
         .map(|signal| {
             format!(

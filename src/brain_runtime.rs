@@ -1555,11 +1555,23 @@ fn extract_openai_api_key(message: &str) -> Option<String> {
 
 fn extract_requested_grosshirn_model(message: &str) -> Option<String> {
     let lowered = message.to_lowercase();
-    if lowered.contains("gpt-5.4-pro") || lowered.contains("gpt 5.4 pro") {
-        return Some("gpt-5.4-pro".to_string());
+    if lowered.contains("openai/gpt-5.4-nano")
+        || lowered.contains("gpt-5.4-nano")
+        || lowered.contains("gpt 5.4 nano")
+    {
+        return Some("openai/gpt-5.4-nano".to_string());
     }
-    if lowered.contains("gpt-5.4") || lowered.contains("gpt 5.4") {
-        return Some("gpt-5.4".to_string());
+    if lowered.contains("openai/gpt-5.4-mini")
+        || lowered.contains("gpt-5.4-mini")
+        || lowered.contains("gpt 5.4 mini")
+    {
+        return Some("openai/gpt-5.4-mini".to_string());
+    }
+    if lowered.contains("openai/gpt-5.4")
+        || lowered.contains("gpt-5.4")
+        || lowered.contains("gpt 5.4")
+    {
+        return Some("openai/gpt-5.4".to_string());
     }
     None
 }

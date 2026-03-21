@@ -2094,10 +2094,12 @@ fn latest_compact_routing_preference(paths: &Paths, task_id: i64) -> Option<Comp
 }
 
 fn model_prefers_external(model_id: &str) -> bool {
-    let lowered = model_id.trim().to_ascii_lowercase();
-    lowered.starts_with("gpt-4.5")
-        || lowered.starts_with("gpt-5")
-        || lowered.starts_with("gpt-4")
+    let lowered = model_id
+        .trim()
+        .to_ascii_lowercase()
+        .trim_start_matches("openai/")
+        .to_string();
+    lowered.starts_with("gpt-5")
 }
 
 fn apply_requested_model_override(target: &mut ModelTarget, requested_model: &str, source_label: &str) {
@@ -2105,8 +2107,14 @@ fn apply_requested_model_override(target: &mut ModelTarget, requested_model: &st
     if normalized_model.trim().is_empty() {
         return;
     }
-    target.model_id = normalized_model;
-    target.source_label = format!("{source_label} {}", target.model_id);
+    target.model_id = if uses_responses_adapter(target) {
+        normalized_model
+            .trim_start_matches("openai/")
+            .to_string()
+    } else {
+        normalized_model.clone()
+    };
+    target.source_label = format!("{source_label} {}", normalized_model);
 }
 
 fn resolve_kleinhirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>> {
@@ -2245,7 +2253,7 @@ fn resolve_grosshirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
     let Some(api_key) = api_key.filter(|value| !value.trim().is_empty()) else {
         return Ok(None);
     };
-    let model_id = std::env::var("CTO_AGENT_GROSSHIRN_MODEL")
+    let model_choice = std::env::var("CTO_AGENT_GROSSHIRN_MODEL")
         .ok()
         .or_else(|| persisted_env.get("CTO_AGENT_GROSSHIRN_MODEL").cloned())
         .or_else(|| default_candidate.runtime_model_id.clone())
@@ -2254,11 +2262,11 @@ fn resolve_grosshirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
         .grosshirn_candidates
         .iter()
         .find(|candidate| {
-            candidate.model_id.eq_ignore_ascii_case(&model_id)
+            candidate.model_id.eq_ignore_ascii_case(&model_choice)
                 || candidate
                     .runtime_model_id
                     .as_deref()
-                    .map(|runtime_model| runtime_model.eq_ignore_ascii_case(&model_id))
+                    .map(|runtime_model| runtime_model.eq_ignore_ascii_case(&model_choice))
                     .unwrap_or(false)
         })
         .unwrap_or(default_candidate);
@@ -2287,7 +2295,7 @@ fn resolve_grosshirn_target(paths: &Paths) -> anyhow::Result<Option<ModelTarget>
         .unwrap_or_else(|| selected_candidate.reasoning_effort.clone());
     Ok(Some(ModelTarget {
         base_url,
-        model_id,
+        model_id: selected_candidate.model_id.clone(),
         api_key,
         adapter,
         brain_tier: "grosshirn".to_string(),
@@ -4699,7 +4707,7 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         };
         let grosshirn_target = ModelTarget {
             base_url: "https://api.openai.com/v1".to_string(),
-            model_id: "gpt-5.4-pro".to_string(),
+            model_id: "gpt-5.4".to_string(),
             api_key: "secret".to_string(),
             adapter: "openai_responses".to_string(),
             brain_tier: "grosshirn".to_string(),
@@ -4867,7 +4875,7 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
     fn empty_text_retry_messages_name_grosshirn_and_budget_exhaustion() {
         let target = ModelTarget {
             base_url: "https://api.openai.com/v1".to_string(),
-            model_id: "gpt-5.4-pro".to_string(),
+            model_id: "gpt-5.4".to_string(),
             api_key: "secret".to_string(),
             adapter: "openai_responses".to_string(),
             brain_tier: "grosshirn".to_string(),

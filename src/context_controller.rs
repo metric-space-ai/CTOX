@@ -2118,15 +2118,15 @@ fn select_compact_model_routing(
     let env_map = load_runtime_env_map(paths).unwrap_or_default();
     let simple_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_SIMPLE_MODEL"),
-        &["openai/gpt-oss-20b", "Qwen/Qwen3.5-35B-A3B", "gpt-4.5-nano"],
+        &["openai/gpt-oss-20b", "openai/gpt-5.4-nano"],
     );
     let medium_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_MEDIUM_MODEL"),
-        &["openai/gpt-oss-120b", "Qwen/Qwen3-235B-A22B", "gpt-4.5-mini"],
+        &["openai/gpt-5.4-nano", "openai/gpt-5.4-mini"],
     );
     let red_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_RED_MODEL"),
-        &["gpt-4.5", "gpt-5.4", "gpt-5.4-pro"],
+        &["openai/gpt-5.4-mini", "openai/gpt-5.4"],
     );
     let (tier, candidate_models) = match school_grade {
         1 | 2 => ("simple", simple_candidates),
@@ -2138,7 +2138,7 @@ fn select_compact_model_routing(
             env_map.get("CTO_AGENT_GROSSHIRN_MODEL").cloned(),
             package.brain_access.grosshirn_candidates.first().cloned(),
         ])
-        .unwrap_or_else(|| "gpt-4.5".to_string())
+        .unwrap_or_else(|| "openai/gpt-5.4".to_string())
     } else {
         first_non_empty_owned(&[
             env_map.get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL").cloned(),
