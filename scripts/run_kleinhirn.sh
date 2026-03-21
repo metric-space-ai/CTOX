@@ -60,7 +60,9 @@ else
   unset CUDA_VISIBLE_DEVICES
 fi
 
-if [ "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-0}" = "1" ]; then
+if [ "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-0}" = "1" ] \
+  || [ "${CTO_AGENT_KLEINHIRN_ARCH:-}" = "gpt_oss" ] \
+  || [ "${CTO_AGENT_KLEINHIRN_TENSOR_PARALLEL_BACKEND:-}" = "disabled" ]; then
   export MISTRALRS_NO_NCCL=1
 else
   unset MISTRALRS_NO_NCCL
