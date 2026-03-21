@@ -169,6 +169,7 @@ struct PendingInputItem {
     task_id: Option<i64>,
     task_title: String,
     message: String,
+    created_at_label: String,
     status: PendingInputStatus,
     completed_at: Option<Instant>,
     seen_open: bool,
@@ -731,6 +732,7 @@ impl AttachTui {
                 .clone()
                 .unwrap_or_else(|| visible_input.clone()),
             message: visible_input.clone(),
+            created_at_label: Local::now().format("%H:%M").to_string(),
             status: PendingInputStatus::Queued,
             completed_at: None,
             seen_open: false,
@@ -1001,7 +1003,7 @@ impl AttachTui {
             frame_top("CTO-Agent Settings", &self.primary_status_line(), frame_width),
             frame_row(
                 &format!(
-                    "Status {}  |  Use Up/Down to select, Left/Right to cycle model slots, Enter or Ctrl-S to save, Tab back to chat",
+                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab back to chat",
                     dirty
                 ),
                 frame_width,
@@ -1205,7 +1207,16 @@ impl AttachTui {
     }
 
     fn chat_rows(&self, width: usize, height: usize) -> Vec<String> {
-        let mut lines = recent_chat_lines(&self.snapshot, CHAT_HISTORY_LIMIT)
+        let mut raw_lines = recent_chat_lines(&self.snapshot, CHAT_HISTORY_LIMIT);
+        for line in self.pending_chat_overlay_lines(CHAT_HISTORY_LIMIT) {
+            if !raw_lines.iter().any(|existing| existing == &line) {
+                raw_lines.push(line);
+            }
+        }
+        if raw_lines.len() > CHAT_HISTORY_LIMIT {
+            raw_lines = raw_lines.split_off(raw_lines.len().saturating_sub(CHAT_HISTORY_LIMIT));
+        }
+        let mut lines = raw_lines
             .into_iter()
             .map(|line| frame_row(&line, width))
             .collect::<Vec<_>>();
@@ -1256,6 +1267,23 @@ impl AttachTui {
         }
         rows.truncate(height);
         rows
+    }
+
+    fn pending_chat_overlay_lines(&self, limit: usize) -> Vec<String> {
+        let mut lines = Vec::new();
+        for item in self.pending_inputs.iter().rev().take(limit).rev() {
+            let message = compact_text(&item.message, 92);
+            if message.is_empty() {
+                continue;
+            }
+            lines.push(format!(
+                "{}  {:<9}> {}",
+                item.created_at_label,
+                "owner",
+                message
+            ));
+        }
+        lines
     }
 
     fn chat_queue_rows(&self, width: usize, limit: usize) -> Vec<String> {
@@ -1319,10 +1347,8 @@ impl AttachTui {
             return "No field selected.".to_string();
         };
         let mut line = item.help.to_string();
-        if matches!(
-            item.key,
-            "grosshirn_model" | "simple_model" | "medium_model" | "red_model"
-        ) && item.choices.len() == 1
+        if matches!(item.key, "simple_model" | "medium_model" | "red_model")
+            && item.choices.len() == 1
             && item.choices.first().copied() == Some(GPT_OSS_MODEL)
         {
             line.push_str(" External OpenAI models unlock after setting an OpenAI Key or Grosshirn Key.");
@@ -1685,17 +1711,6 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
         organigram.owner.email.as_str(),
         installation.owner_contact_email.as_str(),
     ]);
-    let kleinhirn_model = env_map
-        .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
-        .cloned()
-        .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
-        .map(|value| clamp_model_choice("kleinhirn_model", Some(&value), external_model_access))
-        .unwrap_or_else(|| clamp_model_choice("kleinhirn_model", None, external_model_access));
-    let grosshirn_model = clamp_model_choice(
-        "grosshirn_model",
-        env_map.get("CTO_AGENT_GROSSHIRN_MODEL").map(String::as_str),
-        external_model_access,
-    );
     let simple_model = clamp_model_choice(
         "simple_model",
         env_map
@@ -1862,28 +1877,12 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             help: "Dedicated API key for external grosshirn routing.",
         },
         SettingsItem {
-            key: "kleinhirn_model",
-            label: "Local Runtime",
-            value: kleinhirn_model,
-            secret: false,
-            choices: model_choices_for_setting("kleinhirn_model", external_model_access),
-            help: "The actively running local kleinhirn runtime. Saving this field switches the local runtime instead of only changing compact slots.",
-        },
-        SettingsItem {
-            key: "grosshirn_model",
-            label: "Grosshirn Model",
-            value: grosshirn_model,
-            secret: false,
-            choices: model_choices_for_setting("grosshirn_model", external_model_access),
-            help: "Default external model used when the loop routes through grosshirn.",
-        },
-        SettingsItem {
             key: "simple_model",
             label: "Simple Model",
             value: simple_model,
             secret: false,
             choices: model_choices_for_setting("simple_model", external_model_access),
-            help: "Compact slot chosen after compaction when progress remains strong. This is not the same thing as the active local runtime above.",
+            help: "Compaction tier 1. The compact cycle chooses this slot when progress remains strong.",
         },
         SettingsItem {
             key: "medium_model",
@@ -1891,7 +1890,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             value: medium_model,
             secret: false,
             choices: model_choices_for_setting("medium_model", external_model_access),
-            help: "Compact slot chosen when compaction grades the progress as unstable or average.",
+            help: "Compaction tier 2. The compact cycle chooses this slot when progress is mixed or unstable.",
         },
         SettingsItem {
             key: "red_model",
@@ -1899,7 +1898,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             value: red_model,
             secret: false,
             choices: model_choices_for_setting("red_model", external_model_access),
-            help: "Compact escalation slot chosen when compaction grades the progress as red.",
+            help: "Compaction tier 3. The compact cycle chooses this slot when progress is in the red zone.",
         },
     ]
 }
@@ -1987,17 +1986,13 @@ fn save_settings_items(
     }
 
     let external_model_access = has_external_model_access(&env_map);
-    requested_local_model = Some(clamp_model_choice(
-        "kleinhirn_model",
-        requested_local_model.as_deref(),
-        external_model_access,
-    ));
-    clamp_persisted_model_choice(
-        &mut env_map,
-        "CTO_AGENT_GROSSHIRN_MODEL",
-        "grosshirn_model",
-        external_model_access,
-    );
+    requested_local_model = requested_local_model.map(|requested| {
+        clamp_model_choice(
+            "kleinhirn_model",
+            Some(requested.as_str()),
+            external_model_access,
+        )
+    });
     clamp_persisted_model_choice(
         &mut env_map,
         "CTO_AGENT_COMPACT_SIMPLE_MODEL",
@@ -2016,6 +2011,11 @@ fn save_settings_items(
         "red_model",
         external_model_access,
     );
+    let effective_red_model = env_map
+        .get("CTO_AGENT_COMPACT_RED_MODEL")
+        .map(String::as_str)
+        .unwrap_or_else(|| default_model_choice_for_setting("red_model", external_model_access));
+    upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_MODEL", effective_red_model);
 
     if saw_mail_address {
         installation.email_assignment_mode = "assigned_now".to_string();
@@ -3107,6 +3107,7 @@ mod tests {
                     task_id: Some(413),
                     task_title: "Show the BIOS link on the attach screen".to_string(),
                     message: "Michael Welsch: Please make the BIOS link more visible".to_string(),
+                    created_at_label: "16:09".to_string(),
                     status: PendingInputStatus::Queued,
                     completed_at: None,
                     seen_open: true,
@@ -3116,6 +3117,7 @@ mod tests {
                     task_title: "Make the interrupt queue more visible in the UI".to_string(),
                     message: "Michael Welsch: after that please show me the last three turns"
                         .to_string(),
+                    created_at_label: "16:09".to_string(),
                     status: PendingInputStatus::Queued,
                     completed_at: None,
                     seen_open: true,
@@ -3205,6 +3207,31 @@ mod tests {
             clamp_model_choice("red_model", Some("openai/gpt-5.4"), true),
             "openai/gpt-5.4"
         );
+    }
+
+    #[test]
+    fn load_settings_items_only_exposes_three_compaction_model_controls() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("settings_model_controls");
+        std::fs::create_dir_all(root.join("runtime"))?;
+        std::fs::write(
+            root.join("runtime/kleinhirn.env"),
+            "OPENAI_API_KEY='sk-test'\nCTO_AGENT_COMPACT_SIMPLE_MODEL='openai/gpt-oss-20b'\nCTO_AGENT_COMPACT_MEDIUM_MODEL='openai/gpt-5.4-mini'\nCTO_AGENT_COMPACT_RED_MODEL='openai/gpt-5.4'\nCTO_AGENT_GROSSHIRN_MODEL='openai/gpt-5.4'\nCTO_AGENT_KLEINHIRN_RUNTIME_MODEL='openai/gpt-oss-20b'\n",
+        )?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+
+        let items = load_settings_items(&paths);
+        let model_keys = items
+            .iter()
+            .filter(|item| item.key.ends_with("_model"))
+            .map(|item| item.key)
+            .collect::<Vec<_>>();
+
+        assert_eq!(model_keys, vec!["simple_model", "medium_model", "red_model"]);
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
     }
 
     #[test]
@@ -3379,6 +3406,18 @@ mod tests {
         assert!(!lines.contains("unusable output"));
         assert!(!lines.contains("\"taskStatus\""));
         assert_eq!(lines.matches("Ich prüfe gerade den Mailpfad.").count(), 1);
+    }
+
+    #[test]
+    fn chat_rows_keep_pending_owner_input_visible_before_persisted_history_catches_up() {
+        let mut ui = sample_ui();
+        ui.snapshot.boot_entries.clear();
+
+        let lines = ui.chat_rows(140, 8).join("\n");
+
+        assert!(lines.contains("owner"));
+        assert!(lines.contains("Please make the BIOS link more visible"));
+        assert!(lines.contains("after that please show me the last three turns"));
     }
 
     #[test]
