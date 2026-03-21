@@ -7,6 +7,7 @@ use crate::brain_runtime::load_kleinhirn_runtime_snapshot;
 use crate::brain_runtime::load_runtime_env_map;
 use crate::brain_runtime::save_runtime_env_map;
 use crate::contracts::BootEntry;
+use crate::contracts::control_plane_bind_host;
 use crate::contracts::control_plane_public_base_url;
 use crate::contracts::InstallationBootstrapState;
 use crate::contracts::Organigram;
@@ -150,6 +151,10 @@ struct SettingsItem {
     secret: bool,
     choices: Vec<&'static str>,
     help: &'static str,
+}
+
+struct SaveSettingsOutcome {
+    runtime_restart_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -746,7 +751,10 @@ impl AttachTui {
     }
 
     fn save_settings(&mut self, paths: &Paths) -> anyhow::Result<()> {
-        save_settings_items(paths, &self.settings_items)?;
+        let outcome = save_settings_items(paths, &self.settings_items)?;
+        if outcome.runtime_restart_required {
+            restart_runtime_after_network_settings_change(paths)?;
+        }
         self.settings_dirty = false;
         self.snapshot = collect_ui_snapshot(paths);
         self.settings_items = load_settings_items(paths);
@@ -754,6 +762,12 @@ impl AttachTui {
             "saved",
             "Attach settings persisted to organigram, installation bootstrap, and runtime env.",
         );
+        if outcome.runtime_restart_required {
+            self.push_local_notice(
+                "restart",
+                "The runtime was restarted so BIOS network changes take effect immediately.",
+            );
+        }
         Ok(())
     }
 
@@ -1728,6 +1742,41 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             help: "How the owner can be reached beyond mail, for example phone, Signal, calendar or assistant notes.",
         },
         SettingsItem {
+            key: "bind_host",
+            label: "Bind Host",
+            value: env_map
+                .get("CTO_AGENT_BIND_HOST")
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(control_plane_bind_host),
+            secret: false,
+            choices: Vec::new(),
+            help: "Socket bind host for the BIOS/control plane. Use 0.0.0.0 to expose it on the machine IP instead of localhost only.",
+        },
+        SettingsItem {
+            key: "public_base_url",
+            label: "Public BIOS URL",
+            value: env_map
+                .get("CTO_AGENT_PUBLIC_BASE_URL")
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(control_plane_public_base_url),
+            secret: false,
+            choices: Vec::new(),
+            help: "Public base URL shown in the TUI and used for BIOS links, for example https://100.96.1.7:8443.",
+        },
+        SettingsItem {
+            key: "tls_alt_names",
+            label: "TLS Alt Names",
+            value: env_map
+                .get("CTO_AGENT_TLS_ALT_NAMES")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Comma-separated hostnames or IPs to include in the self-signed BIOS certificate.",
+        },
+        SettingsItem {
             key: "mail_address",
             label: "Mail Address",
             value: env_map
@@ -1855,10 +1904,22 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
     ]
 }
 
-fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<()> {
+fn save_settings_items(
+    paths: &Paths,
+    items: &[SettingsItem],
+) -> anyhow::Result<SaveSettingsOutcome> {
     let mut organigram = load_organigram(paths);
     let mut installation = load_installation_bootstrap_state(paths);
     let mut env_map = load_runtime_env_map(paths).unwrap_or_default();
+    let previous_bind_host = env_map.get("CTO_AGENT_BIND_HOST").cloned().unwrap_or_default();
+    let previous_public_base_url = env_map
+        .get("CTO_AGENT_PUBLIC_BASE_URL")
+        .cloned()
+        .unwrap_or_default();
+    let previous_tls_alt_names = env_map
+        .get("CTO_AGENT_TLS_ALT_NAMES")
+        .cloned()
+        .unwrap_or_default();
     let mut saw_mail_address = false;
     let current_local_model = env_map
         .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
@@ -1880,6 +1941,11 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
                 installation.owner_contact_email = value;
             }
             "owner_contact" => installation.owner_contact_info = value,
+            "bind_host" => upsert_env_value(&mut env_map, "CTO_AGENT_BIND_HOST", &value),
+            "public_base_url" => {
+                upsert_env_value(&mut env_map, "CTO_AGENT_PUBLIC_BASE_URL", &value)
+            }
+            "tls_alt_names" => upsert_env_value(&mut env_map, "CTO_AGENT_TLS_ALT_NAMES", &value),
             "mail_address" => {
                 saw_mail_address = !value.is_empty();
                 upsert_env_value(&mut env_map, "CTO_EMAIL_ADDRESS", &value);
@@ -1968,6 +2034,22 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
     save_installation_bootstrap_state(paths, &installation)?;
     save_runtime_env_map(paths, &env_map)?;
 
+    let runtime_restart_required = env_map
+        .get("CTO_AGENT_BIND_HOST")
+        .cloned()
+        .unwrap_or_default()
+        != previous_bind_host
+        || env_map
+            .get("CTO_AGENT_PUBLIC_BASE_URL")
+            .cloned()
+            .unwrap_or_default()
+            != previous_public_base_url
+        || env_map
+            .get("CTO_AGENT_TLS_ALT_NAMES")
+            .cloned()
+            .unwrap_or_default()
+            != previous_tls_alt_names;
+
     if let Some(local_model) = requested_local_model
         .filter(|value| !value.trim().is_empty())
         .filter(|value| !value.eq_ignore_ascii_case(&current_local_model))
@@ -1976,7 +2058,9 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
             .with_context(|| format!("failed to switch active local kleinhirn to {local_model}"))?;
     }
 
-    Ok(())
+    Ok(SaveSettingsOutcome {
+        runtime_restart_required,
+    })
 }
 
 fn first_non_empty(values: &[&str]) -> String {
@@ -2255,6 +2339,23 @@ fn bios_url(website_path: &str) -> Option<String> {
 fn perform_attach_factory_reset(paths: &Paths) -> anyhow::Result<()> {
     stop_running_runtime_for_factory_reset(paths)?;
     factory_reset_installation(paths)?;
+    spawn_detached_runtime(paths)?;
+    wait_for_attach_runtime(paths, Duration::from_secs(12))
+}
+
+fn restart_runtime_after_network_settings_change(paths: &Paths) -> anyhow::Result<()> {
+    if let Some(pid) = runtime_pid_from_lock(paths).filter(|pid| *pid != std::process::id()) {
+        if process_is_alive(pid) {
+            send_signal(pid, "-TERM")
+                .with_context(|| format!("failed to restart CTO-Agent process {pid}"))?;
+            let _ = wait_for_process_exit(pid, Duration::from_secs(6));
+        }
+    }
+
+    if wait_for_attach_runtime(paths, Duration::from_secs(12)).is_ok() {
+        return Ok(());
+    }
+
     spawn_detached_runtime(paths)?;
     wait_for_attach_runtime(paths, Duration::from_secs(12))
 }
@@ -3104,6 +3205,85 @@ mod tests {
             clamp_model_choice("red_model", Some("openai/gpt-5.4"), true),
             "openai/gpt-5.4"
         );
+    }
+
+    #[test]
+    fn save_settings_items_persist_mail_and_bios_network_settings() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("settings_persist");
+        std::fs::create_dir_all(root.join("runtime"))?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        let items = vec![
+            SettingsItem {
+                key: "bind_host",
+                label: "Bind Host",
+                value: "0.0.0.0".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
+            SettingsItem {
+                key: "public_base_url",
+                label: "Public BIOS URL",
+                value: "https://100.96.1.7:8443".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
+            SettingsItem {
+                key: "tls_alt_names",
+                label: "TLS Alt Names",
+                value: "100.96.1.7".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
+            SettingsItem {
+                key: "mail_address",
+                label: "Mail Address",
+                value: "cto1@metric-space.ai".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
+            SettingsItem {
+                key: "mail_password",
+                label: "Mail Password",
+                value: "supersecret".to_string(),
+                secret: true,
+                choices: Vec::new(),
+                help: "",
+            },
+        ];
+
+        let outcome = save_settings_items(&paths, &items)?;
+        let env_map = load_runtime_env_map(&paths)?;
+
+        assert!(outcome.runtime_restart_required);
+        assert_eq!(
+            env_map.get("CTO_AGENT_BIND_HOST").map(String::as_str),
+            Some("0.0.0.0")
+        );
+        assert_eq!(
+            env_map.get("CTO_AGENT_PUBLIC_BASE_URL").map(String::as_str),
+            Some("https://100.96.1.7:8443")
+        );
+        assert_eq!(
+            env_map.get("CTO_AGENT_TLS_ALT_NAMES").map(String::as_str),
+            Some("100.96.1.7")
+        );
+        assert_eq!(
+            env_map.get("CTO_EMAIL_ADDRESS").map(String::as_str),
+            Some("cto1@metric-space.ai")
+        );
+        assert_eq!(
+            env_map.get("CTO_EMAIL_PASSWORD").map(String::as_str),
+            Some("supersecret")
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
     }
 
     #[test]

@@ -120,7 +120,7 @@ KLEINHIRN_PORT="${CTO_AGENT_KLEINHIRN_PORT:-1234}"
 KLEINHIRN_STARTUP_WAIT_SECS="${CTO_AGENT_KLEINHIRN_STARTUP_WAIT_SECS:-900}"
 KLEINHIRN_BASE_URL="http://127.0.0.1:${KLEINHIRN_PORT}/v1"
 CTO_AGENT_PORT="${CTO_AGENT_PORT:-8443}"
-CTO_AGENT_BIND_HOST="${CTO_AGENT_BIND_HOST:-127.0.0.1}"
+CTO_AGENT_BIND_HOST="${CTO_AGENT_BIND_HOST:-}"
 CTO_AGENT_PUBLIC_BASE_URL="${CTO_AGENT_PUBLIC_BASE_URL:-}"
 CTO_AGENT_TLS_ALT_NAMES="${CTO_AGENT_TLS_ALT_NAMES:-}"
 CONTEXT_EMBEDDING_ENABLED="${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:-1}"
@@ -155,6 +155,27 @@ CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-}"
 CTO_AGENT_COMPACT_SIMPLE_MODEL="${CTO_AGENT_COMPACT_SIMPLE_MODEL:-}"
 CTO_AGENT_COMPACT_MEDIUM_MODEL="${CTO_AGENT_COMPACT_MEDIUM_MODEL:-}"
 CTO_AGENT_COMPACT_RED_MODEL="${CTO_AGENT_COMPACT_RED_MODEL:-}"
+
+detect_public_control_plane_host() {
+  if command -v tailscale >/dev/null 2>&1; then
+    tailscale ip -4 2>/dev/null | awk 'NF { print; exit }'
+    return
+  fi
+  if command -v hostname >/dev/null 2>&1; then
+    hostname -I 2>/dev/null | tr ' ' '\n' | awk 'NF && $1 !~ /^127\./ { print; exit }'
+    return
+  fi
+  if command -v ip >/dev/null 2>&1; then
+    ip -o -4 addr show scope global 2>/dev/null | awk '{
+      split($4, address, "/");
+      if (address[1] !~ /^127\./) {
+        print address[1];
+        exit;
+      }
+    }'
+    return
+  fi
+}
 
 detect_gpu_count() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -445,6 +466,7 @@ adopt_existing_runtime_mail_env() {
   existing_bind_host="$(read_runtime_env_file_value CTO_AGENT_BIND_HOST || true)"
   existing_public_base_url="$(read_runtime_env_file_value CTO_AGENT_PUBLIC_BASE_URL || true)"
   existing_tls_alt_names="$(read_runtime_env_file_value CTO_AGENT_TLS_ALT_NAMES || true)"
+  detected_public_host="$(detect_public_control_plane_host || true)"
 
   CTO_EMAIL_ADDRESS="${CTO_EMAIL_ADDRESS:-$existing_address}"
   CTO_EMAIL_PASSWORD="${CTO_EMAIL_PASSWORD:-$existing_password}"
@@ -459,9 +481,26 @@ adopt_existing_runtime_mail_env() {
   CTO_AGENT_GROSSHIRN_BASE_URL="${CTO_AGENT_GROSSHIRN_BASE_URL:-${existing_grosshirn_base_url:-https://api.openai.com/v1}}"
   CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-${existing_grosshirn_reasoning:-medium}}"
   CTO_AGENT_PORT="${CTO_AGENT_PORT:-${existing_agent_port:-8443}}"
-  CTO_AGENT_BIND_HOST="${CTO_AGENT_BIND_HOST:-${existing_bind_host:-127.0.0.1}}"
-  CTO_AGENT_PUBLIC_BASE_URL="${CTO_AGENT_PUBLIC_BASE_URL:-$existing_public_base_url}"
-  CTO_AGENT_TLS_ALT_NAMES="${CTO_AGENT_TLS_ALT_NAMES:-$existing_tls_alt_names}"
+  bind_host_candidate="${existing_bind_host:-}"
+  if [ -z "$bind_host_candidate" ] || [ "$bind_host_candidate" = "127.0.0.1" ]; then
+    if [ -n "$detected_public_host" ]; then
+      bind_host_candidate="0.0.0.0"
+    else
+      bind_host_candidate="${bind_host_candidate:-127.0.0.1}"
+    fi
+  fi
+  public_base_url_candidate="${existing_public_base_url:-}"
+  if [ -z "$public_base_url_candidate" ] && [ -n "$detected_public_host" ]; then
+    public_base_url_candidate="https://${detected_public_host}:${CTO_AGENT_PORT}"
+  fi
+  tls_alt_names_candidate="${existing_tls_alt_names:-}"
+  if [ -z "$tls_alt_names_candidate" ] && [ -n "$detected_public_host" ]; then
+    tls_alt_names_candidate="$detected_public_host"
+  fi
+
+  CTO_AGENT_BIND_HOST="${CTO_AGENT_BIND_HOST:-$bind_host_candidate}"
+  CTO_AGENT_PUBLIC_BASE_URL="${CTO_AGENT_PUBLIC_BASE_URL:-$public_base_url_candidate}"
+  CTO_AGENT_TLS_ALT_NAMES="${CTO_AGENT_TLS_ALT_NAMES:-$tls_alt_names_candidate}"
 }
 
 ensure_mail_and_cli_bootstrap_assets() {
