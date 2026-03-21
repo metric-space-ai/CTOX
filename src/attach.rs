@@ -3212,6 +3212,10 @@ mod tests {
         let _guard = env_lock().lock().expect("test env lock poisoned");
         let root = unique_test_root("settings_persist");
         std::fs::create_dir_all(root.join("runtime"))?;
+        std::fs::write(
+            root.join("runtime/kleinhirn.env"),
+            "CTO_AGENT_KLEINHIRN_RUNTIME_MODEL='openai/gpt-oss-20b'\n",
+        )?;
         let _env = EnvGuard::set_cto_root(&root);
         let paths = Paths::discover()?;
         let items = vec![
