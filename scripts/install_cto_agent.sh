@@ -170,10 +170,10 @@ detect_public_control_plane_host() {
   fi
   if command -v hostname >/dev/null 2>&1; then
     hostname -I 2>/dev/null | tr ' ' '\n' | awk '
-      NF && $1 ~ /^100\./ { print; exit }
+      NF && $1 ~ /^100\./ { print; found = 1; exit }
       NF && $1 !~ /^127\./ && preferred == "" { preferred = $1 }
       END {
-        if (preferred != "") {
+        if (!found && preferred != "") {
           print preferred;
         }
       }'
@@ -184,13 +184,14 @@ detect_public_control_plane_host() {
       split($4, address, "/");
       if (address[1] ~ /^100\./) {
         print address[1];
+        found = 1;
         exit;
       }
       if (address[1] !~ /^127\./ && preferred == "") {
         preferred = address[1];
       }
     } END {
-      if (preferred != "") {
+      if (!found && preferred != "") {
         print preferred;
       }
     }'
