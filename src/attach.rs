@@ -1490,8 +1490,7 @@ impl AttachTui {
                 width,
             ),
             fit_line(&self.compact_slots_line(width), width),
-            fit_line(&self.context_window_line(width), width),
-            fit_line(&self.compaction_budget_line(width), width),
+            fit_line(&self.context_line(width), width),
             "-".repeat(width),
         ]
     }
@@ -1522,23 +1521,24 @@ impl AttachTui {
         format!("Compact slots  S {simple_slot}  |  M {medium_slot}  |  R {red_slot}")
     }
 
-    fn context_window_line(&self, width: usize) -> String {
+    fn context_line(&self, width: usize) -> String {
         let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
+        let (_, compact_budget, _) = self.compaction_budget_metrics();
         let Some(window) = self.model_window_tokens() else {
-            return format!("Context window  unavailable for current route  |  last turn used {used} tokens");
+            return format!(
+                "Context [{}]  n/a | external window | {} tok",
+                "-".repeat(width.saturating_sub(52).clamp(16, 72)),
+                used
+            );
         };
         let percent = used.saturating_mul(100) / window.max(1);
-        let meter_width = width.saturating_sub(34).clamp(16, 72);
-        let meter = ascii_meter(percent, meter_width);
-        format!("Context window {meter} {percent:>3}%  {used}/{window}")
-    }
-
-    fn compaction_budget_line(&self, width: usize) -> String {
-        let (used, budget, percent) = self.compaction_budget_metrics();
-        let meter_width = width.saturating_sub(36).clamp(16, 72);
-        let meter = ascii_meter(percent, meter_width);
+        let meter_width = width.saturating_sub(30).clamp(24, 88);
+        let compact_limit = compact_budget.min(window);
+        let meter = context_meter(used, window, compact_limit, meter_width);
         format!(
-            "Compaction budget {meter} {percent:>3}%  {used}/{budget} est  |  wrapper-facing compact package"
+            "Context {meter} {percent:>3}% | {} | {} tok",
+            format_token_short(window),
+            used
         )
     }
 
@@ -2894,6 +2894,28 @@ fn ascii_meter(percent: usize, width: usize) -> String {
     )
 }
 
+fn context_meter(used: usize, window: usize, compact_limit: usize, width: usize) -> String {
+    let width = width.max(8);
+    let mut cells = vec!['-'; width];
+    let filled = width.saturating_mul(used.min(window)) / window.max(1);
+    for cell in cells.iter_mut().take(filled.min(width)) {
+        *cell = '#';
+    }
+    let marker = width.saturating_mul(compact_limit.min(window)) / window.max(1);
+    let marker_start = marker.min(width.saturating_sub(2));
+    cells[marker_start] = '[';
+    cells[marker_start + 1] = ']';
+    format!("[{}]", cells.into_iter().collect::<String>())
+}
+
+fn format_token_short(tokens: usize) -> String {
+    if tokens >= 1024 {
+        format!("{}k", tokens / 1024)
+    } else {
+        format!("{tokens}")
+    }
+}
+
 fn approx_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     ((chars + 3) / 4).max(1)
@@ -3475,7 +3497,7 @@ mod tests {
                     task_id: 413,
                     task_title: "Show the BIOS link on the attach screen".to_string(),
                     context_mode: "execute_task".to_string(),
-                    budget_hint: 1200,
+                    budget_hint: 65_536,
                     estimated_tokens: 760,
                     trigger: "interrupt".to_string(),
                     controller: "context_optimizer_simple_html_root_v1".to_string(),
@@ -3940,7 +3962,7 @@ mod tests {
             task_id: 700,
             task_title: "Check continuity".to_string(),
             context_mode: "execute_task".to_string(),
-            budget_hint: 1200,
+            budget_hint: 65_536,
             rationale: "interrupt compact".to_string(),
             package_json: serde_json::json!({
                 "compactController": {
@@ -3980,15 +4002,14 @@ mod tests {
     }
 
     #[test]
-    fn context_header_lines_split_window_and_compaction_budget() {
+    fn context_header_uses_single_bar_with_compaction_marker() {
         let ui = sample_ui();
-        let window_line = ui.context_window_line(140);
-        let budget_line = ui.compaction_budget_line(140);
+        let line = ui.context_line(140);
 
-        assert!(window_line.contains("Context window ["));
-        assert!(window_line.contains("131072"));
-        assert!(budget_line.contains("Compaction budget ["));
-        assert!(budget_line.contains("760/1200"));
+        assert!(line.contains("Context ["));
+        assert!(line.contains("[]"));
+        assert!(line.contains("128k"));
+        assert!(line.contains("693 tok"));
     }
 
     #[test]

@@ -1847,7 +1847,7 @@ pub fn default_context_policy() -> ContextPolicy {
         modes: vec![
             ContextModePolicy {
                 mode: "minimal".to_string(),
-                budget_hint: 1400,
+                budget_hint: 8192,
                 recent_boot_entries: 1,
                 recent_bios_dialogue: 2,
                 recent_memory_items: 3,
@@ -1857,7 +1857,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "working".to_string(),
-                budget_hint: 3200,
+                budget_hint: 32768,
                 recent_boot_entries: 3,
                 recent_bios_dialogue: 5,
                 recent_memory_items: 8,
@@ -1867,7 +1867,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "preparation".to_string(),
-                budget_hint: 4800,
+                budget_hint: 49152,
                 recent_boot_entries: 4,
                 recent_bios_dialogue: 6,
                 recent_memory_items: 10,
@@ -1877,7 +1877,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "preparation_query".to_string(),
-                budget_hint: 2200,
+                budget_hint: 16384,
                 recent_boot_entries: 2,
                 recent_bios_dialogue: 3,
                 recent_memory_items: 4,
@@ -1887,7 +1887,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "preparation_rewrite".to_string(),
-                budget_hint: 3200,
+                budget_hint: 32768,
                 recent_boot_entries: 3,
                 recent_bios_dialogue: 4,
                 recent_memory_items: 6,
@@ -1897,7 +1897,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "preparation_review".to_string(),
-                budget_hint: 2600,
+                budget_hint: 24576,
                 recent_boot_entries: 2,
                 recent_bios_dialogue: 3,
                 recent_memory_items: 4,
@@ -1907,7 +1907,7 @@ pub fn default_context_policy() -> ContextPolicy {
             },
             ContextModePolicy {
                 mode: "forensic".to_string(),
-                budget_hint: 5600,
+                budget_hint: 65536,
                 recent_boot_entries: 5,
                 recent_bios_dialogue: 7,
                 recent_memory_items: 12,
