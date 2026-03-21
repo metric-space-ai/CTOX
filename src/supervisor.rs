@@ -20,7 +20,10 @@ use crate::command_exec::start_session;
 use crate::command_exec::terminate_session;
 use crate::command_exec::write_session;
 use crate::context_controller::ContextPreparedArtifact;
+use crate::context_controller::ContextPackagePreflightDecision;
+use crate::context_controller::decide_context_package_preflight;
 use crate::context_controller::prepare_context_package;
+use crate::context_controller::prepare_context_package_with_trigger;
 use crate::contracts::AgentState;
 use crate::contracts::BrainModel;
 use crate::contracts::GpuDevice;
@@ -970,23 +973,66 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                     }
                     continue;
                 }
-                if let Err(err) = prepare_context_package(&paths, &task) {
-                    let summary = format!("Task {} could not build a context package.", task.id);
-                    let detail = err.to_string();
-                    let _ = register_loop_incident(
-                        &paths,
-                        "context_preflight_failure",
-                        "high",
-                        &summary,
-                        &detail,
-                        Some(task.id),
-                        None,
-                        false,
-                        true,
-                    );
-                    let _ = block_task(&paths, task.id, &summary, &detail, None);
-                    eprintln!("context preflight failed for task {}: {err}", task.id);
-                    continue;
+                match decide_context_package_preflight(&paths, &task) {
+                    Ok(ContextPackagePreflightDecision::ReuseLatest) => {
+                        let _ = crate::runtime_db::record_resource_status(
+                            &paths,
+                            "agentic_loop",
+                            "context_preflight",
+                            "reuse_latest",
+                            &format!(
+                                "Task #{} {} reused the latest prepared context package because no new interrupt was recorded and the estimated active context remains below the compaction threshold.",
+                                task.id, task.title
+                            ),
+                        );
+                    }
+                    Ok(ContextPackagePreflightDecision::Refresh(trigger)) => {
+                        let refresh_result = match trigger {
+                            crate::context_controller::ContextCompactionTrigger::Auto => {
+                                prepare_context_package(&paths, &task)
+                            }
+                            crate::context_controller::ContextCompactionTrigger::Interrupt => {
+                                prepare_context_package_with_trigger(&paths, &task, trigger)
+                            }
+                        };
+                        if let Err(err) = refresh_result {
+                            let summary =
+                                format!("Task {} could not build a context package.", task.id);
+                            let detail = err.to_string();
+                            let _ = register_loop_incident(
+                                &paths,
+                                "context_preflight_failure",
+                                "high",
+                                &summary,
+                                &detail,
+                                Some(task.id),
+                                None,
+                                false,
+                                true,
+                            );
+                            let _ = block_task(&paths, task.id, &summary, &detail, None);
+                            eprintln!("context preflight failed for task {}: {err}", task.id);
+                            continue;
+                        }
+                    }
+                    Err(err) => {
+                        let summary = format!("Task {} could not decide context preflight.", task.id);
+                        let detail = err.to_string();
+                        let _ = register_loop_incident(
+                            &paths,
+                            "context_preflight_failure",
+                            "high",
+                            &summary,
+                            &detail,
+                            Some(task.id),
+                            None,
+                            false,
+                            true,
+                        );
+                        let _ = block_task(&paths, task.id, &summary, &detail, None);
+                        eprintln!("context preflight decision failed for task {}: {err}", task.id);
+                        continue;
+                    }
                 }
                 let turn = match start_agent_turn(
                     &paths,

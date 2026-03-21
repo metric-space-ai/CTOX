@@ -27,9 +27,10 @@ use crate::contracts::load_installation_bootstrap_state;
 use crate::contracts::load_loop_safety_policy;
 use crate::contracts::load_mode_system_policy;
 use crate::contracts::load_model_policy;
-use crate::contracts::normalize_runtime_model_choice;
 use crate::contracts::load_self_preservation_state;
+use crate::contracts::normalize_runtime_model_choice;
 use crate::contracts::now_iso;
+use crate::contracts::recommended_kleinhirn;
 use crate::runtime_db::BiosDialogueEntry;
 use crate::runtime_db::LearningEntryRecord;
 use crate::runtime_db::MemoryItemRecord;
@@ -43,6 +44,7 @@ use crate::runtime_db::list_bios_dialogue;
 use crate::runtime_db::list_memory_items;
 use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_pending_proactive_contact_candidates;
+use crate::runtime_db::list_recent_context_packages_for_task;
 use crate::runtime_db::list_person_notes_for_person;
 use crate::runtime_db::list_person_profiles;
 use crate::runtime_db::list_recent_mail_previews_for_person;
@@ -59,6 +61,8 @@ use crate::runtime_db::load_task_by_id;
 use crate::runtime_db::mark_learning_entries_recalled;
 use crate::runtime_db::record_context_package;
 use crate::runtime_db::sync_skills;
+use chrono::DateTime;
+use chrono::Utc;
 use reqwest::blocking::Client;
 use rusqlite::Connection;
 use rusqlite::params;
@@ -137,6 +141,12 @@ impl ContextCompactionTrigger {
             Self::Interrupt => "interrupt",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextPackagePreflightDecision {
+    ReuseLatest,
+    Refresh(ContextCompactionTrigger),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -911,6 +921,127 @@ fn approx_token_count(text: &str) -> usize {
     let chars = text.chars().count();
     let words = text.split_whitespace().count();
     words.max((chars + 3) / 4)
+}
+
+fn parse_rfc3339_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+fn recorded_after_threshold(value: &str, threshold: DateTime<Utc>) -> bool {
+    parse_rfc3339_utc(value)
+        .map(|recorded| recorded > threshold)
+        .unwrap_or(false)
+}
+
+fn current_context_window_tokens(paths: &Paths) -> usize {
+    std::env::var("CTO_AGENT_CONTEXT_WINDOW_TOKENS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .or_else(|| {
+            let policy = load_model_policy(paths);
+            let census = load_census(paths);
+            recommended_kleinhirn(&policy, &census)
+                .startup_max_seq_len
+                .and_then(|value| usize::try_from(value).ok())
+                .filter(|value| *value >= 1)
+        })
+        .unwrap_or(131_072)
+}
+
+fn context_compaction_trigger_tokens(paths: &Paths) -> usize {
+    std::env::var("CTO_AGENT_CONTEXT_COMPACT_TRIGGER_TOKENS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .unwrap_or_else(|| (current_context_window_tokens(paths) / 2).max(1))
+}
+
+fn interrupt_signal_recorded_after(
+    paths: &Paths,
+    task_id: i64,
+    threshold: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    Ok(list_turn_signals_for_task(paths, task_id, 16)?
+        .into_iter()
+        .any(|signal| {
+            signal.signal_kind == "interrupt"
+                && recorded_after_threshold(&signal.created_at, threshold)
+        }))
+}
+
+fn estimated_pending_context_growth_tokens(
+    paths: &Paths,
+    task: &TaskRecord,
+    threshold: DateTime<Utc>,
+) -> anyhow::Result<usize> {
+    let checkpoint_tokens = list_task_checkpoints(paths, task.id, 96)?
+        .into_iter()
+        .filter(|checkpoint| recorded_after_threshold(&checkpoint.created_at, threshold))
+        .map(|checkpoint| {
+            approx_token_count(&format!("{}\n{}", checkpoint.summary, checkpoint.detail))
+        })
+        .sum::<usize>();
+    let signal_tokens = list_turn_signals_for_task(paths, task.id, 48)?
+        .into_iter()
+        .filter(|signal| recorded_after_threshold(&signal.created_at, threshold))
+        .map(|signal| {
+            approx_token_count(&format!(
+                "{}\n{}\n{}",
+                signal.signal_kind, signal.speaker, signal.message
+            ))
+        })
+        .sum::<usize>();
+    let latest_output_tokens = task
+        .last_output
+        .as_deref()
+        .filter(|_| {
+            task.last_checkpoint_at
+                .as_deref()
+                .and_then(parse_rfc3339_utc)
+                .map(|recorded| recorded > threshold)
+                .unwrap_or(false)
+        })
+        .map(approx_token_count)
+        .unwrap_or(0);
+    Ok(checkpoint_tokens + signal_tokens + latest_output_tokens)
+}
+
+pub fn decide_context_package_preflight(
+    paths: &Paths,
+    task: &TaskRecord,
+) -> anyhow::Result<ContextPackagePreflightDecision> {
+    if task.task_kind == "context_preparation" {
+        return Ok(ContextPackagePreflightDecision::Refresh(
+            ContextCompactionTrigger::Auto,
+        ));
+    }
+    let Some(previous_package) = latest_context_package_for_task(paths, task.id)? else {
+        return Ok(ContextPackagePreflightDecision::Refresh(
+            ContextCompactionTrigger::Auto,
+        ));
+    };
+    let Some(previous_package_at) = parse_rfc3339_utc(&previous_package.created_at) else {
+        return Ok(ContextPackagePreflightDecision::Refresh(
+            ContextCompactionTrigger::Auto,
+        ));
+    };
+    if interrupt_signal_recorded_after(paths, task.id, previous_package_at)? {
+        return Ok(ContextPackagePreflightDecision::Refresh(
+            ContextCompactionTrigger::Interrupt,
+        ));
+    }
+    let estimated_tokens = approx_token_count(&previous_package.package_json).saturating_add(
+        estimated_pending_context_growth_tokens(paths, task, previous_package_at)?,
+    );
+    if estimated_tokens >= context_compaction_trigger_tokens(paths) {
+        return Ok(ContextPackagePreflightDecision::Refresh(
+            ContextCompactionTrigger::Auto,
+        ));
+    }
+    Ok(ContextPackagePreflightDecision::ReuseLatest)
 }
 
 fn normalized_block_text(text: &str) -> String {
@@ -3159,6 +3290,31 @@ fn append_context_distillation_candidates_from_package(
     }
 }
 
+fn append_latest_context_distillation_candidates(
+    candidates: &mut Vec<ContextQueryCandidate>,
+    paths: &Paths,
+    task_id: i64,
+    task_title: &str,
+) {
+    let Ok(packages) = list_recent_context_packages_for_task(paths, task_id, 8) else {
+        return;
+    };
+    let Some(package) = packages.iter().find(|package| {
+        serde_json::from_str::<serde_json::Value>(&package.package_json)
+            .ok()
+            .and_then(|value| value.get("contextDistillation").cloned())
+            .is_some()
+    }) else {
+        return;
+    };
+    append_context_distillation_candidates_from_package(
+        candidates,
+        task_id,
+        task_title,
+        &package.package_json,
+    );
+}
+
 fn build_context_query_candidates(paths: &Paths, task: &TaskRecord) -> Vec<ContextQueryCandidate> {
     let mut candidates = Vec::new();
     let mut task_text = format!("{}\n\n{}", task.title, task.detail);
@@ -3189,14 +3345,7 @@ fn build_context_query_candidates(paths: &Paths, task: &TaskRecord) -> Vec<Conte
         summary: format!("Task #{} {} ({})", task.id, task.title, task.task_kind),
         text: task_text,
     });
-    if let Ok(Some(package)) = latest_context_package_for_task(paths, task.id) {
-        append_context_distillation_candidates_from_package(
-            &mut candidates,
-            task.id,
-            &task.title,
-            &package.package_json,
-        );
-    }
+    append_latest_context_distillation_candidates(&mut candidates, paths, task.id, &task.title);
     if let Some(parent_task_id) = task.parent_task_id
         && let Ok(Some(parent_task)) = load_task_by_id(paths, parent_task_id)
     {
@@ -3217,14 +3366,12 @@ fn build_context_query_candidates(paths: &Paths, task: &TaskRecord) -> Vec<Conte
                 text: format!("{}\n\n{}", checkpoint.summary, checkpoint.detail),
             });
         }
-        if let Ok(Some(package)) = latest_context_package_for_task(paths, parent_task_id) {
-            append_context_distillation_candidates_from_package(
-                &mut candidates,
-                parent_task_id,
-                &parent_task.title,
-                &package.package_json,
-            );
-        }
+        append_latest_context_distillation_candidates(
+            &mut candidates,
+            paths,
+            parent_task_id,
+            &parent_task.title,
+        );
     }
     for outcome in list_recent_task_outcomes(paths, task.id, 8).unwrap_or_default() {
         let mut text = String::new();
@@ -3249,14 +3396,12 @@ fn build_context_query_candidates(paths: &Paths, task: &TaskRecord) -> Vec<Conte
             summary: format!("Recent task outcome #{} {}", outcome.id, outcome.title),
             text,
         });
-        if let Ok(Some(package)) = latest_context_package_for_task(paths, outcome.id) {
-            append_context_distillation_candidates_from_package(
-                &mut candidates,
-                outcome.id,
-                &outcome.title,
-                &package.package_json,
-            );
-        }
+        append_latest_context_distillation_candidates(
+            &mut candidates,
+            paths,
+            outcome.id,
+            &outcome.title,
+        );
     }
     for item in list_memory_items(paths, 18).unwrap_or_default() {
         candidates.push(ContextQueryCandidate {
@@ -6879,6 +7024,16 @@ mod tests {
             &package_json,
         )
         .expect("context package should persist");
+        crate::runtime_db::record_context_package(
+            &paths,
+            task.id,
+            &task.title,
+            "working",
+            65_536,
+            "later broad package",
+            r#"{"taskBrief":{"title":"Reflect on browser rollout"}}"#,
+        )
+        .expect("later context package should persist");
 
         let candidates = build_context_query_candidates(&paths, &task);
         assert!(
@@ -6900,6 +7055,105 @@ mod tests {
             candidates
                 .iter()
                 .any(|item| item.source_kind == "context_distillation_artifact")
+        );
+    }
+
+    #[test]
+    fn auto_context_preflight_reuses_latest_package_below_half_window() {
+        let root = temp_root("context_preflight_reuse");
+        let paths = sample_paths(&root);
+        crate::runtime_db::init_runtime_db(&paths).expect("runtime schema should initialize");
+        let task = TaskRecord {
+            id: 144,
+            task_kind: "owner_interrupt".to_string(),
+            title: "Keep working".to_string(),
+            detail: "Continue the bounded task without forced compaction.".to_string(),
+            ..sample_task("Keep working", "Continue the bounded task.")
+        };
+        crate::runtime_db::record_context_package(
+            &paths,
+            task.id,
+            &task.title,
+            "working",
+            65_536,
+            "small package",
+            r#"{"taskBrief":{"title":"Keep working","detail":"Continue the bounded task."},"recentTaskCheckpoints":[]}"#,
+        )
+        .expect("context package should persist");
+
+        let decision =
+            decide_context_package_preflight(&paths, &task).expect("preflight decision should work");
+        assert_eq!(decision, ContextPackagePreflightDecision::ReuseLatest);
+    }
+
+    #[test]
+    fn auto_context_preflight_refreshes_after_half_window_or_interrupt() {
+        let root = temp_root("context_preflight_refresh");
+        let paths = sample_paths(&root);
+        crate::runtime_db::init_runtime_db(&paths).expect("runtime schema should initialize");
+        let large_payload = "token ".repeat(70_000);
+        let task = TaskRecord {
+            id: 145,
+            task_kind: "workspace_repair".to_string(),
+            title: "Large context task".to_string(),
+            detail: "This task already carries a large execution package.".to_string(),
+            ..sample_task("Large context task", "This task already carries a large execution package.")
+        };
+        crate::runtime_db::record_context_package(
+            &paths,
+            task.id,
+            &task.title,
+            "working",
+            65_536,
+            "large package",
+            &format!(r#"{{"payload":"{large_payload}"}}"#),
+        )
+        .expect("large context package should persist");
+        let large_decision =
+            decide_context_package_preflight(&paths, &task).expect("preflight decision should work");
+        assert_eq!(
+            large_decision,
+            ContextPackagePreflightDecision::Refresh(ContextCompactionTrigger::Auto)
+        );
+
+        let interrupt_task = TaskRecord {
+            id: 146,
+            task_kind: "owner_interrupt".to_string(),
+            title: "Interrupted task".to_string(),
+            detail: "This task should refresh because a new interrupt arrived.".to_string(),
+            ..sample_task("Interrupted task", "This task should refresh.")
+        };
+        crate::runtime_db::record_context_package(
+            &paths,
+            interrupt_task.id,
+            &interrupt_task.title,
+            "working",
+            65_536,
+            "small package",
+            r#"{"taskBrief":{"title":"Interrupted task"}}"#,
+        )
+        .expect("interrupt task package should persist");
+        let package_record = crate::runtime_db::latest_context_package_for_task(&paths, interrupt_task.id)
+            .expect("latest context package should load")
+            .expect("interrupt task package should exist");
+        let interrupt_at = chrono::DateTime::parse_from_rfc3339(&package_record.created_at)
+            .expect("package timestamp should parse")
+            .with_timezone(&chrono::Utc)
+            + chrono::Duration::seconds(1);
+        let conn =
+            rusqlite::Connection::open(&paths.runtime_db_path).expect("runtime db should open");
+        conn.execute(
+            "INSERT INTO turn_signals(created_at, thread_key, turn_id, task_id, signal_kind, source_channel, speaker, message, status)
+             VALUES(?1, 'main', NULL, ?2, 'interrupt', 'bios', 'Michael Welsch', 'Neue Priorität', 'recorded')",
+            rusqlite::params![interrupt_at.to_rfc3339(), interrupt_task.id],
+        )
+        .expect("interrupt signal should persist");
+
+        let interrupt_decision = decide_context_package_preflight(&paths, &interrupt_task)
+            .expect("interrupt preflight decision should work");
+        assert_eq!(
+            interrupt_decision,
+            ContextPackagePreflightDecision::Refresh(ContextCompactionTrigger::Interrupt)
         );
     }
 

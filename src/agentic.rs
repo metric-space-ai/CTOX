@@ -13,6 +13,7 @@ use crate::runtime_db::TaskRecord;
 use crate::runtime_db::activate_selected_task;
 use crate::runtime_db::has_open_loop_incident;
 use crate::runtime_db::latest_context_package_for_task;
+use crate::runtime_db::list_recent_context_packages_for_task;
 use crate::runtime_db::list_queued_tasks;
 use crate::runtime_db::list_task_checkpoints;
 use crate::runtime_db::load_active_task;
@@ -2090,25 +2091,40 @@ fn resolve_operating_targets(
 }
 
 fn latest_compact_routing_preference(paths: &Paths, task_id: i64) -> Option<CompactRoutingPreference> {
-    let package = latest_context_package_for_task(paths, task_id).ok().flatten()?;
-    let value = serde_json::from_str::<Value>(&package.package_json).ok()?;
-    let routing = value.get("compactController")?.get("modelRouting")?;
-    let requested_model = normalize_runtime_model_choice(routing.get("requestedModel")?.as_str()?);
-    if requested_model.is_empty() {
-        return None;
+    let packages = list_recent_context_packages_for_task(paths, task_id, 12).ok()?;
+    for package in packages {
+        let Some(value) = serde_json::from_str::<Value>(&package.package_json).ok() else {
+            continue;
+        };
+        let Some(routing) = value
+            .get("compactController")
+            .and_then(|controller| controller.get("modelRouting"))
+        else {
+            continue;
+        };
+        let requested_model = normalize_runtime_model_choice(
+            routing
+                .get("requestedModel")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        if requested_model.is_empty() {
+            continue;
+        }
+        return Some(CompactRoutingPreference {
+            tier: routing
+                .get("tier")
+                .and_then(Value::as_str)
+                .unwrap_or("simple")
+                .to_string(),
+            requested_model,
+            switch_planned: routing
+                .get("switchPlanned")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        });
     }
-    Some(CompactRoutingPreference {
-        tier: routing
-            .get("tier")
-            .and_then(Value::as_str)
-            .unwrap_or("simple")
-            .to_string(),
-        requested_model,
-        switch_planned: routing
-            .get("switchPlanned")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
+    None
 }
 
 fn model_prefers_external(model_id: &str) -> bool {
@@ -4717,6 +4733,45 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
                 .note,
             4
         );
+    }
+
+    #[test]
+    fn latest_compact_routing_preference_survives_newer_non_compacted_packages() -> anyhow::Result<()>
+    {
+        let root = unique_test_root("compact_routing_preference");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+        crate::runtime_db::record_context_package(
+            &paths,
+            42,
+            "Routing task",
+            "compact",
+            65_536,
+            "compact routing",
+            r#"{"compactController":{"modelRouting":{"tier":"red","requestedModel":"openai/gpt-5.4","switchPlanned":true}}}"#,
+        )?;
+        crate::runtime_db::record_context_package(
+            &paths,
+            42,
+            "Routing task",
+            "working",
+            65_536,
+            "later broad package",
+            r#"{"taskBrief":{"title":"Routing task"}}"#,
+        )?;
+
+        let preference =
+            latest_compact_routing_preference(&paths, 42).expect("routing preference should persist");
+        assert_eq!(preference.tier, "red");
+        assert_eq!(preference.requested_model, "openai/gpt-5.4");
+        assert!(preference.switch_planned);
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
     }
 
     #[test]

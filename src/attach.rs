@@ -31,6 +31,7 @@ use crate::runtime_db::FocusStateRecord;
 use crate::runtime_db::LoopInterruptRecord;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::latest_context_package;
+use crate::runtime_db::list_recent_context_packages;
 use crate::runtime_db::load_brain_usage_rollup;
 use crate::runtime_db::list_agent_events_since;
 use crate::runtime_db::list_recent_loop_interrupts;
@@ -137,6 +138,7 @@ struct AttachUiSnapshot {
     last_turn: Option<AgentTurnRecord>,
     open_tasks: Vec<TaskRecord>,
     completed_owner_tasks: Vec<TaskRecord>,
+    latest_context_tokens: usize,
     latest_continuity: Option<AttachContinuitySnapshot>,
     boot_entries: Vec<BootEntry>,
     chat_interrupts: Vec<LoopInterruptRecord>,
@@ -1544,6 +1546,9 @@ impl AttachTui {
     }
 
     fn estimated_active_context_tokens(&self) -> usize {
+        if self.snapshot.latest_context_tokens > 0 {
+            return self.snapshot.latest_context_tokens;
+        }
         self.snapshot
             .latest_continuity
             .as_ref()
@@ -1831,6 +1836,7 @@ impl AttachTui {
 
 fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
     let bios = load_bios(paths);
+    let latest_context_package = latest_context_package(paths).ok().flatten();
     let mut boot_entries = load_boot_entries(paths);
     if boot_entries.len() > CHAT_HISTORY_LIMIT * 4 {
         boot_entries = boot_entries.split_off(boot_entries.len() - (CHAT_HISTORY_LIMIT * 4));
@@ -1850,6 +1856,10 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
         last_turn: load_latest_completed_agent_turn(paths).ok().flatten(),
         open_tasks: list_open_tasks(paths, 8).unwrap_or_default(),
         completed_owner_tasks: list_recent_completed_owner_tasks(paths, 8).unwrap_or_default(),
+        latest_context_tokens: latest_context_package
+            .as_ref()
+            .map(|record| approx_token_count(&record.package_json))
+            .unwrap_or(0),
         latest_continuity: load_latest_continuity_snapshot(paths),
         boot_entries,
         chat_interrupts,
@@ -1859,10 +1869,10 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
 }
 
 fn load_latest_continuity_snapshot(paths: &Paths) -> Option<AttachContinuitySnapshot> {
-    latest_context_package(paths)
-        .ok()
-        .flatten()
-        .and_then(|record| extract_latest_continuity_snapshot(&record))
+    list_recent_context_packages(paths, 24)
+        .ok()?
+        .into_iter()
+        .find_map(|record| extract_latest_continuity_snapshot(&record))
 }
 
 fn extract_latest_continuity_snapshot(
@@ -3578,6 +3588,7 @@ mod tests {
                         last_output: Some("watchdog restart ok".to_string()),
                     },
                 ],
+                latest_context_tokens: 8192,
                 latest_continuity: Some(AttachContinuitySnapshot {
                     created_at: "2026-03-18T15:09:35+00:00".to_string(),
                     task_id: 413,
