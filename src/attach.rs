@@ -155,6 +155,8 @@ struct AttachContinuitySnapshot {
     task_id: i64,
     task_title: String,
     context_mode: String,
+    budget_hint: usize,
+    estimated_tokens: usize,
     trigger: String,
     controller: String,
     school_grade: Option<u8>,
@@ -986,43 +988,18 @@ impl AttachTui {
         width: usize,
         height: usize,
     ) -> anyhow::Result<()> {
-        let frame_width = width;
-        let agent_rows = self.agent_rows(frame_width);
-        let current_rows = self.now_rows(frame_width);
-        let queue_rows = self.next_rows(frame_width);
-        let fixed_rows = 2 + 1 + agent_rows.len() + 1 + current_rows.len() + 1 + queue_rows.len() + 1 + 1;
-        let completed_rows = height.saturating_sub(fixed_rows).max(4);
-
-        let mut frame_lines = vec![
-            frame_top("CTO-Agent Tasks", &self.primary_status_line(), frame_width),
-            frame_row(
-                &format!(
-                    "BIOS {}  |  Page {}",
-                    self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
-                    self.page_label()
-                ),
-                frame_width,
-            ),
-            frame_separator("Agent", frame_width),
-        ];
-        frame_lines.extend(agent_rows);
-        frame_lines.push(frame_separator("Current", frame_width));
-        frame_lines.extend(current_rows);
-        frame_lines.push(frame_separator("Queue", frame_width));
-        frame_lines.extend(queue_rows);
-        frame_lines.push(frame_separator("Completed", frame_width));
-        frame_lines.extend(self.completed_owner_task_rows(frame_width, completed_rows));
-        frame_lines.push(frame_bottom(frame_width));
-
-        let mut screen_lines = frame_lines;
-        screen_lines
-            .push("Tab Chat · Tab Continuity · Tab Settings · Ctrl-P reset · Ctrl-C exit".to_string());
-        let fitted_lines = screen_lines
-            .into_iter()
-            .take(height)
-            .map(|line| fit_line(&line, width))
-            .collect::<Vec<_>>();
-        render_screen_lines(stdout, &fitted_lines, 0, fitted_lines.len().saturating_sub(1) as u16)
+        let body = self.tasks_body_rows(width, height);
+        self.render_nano_page(
+            stdout,
+            width,
+            height,
+            "Tasks",
+            body,
+            "^I next page   Chat is a separate page   ^P reset   ^C exit",
+            "Switch to Chat to type. This page is read-only.",
+            false,
+            None,
+        )
     }
 
     fn render_chat_page(
@@ -1031,45 +1008,25 @@ impl AttachTui {
         width: usize,
         height: usize,
     ) -> anyhow::Result<()> {
-        let frame_width = width;
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
-        let input_hint = if self.snapshot.active_turn.is_some() {
-            "Enter queues raw chat for the next safe boundary. Tab cycles Tasks, Continuity and Settings."
+        let body = self.chat_body_rows(width, height);
+        let help = if self.snapshot.active_turn.is_some() {
+            "^I next page   Enter queues raw chat for the next safe boundary   ^P reset   ^C exit"
         } else {
-            "Enter sends raw chat now. Tab cycles Tasks, Continuity and Settings."
+            "^I next page   Enter sends raw chat now   ^P reset   ^C exit"
         };
-        let agent_rows = self.agent_rows(frame_width);
-        let fixed_rows = 2 + 1 + agent_rows.len() + 1 + 1 + 1 + 1 + 1;
-        let chat_rows = height.saturating_sub(fixed_rows).max(10);
-
-        let mut frame_lines = vec![
-            frame_top("CTO-Agent Chat", &self.primary_status_line(), frame_width),
-            frame_row(
-                &format!(
-                    "BIOS {}  |  Page {}",
-                    self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
-                    self.page_label()
-                ),
-                frame_width,
-            ),
-            frame_separator("Agent", frame_width),
-        ];
-        frame_lines.extend(agent_rows);
-        frame_lines.push(frame_separator("Conversation", frame_width));
-        frame_lines.extend(self.chat_rows(frame_width, chat_rows));
-        frame_lines.push(frame_separator("Compose", frame_width));
-        frame_lines.push(frame_row(input_hint, frame_width));
-        frame_lines.push(frame_row(&format!("{prompt}{input_display}"), frame_width));
-        frame_lines.push(frame_bottom(frame_width));
-        let fitted_lines = frame_lines
-            .into_iter()
-            .take(height)
-            .map(|line| fit_line(&line, width))
-            .collect::<Vec<_>>();
-        let cursor_row = fitted_lines.len().saturating_sub(2) as u16;
-        let cursor_col = cursor_col.min(width.saturating_sub(1)) as u16;
-        render_screen_lines(stdout, &fitted_lines, cursor_col, cursor_row)
+        self.render_nano_page(
+            stdout,
+            width,
+            height,
+            "Chat",
+            body,
+            help,
+            &format!("{prompt}{input_display}"),
+            true,
+            Some(cursor_col),
+        )
     }
 
     fn render_continuity_page(
@@ -1078,46 +1035,18 @@ impl AttachTui {
         width: usize,
         height: usize,
     ) -> anyhow::Result<()> {
-        let frame_width = width;
-        let summary_rows = self.continuity_summary_rows(frame_width);
-        let fixed_rows = 2 + 1 + 1 + summary_rows.len() + 1 + 1 + 1 + 1;
-        let remaining = height.saturating_sub(fixed_rows);
-        let base_rows = 3usize;
-        let extra_rows = remaining.saturating_sub(base_rows * 3);
-        let narrative_rows = base_rows + (extra_rows / 3);
-        let anchors_rows = base_rows + (extra_rows / 3);
-        let focus_rows =
-            base_rows + extra_rows.saturating_sub((narrative_rows - base_rows) + (anchors_rows - base_rows));
-
-        let mut frame_lines = vec![
-            frame_top("CTO-Agent Continuity", &self.primary_status_line(), frame_width),
-            frame_row(
-                &format!(
-                    "BIOS {}  |  Page {}",
-                    self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
-                    self.page_label()
-                ),
-                frame_width,
-            ),
-            frame_separator("Last Compact", frame_width),
-        ];
-        frame_lines.extend(summary_rows);
-        frame_lines.push(frame_separator("Narrative", frame_width));
-        frame_lines.extend(self.continuity_narrative_rows(frame_width, narrative_rows));
-        frame_lines.push(frame_separator("Anchors", frame_width));
-        frame_lines.extend(self.continuity_anchor_rows(frame_width, anchors_rows));
-        frame_lines.push(frame_separator("Focus", frame_width));
-        frame_lines.extend(self.continuity_focus_rows(frame_width, focus_rows));
-        frame_lines.push(frame_bottom(frame_width));
-
-        let mut screen_lines = frame_lines;
-        screen_lines.push("Tab Settings · Tab Tasks · Tab Chat · Ctrl-P reset · Ctrl-C exit".to_string());
-        let fitted_lines = screen_lines
-            .into_iter()
-            .take(height)
-            .map(|line| fit_line(&line, width))
-            .collect::<Vec<_>>();
-        render_screen_lines(stdout, &fitted_lines, 0, fitted_lines.len().saturating_sub(1) as u16)
+        let body = self.continuity_body_rows(width, height);
+        self.render_nano_page(
+            stdout,
+            width,
+            height,
+            "Continuity",
+            body,
+            "^I next page   Read the latest compaction bridge here   ^P reset   ^C exit",
+            "Read-only continuity view from the most recent compaction.",
+            false,
+            None,
+        )
     }
 
     fn render_settings_page(
@@ -1126,41 +1055,20 @@ impl AttachTui {
         width: usize,
         height: usize,
     ) -> anyhow::Result<()> {
-        let frame_width = width;
-        let fixed_rows = 2 + 1 + 3 + 1 + 1 + 2;
-        let list_rows = height.saturating_sub(fixed_rows).max(8);
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
-        let dirty = if self.settings_dirty { "DIRTY" } else { "SAVED" };
-
-        let mut frame_lines = vec![
-            frame_top("CTO-Agent Settings", &self.primary_status_line(), frame_width),
-            frame_row(
-                &format!(
-                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab cycles Tasks, Chat and Continuity",
-                    dirty
-                ),
-                frame_width,
-            ),
-            frame_separator("Fields", frame_width),
-        ];
-        frame_lines.extend(self.settings_rows(frame_width, list_rows));
-        frame_lines.push(frame_separator("Selected", frame_width));
-        frame_lines.push(frame_row(&self.selected_setting_help_line(), frame_width));
-        frame_lines.push(frame_bottom(frame_width));
-
-        let mut screen_lines = frame_lines;
-        screen_lines.push("Esc clears selected value · secrets are masked in the list view".to_string());
-        screen_lines.push(format!("{prompt}{input_display}"));
-
-        let fitted_lines = screen_lines
-            .into_iter()
-            .take(height)
-            .map(|line| fit_line(&line, width))
-            .collect::<Vec<_>>();
-        let cursor_row = fitted_lines.len().saturating_sub(1) as u16;
-        let cursor_col = cursor_col.min(width.saturating_sub(1)) as u16;
-        render_screen_lines(stdout, &fitted_lines, cursor_col, cursor_row)
+        let body = self.settings_body_rows(width, height);
+        self.render_nano_page(
+            stdout,
+            width,
+            height,
+            "Settings",
+            body,
+            "^I next page   Up/Down select   Left/Right cycle models   Enter edit   Ctrl-S save",
+            &format!("{prompt}{input_display}"),
+            false,
+            Some(cursor_col),
+        )
     }
 
     fn page_label(&self) -> &'static str {
@@ -1301,10 +1209,12 @@ impl AttachTui {
             ),
             frame_row(
                 &format!(
-                    "Model tier {}  |  request {}  |  mode {}",
+                    "Model tier {}  |  request {}  |  mode {}  |  budget {} est {}",
                     continuity.model_tier,
                     compact_text(&continuity.requested_model, 36),
-                    continuity.context_mode
+                    continuity.context_mode,
+                    continuity.budget_hint,
+                    continuity.estimated_tokens
                 ),
                 width,
             ),
@@ -1507,6 +1417,184 @@ impl AttachTui {
             queue_depth,
             turn
         )
+    }
+
+    fn render_nano_page(
+        &self,
+        stdout: &mut io::Stdout,
+        width: usize,
+        height: usize,
+        title: &str,
+        mut body_lines: Vec<String>,
+        help_line: &str,
+        bottom_line: &str,
+        tail_align_body: bool,
+        cursor_col: Option<usize>,
+    ) -> anyhow::Result<()> {
+        let mut screen_lines = self.nano_header_lines(title, width);
+        let reserved = screen_lines.len() + 3;
+        let body_height = height.saturating_sub(reserved).max(1);
+        if body_lines.len() > body_height {
+            if tail_align_body {
+                body_lines = body_lines.split_off(body_lines.len().saturating_sub(body_height));
+            } else {
+                body_lines.truncate(body_height);
+            }
+        }
+        while body_lines.len() < body_height {
+            body_lines.push(String::new());
+        }
+        screen_lines.extend(
+            body_lines
+                .into_iter()
+                .take(body_height)
+                .map(|line| fit_line(&line, width)),
+        );
+        screen_lines.push("-".repeat(width));
+        screen_lines.push(fit_line(help_line, width));
+        screen_lines.push(fit_line(bottom_line, width));
+
+        let cursor_row = screen_lines.len().saturating_sub(1) as u16;
+        let cursor_col = cursor_col
+            .map(|value| value.min(width.saturating_sub(1)) as u16)
+            .unwrap_or(0);
+        render_screen_lines(stdout, &screen_lines, cursor_col, cursor_row)
+    }
+
+    fn nano_header_lines(&self, title: &str, width: usize) -> Vec<String> {
+        let usage = &self.snapshot.brain_usage;
+        vec![
+            fit_line(
+                &format!("CTO-Agent :: {title}    {}", self.primary_status_line()),
+                width,
+            ),
+            fit_line(
+                &format!(
+                    "{}  BIOS {}",
+                    self.page_tabs_line(),
+                    compact_text(
+                        self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
+                        width / 2
+                    )
+                ),
+                width,
+            ),
+            fit_line(
+                &format!(
+                    "Model {}  |  Tokens in {} out {} all {}",
+                    compact_text(&current_brain_model_label(&self.snapshot), width / 2),
+                    usage.total_input_tokens,
+                    usage.total_output_tokens,
+                    usage.total_tokens
+                ),
+                width,
+            ),
+            fit_line(&self.context_fill_line(width), width),
+            "-".repeat(width),
+        ]
+    }
+
+    fn page_tabs_line(&self) -> String {
+        [
+            (AttachPage::Tasks, "Tasks"),
+            (AttachPage::Chat, "Chat"),
+            (AttachPage::Continuity, "Continuity"),
+            (AttachPage::Settings, "Settings"),
+        ]
+        .into_iter()
+        .map(|(page, label)| {
+            if self.page == page {
+                format!(">{label}<")
+            } else {
+                format!("[{label}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+
+    fn context_fill_line(&self, width: usize) -> String {
+        let simple_slot = compact_text(self.setting_value("simple_model").unwrap_or("?"), 18);
+        let medium_slot = compact_text(self.setting_value("medium_model").unwrap_or("?"), 18);
+        let red_slot = compact_text(self.setting_value("red_model").unwrap_or("?"), 18);
+        let (used, budget, percent) = self.context_fill_metrics();
+        let meter_width = width.clamp(10, 120) / 6;
+        let meter = ascii_meter(percent, meter_width.max(10));
+        format!(
+            "Context {meter} {percent:>3}%  {used}/{budget} est  |  Slots S {simple_slot}  M {medium_slot}  R {red_slot}"
+        )
+    }
+
+    fn context_fill_metrics(&self) -> (usize, usize, usize) {
+        if let Some(continuity) = self.snapshot.latest_continuity.as_ref() {
+            let budget = continuity.budget_hint.max(1);
+            let used = continuity.estimated_tokens.max(1);
+            let percent = used.saturating_mul(100) / budget.max(1);
+            return (used, budget, percent.min(999));
+        }
+        let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
+        let budget = used.max(1);
+        (used, budget, 100)
+    }
+
+    fn tasks_body_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let content_width = width.saturating_sub(2).max(20);
+        let mut lines = Vec::new();
+        lines.push("Current".to_string());
+        lines.extend(plain_frame_rows(self.now_rows(width)));
+        lines.push(String::new());
+        lines.push("Queue".to_string());
+        lines.extend(plain_frame_rows(self.next_rows(width)));
+        lines.push(String::new());
+        lines.push("Completed".to_string());
+        lines.extend(plain_frame_rows(self.completed_owner_task_rows(width, height.max(6))));
+        normalize_body_lines(lines, content_width)
+    }
+
+    fn chat_body_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let content_width = width.saturating_sub(2).max(20);
+        let chat_height = height.saturating_sub(8).max(8);
+        let mut lines = vec![
+            format!(
+                "Session  {}  |  Route {}",
+                self.chat_session_label(),
+                brain_route_label(&self.snapshot.brain_routing.route_mode)
+            ),
+            String::new(),
+        ];
+        lines.extend(plain_frame_rows(self.chat_rows(width, chat_height)));
+        normalize_body_lines(lines, content_width)
+    }
+
+    fn continuity_body_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let content_width = width.saturating_sub(2).max(20);
+        let section_height = height.saturating_sub(12).max(3);
+        let mut lines = Vec::new();
+        lines.push("Last Compact".to_string());
+        lines.extend(plain_frame_rows(self.continuity_summary_rows(width)));
+        lines.push(String::new());
+        lines.push("Narrative".to_string());
+        lines.extend(plain_frame_rows(self.continuity_narrative_rows(width, section_height)));
+        lines.push(String::new());
+        lines.push("Anchors".to_string());
+        lines.extend(plain_frame_rows(self.continuity_anchor_rows(width, section_height)));
+        lines.push(String::new());
+        lines.push("Focus".to_string());
+        lines.extend(plain_frame_rows(self.continuity_focus_rows(width, section_height)));
+        normalize_body_lines(lines, content_width)
+    }
+
+    fn settings_body_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let content_width = width.saturating_sub(2).max(20);
+        let list_height = height.saturating_sub(10).max(8);
+        let dirty = if self.settings_dirty { "DIRTY" } else { "SAVED" };
+        let mut lines = vec![
+            format!("Status {dirty}"),
+            self.selected_setting_help_line(),
+            String::new(),
+        ];
+        lines.extend(plain_frame_rows(self.settings_rows(width, list_height)));
+        normalize_body_lines(lines, content_width)
     }
 
     fn now_rows(&self, width: usize) -> Vec<String> {
@@ -1745,6 +1833,8 @@ fn extract_latest_continuity_snapshot(
         task_id: record.task_id,
         task_title: record.task_title.clone(),
         context_mode: record.context_mode.clone(),
+        budget_hint: record.budget_hint.max(0) as usize,
+        estimated_tokens: approx_token_count(&record.package_json),
         trigger,
         controller,
         school_grade: json_u8(compact, &["progressReview", "schoolGrade"]),
@@ -2729,6 +2819,48 @@ fn frame_bottom(width: usize) -> String {
     format!("+{}+", "-".repeat(width - 2))
 }
 
+fn plain_frame_row(line: &str) -> String {
+    line.strip_prefix("| ")
+        .and_then(|value| value.strip_suffix(" |"))
+        .map(str::trim_end)
+        .unwrap_or(line)
+        .to_string()
+}
+
+fn plain_frame_rows(rows: Vec<String>) -> Vec<String> {
+    rows.into_iter().map(|line| plain_frame_row(&line)).collect()
+}
+
+fn normalize_body_lines(lines: Vec<String>, width: usize) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            normalized.push(String::new());
+            continue;
+        }
+        normalized.extend(wrap_text_to_width(line.trim(), width));
+    }
+    if normalized.is_empty() {
+        normalized.push(String::new());
+    }
+    normalized
+}
+
+fn ascii_meter(percent: usize, width: usize) -> String {
+    let width = width.max(4);
+    let filled = width.saturating_mul(percent.min(100)) / 100;
+    format!(
+        "[{}{}]",
+        "#".repeat(filled),
+        "-".repeat(width.saturating_sub(filled))
+    )
+}
+
+fn approx_token_count(text: &str) -> usize {
+    let chars = text.chars().count();
+    ((chars + 3) / 4).max(1)
+}
+
 fn pad_to_width(text: &str, width: usize) -> String {
     let text_width = text.chars().count();
     if text_width >= width {
@@ -3305,6 +3437,8 @@ mod tests {
                     task_id: 413,
                     task_title: "Show the BIOS link on the attach screen".to_string(),
                     context_mode: "execute_task".to_string(),
+                    budget_hint: 1200,
+                    estimated_tokens: 760,
                     trigger: "interrupt".to_string(),
                     controller: "context_optimizer_simple_html_root_v1".to_string(),
                     school_grade: Some(3),
@@ -3805,6 +3939,16 @@ mod tests {
         assert_eq!(snapshot.model_tier, "medium");
         assert_eq!(snapshot.requested_model, "openai/gpt-5.4-mini");
         assert!(snapshot.continuity_narrative.contains("owner interrupt"));
+    }
+
+    #[test]
+    fn context_fill_line_uses_latest_compaction_budget() {
+        let ui = sample_ui();
+        let line = ui.context_fill_line(140);
+
+        assert!(line.contains("Context ["));
+        assert!(line.contains("760/1200"));
+        assert!(line.contains("Slots S openai/gpt-oss-20b"));
     }
 
     #[test]
