@@ -1437,6 +1437,7 @@ pub fn default_model_policy() -> ModelPolicy {
                 startup_tensor_parallel_backend: None,
                 startup_visible_gpu_policy: None,
                 prefer_auto_device_mapping: false,
+            },
         ],
         updated_at: now_iso(),
     }
