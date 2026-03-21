@@ -19,6 +19,7 @@ gethostname = "1.1.0"
 getrandom = "0.2.17"
 hex = "0.4.3"
 pbkdf2 = "0.12.2"
+qrcodegen = "1.8.0"
 rcgen = "0.14.5"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rustls = { version = "0.23.37", default-features = false, features = ["aws-lc-rs"] }
