@@ -139,6 +139,7 @@ struct AttachUiSnapshot {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AttachPage {
+    Tasks,
     Chat,
     Settings,
 }
@@ -359,6 +360,7 @@ fn run_attach_tui(paths: &Paths) -> anyhow::Result<()> {
                 }
                 TerminalEvent::Paste(text) => {
                     match ui.page {
+                        AttachPage::Tasks => {}
                         AttachPage::Chat => ui.chat_input.push_str(&text),
                         AttachPage::Settings => {
                             if let Some(item) = ui.settings_items.get_mut(ui.settings_selected) {
@@ -462,7 +464,7 @@ impl AttachTui {
             event_lines: Vec::new(),
             local_notices: VecDeque::new(),
             pending_inputs: Vec::new(),
-            page: AttachPage::Chat,
+            page: AttachPage::Tasks,
             chat_input: String::new(),
             settings_items: load_settings_items(paths),
             settings_selected: 0,
@@ -528,11 +530,13 @@ impl AttachTui {
                 code: KeyCode::Tab, ..
             } => {
                 self.page = match self.page {
+                    AttachPage::Tasks => AttachPage::Chat,
                     AttachPage::Chat => AttachPage::Settings,
-                    AttachPage::Settings => AttachPage::Chat,
+                    AttachPage::Settings => AttachPage::Tasks,
                 };
             }
             _ => match self.page {
+                AttachPage::Tasks => {}
                 AttachPage::Chat => self.handle_chat_key_event(paths, key_event),
                 AttachPage::Settings => self.handle_settings_key_event(paths, key_event),
             },
@@ -659,6 +663,7 @@ impl AttachTui {
 
     fn active_editor_is_empty(&self) -> bool {
         match self.page {
+            AttachPage::Tasks => true,
             AttachPage::Chat => self.chat_input.is_empty(),
             AttachPage::Settings => self
                 .settings_items
@@ -852,6 +857,7 @@ impl AttachTui {
         }
 
         match self.page {
+            AttachPage::Tasks => self.render_tasks_page(stdout, width_usize, height_usize),
             AttachPage::Chat => self.render_chat_page(stdout, width_usize, height_usize),
             AttachPage::Settings => self.render_settings_page(stdout, width_usize, height_usize),
         }
@@ -908,8 +914,10 @@ impl AttachTui {
             format!("Queued Chats: {pending_count}"),
             fit_line(&format!("Last done: {latest_done}"), width),
             "Tab page | Enter act/save | Ctrl-P reset | Ctrl-C exit".to_string(),
-            format!("{prompt}{input_text}"),
         ];
+        if !prompt.is_empty() {
+            lines.push(format!("{prompt}{input_text}"));
+        }
         if lines.len() > height {
             let keep = height.saturating_sub(1);
             let mut compact = vec!["=== CTO-Agent Attach Terminal ===".to_string()];
@@ -931,8 +939,56 @@ impl AttachTui {
             .map(|line| fit_line(&line, width))
             .collect::<Vec<_>>();
         let cursor_row = fitted.len().saturating_sub(1) as u16;
-        let cursor_col = cursor_col.min(width.saturating_sub(1)) as u16;
+        let cursor_col = if prompt.is_empty() {
+            0
+        } else {
+            cursor_col.min(width.saturating_sub(1))
+        } as u16;
         render_screen_lines(stdout, &fitted, cursor_col, cursor_row)
+    }
+
+    fn render_tasks_page(
+        &self,
+        stdout: &mut io::Stdout,
+        width: usize,
+        height: usize,
+    ) -> anyhow::Result<()> {
+        let frame_width = width;
+        let agent_rows = self.agent_rows(frame_width);
+        let current_rows = self.now_rows(frame_width);
+        let queue_rows = self.next_rows(frame_width);
+        let fixed_rows = 2 + 1 + agent_rows.len() + 1 + current_rows.len() + 1 + queue_rows.len() + 1 + 1;
+        let completed_rows = height.saturating_sub(fixed_rows).max(4);
+
+        let mut frame_lines = vec![
+            frame_top("CTO-Agent Tasks", &self.primary_status_line(), frame_width),
+            frame_row(
+                &format!(
+                    "BIOS {}  |  Page {}",
+                    self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
+                    self.page_label()
+                ),
+                frame_width,
+            ),
+            frame_separator("Agent", frame_width),
+        ];
+        frame_lines.extend(agent_rows);
+        frame_lines.push(frame_separator("Current", frame_width));
+        frame_lines.extend(current_rows);
+        frame_lines.push(frame_separator("Queue", frame_width));
+        frame_lines.extend(queue_rows);
+        frame_lines.push(frame_separator("Completed", frame_width));
+        frame_lines.extend(self.completed_owner_task_rows(frame_width, completed_rows));
+        frame_lines.push(frame_bottom(frame_width));
+
+        let mut screen_lines = frame_lines;
+        screen_lines.push("Tab Chat · Tab Settings · Ctrl-P reset · Ctrl-C exit".to_string());
+        let fitted_lines = screen_lines
+            .into_iter()
+            .take(height)
+            .map(|line| fit_line(&line, width))
+            .collect::<Vec<_>>();
+        render_screen_lines(stdout, &fitted_lines, 0, fitted_lines.len().saturating_sub(1) as u16)
     }
 
     fn render_chat_page(
@@ -942,8 +998,16 @@ impl AttachTui {
         height: usize,
     ) -> anyhow::Result<()> {
         let frame_width = width;
-        let fixed_rows = 2 + 1 + 3 + 1 + 6 + 1 + 1 + 2;
-        let chat_rows = height.saturating_sub(fixed_rows).max(6);
+        let prompt = self.editor_prompt();
+        let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
+        let input_hint = if self.snapshot.active_turn.is_some() {
+            "Enter queues raw chat for the next safe boundary. Tab cycles to Tasks and Settings."
+        } else {
+            "Enter sends raw chat now. Tab cycles to Tasks and Settings."
+        };
+        let agent_rows = self.agent_rows(frame_width);
+        let fixed_rows = 2 + 1 + agent_rows.len() + 1 + 1 + 1 + 1 + 1;
+        let chat_rows = height.saturating_sub(fixed_rows).max(10);
 
         let mut frame_lines = vec![
             frame_top("CTO-Agent Chat", &self.primary_status_line(), frame_width),
@@ -957,31 +1021,19 @@ impl AttachTui {
             ),
             frame_separator("Agent", frame_width),
         ];
-        frame_lines.extend(self.agent_rows(frame_width));
-        frame_lines.push(frame_separator("Tasks", frame_width));
-        frame_lines.extend(self.task_rows(frame_width));
-        frame_lines.push(frame_separator("Chat", frame_width));
+        frame_lines.extend(agent_rows);
+        frame_lines.push(frame_separator("Conversation", frame_width));
         frame_lines.extend(self.chat_rows(frame_width, chat_rows));
+        frame_lines.push(frame_separator("Compose", frame_width));
+        frame_lines.push(frame_row(input_hint, frame_width));
+        frame_lines.push(frame_row(&format!("{prompt}{input_display}"), frame_width));
         frame_lines.push(frame_bottom(frame_width));
-
-        let input_hint = if self.snapshot.active_turn.is_some() {
-            "Tab Settings · Enter queues raw chat for the next safe boundary · Use Settings for mail and API keys · Ctrl-P reset · Ctrl-C exit"
-        } else {
-            "Tab Settings · Enter sends raw chat now · Use Settings for mail and API keys · Ctrl-P reset · Ctrl-C exit"
-        };
-        let prompt = self.editor_prompt();
-        let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
-
-        let mut screen_lines = frame_lines;
-        screen_lines.push(input_hint.to_string());
-        screen_lines.push(format!("{prompt}{input_display}"));
-
-        let fitted_lines = screen_lines
+        let fitted_lines = frame_lines
             .into_iter()
             .take(height)
             .map(|line| fit_line(&line, width))
             .collect::<Vec<_>>();
-        let cursor_row = fitted_lines.len().saturating_sub(1) as u16;
+        let cursor_row = fitted_lines.len().saturating_sub(2) as u16;
         let cursor_col = cursor_col.min(width.saturating_sub(1)) as u16;
         render_screen_lines(stdout, &fitted_lines, cursor_col, cursor_row)
     }
@@ -1003,7 +1055,7 @@ impl AttachTui {
             frame_top("CTO-Agent Settings", &self.primary_status_line(), frame_width),
             frame_row(
                 &format!(
-                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab back to chat",
+                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab cycles Tasks and Chat",
                     dirty
                 ),
                 frame_width,
@@ -1031,6 +1083,7 @@ impl AttachTui {
 
     fn page_label(&self) -> &'static str {
         match self.page {
+            AttachPage::Tasks => "TASKS",
             AttachPage::Chat => "CHAT",
             AttachPage::Settings => "SETTINGS",
         }
@@ -1038,6 +1091,7 @@ impl AttachTui {
 
     fn editor_prompt(&self) -> String {
         match self.page {
+            AttachPage::Tasks => String::new(),
             AttachPage::Chat => "Chat to CTO: ".to_string(),
             AttachPage::Settings => {
                 let label = self
@@ -1052,6 +1106,7 @@ impl AttachTui {
 
     fn editor_text(&self) -> &str {
         match self.page {
+            AttachPage::Tasks => "",
             AttachPage::Chat => &self.chat_input,
             AttachPage::Settings => self
                 .settings_items
@@ -3436,6 +3491,40 @@ mod tests {
             line,
             "email: cto1@metric-space.ai password: supersecret imap host: imap.one.com"
         );
+    }
+
+    #[test]
+    fn tasks_page_has_no_active_editor_prompt() {
+        let mut ui = sample_ui();
+        ui.page = AttachPage::Tasks;
+
+        assert_eq!(ui.page_label(), "TASKS");
+        assert!(ui.editor_prompt().is_empty());
+        assert!(ui.editor_text().is_empty());
+        assert!(ui.active_editor_is_empty());
+    }
+
+    #[test]
+    fn tab_cycles_tasks_chat_settings() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("tab_cycle_pages");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        let mut ui = sample_ui();
+        ui.page = AttachPage::Tasks;
+
+        ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ui.page, AttachPage::Chat);
+
+        ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ui.page, AttachPage::Settings);
+
+        ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ui.page, AttachPage::Tasks);
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
     }
 
     #[test]
