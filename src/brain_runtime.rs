@@ -67,6 +67,9 @@ struct StartupCalibrationCandidate {
 const KLEINHIRN_TRANSITION_GRACE_SECS: u64 = 600;
 const RUNTIME_DISK_WARNING_FLOOR_GB: u64 = 12;
 const RUNTIME_DISK_CRITICAL_FLOOR_GB: u64 = 6;
+const KLEINHIRN_CONTEXT_BACKOFF_MIN_SEQ_LEN: u64 = 4_096;
+const KLEINHIRN_CONTEXT_BACKOFF_MIN_REDUCTION: u64 = 2_048;
+const KLEINHIRN_CONTEXT_BACKOFF_MAX_STEPS: usize = 12;
 
 #[derive(Debug, Clone)]
 pub struct RuntimeDiskHeadroomStatus {
@@ -180,6 +183,11 @@ pub fn attempt_kleinhirn_runtime_repair(paths: &Paths) -> anyhow::Result<String>
         .err()
         .map(|err| err.to_string())
         .unwrap_or_else(|| "unknown kleinhirn restart failure".to_string());
+    if let Some(repair_note) =
+        attempt_context_backoff_recovery(paths, &runtime_model, &label, &direct_error)?
+    {
+        return Ok(repair_note);
+    }
     let policy = load_model_policy(paths);
     let census = load_census(paths);
     let baseline = &policy.kleinhirn;
@@ -200,6 +208,97 @@ pub fn attempt_kleinhirn_runtime_repair(paths: &Paths) -> anyhow::Result<String>
             downgrade_err
         ),
     }
+}
+
+fn attempt_context_backoff_recovery(
+    paths: &Paths,
+    runtime_model: &str,
+    label: &str,
+    initial_detail: &str,
+) -> anyhow::Result<Option<String>> {
+    let env_path = paths.root.join("runtime/kleinhirn.env");
+    let original_text = fs::read_to_string(&env_path)
+        .with_context(|| format!("failed to read {}", env_path.display()))?;
+    let mut env_map = parse_env_file(&original_text);
+    let mut current_max_seq_len = runtime_env_value("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN", &env_map)
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value > 0);
+    let mut failure_detail = format!(
+        "{}\n{}",
+        initial_detail,
+        capture_kleinhirn_failure_detail(paths)
+    );
+
+    if !kleinhirn_failure_supports_context_backoff(&failure_detail) {
+        return Ok(None);
+    }
+
+    let mut steps = Vec::new();
+    for _ in 0..KLEINHIRN_CONTEXT_BACKOFF_MAX_STEPS {
+        let Some(current) = current_max_seq_len else {
+            break;
+        };
+        let Some(next) = next_context_backoff_value(current) else {
+            break;
+        };
+
+        env_map.insert("CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN".to_string(), next.to_string());
+        if let Some(pa_context_len) = runtime_env_value("CTO_AGENT_KLEINHIRN_PA_CTXT_LEN", &env_map)
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|value| *value > next)
+        {
+            env_map.insert(
+                "CTO_AGENT_KLEINHIRN_PA_CTXT_LEN".to_string(),
+                pa_context_len.min(next).to_string(),
+            );
+        }
+
+        write_kleinhirn_env(&env_path, &env_map)?;
+        write_kleinhirn_transition_state(
+            paths,
+            "runtime_context_backoff_recovery",
+            runtime_model,
+            KLEINHIRN_TRANSITION_GRACE_SECS,
+        )?;
+
+        let restart_result = restart_kleinhirn_runtime(paths)
+            .and_then(|_| wait_for_kleinhirn_startup_ready(paths))
+            .and_then(|_| enforce_kleinhirn_ready(paths));
+
+        match restart_result {
+            Ok(()) => {
+                clear_kleinhirn_transition_state(paths);
+                steps.push(next);
+                return Ok(Some(format!(
+                    "Kernel self-repair restored READY for {} ({}) by reducing max context in staged recovery to {} after OOM/runtime pressure. Tried sequence: {}.",
+                    label,
+                    runtime_model,
+                    next,
+                    steps
+                        .iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                )));
+            }
+            Err(err) => {
+                steps.push(next);
+                failure_detail = format!(
+                    "{}\n{}",
+                    err,
+                    capture_kleinhirn_failure_detail(paths)
+                );
+                current_max_seq_len = Some(next);
+                if !kleinhirn_failure_supports_context_backoff(&failure_detail) {
+                    break;
+                }
+            }
+        }
+    }
+
+    clear_kleinhirn_transition_state(paths);
+    write_raw_env(&env_path, &original_text)?;
+    Ok(None)
 }
 
 pub fn inspect_runtime_disk_headroom(paths: &Paths) -> anyhow::Result<RuntimeDiskHeadroomStatus> {
@@ -1118,6 +1217,33 @@ fn build_startup_calibration_candidates(
     }]
 }
 
+fn next_context_backoff_value(current: u64) -> Option<u64> {
+    if current <= KLEINHIRN_CONTEXT_BACKOFF_MIN_SEQ_LEN {
+        return None;
+    }
+    let reduction = (current / 8).max(KLEINHIRN_CONTEXT_BACKOFF_MIN_REDUCTION);
+    let mut next = current.saturating_sub(reduction);
+    next = (next / KLEINHIRN_CONTEXT_BACKOFF_MIN_REDUCTION)
+        * KLEINHIRN_CONTEXT_BACKOFF_MIN_REDUCTION;
+    if next < KLEINHIRN_CONTEXT_BACKOFF_MIN_SEQ_LEN {
+        next = KLEINHIRN_CONTEXT_BACKOFF_MIN_SEQ_LEN;
+    }
+    Some(next)
+}
+
+fn kleinhirn_failure_supports_context_backoff(detail: &str) -> bool {
+    let lowered = detail.to_ascii_lowercase();
+    lowered.contains("cuda_error_out_of_memory")
+        || lowered.contains("out of memory")
+        || lowered.contains("illegal memory access")
+        || lowered.contains("cuda_error_illegal_address")
+        || lowered.contains("no response received from the model")
+        || lowered.contains("channel closed")
+        || lowered.contains("senderror")
+        || lowered.contains("engine openai/gpt-oss-20b is dead")
+        || lowered.contains("empty_text_output_via_endpoint_error")
+}
+
 fn multi_gpu_bootstrap_max_seq_len(selected: &BrainModel) -> Option<u64> {
     let env_cap = std::env::var("CTO_AGENT_MULTI_GPU_BOOTSTRAP_MAX_SEQ_LEN")
         .ok()
@@ -1367,6 +1493,37 @@ fn restart_kleinhirn_runtime(paths: &Paths) -> anyhow::Result<()> {
         return Ok(());
     }
     try_restart_with_local_script(paths)
+}
+
+fn capture_kleinhirn_failure_detail(paths: &Paths) -> String {
+    let mut detail_parts = Vec::new();
+    let log_path = paths.root.join("runtime/logs/kleinhirn.log");
+    if let Ok(text) = fs::read_to_string(&log_path) {
+        let tail = tail_text_lines(&text, 120);
+        if !tail.trim().is_empty() {
+            detail_parts.push(tail);
+        }
+    }
+
+    if let Ok(output) = Command::new("journalctl")
+        .args(["--user", "-u", "cto-kleinhirn.service", "-n", "120", "--no-pager"])
+        .output()
+        && output.status.success()
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let tail = tail_text_lines(&stdout, 120);
+        if !tail.trim().is_empty() {
+            detail_parts.push(tail);
+        }
+    }
+
+    detail_parts.join("\n")
+}
+
+fn tail_text_lines(text: &str, limit: usize) -> String {
+    let lines = text.lines().collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(limit);
+    lines[start..].join("\n")
 }
 
 fn try_restart_with_systemd(paths: &Paths) -> anyhow::Result<bool> {
@@ -1821,6 +1978,28 @@ mod tests {
                 .iter()
                 .all(|item| item.paged_attn_mode.as_deref() == Some("on"))
         );
+    }
+
+    #[test]
+    fn context_backoff_value_steps_down_gradually() {
+        assert_eq!(next_context_backoff_value(131_072), Some(114_688));
+        assert_eq!(next_context_backoff_value(65_536), Some(57_344));
+        assert_eq!(next_context_backoff_value(8_192), Some(6_144));
+        assert_eq!(next_context_backoff_value(5_000), Some(4_096));
+        assert_eq!(next_context_backoff_value(4_096), None);
+    }
+
+    #[test]
+    fn context_backoff_detection_matches_runtime_oom_signatures() {
+        assert!(kleinhirn_failure_supports_context_backoff(
+            "http 500 from model endpoint: DriverError(CUDA_ERROR_OUT_OF_MEMORY, \"out of memory\")"
+        ));
+        assert!(kleinhirn_failure_supports_context_backoff(
+            "agentic loop is not ready (status=empty_text_output_via_endpoint_error)"
+        ));
+        assert!(!kleinhirn_failure_supports_context_backoff(
+            "mail sync failed because credentials are missing"
+        ));
     }
 
     #[test]

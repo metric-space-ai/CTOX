@@ -90,6 +90,12 @@ async fn main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
+        Some("repair-kleinhirn") => {
+            let paths = contracts::Paths::discover()?;
+            let note = brain_runtime::attempt_kleinhirn_runtime_repair(&paths)?;
+            println!("{note}");
+            return Ok(());
+        }
         Some("hard-reset-report") => {
             let paths = contracts::Paths::discover()?;
             let reason = if args.len() > 1 {

@@ -804,3 +804,14 @@ The supervisor now treats configured Jami the same way it treats configured mail
 The reviewed file adapter alone was not enough for a real installation path: the Linux installer still left Jami itself absent and therefore could only stage wrappers without a daemon behind them.
 The installation flow now provisions the official Jami apt repository on supported Debian/Ubuntu-family hosts, installs `jami-daemon` with `dbus-x11`, prepares the runtime inbox/outbox/archive directories, persists the `CTO_JAMI_*` environment, and installs a dedicated `cto-jami-daemon.service` user unit that launches the daemon through the reviewed local bridge path.
 That keeps the communication expansion honest: Jami is still mediated through the local reviewed adapter, but the installer now brings up the daemon/runtime substrate that the adapter depends on instead of pretending a host integration already exists.
+
+## 2026-03-21 - Attach TUI Gains Real Jami QR Pairing Instead Of Empty Placeholder Fields
+
+The next owner correction hit an honest product gap: installing a daemon and showing blank Jami fields in the TUI did not actually let anyone link the host, because the real user flow on mobile starts with a QR code scan.
+The attach terminal now exposes an explicit Jami link action that starts the import-side device-link protocol over the reviewed Jami DBus path, renders the returned `jami-auth://` token as a scannable QR block in the TUI, accepts an optional temporary link password if the existing mobile account requires it, and writes the resulting local `CTO_JAMI_ACCOUNT_ID` back into runtime settings on success.
+That closes the false gap between “Jami installed” and “the owner can actually message the CTO-Agent over Jami from the phone.”
+## 2026-03-21 - Runtime Context Backoff Recovery Restored
+
+The staged max-context backoff for kleinhirn OOM/runtime failures had drifted into the installer path only, while the live runtime repair path merely restarted the service or fell through to a coarse baseline downgrade.
+That regression left the running agent unhealthy on hosts where the chosen `max_seq_len` was too ambitious for the current GPU layout.
+The runtime self-repair path and watchdog bridge now restore the same principle during normal operation: if kleinhirn fails with OOM/CUDA/runtime crash signatures, the agent reduces `CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN` in steps and retries until READY returns or the minimum floor is reached.

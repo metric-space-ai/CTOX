@@ -48,6 +48,13 @@ if curl -k -fsS "$HEALTH_URL" >/dev/null 2>&1; then
 fi
 
 if [ -x "$ROOT/target/release/cto-agent" ]; then
+  if "$ROOT/target/release/cto-agent" repair-kleinhirn >>"$LOG_FILE" 2>&1; then
+    sleep 8
+    if curl -k -fsS "$HEALTH_URL" >/dev/null 2>&1; then
+      log_line "CTO-Agent recovered after kleinhirn context backoff repair"
+      exit 0
+    fi
+  fi
   "$ROOT/target/release/cto-agent" hard-reset-report "watchdog readyz failure before automatic restart" >/dev/null 2>&1 || true
 fi
 
