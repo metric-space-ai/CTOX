@@ -16,7 +16,6 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::Path;
 use std::path::PathBuf;
-use url::Url;
 
 const PASSWORD_ITERATIONS: u32 = 200_000;
 
@@ -255,10 +254,8 @@ fn desired_tls_alt_names() -> Vec<String> {
     push_tls_alt_name(&mut names, "127.0.0.1");
     push_tls_alt_name(&mut names, &control_plane_bind_host());
 
-    if let Ok(parsed) = Url::parse(&control_plane_public_base_url()) {
-        if let Some(host) = parsed.host_str() {
-            push_tls_alt_name(&mut names, host);
-        }
+    if let Some(host) = host_from_public_base_url(&control_plane_public_base_url()) {
+        push_tls_alt_name(&mut names, &host);
     }
 
     if let Ok(extra) = std::env::var("CTO_AGENT_TLS_ALT_NAMES") {
@@ -268,6 +265,32 @@ fn desired_tls_alt_names() -> Vec<String> {
     }
 
     names
+}
+
+fn host_from_public_base_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let after_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let authority = after_scheme.split('/').next().unwrap_or(after_scheme).trim();
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_string());
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if !host.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
+            return Some(host.to_string());
+        }
+    }
+    Some(authority.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
