@@ -31,6 +31,23 @@ backup_install_dir() {
   mv "$INSTALL_DIR" "$backup_dir"
 }
 
+stop_existing_install_services() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return
+  fi
+
+  systemctl --user stop \
+    cto-agent-watchdog.timer \
+    cto-agent-watchdog.service \
+    cto-agent.service \
+    cto-kleinhirn.service >/dev/null 2>&1 || true
+  systemctl --user reset-failed \
+    cto-agent-watchdog.timer \
+    cto-agent-watchdog.service \
+    cto-agent.service \
+    cto-kleinhirn.service >/dev/null 2>&1 || true
+}
+
 run_sudo() {
   if [ -n "${CTO_AGENT_SUDO_PASSWORD:-}" ]; then
     printf '%s\n' "$CTO_AGENT_SUDO_PASSWORD" | sudo -S "$@"
@@ -55,15 +72,28 @@ ensure_git_available() {
 }
 
 clone_repo() {
-  mkdir -p "$INSTALL_DIR"
-  if [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
-    echo "Install dir $INSTALL_DIR must be empty before cloning." >&2
-    exit 1
-  fi
+  attempts=0
+  while [ "$attempts" -lt 3 ]; do
+    stop_existing_install_services
+    mkdir -p "$INSTALL_DIR"
+    if [ -z "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
+      rmdir "$INSTALL_DIR" 2>/dev/null || true
+      echo "[bootstrap] Clone CTO-Agent into $INSTALL_DIR"
+      git clone --branch "$GIT_REF" "$REPO_URL" "$INSTALL_DIR"
+      return
+    fi
 
-  rmdir "$INSTALL_DIR" 2>/dev/null || true
-  echo "[bootstrap] Clone CTO-Agent into $INSTALL_DIR"
-  git clone --branch "$GIT_REF" "$REPO_URL" "$INSTALL_DIR"
+    backup_install_dir "install dir was repopulated while preparing fresh clone"
+    attempts=$((attempts + 1))
+  done
+
+  echo "Install dir $INSTALL_DIR could not be kept empty long enough for a fresh clone." >&2
+  exit 1
+}
+
+prepare_fresh_clone() {
+  stop_existing_install_services
+  clone_repo
 }
 
 sync_repo() {
@@ -73,13 +103,13 @@ sync_repo() {
     current_remote="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
     if [ -n "$current_remote" ] && [ "$(normalize_remote "$current_remote")" != "$normalized_repo_url" ]; then
       backup_install_dir "existing checkout points to a different git remote: $current_remote"
-      clone_repo
+      prepare_fresh_clone
       return
     fi
 
     if [ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all 2>/dev/null || true)" ]; then
       backup_install_dir "existing checkout has local or untracked changes"
-      clone_repo
+      prepare_fresh_clone
       return
     fi
 
@@ -90,18 +120,18 @@ sync_repo() {
     fi
     if ! git -C "$INSTALL_DIR" pull --ff-only origin "$GIT_REF"; then
       backup_install_dir "fast-forward update failed"
-      clone_repo
+      prepare_fresh_clone
     fi
     return
   fi
 
   if [ -e "$INSTALL_DIR" ] && [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
     backup_install_dir "existing install dir is not an empty CTO-Agent checkout"
-    clone_repo
+    prepare_fresh_clone
     return
   fi
 
-  clone_repo
+  prepare_fresh_clone
 }
 
 ensure_git_available
