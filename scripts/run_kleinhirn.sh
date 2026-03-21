@@ -169,6 +169,10 @@ main_runtime_uses_parallel_local_server() {
 }
 
 start_context_embedding_server() {
+  if [ "${CTO_AGENT_KLEINHIRN_ARCH:-}" = "gpt_oss" ]; then
+    echo "Skipping context embedding sidecar for GPT-OSS runtime stability." >&2
+    return 0
+  fi
   case "$(printf '%s' "${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:-1}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off)
       return 0
