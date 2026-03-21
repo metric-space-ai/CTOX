@@ -5788,7 +5788,8 @@ fn review_retry_should_reopen_parent_non_machine_owner_stall(
         return false;
     };
     parent_task.task_kind == "owner_interrupt"
-        && parent_summary.trim() == grounded_workspace_non_machine_summary().trim()
+        && (parent_summary.trim() == grounded_workspace_non_machine_summary().trim()
+            || parent_summary.contains("Owner interrupt stays on the direct owner-review path."))
 }
 
 fn publish_task_result_to_origin(
