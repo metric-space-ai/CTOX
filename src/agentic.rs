@@ -940,22 +940,8 @@ pub fn enforce_kleinhirn_ready(paths: &Paths) -> anyhow::Result<()> {
             "Kleinhirn readiness failed: missing local OpenAI-compatible kleinhirn endpoint"
         );
     };
-    let payload = build_model_payload(
-        &target,
-        None,
-        "You are a readiness probe.",
-        "Reply with READY in plain text only.",
-        "",
-    );
-    let response = post_model_request(&target, &payload, model_post_timeout())
+    probe_kleinhirn_endpoint(&target)
         .with_context(|| format!("failed readiness probe against {}", target.base_url))?;
-    let content = require_model_text_output(&target, &response)?;
-    if !content.to_uppercase().contains("READY") {
-        anyhow::bail!(
-            "Kleinhirn readiness failed: endpoint responded, but not with READY ({})",
-            content
-        );
-    }
     Ok(())
 }
 
@@ -2512,7 +2498,66 @@ fn probe_kleinhirn_endpoint(target: &ModelTarget) -> anyhow::Result<String> {
             models.len()
         )
     };
-    Ok(detail)
+    let control_detail = probe_kleinhirn_control_output(target)?;
+    Ok(format!("{detail}; {control_detail}"))
+}
+
+fn probe_kleinhirn_control_output(target: &ModelTarget) -> anyhow::Result<String> {
+    let system_prompt =
+        "You are a readiness probe for a bounded agentic control loop. Respond with strict JSON only.";
+    let user_prompt = r#"Return exactly {"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"ready"}"#;
+    let payload = build_model_payload(target, None, system_prompt, user_prompt, "");
+    let response = post_model_request(target, &payload, model_post_timeout())?;
+    let content = require_model_text_output(target, &response)?;
+    let Some(value) = extract_first_valid_json_value(&content) else {
+        anyhow::bail!(
+            "model control probe returned unusable non-JSON text: {}",
+            trim_for_summary(&content)
+        );
+    };
+    let Some(object) = value.as_object() else {
+        anyhow::bail!(
+            "model control probe returned non-object JSON: {}",
+            trim_for_summary(&content)
+        );
+    };
+    let task_status = object
+        .get("taskStatus")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if normalize_task_status(task_status) != Some("continue") {
+        anyhow::bail!(
+            "model control probe returned unsupported taskStatus `{}`",
+            trim_for_summary(task_status)
+        );
+    }
+    let next_mode = object
+        .get("nextMode")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if normalize_next_mode(next_mode, "continue", None) != "execute_task" {
+        anyhow::bail!(
+            "model control probe returned unsupported nextMode `{}`",
+            trim_for_summary(next_mode)
+        );
+    }
+    let checkpoint_summary = object
+        .get("checkpointSummary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !checkpoint_summary.eq_ignore_ascii_case("ready") {
+        anyhow::bail!(
+            "model control probe returned unexpected checkpointSummary `{}`",
+            trim_for_summary(checkpoint_summary)
+        );
+    }
+    Ok(format!(
+        "model control output is valid via {} ({})",
+        target.base_url, target.model_id
+    ))
 }
 
 fn post_json_request(
