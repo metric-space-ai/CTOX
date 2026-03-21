@@ -2973,6 +2973,32 @@ pub fn load_loop_interrupt_by_id(
     load_loop_interrupt_by_id_with_conn(&conn, interrupt_id)
 }
 
+pub fn list_recent_loop_interrupts(
+    paths: &Paths,
+    limit: usize,
+) -> anyhow::Result<Vec<LoopInterruptRecord>> {
+    let conn = open_db(paths)?;
+    let mut stmt = conn.prepare(
+        "SELECT id, created_at, source_channel, speaker, message, status, response, error
+         FROM loop_interrupts
+         ORDER BY id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(LoopInterruptRecord {
+            id: row.get(0)?,
+            created_at: row.get(1)?,
+            source_channel: row.get(2)?,
+            speaker: row.get(3)?,
+            message: row.get(4)?,
+            status: row.get(5)?,
+            response: row.get(6)?,
+            error: row.get(7)?,
+        })
+    })?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
 fn load_loop_interrupt_by_id_with_conn(
     conn: &Connection,
     interrupt_id: i64,

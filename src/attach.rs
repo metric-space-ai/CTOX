@@ -28,10 +28,12 @@ use crate::runtime_db::BrainRoutingState;
 use crate::runtime_db::BrainUsageRollup;
 use crate::runtime_db::ContextPackageRecord;
 use crate::runtime_db::FocusStateRecord;
+use crate::runtime_db::LoopInterruptRecord;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::latest_context_package;
 use crate::runtime_db::load_brain_usage_rollup;
 use crate::runtime_db::list_agent_events_since;
+use crate::runtime_db::list_recent_loop_interrupts;
 use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_recent_agent_events;
 use crate::runtime_db::list_recent_completed_owner_tasks;
@@ -137,6 +139,7 @@ struct AttachUiSnapshot {
     completed_owner_tasks: Vec<TaskRecord>,
     latest_continuity: Option<AttachContinuitySnapshot>,
     boot_entries: Vec<BootEntry>,
+    chat_interrupts: Vec<LoopInterruptRecord>,
     organigram: Organigram,
     installation_bootstrap: InstallationBootstrapState,
 }
@@ -1832,6 +1835,9 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
     if boot_entries.len() > CHAT_HISTORY_LIMIT * 4 {
         boot_entries = boot_entries.split_off(boot_entries.len() - (CHAT_HISTORY_LIMIT * 4));
     }
+    let mut chat_interrupts = list_recent_loop_interrupts(paths, CHAT_HISTORY_LIMIT * 4)
+        .unwrap_or_default();
+    chat_interrupts.reverse();
     AttachUiSnapshot {
         bios_url: bios_url(&bios.website_path),
         thread: load_agent_thread(paths).ok(),
@@ -1846,6 +1852,7 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
         completed_owner_tasks: list_recent_completed_owner_tasks(paths, 8).unwrap_or_default(),
         latest_continuity: load_latest_continuity_snapshot(paths),
         boot_entries,
+        chat_interrupts,
         organigram: load_organigram(paths),
         installation_bootstrap: load_installation_bootstrap_state(paths),
     }
@@ -2485,25 +2492,63 @@ fn display_setting_value(item: &SettingsItem) -> String {
 
 fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
     let mut lines = Vec::new();
-    let mut last_signature: Option<(String, String)> = None;
-    for entry in snapshot
-        .boot_entries
+    let mut last_owner_signature: Option<(String, String)> = None;
+    let mut last_visible_signature: Option<(String, String)> = None;
+    let mut last_owner_at: Option<DateTime<Utc>> = None;
+    let mut last_reply_signature: Option<(String, String)> = None;
+    let mut last_reply_at: Option<DateTime<Utc>> = None;
+    for interrupt in snapshot
+        .chat_interrupts
         .iter()
-        .filter(|entry| is_chat_entry(snapshot, entry))
+        .filter(|interrupt| is_chat_interrupt_entry(snapshot, interrupt))
     {
-        let speaker_label = chat_speaker_label(snapshot, &entry.speaker).to_string();
-        let message = compact_text(&entry.message, 92);
-        let signature = (speaker_label.clone(), message.clone());
-        if last_signature.as_ref() == Some(&signature) {
+        let owner_message = owner_visible_input_echo(&interrupt.message);
+        let owner_signature = ("owner".to_string(), owner_message.clone());
+        let interrupt_at = parse_iso_utc(&interrupt.created_at);
+        let duplicate_owner_burst = last_owner_signature.as_ref() == Some(&owner_signature)
+            && matches!(
+                (last_owner_at, interrupt_at),
+                (Some(previous), Some(current)) if (current - previous).num_seconds().abs() <= 90
+            );
+        if !duplicate_owner_burst {
+            lines.push(format!(
+                "{}  {:<9}> {}",
+                short_timestamp(&interrupt.created_at),
+                "owner",
+                compact_text(&owner_message, 92)
+            ));
+            last_visible_signature = Some(owner_signature.clone());
+        }
+        last_owner_signature = Some(owner_signature);
+        last_owner_at = interrupt_at;
+
+        let Some(reply) = visible_interrupt_reply(interrupt) else {
+            continue;
+        };
+        let reply_signature = ("cto-agent".to_string(), reply.clone());
+        let duplicate_reply_burst = last_reply_signature.as_ref() == Some(&reply_signature)
+            && matches!(
+                (last_reply_at, interrupt_at),
+                (Some(previous), Some(current)) if (current - previous).num_seconds().abs() <= 90
+            );
+        if last_visible_signature.as_ref() == Some(&reply_signature) || duplicate_reply_burst {
             continue;
         }
         lines.push(format!(
             "{}  {:<9}> {}",
-            short_timestamp(&entry.timestamp),
-            speaker_label,
-            message
+            short_timestamp(
+                interrupt
+                    .response
+                    .as_deref()
+                    .map(|_| interrupt.created_at.as_str())
+                    .unwrap_or(&interrupt.created_at)
+            ),
+            "cto-agent",
+            compact_text(&reply, 92)
         ));
-        last_signature = Some(signature);
+        last_visible_signature = Some(reply_signature);
+        last_reply_signature = last_visible_signature.clone();
+        last_reply_at = interrupt_at;
     }
     if lines.len() > limit {
         lines = lines.split_off(lines.len().saturating_sub(limit));
@@ -2513,11 +2558,11 @@ fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
 
 fn has_recent_owner_chat(snapshot: &AttachUiSnapshot) -> bool {
     snapshot
-        .boot_entries
+        .chat_interrupts
         .iter()
         .rev()
-        .find(|entry| owner_matches_snapshot(snapshot, &entry.speaker))
-        .and_then(|entry| DateTime::parse_from_rfc3339(&entry.timestamp).ok())
+        .find(|entry| is_chat_interrupt_entry(snapshot, entry))
+        .and_then(|entry| DateTime::parse_from_rfc3339(&entry.created_at).ok())
         .map(|dt| {
             let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
             age.num_seconds() >= 0 && age.num_seconds() as u64 <= CHAT_IDLE_SECS
@@ -2525,21 +2570,12 @@ fn has_recent_owner_chat(snapshot: &AttachUiSnapshot) -> bool {
         .unwrap_or(false)
 }
 
-fn is_chat_entry(snapshot: &AttachUiSnapshot, entry: &BootEntry) -> bool {
-    if owner_matches_snapshot(snapshot, &entry.speaker) {
-        return true;
-    }
-    is_cto_speaker(&entry.speaker) && is_owner_visible_chat_text(&entry.message)
-}
-
-fn chat_speaker_label(snapshot: &AttachUiSnapshot, speaker: &str) -> &'static str {
-    if is_cto_speaker(speaker) {
-        "cto-agent"
-    } else if owner_matches_snapshot(snapshot, speaker) {
-        "owner"
-    } else {
-        "chat"
-    }
+fn is_chat_interrupt_entry(snapshot: &AttachUiSnapshot, entry: &LoopInterruptRecord) -> bool {
+    matches!(
+        entry.source_channel.as_str(),
+        "attach_terminal" | "bios" | "terminal" | "homepage"
+    ) && owner_matches_snapshot(snapshot, &entry.speaker)
+        && is_owner_visible_chat_input(&entry.message)
 }
 
 fn is_cto_speaker(speaker: &str) -> bool {
@@ -2561,10 +2597,46 @@ fn is_owner_visible_chat_text(message: &str) -> bool {
         && !lowered.contains("the kleinhirn endpoint responded with unusable output")
         && !lowered.contains("reclassify the task instead")
         && !lowered.contains("current agent mode: mode=")
+        && !lowered.contains("workspace execution contract is active")
+        && !lowered.contains("all systems nominal. awaiting next command.")
+        && !lowered.contains("i am currently unable to produce any new progress")
+        && !lowered.contains("queued as task ")
 }
 
 fn owner_visible_input_echo(message: &str) -> String {
     message.trim().to_string()
+}
+
+fn is_owner_visible_chat_input(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    !is_legacy_chat_command_text(trimmed)
+}
+
+fn is_legacy_chat_command_text(message: &str) -> bool {
+    matches!(
+        message.trim().to_ascii_lowercase().as_str(),
+        "/status" | "/thread" | "/help" | "/turns" | "/events"
+    )
+}
+
+fn visible_interrupt_reply(interrupt: &LoopInterruptRecord) -> Option<String> {
+    if interrupt.status != "completed" {
+        return None;
+    }
+    let reply = interrupt.response.as_deref()?.trim();
+    if !is_owner_visible_chat_text(reply) {
+        return None;
+    }
+    Some(reply.to_string())
+}
+
+fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
 }
 
 fn owner_matches_snapshot(snapshot: &AttachUiSnapshot, speaker: &str) -> bool {
@@ -3551,6 +3623,20 @@ mod tests {
                         message: "The request is queued as Chatten and will reprioritize at the next safe boundary.".to_string(),
                     },
                 ],
+                chat_interrupts: vec![
+                    LoopInterruptRecord {
+                        id: 77,
+                        created_at: "2026-03-18T15:09:00+00:00".to_string(),
+                        source_channel: "attach_terminal".to_string(),
+                        speaker: "Michael Welsch".to_string(),
+                        message: "Please make the BIOS link more visible".to_string(),
+                        status: "completed".to_string(),
+                        response: Some(
+                            "The request is queued as Chatten and will reprioritize at the next safe boundary.".to_string(),
+                        ),
+                        error: None,
+                    },
+                ],
                 organigram: Organigram {
                     owner: crate::contracts::OwnerRef {
                         name: "Michael Welsch".to_string(),
@@ -3858,48 +3944,117 @@ mod tests {
     #[test]
     fn recent_chat_lines_hide_internal_cto_noise_and_dedup_adjacent_duplicates() {
         let mut ui = sample_ui();
-        ui.snapshot.boot_entries = vec![
-            BootEntry {
-                timestamp: "2026-03-18T15:09:00+00:00".to_string(),
+        ui.snapshot.chat_interrupts = vec![
+            LoopInterruptRecord {
+                id: 1,
+                created_at: "2026-03-18T15:09:00+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
                 speaker: "Michael Welsch".to_string(),
                 message: "Hast du die Mail schon eingerichtet?".to_string(),
+                status: "completed".to_string(),
+                response: Some("Ich prüfe gerade den Mailpfad.".to_string()),
+                error: None,
             },
-            BootEntry {
-                timestamp: "2026-03-18T15:09:30+00:00".to_string(),
-                speaker: "cto-agent".to_string(),
-                message: "Ich prüfe gerade den Mailpfad.".to_string(),
+            LoopInterruptRecord {
+                id: 2,
+                created_at: "2026-03-18T15:09:30+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Hast du die Mail schon eingerichtet?".to_string(),
+                status: "completed".to_string(),
+                response: Some("Ich prüfe gerade den Mailpfad.".to_string()),
+                error: None,
             },
-            BootEntry {
-                timestamp: "2026-03-18T15:09:31+00:00".to_string(),
-                speaker: "cto-agent".to_string(),
-                message: "Ich prüfe gerade den Mailpfad.".to_string(),
+            LoopInterruptRecord {
+                id: 3,
+                created_at: "2026-03-18T15:09:40+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "/status".to_string(),
+                status: "completed".to_string(),
+                response: Some("All systems nominal. Awaiting next command.".to_string()),
+                error: None,
             },
-            BootEntry {
-                timestamp: "2026-03-18T15:09:40+00:00".to_string(),
-                speaker: "cto-agent".to_string(),
-                message:
-                    "The kleinhirn endpoint responded with unusable output. Reclassify the task instead.".to_string(),
+            LoopInterruptRecord {
+                id: 4,
+                created_at: "2026-03-18T15:09:50+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Bitte aktualisiere den Chat.".to_string(),
+                status: "completed".to_string(),
+                response: Some(
+                    "Workspace execution contract is active and no exec/browser machine path ran in this turn, so this reply remains planning or inspection only.".to_string(),
+                ),
+                error: None,
             },
-            BootEntry {
-                timestamp: "2026-03-18T15:09:50+00:00".to_string(),
-                speaker: "cto-agent".to_string(),
-                message:
-                    "{\"taskStatus\":\"continue\",\"nextMode\":\"execute_task\"}".to_string(),
+            LoopInterruptRecord {
+                id: 5,
+                created_at: "2026-03-18T15:10:00+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Was ist als Nächstes dran?".to_string(),
+                status: "completed".to_string(),
+                response: Some("Ich prüfe gerade den Mailpfad.".to_string()),
+                error: None,
             },
         ];
 
         let lines = recent_chat_lines(&ui.snapshot, 12).join("\n");
         assert!(lines.contains("owner"));
         assert!(lines.contains("cto-agent"));
-        assert!(!lines.contains("unusable output"));
-        assert!(!lines.contains("\"taskStatus\""));
+        assert!(!lines.contains("All systems nominal"));
+        assert!(!lines.contains("Workspace execution contract is active"));
+        assert!(!lines.contains("/status"));
+        assert_eq!(
+            lines.matches("Hast du die Mail schon eingerichtet?").count(),
+            1
+        );
         assert_eq!(lines.matches("Ich prüfe gerade den Mailpfad.").count(), 1);
+    }
+
+    #[test]
+    fn recent_chat_lines_preserve_owner_then_reply_order_from_interrupts() {
+        let mut ui = sample_ui();
+        ui.snapshot.chat_interrupts = vec![
+            LoopInterruptRecord {
+                id: 10,
+                created_at: "2026-03-18T15:09:00+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Erste Frage".to_string(),
+                status: "completed".to_string(),
+                response: Some("Erste Antwort".to_string()),
+                error: None,
+            },
+            LoopInterruptRecord {
+                id: 11,
+                created_at: "2026-03-18T15:10:00+00:00".to_string(),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Zweite Frage".to_string(),
+                status: "completed".to_string(),
+                response: Some("Zweite Antwort".to_string()),
+                error: None,
+            },
+        ];
+
+        let lines = recent_chat_lines(&ui.snapshot, 12);
+        let rendered = lines.join("\n");
+        let first_owner = rendered.find("Erste Frage").expect("first owner line");
+        let first_reply = rendered.find("Erste Antwort").expect("first reply line");
+        let second_owner = rendered.find("Zweite Frage").expect("second owner line");
+        let second_reply = rendered.find("Zweite Antwort").expect("second reply line");
+
+        assert!(first_owner < first_reply);
+        assert!(first_reply < second_owner);
+        assert!(second_owner < second_reply);
     }
 
     #[test]
     fn chat_rows_keep_pending_owner_input_visible_before_persisted_history_catches_up() {
         let mut ui = sample_ui();
         ui.snapshot.boot_entries.clear();
+        ui.snapshot.chat_interrupts.clear();
 
         let lines = ui.chat_rows(140, 8).join("\n");
 
