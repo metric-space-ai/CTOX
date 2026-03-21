@@ -1049,6 +1049,9 @@ fn build_simple_system_prompt() -> String {
         "Keep `nextMode=execute_task` while the same task should stay active. Use `reprioritize` only at real task boundaries.",
         "Return at most one machine path: `execSessionAction`, `execCommand`, or `browserAction`.",
         "`execCommand` is for one exact single-line command. For multi-step terminal work, session reuse or `execSessionAction=start` is the default. Do not put raw newlines or heredocs into `execCommand`.",
+        "Never mention that you are starting, reusing, writing to, reading from, or terminating an exec session unless the JSON also contains the exact matching machine fields.",
+        "If you set `execSessionAction=start`, you must also return `execSessionCommand` as a non-empty JSON array. If you cannot name the exact command yet, do not emit `execSessionAction` at all.",
+        "If you need one exact bounded repo step and can name the command now, prefer a complete `execCommand` over an incomplete exec-session plan.",
         "Skills and reviewed raw inclusions are authoritative. Follow them instead of improvising alternate workflows.",
         "Use `brainAction` only when the current task materially needs a local model upgrade or an explicitly justified temporary grosshirn boost.",
         "Respond with strict JSON only.",
@@ -3367,6 +3370,49 @@ fn malformed_agent_output(
     }
 }
 
+fn invalid_machine_directive_summary(
+    exec_session_directive: Option<&ExecSessionDirective>,
+    exec_directive: Option<&ExecCommandDirective>,
+    browser_directive: Option<&BrowserActionDirective>,
+) -> Option<String> {
+    let machine_path_count = usize::from(exec_session_directive.is_some())
+        + usize::from(exec_directive.is_some())
+        + usize::from(browser_directive.is_some());
+    if machine_path_count > 1 {
+        return Some(
+            "Model returned multiple machine paths in one bounded step; completion refused."
+                .to_string(),
+        );
+    }
+
+    let directive = exec_session_directive?;
+    let has_session_id = directive
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some();
+    match directive.action.trim().to_lowercase().as_str() {
+        "start" if directive.command.is_empty() => Some(
+            "Model returned execSessionAction=start without execSessionCommand; completion refused."
+                .to_string(),
+        ),
+        "write" if !has_session_id => Some(
+            "Model returned execSessionAction=write without execSessionId; completion refused."
+                .to_string(),
+        ),
+        "write" if directive.input.is_none() && !directive.close_stdin => Some(
+            "Model returned execSessionAction=write without execSessionInput; completion refused."
+                .to_string(),
+        ),
+        "read" | "terminate" if !has_session_id => Some(format!(
+            "Model returned execSessionAction={} without execSessionId; completion refused.",
+            directive.action
+        )),
+        _ => None,
+    }
+}
+
 fn normalize_task_status(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "continue" | "in_progress" | "in-progress" | "progress" | "retry" | "reopen"
@@ -3470,6 +3516,13 @@ fn parse_agent_output_for_task(content: &str, task_kind: Option<&str>) -> Parsed
         let exec_session_directive = parse_exec_session_directive(object);
         let exec_directive = parse_exec_directive(object);
         let browser_directive = parse_browser_directive(object);
+        if let Some(summary) = invalid_machine_directive_summary(
+            exec_session_directive.as_ref(),
+            exec_directive.as_ref(),
+            browser_directive.as_ref(),
+        ) {
+            return malformed_agent_output(summary, content, task_kind);
+        }
         let homepage_update = parse_homepage_update(object);
         let delegate_contract = parse_delegate_contract(object);
         let followup_task = parse_followup_task(object);
@@ -5422,5 +5475,20 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         assert_eq!(parsed.task_status, "continue");
         assert_eq!(parsed.next_mode, "execute_task");
         assert!(parsed.reply.is_none());
+    }
+
+    #[test]
+    fn exec_session_start_without_command_is_rejected_as_malformed_output() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"Start session","reply":"Starting a new exec session now.","execSessionAction":"start"}"#,
+            Some("owner_interrupt"),
+        );
+        assert_eq!(parsed.task_status, "continue");
+        assert_eq!(parsed.next_mode, "execute_task");
+        assert_eq!(
+            parsed.checkpoint_summary,
+            "Model returned execSessionAction=start without execSessionCommand; completion refused."
+        );
+        assert!(parsed.exec_session_directive.is_none());
     }
 }
