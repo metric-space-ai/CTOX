@@ -36,98 +36,7 @@ GPT_OSS_20B = {
     "startupVisibleGpuPolicy": "all",
 }
 
-QWEN35_0_8B = {
-    "role": "kleinhirn",
-    "provider": "qwen",
-    "modelId": "Qwen3.5-0.8B",
-    "runtimeModelId": "Qwen/Qwen3.5-0.8B",
-    "officialLabel": "Qwen3.5 0.8B",
-    "agenticAdapter": "openai_compatible_chat",
-    "reasoningEffort": "high",
-    "deploymentMode": "local_or_self_hosted",
-    "purpose": "smallest local Qwen3.5 always-on supervisor when the host cannot yet carry the larger family members",
-    "supportsVision": False,
-    "minCpuThreads": 4,
-    "minMemoryGb": 8,
-    "minGpuCount": 1,
-    "minTotalGpuMemoryGb": 4,
-    "minSingleGpuMemoryGb": 4,
-    "startupMaxSeqs": 1,
-    "startupMaxBatchSize": 1,
-    "startupMaxSeqLen": 8192,
-    "startupPaContextLen": 4096,
-    "startupPaCacheType": "f8e4m3",
-    "startupPagedAttnMode": "auto",
-    "startupMultiGpuMode": "tensor_parallel",
-    "startupTensorParallelBackend": "nccl",
-    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
-    "preferAutoDeviceMapping": False,
-}
-
-QWEN35_2B = {
-    "role": "kleinhirn_install_alternative",
-    "provider": "qwen",
-    "modelId": "Qwen3.5-2B",
-    "runtimeModelId": "Qwen/Qwen3.5-2B",
-    "officialLabel": "Qwen3.5 2B",
-    "agenticAdapter": "openai_compatible_chat",
-    "reasoningEffort": "high",
-    "deploymentMode": "local_or_self_hosted",
-    "purpose": "small local Qwen3.5 supervisor when the host can carry a little more context and quality than 0.8B",
-    "supportsVision": False,
-    "minCpuThreads": 8,
-    "minMemoryGb": 12,
-    "minGpuCount": 1,
-    "minTotalGpuMemoryGb": 6,
-    "minSingleGpuMemoryGb": 6,
-    "startupMaxSeqs": 1,
-    "startupMaxBatchSize": 1,
-    "startupMaxSeqLen": 8192,
-    "startupPaContextLen": 6144,
-    "startupPaCacheType": "f8e4m3",
-    "startupPagedAttnMode": "auto",
-    "startupMultiGpuMode": "tensor_parallel",
-    "startupTensorParallelBackend": "nccl",
-    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
-    "preferAutoDeviceMapping": False,
-}
-
-QWEN35_4B = {
-    "role": "kleinhirn_install_alternative",
-    "provider": "qwen",
-    "modelId": "Qwen3.5-4B",
-    "runtimeModelId": "Qwen/Qwen3.5-4B",
-    "officialLabel": "Qwen3.5 4B",
-    "agenticAdapter": "openai_compatible_chat",
-    "reasoningEffort": "high",
-    "deploymentMode": "local_or_self_hosted",
-    "purpose": "mid-sized local Qwen3.5 supervisor when the host can carry a materially stronger local family member without needing the 35B tier yet",
-    "supportsVision": False,
-    "minCpuThreads": 8,
-    "minMemoryGb": 16,
-    "minGpuCount": 1,
-    "minTotalGpuMemoryGb": 12,
-    "minSingleGpuMemoryGb": 12,
-    "startupMaxSeqs": 1,
-    "startupMaxBatchSize": 1,
-    "startupMaxSeqLen": 131072,
-    "startupPaContextLen": 131072,
-    "startupPaCacheType": "f8e4m3",
-    "startupPagedAttnMode": "auto",
-    "startupMultiGpuMode": "tensor_parallel",
-    "startupTensorParallelBackend": "nccl",
-    "startupVisibleGpuPolicy": "largest_power_of_two_prefer_display_free",
-    "preferAutoDeviceMapping": False,
-}
-
 INSTALL_ALTERNATIVES = []
-
-QWEN35_FAMILY = [
-    QWEN35_0_8B,
-    QWEN35_2B,
-    QWEN35_4B,
-    QWEN35_35B_A3B,
-]
 
 UPGRADE_CANDIDATES = []
 
@@ -210,12 +119,8 @@ def main() -> int:
     policy = load_policy(policy_path)
 
     profile = normalize_profile_name(args.profile)
-    if profile == "qwen35":
-        selected = deepcopy(QWEN35_35B_A3B)
-        install_alternatives = deepcopy(QWEN35_FAMILY[:-1])
-    else:
-        selected = deepcopy(GPT_OSS_20B)
-        install_alternatives = deepcopy(INSTALL_ALTERNATIVES)
+    selected = deepcopy(GPT_OSS_20B)
+    install_alternatives = deepcopy(INSTALL_ALTERNATIVES)
 
     policy["version"] = int(policy.get("version") or 1)
     policy["kleinhirn"] = selected
