@@ -5658,6 +5658,31 @@ pub fn latest_context_package_for_task(
     .map_err(Into::into)
 }
 
+pub fn latest_context_package(paths: &Paths) -> anyhow::Result<Option<ContextPackageRecord>> {
+    let conn = open_db(paths)?;
+    conn.query_row(
+        "SELECT id, created_at, task_id, task_title, context_mode, budget_hint, rationale, package_json
+         FROM context_packages
+         ORDER BY id DESC
+         LIMIT 1",
+        [],
+        |row| {
+            Ok(ContextPackageRecord {
+                id: row.get(0)?,
+                created_at: row.get(1)?,
+                task_id: row.get(2)?,
+                task_title: row.get(3)?,
+                context_mode: row.get(4)?,
+                budget_hint: row.get(5)?,
+                rationale: row.get(6)?,
+                package_json: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn open_db(paths: &Paths) -> anyhow::Result<Connection> {
     if let Some(parent) = paths.runtime_db_path.parent() {
         fs::create_dir_all(parent)?;

@@ -26,8 +26,10 @@ use crate::runtime_db::AgentThreadRecord;
 use crate::runtime_db::AgentTurnRecord;
 use crate::runtime_db::BrainRoutingState;
 use crate::runtime_db::BrainUsageRollup;
+use crate::runtime_db::ContextPackageRecord;
 use crate::runtime_db::FocusStateRecord;
 use crate::runtime_db::TaskRecord;
+use crate::runtime_db::latest_context_package;
 use crate::runtime_db::load_brain_usage_rollup;
 use crate::runtime_db::list_agent_events_since;
 use crate::runtime_db::list_open_tasks;
@@ -60,6 +62,7 @@ use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::fs;
@@ -132,6 +135,7 @@ struct AttachUiSnapshot {
     last_turn: Option<AgentTurnRecord>,
     open_tasks: Vec<TaskRecord>,
     completed_owner_tasks: Vec<TaskRecord>,
+    latest_continuity: Option<AttachContinuitySnapshot>,
     boot_entries: Vec<BootEntry>,
     organigram: Organigram,
     installation_bootstrap: InstallationBootstrapState,
@@ -141,7 +145,29 @@ struct AttachUiSnapshot {
 enum AttachPage {
     Tasks,
     Chat,
+    Continuity,
     Settings,
+}
+
+#[derive(Debug, Clone)]
+struct AttachContinuitySnapshot {
+    created_at: String,
+    task_id: i64,
+    task_title: String,
+    context_mode: String,
+    trigger: String,
+    controller: String,
+    school_grade: Option<u8>,
+    grade_label: String,
+    progress_summary: String,
+    progress_rationale: String,
+    continuity_narrative: String,
+    continuity_anchors: String,
+    active_focus: String,
+    reprioritization_summary: String,
+    next_action: String,
+    model_tier: String,
+    requested_model: String,
 }
 
 #[derive(Debug, Clone)]
@@ -362,6 +388,7 @@ fn run_attach_tui(paths: &Paths) -> anyhow::Result<()> {
                     match ui.page {
                         AttachPage::Tasks => {}
                         AttachPage::Chat => ui.chat_input.push_str(&text),
+                        AttachPage::Continuity => {}
                         AttachPage::Settings => {
                             if let Some(item) = ui.settings_items.get_mut(ui.settings_selected) {
                                 item.value.push_str(&text);
@@ -531,13 +558,15 @@ impl AttachTui {
             } => {
                 self.page = match self.page {
                     AttachPage::Tasks => AttachPage::Chat,
-                    AttachPage::Chat => AttachPage::Settings,
+                    AttachPage::Chat => AttachPage::Continuity,
+                    AttachPage::Continuity => AttachPage::Settings,
                     AttachPage::Settings => AttachPage::Tasks,
                 };
             }
             _ => match self.page {
                 AttachPage::Tasks => {}
                 AttachPage::Chat => self.handle_chat_key_event(paths, key_event),
+                AttachPage::Continuity => {}
                 AttachPage::Settings => self.handle_settings_key_event(paths, key_event),
             },
         }
@@ -665,6 +694,7 @@ impl AttachTui {
         match self.page {
             AttachPage::Tasks => true,
             AttachPage::Chat => self.chat_input.is_empty(),
+            AttachPage::Continuity => true,
             AttachPage::Settings => self
                 .settings_items
                 .get(self.settings_selected)
@@ -859,6 +889,9 @@ impl AttachTui {
         match self.page {
             AttachPage::Tasks => self.render_tasks_page(stdout, width_usize, height_usize),
             AttachPage::Chat => self.render_chat_page(stdout, width_usize, height_usize),
+            AttachPage::Continuity => {
+                self.render_continuity_page(stdout, width_usize, height_usize)
+            }
             AttachPage::Settings => self.render_settings_page(stdout, width_usize, height_usize),
         }
     }
@@ -982,7 +1015,8 @@ impl AttachTui {
         frame_lines.push(frame_bottom(frame_width));
 
         let mut screen_lines = frame_lines;
-        screen_lines.push("Tab Chat · Tab Settings · Ctrl-P reset · Ctrl-C exit".to_string());
+        screen_lines
+            .push("Tab Chat · Tab Continuity · Tab Settings · Ctrl-P reset · Ctrl-C exit".to_string());
         let fitted_lines = screen_lines
             .into_iter()
             .take(height)
@@ -1001,9 +1035,9 @@ impl AttachTui {
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
         let input_hint = if self.snapshot.active_turn.is_some() {
-            "Enter queues raw chat for the next safe boundary. Tab cycles to Tasks and Settings."
+            "Enter queues raw chat for the next safe boundary. Tab cycles Tasks, Continuity and Settings."
         } else {
-            "Enter sends raw chat now. Tab cycles to Tasks and Settings."
+            "Enter sends raw chat now. Tab cycles Tasks, Continuity and Settings."
         };
         let agent_rows = self.agent_rows(frame_width);
         let fixed_rows = 2 + 1 + agent_rows.len() + 1 + 1 + 1 + 1 + 1;
@@ -1038,6 +1072,54 @@ impl AttachTui {
         render_screen_lines(stdout, &fitted_lines, cursor_col, cursor_row)
     }
 
+    fn render_continuity_page(
+        &self,
+        stdout: &mut io::Stdout,
+        width: usize,
+        height: usize,
+    ) -> anyhow::Result<()> {
+        let frame_width = width;
+        let summary_rows = self.continuity_summary_rows(frame_width);
+        let fixed_rows = 2 + 1 + 1 + summary_rows.len() + 1 + 1 + 1 + 1;
+        let remaining = height.saturating_sub(fixed_rows);
+        let base_rows = 3usize;
+        let extra_rows = remaining.saturating_sub(base_rows * 3);
+        let narrative_rows = base_rows + (extra_rows / 3);
+        let anchors_rows = base_rows + (extra_rows / 3);
+        let focus_rows =
+            base_rows + extra_rows.saturating_sub((narrative_rows - base_rows) + (anchors_rows - base_rows));
+
+        let mut frame_lines = vec![
+            frame_top("CTO-Agent Continuity", &self.primary_status_line(), frame_width),
+            frame_row(
+                &format!(
+                    "BIOS {}  |  Page {}",
+                    self.snapshot.bios_url.as_deref().unwrap_or("unavailable"),
+                    self.page_label()
+                ),
+                frame_width,
+            ),
+            frame_separator("Last Compact", frame_width),
+        ];
+        frame_lines.extend(summary_rows);
+        frame_lines.push(frame_separator("Narrative", frame_width));
+        frame_lines.extend(self.continuity_narrative_rows(frame_width, narrative_rows));
+        frame_lines.push(frame_separator("Anchors", frame_width));
+        frame_lines.extend(self.continuity_anchor_rows(frame_width, anchors_rows));
+        frame_lines.push(frame_separator("Focus", frame_width));
+        frame_lines.extend(self.continuity_focus_rows(frame_width, focus_rows));
+        frame_lines.push(frame_bottom(frame_width));
+
+        let mut screen_lines = frame_lines;
+        screen_lines.push("Tab Settings · Tab Tasks · Tab Chat · Ctrl-P reset · Ctrl-C exit".to_string());
+        let fitted_lines = screen_lines
+            .into_iter()
+            .take(height)
+            .map(|line| fit_line(&line, width))
+            .collect::<Vec<_>>();
+        render_screen_lines(stdout, &fitted_lines, 0, fitted_lines.len().saturating_sub(1) as u16)
+    }
+
     fn render_settings_page(
         &self,
         stdout: &mut io::Stdout,
@@ -1055,7 +1137,7 @@ impl AttachTui {
             frame_top("CTO-Agent Settings", &self.primary_status_line(), frame_width),
             frame_row(
                 &format!(
-                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab cycles Tasks and Chat",
+                    "Status {}  |  Use Up/Down to select, Left/Right to cycle the three compaction tiers, Enter or Ctrl-S to save, Tab cycles Tasks, Chat and Continuity",
                     dirty
                 ),
                 frame_width,
@@ -1085,6 +1167,7 @@ impl AttachTui {
         match self.page {
             AttachPage::Tasks => "TASKS",
             AttachPage::Chat => "CHAT",
+            AttachPage::Continuity => "CONTINUITY",
             AttachPage::Settings => "SETTINGS",
         }
     }
@@ -1093,6 +1176,7 @@ impl AttachTui {
         match self.page {
             AttachPage::Tasks => String::new(),
             AttachPage::Chat => "Chat to CTO: ".to_string(),
+            AttachPage::Continuity => String::new(),
             AttachPage::Settings => {
                 let label = self
                     .settings_items
@@ -1108,6 +1192,7 @@ impl AttachTui {
         match self.page {
             AttachPage::Tasks => "",
             AttachPage::Chat => &self.chat_input,
+            AttachPage::Continuity => "",
             AttachPage::Settings => self
                 .settings_items
                 .get(self.settings_selected)
@@ -1176,6 +1261,100 @@ impl AttachTui {
                 width,
             ),
         ]
+    }
+
+    fn continuity_summary_rows(&self, width: usize) -> Vec<String> {
+        let Some(continuity) = self.snapshot.latest_continuity.as_ref() else {
+            return vec![
+                frame_row("No compact continuity package has been recorded yet.", width),
+                frame_row(
+                    "A new owner interrupt or task preparation pass will create the next continuity record.",
+                    width,
+                ),
+                frame_row(" ", width),
+                frame_row(" ", width),
+            ];
+        };
+        let grade = continuity
+            .school_grade
+            .map(|grade| grade.to_string())
+            .unwrap_or_else(|| "?".to_string());
+        vec![
+            frame_row(
+                &format!(
+                    "{}  |  task #{} {}",
+                    short_timestamp(&continuity.created_at),
+                    continuity.task_id,
+                    compact_text(&continuity.task_title, 92)
+                ),
+                width,
+            ),
+            frame_row(
+                &format!(
+                    "Trigger {}  |  grade {} ({})  |  next {}",
+                    continuity.trigger,
+                    grade,
+                    continuity.grade_label,
+                    continuity.next_action
+                ),
+                width,
+            ),
+            frame_row(
+                &format!(
+                    "Model tier {}  |  request {}  |  mode {}",
+                    continuity.model_tier,
+                    compact_text(&continuity.requested_model, 36),
+                    continuity.context_mode
+                ),
+                width,
+            ),
+            frame_row(
+                &format!(
+                    "{}  |  {}",
+                    compact_text(&continuity.controller, 42),
+                    compact_text(&continuity.reprioritization_summary, 72)
+                ),
+                width,
+            ),
+        ]
+    }
+
+    fn continuity_narrative_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let Some(continuity) = self.snapshot.latest_continuity.as_ref() else {
+            return blank_frame_rows(width, height);
+        };
+        let mut text = continuity.progress_summary.clone();
+        if !continuity.progress_rationale.trim().is_empty() {
+            text.push_str("\n");
+            text.push_str(&continuity.progress_rationale);
+        }
+        if !continuity.continuity_narrative.trim().is_empty() {
+            text.push_str("\n\n");
+            text.push_str(&continuity.continuity_narrative);
+        }
+        frame_wrapped_rows(&text, width, height)
+    }
+
+    fn continuity_anchor_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let Some(continuity) = self.snapshot.latest_continuity.as_ref() else {
+            return blank_frame_rows(width, height);
+        };
+        frame_wrapped_rows(&continuity.continuity_anchors, width, height)
+    }
+
+    fn continuity_focus_rows(&self, width: usize, height: usize) -> Vec<String> {
+        let Some(continuity) = self.snapshot.latest_continuity.as_ref() else {
+            return blank_frame_rows(width, height);
+        };
+        let mut text = continuity.active_focus.clone();
+        if !continuity.requested_model.trim().is_empty() {
+            text.push_str("\n");
+            text.push_str(&format!(
+                "Requested model: {}",
+                continuity.requested_model.trim()
+            ));
+        }
+        frame_wrapped_rows(&text, width, height)
     }
 
     fn setting_value(&self, key: &str) -> Option<&str> {
@@ -1527,10 +1706,59 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
         last_turn: load_latest_completed_agent_turn(paths).ok().flatten(),
         open_tasks: list_open_tasks(paths, 8).unwrap_or_default(),
         completed_owner_tasks: list_recent_completed_owner_tasks(paths, 8).unwrap_or_default(),
+        latest_continuity: load_latest_continuity_snapshot(paths),
         boot_entries,
         organigram: load_organigram(paths),
         installation_bootstrap: load_installation_bootstrap_state(paths),
     }
+}
+
+fn load_latest_continuity_snapshot(paths: &Paths) -> Option<AttachContinuitySnapshot> {
+    latest_context_package(paths)
+        .ok()
+        .flatten()
+        .and_then(|record| extract_latest_continuity_snapshot(&record))
+}
+
+fn extract_latest_continuity_snapshot(
+    record: &ContextPackageRecord,
+) -> Option<AttachContinuitySnapshot> {
+    let package: Value = serde_json::from_str(&record.package_json).ok()?;
+    let compact = package.get("compactController")?;
+
+    let trigger = json_string(compact, &["trigger"]);
+    let controller = json_string(compact, &["controller"]);
+    let continuity_narrative = json_string(compact, &["continuityNarrative"]);
+    let continuity_anchors = json_string(compact, &["continuityAnchors"]);
+    let active_focus = json_string(compact, &["activeFocus"]);
+    if trigger.is_empty()
+        && controller.is_empty()
+        && continuity_narrative.is_empty()
+        && continuity_anchors.is_empty()
+        && active_focus.is_empty()
+    {
+        return None;
+    }
+
+    Some(AttachContinuitySnapshot {
+        created_at: record.created_at.clone(),
+        task_id: record.task_id,
+        task_title: record.task_title.clone(),
+        context_mode: record.context_mode.clone(),
+        trigger,
+        controller,
+        school_grade: json_u8(compact, &["progressReview", "schoolGrade"]),
+        grade_label: json_string(compact, &["progressReview", "label"]),
+        progress_summary: json_string(compact, &["progressReview", "summary"]),
+        progress_rationale: json_string(compact, &["progressReview", "rationale"]),
+        continuity_narrative,
+        continuity_anchors,
+        active_focus,
+        reprioritization_summary: json_string(compact, &["reprioritizationReview", "summary"]),
+        next_action: json_string(compact, &["reprioritizationReview", "nextAction"]),
+        model_tier: json_string(compact, &["modelRouting", "tier"]),
+        requested_model: json_string(compact, &["modelRouting", "requestedModel"]),
+    })
 }
 
 fn render_attach_banner(paths: &Paths) -> String {
@@ -2509,6 +2737,111 @@ fn pad_to_width(text: &str, width: usize) -> String {
     format!("{text}{}", " ".repeat(width - text_width))
 }
 
+fn blank_frame_rows(width: usize, height: usize) -> Vec<String> {
+    (0..height).map(|_| frame_row(" ", width)).collect()
+}
+
+fn frame_wrapped_rows(text: &str, width: usize, height: usize) -> Vec<String> {
+    if height == 0 {
+        return Vec::new();
+    }
+    let inner = width.saturating_sub(4).max(1);
+    let mut rows = Vec::new();
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed.is_empty() {
+            rows.push(frame_row(" ", width));
+            continue;
+        }
+        rows.extend(
+            wrap_text_to_width(trimmed, inner)
+                .into_iter()
+                .map(|line| frame_row(&line, width)),
+        );
+    }
+    if rows.is_empty() {
+        rows.push(frame_row(" ", width));
+    }
+    if rows.len() > height {
+        rows.truncate(height.saturating_sub(1));
+        rows.push(frame_row("...", width));
+    }
+    while rows.len() < height {
+        rows.push(frame_row(" ", width));
+    }
+    rows
+}
+
+fn wrap_text_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let words = text.split_whitespace().collect::<Vec<_>>();
+    if words.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in words {
+        let tentative = if current.is_empty() {
+            word.to_string()
+        } else {
+            format!("{current} {word}")
+        };
+        if tentative.chars().count() <= width {
+            current = tentative;
+            continue;
+        }
+        if !current.is_empty() {
+            lines.push(current);
+            current = String::new();
+        }
+        if word.chars().count() <= width {
+            current = word.to_string();
+            continue;
+        }
+        let mut chunk = String::new();
+        for ch in word.chars() {
+            chunk.push(ch);
+            if chunk.chars().count() >= width {
+                lines.push(chunk);
+                chunk = String::new();
+            }
+        }
+        current = chunk;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+fn json_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+fn json_string(value: &Value, path: &[&str]) -> String {
+    json_at_path(value, path)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn json_u8(value: &Value, path: &[&str]) -> Option<u8> {
+    json_at_path(value, path)
+        .and_then(Value::as_u64)
+        .and_then(|raw| u8::try_from(raw).ok())
+}
+
 fn format_activity_line(event: &AgentEventRecord) -> String {
     let time = short_timestamp(&event.created_at);
     let method = match event.method.as_str() {
@@ -2967,6 +3300,37 @@ mod tests {
                         last_output: Some("watchdog restart ok".to_string()),
                     },
                 ],
+                latest_continuity: Some(AttachContinuitySnapshot {
+                    created_at: "2026-03-18T15:09:35+00:00".to_string(),
+                    task_id: 413,
+                    task_title: "Show the BIOS link on the attach screen".to_string(),
+                    context_mode: "execute_task".to_string(),
+                    trigger: "interrupt".to_string(),
+                    controller: "context_optimizer_simple_html_root_v1".to_string(),
+                    school_grade: Some(3),
+                    grade_label: "befriedigend".to_string(),
+                    progress_summary:
+                        "The agent is progressing, but the workstream is no longer trivial and needs explicit steering."
+                            .to_string(),
+                    progress_rationale:
+                        "An interrupt arrived and forced a bounded continuity refresh."
+                            .to_string(),
+                    continuity_narrative:
+                        "The owner asked for a stronger BIOS bridge while the loop was already in bounded execution."
+                            .to_string(),
+                    continuity_anchors:
+                        "workspace anchor: src/attach.rs already contains the attach rendering path.\nsystem queue state: owner interrupt is waiting behind the running turn."
+                            .to_string(),
+                    active_focus:
+                        "Status: continue\nBlocker: none\nNext step: split the attach UI into explicit tasks, chat and continuity surfaces.\nDone criteria: the owner can see the BIOS link, tasks and continuity without mixed noise."
+                            .to_string(),
+                    reprioritization_summary:
+                        "Compaction recommends a task-order review before the next bounded step."
+                            .to_string(),
+                    next_action: "reprioritize".to_string(),
+                    model_tier: "medium".to_string(),
+                    requested_model: "openai/gpt-5.4-mini".to_string(),
+                }),
                 boot_entries: vec![
                     BootEntry {
                         timestamp: "2026-03-18T15:09:00+00:00".to_string(),
@@ -3239,8 +3603,9 @@ mod tests {
         let next_rows = ui.next_rows(120).join("\n");
         let done_rows = ui.completed_owner_task_rows(120, 8).join("\n");
 
-        assert!(ui.brain_status_line().contains("Brain [KLEINHIRN]"));
-        assert!(ui.brain_status_line().contains("GPT-OSS 20B"));
+        let continuity_rows = ui.continuity_summary_rows(120).join("\n");
+        assert!(continuity_rows.contains("grade 3 (befriedigend)"));
+        assert!(continuity_rows.contains("openai/gpt-5.4-mini"));
         assert!(now_rows.contains("Summary  Bounded step is still running."));
         assert!(now_rows.contains("Last done  #409 Secure the browser health check"));
         assert!(next_rows.contains("o #413 Show the BIOS link on the attach screen"));
@@ -3359,7 +3724,18 @@ mod tests {
     }
 
     #[test]
-    fn tab_cycles_tasks_chat_settings() -> anyhow::Result<()> {
+    fn continuity_page_has_no_active_editor_prompt() {
+        let mut ui = sample_ui();
+        ui.page = AttachPage::Continuity;
+
+        assert_eq!(ui.page_label(), "CONTINUITY");
+        assert!(ui.editor_prompt().is_empty());
+        assert!(ui.editor_text().is_empty());
+        assert!(ui.active_editor_is_empty());
+    }
+
+    #[test]
+    fn tab_cycles_tasks_chat_continuity_settings() -> anyhow::Result<()> {
         let _guard = env_lock().lock().expect("test env lock poisoned");
         let root = unique_test_root("tab_cycle_pages");
         std::fs::create_dir_all(&root)?;
@@ -3372,6 +3748,9 @@ mod tests {
         assert_eq!(ui.page, AttachPage::Chat);
 
         ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(ui.page, AttachPage::Continuity);
+
+        ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(ui.page, AttachPage::Settings);
 
         ui.handle_key_event(&paths, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -3379,6 +3758,53 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())
+    }
+
+    #[test]
+    fn extract_latest_continuity_snapshot_reads_compact_controller() {
+        let record = ContextPackageRecord {
+            id: 44,
+            created_at: "2026-03-21T13:55:00+00:00".to_string(),
+            task_id: 700,
+            task_title: "Check continuity".to_string(),
+            context_mode: "execute_task".to_string(),
+            budget_hint: 1200,
+            rationale: "interrupt compact".to_string(),
+            package_json: serde_json::json!({
+                "compactController": {
+                    "trigger": "interrupt",
+                    "controller": "context_optimizer_simple_html_root_v1",
+                    "progressReview": {
+                        "schoolGrade": 4,
+                        "label": "ausreichend",
+                        "summary": "Progress is only adequate.",
+                        "rationale": "The queue changed."
+                    },
+                    "continuityNarrative": "The task packet changed after the owner interrupt.",
+                    "continuityAnchors": "anchor A\nanchor B",
+                    "activeFocus": "Status: continue\nNext step: reprioritize",
+                    "reprioritizationReview": {
+                        "summary": "Review task order now.",
+                        "nextAction": "reprioritize"
+                    },
+                    "modelRouting": {
+                        "tier": "medium",
+                        "requestedModel": "openai/gpt-5.4-mini"
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let snapshot =
+            extract_latest_continuity_snapshot(&record).expect("snapshot should parse");
+
+        assert_eq!(snapshot.task_id, 700);
+        assert_eq!(snapshot.trigger, "interrupt");
+        assert_eq!(snapshot.grade_label, "ausreichend");
+        assert_eq!(snapshot.model_tier, "medium");
+        assert_eq!(snapshot.requested_model, "openai/gpt-5.4-mini");
+        assert!(snapshot.continuity_narrative.contains("owner interrupt"));
     }
 
     #[test]
