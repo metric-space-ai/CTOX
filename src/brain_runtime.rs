@@ -785,7 +785,10 @@ fn apply_selected_model_to_env(
     let tune = supported_model_tune_candidate(selected, census);
     let reliable_layout_tune =
         tune.filter(|candidate| candidate.max_context_tokens.unwrap_or(0) > 0);
-    match tune.and_then(|candidate| candidate.recommended_isq.clone()) {
+    match tune
+        .and_then(|candidate| candidate.recommended_isq.clone())
+        .filter(|_| !is_gpt_oss_family(selected))
+    {
         Some(value) if !value.trim().is_empty() => {
             env_map.insert("CTO_AGENT_KLEINHIRN_ISQ".to_string(), value);
         }

@@ -1207,6 +1207,9 @@ KLEINHIRN_VISIBLE_GPU_POLICY="$(resolve_visible_gpu_policy)"
 if [ -z "$KLEINHIRN_ISQ" ] && [ -n "${RECOMMENDED_ISQ:-}" ]; then
   KLEINHIRN_ISQ="$(printf '%s' "$RECOMMENDED_ISQ" | tr '[:upper:]' '[:lower:]')"
 fi
+if [ "$KLEINHIRN_PROFILE" = "gpt_oss" ]; then
+  KLEINHIRN_ISQ=""
+fi
 if [ -z "$KLEINHIRN_DEVICE_LAYERS" ] && [ -n "${RECOMMENDED_DEVICE_LAYERS:-}" ] && [ "${CENSUS_GPU_COUNT:-0}" -le 1 ]; then
   KLEINHIRN_DEVICE_LAYERS="$RECOMMENDED_DEVICE_LAYERS"
 fi
@@ -1217,9 +1220,6 @@ if [ -n "${RECOMMENDED_MAX_CONTEXT_TOKENS:-}" ]; then
   if [ "$KLEINHIRN_PAGED_ATTN_MODE" != "off" ] && { [ -z "$KLEINHIRN_PA_CTXT_LEN" ] || [ "$KLEINHIRN_PA_CTXT_LEN" -lt "$RECOMMENDED_MAX_CONTEXT_TOKENS" ]; }; then
     KLEINHIRN_PA_CTXT_LEN="$RECOMMENDED_MAX_CONTEXT_TOKENS"
   fi
-fi
-if [ "$KLEINHIRN_PROFILE" = "gpt_oss" ] && [ -z "$KLEINHIRN_ISQ" ]; then
-  KLEINHIRN_ISQ="q6k"
 fi
 if [ -z "$KLEINHIRN_MAX_SEQS" ]; then
   KLEINHIRN_MAX_SEQS="1"
