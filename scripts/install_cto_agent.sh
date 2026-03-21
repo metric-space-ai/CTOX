@@ -169,15 +169,29 @@ detect_public_control_plane_host() {
     return
   fi
   if command -v hostname >/dev/null 2>&1; then
-    hostname -I 2>/dev/null | tr ' ' '\n' | awk 'NF && $1 !~ /^127\./ { print; exit }'
+    hostname -I 2>/dev/null | tr ' ' '\n' | awk '
+      NF && $1 ~ /^100\./ { print; exit }
+      NF && $1 !~ /^127\./ && preferred == "" { preferred = $1 }
+      END {
+        if (preferred != "") {
+          print preferred;
+        }
+      }'
     return
   fi
   if command -v ip >/dev/null 2>&1; then
     ip -o -4 addr show scope global 2>/dev/null | awk '{
       split($4, address, "/");
-      if (address[1] !~ /^127\./) {
+      if (address[1] ~ /^100\./) {
         print address[1];
         exit;
+      }
+      if (address[1] !~ /^127\./ && preferred == "") {
+        preferred = address[1];
+      }
+    } END {
+      if (preferred != "") {
+        print preferred;
       }
     }'
     return
