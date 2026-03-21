@@ -326,13 +326,15 @@ fn owner_chat_plaintext_recovery_allowed(
     context_block: &str,
     result: &AgenticRunResult,
 ) -> bool {
+    let status_question = crate::context_controller::owner_interrupt_is_status_question(task);
     if task.task_kind != "owner_interrupt"
         || !matches!(
             task.source_channel.as_str(),
             "attach_terminal" | "bios" | "homepage" | "terminal"
         )
         || !result.retriable_local_failure
-        || context_block.contains("workspace-execution-capability-policy.json")
+        || (!status_question
+            && context_block.contains("workspace-execution-capability-policy.json"))
     {
         return false;
     }
@@ -1021,7 +1023,7 @@ fn queued_owner_interrupt_should_preempt_active_task(
     if queued_task.task_kind != "owner_interrupt"
         || !matches!(
             queued_task.source_channel.as_str(),
-            "terminal" | "attach_terminal" | "bios" | "homepage" | "email"
+            "terminal" | "attach_terminal" | "bios" | "homepage" | "email" | "jami"
         )
         || !is_owner_speaker(&queued_task.speaker, owner_name)
         || queued_task.priority_score < active_task.priority_score
@@ -1201,7 +1203,7 @@ fn build_simple_system_prompt() -> String {
         "You are the bounded Codex-style worker inside a thin Rust wrapper.",
         "The wrapper already selects the task, tracks the queue, manages the active focus, compacts context, and handles interrupts plus reprioritization.",
         "Do not invent a second planner above the wrapper. Work only on the selected task for one bounded step.",
-        "Owner input has absolute priority. Mail, terminal/TUI, BIOS, and homepage all feed the same interrupt path. Interrupts do not hard-abort the current machine step; they are handled at safe turn boundaries.",
+        "Owner input has absolute priority. Mail, Jami, terminal/TUI, BIOS, and homepage all feed the same interrupt path. Interrupts do not hard-abort the current machine step; they are handled at safe turn boundaries.",
         "Use `compactController` as the wrapper-facing bridge at each compaction boundary. Its progress review, reprioritization review, and model routing describe what the wrapper expects next.",
         "Use `contextDistillation` as the main handoff. `continuityNarrative` is story continuity. `continuityArtifacts` plus `continuityAnchors` carry the concrete files, contracts, sessions, checkpoints, and facts that must survive later turns. `activeFocus` is the exact next-step brief. `systemContinuityAnchors` are wrapper-level guardrails. `historicalRetrievalRefs` are narrow reload pointers.",
         "Treat `preparedContextArtifact` as provenance, except on `context_preparation` tasks where it is a required machine-readable output.",
@@ -1405,7 +1407,7 @@ Task Role:\n\
 {mode_hint}\n\n\
 Wrapper Reminders:\n\
 - The outer task manager already chose this task. Do not reopen global scheduling.\n\
-- Mail, terminal/TUI, BIOS, and homepage interrupts already share one reprioritization path.\n\
+- Mail, Jami, terminal/TUI, BIOS, and homepage interrupts already share one reprioritization path.\n\
 - Use `contextDistillation.activeFocus` first.\n\
 - Preserve story continuity through `contextDistillation.continuityNarrative`.\n\
 - Preserve concrete continuity through `contextDistillation.continuityArtifacts` and `contextDistillation.continuityAnchors`.\n\
@@ -5744,8 +5746,23 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             "{\"rawInclusions\":[]}",
             &result
         ));
+        let workspace_task = TaskRecord {
+            detail: "Erstelle eine C++-Konsolenanwendung mit persistenter Speicherung."
+                .to_string(),
+            ..task.clone()
+        };
         assert!(!owner_chat_plaintext_recovery_allowed(
-            &task,
+            &workspace_task,
+            "{\"rawInclusions\":[{\"sourceRef\":\"contracts/system/workspace-execution-capability-policy.json\"}]}",
+            &result
+        ));
+
+        let status_task = TaskRecord {
+            detail: "Hast du schon an der C++-App gearbeitet?".to_string(),
+            ..task.clone()
+        };
+        assert!(owner_chat_plaintext_recovery_allowed(
+            &status_task,
             "{\"rawInclusions\":[{\"sourceRef\":\"contracts/system/workspace-execution-capability-policy.json\"}]}",
             &result
         ));

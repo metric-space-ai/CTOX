@@ -1513,7 +1513,7 @@ fn compose_bios_reply(paths: &Paths, homepage_note: Option<&str>) -> anyhow::Res
         homepage.stage
     ));
     parts.push(format!(
-        "I treat email and WhatsApp as low-trust channels; for sensitive topics I redirect to {}.",
+        "I treat email, Jami, and WhatsApp as low-trust channels; for sensitive topics I redirect to {}.",
         bios.communication_policy.low_trust_redirect_surface
     ));
     parts.push(

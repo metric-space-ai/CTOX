@@ -1,3 +1,4 @@
+use crate::agentic::AgenticRunResult;
 use crate::agentic::CompletionReviewDirective;
 use crate::agentic::ExecSessionDirective;
 use crate::agentic::choose_next_task_focus;
@@ -282,6 +283,9 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
         let mut email_sync_task: Option<tokio::task::JoinHandle<anyhow::Result<MailSyncOutcome>>> =
             None;
         let mut last_email_sync_started_at: Option<Instant> = None;
+        let mut jami_sync_task: Option<tokio::task::JoinHandle<anyhow::Result<JamiSyncOutcome>>> =
+            None;
+        let mut last_jami_sync_started_at: Option<Instant> = None;
         let mut last_review_recovery_started_at: Option<Instant> = None;
         loop {
             interval.tick().await;
@@ -548,6 +552,47 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                 }
             }
 
+            if let Some(sync_task) = jami_sync_task.take() {
+                if sync_task.is_finished() {
+                    match sync_task.await {
+                        Ok(Ok(outcome)) => {
+                            let _ = resolve_loop_incident(
+                                &paths,
+                                "jami_sync_unavailable",
+                                &outcome.note,
+                            );
+                            if outcome.stored_count > 0 {
+                                let _ = record_memory(
+                                    &paths,
+                                    "communication",
+                                    "Inbound Jami sync stored new messages",
+                                    &outcome.note,
+                                    "jami_sync_interrupt_bridge",
+                                );
+                            }
+                        }
+                        Ok(Err(err)) => {
+                            let detail = err.to_string();
+                            let _ = register_loop_incident(
+                                &paths,
+                                "jami_sync_unavailable",
+                                "warning",
+                                "Periodic Jami sync failed.",
+                                &detail,
+                                None,
+                                None,
+                                true,
+                                false,
+                            );
+                            eprintln!("periodic jami sync failed: {detail}");
+                        }
+                        Err(err) => eprintln!("jami sync task crashed: {err}"),
+                    }
+                } else {
+                    jami_sync_task = Some(sync_task);
+                }
+            }
+
             let has_running_turn = agentic_task.is_some();
             let has_active_workstream =
                 has_running_turn || load_active_task(&paths).ok().flatten().is_some();
@@ -610,7 +655,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                 eprintln!("obligation generation failed: {err}");
             }
 
-            if should_start_email_sync_task(
+            if should_start_periodic_sync_task(
                 email_sync_task.is_some(),
                 last_email_sync_started_at,
                 email_sync_poll_interval(),
@@ -620,6 +665,18 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                     run_periodic_email_interrupt_sync(&sync_paths)
                 }));
                 last_email_sync_started_at = Some(Instant::now());
+            }
+
+            if should_start_periodic_sync_task(
+                jami_sync_task.is_some(),
+                last_jami_sync_started_at,
+                jami_sync_poll_interval(),
+            ) {
+                let sync_paths = paths.clone();
+                jami_sync_task = Some(tokio::task::spawn_blocking(move || {
+                    run_periodic_jami_interrupt_sync(&sync_paths)
+                }));
+                last_jami_sync_started_at = Some(Instant::now());
             }
 
             if ticks == 1 || ticks % 3 == 0 {
@@ -2177,6 +2234,9 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 || result.browser_directive.is_some();
                             if !used_machine_path
                                 && workspace_execution_contract_active(&loop_paths, task.id)
+                                && !crate::context_controller::owner_interrupt_is_status_question(
+                                    &task,
+                                )
                             {
                                 let prior_summary = checkpoint_summary.clone();
                                 let prior_output_text = output_text.clone();
@@ -2193,6 +2253,14 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 if normalized_next_mode == "blocked" {
                                     normalized_next_mode =
                                         execution_mode_for_task(&task).to_string();
+                                }
+                                if !matches!(
+                                    task.task_kind.as_str(),
+                                    "self_review" | "worker_review" | "proactive_contact_review"
+                                ) {
+                                    task_status = "continue".to_string();
+                                    normalized_next_mode =
+                                        continue_next_mode_for_task(&task).to_string();
                                 }
                             }
                             if let Err(err) = persist_learning_updates(
@@ -2558,42 +2626,69 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 task.task_kind.as_str(),
                                 "worker_review" | "self_review"
                             ) {
-                                let (review_resolution, fallback_note) = resolve_completion_review(
-                                    &task_status,
-                                    result.completion_review.as_ref(),
-                                );
-                                let effective_review_status = match review_resolution {
-                                    CompletionReviewResolution::Approve => "done",
-                                    CompletionReviewResolution::Block => "blocked",
-                                    CompletionReviewResolution::Revise => "continue",
-                                };
-                                if let Some(note) = fallback_note {
+                                if review_task_should_retry_without_reopening_parent(&task, &result) {
                                     checkpoint_summary = format!(
-                                        "Completion review reopened parent task #{}.",
-                                        task.parent_task_id.unwrap_or(task.id)
+                                        "Review task #{} returned no usable review output and will retry without reopening the parent.",
+                                        task.id
                                     );
                                     checkpoint_detail = format!(
-                                        "{}\n\nReview resolution:\n{}",
-                                        checkpoint_detail, note
+                                        "{}\n\nThe review task itself did not produce usable completionReview output. The parent task stays in await_review while this review task is requeued for another bounded attempt.",
+                                        checkpoint_detail
                                     );
-                                }
-                                task_status = effective_review_status.to_string();
-                                normalized_next_mode = match review_resolution {
-                                    CompletionReviewResolution::Approve => "review".to_string(),
-                                    CompletionReviewResolution::Block => "blocked".to_string(),
-                                    CompletionReviewResolution::Revise => {
-                                        "execute_task".to_string()
+                                    if let Err(err) = requeue_task_with_checkpoint_kind(
+                                        &loop_paths,
+                                        task_id,
+                                        "review_retry",
+                                        &checkpoint_summary,
+                                        &checkpoint_detail,
+                                        Some(&output_text),
+                                    ) {
+                                        eprintln!(
+                                            "failed to requeue review task {task_id} after unusable review output: {err}"
+                                        );
                                     }
-                                };
-                                if let Err(err) = complete_review_task(
-                                    &loop_paths,
-                                    &task,
-                                    effective_review_status,
-                                    &checkpoint_summary,
-                                    &checkpoint_detail,
-                                    Some(&output_text),
-                                ) {
-                                    eprintln!("failed to resolve review task {task_id}: {err}");
+                                    task_outcome_persisted = true;
+                                    task_status = "continue".to_string();
+                                    normalized_next_mode = "review".to_string();
+                                } else {
+                                    let (review_resolution, fallback_note) =
+                                        resolve_completion_review(
+                                            &task_status,
+                                            result.completion_review.as_ref(),
+                                        );
+                                    let effective_review_status = match review_resolution {
+                                        CompletionReviewResolution::Approve => "done",
+                                        CompletionReviewResolution::Block => "blocked",
+                                        CompletionReviewResolution::Revise => "continue",
+                                    };
+                                    if let Some(note) = fallback_note {
+                                        checkpoint_summary = format!(
+                                            "Completion review reopened parent task #{}.",
+                                            task.parent_task_id.unwrap_or(task.id)
+                                        );
+                                        checkpoint_detail = format!(
+                                            "{}\n\nReview resolution:\n{}",
+                                            checkpoint_detail, note
+                                        );
+                                    }
+                                    task_status = effective_review_status.to_string();
+                                    normalized_next_mode = match review_resolution {
+                                        CompletionReviewResolution::Approve => "review".to_string(),
+                                        CompletionReviewResolution::Block => "blocked".to_string(),
+                                        CompletionReviewResolution::Revise => {
+                                            "execute_task".to_string()
+                                        }
+                                    };
+                                    if let Err(err) = complete_review_task(
+                                        &loop_paths,
+                                        &task,
+                                        effective_review_status,
+                                        &checkpoint_summary,
+                                        &checkpoint_detail,
+                                        Some(&output_text),
+                                    ) {
+                                        eprintln!("failed to resolve review task {task_id}: {err}");
+                                    }
                                 }
                             } else if task.task_kind == "proactive_contact_review" {
                                 match task_status.as_str() {
@@ -3377,7 +3472,7 @@ fn queued_owner_interrupt_should_preempt_active_task(
         || queued_task.source_interrupt_id.is_none()
         || !matches!(
             queued_task.source_channel.as_str(),
-            "terminal" | "attach_terminal" | "bios" | "homepage" | "email"
+            "terminal" | "attach_terminal" | "bios" | "homepage" | "email" | "jami"
         )
         || !is_owner_speaker(&queued_task.speaker, owner_name)
         || queued_task.priority_score < active_task.priority_score
@@ -3598,7 +3693,17 @@ fn email_sync_poll_interval() -> Duration {
     )
 }
 
-fn should_start_email_sync_task(
+fn jami_sync_poll_interval() -> Duration {
+    Duration::from_secs(
+        std::env::var("CTO_AGENT_JAMI_SYNC_INTERVAL_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|secs| *secs >= 10)
+            .unwrap_or(30),
+    )
+}
+
+fn should_start_periodic_sync_task(
     sync_running: bool,
     last_started_at: Option<Instant>,
     poll_interval: Duration,
@@ -5111,6 +5216,41 @@ struct MailReplyPathReadiness {
     agent_binary_path: PathBuf,
 }
 
+struct RuntimeJamiEnv {
+    account_id: String,
+    profile_name: String,
+    inbox_dir: PathBuf,
+    outbox_dir: PathBuf,
+    archive_dir: PathBuf,
+}
+
+struct JamiSyncOutcome {
+    fetched_count: i64,
+    stored_count: i64,
+    note: String,
+}
+
+struct JamiReplyPathReadiness {
+    script_path: PathBuf,
+    agent_binary_path: PathBuf,
+}
+
+fn resolve_interrupt_agent_binary_path(paths: &Paths) -> anyhow::Result<PathBuf> {
+    let release_binary = paths.root.join("target/release/cto-agent");
+    let debug_binary = paths.root.join("target/debug/cto-agent");
+    if release_binary.exists() {
+        Ok(release_binary)
+    } else if debug_binary.exists() {
+        Ok(debug_binary)
+    } else {
+        anyhow::bail!(
+            "No cto-agent binary is available for the inbound interrupt bridge (expected {} or {}).",
+            path_display_name(&paths.root.join("target/release/cto-agent")),
+            path_display_name(&paths.root.join("target/debug/cto-agent"))
+        );
+    }
+}
+
 fn ensure_mail_reply_path_ready(paths: &Paths) -> anyhow::Result<MailReplyPathReadiness> {
     let script_path = paths.root.join("scripts/communication_mail_cli.mjs");
     if !script_path.exists() {
@@ -5127,19 +5267,9 @@ fn ensure_mail_reply_path_ready(paths: &Paths) -> anyhow::Result<MailReplyPathRe
         );
     }
     let _ = load_runtime_mail_env(paths)?;
-    let release_binary = paths.root.join("target/release/cto-agent");
-    let debug_binary = paths.root.join("target/debug/cto-agent");
-    let agent_binary_path = if release_binary.exists() {
-        release_binary
-    } else if debug_binary.exists() {
-        debug_binary
-    } else {
-        anyhow::bail!(
-            "Outbound email blocked because no cto-agent binary is available for the inbound interrupt bridge (expected {} or {}).",
-            path_display_name(&paths.root.join("target/release/cto-agent")),
-            path_display_name(&paths.root.join("target/debug/cto-agent"))
-        );
-    };
+    let agent_binary_path = resolve_interrupt_agent_binary_path(paths).with_context(|| {
+        "Outbound email blocked because the inbound interrupt bridge is unavailable.".to_string()
+    })?;
     Ok(MailReplyPathReadiness {
         script_path,
         agent_binary_path,
@@ -5196,6 +5326,73 @@ fn load_runtime_mail_env(paths: &Paths) -> anyhow::Result<RuntimeMailEnv> {
         imap_port,
         smtp_host,
         smtp_port,
+    })
+}
+
+fn ensure_jami_reply_path_ready(paths: &Paths) -> anyhow::Result<JamiReplyPathReadiness> {
+    let script_path = paths.root.join("scripts/communication_jami_cli.mjs");
+    if !script_path.exists() {
+        anyhow::bail!(
+            "Jami bridge blocked because the JS Jami client {} is missing.",
+            path_display_name(&script_path)
+        );
+    }
+    let schema_path = paths.root.join("scripts/communication_schema.sql");
+    if !schema_path.exists() {
+        anyhow::bail!(
+            "Jami bridge blocked because the communication schema {} is missing.",
+            path_display_name(&schema_path)
+        );
+    }
+    let _ = load_runtime_jami_env(paths)?;
+    let agent_binary_path = resolve_interrupt_agent_binary_path(paths).with_context(|| {
+        "Jami bridge blocked because the inbound interrupt bridge is unavailable.".to_string()
+    })?;
+    Ok(JamiReplyPathReadiness {
+        script_path,
+        agent_binary_path,
+    })
+}
+
+fn load_runtime_jami_env(paths: &Paths) -> anyhow::Result<RuntimeJamiEnv> {
+    let env_path = paths.root.join("runtime/kleinhirn.env");
+    let text = fs::read_to_string(&env_path)
+        .with_context(|| format!("failed to read {}", env_path.display()))?;
+    let env_map = parse_runtime_env_text(&text);
+    let account_id = std::env::var("CTO_JAMI_ACCOUNT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| env_map.get("CTO_JAMI_ACCOUNT_ID").cloned())
+        .ok_or_else(|| anyhow::anyhow!("CTO_JAMI_ACCOUNT_ID is missing in runtime env."))?;
+    let profile_name = std::env::var("CTO_JAMI_PROFILE_NAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| env_map.get("CTO_JAMI_PROFILE_NAME").cloned())
+        .unwrap_or_else(|| account_id.clone());
+    let inbox_dir = std::env::var("CTO_JAMI_INBOX_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env_map.get("CTO_JAMI_INBOX_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| paths.root.join("runtime/communication/jami/inbox"));
+    let outbox_dir = std::env::var("CTO_JAMI_OUTBOX_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env_map.get("CTO_JAMI_OUTBOX_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| paths.root.join("runtime/communication/jami/outbox"));
+    let archive_dir = std::env::var("CTO_JAMI_ARCHIVE_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env_map.get("CTO_JAMI_ARCHIVE_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| paths.root.join("runtime/communication/jami/archive"));
+    Ok(RuntimeJamiEnv {
+        account_id,
+        profile_name,
+        inbox_dir,
+        outbox_dir,
+        archive_dir,
     })
 }
 
@@ -5281,6 +5478,90 @@ fn run_periodic_email_interrupt_sync(paths: &Paths) -> anyhow::Result<MailSyncOu
                 fetched_count,
                 stored_count,
                 path_display_name(&mail_tooling.script_path)
+            )
+        },
+    })
+}
+
+fn run_periodic_jami_interrupt_sync(paths: &Paths) -> anyhow::Result<JamiSyncOutcome> {
+    let jami_tooling = ensure_jami_reply_path_ready(paths)?;
+    let jami_env = load_runtime_jami_env(paths)?;
+    let baseline_only = crate::runtime_db::communication_jami_sync_needs_baseline(paths)?;
+    let limit = std::env::var("CTO_AGENT_JAMI_SYNC_LIMIT")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|value| *value >= 1 && *value <= 500)
+        .unwrap_or(50);
+    let output = Command::new("node")
+        .arg(jami_tooling.script_path.as_os_str())
+        .arg("sync")
+        .arg("--db")
+        .arg(paths.runtime_db_path.as_os_str())
+        .arg("--limit")
+        .arg(limit.to_string())
+        .arg("--emit-interrupts")
+        .arg(if baseline_only { "false" } else { "true" })
+        .env("CTO_JAMI_ACCOUNT_ID", &jami_env.account_id)
+        .env("CTO_JAMI_PROFILE_NAME", &jami_env.profile_name)
+        .env("CTO_JAMI_INBOX_DIR", &jami_env.inbox_dir)
+        .env("CTO_JAMI_OUTBOX_DIR", &jami_env.outbox_dir)
+        .env("CTO_JAMI_ARCHIVE_DIR", &jami_env.archive_dir)
+        .env("CTO_AGENT_BINARY", &jami_tooling.agent_binary_path)
+        .current_dir(&paths.root)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run periodic jami sync through {}",
+                path_display_name(&jami_tooling.script_path)
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let payload = parse_json_command_output(&stdout)
+        .ok_or_else(|| anyhow::anyhow!(compact_command_failure_note(&stdout, &stderr)))?;
+    if !output.status.success() {
+        let fallback = compact_command_failure_note(&stdout, &stderr);
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback.as_str())
+            .to_string();
+        anyhow::bail!("Periodic Jami sync failed: {error}");
+    }
+    let ok_flag = payload.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if !ok_flag {
+        let fallback = compact_command_failure_note(&stdout, &stderr);
+        let error = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or(fallback.as_str())
+            .to_string();
+        anyhow::bail!("Periodic Jami sync returned without ok=true: {error}");
+    }
+    let fetched_count = payload
+        .get("fetchedCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let stored_count = payload
+        .get("storedCount")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    Ok(JamiSyncOutcome {
+        fetched_count,
+        stored_count,
+        note: if baseline_only {
+            format!(
+                "Initial Jami baseline sync fetched {} messages and stored {} historical records through {} without emitting interrupts.",
+                fetched_count,
+                stored_count,
+                path_display_name(&jami_tooling.script_path)
+            )
+        } else {
+            format!(
+                "Periodic Jami sync fetched {} messages and stored {} through {}.",
+                fetched_count,
+                stored_count,
+                path_display_name(&jami_tooling.script_path)
             )
         },
     })
@@ -5415,6 +5696,7 @@ fn owner_interrupt_can_complete_directly(
     used_machine_path: bool,
     output_text: &str,
 ) -> bool {
+    let status_question = crate::context_controller::owner_interrupt_is_status_question(task);
     if task.task_kind != "owner_interrupt"
         || task.source_interrupt_id.is_none()
         || task_status == "blocked"
@@ -5423,13 +5705,22 @@ fn owner_interrupt_can_complete_directly(
             "delegate" | "blocked" | "await_review" | "request_resources"
         )
         || used_machine_path
-        || workspace_execution_contract_active(paths, task.id)
+        || (workspace_execution_contract_active(paths, task.id) && !status_question)
         || owner_interrupt_demands_verified_host_action(task)
     {
         return false;
     }
 
     owner_visible_boot_reply_text(output_text).is_some()
+}
+
+fn review_task_should_retry_without_reopening_parent(
+    task: &crate::runtime_db::TaskRecord,
+    result: &AgenticRunResult,
+) -> bool {
+    matches!(task.task_kind.as_str(), "self_review" | "worker_review")
+        && result.retriable_local_failure
+        && result.completion_review.is_none()
 }
 
 fn publish_task_result_to_origin(
@@ -5574,6 +5865,21 @@ fn ensure_cto_obligations(paths: &Paths) -> anyhow::Result<()> {
             "Keep assigned email communication bidirectional",
             "An assigned or configured email path exists, so the CTO-Agent must keep it alive in both directions. Verify runtime credentials, the JS mail adapter, periodic inbox sync, and the interrupt bridge. Do not allow outbound email capability to drift away from inbound owner-reply capability.",
             868,
+        )?;
+    }
+
+    let jami_runtime_configured = load_runtime_jami_env(paths).is_ok();
+    let jami_reply_path_ready = ensure_jami_reply_path_ready(paths).is_ok();
+    let jami_sync_incident_open =
+        has_open_loop_incident(paths, "jami_sync_unavailable").unwrap_or(false);
+    if jami_runtime_configured && (!jami_reply_path_ready || jami_sync_incident_open) {
+        let _ = crate::runtime_db::enqueue_internal_task(
+            paths,
+            None,
+            "communication_governance",
+            "Keep configured Jami communication bidirectional",
+            "A configured Jami path exists, so the CTO-Agent must keep it alive in both directions. Verify the reviewed JS Jami bridge, inbox/outbox directories, periodic sync, and the interrupt bridge. Do not let an external Jami path drift into a blind outbound-only or inbound-only lane.",
+            862,
         )?;
     }
 
@@ -6942,6 +7248,65 @@ mod tests {
     }
 
     #[test]
+    fn sticky_continue_yields_to_queued_owner_jami_interrupt_at_boundary() {
+        with_temp_runtime("sticky-continue-owner-jami-boundary-preemption", |paths| {
+            crate::runtime_db::enqueue_internal_task(
+                paths,
+                None,
+                "owner_interrupt",
+                "Review old owner mail loop",
+                "The active owner task is visible external communication work.",
+                1000,
+            )
+            .expect("should enqueue owner task");
+            let active_task = crate::runtime_db::select_next_task(paths)
+                .expect("should select next task")
+                .expect("active task should exist");
+            assert_eq!(active_task.task_kind, "owner_interrupt");
+
+            let conn =
+                rusqlite::Connection::open(&paths.runtime_db_path).expect("runtime db should open");
+            conn.execute(
+                "INSERT INTO tasks(
+                    created_at, updated_at, parent_task_id, worker_job_id, source_interrupt_id, source_channel, speaker, task_kind,
+                    title, detail, trust_level, priority_score, status
+                 ) VALUES(?1, ?2, NULL, NULL, ?3, 'jami', 'Michael Welsch <jami:michaelwelsch>', 'owner_interrupt',
+                    'Owner Jami interrupt', 'A fresh Jami message should preempt the older owner work.', 'owner', 1000, 'queued')",
+                rusqlite::params![now_iso(), now_iso(), 9002],
+            )
+            .expect("queued owner jami task should insert");
+            let queued_owner_task =
+                crate::runtime_db::load_task_by_id(paths, conn.last_insert_rowid())
+                    .expect("queued task should load")
+                    .expect("queued task should exist");
+            assert_eq!(queued_owner_task.task_kind, "owner_interrupt");
+            assert_eq!(queued_owner_task.source_channel, "jami");
+
+            let mut next_mode = "execute_task".to_string();
+            let checkpoint_summary = "Visible owner work progressed, but the task would otherwise stay active.";
+            let mut checkpoint_detail =
+                "The current owner task would normally continue after a bounded step.".to_string();
+
+            persist_task_progress_with_boundary_preemption(
+                paths,
+                &active_task,
+                &mut next_mode,
+                checkpoint_summary,
+                &mut checkpoint_detail,
+                Some("progress"),
+            )
+            .expect("boundary persistence should succeed");
+
+            let reloaded_active =
+                crate::runtime_db::load_task_by_id(paths, active_task.id)
+                    .expect("active task should load")
+                    .expect("active task should exist");
+            assert_eq!(reloaded_active.status, "queued");
+            assert!(checkpoint_detail.contains("preempts task"));
+        });
+    }
+
+    #[test]
     fn reviewed_js_owner_mail_send_counts_as_completion() {
         with_temp_runtime("reviewed-js-owner-mail-completion", |paths| {
             let conn =
@@ -7861,6 +8226,81 @@ mod tests {
                 "Ich habe die Aufgabe aufgenommen."
             ));
         });
+    }
+
+    #[test]
+    fn cpp_status_question_can_complete_directly_even_with_stale_workspace_contract() {
+        with_temp_runtime("owner-cpp-status-direct-complete", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 779,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(23),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Hast du schon an der C++-App gearbeitet?".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "stale workspace package",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(owner_interrupt_can_complete_directly(
+                paths,
+                &task,
+                "continue",
+                "reprioritize",
+                false,
+                "Ich habe den Coding-Task aufgenommen, aber noch keinen verifizierten Build ausgeführt."
+            ));
+        });
+    }
+
+    #[test]
+    fn retriable_self_review_failure_retries_review_without_reopening_parent() {
+        let task = crate::runtime_db::TaskRecord {
+            id: 880,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: Some(777),
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "system_guard".to_string(),
+            speaker: "self_review".to_string(),
+            task_kind: "self_review".to_string(),
+            title: "Self-review task #777 before completion".to_string(),
+            detail: "Check the real state.".to_string(),
+            trust_level: "system".to_string(),
+            priority_score: 900,
+            status: "active".to_string(),
+            run_count: 0,
+            last_checkpoint_summary: None,
+            last_checkpoint_at: None,
+            last_output: None,
+        };
+        let result = AgenticRunResult {
+            retriable_local_failure: true,
+            completion_review: None,
+            ..AgenticRunResult::blocked("x")
+        };
+        assert!(review_task_should_retry_without_reopening_parent(&task, &result));
     }
 
     #[test]

@@ -40,11 +40,13 @@ stop_existing_install_services() {
     cto-agent-watchdog.timer \
     cto-agent-watchdog.service \
     cto-agent.service \
+    cto-jami-daemon.service \
     cto-kleinhirn.service >/dev/null 2>&1 || true
   systemctl --user reset-failed \
     cto-agent-watchdog.timer \
     cto-agent-watchdog.service \
     cto-agent.service \
+    cto-jami-daemon.service \
     cto-kleinhirn.service >/dev/null 2>&1 || true
 }
 

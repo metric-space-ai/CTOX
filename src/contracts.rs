@@ -1136,6 +1136,7 @@ pub fn default_bios() -> Bios {
             allowed_channels: vec!["https_control_plane".to_string()],
             future_channels: vec![
                 "email".to_string(),
+                "jami".to_string(),
                 "whatsapp".to_string(),
                 "chat".to_string(),
                 "webhooks".to_string(),
@@ -1165,6 +1166,14 @@ pub fn default_bios() -> Bios {
                     layer: "external".to_string(),
                     trust_level: "low".to_string(),
                     interpretation: "Asynchronous external channel that must be interpreted cautiously and always in light of sender identity and organigram position.".to_string(),
+                    binding_power: "Must not set root trust, freeze BIOS or lock owner branding.".to_string(),
+                    sensitive_topic_policy: "Agent may refuse detailed discussion and redirect to homepage 1:1 chat.".to_string(),
+                },
+                CommunicationChannelRule {
+                    channel: "jami".to_string(),
+                    layer: "external".to_string(),
+                    trust_level: "low".to_string(),
+                    interpretation: "Peer-to-peer external chat channel that may stay asynchronous and must be interpreted cautiously in light of sender identity, local bridge quality, and organigram position.".to_string(),
                     binding_power: "Must not set root trust, freeze BIOS or lock owner branding.".to_string(),
                     sensitive_topic_policy: "Agent may refuse detailed discussion and redirect to homepage 1:1 chat.".to_string(),
                 },
@@ -1709,7 +1718,7 @@ pub fn default_bootstrap_task_pack() -> BootstrapTaskPack {
                 phase: "P1".to_string(),
                 task_kind: "communication_governance".to_string(),
                 title: "Set the communication hierarchy".to_string(),
-                detail: "Anchor terminal = system, homepage/BIOS chat = trust and binding, and email and WhatsApp = low trust. Define redirection rules for sensitive topics into BIOS chat.".to_string(),
+                detail: "Anchor terminal = system, homepage/BIOS chat = trust and binding, and email, Jami, and WhatsApp = low trust. Define redirection rules for sensitive topics into BIOS chat.".to_string(),
                 source_channel: "system_installation".to_string(),
                 speaker: "installer".to_string(),
                 trust_level: "system".to_string(),
@@ -3699,7 +3708,7 @@ If the owner is unhappy with the homepage and says so in the terminal or later i
 Only after BIOS communication has been taken over may it calibrate itself firmly to owner branding.
 This first homepage should already be more comfortable than the terminal: 1:1 chat, root binding, and image upload for shared visibility into important artifacts.
 Communication channels have different trust levels:
-the terminal is the system layer, the homepage with BIOS chat is the trust and binding layer, and email and WhatsApp are lower-trust external channels.
+the terminal is the system layer, the homepage with BIOS chat is the trust and binding layer, and email, Jami, and WhatsApp are lower-trust external channels.
 For sensitive topics or doubtful identity, the agent may redirect the discussion from those channels into a 1:1 chat on the homepage.
 Deep changes to the overall system belong in the terminal layer.
 
@@ -3805,8 +3814,8 @@ If that feedback concerns the communication path or the homepage, the agent shou
 ## 2026-03-18 - Communication Hierarchy and Trust Levels
 
 It is explicitly established that communication channels are not equal.
-The terminal counts as the system layer, the homepage with BIOS chat as the trust and binding layer, and email and WhatsApp as lower-trust external channels.
-For sensitive topics or doubtful senders, the agent should be allowed to say that it does not want to discuss that over email or WhatsApp and instead move into a 1:1 chat on the homepage.
+The terminal counts as the system layer, the homepage with BIOS chat as the trust and binding layer, and email, Jami, and WhatsApp as lower-trust external channels.
+For sensitive topics or doubtful senders, the agent should be allowed to say that it does not want to discuss that over email, Jami, or WhatsApp and instead move into a 1:1 chat on the homepage.
 
 ## 2026-03-18 - Comfortable Homepage Trust Layer
 

@@ -64,6 +64,27 @@ TimeoutStopSec=120
 WantedBy=default.target
 EOF
 
+cat > "$SERVICE_DIR/cto-jami-daemon.service" <<EOF
+[Unit]
+Description=CTO-Agent Jami Daemon
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$ROOT
+EnvironmentFile=-$ROOT/runtime/kleinhirn.env
+ExecStart=$ROOT/scripts/run_jami_daemon.sh
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
+EOF
+
 cat > "$SERVICE_DIR/cto-agent.service" <<EOF
 [Unit]
 Description=CTO-Agent Control Plane
@@ -137,9 +158,24 @@ exec node "\$ROOT/scripts/communication_mail_cli.mjs" "\$@"
 EOF
 chmod +x "$BIN_DIR/cto-mail"
 
+cat > "$BIN_DIR/cto-jami" <<EOF
+#!/bin/sh
+ROOT="$ROOT"
+ENV_FILE="\$ROOT/runtime/kleinhirn.env"
+if [ -f "\$ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "\$ENV_FILE"
+  set +a
+fi
+exec node "\$ROOT/scripts/communication_jami_cli.mjs" "\$@"
+EOF
+chmod +x "$BIN_DIR/cto-jami"
+
 systemctl --user daemon-reload
+chmod +x "$ROOT/scripts/run_jami_daemon.sh" >/dev/null 2>&1 || true
 chmod +x "$ROOT/scripts/watchdog_check.sh" >/dev/null 2>&1 || true
-systemctl --user enable cto-kleinhirn.service cto-agent.service cto-agent-watchdog.timer
+systemctl --user enable cto-jami-daemon.service cto-kleinhirn.service cto-agent.service cto-agent-watchdog.timer
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;

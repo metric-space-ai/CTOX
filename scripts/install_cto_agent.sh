@@ -147,6 +147,13 @@ CTO_EMAIL_IMAP_PORT="${CTO_EMAIL_IMAP_PORT:-}"
 CTO_EMAIL_SMTP_HOST="${CTO_EMAIL_SMTP_HOST:-}"
 CTO_EMAIL_SMTP_PORT="${CTO_EMAIL_SMTP_PORT:-}"
 CTO_AGENT_EMAIL_SYNC_LIMIT="${CTO_AGENT_EMAIL_SYNC_LIMIT:-}"
+CTO_JAMI_ACCOUNT_ID="${CTO_JAMI_ACCOUNT_ID:-}"
+CTO_JAMI_PROFILE_NAME="${CTO_JAMI_PROFILE_NAME:-}"
+CTO_JAMI_INBOX_DIR="${CTO_JAMI_INBOX_DIR:-}"
+CTO_JAMI_OUTBOX_DIR="${CTO_JAMI_OUTBOX_DIR:-}"
+CTO_JAMI_ARCHIVE_DIR="${CTO_JAMI_ARCHIVE_DIR:-}"
+CTO_JAMI_DAEMON_ARGS="${CTO_JAMI_DAEMON_ARGS:-}"
+CTO_AGENT_INSTALL_JAMI_GUI="${CTO_AGENT_INSTALL_JAMI_GUI:-0}"
 CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-}"
 CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-}"
 CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-}"
@@ -449,7 +456,26 @@ read_runtime_env_file_value() {
   '
 }
 
-adopt_existing_runtime_mail_env() {
+discover_local_jami_account_id() {
+  config_file="${CTO_JAMI_DRING_PATH:-${XDG_CONFIG_HOME:-$HOME/.config}/jami/dring.yml}"
+  if [ ! -f "$config_file" ]; then
+    return 0
+  fi
+  awk '
+    /^[[:space:]]*id:[[:space:]]*/ {
+      value=$0
+      sub(/^[[:space:]]*id:[[:space:]]*/, "", value)
+      gsub(/["'"'"']/, "", value)
+      gsub(/[[:space:]]+$/, "", value)
+      if (length(value) >= 16) {
+        print value
+        exit
+      }
+    }
+  ' "$config_file"
+}
+
+adopt_existing_runtime_communication_env() {
   existing_address="$(read_runtime_env_file_value CTO_EMAIL_ADDRESS || true)"
   existing_password="$(read_runtime_env_file_value CTO_EMAIL_PASSWORD || true)"
   existing_imap_host="$(read_runtime_env_file_value CTO_EMAIL_IMAP_HOST || true)"
@@ -457,6 +483,12 @@ adopt_existing_runtime_mail_env() {
   existing_smtp_host="$(read_runtime_env_file_value CTO_EMAIL_SMTP_HOST || true)"
   existing_smtp_port="$(read_runtime_env_file_value CTO_EMAIL_SMTP_PORT || true)"
   existing_sync_limit="$(read_runtime_env_file_value CTO_AGENT_EMAIL_SYNC_LIMIT || true)"
+  existing_jami_account_id="$(read_runtime_env_file_value CTO_JAMI_ACCOUNT_ID || true)"
+  existing_jami_profile_name="$(read_runtime_env_file_value CTO_JAMI_PROFILE_NAME || true)"
+  existing_jami_inbox_dir="$(read_runtime_env_file_value CTO_JAMI_INBOX_DIR || true)"
+  existing_jami_outbox_dir="$(read_runtime_env_file_value CTO_JAMI_OUTBOX_DIR || true)"
+  existing_jami_archive_dir="$(read_runtime_env_file_value CTO_JAMI_ARCHIVE_DIR || true)"
+  existing_jami_daemon_args="$(read_runtime_env_file_value CTO_JAMI_DAEMON_ARGS || true)"
   existing_grosshirn_api_key="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_API_KEY || true)"
   existing_grosshirn_model="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_MODEL || true)"
   existing_grosshirn_adapter="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER || true)"
@@ -475,6 +507,18 @@ adopt_existing_runtime_mail_env() {
   CTO_EMAIL_SMTP_HOST="${CTO_EMAIL_SMTP_HOST:-${existing_smtp_host:-send.one.com}}"
   CTO_EMAIL_SMTP_PORT="${CTO_EMAIL_SMTP_PORT:-${existing_smtp_port:-465}}"
   CTO_AGENT_EMAIL_SYNC_LIMIT="${CTO_AGENT_EMAIL_SYNC_LIMIT:-${existing_sync_limit:-20}}"
+  discovered_jami_account_id="$(discover_local_jami_account_id || true)"
+  CTO_JAMI_ACCOUNT_ID="${CTO_JAMI_ACCOUNT_ID:-${existing_jami_account_id:-$discovered_jami_account_id}}"
+  if [ -n "${CTO_JAMI_ACCOUNT_ID:-}" ]; then
+    CTO_JAMI_PROFILE_NAME="${CTO_JAMI_PROFILE_NAME:-${existing_jami_profile_name:-$CTO_JAMI_ACCOUNT_ID}}"
+  else
+    CTO_JAMI_PROFILE_NAME="${CTO_JAMI_PROFILE_NAME:-$existing_jami_profile_name}"
+  fi
+  jami_runtime_root="$ROOT/runtime/communication/jami"
+  CTO_JAMI_INBOX_DIR="${CTO_JAMI_INBOX_DIR:-${existing_jami_inbox_dir:-$jami_runtime_root/inbox}}"
+  CTO_JAMI_OUTBOX_DIR="${CTO_JAMI_OUTBOX_DIR:-${existing_jami_outbox_dir:-$jami_runtime_root/outbox}}"
+  CTO_JAMI_ARCHIVE_DIR="${CTO_JAMI_ARCHIVE_DIR:-${existing_jami_archive_dir:-$jami_runtime_root/archive}}"
+  CTO_JAMI_DAEMON_ARGS="${CTO_JAMI_DAEMON_ARGS:-${existing_jami_daemon_args:--p}}"
   CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-$existing_grosshirn_api_key}"
   CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-${existing_grosshirn_model:-openai/gpt-5.4}}"
   CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-${existing_grosshirn_adapter:-openai_responses}}"
@@ -503,10 +547,20 @@ adopt_existing_runtime_mail_env() {
   CTO_AGENT_TLS_ALT_NAMES="${CTO_AGENT_TLS_ALT_NAMES:-$tls_alt_names_candidate}"
 }
 
+ensure_jami_runtime_directories() {
+  mkdir -p \
+    "$ROOT/runtime/communication/jami/raw" \
+    "$CTO_JAMI_INBOX_DIR" \
+    "$CTO_JAMI_OUTBOX_DIR" \
+    "$CTO_JAMI_ARCHIVE_DIR"
+}
+
 ensure_mail_and_cli_bootstrap_assets() {
   for required in \
     "$ROOT/scripts/communication_mail_cli.mjs" \
+    "$ROOT/scripts/communication_jami_cli.mjs" \
     "$ROOT/scripts/communication_schema.sql" \
+    "$ROOT/scripts/run_jami_daemon.sh" \
     "$ROOT/.agents/skills/codex-command-exec-operations/SKILL.md" \
     "$ROOT/contracts/system/codex-command-exec-capability-policy.json" \
     "$ROOT/.agents/skills/workspace-execution-operations/SKILL.md" \
@@ -528,6 +582,11 @@ smoke_check_mail_bootstrap() {
     list \
     --db "$ROOT/runtime/cto_agent.db" \
     --limit 1 >/tmp/cto_mail_bootstrap_list.out
+
+  node "$ROOT/scripts/communication_jami_cli.mjs" \
+    list \
+    --db "$ROOT/runtime/cto_agent.db" \
+    --limit 1 >/tmp/cto_jami_bootstrap_list.out
 
   if [ -n "$CTO_EMAIL_ADDRESS" ] && [ -n "$CTO_EMAIL_PASSWORD" ]; then
     CTO_EMAIL_ADDRESS="$CTO_EMAIL_ADDRESS" \
@@ -599,6 +658,12 @@ write_kleinhirn_env_file() {
     printf 'CTO_EMAIL_SMTP_HOST=%s\n' "$(shell_quote "$CTO_EMAIL_SMTP_HOST")"
     printf 'CTO_EMAIL_SMTP_PORT=%s\n' "$(shell_quote "$CTO_EMAIL_SMTP_PORT")"
     printf 'CTO_AGENT_EMAIL_SYNC_LIMIT=%s\n' "$(shell_quote "$CTO_AGENT_EMAIL_SYNC_LIMIT")"
+    printf 'CTO_JAMI_ACCOUNT_ID=%s\n' "$(shell_quote "$CTO_JAMI_ACCOUNT_ID")"
+    printf 'CTO_JAMI_PROFILE_NAME=%s\n' "$(shell_quote "$CTO_JAMI_PROFILE_NAME")"
+    printf 'CTO_JAMI_INBOX_DIR=%s\n' "$(shell_quote "$CTO_JAMI_INBOX_DIR")"
+    printf 'CTO_JAMI_OUTBOX_DIR=%s\n' "$(shell_quote "$CTO_JAMI_OUTBOX_DIR")"
+    printf 'CTO_JAMI_ARCHIVE_DIR=%s\n' "$(shell_quote "$CTO_JAMI_ARCHIVE_DIR")"
+    printf 'CTO_JAMI_DAEMON_ARGS=%s\n' "$(shell_quote "$CTO_JAMI_DAEMON_ARGS")"
     printf 'CTO_AGENT_GROSSHIRN_API_KEY=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_API_KEY")"
     printf 'CTO_AGENT_GROSSHIRN_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_MODEL")"
     printf 'CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER")"
@@ -1067,6 +1132,107 @@ linux_build_prereqs_missing() {
   return 1
 }
 
+resolve_jami_linux_repo_suffix() {
+  if [ ! -f /etc/os-release ]; then
+    return 1
+  fi
+
+  os_id=""
+  version_id=""
+  id_like=""
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  os_id="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+  version_id="$(printf '%s' "${VERSION_ID:-}" | tr -d '"')"
+  id_like="$(printf '%s' "${ID_LIKE:-}" | tr '[:upper:]' '[:lower:]')"
+
+  case "$os_id" in
+    ubuntu)
+      case "$version_id" in
+        20.04|22.04|24.04|24.10|25.04)
+          printf 'ubuntu_%s\n' "$version_id"
+          return 0
+          ;;
+      esac
+      ;;
+    debian)
+      case "$version_id" in
+        11|12|13)
+          printf 'debian_%s\n' "$version_id"
+          return 0
+          ;;
+      esac
+      ;;
+    linuxmint)
+      case "$version_id" in
+        21*)
+          printf '%s\n' "ubuntu_22.04"
+          return 0
+          ;;
+        22*)
+          printf '%s\n' "ubuntu_24.04"
+          return 0
+          ;;
+        6)
+          printf '%s\n' "debian_12"
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+
+  case "$id_like" in
+    *ubuntu*)
+      case "$version_id" in
+        20.04|22.04|24.04|24.10|25.04)
+          printf 'ubuntu_%s\n' "$version_id"
+          return 0
+          ;;
+      esac
+      ;;
+    *debian*)
+      case "$version_id" in
+        11|12|13)
+          printf 'debian_%s\n' "$version_id"
+          return 0
+          ;;
+      esac
+      ;;
+  esac
+
+  return 1
+}
+
+ensure_linux_jami_installed() {
+  if [ "$(uname -s)" != "Linux" ] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
+    return
+  fi
+
+  repo_suffix="$(resolve_jami_linux_repo_suffix || true)"
+  if [ -z "$repo_suffix" ]; then
+    echo "[prep] Skip Jami package auto-install because this Linux distribution is not mapped to an official Jami apt repository." >&2
+    echo "[prep] Configure Jami manually via https://jami.net/en/download-jami-linux if this host still needs the daemon." >&2
+    return
+  fi
+
+  jami_repo_line="deb [signed-by=/usr/share/keyrings/jami-archive-keyring.gpg] https://dl.jami.net/stable/${repo_suffix}/ jami main"
+  echo "[prep] Install official Jami daemon runtime ($repo_suffix)"
+  run_sudo apt-get install -y gnupg dirmngr ca-certificates curl --no-install-recommends
+  tmp_keyring="$(mktemp /tmp/cto-jami-keyring.XXXXXX)"
+  curl -fsSL https://dl.jami.net/public-key.gpg -o "$tmp_keyring"
+  run_sudo install -m 0644 "$tmp_keyring" /usr/share/keyrings/jami-archive-keyring.gpg
+  rm -f "$tmp_keyring"
+  tmp_list="$(mktemp /tmp/cto-jami-repo.XXXXXX)"
+  printf '%s\n' "$jami_repo_line" >"$tmp_list"
+  run_sudo install -m 0644 "$tmp_list" /etc/apt/sources.list.d/jami.list
+  rm -f "$tmp_list"
+  apt_update_with_retry
+  run_sudo apt-get install -y jami-daemon dbus-x11
+  if [ "$CTO_AGENT_INSTALL_JAMI_GUI" = "1" ]; then
+    run_sudo apt-get install -y jami
+  fi
+}
+
 if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
   GPU_COUNT="$(detect_gpu_count)"
   if linux_build_prereqs_missing; then
@@ -1087,6 +1253,7 @@ if [ "$(uname -s)" = "Linux" ] && command -v apt-get >/dev/null 2>&1 && command 
   else
     echo "[prep] Linux build prerequisites already present"
   fi
+  ensure_linux_jami_installed
   ensure_modern_rust_toolchain
   ensure_cuda_build_prereqs
   configure_cuda_env
@@ -1112,22 +1279,25 @@ if ! command -v pkg-config >/dev/null 2>&1; then
 fi
 
 mkdir -p "$ROOT/runtime" "$KLEINHIRN_LOG_DIR"
-adopt_existing_runtime_mail_env
+adopt_existing_runtime_communication_env
+ensure_jami_runtime_directories
 ensure_mail_and_cli_bootstrap_assets
 chmod +x \
   "$ROOT/scripts/communication_mail_cli.mjs" \
+  "$ROOT/scripts/communication_jami_cli.mjs" \
   "$ROOT/scripts/install_cto_agent.sh" \
   "$ROOT/scripts/install_browser_engine.sh" \
   "$ROOT/scripts/install_browser_agent_extension.sh" \
   "$ROOT/scripts/install_linux_user_services.sh" \
   "$ROOT/scripts/launch_browser_agent_chrome.sh" \
+  "$ROOT/scripts/run_jami_daemon.sh" \
   "$ROOT/scripts/run_kleinhirn.sh" \
   "$ROOT/scripts/run_control_plane.sh" \
   "$ROOT/scripts/start_control_plane.sh" \
   >/dev/null 2>&1 || true
 
 echo "[prep] Stop stale local CTO-Agent processes"
-systemctl --user stop cto-agent.service cto-kleinhirn.service >/dev/null 2>&1 || true
+systemctl --user stop cto-agent.service cto-kleinhirn.service cto-jami-daemon.service >/dev/null 2>&1 || true
 pkill -f "$ROOT/target/debug/cto-agent" >/dev/null 2>&1 || true
 pkill -f "$ROOT/target/release/cto-agent" >/dev/null 2>&1 || true
 pkill -f "$ROOT/scripts/run_control_plane.sh" >/dev/null 2>&1 || true
@@ -1315,6 +1485,10 @@ CTO_AGENT_COMPACT_RED_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPAC
 
 echo "[6/10] Write Kleinhirn environment"
 write_kleinhirn_env_file
+if [ -z "$CTO_JAMI_ACCOUNT_ID" ]; then
+  echo "[6/10] Jami daemon/runtime prepared, but no CTO_JAMI_ACCOUNT_ID was discovered yet."
+  echo "       Configure the Jami account in the TUI settings or copy an existing ~/.config/jami and ~/.local/share/jami profile onto this host." >&2
+fi
 
 echo "[7/10] Install browser runtime (KDE/Chrome/extension)"
 CTO_AGENT_SUDO_PASSWORD="${CTO_AGENT_SUDO_PASSWORD:-}" \
@@ -1327,6 +1501,7 @@ if ! cuda_runtime_driver_ready; then
   echo "CTO-Agent installation finished provisioning, but the CUDA runtime is not currently usable. Reboot the host and rerun the installer to complete Kleinhirn startup." >&2
   exit 1
 fi
+systemctl --user restart cto-jami-daemon.service >/dev/null 2>&1 || true
 systemctl --user restart cto-kleinhirn.service
 
 echo "[9/10] Wait for selected Kleinhirn startup readiness (${KLEINHIRN_OFFICIAL_LABEL})"
@@ -1391,6 +1566,7 @@ while [ "$i" -le 60 ]; do
   if curl -k -fsS "$READY_URL" >/tmp/cto_health.out 2>/dev/null; then
     "$HOME/.local/bin/cto-agent" status >/tmp/cto_cli_wrapper_status.out
     "$HOME/.local/bin/cto-mail" list --db "$ROOT/runtime/cto_agent.db" --limit 1 >/tmp/cto_mail_wrapper_status.out
+    "$HOME/.local/bin/cto-jami" list --db "$ROOT/runtime/cto_agent.db" --limit 1 >/tmp/cto_jami_wrapper_status.out
     if [ "$(uname -s)" = "Linux" ] && [ "${CTO_AGENT_START_BROWSER_AGENT_CHROME:-1}" = "1" ]; then
       echo "Starting Chrome with Browser-Agent extension..."
       CTO_AGENT_WAIT_FOR_BROWSER_AGENT_BRIDGE=1 \

@@ -31,6 +31,7 @@
     ],
     "futureChannels": [
       "email",
+      "jami",
       "whatsapp",
       "chat",
       "webhooks",
@@ -60,6 +61,14 @@
         "layer": "external",
         "trustLevel": "low",
         "interpretation": "Asynchronous external channel that must be interpreted cautiously and always in light of sender identity and organigram position.",
+        "bindingPower": "Must not set root trust, freeze BIOS or lock owner branding.",
+        "sensitiveTopicPolicy": "Agent may refuse detailed discussion and redirect to homepage 1:1 chat."
+      },
+      {
+        "channel": "jami",
+        "layer": "external",
+        "trustLevel": "low",
+        "interpretation": "Peer-to-peer external chat channel that may stay asynchronous and must be interpreted cautiously in light of sender identity, local bridge quality, and organigram position.",
         "bindingPower": "Must not set root trust, freeze BIOS or lock owner branding.",
         "sensitiveTopicPolicy": "Agent may refuse detailed discussion and redirect to homepage 1:1 chat."
       },

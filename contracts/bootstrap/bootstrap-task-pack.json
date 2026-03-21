@@ -118,7 +118,7 @@
       "phase": "P1",
       "taskKind": "communication_governance",
       "title": "Set the communication hierarchy",
-      "detail": "Anchor terminal = system, homepage/BIOS chat = trust and binding, email and WhatsApp = low trust. Define redirection rules for sensitive topics into BIOS chat.",
+      "detail": "Anchor terminal = system, homepage/BIOS chat = trust and binding, email, Jami, and WhatsApp = low trust. Define redirection rules for sensitive topics into BIOS chat.",
       "sourceChannel": "system_installation",
       "speaker": "installer",
       "trustLevel": "system",

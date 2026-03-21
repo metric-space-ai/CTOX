@@ -1847,6 +1847,17 @@ pub fn communication_message_sent(paths: &Paths, message_id: &str) -> anyhow::Re
 }
 
 pub fn communication_email_sync_needs_baseline(paths: &Paths) -> anyhow::Result<bool> {
+    communication_channel_sync_needs_baseline(paths, "email")
+}
+
+pub fn communication_jami_sync_needs_baseline(paths: &Paths) -> anyhow::Result<bool> {
+    communication_channel_sync_needs_baseline(paths, "jami")
+}
+
+fn communication_channel_sync_needs_baseline(
+    paths: &Paths,
+    channel: &str,
+) -> anyhow::Result<bool> {
     let conn = open_db(paths)?;
     if !table_exists(&conn, "communication_sync_runs")? {
         return Ok(true);
@@ -1854,9 +1865,9 @@ pub fn communication_email_sync_needs_baseline(paths: &Paths) -> anyhow::Result<
     let successful_runs: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM communication_sync_runs
-         WHERE channel = 'email'
+         WHERE channel = ?1
            AND ok = 1",
-        [],
+        params![channel],
         |row| row.get(0),
     )?;
     Ok(successful_runs == 0)
@@ -3115,7 +3126,7 @@ pub fn list_recent_completed_owner_tasks(
                 last_checkpoint_summary, last_checkpoint_at, last_output
          FROM tasks
          WHERE status = 'done'
-           AND source_channel IN ('bios', 'homepage', 'terminal', 'attach_terminal', 'email')
+           AND source_channel IN ('bios', 'homepage', 'terminal', 'attach_terminal', 'email', 'jami')
          ORDER BY updated_at DESC, id DESC
          LIMIT ?1",
     )?;
@@ -6656,7 +6667,7 @@ fn classify_task_kind(message: &str) -> String {
     }
     if contains_any(
         &lowered,
-        &["mail", "email", "whatsapp", "kanal", "kommunikationspfad"],
+        &["mail", "email", "jami", "whatsapp", "kanal", "kommunikationspfad"],
     ) {
         return "channel_expansion".to_string();
     }
@@ -6800,6 +6811,7 @@ fn compute_priority_score(
         "homepage" => 240,
         "terminal" | "attach_terminal" => 220,
         "email" => 80,
+        "jami" => 80,
         "whatsapp" => 60,
         _ => 40,
     };
@@ -7895,6 +7907,7 @@ fn normalize_proactive_contact_channel(channel: &str, person_email: &str) -> Str
     let normalized = channel.trim().to_lowercase();
     match normalized.as_str() {
         "email" | "mail" => "email".to_string(),
+        "jami" => "jami".to_string(),
         "bios" => "bios".to_string(),
         "homepage" => "homepage".to_string(),
         "terminal" => "terminal".to_string(),
@@ -8858,6 +8871,17 @@ mod tests {
     }
 
     #[test]
+    fn owner_jami_interrupt_with_address_stays_owner_interrupt() {
+        let task_kind = classify_interrupt_task_kind(
+            "Michael Welsch",
+            "jami",
+            "Michael Welsch <jami:michaelwelsch>",
+            "Bitte stoppe die alte Schleife und reagiere auf diese neue Nachricht.",
+        );
+        assert_eq!(task_kind, "owner_interrupt");
+    }
+
+    #[test]
     fn first_email_sync_run_is_treated_as_baseline() -> anyhow::Result<()> {
         let _guard = env_lock().lock().expect("test env lock poisoned");
         let root = unique_test_root("email-sync-baseline");
@@ -8885,6 +8909,39 @@ mod tests {
         drop(conn);
 
         assert!(!communication_email_sync_needs_baseline(&paths)?);
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn first_jami_sync_run_is_treated_as_baseline() -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("jami-sync-baseline");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let conn = open_db(&paths)?;
+        conn.execute_batch(include_str!("../scripts/communication_schema.sql"))?;
+        drop(conn);
+
+        assert!(communication_jami_sync_needs_baseline(&paths)?);
+
+        let conn = open_db(&paths)?;
+        conn.execute(
+            "INSERT INTO communication_sync_runs(
+                run_key, channel, account_key, folder_hint, started_at, finished_at,
+                ok, fetched_count, stored_count, error_text, metadata_json
+             ) VALUES(?1, 'jami', 'jami:owner', 'INBOX', ?2, ?2, 1, 2, 2, '', '{}')",
+            params!["run-1", now_iso()],
+        )?;
+        drop(conn);
+
+        assert!(!communication_jami_sync_needs_baseline(&paths)?);
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())

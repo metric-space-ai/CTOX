@@ -792,3 +792,15 @@ The supervisor now suppresses `ensure_cto_obligations()` whenever an open `owner
 The next architecture correction narrowed the Codex-derived control loop instead of adding another competing agent around it.
 The reference compact path now uses the HTML-style staged controller directly: it grades the agent's progress in German school marks, compacts context into continuity narrative, anchors, and active focus, emits structured reprioritization ops for the light wrapper, and then silently reroutes the next working model tier from the same compact cycle.
 That keeps interrupts, task reshaping, and model escalation tied to one bounded controller at the original compact boundary instead of scattering those decisions across a second meta-loop.
+
+## 2026-03-21 - Jami Joins The External Interrupt Bridge As A Reviewed Local File Adapter
+
+The next communication expansion did not come with a clean direct app API on this Mac: there was no local `jami`, `jamid`, or D-Bus surface to bind against honestly.
+Instead of pretending otherwise, the repo now gains a reviewed local Jami adapter that uses the same channel-neutral SQLite communication store and the same `channel-interrupt` bridge as mail, but speaks through explicit inbox, outbox, and archive directories for a local helper around the Jami application.
+The supervisor now treats configured Jami the same way it treats configured mail on the inbound side: periodic sync, first-run baseline import without interrupt flood, incident tracking when the bridge fails, and bounded-turn owner preemption when a fresh Jami owner message arrives.
+
+## 2026-03-21 - Installer Now Provisions The Official Jami Daemon Path
+
+The reviewed file adapter alone was not enough for a real installation path: the Linux installer still left Jami itself absent and therefore could only stage wrappers without a daemon behind them.
+The installation flow now provisions the official Jami apt repository on supported Debian/Ubuntu-family hosts, installs `jami-daemon` with `dbus-x11`, prepares the runtime inbox/outbox/archive directories, persists the `CTO_JAMI_*` environment, and installs a dedicated `cto-jami-daemon.service` user unit that launches the daemon through the reviewed local bridge path.
+That keeps the communication expansion honest: Jami is still mediated through the local reviewed adapter, but the installer now brings up the daemon/runtime substrate that the adapter depends on instead of pretending a host integration already exists.

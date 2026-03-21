@@ -5139,8 +5139,65 @@ fn task_should_get_codex_command_exec_guidance(task: &TaskRecord) -> bool {
     )
 }
 
+pub(crate) fn owner_interrupt_is_status_question(task: &TaskRecord) -> bool {
+    if task.task_kind != "owner_interrupt" {
+        return false;
+    }
+    let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
+    let keywords = extract_keywords(&haystack);
+    let looks_like_question = haystack.contains('?')
+        || [
+            "woran arbeitest",
+            "an was arbeitest",
+            "arbeitest du gerade",
+            "wie weit",
+            "wie läuft",
+            "wie laeuft",
+            "was ist der stand",
+            "wie ist der stand",
+            "bist du fertig",
+            "hast du schon",
+            "woran bist du",
+            "what are you working on",
+            "what is the status",
+            "how far are you",
+            "have you already",
+        ]
+        .iter()
+        .any(|needle| haystack.contains(needle))
+        || (keywords.contains("status")
+            && (keywords.contains("fortschritt")
+                || keywords.contains("stand")
+                || keywords.contains("arbeit")
+                || keywords.contains("working")));
+    let looks_like_implementation_request = [
+        "erstelle",
+        "baue",
+        "implement",
+        "implementiere",
+        "schreibe",
+        "create",
+        "build",
+        "write",
+        "fix",
+        "patch",
+        "repar",
+        "compile",
+        "kompil",
+        "teste",
+        "reviewe",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle) || keywords.contains(*needle));
+
+    looks_like_question && !looks_like_implementation_request
+}
+
 fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool {
     if task.task_kind != "owner_interrupt" {
+        return false;
+    }
+    if owner_interrupt_is_status_question(task) {
         return false;
     }
     let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
@@ -7214,6 +7271,13 @@ mod tests {
             interrupt_decision,
             ContextPackagePreflightDecision::Refresh(ContextCompactionTrigger::Interrupt)
         );
+    }
+
+    #[test]
+    fn owner_status_question_about_cpp_work_stays_chat_like() {
+        let task = sample_task("Chatten", "Hast du schon an der C++-App gearbeitet?");
+        assert!(owner_interrupt_is_status_question(&task));
+        assert!(!owner_interrupt_needs_workspace_execution_guidance(&task));
     }
 
     #[test]

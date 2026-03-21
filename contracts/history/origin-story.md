@@ -50,7 +50,7 @@ If the owner is unhappy with the homepage and says so in the terminal or later i
 Only after BIOS communication has been taken over may it calibrate itself firmly to owner branding.
 This first homepage should already be more comfortable than the terminal: 1:1 chat, root binding, and image upload for shared visibility into important artifacts.
 Communication channels have different trust levels:
-the terminal is the system layer, the homepage with BIOS chat is the trust and binding layer, and email and WhatsApp are lower-trust external channels.
+the terminal is the system layer, the homepage with BIOS chat is the trust and binding layer, and email, Jami, and WhatsApp are lower-trust external channels.
 For sensitive topics or doubtful identity, the agent may redirect the discussion from those channels into a 1:1 chat on the homepage.
 Deep changes to the overall system belong in the terminal layer.
 

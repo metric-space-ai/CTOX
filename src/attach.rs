@@ -2158,6 +2158,61 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             help: "Outgoing SMTP port, for example 465 or 587.",
         },
         SettingsItem {
+            key: "jami_account_id",
+            label: "Jami Account",
+            value: env_map
+                .get("CTO_JAMI_ACCOUNT_ID")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Stable local Jami account identifier that activates the Jami interrupt bridge.",
+        },
+        SettingsItem {
+            key: "jami_profile_name",
+            label: "Jami Profile",
+            value: env_map
+                .get("CTO_JAMI_PROFILE_NAME")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Human-readable local profile label used for queued outbound Jami messages.",
+        },
+        SettingsItem {
+            key: "jami_inbox_dir",
+            label: "Jami Inbox Dir",
+            value: env_map
+                .get("CTO_JAMI_INBOX_DIR")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Directory where a local Jami bridge drops inbound JSON or JSONL payloads for sync.",
+        },
+        SettingsItem {
+            key: "jami_outbox_dir",
+            label: "Jami Outbox Dir",
+            value: env_map
+                .get("CTO_JAMI_OUTBOX_DIR")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Directory where outbound Jami payloads are queued for a local bridge helper.",
+        },
+        SettingsItem {
+            key: "jami_archive_dir",
+            label: "Jami Archive Dir",
+            value: env_map
+                .get("CTO_JAMI_ARCHIVE_DIR")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Directory where processed inbound Jami bridge files are archived after sync.",
+        },
+        SettingsItem {
             key: "openai_api_key",
             label: "OpenAI Key",
             value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
@@ -2220,6 +2275,7 @@ fn save_settings_items(
         .cloned()
         .unwrap_or_default();
     let mut saw_mail_address = false;
+    let mut saw_jami_account = false;
     let current_local_model = env_map
         .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
         .cloned()
@@ -2254,6 +2310,14 @@ fn save_settings_items(
             "mail_imap_port" => upsert_env_value(&mut env_map, "CTO_EMAIL_IMAP_PORT", &value),
             "mail_smtp_host" => upsert_env_value(&mut env_map, "CTO_EMAIL_SMTP_HOST", &value),
             "mail_smtp_port" => upsert_env_value(&mut env_map, "CTO_EMAIL_SMTP_PORT", &value),
+            "jami_account_id" => {
+                saw_jami_account = !value.is_empty();
+                upsert_env_value(&mut env_map, "CTO_JAMI_ACCOUNT_ID", &value);
+            }
+            "jami_profile_name" => upsert_env_value(&mut env_map, "CTO_JAMI_PROFILE_NAME", &value),
+            "jami_inbox_dir" => upsert_env_value(&mut env_map, "CTO_JAMI_INBOX_DIR", &value),
+            "jami_outbox_dir" => upsert_env_value(&mut env_map, "CTO_JAMI_OUTBOX_DIR", &value),
+            "jami_archive_dir" => upsert_env_value(&mut env_map, "CTO_JAMI_ARCHIVE_DIR", &value),
             "openai_api_key" => upsert_env_value(&mut env_map, "OPENAI_API_KEY", &value),
             "grosshirn_api_key" => {
                 upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_API_KEY", &value)
@@ -2330,6 +2394,7 @@ fn save_settings_items(
         || !installation.owner_contact_email.trim().is_empty()
         || !installation.owner_contact_info.trim().is_empty()
         || saw_mail_address
+        || saw_jami_account
     {
         installation.status = "captured".to_string();
     }
@@ -3890,6 +3955,22 @@ mod tests {
                 choices: Vec::new(),
                 help: "",
             },
+            SettingsItem {
+                key: "jami_account_id",
+                label: "Jami Account",
+                value: "jami:owner-account".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
+            SettingsItem {
+                key: "jami_inbox_dir",
+                label: "Jami Inbox Dir",
+                value: "/tmp/cto-jami-inbox".to_string(),
+                secret: false,
+                choices: Vec::new(),
+                help: "",
+            },
         ];
 
         let outcome = save_settings_items(&paths, &items)?;
@@ -3915,6 +3996,14 @@ mod tests {
         assert_eq!(
             env_map.get("CTO_EMAIL_PASSWORD").map(String::as_str),
             Some("supersecret")
+        );
+        assert_eq!(
+            env_map.get("CTO_JAMI_ACCOUNT_ID").map(String::as_str),
+            Some("jami:owner-account")
+        );
+        assert_eq!(
+            env_map.get("CTO_JAMI_INBOX_DIR").map(String::as_str),
+            Some("/tmp/cto-jami-inbox")
         );
 
         std::fs::remove_dir_all(&root).ok();
