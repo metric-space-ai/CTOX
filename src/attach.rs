@@ -1489,7 +1489,9 @@ impl AttachTui {
                 ),
                 width,
             ),
-            fit_line(&self.context_fill_line(width), width),
+            fit_line(&self.compact_slots_line(width), width),
+            fit_line(&self.context_window_line(width), width),
+            fit_line(&self.compaction_budget_line(width), width),
             "-".repeat(width),
         ]
     }
@@ -1513,19 +1515,34 @@ impl AttachTui {
         .join(" ")
     }
 
-    fn context_fill_line(&self, width: usize) -> String {
+    fn compact_slots_line(&self, _width: usize) -> String {
         let simple_slot = compact_text(self.setting_value("simple_model").unwrap_or("?"), 18);
         let medium_slot = compact_text(self.setting_value("medium_model").unwrap_or("?"), 18);
         let red_slot = compact_text(self.setting_value("red_model").unwrap_or("?"), 18);
-        let (used, budget, percent) = self.context_fill_metrics();
-        let meter_width = width.clamp(10, 120) / 6;
-        let meter = ascii_meter(percent, meter_width.max(10));
+        format!("Compact slots  S {simple_slot}  |  M {medium_slot}  |  R {red_slot}")
+    }
+
+    fn context_window_line(&self, width: usize) -> String {
+        let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
+        let Some(window) = self.model_window_tokens() else {
+            return format!("Context window  unavailable for current route  |  last turn used {used} tokens");
+        };
+        let percent = used.saturating_mul(100) / window.max(1);
+        let meter_width = width.saturating_sub(34).clamp(16, 72);
+        let meter = ascii_meter(percent, meter_width);
+        format!("Context window {meter} {percent:>3}%  {used}/{window}")
+    }
+
+    fn compaction_budget_line(&self, width: usize) -> String {
+        let (used, budget, percent) = self.compaction_budget_metrics();
+        let meter_width = width.saturating_sub(36).clamp(16, 72);
+        let meter = ascii_meter(percent, meter_width);
         format!(
-            "Context {meter} {percent:>3}%  {used}/{budget} est  |  Slots S {simple_slot}  M {medium_slot}  R {red_slot}"
+            "Compaction budget {meter} {percent:>3}%  {used}/{budget} est  |  wrapper-facing compact package"
         )
     }
 
-    fn context_fill_metrics(&self) -> (usize, usize, usize) {
+    fn compaction_budget_metrics(&self) -> (usize, usize, usize) {
         if let Some(continuity) = self.snapshot.latest_continuity.as_ref() {
             let budget = continuity.budget_hint.max(1);
             let used = continuity.estimated_tokens.max(1);
@@ -1535,6 +1552,27 @@ impl AttachTui {
         let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
         let budget = used.max(1);
         (used, budget, 100)
+    }
+
+    fn model_window_tokens(&self) -> Option<usize> {
+        if self.snapshot.brain_routing.route_mode == "grosshirn" {
+            return None;
+        }
+        let runtime_model = self
+            .snapshot
+            .kleinhirn_runtime
+            .as_ref()
+            .and_then(|runtime| {
+                runtime
+                    .runtime_model
+                    .as_deref()
+                    .or(runtime.policy_model.as_deref())
+            })
+            .map(normalize_runtime_model_choice)?;
+        match runtime_model.as_str() {
+            "openai/gpt-oss-20b" => Some(131_072),
+            _ => None,
+        }
     }
 
     fn tasks_body_rows(&self, width: usize, height: usize) -> Vec<String> {
@@ -3942,13 +3980,15 @@ mod tests {
     }
 
     #[test]
-    fn context_fill_line_uses_latest_compaction_budget() {
+    fn context_header_lines_split_window_and_compaction_budget() {
         let ui = sample_ui();
-        let line = ui.context_fill_line(140);
+        let window_line = ui.context_window_line(140);
+        let budget_line = ui.compaction_budget_line(140);
 
-        assert!(line.contains("Context ["));
-        assert!(line.contains("760/1200"));
-        assert!(line.contains("Slots S openai/gpt-oss-20b"));
+        assert!(window_line.contains("Context window ["));
+        assert!(window_line.contains("131072"));
+        assert!(budget_line.contains("Compaction budget ["));
+        assert!(budget_line.contains("760/1200"));
     }
 
     #[test]
