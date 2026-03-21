@@ -150,6 +150,22 @@ fi
 
 EMBED_PID=""
 
+main_runtime_uses_parallel_local_server() {
+  case "${CTO_AGENT_KLEINHIRN_MN_LOCAL_WORLD_SIZE:-${MISTRALRS_MN_LOCAL_WORLD_SIZE:-}}" in
+    ""|0|1)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  if [ -n "${CTO_AGENT_KLEINHIRN_TOPOLOGY:-}" ]; then
+    return 0
+  fi
+
+  return 1
+}
+
 start_context_embedding_server() {
   case "$(printf '%s' "${CTO_AGENT_CONTEXT_EMBEDDING_ENABLED:-1}" | tr '[:upper:]' '[:lower:]')" in
     0|false|no|off)
@@ -157,6 +173,10 @@ start_context_embedding_server() {
       ;;
   esac
   if [ -z "${CTO_AGENT_CONTEXT_EMBEDDING_RUNTIME_MODEL:-}" ]; then
+    return 0
+  fi
+  if main_runtime_uses_parallel_local_server; then
+    echo "Skipping context embedding sidecar because the active kleinhirn runtime uses parallel local startup." >&2
     return 0
   fi
   "$HOME/.cargo/bin/mistralrs" serve \
