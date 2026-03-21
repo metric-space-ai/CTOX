@@ -4054,7 +4054,15 @@ pub fn normalize_runtime_model_choice(raw: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    match trimmed.to_ascii_lowercase().as_str() {
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.starts_with("openai/gpt-") && !lowered.starts_with("openai/gpt-oss-") {
+        return trimmed
+            .strip_prefix("openai/")
+            .or_else(|| trimmed.strip_prefix("OpenAI/"))
+            .unwrap_or(trimmed)
+            .to_string();
+    }
+    match lowered.as_str() {
         "gpt-oss-20b" => "openai/gpt-oss-20b".to_string(),
         "gpt-oss-120b" => "openai/gpt-oss-120b".to_string(),
         "qwen3.5-35b-a3b" | "qwen/qwen3.5-35b-a3b" => "Qwen/Qwen3.5-35B-A3B".to_string(),
@@ -4296,6 +4304,22 @@ mod tests {
             find_local_kleinhirn_candidate(&policy, "GPT-OSS 20B")
                 .map(|candidate| candidate.model_id.as_str()),
             Some("gpt-oss-20b")
+        );
+    }
+
+    #[test]
+    fn normalize_runtime_model_choice_strips_external_openai_prefix() {
+        assert_eq!(
+            normalize_runtime_model_choice("openai/gpt-5.4-mini"),
+            "gpt-5.4-mini"
+        );
+        assert_eq!(
+            normalize_runtime_model_choice("openai/gpt-4.5"),
+            "gpt-4.5"
+        );
+        assert_eq!(
+            normalize_runtime_model_choice("openai/gpt-oss-20b"),
+            "openai/gpt-oss-20b"
         );
     }
 

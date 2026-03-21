@@ -1,4 +1,5 @@
 use crate::bootstrap::handle_attach_line_detailed;
+use crate::brain_runtime::apply_targeted_kleinhirn_upgrade;
 use crate::brain_runtime::GrosshirnRuntimeSnapshot;
 use crate::brain_runtime::KleinhirnRuntimeSnapshot;
 use crate::brain_runtime::load_grosshirn_runtime_snapshot;
@@ -98,8 +99,12 @@ const MEDIUM_MODEL_OPTIONS: &[&str] = &[
     "openai/gpt-oss-120b",
     "Qwen/Qwen3-235B-A22B",
     "gpt-4.5-mini",
+    "gpt-5.4-mini",
 ];
 const RED_MODEL_OPTIONS: &[&str] = &["gpt-4.5", "gpt-5.4", "gpt-5.4-pro"];
+const LOCAL_MODEL_OPTIONS: &[&str] = &["openai/gpt-oss-20b", "Qwen/Qwen3.5-35B-A3B"];
+const GROSSHIRN_MODEL_OPTIONS: &[&str] =
+    &["gpt-4.5", "gpt-4.5-mini", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-pro"];
 
 #[derive(Debug, Serialize, Deserialize)]
 struct AttachRequest {
@@ -1050,6 +1055,9 @@ impl AttachTui {
 
     fn agent_rows(&self, width: usize) -> Vec<String> {
         let usage = &self.snapshot.brain_usage;
+        let simple_slot = self.setting_value("simple_model").unwrap_or("?");
+        let medium_slot = self.setting_value("medium_model").unwrap_or("?");
+        let red_slot = self.setting_value("red_model").unwrap_or("?");
         let last_model = if usage.last_model_id.trim().is_empty() {
             "no model call recorded yet".to_string()
         } else {
@@ -1071,7 +1079,7 @@ impl AttachTui {
         vec![
             frame_row(
                 &format!(
-                    "Model active {}  |  Route {}  |  Chat session {}",
+                    "Runtime active {}  |  Route {}  |  Chat session {}",
                     compact_text(&current_brain_model_label(&self.snapshot), 56),
                     brain_route_label(&self.snapshot.brain_routing.route_mode),
                     self.chat_session_label()
@@ -1087,6 +1095,15 @@ impl AttachTui {
             ),
             frame_row(
                 &format!(
+                    "Compact slots  S {}  |  M {}  |  R {}",
+                    compact_text(simple_slot, 18),
+                    compact_text(medium_slot, 18),
+                    compact_text(red_slot, 18)
+                ),
+                width,
+            ),
+            frame_row(
+                &format!(
                     "Last usage  {}  |  in {} out {} all {}",
                     compact_text(&last_model, 72),
                     usage.last_input_tokens,
@@ -1096,6 +1113,13 @@ impl AttachTui {
                 width,
             ),
         ]
+    }
+
+    fn setting_value(&self, key: &str) -> Option<&str> {
+        self.settings_items
+            .iter()
+            .find(|item| item.key == key)
+            .map(|item| item.value.as_str())
     }
 
     fn task_rows(&self, width: usize) -> Vec<String> {
@@ -1646,10 +1670,20 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
         organigram.owner.email.as_str(),
         installation.owner_contact_email.as_str(),
     ]);
+    let kleinhirn_model = env_map
+        .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
+        .cloned()
+        .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
+        .map(|value| normalize_runtime_model_choice(&value))
+        .unwrap_or_else(|| LOCAL_MODEL_OPTIONS[0].to_string());
+    let grosshirn_model = env_map
+        .get("CTO_AGENT_GROSSHIRN_MODEL")
+        .cloned()
+        .map(|value| normalize_runtime_model_choice(&value))
+        .unwrap_or_else(|| GROSSHIRN_MODEL_OPTIONS[0].to_string());
     let simple_model = env_map
         .get("CTO_AGENT_COMPACT_SIMPLE_MODEL")
         .cloned()
-        .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
         .map(|value| normalize_runtime_model_choice(&value))
         .unwrap_or_else(|| SIMPLE_MODEL_OPTIONS[0].to_string());
     let medium_model = env_map
@@ -1660,7 +1694,6 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
     let red_model = env_map
         .get("CTO_AGENT_COMPACT_RED_MODEL")
         .cloned()
-        .or_else(|| env_map.get("CTO_AGENT_GROSSHIRN_MODEL").cloned())
         .map(|value| normalize_runtime_model_choice(&value))
         .unwrap_or_else(|| RED_MODEL_OPTIONS[0].to_string());
 
@@ -1775,12 +1808,28 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             help: "Dedicated API key for external grosshirn routing.",
         },
         SettingsItem {
+            key: "kleinhirn_model",
+            label: "Local Runtime",
+            value: kleinhirn_model,
+            secret: false,
+            choices: LOCAL_MODEL_OPTIONS,
+            help: "The actively running local kleinhirn runtime. Saving this field switches the local runtime instead of only changing compact slots.",
+        },
+        SettingsItem {
+            key: "grosshirn_model",
+            label: "Grosshirn Model",
+            value: grosshirn_model,
+            secret: false,
+            choices: GROSSHIRN_MODEL_OPTIONS,
+            help: "Default external model used when the loop routes through grosshirn.",
+        },
+        SettingsItem {
             key: "simple_model",
             label: "Simple Model",
             value: simple_model,
             secret: false,
             choices: SIMPLE_MODEL_OPTIONS,
-            help: "Low-cost slot chosen after compaction when progress remains strong.",
+            help: "Compact slot chosen after compaction when progress remains strong. This is not the same thing as the active local runtime above.",
         },
         SettingsItem {
             key: "medium_model",
@@ -1788,7 +1837,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             value: medium_model,
             secret: false,
             choices: MEDIUM_MODEL_OPTIONS,
-            help: "Middle slot chosen when compaction grades the progress as unstable or average.",
+            help: "Compact slot chosen when compaction grades the progress as unstable or average.",
         },
         SettingsItem {
             key: "red_model",
@@ -1796,7 +1845,7 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             value: red_model,
             secret: false,
             choices: RED_MODEL_OPTIONS,
-            help: "Escalation slot chosen when compaction grades the progress as red.",
+            help: "Compact escalation slot chosen when compaction grades the progress as red.",
         },
     ]
 }
@@ -1806,6 +1855,13 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
     let mut installation = load_installation_bootstrap_state(paths);
     let mut env_map = load_runtime_env_map(paths).unwrap_or_default();
     let mut saw_mail_address = false;
+    let current_local_model = env_map
+        .get("CTO_AGENT_KLEINHIRN_RUNTIME_MODEL")
+        .cloned()
+        .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
+        .map(|value| normalize_runtime_model_choice(&value))
+        .unwrap_or_default();
+    let mut requested_local_model: Option<String> = None;
 
     for item in items {
         let value = item.value.trim().to_string();
@@ -1832,6 +1888,14 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
             "grosshirn_api_key" => {
                 upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_API_KEY", &value)
             }
+            "kleinhirn_model" => {
+                requested_local_model = Some(normalize_runtime_model_choice(&value));
+            }
+            "grosshirn_model" => upsert_env_value(
+                &mut env_map,
+                "CTO_AGENT_GROSSHIRN_MODEL",
+                &normalize_runtime_model_choice(&value),
+            ),
             "simple_model" => upsert_env_value(
                 &mut env_map,
                 "CTO_AGENT_COMPACT_SIMPLE_MODEL",
@@ -1866,7 +1930,17 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
     installation.updated_at = now_iso();
     save_organigram(paths, &organigram)?;
     save_installation_bootstrap_state(paths, &installation)?;
-    save_runtime_env_map(paths, &env_map)
+    save_runtime_env_map(paths, &env_map)?;
+
+    if let Some(local_model) = requested_local_model
+        .filter(|value| !value.trim().is_empty())
+        .filter(|value| !value.eq_ignore_ascii_case(&current_local_model))
+    {
+        apply_targeted_kleinhirn_upgrade(paths, Some(&local_model))
+            .with_context(|| format!("failed to switch active local kleinhirn to {local_model}"))?;
+    }
+
+    Ok(())
 }
 
 fn first_non_empty(values: &[&str]) -> String {
