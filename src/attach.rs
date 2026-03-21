@@ -2013,9 +2013,15 @@ fn save_settings_items(
     );
     let effective_red_model = env_map
         .get("CTO_AGENT_COMPACT_RED_MODEL")
-        .map(String::as_str)
-        .unwrap_or_else(|| default_model_choice_for_setting("red_model", external_model_access));
-    upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_MODEL", effective_red_model);
+        .cloned()
+        .unwrap_or_else(|| {
+            default_model_choice_for_setting("red_model", external_model_access).to_string()
+        });
+    upsert_env_value(
+        &mut env_map,
+        "CTO_AGENT_GROSSHIRN_MODEL",
+        &effective_red_model,
+    );
 
     if saw_mail_address {
         installation.email_assignment_mode = "assigned_now".to_string();
