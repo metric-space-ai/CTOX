@@ -2503,8 +2503,7 @@ fn probe_kleinhirn_endpoint(target: &ModelTarget) -> anyhow::Result<String> {
 }
 
 fn probe_kleinhirn_control_output(target: &ModelTarget) -> anyhow::Result<String> {
-    let system_prompt =
-        "You are a readiness probe for a bounded agentic control loop. Respond with strict JSON only.";
+    let system_prompt = "Reply only with JSON.";
     let user_prompt = r#"Return exactly {"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"ready"}"#;
     let payload = build_model_payload(target, None, system_prompt, user_prompt, "");
     let response = post_model_request(target, &payload, model_post_timeout())?;
