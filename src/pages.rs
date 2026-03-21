@@ -1041,22 +1041,6 @@ pub fn bios_page(
     } else {
         "not frozen yet"
     };
-    let dialogue_rows = if dialogue.is_empty() {
-        r#"<tr><td colspan="4" class="muted">No BIOS dialogue recorded yet.</td></tr>"#.to_string()
-    } else {
-        dialogue
-            .iter()
-            .map(|entry| {
-                format!(
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                    esc(&entry.created_at),
-                    esc(&entry.speaker),
-                    esc(&entry.message),
-                    if entry.used_grosshirn { "yes" } else { "no" }
-                )
-            })
-            .collect()
-    };
     let memory_rows = if memory_items.is_empty() {
         r#"<tr><td colspan="5" class="muted">No memory entries recorded yet.</td></tr>"#.to_string()
     } else {
