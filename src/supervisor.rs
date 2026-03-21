@@ -5787,8 +5787,8 @@ fn review_retry_should_reopen_parent_non_machine_owner_stall(
     let Some(parent_summary) = parent_task.last_checkpoint_summary.as_deref() else {
         return false;
     };
-
-    repeated_workspace_non_machine_owner_summary(&parent_task, parent_summary, &task.detail)
+    parent_task.task_kind == "owner_interrupt"
+        && parent_summary.trim() == grounded_workspace_non_machine_summary().trim()
 }
 
 fn publish_task_result_to_origin(
