@@ -1000,7 +1000,16 @@ pub fn probe_kleinhirn_health(paths: &Paths) -> anyhow::Result<()> {
         anyhow::bail!("{detail}");
     };
 
-    match probe_kleinhirn_endpoint(&target) {
+    let health_mode = std::env::var("CTO_AGENT_KLEINHIRN_HEALTH_PROBE_MODE")
+        .ok()
+        .unwrap_or_else(|| "catalog".to_string());
+    let health_result = if health_mode.eq_ignore_ascii_case("strict") {
+        probe_kleinhirn_endpoint(&target)
+    } else {
+        probe_kleinhirn_catalog(&target)
+    };
+
+    match health_result {
         Ok(detail) => {
             record_resource_status(
                 paths,
@@ -2475,6 +2484,12 @@ fn post_model_request_with_fallback(
 }
 
 fn probe_kleinhirn_endpoint(target: &ModelTarget) -> anyhow::Result<String> {
+    let detail = probe_kleinhirn_catalog(target)?;
+    let control_detail = probe_kleinhirn_control_output(target)?;
+    Ok(format!("{detail}; {control_detail}"))
+}
+
+fn probe_kleinhirn_catalog(target: &ModelTarget) -> anyhow::Result<String> {
     let response = get_models_request(target)?;
     let models = response
         .get("data")
@@ -2486,7 +2501,7 @@ fn probe_kleinhirn_endpoint(target: &ModelTarget) -> anyhow::Result<String> {
             .map(|id| id == target.model_id)
             .unwrap_or(false)
     });
-    let detail = if model_present {
+    Ok(if model_present {
         format!(
             "model catalog ready via {} (found {})",
             target.base_url, target.model_id
@@ -2497,9 +2512,7 @@ fn probe_kleinhirn_endpoint(target: &ModelTarget) -> anyhow::Result<String> {
             target.base_url,
             models.len()
         )
-    };
-    let control_detail = probe_kleinhirn_control_output(target)?;
-    Ok(format!("{detail}; {control_detail}"))
+    })
 }
 
 fn probe_kleinhirn_control_output(target: &ModelTarget) -> anyhow::Result<String> {
