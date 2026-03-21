@@ -9,6 +9,28 @@ normalize_remote() {
   printf '%s' "$1" | sed 's#^[[:space:]]*##; s#[[:space:]]*$##; s#\.git$##'
 }
 
+timestamp_suffix() {
+  date -u +%Y%m%d-%H%M%S 2>/dev/null || date +%Y%m%d-%H%M%S
+}
+
+next_backup_dir() {
+  stamp="$(timestamp_suffix)"
+  candidate="${INSTALL_DIR}-backup-${stamp}"
+  suffix=1
+  while [ -e "$candidate" ]; do
+    candidate="${INSTALL_DIR}-backup-${stamp}-${suffix}"
+    suffix=$((suffix + 1))
+  done
+  printf '%s\n' "$candidate"
+}
+
+backup_install_dir() {
+  reason="$1"
+  backup_dir="$(next_backup_dir)"
+  echo "[bootstrap] Move existing install dir to $backup_dir ($reason)"
+  mv "$INSTALL_DIR" "$backup_dir"
+}
+
 run_sudo() {
   if [ -n "${CTO_AGENT_SUDO_PASSWORD:-}" ]; then
     printf '%s\n' "$CTO_AGENT_SUDO_PASSWORD" | sudo -S "$@"
@@ -32,28 +54,7 @@ ensure_git_available() {
   run_sudo apt-get install -y git
 }
 
-sync_repo() {
-  normalized_repo_url="$(normalize_remote "$REPO_URL")"
-
-  if [ -d "$INSTALL_DIR/.git" ]; then
-    current_remote="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
-    if [ -n "$current_remote" ] && [ "$(normalize_remote "$current_remote")" != "$normalized_repo_url" ]; then
-      echo "Install dir $INSTALL_DIR already points to a different git remote: $current_remote" >&2
-      exit 1
-    fi
-
-    echo "[bootstrap] Update existing CTO-Agent checkout in $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch origin "$GIT_REF" --tags
-    git -C "$INSTALL_DIR" checkout "$GIT_REF" >/dev/null 2>&1 || git -C "$INSTALL_DIR" checkout -B "$GIT_REF" "origin/$GIT_REF"
-    git -C "$INSTALL_DIR" pull --ff-only origin "$GIT_REF"
-    return
-  fi
-
-  if [ -e "$INSTALL_DIR" ] && [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
-    echo "Install dir $INSTALL_DIR exists and is not an empty CTO-Agent checkout." >&2
-    exit 1
-  fi
-
+clone_repo() {
   mkdir -p "$INSTALL_DIR"
   if [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
     echo "Install dir $INSTALL_DIR must be empty before cloning." >&2
@@ -63,6 +64,44 @@ sync_repo() {
   rmdir "$INSTALL_DIR" 2>/dev/null || true
   echo "[bootstrap] Clone CTO-Agent into $INSTALL_DIR"
   git clone --branch "$GIT_REF" "$REPO_URL" "$INSTALL_DIR"
+}
+
+sync_repo() {
+  normalized_repo_url="$(normalize_remote "$REPO_URL")"
+
+  if [ -d "$INSTALL_DIR/.git" ]; then
+    current_remote="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
+    if [ -n "$current_remote" ] && [ "$(normalize_remote "$current_remote")" != "$normalized_repo_url" ]; then
+      backup_install_dir "existing checkout points to a different git remote: $current_remote"
+      clone_repo
+      return
+    fi
+
+    if [ -n "$(git -C "$INSTALL_DIR" status --porcelain --untracked-files=all 2>/dev/null || true)" ]; then
+      backup_install_dir "existing checkout has local or untracked changes"
+      clone_repo
+      return
+    fi
+
+    echo "[bootstrap] Update existing CTO-Agent checkout in $INSTALL_DIR"
+    git -C "$INSTALL_DIR" fetch origin "$GIT_REF" --tags
+    if ! git -C "$INSTALL_DIR" checkout "$GIT_REF" >/dev/null 2>&1; then
+      git -C "$INSTALL_DIR" checkout -B "$GIT_REF" "origin/$GIT_REF"
+    fi
+    if ! git -C "$INSTALL_DIR" pull --ff-only origin "$GIT_REF"; then
+      backup_install_dir "fast-forward update failed"
+      clone_repo
+    fi
+    return
+  fi
+
+  if [ -e "$INSTALL_DIR" ] && [ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | head -n 1)" ]; then
+    backup_install_dir "existing install dir is not an empty CTO-Agent checkout"
+    clone_repo
+    return
+  fi
+
+  clone_repo
 }
 
 ensure_git_available
