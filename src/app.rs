@@ -1022,14 +1022,21 @@ async fn bios_get(
 ) -> Result<Html<String>, AppError> {
     let bios = refresh_bios_draft(&state.paths)?;
     let genome = load_genome(&state.paths);
+    let homepage = load_homepage_policy(&state.paths);
+    let root_auth = load_root_auth(&state.paths);
     let model_policy = load_model_policy(&state.paths);
     let census =
         inspect_local_resources(&state.paths).unwrap_or_else(|_| load_census(&state.paths));
+    let agent_state = load_agent_state(&state.paths);
+    let browser_state = refresh_browser_engine_state(&state.paths)
+        .unwrap_or_else(|_| crate::contracts::load_browser_engine_state(&state.paths));
     let _ = sync_owner_trust(&state.paths);
     let _ = sync_resources_from_census(&state.paths, &census);
     let _ = sync_model_resources(&state.paths, &model_policy, &census);
     let _ = sync_skills(&state.paths);
     let trust = load_owner_trust(&state.paths)?;
+    let focus_state = load_focus_state(&state.paths).ok();
+    let open_tasks = list_open_tasks(&state.paths, 12)?;
     let dialogue = list_bios_dialogue(&state.paths, 12)?;
     let memory_items = list_memory_items(&state.paths, 10)?;
     let memory_summary = load_memory_summary(&state.paths, "owner_calibration")?;
@@ -1048,10 +1055,16 @@ async fn bios_get(
     Ok(Html(bios_page(
         query.msg.as_deref(),
         &genome,
+        &homepage,
         &bios,
+        &root_auth,
         &trust,
         &model_policy,
         &census,
+        &agent_state,
+        &browser_state,
+        focus_state.as_ref(),
+        &open_tasks,
         memory_summary.as_deref(),
         learning_working_set.as_deref(),
         learning_operational.as_deref(),

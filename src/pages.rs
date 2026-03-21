@@ -16,6 +16,7 @@ use crate::contracts::describe_kleinhirn_selection;
 use crate::contracts::recommended_kleinhirn;
 use crate::runtime_db::BiosDialogueEntry;
 use crate::runtime_db::BiosUploadRecord;
+use crate::runtime_db::FocusStateRecord;
 use crate::runtime_db::HomepageRevisionRecord;
 use crate::runtime_db::LearningEntryRecord;
 use crate::runtime_db::MemoryItemRecord;
@@ -25,6 +26,7 @@ use crate::runtime_db::PersonProfileRecord;
 use crate::runtime_db::ProactiveContactCandidateRecord;
 use crate::runtime_db::ResourceRecord;
 use crate::runtime_db::SkillRecord;
+use crate::runtime_db::TaskRecord;
 use crate::runtime_db::WorkerJobRecord;
 use serde_json::json;
 
@@ -958,10 +960,16 @@ pub fn root_auth_page(message: Option<&str>, root_auth: &RootAuthState) -> Strin
 pub fn bios_page(
     message: Option<&str>,
     genome: &Genome,
+    homepage: &HomepagePolicy,
     bios: &Bios,
+    root_auth: &RootAuthState,
     trust: &OwnerTrustSnapshot,
     model_policy: &ModelPolicy,
     census: &SystemCensus,
+    state: &AgentState,
+    browser_state: &BrowserEngineState,
+    focus_state: Option<&FocusStateRecord>,
+    open_tasks: &[TaskRecord],
     memory_summary: Option<&str>,
     learning_working_set: Option<&str>,
     learning_operational: Option<&str>,
@@ -1247,296 +1255,678 @@ pub fn bios_page(
             })
             .collect()
     };
-    layout(
-        "BIOS",
-        &format!(
-            r#"{banner}
-<section class="card hero">
-  <h1>BIOS</h1>
-  <p>This page is the CTO-Agent's trust, calibration, and control surface.</p>
-  <p><strong>Status:</strong> {status}</p>
-</section>
-<section class="grid">
-  <div class="card">
-    <h2>Genome</h2>
-    <p><strong>Immutable genes</strong></p>
-    <pre>{immutable_genes}</pre>
-    <p><strong>Adaptive surfaces</strong></p>
-    <pre>{adaptive_surfaces}</pre>
-  </div>
-  <div class="card">
-    <h2>Owner Trust</h2>
-    <table>
-      <tr><th>Owner from contract</th><td>{owner}</td></tr>
-      <tr><th>Commitment</th><td>{committed_owner}</td></tr>
-      <tr><th>Owner contact</th><td>{owner_contact}</td></tr>
-      <tr><th>BIOS as primary channel</th><td>{bios_channel}</td></tr>
-      <tr><th>Superpassword set</th><td>{superpassword}</td></tr>
-      <tr><th>Commitment score</th><td>{commitment_score}/100</td></tr>
-      <tr><th>Last owner dialogue</th><td>{last_owner_dialogue}</td></tr>
-      <tr><th>Brain Access</th><td>{brain_access}</td></tr>
-      <tr><th>Active kleinhirn</th><td>{kleinhirn}</td></tr>
-    </table>
-    <p class="muted">{calibration_notes}</p>
-  </div>
-  <form class="card" method="post" action="/bios/update">
-    <h2>BIOS Draft</h2>
-    <label for="agent_name">Agent name</label>
-    <input id="agent_name" name="agent_name" value="{agent_name}">
-    <label for="mission">Mission</label>
-    <textarea id="mission" name="mission" placeholder="What is the mission of this CTO-Agent?">{mission}</textarea>
-    <button type="submit" {disabled}>Save BIOS draft</button>
-    <p class="muted">Owner and organigram are pulled from the organigram contract.</p>
-  </form>
-  <div class="card">
-    <h2>BIOS on the website</h2>
-    <pre>{pretty}</pre>
-    <p class="muted">Base owner: {owner}</p>
-  </div>
-</section>
-<section class="card">
-  <h2>Communication and trust matrix</h2>
-  <table>
-    <tr><th>Channel</th><th>Layer</th><th>Trust</th><th>Interpretation</th><th>Binding</th><th>Sensitive Topics</th></tr>
-    {communication_rows}
-  </table>
-  <p class="muted">
-    Senders must be checked against the organigram: {organigram_check}. Unknown senders default to low trust: {unknown_sender_low_trust}.
-    Sensitive topics may be redirected from low-trust channels to {redirect_target}: {may_refuse}.
-  </p>
-</section>
-<section class="card">
-  <h2>Change Classes and Allowed Layers</h2>
-  <table>
-    <tr><th>Action</th><th>Description</th><th>Channels</th><th>Root</th><th>BIOS primary</th><th>Terminal only</th></tr>
-    {action_rows}
-  </table>
-</section>
-<section class="grid">
-  <form class="card" method="post" action="/bios/chat">
-    <h2>BIOS Chat</h2>
-    <p>This is where the owner should speak with the CTO-Agent from now on, build trust, and calibrate it.</p>
-    <p class="muted">If criticism of the homepage, BIOS visibility, or communication path is expressed here, the agent may also adapt the homepage through its homepage skill.</p>
-    <label for="bios_speaker">Speaker</label>
-    <input id="bios_speaker" name="speaker" value="{speaker}">
-    <label for="bios_message">Message</label>
-    <textarea id="bios_message" name="message" placeholder="Calibrate the agent on purpose, limits, priorities, and trust."></textarea>
-    <button type="submit">Chat in BIOS</button>
-  </form>
-  <form class="card" method="post" action="/bios/brain-access">
-    <h2>Brain Access</h2>
-    <p>This is where the owner decides whether the agent may use only kleinhirn or also grosshirn.</p>
-    <label for="brain_mode">Mode</label>
-    <select id="brain_mode" name="mode">
-      <option value="kleinhirn_only" {kleinhirn_only_selected}>Kleinhirn only</option>
-      <option value="kleinhirn_plus_grosshirn" {kleinhirn_plus_grosshirn_selected}>Kleinhirn + Grosshirn</option>
-    </select>
-    <label for="brain_password">Superpassword for root verification</label>
-    <input id="brain_password" name="password" type="password">
-    <button type="submit">Save brain access</button>
-  </form>
-  <form class="card" method="post" action="/root-auth/set">
-    <h2>Set superpassword in BIOS</h2>
-    <p>Root trust should be established directly from BIOS.</p>
-    <label for="bios_password">Superpassword</label>
-    <input id="bios_password" name="password" type="password">
-    <label for="bios_confirm">Repeat</label>
-    <input id="bios_confirm" name="confirm" type="password">
-    <button type="submit">Save superpassword</button>
-  </form>
-  <form class="card" method="post" action="/bios/upload" enctype="multipart/form-data">
-    <h2>Load image into BIOS chat</h2>
-    <p>This is where the first comfortable trust layer above the terminal takes shape. Images can be shared directly in the 1:1 chat.</p>
-    <input type="hidden" name="source_channel" value="bios">
-    <input type="hidden" name="redirect_to" value="/bios">
-    <label for="bios_upload_speaker">Speaker</label>
-    <input id="bios_upload_speaker" name="speaker" value="{speaker}">
-    <label for="bios_upload_note">Note</label>
-    <textarea id="bios_upload_note" name="note" placeholder="Why is this image important and what should we discuss about it?"></textarea>
-    <label for="bios_upload_image">Image</label>
-    <input id="bios_upload_image" name="image" type="file" accept="image/*">
-    <button type="submit">Load image into BIOS chat</button>
-  </form>
-</section>
-<section class="grid">
-  <div class="card">
-    <h2>Memory</h2>
-    <p class="muted">{memory_summary}</p>
-    <table>
-      <tr><th>Time</th><th>Kind</th><th>Summary</th><th>Source</th><th>Detail</th></tr>
-      {memory_rows}
-    </table>
-  </div>
-  <div class="card">
-    <h2>Resources</h2>
-    <table>
-      <tr><th>Category</th><th>Name</th><th>Status</th><th>Detail</th><th>Observed</th></tr>
-      {resource_rows}
-    </table>
-  </div>
-  <div class="card">
-    <h2>Skills</h2>
-    <table>
-      <tr><th>Name</th><th>Status</th><th>Path</th><th>Note</th></tr>
-      {skill_rows}
-    </table>
-  </div>
-</section>
-<section class="card">
-  <h2>Learning Path</h2>
-  <p class="muted">{learning_working_set}</p>
-  <table>
-    <tr><th>Class</th><th>Condensed reference</th></tr>
-    <tr><td>operational</td><td>{learning_operational}</td></tr>
-    <tr><td>general</td><td>{learning_general}</td></tr>
-    <tr><td>negative</td><td>{learning_negative}</td></tr>
-  </table>
-  <p class="muted">Operational stays in daily working memory, general collects broader insights, and negative preserves failures, dead ends, and anti-patterns.</p>
-  <table>
-    <tr><th>Updated</th><th>Class</th><th>Summary</th><th>Confidence</th><th>Salience</th><th>Applicability</th><th>Evidence</th><th>Detail</th></tr>
-    {learning_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>People Paths</h2>
-  <p class="muted">{people_working_set}</p>
-  <p class="muted">Each person gets their own profile with a conversation trail, notebook references, and a guard note for proactive contacts.</p>
-  <table>
-    <tr><th>Name</th><th>Email</th><th>Relationship</th><th>Trust</th><th>Last Interaction</th><th>Interactions</th><th>Conversation Trail</th><th>Notebook</th></tr>
-    {person_profile_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>People Notebook</h2>
-  <table>
-    <tr><th>Updated</th><th>Person</th><th>Kind</th><th>Source</th><th>Summary</th><th>Detail</th></tr>
-    {person_note_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>Proactive Contact Drafts</h2>
-  <p class="muted">These entries are created model-first, validated before dispatch, and may then go out autonomously through the available delivery path. The table therefore also shows the real dispatch state.</p>
-  <table>
-    <tr><th>Updated</th><th>Person</th><th>Status</th><th>Intent</th><th>Dispatch</th><th>Subject</th><th>Rationale</th><th>Conflict Check</th><th>Sent</th><th>Validation / Dispatch</th></tr>
-    {proactive_contact_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>Image Uploads in 1:1 Chat</h2>
-  <table>
-    <tr><th>Time</th><th>Speaker</th><th>Source</th><th>Note</th><th>File</th><th>Preview</th></tr>
-    {upload_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>BIOS Dialogue History</h2>
-  <table>
-    <tr><th>Time</th><th>Speaker</th><th>Content</th><th>Grosshirn</th></tr>
-    {dialogue_rows}
-  </table>
-</section>
-<section class="card">
-  <h2>Freeze BIOS</h2>
-  <p>To freeze, the agent needs an organigram, a configured superpassword, and root verification.</p>
-  <form method="post" action="/bios/freeze">
-    <label for="freeze_password">Superpassword for root verification</label>
-    <input id="freeze_password" name="password" type="password">
-    <button type="submit" {disabled}>Freeze BIOS</button>
-  </form>
-</section>"#,
-            banner = banner(message),
-            status = esc(status),
-            immutable_genes = esc(&genome.immutable_genes.join("\n")),
-            adaptive_surfaces = esc(&genome.adaptive_surfaces.join("\n")),
-            agent_name = esc(&bios.agent_identity.agent_name),
-            mission = esc(&bios.mission),
-            pretty = esc(&pretty),
-            owner = esc(if bios.owner.name.is_empty() {
-                "not set yet"
+    let flash = match message {
+        Some(msg) if !msg.is_empty() => {
+            format!(r#"<div class="flash"><strong>{}</strong></div>"#, esc(msg))
+        }
+        _ => String::new(),
+    };
+    let owner_display = if !trust.committed_owner_name.trim().is_empty() {
+        trust.committed_owner_name.as_str()
+    } else if !bios.owner.name.trim().is_empty() {
+        bios.owner.name.as_str()
+    } else {
+        "Michael Welsch"
+    };
+    let homepage_title = if homepage.current_title.trim().is_empty() {
+        "CTO-Agent BIOS"
+    } else {
+        homepage.current_title.as_str()
+    };
+    let homepage_headline = if homepage.current_headline.trim().is_empty() {
+        "Recognizable BIOS control surface"
+    } else {
+        homepage.current_headline.as_str()
+    };
+    let homepage_intro = if homepage.current_intro.trim().is_empty() {
+        "This page should stay a BIOS-like setup utility, not drift into a soft homepage shell."
+    } else {
+        homepage.current_intro.as_str()
+    };
+    let communication_note = if homepage.communication_note.trim().is_empty() {
+        "Use the BIOS chat as the preferred 1:1 trust and calibration surface."
+    } else {
+        homepage.communication_note.as_str()
+    };
+    let terminal_fallback_note = if homepage.terminal_fallback_note.trim().is_empty() {
+        "Terminal remains the permanent fallback surface."
+    } else {
+        homepage.terminal_fallback_note.as_str()
+    };
+    let root_configured = root_auth.configured || trust.superpassword_set;
+    let focus_mode = focus_state
+        .map(|focus| focus.mode.as_str())
+        .unwrap_or("observe");
+    let active_task = focus_state
+        .and_then(|focus| {
+            let title = focus.active_task_title.trim();
+            if title.is_empty() {
+                None
             } else {
-                &bios.owner.name
-            }),
-            committed_owner = esc(if trust.committed_owner_name.is_empty() {
-                "not firmly calibrated yet"
-            } else {
-                &trust.committed_owner_name
-            }),
-            owner_contact = trust.owner_contact_established,
-            bios_channel = trust.bios_primary_channel_confirmed,
-            superpassword = trust.superpassword_set,
-            commitment_score = trust.owner_commitment_score,
-            last_owner_dialogue = esc(trust
-                .last_owner_dialogue_at
-                .as_deref()
-                .unwrap_or("none yet")),
-            brain_access = esc(&trust.brain_access_mode),
-            kleinhirn = esc(&format!(
-                "{} ({})",
-                selected_kleinhirn.official_label, selected_kleinhirn.model_id
-            )),
-            communication_rows = communication_rows,
-            action_rows = action_rows,
-            organigram_check = bios
-                .communication_policy
-                .escalation_policy
-                .sender_identity_checked_against_organigram,
-            unknown_sender_low_trust = bios
-                .communication_policy
-                .escalation_policy
-                .unknown_sender_defaults_to_low_trust,
-            redirect_target = esc(&bios
-                .communication_policy
-                .escalation_policy
-                .sensitive_topics_redirect_to),
-            may_refuse = bios
-                .communication_policy
-                .escalation_policy
-                .may_refuse_sensitive_topics_on_low_trust_channels,
-            calibration_notes = esc(if trust.calibration_notes.is_empty() {
-                "No calibration notes recorded yet."
-            } else {
-                &trust.calibration_notes
-            }),
-            speaker = esc(if !bios.owner.name.is_empty() {
-                &bios.owner.name
-            } else {
-                "Michael Welsch"
-            }),
-            kleinhirn_only_selected = if trust.brain_access_mode == "kleinhirn_only" {
+                Some(title)
+            }
+        })
+        .unwrap_or("none");
+    let queue_depth = focus_state
+        .map(|focus| focus.queue_depth.to_string())
+        .unwrap_or_else(|| open_tasks.len().to_string());
+    let reports_to = if bios.reports_to.trim().is_empty() {
+        "still open"
+    } else {
+        bios.reports_to.as_str()
+    };
+    let board_lines = if bios.board.is_empty() {
+        "still open".to_string()
+    } else {
+        bios.board.join("\n")
+    };
+    let peer_cxo_lines = if bios.peer_cxos.is_empty() {
+        "none yet".to_string()
+    } else {
+        bios.peer_cxos.join("\n")
+    };
+    let subordinate_lines = {
+        let mut lines = Vec::new();
+        lines.extend(
+            bios.subordinates
+                .people
+                .iter()
+                .map(|entry| format!("Person: {entry}")),
+        );
+        lines.extend(
+            bios.subordinates
+                .agents
+                .iter()
+                .map(|entry| format!("Agent: {entry}")),
+        );
+        lines.extend(
+            bios.subordinates
+                .vendors
+                .iter()
+                .map(|entry| format!("Vendor: {entry}")),
+        );
+        if lines.is_empty() {
+            "no subordinates recorded yet".to_string()
+        } else {
+            lines.join("\n")
+        }
+    };
+    let organigram_tree = {
+        let mut lines = vec![
+            owner_display.to_string(),
+            format!("└─ Reports To: {reports_to}"),
+        ];
+        if bios.board.is_empty() {
+            lines.push("   • Board: still open".to_string());
+        } else {
+            lines.extend(bios.board.iter().map(|entry| format!("   • Board: {entry}")));
+        }
+        if bios.peer_cxos.is_empty() {
+            lines.push("   • Peer CXO: none yet".to_string());
+        } else {
+            lines.extend(
+                bios.peer_cxos
+                    .iter()
+                    .map(|entry| format!("   • Peer CXO: {entry}")),
+            );
+        }
+        lines.push(format!("   └─ {}", bios.agent_identity.agent_name));
+        if bios.subordinates.people.is_empty()
+            && bios.subordinates.agents.is_empty()
+            && bios.subordinates.vendors.is_empty()
+        {
+            lines.push("      └─ no subordinates recorded yet".to_string());
+        } else {
+            lines.extend(
+                bios.subordinates
+                    .people
+                    .iter()
+                    .map(|entry| format!("      ├─ Person: {entry}")),
+            );
+            lines.extend(
+                bios.subordinates
+                    .agents
+                    .iter()
+                    .map(|entry| format!("      ├─ Agent: {entry}")),
+            );
+            lines.extend(
+                bios.subordinates
+                    .vendors
+                    .iter()
+                    .map(|entry| format!("      └─ Vendor: {entry}")),
+            );
+        }
+        lines.join("\n")
+    };
+    let browser_vision = describe_browser_vision_kleinhirn_selection(model_policy, census);
+    let last_heartbeat = state.last_heartbeat_at.as_deref().unwrap_or("none yet");
+    let runtime_feeds = [
+        "owner_trust",
+        "focus_state",
+        "tasks",
+        "bios_dialogue",
+        "memory_items",
+        "memory_summaries",
+        "learning_entries",
+        "resources",
+        "skills",
+        "homepage_revisions",
+        "bios_uploads",
+    ]
+    .join("\n");
+    let open_task_rows = if open_tasks.is_empty() {
+        r#"<tr><td colspan="4" class="muted">No open tasks recorded yet.</td></tr>"#.to_string()
+    } else {
+        open_tasks
+            .iter()
+            .map(|task| {
+                format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    task.id,
+                    esc(&task.title),
+                    esc(&task.status),
+                    task.priority_score,
+                )
+            })
+            .collect()
+    };
+    let dialogue_log = if dialogue.is_empty() {
+        r#"<div class="msg"><div class="meta">system</div><div>No BIOS dialogue recorded yet.</div></div>"#
+            .to_string()
+    } else {
+        dialogue
+            .iter()
+            .map(|entry| {
+                format!(
+                    r#"<div class="msg"><div class="meta">{created} · {speaker} · Grosshirn {grosshirn}</div><div>{message}</div></div>"#,
+                    created = esc(&entry.created_at),
+                    speaker = esc(&entry.speaker),
+                    grosshirn = if entry.used_grosshirn { "yes" } else { "no" },
+                    message = esc(&entry.message),
+                )
+            })
+            .collect()
+    };
+    let website_path = if bios.website_path.trim().is_empty() {
+        "/bios"
+    } else {
+        bios.website_path.as_str()
+    };
+    let footer_right = format!(
+        "Website {} · Loop {} · Browser {} · Heartbeat {}",
+        website_path, state.loop_health, browser_state.status, last_heartbeat
+    );
+    let page_body = format!(
+        r#"<div class="bios">
+  <div class="bar">
+    <div>CTO-Agent BIOS Setup Utility</div>
+    <div class="top-links">
+      <a href="/">Home</a>
+      <a href="/chat">Bootstrap Chat</a>
+      <a href="/bios">BIOS</a>
+      <a href="/org">Organigram</a>
+      <a href="/root-auth">Root Auth</a>
+      <a href="/history">History</a>
+      <a href="/browser">Browser</a>
+      <a href="/models">Models</a>
+      <a href="/census">Census</a>
+    </div>
+  </div>
+  {flash}
+  <div id="tabs">
+    <button class="tab on" data-tab="overview" type="button">Overview</button>
+    <button class="tab" data-tab="organigram" type="button">Organigram</button>
+    <button class="tab" data-tab="runtime" type="button">Runtime</button>
+    <button class="tab" data-tab="chat" type="button">Chat</button>
+    <button class="tab" data-tab="memory" type="button">Memory</button>
+    <button class="tab" data-tab="root" type="button">Root</button>
+  </div>
+  <div class="body">
+    <aside class="left">
+      <div id="left-overview" class="pane on">
+        <form method="post" action="/bios/update">
+          <fieldset>
+            <legend>Identity</legend>
+            <label for="agent_name">Agent Name<input id="agent_name" name="agent_name" value="{agent_name}"></label>
+            <label>Homepage Title<input value="{homepage_title}" readonly></label>
+            <label>Owner<input value="{owner}" readonly></label>
+            <label for="mission">Mission<textarea id="mission" name="mission" placeholder="What is the mission of this CTO-Agent?">{mission}</textarea></label>
+            <button type="submit" {disabled}>Save BIOS Draft</button>
+          </fieldset>
+        </form>
+        <fieldset>
+          <legend>Status</legend>
+          <label>BIOS State<input value="{status}" readonly></label>
+          <label>Brain Access<input value="{brain_access}" readonly></label>
+          <label>Focus Mode<input value="{focus_mode}" readonly></label>
+          <label>Queue Depth<input value="{queue_depth}" readonly></label>
+          <label>Loop Health<input value="{loop_health}" readonly></label>
+        </fieldset>
+      </div>
+      <div id="left-organigram" class="pane">
+        <fieldset>
+          <legend>Organigram</legend>
+          <label>Owner<input value="{owner}" readonly></label>
+          <label>Reports To<input value="{reports_to}" readonly></label>
+          <label>Board<textarea readonly>{board_lines}</textarea></label>
+          <label>Peer CXOs<textarea readonly>{peer_cxos}</textarea></label>
+          <label>Subordinates<textarea readonly>{subordinates}</textarea></label>
+        </fieldset>
+      </div>
+      <div id="left-runtime" class="pane">
+        <fieldset>
+          <legend>Runtime</legend>
+          <label>Active Task<input value="{active_task}" readonly></label>
+          <label>Heartbeat<input value="{heartbeat}" readonly></label>
+          <label>Browser Engine<input value="{browser_status}" readonly></label>
+          <label>Kleinhirn<input value="{kleinhirn}" readonly></label>
+          <label>Browser / Vision<input value="{browser_vision}" readonly></label>
+        </fieldset>
+        <fieldset>
+          <legend>SQLite Feeds</legend>
+          <textarea readonly>{runtime_feeds}</textarea>
+        </fieldset>
+      </div>
+      <div id="left-chat" class="pane">
+        <form method="post" action="/bios/chat">
+          <fieldset>
+            <legend>BIOS Chat</legend>
+            <label for="bios_speaker">Speaker<input id="bios_speaker" name="speaker" value="{owner}"></label>
+            <label for="bios_message">Message<textarea id="bios_message" name="message" placeholder="Calibrate the agent on purpose, limits, priorities, and trust."></textarea></label>
+            <button type="submit">Chat in BIOS</button>
+          </fieldset>
+        </form>
+        <form method="post" action="/bios/upload" enctype="multipart/form-data">
+          <fieldset>
+            <legend>Uploads</legend>
+            <input type="hidden" name="source_channel" value="bios">
+            <input type="hidden" name="redirect_to" value="/bios">
+            <label for="bios_upload_speaker">Speaker<input id="bios_upload_speaker" name="speaker" value="{owner}"></label>
+            <label for="bios_upload_note">Note<textarea id="bios_upload_note" name="note" placeholder="Why is this image important and what should we discuss about it?"></textarea></label>
+            <label for="bios_upload_image">Image<input id="bios_upload_image" name="image" type="file" accept="image/*"></label>
+            <button type="submit">Load image into BIOS chat</button>
+          </fieldset>
+        </form>
+      </div>
+      <div id="left-memory" class="pane">
+        <fieldset>
+          <legend>Memory Summaries</legend>
+          <label>Owner Calibration<textarea readonly>{memory_summary}</textarea></label>
+          <label>Working Set<textarea readonly>{learning_working_set}</textarea></label>
+          <label>Operational<textarea readonly>{learning_operational}</textarea></label>
+        </fieldset>
+        <fieldset>
+          <legend>People Working Set</legend>
+          <textarea readonly>{people_working_set}</textarea>
+        </fieldset>
+      </div>
+      <div id="left-root" class="pane">
+        <fieldset>
+          <legend>Root Status</legend>
+          <label>Superpassword<input value="{superpassword_status}" readonly></label>
+          <label>Branding Lock<input value="{branding_lock}" readonly></label>
+          <label>BIOS Freeze<input value="{status}" readonly></label>
+          <label>BIOS Primary<input value="{bios_channel}" readonly></label>
+        </fieldset>
+        <form method="post" action="/bios/brain-access">
+          <fieldset>
+            <legend>Brain Access</legend>
+            <label for="brain_mode">Mode
+              <select id="brain_mode" name="mode">
+                <option value="kleinhirn_only" {kleinhirn_only_selected}>Kleinhirn only</option>
+                <option value="kleinhirn_plus_grosshirn" {kleinhirn_plus_grosshirn_selected}>Kleinhirn + Grosshirn</option>
+              </select>
+            </label>
+            <label for="brain_password">Superpassword for root verification<input id="brain_password" name="password" type="password"></label>
+            <button type="submit">Save brain access</button>
+          </fieldset>
+        </form>
+        <form method="post" action="/root-auth/set">
+          <fieldset>
+            <legend>Set Superpassword</legend>
+            <label for="bios_password">Superpassword<input id="bios_password" name="password" type="password"></label>
+            <label for="bios_confirm">Repeat<input id="bios_confirm" name="confirm" type="password"></label>
+            <button type="submit">Save superpassword</button>
+          </fieldset>
+        </form>
+        <form method="post" action="/bios/freeze">
+          <fieldset>
+            <legend>Freeze BIOS</legend>
+            <label for="freeze_password">Superpassword for root verification<input id="freeze_password" name="password" type="password"></label>
+            <button type="submit" {disabled}>Freeze BIOS</button>
+          </fieldset>
+        </form>
+      </div>
+    </aside>
+    <main class="right">
+      <div id="right-overview" class="pane on">
+        <div class="panel">
+          <div class="prompt">START HERE: BIOS CONTROL SURFACE</div>
+          <div>{headline}</div>
+          <div class="muted">{intro}</div>
+        </div>
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">TRUST SUMMARY</div>
+            <table>
+              <tr><th>Owner from contract</th><td>{bios_owner}</td></tr>
+              <tr><th>Committed owner</th><td>{owner}</td></tr>
+              <tr><th>Owner contact</th><td>{owner_contact}</td></tr>
+              <tr><th>Commitment score</th><td>{commitment_score}/100</td></tr>
+              <tr><th>Last owner dialogue</th><td>{last_owner_dialogue}</td></tr>
+              <tr><th>Calibration notes</th><td>{calibration_notes}</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">GENOME</div>
+            <div class="code">Immutable genes:
+{immutable_genes}
+
+Adaptive surfaces:
+{adaptive_surfaces}</div>
+          </div>
+          <div class="panel">
+            <div class="prompt">OPEN TASKS</div>
+            <table>
+              <tr><th>#</th><th>Title</th><th>Status</th><th>Priority</th></tr>
+              {open_task_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">BIOS CONTRACT PREVIEW</div>
+            <div class="code">{pretty}</div>
+          </div>
+        </div>
+      </div>
+      <div id="right-organigram" class="pane">
+        <div class="panel">
+          <div class="prompt">REPORTING TREE</div>
+          <div class="tree">{organigram_tree}</div>
+        </div>
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">COMMUNICATION RULES</div>
+            <table>
+              <tr><th>Channel</th><th>Layer</th><th>Trust</th><th>Interpretation</th><th>Binding</th><th>Sensitive Topics</th></tr>
+              {communication_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">PEOPLE PATHS</div>
+            <table>
+              <tr><th>Name</th><th>Email</th><th>Relationship</th><th>Trust</th><th>Last Interaction</th><th>Interactions</th><th>Conversation Trail</th><th>Notebook</th></tr>
+              {person_profile_rows}
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="right-runtime" class="pane">
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">RUNTIME STATE</div>
+            <table>
+              <tr><th>Supervisor</th><td>{supervisor_status}</td></tr>
+              <tr><th>Loop Health</th><td>{loop_health}</td></tr>
+              <tr><th>Heartbeat</th><td>{heartbeat}</td></tr>
+              <tr><th>Browser Engine</th><td>{browser_status}</td></tr>
+              <tr><th>Desktop / Headless</th><td>{desktop_ready} / {headless_ready}</td></tr>
+              <tr><th>Terminal fallback</th><td>{terminal_fallback}</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">RESOURCES</div>
+            <table>
+              <tr><th>Category</th><th>Name</th><th>Status</th><th>Detail</th><th>Observed</th></tr>
+              {resource_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">SKILLS</div>
+            <table>
+              <tr><th>Name</th><th>Status</th><th>Path</th><th>Note</th></tr>
+              {skill_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">PROACTIVE CONTACT DRAFTS</div>
+            <table>
+              <tr><th>Updated</th><th>Person</th><th>Status</th><th>Intent</th><th>Dispatch</th><th>Subject</th><th>Rationale</th><th>Conflict Check</th><th>Sent</th><th>Validation / Dispatch</th></tr>
+              {proactive_contact_rows}
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="right-chat" class="pane">
+        <div class="panel">
+          <div class="prompt">CHAT WITH CTO</div>
+          <div class="muted">{communication_note}</div>
+        </div>
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">BIOS DIALOGUE</div>
+            <div class="chatlog">{dialogue_log}</div>
+          </div>
+          <div class="panel">
+            <div class="prompt">UPLOADS IN 1:1 CHAT</div>
+            <table>
+              <tr><th>Time</th><th>Speaker</th><th>Source</th><th>Note</th><th>File</th><th>Preview</th></tr>
+              {upload_rows}
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="right-memory" class="pane">
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">MEMORY ITEMS</div>
+            <table>
+              <tr><th>Time</th><th>Kind</th><th>Summary</th><th>Source</th><th>Detail</th></tr>
+              {memory_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">LEARNING ENTRIES</div>
+            <table>
+              <tr><th>Updated</th><th>Class</th><th>Summary</th><th>Confidence</th><th>Salience</th><th>Applicability</th><th>Evidence</th><th>Detail</th></tr>
+              {learning_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">LEARNING SUMMARIES</div>
+            <table>
+              <tr><th>Working Set</th><td>{learning_working_set}</td></tr>
+              <tr><th>Operational</th><td>{learning_operational}</td></tr>
+              <tr><th>General</th><td>{learning_general}</td></tr>
+              <tr><th>Negative</th><td>{learning_negative}</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">PEOPLE NOTEBOOK</div>
+            <table>
+              <tr><th>Updated</th><th>Person</th><th>Kind</th><th>Source</th><th>Summary</th><th>Detail</th></tr>
+              {person_note_rows}
+            </table>
+          </div>
+        </div>
+      </div>
+      <div id="right-root" class="pane">
+        <div class="grid">
+          <div class="panel">
+            <div class="prompt">OWNER TRUST</div>
+            <table>
+              <tr><th>Owner contact</th><td>{owner_contact}</td></tr>
+              <tr><th>BIOS as primary channel</th><td>{bios_channel}</td></tr>
+              <tr><th>Superpassword</th><td>{superpassword_status}</td></tr>
+              <tr><th>Brain Access</th><td>{brain_access}</td></tr>
+              <tr><th>Active kleinhirn</th><td>{kleinhirn}</td></tr>
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">TRUST GATES</div>
+            <table>
+              <tr><th>Action</th><th>Description</th><th>Channels</th><th>Root</th><th>BIOS primary</th><th>Terminal only</th></tr>
+              {action_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">CHANNEL MATRIX</div>
+            <table>
+              <tr><th>Channel</th><th>Layer</th><th>Trust</th><th>Interpretation</th><th>Binding</th><th>Sensitive Topics</th></tr>
+              {communication_rows}
+            </table>
+          </div>
+          <div class="panel">
+            <div class="prompt">FREEZE GUARDRAILS</div>
+            <div class="code">Senders checked against organigram: {organigram_check}
+Unknown senders default to low trust: {unknown_sender_low_trust}
+Sensitive topics redirect to: {redirect_target}
+May refuse low-trust sensitive topics: {may_refuse}
+
+{terminal_fallback_note}</div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <div class="foot">
+    <div>Tabs on top · controls on the left · active BIOS workspace on the right.</div>
+    <div>{footer_right}</div>
+  </div>
+</div>"#,
+        flash = flash,
+        agent_name = esc(&bios.agent_identity.agent_name),
+        homepage_title = esc(homepage_title),
+        owner = esc(owner_display),
+        mission = esc(&bios.mission),
+        status = esc(status),
+        brain_access = esc(&trust.brain_access_mode),
+        focus_mode = esc(focus_mode),
+        queue_depth = esc(&queue_depth),
+        loop_health = esc(&state.loop_health),
+        reports_to = esc(reports_to),
+        board_lines = esc(&board_lines),
+        peer_cxos = esc(&peer_cxo_lines),
+        subordinates = esc(&subordinate_lines),
+        active_task = esc(active_task),
+        heartbeat = esc(last_heartbeat),
+        browser_status = esc(&browser_state.status),
+        kleinhirn = esc(&format!(
+            "{} ({})",
+            selected_kleinhirn.official_label, selected_kleinhirn.model_id
+        )),
+        browser_vision = esc(&browser_vision),
+        runtime_feeds = esc(&runtime_feeds),
+        memory_summary =
+            esc(memory_summary.unwrap_or("No condensed memory summary recorded yet.")),
+        learning_working_set = esc(learning_working_set
+            .unwrap_or("No permanently condensed learning working set recorded yet.")),
+        learning_operational =
+            esc(learning_operational.unwrap_or("No operational core learnings recorded yet.")),
+        people_working_set =
+            esc(people_working_set.unwrap_or("No condensed people working set recorded yet.")),
+        superpassword_status = if root_configured {
+            "configured"
+        } else {
+            "missing"
+        },
+        branding_lock = if homepage.owner_branding_locked {
+            "locked"
+        } else {
+            "open"
+        },
+        bios_channel = trust.bios_primary_channel_confirmed,
+        kleinhirn_only_selected = if trust.brain_access_mode == "kleinhirn_only" {
+            "selected"
+        } else {
+            ""
+        },
+        kleinhirn_plus_grosshirn_selected =
+            if trust.brain_access_mode == "kleinhirn_plus_grosshirn" {
                 "selected"
             } else {
                 ""
             },
-            kleinhirn_plus_grosshirn_selected =
-                if trust.brain_access_mode == "kleinhirn_plus_grosshirn" {
-                    "selected"
-                } else {
-                    ""
-                },
-            memory_summary =
-                esc(memory_summary.unwrap_or("No condensed memory summary recorded yet.")),
-            learning_working_set = esc(learning_working_set
-                .unwrap_or("No permanently condensed learning working set recorded yet.")),
-            learning_operational =
-                esc(learning_operational.unwrap_or("No operational core learnings recorded yet.")),
-            learning_general =
-                esc(learning_general.unwrap_or("No general learnings recorded yet.")),
-            learning_negative =
-                esc(learning_negative
-                    .unwrap_or("No negative learnings or anti-patterns recorded yet.")),
-            people_working_set =
-                esc(people_working_set.unwrap_or("No condensed people working set recorded yet.")),
-            memory_rows = memory_rows,
-            learning_rows = learning_rows,
-            person_profile_rows = person_profile_rows,
-            person_note_rows = person_note_rows,
-            proactive_contact_rows = proactive_contact_rows,
-            resource_rows = resource_rows,
-            skill_rows = skill_rows,
-            upload_rows = upload_rows,
-            dialogue_rows = dialogue_rows,
-            disabled = if bios.frozen { "disabled" } else { "" },
+        headline = esc(homepage_headline),
+        intro = esc(homepage_intro),
+        bios_owner = esc(if bios.owner.name.is_empty() {
+            "not set yet"
+        } else {
+            &bios.owner.name
+        }),
+        owner_contact = trust.owner_contact_established,
+        commitment_score = trust.owner_commitment_score,
+        last_owner_dialogue = esc(trust
+            .last_owner_dialogue_at
+            .as_deref()
+            .unwrap_or("none yet")),
+        calibration_notes = esc(if trust.calibration_notes.is_empty() {
+            "No calibration notes recorded yet."
+        } else {
+            &trust.calibration_notes
+        }),
+        immutable_genes = esc(&genome.immutable_genes.join("\n")),
+        adaptive_surfaces = esc(&genome.adaptive_surfaces.join("\n")),
+        open_task_rows = open_task_rows,
+        pretty = esc(&pretty),
+        organigram_tree = esc(&organigram_tree),
+        communication_rows = communication_rows,
+        person_profile_rows = person_profile_rows,
+        supervisor_status = esc(&state.supervisor_status),
+        desktop_ready = browser_state.desktop_available,
+        headless_ready = browser_state.headless_ready,
+        terminal_fallback = homepage.terminal_fallback_enabled,
+        resource_rows = resource_rows,
+        skill_rows = skill_rows,
+        proactive_contact_rows = proactive_contact_rows,
+        communication_note = esc(communication_note),
+        dialogue_log = dialogue_log,
+        upload_rows = upload_rows,
+        memory_rows = memory_rows,
+        learning_rows = learning_rows,
+        learning_general =
+            esc(learning_general.unwrap_or("No general learnings recorded yet.")),
+        learning_negative = esc(
+            learning_negative.unwrap_or("No negative learnings or anti-patterns recorded yet.")
         ),
+        person_note_rows = person_note_rows,
+        action_rows = action_rows,
+        organigram_check = bios
+            .communication_policy
+            .escalation_policy
+            .sender_identity_checked_against_organigram,
+        unknown_sender_low_trust = bios
+            .communication_policy
+            .escalation_policy
+            .unknown_sender_defaults_to_low_trust,
+        redirect_target = esc(&bios
+            .communication_policy
+            .escalation_policy
+            .sensitive_topics_redirect_to),
+        may_refuse = bios
+            .communication_policy
+            .escalation_policy
+            .may_refuse_sensitive_topics_on_low_trust_channels,
+        terminal_fallback_note = esc(terminal_fallback_note),
+        footer_right = esc(&footer_right),
+        disabled = if bios.frozen { "disabled" } else { "" },
+    );
+    bios_vanilla_layout(
+        "BIOS",
+        &page_body,
+        r#"document.addEventListener("click", function (ev) {
+  const tab = ev.target.closest("[data-tab]");
+  if (!tab) return;
+  const name = tab.getAttribute("data-tab");
+  document.querySelectorAll(".tab").forEach((item) => {
+    item.classList.toggle("on", item.getAttribute("data-tab") === name);
+  });
+  document.querySelectorAll(".left .pane").forEach((item) => {
+    item.classList.toggle("on", item.id === "left-" + name);
+  });
+  document.querySelectorAll(".right .pane").forEach((item) => {
+    item.classList.toggle("on", item.id === "right-" + name);
+  });
+});"#,
     )
 }
 
