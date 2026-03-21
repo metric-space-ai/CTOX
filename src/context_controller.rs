@@ -2117,11 +2117,11 @@ fn select_compact_model_routing(
     let env_map = load_runtime_env_map(paths).unwrap_or_default();
     let simple_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_SIMPLE_MODEL"),
-        &["gpt-oss-20b", "Qwen3.5-35B-A3B", "gpt-4.5-nano"],
+        &["openai/gpt-oss-20b", "Qwen/Qwen3.5-35B-A3B", "gpt-4.5-nano"],
     );
     let medium_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_MEDIUM_MODEL"),
-        &["gpt-oss-120b", "Qwen3-235B-A22B", "gpt-4.5-mini"],
+        &["openai/gpt-oss-120b", "Qwen/Qwen3-235B-A22B", "gpt-4.5-mini"],
     );
     let red_candidates = compact_candidate_models(
         env_map.get("CTO_AGENT_COMPACT_RED_MODEL"),
@@ -2145,7 +2145,7 @@ fn select_compact_model_routing(
             Some(package.brain_access.local_selected_kleinhirn.clone()),
             Some(package.brain_access.current_runtime_kleinhirn.clone()),
         ])
-        .unwrap_or_else(|| "gpt-oss-20b".to_string())
+        .unwrap_or_else(|| "openai/gpt-oss-20b".to_string())
     };
     let requested_model = candidate_models
         .first()
