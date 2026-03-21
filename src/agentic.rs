@@ -4,6 +4,7 @@ use crate::contracts::Paths;
 use crate::contracts::load_bios;
 use crate::contracts::load_census;
 use crate::contracts::load_model_policy;
+use crate::contracts::normalize_runtime_model_choice;
 use crate::contracts::recommended_kleinhirn;
 use crate::runtime_db::LearningEntryDraft;
 use crate::runtime_db::ProactiveContactDraft;
@@ -2074,7 +2075,7 @@ fn latest_compact_routing_preference(paths: &Paths, task_id: i64) -> Option<Comp
     let package = latest_context_package_for_task(paths, task_id).ok().flatten()?;
     let value = serde_json::from_str::<Value>(&package.package_json).ok()?;
     let routing = value.get("compactController")?.get("modelRouting")?;
-    let requested_model = routing.get("requestedModel")?.as_str()?.trim().to_string();
+    let requested_model = normalize_runtime_model_choice(routing.get("requestedModel")?.as_str()?);
     if requested_model.is_empty() {
         return None;
     }
@@ -2100,10 +2101,11 @@ fn model_prefers_external(model_id: &str) -> bool {
 }
 
 fn apply_requested_model_override(target: &mut ModelTarget, requested_model: &str, source_label: &str) {
-    if requested_model.trim().is_empty() {
+    let normalized_model = normalize_runtime_model_choice(requested_model);
+    if normalized_model.trim().is_empty() {
         return;
     }
-    target.model_id = requested_model.trim().to_string();
+    target.model_id = normalized_model;
     target.source_label = format!("{source_label} {}", target.model_id);
 }
 

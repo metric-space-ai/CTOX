@@ -13,6 +13,7 @@ use crate::contracts::load_bios;
 use crate::contracts::load_boot_entries;
 use crate::contracts::load_installation_bootstrap_state;
 use crate::contracts::load_organigram;
+use crate::contracts::normalize_runtime_model_choice;
 use crate::contracts::now_iso;
 use crate::contracts::save_installation_bootstrap_state;
 use crate::contracts::save_organigram;
@@ -88,10 +89,16 @@ const FACTORY_RESET_CONFIRM_WINDOW_SECS: u64 = 3;
 const CHAT_HISTORY_LIMIT: usize = 14;
 const CHAT_IDLE_SECS: u64 = 180;
 
-const SIMPLE_MODEL_OPTIONS: &[&str] =
-    &["gpt-oss-20b", "Qwen3.5-35B-A3B", "gpt-4.5-nano"];
-const MEDIUM_MODEL_OPTIONS: &[&str] =
-    &["gpt-oss-120b", "Qwen3-235B-A22B", "gpt-4.5-mini"];
+const SIMPLE_MODEL_OPTIONS: &[&str] = &[
+    "openai/gpt-oss-20b",
+    "Qwen/Qwen3.5-35B-A3B",
+    "gpt-4.5-nano",
+];
+const MEDIUM_MODEL_OPTIONS: &[&str] = &[
+    "openai/gpt-oss-120b",
+    "Qwen/Qwen3-235B-A22B",
+    "gpt-4.5-mini",
+];
 const RED_MODEL_OPTIONS: &[&str] = &["gpt-4.5", "gpt-5.4", "gpt-5.4-pro"];
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1615,15 +1622,18 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
         .get("CTO_AGENT_COMPACT_SIMPLE_MODEL")
         .cloned()
         .or_else(|| env_map.get("CTO_AGENT_KLEINHIRN_MODEL").cloned())
+        .map(|value| normalize_runtime_model_choice(&value))
         .unwrap_or_else(|| SIMPLE_MODEL_OPTIONS[0].to_string());
     let medium_model = env_map
         .get("CTO_AGENT_COMPACT_MEDIUM_MODEL")
         .cloned()
+        .map(|value| normalize_runtime_model_choice(&value))
         .unwrap_or_else(|| MEDIUM_MODEL_OPTIONS[0].to_string());
     let red_model = env_map
         .get("CTO_AGENT_COMPACT_RED_MODEL")
         .cloned()
         .or_else(|| env_map.get("CTO_AGENT_GROSSHIRN_MODEL").cloned())
+        .map(|value| normalize_runtime_model_choice(&value))
         .unwrap_or_else(|| RED_MODEL_OPTIONS[0].to_string());
 
     vec![
@@ -1794,13 +1804,21 @@ fn save_settings_items(paths: &Paths, items: &[SettingsItem]) -> anyhow::Result<
             "grosshirn_api_key" => {
                 upsert_env_value(&mut env_map, "CTO_AGENT_GROSSHIRN_API_KEY", &value)
             }
-            "simple_model" => {
-                upsert_env_value(&mut env_map, "CTO_AGENT_COMPACT_SIMPLE_MODEL", &value)
-            }
-            "medium_model" => {
-                upsert_env_value(&mut env_map, "CTO_AGENT_COMPACT_MEDIUM_MODEL", &value)
-            }
-            "red_model" => upsert_env_value(&mut env_map, "CTO_AGENT_COMPACT_RED_MODEL", &value),
+            "simple_model" => upsert_env_value(
+                &mut env_map,
+                "CTO_AGENT_COMPACT_SIMPLE_MODEL",
+                &normalize_runtime_model_choice(&value),
+            ),
+            "medium_model" => upsert_env_value(
+                &mut env_map,
+                "CTO_AGENT_COMPACT_MEDIUM_MODEL",
+                &normalize_runtime_model_choice(&value),
+            ),
+            "red_model" => upsert_env_value(
+                &mut env_map,
+                "CTO_AGENT_COMPACT_RED_MODEL",
+                &normalize_runtime_model_choice(&value),
+            ),
             _ => {}
         }
     }
@@ -2747,7 +2765,7 @@ mod tests {
                 SettingsItem {
                     key: "simple_model",
                     label: "Simple Model",
-                    value: "gpt-oss-20b".to_string(),
+                    value: "openai/gpt-oss-20b".to_string(),
                     secret: false,
                     choices: SIMPLE_MODEL_OPTIONS,
                     help: "Simple slot.",

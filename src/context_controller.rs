@@ -27,6 +27,7 @@ use crate::contracts::load_installation_bootstrap_state;
 use crate::contracts::load_loop_safety_policy;
 use crate::contracts::load_mode_system_policy;
 use crate::contracts::load_model_policy;
+use crate::contracts::normalize_runtime_model_choice;
 use crate::contracts::load_self_preservation_state;
 use crate::contracts::now_iso;
 use crate::runtime_db::BiosDialogueEntry;
@@ -2167,13 +2168,16 @@ fn compact_candidate_models(value: Option<&String>, defaults: &[&str]) -> Vec<St
             .split(',')
             .map(|item| item.trim())
             .filter(|item| !item.is_empty())
-            .map(|item| item.to_string())
+            .map(normalize_runtime_model_choice)
             .collect::<Vec<_>>();
         if !parsed.is_empty() {
             return parsed;
         }
     }
-    defaults.iter().map(|item| item.to_string()).collect()
+    defaults
+        .iter()
+        .map(|item| normalize_runtime_model_choice(item))
+        .collect()
 }
 
 fn first_non_empty_owned(values: &[Option<String>]) -> Option<String> {

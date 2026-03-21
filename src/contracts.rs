@@ -3918,6 +3918,20 @@ fn supports_model(model: &BrainModel, census: &SystemCensus) -> bool {
     cpu_ok && memory_ok && gpu_count_ok && total_gpu_memory_ok && single_gpu_memory_ok
 }
 
+pub fn normalize_runtime_model_choice(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "gpt-oss-20b" => "openai/gpt-oss-20b".to_string(),
+        "gpt-oss-120b" => "openai/gpt-oss-120b".to_string(),
+        "qwen3.5-35b-a3b" | "qwen/qwen3.5-35b-a3b" => "Qwen/Qwen3.5-35B-A3B".to_string(),
+        "qwen3-235b-a22b" | "qwen/qwen3-235b-a22b" => "Qwen/Qwen3-235B-A22B".to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
 fn normalized_model_key(model: &BrainModel) -> String {
     model
         .runtime_model_id

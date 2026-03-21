@@ -149,6 +149,9 @@ CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-}"
 CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-}"
 CTO_AGENT_GROSSHIRN_BASE_URL="${CTO_AGENT_GROSSHIRN_BASE_URL:-}"
 CTO_AGENT_GROSSHIRN_REASONING="${CTO_AGENT_GROSSHIRN_REASONING:-}"
+CTO_AGENT_COMPACT_SIMPLE_MODEL="${CTO_AGENT_COMPACT_SIMPLE_MODEL:-}"
+CTO_AGENT_COMPACT_MEDIUM_MODEL="${CTO_AGENT_COMPACT_MEDIUM_MODEL:-}"
+CTO_AGENT_COMPACT_RED_MODEL="${CTO_AGENT_COMPACT_RED_MODEL:-}"
 
 detect_gpu_count() {
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -388,6 +391,27 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+normalize_compact_model_value() {
+  value="$(printf '%s' "$1" | sed 's#^[[:space:]]*##; s#[[:space:]]*$##')"
+  case "$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')" in
+    gpt-oss-20b)
+      printf '%s\n' "openai/gpt-oss-20b"
+      ;;
+    gpt-oss-120b)
+      printf '%s\n' "openai/gpt-oss-120b"
+      ;;
+    qwen3.5-35b-a3b|qwen/qwen3.5-35b-a3b)
+      printf '%s\n' "Qwen/Qwen3.5-35B-A3B"
+      ;;
+    qwen3-235b-a22b|qwen/qwen3-235b-a22b)
+      printf '%s\n' "Qwen/Qwen3-235B-A22B"
+      ;;
+    *)
+      printf '%s\n' "$value"
+      ;;
+  esac
+}
+
 read_runtime_env_file_value() {
   key="$1"
   if [ ! -f "$ENV_FILE" ]; then
@@ -530,6 +554,9 @@ write_kleinhirn_env_file() {
     printf 'CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER")"
     printf 'CTO_AGENT_GROSSHIRN_BASE_URL=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_BASE_URL")"
     printf 'CTO_AGENT_GROSSHIRN_REASONING=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_REASONING")"
+    printf 'CTO_AGENT_COMPACT_SIMPLE_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_COMPACT_SIMPLE_MODEL")"
+    printf 'CTO_AGENT_COMPACT_MEDIUM_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_COMPACT_MEDIUM_MODEL")"
+    printf 'CTO_AGENT_COMPACT_RED_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_COMPACT_RED_MODEL")"
   } > "$ENV_FILE"
 }
 
@@ -1226,6 +1253,10 @@ elif [ "${CENSUS_GPU_COUNT:-0}" -gt 1 ] \
 elif [ -z "${CTO_AGENT_KLEINHIRN_DISABLE_NCCL:-}" ]; then
   KLEINHIRN_DISABLE_NCCL=""
 fi
+
+CTO_AGENT_COMPACT_SIMPLE_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_SIMPLE_MODEL:-$KLEINHIRN_RUNTIME_MODEL}")"
+CTO_AGENT_COMPACT_MEDIUM_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_MEDIUM_MODEL:-openai/gpt-oss-120b}")"
+CTO_AGENT_COMPACT_RED_MODEL="$(normalize_compact_model_value "${CTO_AGENT_COMPACT_RED_MODEL:-${CTO_AGENT_GROSSHIRN_MODEL:-gpt-5.4}}")"
 
 echo "[6/10] Write Kleinhirn environment"
 write_kleinhirn_env_file
