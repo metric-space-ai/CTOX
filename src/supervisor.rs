@@ -2627,29 +2627,58 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 "worker_review" | "self_review"
                             ) {
                                 if review_task_should_retry_without_reopening_parent(&task, &result) {
-                                    checkpoint_summary = format!(
-                                        "Review task #{} returned no usable review output and will retry without reopening the parent.",
-                                        task.id
-                                    );
-                                    checkpoint_detail = format!(
-                                        "{}\n\nThe review task itself did not produce usable completionReview output. The parent task stays in await_review while this review task is requeued for another bounded attempt.",
-                                        checkpoint_detail
-                                    );
-                                    if let Err(err) = requeue_task_with_checkpoint_kind(
+                                    if review_retry_should_reopen_parent_non_machine_owner_stall(
                                         &loop_paths,
-                                        task_id,
-                                        "review_retry",
-                                        &checkpoint_summary,
-                                        &checkpoint_detail,
-                                        Some(&output_text),
+                                        &task,
                                     ) {
-                                        eprintln!(
-                                            "failed to requeue review task {task_id} after unusable review output: {err}"
+                                        checkpoint_summary = format!(
+                                            "Review task #{} reopened its parent instead of retrying the same non-machine stall.",
+                                            task.id
                                         );
+                                        checkpoint_detail = format!(
+                                            "{}\n\nThe review task itself did not produce usable completionReview output, but the parent task is an owner workspace task whose last verified checkpoint only says that no exec/browser machine path ran. Retrying the review would just spin. The parent task is reopened directly so it can continue executing instead of bouncing through endless review retries.",
+                                            checkpoint_detail
+                                        );
+                                        if let Err(err) = complete_review_task(
+                                            &loop_paths,
+                                            &task,
+                                            "continue",
+                                            &checkpoint_summary,
+                                            &checkpoint_detail,
+                                            Some(&output_text),
+                                        ) {
+                                            eprintln!(
+                                                "failed to reopen parent from review task {task_id}: {err}"
+                                            );
+                                        }
+                                        task_outcome_persisted = true;
+                                        task_status = "continue".to_string();
+                                        normalized_next_mode = "execute_task".to_string();
+                                    } else {
+                                        checkpoint_summary = format!(
+                                            "Review task #{} returned no usable review output and will retry without reopening the parent.",
+                                            task.id
+                                        );
+                                        checkpoint_detail = format!(
+                                            "{}\n\nThe review task itself did not produce usable completionReview output. The parent task stays in await_review while this review task is requeued for another bounded attempt.",
+                                            checkpoint_detail
+                                        );
+                                        if let Err(err) = requeue_task_with_checkpoint_kind(
+                                            &loop_paths,
+                                            task_id,
+                                            "review_retry",
+                                            &checkpoint_summary,
+                                            &checkpoint_detail,
+                                            Some(&output_text),
+                                        ) {
+                                            eprintln!(
+                                                "failed to requeue review task {task_id} after unusable review output: {err}"
+                                            );
+                                        }
+                                        task_outcome_persisted = true;
+                                        task_status = "continue".to_string();
+                                        normalized_next_mode = "review".to_string();
                                     }
-                                    task_outcome_persisted = true;
-                                    task_status = "continue".to_string();
-                                    normalized_next_mode = "review".to_string();
                                 } else {
                                     let (review_resolution, fallback_note) =
                                         resolve_completion_review(
@@ -5742,6 +5771,26 @@ fn review_task_should_retry_without_reopening_parent(
         && result.completion_review.is_none()
 }
 
+fn review_retry_should_reopen_parent_non_machine_owner_stall(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+) -> bool {
+    if task.task_kind != "self_review" {
+        return false;
+    }
+    let Some(parent_task_id) = task.parent_task_id else {
+        return false;
+    };
+    let Ok(Some(parent_task)) = crate::runtime_db::load_task_by_id(paths, parent_task_id) else {
+        return false;
+    };
+    let Some(parent_summary) = parent_task.last_checkpoint_summary.as_deref() else {
+        return false;
+    };
+
+    repeated_workspace_non_machine_owner_summary(&parent_task, parent_summary, &task.detail)
+}
+
 fn publish_task_result_to_origin(
     paths: &Paths,
     task: &crate::runtime_db::TaskRecord,
@@ -8365,6 +8414,58 @@ mod tests {
             ..AgenticRunResult::blocked("x")
         };
         assert!(review_task_should_retry_without_reopening_parent(&task, &result));
+    }
+
+    #[test]
+    fn non_machine_owner_self_review_retry_reopens_parent_instead_of_spinning() {
+        with_temp_runtime("non-machine-owner-self-review-reopen", |paths| {
+            let parent = crate::runtime_db::enqueue_internal_task(
+                paths,
+                None,
+                "owner_interrupt",
+                "Build the C++ console app",
+                "Keep implementing the same owner-priority C++ workspace.",
+                1000,
+            )
+            .expect("parent task should enqueue");
+            let summary = grounded_workspace_non_machine_summary();
+            crate::runtime_db::record_task_checkpoint(
+                paths,
+                parent.id,
+                "continue",
+                &summary,
+                "Workspace execution contract note: no exec/browser machine path ran in this bounded turn, so code/build/test/exec-session progress is not persisted as verified.",
+            )
+            .expect("parent checkpoint should persist");
+
+            let review_task = crate::runtime_db::TaskRecord {
+                id: 881,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: Some(parent.id),
+                worker_job_id: None,
+                source_interrupt_id: None,
+                source_channel: "system_guard".to_string(),
+                speaker: "self_review".to_string(),
+                task_kind: "self_review".to_string(),
+                title: format!("Self-review task #{} before completion", parent.id),
+                detail: "Mandatory self-review for the owner workspace task.".to_string(),
+                trust_level: "system".to_string(),
+                priority_score: 900,
+                status: "active".to_string(),
+                run_count: 12,
+                last_checkpoint_summary: Some(
+                    "Review task returned no usable review output and will retry.".to_string(),
+                ),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: None,
+            };
+
+            assert!(review_retry_should_reopen_parent_non_machine_owner_stall(
+                paths,
+                &review_task
+            ));
+        });
     }
 
     #[test]
