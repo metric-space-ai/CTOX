@@ -1035,6 +1035,12 @@ fn queued_owner_interrupt_should_preempt_active_task(
         return true;
     }
 
+    if crate::context_controller::owner_interrupt_needs_workspace_execution_guidance(active_task)
+        && crate::context_controller::owner_interrupt_is_status_question(queued_task)
+    {
+        return false;
+    }
+
     queued_task.id > active_task.id
         && queued_task.id != active_task.id
         && queued_task.source_interrupt_id != active_task.source_interrupt_id
@@ -5644,6 +5650,46 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         assert_eq!(selected.id, reloaded_active.id);
         assert_eq!(selected.task_kind, "owner_interrupt");
         assert_ne!(selected.id, active.id);
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn choose_next_task_focus_keeps_active_workspace_owner_task_over_status_followup()
+    -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        let root = unique_test_root("owner-workspace-status-followup");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let coding_interrupt = crate::runtime_db::enqueue_loop_interrupt(
+            &paths,
+            "attach_terminal",
+            "Michael Welsch",
+            "Erstelle eine C++-Konsolenanwendung mit Login, Freunden und Direktnachrichten.",
+        )?;
+        let coding_task = crate::runtime_db::queue_loop_interrupt_as_task(&paths, coding_interrupt)?
+            .expect("coding interrupt should materialize");
+        let active = crate::runtime_db::activate_selected_task(&paths, coding_task.id)?
+            .expect("coding task should activate");
+
+        let status_interrupt = crate::runtime_db::enqueue_loop_interrupt(
+            &paths,
+            "attach_terminal",
+            "Michael Welsch",
+            "Wie weit bist du mit der C++ App?",
+        )?;
+        let queued_status = crate::runtime_db::queue_loop_interrupt_as_task(&paths, status_interrupt)?
+            .expect("status interrupt should materialize");
+
+        let selected =
+            choose_next_task_focus(&paths)?.expect("active owner task should stay selected");
+        assert_eq!(selected.id, active.id);
+        assert_ne!(selected.id, queued_status.id);
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())

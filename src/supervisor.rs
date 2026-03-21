@@ -3532,6 +3532,12 @@ fn queued_owner_interrupt_should_preempt_active_task(
         return true;
     }
 
+    if crate::context_controller::owner_interrupt_needs_workspace_execution_guidance(active_task)
+        && crate::context_controller::owner_interrupt_is_status_question(queued_task)
+    {
+        return false;
+    }
+
     queued_task.id > active_task.id
         && queued_task.id != active_task.id
         && queued_task.source_interrupt_id != active_task.source_interrupt_id
@@ -7189,6 +7195,48 @@ mod tests {
                 checkpoints
                     .iter()
                     .any(|entry| entry.detail.contains("Boundary preemption:"))
+            );
+        });
+    }
+
+    #[test]
+    fn owner_status_question_does_not_preempt_active_workspace_owner_task() {
+        with_temp_runtime("owner-status-no-coding-preemption", |paths| {
+            let coding_interrupt = crate::runtime_db::enqueue_loop_interrupt(
+                paths,
+                "attach_terminal",
+                "Michael Welsch",
+                "Erstelle eine C++-Konsolenanwendung mit Login, Freunden und Direktnachrichten.",
+            )
+            .expect("coding interrupt should enqueue");
+            let _ = crate::runtime_db::queue_loop_interrupt_as_task(paths, coding_interrupt)
+                .expect("coding task should queue")
+                .expect("coding task should materialize");
+            let active_task = crate::runtime_db::select_next_task(paths)
+                .expect("should select active task")
+                .expect("active task should exist");
+            assert_eq!(active_task.task_kind, "owner_interrupt");
+
+            let status_interrupt = crate::runtime_db::enqueue_loop_interrupt(
+                paths,
+                "attach_terminal",
+                "Michael Welsch",
+                "Wie weit bist du mit der C++ App?",
+            )
+            .expect("status interrupt should enqueue");
+            let queued_task = crate::runtime_db::queue_loop_interrupt_as_task(paths, status_interrupt)
+                .expect("status task should queue")
+                .expect("status task should materialize");
+
+            assert!(!queued_owner_interrupt_should_preempt_active_task(
+                &queued_task,
+                &active_task,
+                "Michael Welsch",
+            ));
+            assert!(
+                find_boundary_owner_interrupt_preemption(paths, &active_task)
+                    .expect("preemption lookup should succeed")
+                    .is_none()
             );
         });
     }

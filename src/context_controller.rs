@@ -5193,7 +5193,7 @@ pub(crate) fn owner_interrupt_is_status_question(task: &TaskRecord) -> bool {
     looks_like_question && !looks_like_implementation_request
 }
 
-fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool {
+pub(crate) fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool {
     if task.task_kind != "owner_interrupt" {
         return false;
     }

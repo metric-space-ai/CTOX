@@ -63,6 +63,8 @@ use crossterm::terminal::Clear;
 use crossterm::terminal::ClearType;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
+use qrcodegen::QrCode;
+use qrcodegen::QrCodeEcc;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -76,11 +78,15 @@ use std::io::IsTerminal;
 use std::io::Write;
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::process::Command;
+use std::process::Child;
+use std::process::ChildStdin;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -96,6 +102,8 @@ const LOCAL_NOTICE_LIMIT: usize = 80;
 const FACTORY_RESET_CONFIRM_WINDOW_SECS: u64 = 3;
 const CHAT_HISTORY_LIMIT: usize = 14;
 const CHAT_IDLE_SECS: u64 = 180;
+const JAMI_LINK_TIMEOUT_SECS: u64 = 900;
+const JAMI_QR_QUIET_ZONE: usize = 4;
 
 const GPT_OSS_MODEL: &str = "openai/gpt-oss-20b";
 const AUTHORIZED_MODEL_OPTIONS: &[&str] = &[
@@ -183,6 +191,8 @@ struct SettingsItem {
     label: &'static str,
     value: String,
     secret: bool,
+    editable: bool,
+    action: bool,
     choices: Vec<&'static str>,
     help: &'static str,
 }
@@ -209,6 +219,26 @@ struct PendingInputItem {
     seen_open: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatTranscriptSpeaker {
+    Owner,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatTranscriptState {
+    Final,
+    Waiting,
+}
+
+#[derive(Debug, Clone)]
+struct ChatTranscriptEntry {
+    speaker: ChatTranscriptSpeaker,
+    created_at_label: String,
+    message: String,
+    state: ChatTranscriptState,
+}
+
 struct AttachTui {
     snapshot: AttachUiSnapshot,
     event_lines: Vec<String>,
@@ -221,6 +251,63 @@ struct AttachTui {
     settings_dirty: bool,
     spinner_phase: usize,
     factory_reset_armed_until: Option<Instant>,
+    jami_link_state: JamiLinkState,
+    jami_link_password_input: String,
+    jami_saved_account_id: Option<String>,
+    jami_link_rx: Option<Receiver<JamiLinkEvent>>,
+    jami_link_child: Option<Child>,
+    jami_link_stdin: Option<ChildStdin>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct JamiLinkState {
+    account_id: Option<String>,
+    token: Option<String>,
+    state_code: Option<i32>,
+    state_label: Option<String>,
+    auth_scheme: Option<String>,
+    auth_error: Option<String>,
+    peer_id: Option<String>,
+    error: Option<String>,
+    active: bool,
+    success: bool,
+    done: bool,
+    updated_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JamiLinkEvent {
+    SessionStarted {
+        account_id: String,
+        updated_at: String,
+    },
+    StateChanged {
+        account_id: String,
+        state_code: i32,
+        state_label: String,
+        details: BTreeMap<String, String>,
+        updated_at: String,
+    },
+    Completed {
+        account_id: String,
+        success: bool,
+        error: String,
+        updated_at: String,
+    },
+    Cancelled {
+        account_id: String,
+        updated_at: String,
+    },
+    Error {
+        message: String,
+        updated_at: String,
+    },
+    Log {
+        level: String,
+        message: String,
+        updated_at: String,
+    },
 }
 
 enum TuiControl {
@@ -397,9 +484,15 @@ fn run_attach_tui(paths: &Paths) -> anyhow::Result<()> {
                         AttachPage::Chat => ui.chat_input.push_str(&text),
                         AttachPage::Continuity => {}
                         AttachPage::Settings => {
-                            if let Some(item) = ui.settings_items.get_mut(ui.settings_selected) {
-                                item.value.push_str(&text);
-                                ui.settings_dirty = true;
+                            if ui.selected_setting_uses_jami_password_editor() {
+                                ui.jami_link_password_input.push_str(&text);
+                            } else if ui.selected_setting_is_editable() {
+                                if let Some(item) = ui.settings_items.get_mut(ui.settings_selected) {
+                                    item.value.push_str(&text);
+                                    if item_mutation_marks_settings_dirty(item.key) {
+                                        ui.settings_dirty = true;
+                                    }
+                                }
                             }
                         }
                     }
@@ -505,13 +598,21 @@ impl AttachTui {
             settings_dirty: false,
             spinner_phase: 0,
             factory_reset_armed_until: None,
+            jami_link_state: JamiLinkState::default(),
+            jami_link_password_input: String::new(),
+            jami_saved_account_id: load_persisted_jami_account_id(paths),
+            jami_link_rx: None,
+            jami_link_child: None,
+            jami_link_stdin: None,
         };
         ui.refresh(paths);
         ui
     }
 
     fn refresh(&mut self, paths: &Paths) {
+        self.poll_jami_link_events(paths);
         self.snapshot = collect_ui_snapshot(paths);
+        self.jami_saved_account_id = load_persisted_jami_account_id(paths);
         self.event_lines = list_recent_agent_events(paths, EVENT_HISTORY_LIMIT)
             .unwrap_or_default()
             .into_iter()
@@ -524,6 +625,7 @@ impl AttachTui {
                 .settings_selected
                 .min(self.settings_items.len().saturating_sub(1));
         }
+        self.apply_dynamic_settings_state();
         self.update_pending_inputs();
     }
 
@@ -569,6 +671,9 @@ impl AttachTui {
                     AttachPage::Continuity => AttachPage::Settings,
                     AttachPage::Settings => AttachPage::Tasks,
                 };
+                if matches!(self.page, AttachPage::Settings) {
+                    self.maybe_start_selected_jami_link(paths);
+                }
             }
             _ => match self.page {
                 AttachPage::Tasks => {}
@@ -625,6 +730,7 @@ impl AttachTui {
                 code: KeyCode::Up, ..
             } => {
                 self.settings_selected = self.settings_selected.saturating_sub(1);
+                self.maybe_start_selected_jami_link(paths);
             }
             KeyEvent {
                 code: KeyCode::Down,
@@ -632,6 +738,7 @@ impl AttachTui {
             } => {
                 self.settings_selected = (self.settings_selected + 1)
                     .min(self.settings_items.len().saturating_sub(1));
+                self.maybe_start_selected_jami_link(paths);
             }
             KeyEvent {
                 code: KeyCode::Left,
@@ -648,25 +755,47 @@ impl AttachTui {
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
+                if self.selected_setting_uses_jami_password_editor() {
+                    self.jami_link_password_input.clear();
+                    return;
+                }
                 if let Some(item) = self.settings_items.get_mut(self.settings_selected) {
+                    if !item.editable {
+                        return;
+                    }
                     item.value.clear();
-                    self.settings_dirty = true;
+                    if item_mutation_marks_settings_dirty(item.key) {
+                        self.settings_dirty = true;
+                    }
                 }
             }
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
             } => {
+                if self.selected_setting_uses_jami_password_editor() {
+                    self.jami_link_password_input.pop();
+                    return;
+                }
                 if let Some(item) = self.settings_items.get_mut(self.settings_selected) {
+                    if !item.editable {
+                        return;
+                    }
                     item.value.pop();
-                    self.settings_dirty = true;
+                    if item_mutation_marks_settings_dirty(item.key) {
+                        self.settings_dirty = true;
+                    }
                 }
             }
             KeyEvent {
                 code: KeyCode::Enter,
                 ..
             } => {
-                if let Err(err) = self.save_settings(paths) {
+                if self.selected_setting_is_action() {
+                    if let Err(err) = self.handle_selected_setting_action(paths) {
+                        self.push_local_notice("error", &err.to_string());
+                    }
+                } else if let Err(err) = self.save_settings(paths) {
                     self.push_local_notice("error", &err.to_string());
                 }
             }
@@ -688,9 +817,18 @@ impl AttachTui {
             } if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
             {
+                if self.selected_setting_uses_jami_password_editor() {
+                    self.jami_link_password_input.push(character);
+                    return;
+                }
                 if let Some(item) = self.settings_items.get_mut(self.settings_selected) {
+                    if !item.editable {
+                        return;
+                    }
                     item.value.push(character);
-                    self.settings_dirty = true;
+                    if item_mutation_marks_settings_dirty(item.key) {
+                        self.settings_dirty = true;
+                    }
                 }
             }
             _ => {}
@@ -702,11 +840,458 @@ impl AttachTui {
             AttachPage::Tasks => true,
             AttachPage::Chat => self.chat_input.is_empty(),
             AttachPage::Continuity => true,
-            AttachPage::Settings => self
-                .settings_items
-                .get(self.settings_selected)
-                .map(|item| item.value.is_empty())
-                .unwrap_or(true),
+            AttachPage::Settings => {
+                if self.selected_setting_uses_jami_password_editor() {
+                    self.jami_link_password_input.is_empty()
+                } else {
+                    self.settings_items
+                        .get(self.settings_selected)
+                        .map(|item| !item.editable || item.value.is_empty())
+                        .unwrap_or(true)
+                }
+            }
+        }
+    }
+
+    fn selected_setting_key(&self) -> Option<&'static str> {
+        self.settings_items
+            .get(self.settings_selected)
+            .map(|item| item.key)
+    }
+
+    fn selected_setting_is_jami(&self) -> bool {
+        matches!(self.selected_setting_key(), Some("jami_link_device"))
+    }
+
+    fn selected_setting_uses_jami_password_editor(&self) -> bool {
+        self.selected_setting_is_jami()
+            && self.jami_link_state.active
+            && !self.jami_link_state.done
+            && self
+                .jami_link_state
+                .auth_scheme
+                .as_deref()
+                .map(|value| value.eq_ignore_ascii_case("password"))
+                .unwrap_or(false)
+    }
+
+    fn selected_setting_is_action(&self) -> bool {
+        self.settings_items
+            .get(self.settings_selected)
+            .map(|item| item.action)
+            .unwrap_or(false)
+    }
+
+    fn selected_setting_is_editable(&self) -> bool {
+        if self.selected_setting_uses_jami_password_editor() {
+            return true;
+        }
+        self.settings_items
+            .get(self.settings_selected)
+            .map(|item| item.editable)
+            .unwrap_or(false)
+    }
+
+    fn handle_selected_setting_action(&mut self, paths: &Paths) -> anyhow::Result<()> {
+        let Some(key) = self
+            .settings_items
+            .get(self.settings_selected)
+            .map(|item| item.key)
+        else {
+            return Ok(());
+        };
+        match key {
+            "jami_link_device" => self.handle_jami_link_action(paths),
+            _ => self.save_settings(paths),
+        }
+    }
+
+    fn handle_jami_link_action(&mut self, paths: &Paths) -> anyhow::Result<()> {
+        if self.jami_link_state.active && !self.jami_link_state.done {
+            if self
+                .jami_link_state
+                .auth_scheme
+                .as_deref()
+                .map(|value| value.eq_ignore_ascii_case("password"))
+                .unwrap_or(false)
+            {
+                return self.submit_jami_link_password();
+            }
+            self.push_local_notice(
+                "jami",
+                "Jami link session already active. Scan the QR code with the phone app and wait for completion.",
+            );
+            return Ok(());
+        }
+        self.start_jami_link_session(paths)
+    }
+
+    fn maybe_start_selected_jami_link(&mut self, paths: &Paths) {
+        if !self.selected_setting_is_jami() {
+            return;
+        }
+        if self.jami_saved_account_id.is_some() {
+            return;
+        }
+        if self.jami_link_state.active
+            || self.jami_link_state.done
+            || self.jami_link_state.token.is_some()
+            || self.jami_link_state.account_id.is_some()
+        {
+            return;
+        }
+        if let Err(err) = self.start_jami_link_session(paths) {
+            self.push_local_notice("error", &err.to_string());
+        }
+    }
+
+    fn start_jami_link_session(&mut self, paths: &Paths) -> anyhow::Result<()> {
+        self.stop_jami_link_worker(false);
+        self.jami_link_password_input.clear();
+        self.jami_link_state = JamiLinkState::default();
+
+        let mut command = Command::new("node");
+        command
+            .arg(paths.root.join("scripts/jami_device_link_cli.mjs"))
+            .arg("--timeout-secs")
+            .arg(JAMI_LINK_TIMEOUT_SECS.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let runtime_env = load_runtime_env_map(paths).unwrap_or_default();
+        if let Some(display_name) = self
+            .settings_items
+            .iter()
+            .find(|item| item.key == "owner_name")
+            .map(|item| item.value.trim())
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                runtime_env
+                    .get("CTO_JAMI_PROFILE_NAME")
+                    .map(String::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
+        {
+            command.arg("--display-name").arg(display_name);
+        }
+        let mut child = command
+            .spawn()
+            .with_context(|| "failed to launch Jami device-link helper via Node".to_string())?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Jami device-link helper did not expose stdout"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Jami device-link helper did not expose stdin"))?;
+        self.jami_link_state = JamiLinkState {
+            active: true,
+            ..JamiLinkState::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                match line {
+                    Ok(payload) if !payload.trim().is_empty() => {
+                        let event = serde_json::from_str::<JamiLinkEvent>(&payload).unwrap_or(
+                            JamiLinkEvent::Error {
+                                message: format!(
+                                    "Failed to parse Jami link helper event: {}",
+                                    payload.trim()
+                                ),
+                                updated_at: now_iso(),
+                            },
+                        );
+                        if tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        let _ = tx.send(JamiLinkEvent::Error {
+                            message: format!("Failed to read Jami link helper output: {err}"),
+                            updated_at: now_iso(),
+                        });
+                        break;
+                    }
+                }
+            }
+        });
+
+        self.jami_link_rx = Some(rx);
+        self.jami_link_stdin = Some(stdin);
+        self.jami_link_child = Some(child);
+        self.push_local_notice(
+            "jami",
+            "Started Jami device link. Scan the QR code with the phone app.",
+        );
+        self.apply_dynamic_settings_state();
+        Ok(())
+    }
+
+    fn submit_jami_link_password(&mut self) -> anyhow::Result<()> {
+        let password = self.jami_link_password_input.trim().to_string();
+        if password.is_empty() {
+            anyhow::bail!("Jami link password is empty. Type it into the footer input first.");
+        }
+        let Some(stdin) = self.jami_link_stdin.as_mut() else {
+            anyhow::bail!("No active Jami link session is available for password submission.");
+        };
+        stdin.write_all(
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "cmd": "provide_auth",
+                    "password": password,
+                    "scheme": self
+                        .jami_link_state
+                        .auth_scheme
+                        .clone()
+                        .unwrap_or_else(|| "password".to_string()),
+                })
+            )
+            .as_bytes(),
+        )?;
+        stdin.flush()?;
+        self.jami_link_password_input.clear();
+        self.push_local_notice(
+            "jami",
+            "Submitted the Jami link password. Wait for the transfer to finish.",
+        );
+        Ok(())
+    }
+
+    fn stop_jami_link_worker(&mut self, preserve_state: bool) {
+        if let Some(stdin) = self.jami_link_stdin.as_mut() {
+            let _ = stdin.write_all(b"{\"cmd\":\"cancel\"}\n");
+            let _ = stdin.flush();
+        }
+        self.jami_link_stdin = None;
+        self.jami_link_rx = None;
+        if let Some(mut child) = self.jami_link_child.take() {
+            thread::sleep(Duration::from_millis(120));
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+        if !preserve_state {
+            self.jami_link_state = JamiLinkState::default();
+        }
+    }
+
+    fn poll_jami_link_events(&mut self, paths: &Paths) {
+        let mut saw_disconnect = false;
+        loop {
+            let recv_outcome = {
+                let Some(rx) = self.jami_link_rx.as_ref() else {
+                    break;
+                };
+                rx.try_recv()
+            };
+            match recv_outcome {
+                Ok(event) => {
+                    self.apply_jami_link_event(paths, event);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    saw_disconnect = true;
+                    break;
+                }
+            }
+        }
+        if saw_disconnect {
+            self.jami_link_rx = None;
+            self.jami_link_stdin = None;
+            if let Some(mut child) = self.jami_link_child.take() {
+                let _ = child.wait();
+            }
+        }
+    }
+
+    fn apply_jami_link_event(&mut self, paths: &Paths, event: JamiLinkEvent) {
+        match event {
+            JamiLinkEvent::SessionStarted {
+                account_id,
+                updated_at,
+            } => {
+                self.jami_link_state.account_id = Some(account_id);
+                self.jami_link_state.active = true;
+                self.jami_link_state.updated_at = Some(updated_at);
+            }
+            JamiLinkEvent::StateChanged {
+                account_id,
+                state_code,
+                state_label,
+                details,
+                updated_at,
+            } => {
+                self.jami_link_state.account_id = Some(account_id);
+                self.jami_link_state.state_code = Some(state_code);
+                self.jami_link_state.state_label = Some(state_label);
+                self.jami_link_state.updated_at = Some(updated_at);
+                self.jami_link_state.active = true;
+                if let Some(token) = details.get("token").cloned() {
+                    self.jami_link_state.token = Some(token);
+                }
+                self.jami_link_state.auth_scheme = details.get("auth_scheme").cloned();
+                self.jami_link_state.auth_error = details.get("auth_error").cloned();
+                self.jami_link_state.peer_id = details.get("peer_id").cloned();
+                self.jami_link_state.error = details.get("error").cloned();
+                if self
+                    .jami_link_state
+                    .auth_error
+                    .as_deref()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    self.push_local_notice(
+                        "jami",
+                        "Jami link password was rejected. Enter the correct password and press Enter on Jami Link again.",
+                    );
+                }
+            }
+            JamiLinkEvent::Completed {
+                account_id,
+                success,
+                error,
+                updated_at,
+            } => {
+                self.jami_link_state.account_id = Some(account_id.clone());
+                self.jami_link_state.success = success;
+                self.jami_link_state.done = true;
+                self.jami_link_state.active = false;
+                self.jami_link_state.updated_at = Some(updated_at);
+                self.jami_link_state.error = if error.trim().is_empty() {
+                    None
+                } else {
+                    Some(error.clone())
+                };
+                self.jami_link_password_input.clear();
+                self.jami_link_stdin = None;
+                if let Some(mut child) = self.jami_link_child.take() {
+                    let _ = child.wait();
+                }
+                self.jami_link_rx = None;
+                if success {
+                    if let Err(err) = persist_linked_jami_account(paths, &account_id) {
+                        self.push_local_notice("error", &err.to_string());
+                    } else {
+                        self.jami_saved_account_id = Some(account_id.clone());
+                        if self.settings_dirty {
+                            self.apply_dynamic_settings_state();
+                        } else {
+                            self.settings_items = load_settings_items(paths);
+                        }
+                        self.push_local_notice(
+                            "jami",
+                            "Jami device linked. The runtime account binding was updated automatically.",
+                        );
+                    }
+                } else {
+                    self.push_local_notice(
+                        "jami",
+                        &format!(
+                            "Jami device link failed{}.",
+                            self.jami_link_state
+                                .error
+                                .as_deref()
+                                .filter(|value| !value.trim().is_empty())
+                                .map(|value| format!(": {value}"))
+                                .unwrap_or_default()
+                        ),
+                    );
+                }
+            }
+            JamiLinkEvent::Cancelled {
+                account_id,
+                updated_at,
+            } => {
+                self.jami_link_state.account_id = Some(account_id);
+                self.jami_link_state.updated_at = Some(updated_at);
+                self.jami_link_state.active = false;
+                self.jami_link_state.done = true;
+                self.jami_link_password_input.clear();
+                self.jami_link_rx = None;
+                self.jami_link_stdin = None;
+                if let Some(mut child) = self.jami_link_child.take() {
+                    let _ = child.wait();
+                }
+            }
+            JamiLinkEvent::Error {
+                message,
+                updated_at,
+            } => {
+                self.jami_link_state.active = false;
+                self.jami_link_state.done = true;
+                self.jami_link_state.success = false;
+                self.jami_link_state.error = Some(message.clone());
+                self.jami_link_state.updated_at = Some(updated_at);
+                self.jami_link_password_input.clear();
+                self.jami_link_rx = None;
+                self.jami_link_stdin = None;
+                if let Some(mut child) = self.jami_link_child.take() {
+                    let _ = child.wait();
+                }
+                self.push_local_notice("error", &message);
+            }
+            JamiLinkEvent::Log {
+                level,
+                message,
+                updated_at,
+            } => {
+                self.jami_link_state.updated_at = Some(updated_at);
+                self.push_local_notice(&format!("jami-{level}"), &message);
+            }
+        }
+        self.apply_dynamic_settings_state();
+    }
+
+    fn apply_dynamic_settings_state(&mut self) {
+        let action_value = self.jami_link_action_value();
+        if let Some(item) = self
+            .settings_items
+            .iter_mut()
+            .find(|item| item.key == "jami_link_device")
+        {
+            item.value = action_value;
+        }
+    }
+
+    fn jami_link_action_value(&self) -> String {
+        if self.jami_link_state.active && !self.jami_link_state.done {
+            return match self.jami_link_state.state_code {
+                Some(1) => "QR ready - scan with phone".to_string(),
+                Some(2) => "Phone detected - establishing link".to_string(),
+                Some(3)
+                    if self
+                        .jami_link_state
+                        .auth_scheme
+                        .as_deref()
+                        .map(|value| value.eq_ignore_ascii_case("password"))
+                        .unwrap_or(false) =>
+                {
+                    "Password required - enter below and press Enter".to_string()
+                }
+                Some(3) => "Authenticating linked device".to_string(),
+                Some(4) => "Transferring account archive".to_string(),
+                _ => "Starting Jami device link".to_string(),
+            };
+        }
+        if self.jami_link_state.done && self.jami_link_state.success {
+            return "Linked - press Enter to generate a new pairing QR".to_string();
+        }
+        if self.jami_link_state.done {
+            return "Failed - press Enter to retry Jami pairing".to_string();
+        }
+        if self.jami_saved_account_id.is_some() {
+            "Linked - press Enter to generate a new pairing QR".to_string()
+        } else {
+            "Select row to pair phone via QR".to_string()
         }
     }
 
@@ -802,6 +1387,7 @@ impl AttachTui {
         self.settings_dirty = false;
         self.snapshot = collect_ui_snapshot(paths);
         self.settings_items = load_settings_items(paths);
+        self.apply_dynamic_settings_state();
         self.push_local_notice(
             "saved",
             "Attach settings persisted to organigram, installation bootstrap, and runtime env.",
@@ -1016,11 +1602,8 @@ impl AttachTui {
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
         let body = self.chat_body_rows(width, height);
-        let help = if self.snapshot.active_turn.is_some() {
-            "^I next page   Enter queues raw chat for the next safe boundary   ^P reset   ^C exit"
-        } else {
-            "^I next page   Enter sends raw chat now   ^P reset   ^C exit"
-        };
+        let help =
+            "^I next page   Enter sends and the reply follows after the current work step   ^P reset   ^C exit";
         self.render_nano_page(
             stdout,
             width,
@@ -1062,14 +1645,15 @@ impl AttachTui {
     ) -> anyhow::Result<()> {
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
-        let body = self.settings_body_rows(width, height);
+        let header_reserved = self.nano_header_lines("Settings", width).len() + 3;
+        let body = self.settings_body_rows(width, height.saturating_sub(header_reserved).max(1));
         self.render_nano_page(
             stdout,
             width,
             height,
             "Settings",
             body,
-            "^I next page   Up/Down select   Left/Right cycle models   Enter edit   Ctrl-S save",
+            "^I next page   Up/Down select   Left/Right cycle models   Enter edit/action   Ctrl-S save",
             &format!("{prompt}{input_display}"),
             false,
             Some(cursor_col),
@@ -1091,12 +1675,19 @@ impl AttachTui {
             AttachPage::Chat => "Chat to CTO: ".to_string(),
             AttachPage::Continuity => String::new(),
             AttachPage::Settings => {
+                if self.selected_setting_uses_jami_password_editor() {
+                    return "Jami Password: ".to_string();
+                }
                 let label = self
                     .settings_items
                     .get(self.settings_selected)
                     .map(|item| item.label)
                     .unwrap_or("Setting");
-                format!("Edit {label}: ")
+                if self.selected_setting_is_action() {
+                    format!("Action {label}: ")
+                } else {
+                    format!("Edit {label}: ")
+                }
             }
         }
     }
@@ -1106,11 +1697,16 @@ impl AttachTui {
             AttachPage::Tasks => "",
             AttachPage::Chat => &self.chat_input,
             AttachPage::Continuity => "",
-            AttachPage::Settings => self
-                .settings_items
-                .get(self.settings_selected)
-                .map(|item| item.value.as_str())
-                .unwrap_or(""),
+            AttachPage::Settings => {
+                if self.selected_setting_uses_jami_password_editor() {
+                    &self.jami_link_password_input
+                } else {
+                    self.settings_items
+                        .get(self.settings_selected)
+                        .map(|item| item.value.as_str())
+                        .unwrap_or("")
+                }
+            }
         }
     }
 
@@ -1280,27 +1876,31 @@ impl AttachTui {
     }
 
     fn chat_rows(&self, width: usize, height: usize) -> Vec<String> {
-        let mut raw_lines = recent_chat_lines(&self.snapshot, CHAT_HISTORY_LIMIT);
-        for line in self.pending_chat_overlay_lines(CHAT_HISTORY_LIMIT) {
-            if !raw_lines.iter().any(|existing| existing == &line) {
-                raw_lines.push(line);
+        let transcript_width = width.saturating_sub(2).max(20);
+        let mut entries = recent_chat_entries(&self.snapshot, CHAT_HISTORY_LIMIT);
+        for entry in self.pending_chat_overlay_entries(CHAT_HISTORY_LIMIT) {
+            if !entries.iter().any(|existing| {
+                existing.speaker == entry.speaker
+                    && existing.message == entry.message
+                    && existing.state == entry.state
+            }) {
+                entries.push(entry);
             }
         }
-        if raw_lines.len() > CHAT_HISTORY_LIMIT {
-            raw_lines = raw_lines.split_off(raw_lines.len().saturating_sub(CHAT_HISTORY_LIMIT));
+        if entries.is_empty() {
+            return vec![
+                "ChatGPT-style transcript. Messages stay here until the agent replies.".to_string(),
+                String::new(),
+                "Type below and press Enter. While the agent is working, the transcript shows a waiting marker instead of debug output.".to_string(),
+            ];
         }
-        let mut lines = raw_lines
-            .into_iter()
-            .map(|line| frame_row(&line, width))
-            .collect::<Vec<_>>();
-        if lines.is_empty() {
-            lines.push(frame_row(
-                "No chat history yet. Start typing below to create the first chat interrupt.",
-                width,
-            ));
-        }
-        while lines.len() < height {
-            lines.insert(0, frame_row(" ", width));
+
+        let mut lines = Vec::new();
+        for (index, entry) in entries.into_iter().enumerate() {
+            if index > 0 {
+                lines.push(String::new());
+            }
+            lines.extend(render_chat_entry(&entry, transcript_width));
         }
         if lines.len() > height {
             lines = lines.split_off(lines.len().saturating_sub(height));
@@ -1324,12 +1924,14 @@ impl AttachTui {
                     " "
                 };
                 let choices = if item.choices.is_empty() { "" } else { " *" };
+                let action = if item.action { " !" } else { "" };
                 rows.push(frame_row(
                     &format!(
-                        "{marker} {:<18} {}{}",
+                        "{marker} {:<18} {}{}{}",
                         item.label,
                         compact_text(&display_setting_value(item), 88),
-                        choices
+                        choices,
+                        action
                     ),
                     width,
                 ));
@@ -1342,21 +1944,30 @@ impl AttachTui {
         rows
     }
 
-    fn pending_chat_overlay_lines(&self, limit: usize) -> Vec<String> {
-        let mut lines = Vec::new();
+    fn pending_chat_overlay_entries(&self, limit: usize) -> Vec<ChatTranscriptEntry> {
+        let mut entries = Vec::new();
         for item in self.pending_inputs.iter().rev().take(limit).rev() {
-            let message = compact_text(&item.message, 92);
+            if item.status == PendingInputStatus::Completed {
+                continue;
+            }
+            let message = owner_visible_input_echo(&item.message);
             if message.is_empty() {
                 continue;
             }
-            lines.push(format!(
-                "{}  {:<9}> {}",
-                item.created_at_label,
-                "owner",
-                message
-            ));
+            entries.push(ChatTranscriptEntry {
+                speaker: ChatTranscriptSpeaker::Owner,
+                created_at_label: item.created_at_label.clone(),
+                message,
+                state: ChatTranscriptState::Final,
+            });
+            entries.push(ChatTranscriptEntry {
+                speaker: ChatTranscriptSpeaker::Agent,
+                created_at_label: item.created_at_label.clone(),
+                message: queued_reply_placeholder(item, self.spinner_phase),
+                state: ChatTranscriptState::Waiting,
+            });
         }
-        lines
+        entries
     }
 
     fn selected_setting_help_line(&self) -> String {
@@ -1364,6 +1975,25 @@ impl AttachTui {
             return "No field selected.".to_string();
         };
         let mut line = item.help.to_string();
+        if self.selected_setting_is_jami() {
+            if self.selected_setting_uses_jami_password_editor() {
+                line.push_str(
+                    " Type the Jami account password below and press Enter to continue linking.",
+                );
+            } else if self.jami_saved_account_id.is_none()
+                && self.jami_link_state.token.is_none()
+                && !self.jami_link_state.active
+                && !self.jami_link_state.done
+            {
+                line.push_str(" Selecting Jami starts the QR pairing flow automatically.");
+            } else {
+                line.push_str(
+                    " Keep the Jami row selected to inspect link status or press Enter to retry/regenerate.",
+                );
+            }
+        } else if item.action {
+            line.push_str(" Press Enter to run the selected Jami action.");
+        }
         if matches!(item.key, "simple_model" | "medium_model" | "red_model")
             && item.choices.len() == 1
             && item.choices.first().copied() == Some(GPT_OSS_MODEL)
@@ -1379,6 +2009,94 @@ impl AttachTui {
             line.push_str(notice);
         }
         compact_text(&line, 140)
+    }
+
+    fn selected_jami_panel_rows(&self, width: usize, height: usize) -> Vec<String> {
+        if height == 0 {
+            return Vec::new();
+        }
+        let selected_is_jami = self
+            .settings_items
+            .get(self.settings_selected)
+            .map(|item| item.key.starts_with("jami_"))
+            .unwrap_or(false);
+        if !selected_is_jami {
+            return Vec::new();
+        }
+
+        let mut rows = vec![
+            frame_row(
+                &format!(
+                    "State  {}",
+                    self.jami_link_state
+                        .state_label
+                        .as_deref()
+                        .or_else(|| self.jami_saved_account_id.as_deref().map(|_| "linked"))
+                        .unwrap_or("idle")
+                        .replace('_', " ")
+                ),
+                width,
+            ),
+            frame_row(
+                &format!(
+                    "Account  {}",
+                    self.jami_link_state
+                        .account_id
+                        .as_deref()
+                        .or(self.jami_saved_account_id.as_deref())
+                        .unwrap_or("not linked yet")
+                ),
+                width,
+            ),
+        ];
+
+        if let Some(error) = self
+            .jami_link_state
+            .error
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            rows.push(frame_row(&format!("Error  {error}"), width));
+        }
+        if let Some(peer_id) = self
+            .jami_link_state
+            .peer_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            rows.push(frame_row(&format!("Peer ID  {peer_id}"), width));
+        }
+        if self.selected_setting_uses_jami_password_editor() {
+            rows.push(frame_row(
+                "Password required by the existing Jami account. Type it below and press Enter.",
+                width,
+            ));
+        }
+        if let Some(token) = self
+            .jami_link_state
+            .token
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            rows.push(frame_row(
+                &format!(
+                    "Token  {}",
+                    compact_text(token, width.saturating_sub(12).max(8))
+                ),
+                width,
+            ));
+            rows.push(frame_row("QR", width));
+            let remaining = height.saturating_sub(rows.len()).max(1);
+            rows.extend(render_qr_rows(token, width, remaining));
+        } else {
+            rows.push(frame_row(
+                "No pairing token yet. Select the Jami row to start QR pairing automatically.",
+                width,
+            ));
+        }
+
+        rows.truncate(height.max(1));
+        rows
     }
 
     fn chat_session_label(&self) -> &'static str {
@@ -1611,17 +2329,14 @@ impl AttachTui {
 
     fn chat_body_rows(&self, width: usize, height: usize) -> Vec<String> {
         let content_width = width.saturating_sub(2).max(20);
-        let chat_height = height.saturating_sub(8).max(8);
-        let mut lines = vec![
-            format!(
-                "Session  {}  |  Route {}",
-                self.chat_session_label(),
-                brain_route_label(&self.snapshot.brain_routing.route_mode)
-            ),
-            String::new(),
-        ];
-        lines.extend(plain_frame_rows(self.chat_rows(width, chat_height)));
-        normalize_body_lines(lines, content_width)
+        let chat_height = height.saturating_sub(4).max(8);
+        let mut lines = vec![format!(
+            "Conversation  {}",
+            self.chat_session_label()
+        )];
+        lines.push(String::new());
+        lines.extend(self.chat_rows(content_width, chat_height));
+        lines
     }
 
     fn continuity_body_rows(&self, width: usize, height: usize) -> Vec<String> {
@@ -1644,15 +2359,44 @@ impl AttachTui {
 
     fn settings_body_rows(&self, width: usize, height: usize) -> Vec<String> {
         let content_width = width.saturating_sub(2).max(20);
-        let list_height = height.saturating_sub(10).max(8);
+        let selected_is_jami = self
+            .settings_items
+            .get(self.settings_selected)
+            .map(|item| item.key.starts_with("jami_"))
+            .unwrap_or(false);
+        let min_list_height = if selected_is_jami { 4 } else { 8 };
+        let panel_title_rows = if selected_is_jami { 2 } else { 0 };
+        let panel_height_budget = height
+            .saturating_sub(3)
+            .saturating_sub(min_list_height)
+            .saturating_sub(panel_title_rows);
+        let jami_panel = self.selected_jami_panel_rows(width, panel_height_budget);
+        let reserved_panel_rows = if jami_panel.is_empty() {
+            0
+        } else {
+            jami_panel.len() + panel_title_rows
+        };
+        let list_height = height
+            .saturating_sub(3)
+            .saturating_sub(reserved_panel_rows)
+            .max(min_list_height);
         let dirty = if self.settings_dirty { "DIRTY" } else { "SAVED" };
-        let mut lines = vec![
-            format!("Status {dirty}"),
-            self.selected_setting_help_line(),
-            String::new(),
-        ];
+        let mut lines = vec![format!("Status {dirty}")];
+        lines.extend(wrap_text_to_width(
+            &self.selected_setting_help_line(),
+            content_width,
+        ));
+        lines.push(String::new());
         lines.extend(plain_frame_rows(self.settings_rows(width, list_height)));
-        normalize_body_lines(lines, content_width)
+        if !jami_panel.is_empty() {
+            lines.push(String::new());
+            lines.push("Jami Link".to_string());
+            lines.extend(plain_frame_rows(jami_panel));
+        }
+        if lines.is_empty() {
+            lines.push(String::new());
+        }
+        lines
     }
 
     fn now_rows(&self, width: usize) -> Vec<String> {
@@ -1831,6 +2575,12 @@ impl AttachTui {
             rows.push(frame_row(" ", width));
         }
         rows
+    }
+}
+
+impl Drop for AttachTui {
+    fn drop(&mut self) {
+        self.stop_jami_link_worker(true);
     }
 }
 
@@ -2037,6 +2787,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Name",
             value: owner_name,
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Human owner name used for chat labeling and trust-aware routing.",
         },
@@ -2045,6 +2797,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Email",
             value: owner_email,
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Primary owner email address.",
         },
@@ -2053,6 +2807,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Owner Reach",
             value: installation.owner_contact_info,
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "How the owner can be reached beyond mail, for example phone, Signal, calendar or assistant notes.",
         },
@@ -2065,6 +2821,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(control_plane_bind_host),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Socket bind host for the BIOS/control plane. Use 0.0.0.0 to expose it on the machine IP instead of localhost only.",
         },
@@ -2077,6 +2835,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(control_plane_public_base_url),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Public base URL shown in the TUI and used for BIOS links, for example https://100.96.1.7:8443.",
         },
@@ -2088,6 +2848,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Comma-separated hostnames or IPs to include in the self-signed BIOS certificate.",
         },
@@ -2099,6 +2861,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Mailbox address used by the CTO-Agent mail interrupt bridge.",
         },
@@ -2110,6 +2874,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: true,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Mailbox password or app password.",
         },
@@ -2121,6 +2887,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Incoming IMAP host.",
         },
@@ -2132,6 +2900,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Incoming IMAP port, for example 993.",
         },
@@ -2143,6 +2913,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Outgoing SMTP host.",
         },
@@ -2154,69 +2926,28 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: false,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Outgoing SMTP port, for example 465 or 587.",
         },
         SettingsItem {
-            key: "jami_account_id",
-            label: "Jami Account",
-            value: env_map
-                .get("CTO_JAMI_ACCOUNT_ID")
-                .cloned()
-                .unwrap_or_default(),
+            key: "jami_link_device",
+            label: "Jami",
+            value: "Select row to pair phone via QR".to_string(),
             secret: false,
+            editable: false,
+            action: true,
             choices: Vec::new(),
-            help: "Stable local Jami account identifier that activates the Jami interrupt bridge.",
-        },
-        SettingsItem {
-            key: "jami_profile_name",
-            label: "Jami Profile",
-            value: env_map
-                .get("CTO_JAMI_PROFILE_NAME")
-                .cloned()
-                .unwrap_or_default(),
-            secret: false,
-            choices: Vec::new(),
-            help: "Human-readable local profile label used for queued outbound Jami messages.",
-        },
-        SettingsItem {
-            key: "jami_inbox_dir",
-            label: "Jami Inbox Dir",
-            value: env_map
-                .get("CTO_JAMI_INBOX_DIR")
-                .cloned()
-                .unwrap_or_default(),
-            secret: false,
-            choices: Vec::new(),
-            help: "Directory where a local Jami bridge drops inbound JSON or JSONL payloads for sync.",
-        },
-        SettingsItem {
-            key: "jami_outbox_dir",
-            label: "Jami Outbox Dir",
-            value: env_map
-                .get("CTO_JAMI_OUTBOX_DIR")
-                .cloned()
-                .unwrap_or_default(),
-            secret: false,
-            choices: Vec::new(),
-            help: "Directory where outbound Jami payloads are queued for a local bridge helper.",
-        },
-        SettingsItem {
-            key: "jami_archive_dir",
-            label: "Jami Archive Dir",
-            value: env_map
-                .get("CTO_JAMI_ARCHIVE_DIR")
-                .cloned()
-                .unwrap_or_default(),
-            secret: false,
-            choices: Vec::new(),
-            help: "Directory where processed inbound Jami bridge files are archived after sync.",
+            help: "Select this row to start Jami QR pairing for the phone app. The manual bridge fields stay internal and are no longer shown here.",
         },
         SettingsItem {
             key: "openai_api_key",
             label: "OpenAI Key",
             value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
             secret: true,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Generic OpenAI-compatible API key fallback.",
         },
@@ -2228,6 +2959,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
                 .cloned()
                 .unwrap_or_default(),
             secret: true,
+            editable: true,
+            action: false,
             choices: Vec::new(),
             help: "Dedicated API key for external grosshirn routing.",
         },
@@ -2236,6 +2969,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Simple Model",
             value: simple_model,
             secret: false,
+            editable: true,
+            action: false,
             choices: model_choices_for_setting("simple_model", external_model_access),
             help: "Compaction tier 1. The compact cycle chooses this slot when progress remains strong.",
         },
@@ -2244,6 +2979,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Medium Model",
             value: medium_model,
             secret: false,
+            editable: true,
+            action: false,
             choices: model_choices_for_setting("medium_model", external_model_access),
             help: "Compaction tier 2. The compact cycle chooses this slot when progress is mixed or unstable.",
         },
@@ -2252,6 +2989,8 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
             label: "Red Model",
             value: red_model,
             secret: false,
+            editable: true,
+            action: false,
             choices: model_choices_for_setting("red_model", external_model_access),
             help: "Compaction tier 3. The compact cycle chooses this slot when progress is in the red zone.",
         },
@@ -2565,12 +3304,144 @@ fn display_setting_value(item: &SettingsItem) -> String {
     format!("{}{}", "*".repeat(mask_len.max(4)), visible_tail)
 }
 
-fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut last_owner_signature: Option<(String, String)> = None;
-    let mut last_visible_signature: Option<(String, String)> = None;
+fn item_mutation_marks_settings_dirty(key: &str) -> bool {
+    !matches!(key, "jami_link_device")
+}
+
+fn load_persisted_jami_account_id(paths: &Paths) -> Option<String> {
+    load_runtime_env_map(paths)
+        .ok()
+        .and_then(|env_map| env_map.get("CTO_JAMI_ACCOUNT_ID").cloned())
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn persist_linked_jami_account(paths: &Paths, account_id: &str) -> anyhow::Result<()> {
+    let mut env_map = load_runtime_env_map(paths).unwrap_or_default();
+    upsert_env_value(&mut env_map, "CTO_JAMI_ACCOUNT_ID", account_id);
+    if env_map
+        .get("CTO_JAMI_PROFILE_NAME")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        upsert_env_value(&mut env_map, "CTO_JAMI_PROFILE_NAME", account_id);
+    }
+    let jami_runtime_root = paths.root.join("runtime/communication/jami");
+    fs::create_dir_all(jami_runtime_root.join("inbox")).ok();
+    fs::create_dir_all(jami_runtime_root.join("outbox")).ok();
+    fs::create_dir_all(jami_runtime_root.join("archive")).ok();
+    if !env_map.contains_key("CTO_JAMI_INBOX_DIR") {
+        upsert_env_value(
+            &mut env_map,
+            "CTO_JAMI_INBOX_DIR",
+            jami_runtime_root.join("inbox").to_string_lossy().as_ref(),
+        );
+    }
+    if !env_map.contains_key("CTO_JAMI_OUTBOX_DIR") {
+        upsert_env_value(
+            &mut env_map,
+            "CTO_JAMI_OUTBOX_DIR",
+            jami_runtime_root.join("outbox").to_string_lossy().as_ref(),
+        );
+    }
+    if !env_map.contains_key("CTO_JAMI_ARCHIVE_DIR") {
+        upsert_env_value(
+            &mut env_map,
+            "CTO_JAMI_ARCHIVE_DIR",
+            jami_runtime_root.join("archive").to_string_lossy().as_ref(),
+        );
+    }
+    save_runtime_env_map(paths, &env_map)
+}
+
+fn render_qr_rows(token: &str, width: usize, height: usize) -> Vec<String> {
+    let Ok(qr) = QrCode::encode_text(token, QrCodeEcc::Medium) else {
+        return frame_wrapped_rows("Failed to render the Jami QR code.", width, height.max(1));
+    };
+    let qr_size = qr.size().max(1) as usize;
+    let total_modules = qr_size + (JAMI_QR_QUIET_ZONE * 2);
+    let available_width = width.max(1);
+    let available_height = height.max(1);
+    let mut scale = 1;
+    loop {
+        let scaled_modules = total_modules.div_ceil(scale);
+        let scaled_rows = scaled_modules.div_ceil(2);
+        if scaled_modules <= available_width && scaled_rows <= available_height {
+            break;
+        }
+        scale += 1;
+        if scale > total_modules {
+            break;
+        }
+    }
+    let scaled_modules = total_modules.div_ceil(scale);
+    let mut rows = Vec::new();
+    for scaled_y in (0..scaled_modules).step_by(2) {
+        let mut line = String::new();
+        for scaled_x in 0..scaled_modules {
+            let top_dark =
+                jami_qr_scaled_cell_is_dark(&qr, qr_size, total_modules, scaled_x, scaled_y, scale);
+            let bottom_dark = jami_qr_scaled_cell_is_dark(
+                &qr,
+                qr_size,
+                total_modules,
+                scaled_x,
+                scaled_y + 1,
+                scale,
+            );
+            line.push(match (top_dark, bottom_dark) {
+                (true, true) => ' ',
+                (true, false) => '▄',
+                (false, true) => '▀',
+                (false, false) => '█',
+            });
+        }
+        rows.push(line);
+        if rows.len() >= height {
+            break;
+        }
+    }
+    if rows.is_empty() {
+        rows.push(frame_row("QR code too small for the current terminal size.", width));
+    }
+    rows
+}
+
+fn jami_qr_scaled_cell_is_dark(
+    qr: &QrCode,
+    qr_size: usize,
+    total_modules: usize,
+    scaled_x: usize,
+    scaled_y: usize,
+    scale: usize,
+) -> bool {
+    let start_x = scaled_x.saturating_mul(scale);
+    let start_y = scaled_y.saturating_mul(scale);
+    for y in start_y..(start_y + scale).min(total_modules) {
+        for x in start_x..(start_x + scale).min(total_modules) {
+            if x < JAMI_QR_QUIET_ZONE
+                || y < JAMI_QR_QUIET_ZONE
+                || x >= JAMI_QR_QUIET_ZONE + qr_size
+                || y >= JAMI_QR_QUIET_ZONE + qr_size
+            {
+                continue;
+            }
+            if qr.get_module(
+                (x.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
+                (y.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn recent_chat_entries(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<ChatTranscriptEntry> {
+    let mut entries = Vec::new();
+    let mut last_owner_signature: Option<(ChatTranscriptSpeaker, String)> = None;
+    let mut last_visible_signature: Option<(ChatTranscriptSpeaker, String)> = None;
     let mut last_owner_at: Option<DateTime<Utc>> = None;
-    let mut last_reply_signature: Option<(String, String)> = None;
+    let mut last_reply_signature: Option<(ChatTranscriptSpeaker, String)> = None;
     let mut last_reply_at: Option<DateTime<Utc>> = None;
     for interrupt in snapshot
         .chat_interrupts
@@ -2578,7 +3449,7 @@ fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
         .filter(|interrupt| is_chat_interrupt_entry(snapshot, interrupt))
     {
         let owner_message = owner_visible_input_echo(&interrupt.message);
-        let owner_signature = ("owner".to_string(), owner_message.clone());
+        let owner_signature = (ChatTranscriptSpeaker::Owner, owner_message.clone());
         let interrupt_at = parse_iso_utc(&interrupt.created_at);
         let duplicate_owner_burst = last_owner_signature.as_ref() == Some(&owner_signature)
             && matches!(
@@ -2586,12 +3457,12 @@ fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
                 (Some(previous), Some(current)) if (current - previous).num_seconds().abs() <= 90
             );
         if !duplicate_owner_burst {
-            lines.push(format!(
-                "{}  {:<9}> {}",
-                short_timestamp(&interrupt.created_at),
-                "owner",
-                compact_text(&owner_message, 92)
-            ));
+            entries.push(ChatTranscriptEntry {
+                speaker: ChatTranscriptSpeaker::Owner,
+                created_at_label: short_timestamp(&interrupt.created_at),
+                message: owner_message.clone(),
+                state: ChatTranscriptState::Final,
+            });
             last_visible_signature = Some(owner_signature.clone());
         }
         last_owner_signature = Some(owner_signature);
@@ -2600,7 +3471,7 @@ fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
         let Some(reply) = visible_interrupt_reply(interrupt) else {
             continue;
         };
-        let reply_signature = ("cto-agent".to_string(), reply.clone());
+        let reply_signature = (ChatTranscriptSpeaker::Agent, reply.clone());
         let duplicate_reply_burst = last_reply_signature.as_ref() == Some(&reply_signature)
             && matches!(
                 (last_reply_at, interrupt_at),
@@ -2609,26 +3480,26 @@ fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
         if last_visible_signature.as_ref() == Some(&reply_signature) || duplicate_reply_burst {
             continue;
         }
-        lines.push(format!(
-            "{}  {:<9}> {}",
-            short_timestamp(
+        entries.push(ChatTranscriptEntry {
+            speaker: ChatTranscriptSpeaker::Agent,
+            created_at_label: short_timestamp(
                 interrupt
                     .response
                     .as_deref()
                     .map(|_| interrupt.created_at.as_str())
-                    .unwrap_or(&interrupt.created_at)
+                    .unwrap_or(&interrupt.created_at),
             ),
-            "cto-agent",
-            compact_text(&reply, 92)
-        ));
+            message: reply.clone(),
+            state: ChatTranscriptState::Final,
+        });
         last_visible_signature = Some(reply_signature);
         last_reply_signature = last_visible_signature.clone();
         last_reply_at = interrupt_at;
     }
-    if lines.len() > limit {
-        lines = lines.split_off(lines.len().saturating_sub(limit));
+    if entries.len() > limit {
+        entries = entries.split_off(entries.len().saturating_sub(limit));
     }
-    lines
+    entries
 }
 
 fn has_recent_owner_chat(snapshot: &AttachUiSnapshot) -> bool {
@@ -2671,6 +3542,9 @@ fn is_owner_visible_chat_text(message: &str) -> bool {
         && !lowered.contains("\"checkpointsummary\"")
         && !lowered.contains("the kleinhirn endpoint responded with unusable output")
         && !lowered.contains("reclassify the task instead")
+        && !lowered.contains("interrupt #")
+        && !lowered.contains("recorded and immediately materialized as task")
+        && !lowered.contains("will reprioritize at the next safe boundary")
         && !lowered.contains("current agent mode: mode=")
         && !lowered.contains("workspace execution contract is active")
         && !lowered.contains("all systems nominal. awaiting next command.")
@@ -2706,25 +3580,51 @@ fn visible_interrupt_reply(interrupt: &LoopInterruptRecord) -> Option<String> {
             }
             Some(reply.to_string())
         }
-        "queued" | "processing" => queued_interrupt_ack_text(interrupt.response.as_deref()),
         _ => None,
     }
 }
 
-fn queued_interrupt_ack_text(response: Option<&str>) -> Option<String> {
-    let response = response?.trim();
-    let suffix = response.strip_prefix("queued as task ")?;
-    let (task_id, tail) = suffix.split_once(' ').unwrap_or((suffix, ""));
-    if task_id.trim().is_empty() {
-        return None;
+fn render_chat_entry(entry: &ChatTranscriptEntry, width: usize) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  {}",
+        chat_speaker_label(entry),
+        entry.created_at_label
+    )];
+    let indent = "  ";
+    let body_width = width.saturating_sub(indent.chars().count()).max(12);
+    for wrapped in wrap_text_to_width(entry.message.trim(), body_width) {
+        lines.push(format!("{indent}{wrapped}"));
     }
-    let task_title = tail.trim().trim_start_matches('(').trim_end_matches(')').trim();
-    if task_title.is_empty() {
-        Some(format!("Received. Queued as task #{task_id}."))
-    } else {
-        Some(format!(
-            "Received. Queued as task #{task_id} ({task_title})."
-        ))
+    lines
+}
+
+fn chat_speaker_label(entry: &ChatTranscriptEntry) -> &'static str {
+    match entry.speaker {
+        ChatTranscriptSpeaker::Owner => "You",
+        ChatTranscriptSpeaker::Agent => match entry.state {
+            ChatTranscriptState::Final => "CTO-Agent",
+            ChatTranscriptState::Waiting => "CTO-Agent ...",
+        },
+    }
+}
+
+fn queued_reply_placeholder(item: &PendingInputItem, spinner_phase: usize) -> String {
+    let dots = animated_wait_dots(spinner_phase);
+    match item.status {
+        PendingInputStatus::Active => format!(
+            "{dots} Ich antworte, sobald der aktuelle Arbeitsschritt abgeschlossen ist."
+        ),
+        PendingInputStatus::Queued | PendingInputStatus::Completed => format!(
+            "{dots} Nachricht angekommen. Antwort folgt nach der aktuellen Aufgabe."
+        ),
+    }
+}
+
+fn animated_wait_dots(spinner_phase: usize) -> &'static str {
+    match spinner_phase % 3 {
+        0 => ".",
+        1 => "..",
+        _ => "...",
     }
 }
 
@@ -3801,6 +4701,8 @@ mod tests {
                     label: "Owner Name",
                     value: "Michael Welsch".to_string(),
                     secret: false,
+                    editable: true,
+                    action: false,
                     choices: Vec::new(),
                     help: "Owner identity.",
                 },
@@ -3809,6 +4711,8 @@ mod tests {
                     label: "Simple Model",
                     value: "openai/gpt-oss-20b".to_string(),
                     secret: false,
+                    editable: true,
+                    action: false,
                     choices: SIMPLE_MODEL_OPTIONS.to_vec(),
                     help: "Simple slot.",
                 },
@@ -3817,6 +4721,12 @@ mod tests {
             settings_dirty: false,
             spinner_phase: 0,
             factory_reset_armed_until: None,
+            jami_link_state: JamiLinkState::default(),
+            jami_link_password_input: String::new(),
+            jami_saved_account_id: None,
+            jami_link_rx: None,
+            jami_link_child: None,
+            jami_link_stdin: None,
         }
     }
 
@@ -3920,6 +4830,8 @@ mod tests {
                 label: "Bind Host",
                 value: "0.0.0.0".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3928,6 +4840,8 @@ mod tests {
                 label: "Public BIOS URL",
                 value: "https://100.96.1.7:8443".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3936,6 +4850,8 @@ mod tests {
                 label: "TLS Alt Names",
                 value: "100.96.1.7".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3944,6 +4860,8 @@ mod tests {
                 label: "Mail Address",
                 value: "cto1@metric-space.ai".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3952,6 +4870,8 @@ mod tests {
                 label: "Mail Password",
                 value: "supersecret".to_string(),
                 secret: true,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3960,6 +4880,8 @@ mod tests {
                 label: "Jami Account",
                 value: "jami:owner-account".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -3968,6 +4890,8 @@ mod tests {
                 label: "Jami Inbox Dir",
                 value: "/tmp/cto-jami-inbox".to_string(),
                 secret: false,
+                editable: true,
+                action: false,
                 choices: Vec::new(),
                 help: "",
             },
@@ -4119,9 +5043,13 @@ mod tests {
             },
         ];
 
-        let lines = recent_chat_lines(&ui.snapshot, 12).join("\n");
-        assert!(lines.contains("owner"));
-        assert!(lines.contains("cto-agent"));
+        let lines = recent_chat_entries(&ui.snapshot, 12)
+            .into_iter()
+            .map(|entry| format!("{}: {}", chat_speaker_label(&entry), entry.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(lines.contains("You"));
+        assert!(lines.contains("CTO-Agent"));
         assert!(!lines.contains("All systems nominal"));
         assert!(!lines.contains("Workspace execution contract is active"));
         assert!(!lines.contains("/status"));
@@ -4133,7 +5061,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_chat_lines_preserve_owner_then_reply_order_from_interrupts() {
+    fn recent_chat_entries_preserve_owner_then_reply_order_from_interrupts() {
         let mut ui = sample_ui();
         ui.snapshot.chat_interrupts = vec![
             LoopInterruptRecord {
@@ -4158,7 +5086,10 @@ mod tests {
             },
         ];
 
-        let lines = recent_chat_lines(&ui.snapshot, 12);
+        let lines = recent_chat_entries(&ui.snapshot, 12)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>();
         let rendered = lines.join("\n");
         let first_owner = rendered.find("Erste Frage").expect("first owner line");
         let first_reply = rendered.find("Erste Antwort").expect("first reply line");
@@ -4171,7 +5102,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_chat_lines_show_friendly_queue_ack_for_pending_interrupts() {
+    fn recent_chat_entries_hide_queue_ack_for_pending_interrupts() {
         let mut ui = sample_ui();
         ui.snapshot.chat_interrupts = vec![LoopInterruptRecord {
             id: 12,
@@ -4184,9 +5115,13 @@ mod tests {
             error: None,
         }];
 
-        let rendered = recent_chat_lines(&ui.snapshot, 12).join("\n");
+        let rendered = recent_chat_entries(&ui.snapshot, 12)
+            .into_iter()
+            .map(|entry| entry.message)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(rendered.contains("Kannst du das reparieren?"));
-        assert!(rendered.contains("Received. Queued as task #4840 (Chatten)."));
+        assert!(!rendered.contains("Queued as task"));
     }
 
     #[test]
@@ -4197,9 +5132,10 @@ mod tests {
 
         let lines = ui.chat_rows(140, 8).join("\n");
 
-        assert!(lines.contains("owner"));
+        assert!(lines.contains("You"));
         assert!(lines.contains("Please make the BIOS link more visible"));
         assert!(lines.contains("after that please show me the last three turns"));
+        assert!(lines.contains("Nachricht angekommen") || lines.contains("Ich antworte"));
     }
 
     #[test]
