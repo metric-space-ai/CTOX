@@ -1522,36 +1522,48 @@ impl AttachTui {
     }
 
     fn context_line(&self, width: usize) -> String {
-        let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
-        let (_, compact_budget, _) = self.compaction_budget_metrics();
+        let used = self.estimated_active_context_tokens();
+        let throughput = self.throughput_text();
         let Some(window) = self.model_window_tokens() else {
             return format!(
-                "Context [{}]  n/a | external window | {} tok",
+                "Context [{}]  n/a | external window | {throughput}",
                 "-".repeat(width.saturating_sub(52).clamp(16, 72)),
-                used
             );
         };
         let percent = used.saturating_mul(100) / window.max(1);
         let meter_width = width.saturating_sub(30).clamp(24, 88);
-        let compact_limit = compact_budget.min(window);
+        let compact_limit = self.compaction_trigger_tokens(window);
         let meter = context_meter(used, window, compact_limit, meter_width);
         format!(
-            "Context {meter} {percent:>3}% | {} | {} tok",
+            "Context {meter} {percent:>3}% | {} | {throughput}",
             format_token_short(window),
-            used
         )
     }
 
-    fn compaction_budget_metrics(&self) -> (usize, usize, usize) {
-        if let Some(continuity) = self.snapshot.latest_continuity.as_ref() {
-            let budget = continuity.budget_hint.max(1);
-            let used = continuity.estimated_tokens.max(1);
-            let percent = used.saturating_mul(100) / budget.max(1);
-            return (used, budget, percent.min(999));
-        }
-        let used = self.snapshot.brain_usage.last_total_tokens.max(0) as usize;
-        let budget = used.max(1);
-        (used, budget, 100)
+    fn estimated_active_context_tokens(&self) -> usize {
+        self.snapshot
+            .latest_continuity
+            .as_ref()
+            .map(|continuity| continuity.estimated_tokens.max(1))
+            .unwrap_or_else(|| self.snapshot.brain_usage.last_total_tokens.max(0) as usize)
+    }
+
+    fn compaction_trigger_tokens(&self, window: usize) -> usize {
+        std::env::var("CTO_AGENT_CONTEXT_COMPACT_TRIGGER_TOKENS")
+            .ok()
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .filter(|value| *value >= 1)
+            .map(|value| value.min(window))
+            .unwrap_or_else(|| (window / 2).max(1))
+    }
+
+    fn throughput_text(&self) -> String {
+        self.snapshot
+            .brain_usage
+            .last_tokens_per_second
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .map(|value| format!("{} tok/s", value.round() as i64))
+            .unwrap_or_else(|| "n/a tok/s".to_string())
     }
 
     fn model_window_tokens(&self) -> Option<usize> {
@@ -3366,6 +3378,8 @@ mod tests {
                     last_input_tokens: 512,
                     last_output_tokens: 181,
                     last_total_tokens: 693,
+                    last_duration_ms: Some(3250),
+                    last_tokens_per_second: Some(213.2),
                     last_recorded_at: Some("2026-03-18T15:08:30+00:00".to_string()),
                 },
                 kleinhirn_runtime: Some(KleinhirnRuntimeSnapshot {
@@ -3498,7 +3512,7 @@ mod tests {
                     task_title: "Show the BIOS link on the attach screen".to_string(),
                     context_mode: "execute_task".to_string(),
                     budget_hint: 65_536,
-                    estimated_tokens: 760,
+                    estimated_tokens: 8192,
                     trigger: "interrupt".to_string(),
                     controller: "context_optimizer_simple_html_root_v1".to_string(),
                     school_grade: Some(3),
@@ -4009,7 +4023,10 @@ mod tests {
         assert!(line.contains("Context ["));
         assert!(line.contains("[]"));
         assert!(line.contains("128k"));
-        assert!(line.contains("693 tok"));
+        assert!(line.contains("213 tok/s"));
+        let marker = line.find("[]").expect("marker should exist");
+        let first_hash = line.find('#').expect("fill should exist");
+        assert!(marker > first_hash + 2);
     }
 
     #[test]

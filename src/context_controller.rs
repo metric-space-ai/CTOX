@@ -4689,7 +4689,7 @@ fn choose_mode(
                 .cloned()
                 .unwrap_or(ContextModePolicy {
                     mode: "working".to_string(),
-                    budget_hint: 32768,
+                    budget_hint: 65536,
                     recent_boot_entries: 2,
                     recent_bios_dialogue: 3,
                     recent_memory_items: 4,
@@ -6211,7 +6211,7 @@ mod tests {
             modes: vec![
                 ContextModePolicy {
                     mode: "execution".to_string(),
-                    budget_hint: 8192,
+                    budget_hint: 16384,
                     recent_boot_entries: 0,
                     recent_bios_dialogue: 0,
                     recent_memory_items: 0,
@@ -6699,7 +6699,7 @@ mod tests {
 
         let query_mode = choose_mode(&policy, &optimization, &task, Some("query_plan"));
         assert_eq!(query_mode.mode, "preparation_query");
-        assert!(query_mode.budget_hint >= 16_384);
+        assert!(query_mode.budget_hint >= 32_768);
 
         let rewrite_mode = choose_mode(&policy, &optimization, &task, Some("rewrite"));
         assert_eq!(rewrite_mode.mode, "preparation_rewrite");

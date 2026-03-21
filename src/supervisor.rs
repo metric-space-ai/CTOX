@@ -1126,6 +1126,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                     usage.input_tokens,
                                     usage.output_tokens,
                                     usage.total_tokens,
+                                    usage.duration_ms,
                                     usage.estimated_cost_usd,
                                     &note,
                                 );

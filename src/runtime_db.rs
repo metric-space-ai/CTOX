@@ -82,6 +82,8 @@ pub struct BrainUsageRollup {
     pub last_input_tokens: i64,
     pub last_output_tokens: i64,
     pub last_total_tokens: i64,
+    pub last_duration_ms: Option<i64>,
+    pub last_tokens_per_second: Option<f64>,
     pub last_recorded_at: Option<String>,
 }
 
@@ -475,6 +477,7 @@ pub fn init_runtime_db(paths: &Paths) -> anyhow::Result<()> {
             input_tokens INTEGER NOT NULL DEFAULT 0,
             output_tokens INTEGER NOT NULL DEFAULT 0,
             total_tokens INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER,
             estimated_cost_usd REAL NOT NULL DEFAULT 0,
             note TEXT NOT NULL DEFAULT ''
         );
@@ -799,6 +802,12 @@ pub fn init_runtime_db(paths: &Paths) -> anyhow::Result<()> {
             resolved_at TEXT
         );
         "#,
+    )?;
+    add_column_if_missing(
+        &conn,
+        "brain_usage_events",
+        "duration_ms",
+        "ALTER TABLE brain_usage_events ADD COLUMN duration_ms INTEGER",
     )?;
     add_column_if_missing(
         &conn,
@@ -1294,6 +1303,7 @@ pub fn record_brain_usage_event(
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     total_tokens: Option<i64>,
+    duration_ms: Option<i64>,
     estimated_cost_usd: Option<f64>,
     note: &str,
 ) -> anyhow::Result<i64> {
@@ -1301,8 +1311,8 @@ pub fn record_brain_usage_event(
     conn.execute(
         "INSERT INTO brain_usage_events(
             created_at, task_id, turn_id, brain_tier, source_label, model_id,
-            input_tokens, output_tokens, total_tokens, estimated_cost_usd, note
-         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            input_tokens, output_tokens, total_tokens, duration_ms, estimated_cost_usd, note
+         ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             now_iso(),
             task_id,
@@ -1313,6 +1323,7 @@ pub fn record_brain_usage_event(
             input_tokens.unwrap_or(0),
             output_tokens.unwrap_or(0),
             total_tokens.unwrap_or(0),
+            duration_ms,
             estimated_cost_usd.unwrap_or(0.0),
             note.trim(),
         ],
@@ -1367,12 +1378,14 @@ pub fn load_brain_usage_rollup(paths: &Paths) -> anyhow::Result<BrainUsageRollup
 
     let latest = conn
         .query_row(
-            "SELECT model_id, brain_tier, input_tokens, output_tokens, total_tokens, created_at
+            "SELECT model_id, brain_tier, input_tokens, output_tokens, total_tokens, duration_ms, created_at
              FROM brain_usage_events
              ORDER BY id DESC
              LIMIT 1",
             [],
             |row| {
+                let last_total_tokens = row.get::<_, i64>(4)?;
+                let last_duration_ms = row.get::<_, Option<i64>>(5)?;
                 Ok(BrainUsageRollup {
                     total_input_tokens,
                     total_output_tokens,
@@ -1381,8 +1394,13 @@ pub fn load_brain_usage_rollup(paths: &Paths) -> anyhow::Result<BrainUsageRollup
                     last_brain_tier: row.get(1)?,
                     last_input_tokens: row.get(2)?,
                     last_output_tokens: row.get(3)?,
-                    last_total_tokens: row.get(4)?,
-                    last_recorded_at: row.get(5)?,
+                    last_total_tokens,
+                    last_duration_ms,
+                    last_tokens_per_second: compute_tokens_per_second(
+                        last_total_tokens,
+                        last_duration_ms,
+                    ),
+                    last_recorded_at: row.get(6)?,
                 })
             },
         )
@@ -1394,6 +1412,14 @@ pub fn load_brain_usage_rollup(paths: &Paths) -> anyhow::Result<BrainUsageRollup
         total_tokens,
         ..Default::default()
     }))
+}
+
+fn compute_tokens_per_second(total_tokens: i64, duration_ms: Option<i64>) -> Option<f64> {
+    let duration_ms = duration_ms?;
+    if total_tokens <= 0 || duration_ms <= 0 {
+        return None;
+    }
+    Some((total_tokens as f64 * 1000.0) / duration_ms as f64)
 }
 
 pub fn record_homepage_revision(

@@ -155,6 +155,7 @@ pub struct ModelUsageMetrics {
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
+    pub duration_ms: Option<i64>,
     pub estimated_cost_usd: Option<f64>,
 }
 
@@ -316,7 +317,8 @@ fn run_agentic_task_once_with_resolved_targets(
 ) -> anyhow::Result<AgenticRunResult> {
     let target = resolved.primary.clone();
     let post_timeout = effective_model_post_timeout(Some(task));
-    match post_model_request_with_fallback(
+    let request_started = std::time::Instant::now();
+    let response = post_model_request_with_fallback(
         paths,
         resolved,
         Some(task),
@@ -324,7 +326,9 @@ fn run_agentic_task_once_with_resolved_targets(
         &prompt_plan.user_prompt,
         context_block,
         post_timeout,
-    ) {
+    );
+    let request_duration_ms = request_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    match response {
         Ok(response) => {
             let (used_target, response) = response;
             let content = match require_model_text_output(&used_target, &response) {
@@ -346,12 +350,17 @@ fn run_agentic_task_once_with_resolved_targets(
                         &response,
                         &detail,
                         output_budget,
+                        request_duration_ms,
                     ));
                 }
                 Err(err) => return Err(err),
             };
             let retriable_local_failure = looks_like_incomplete_json_output(&content);
             let parsed = parse_agent_output_for_task(&content, Some(&task.task_kind));
+            let mut model_usage = extract_model_usage(&used_target, &response);
+            if let Some(usage) = model_usage.as_mut() {
+                usage.duration_ms = Some(request_duration_ms);
+            }
             let result = AgenticRunResult {
                 status: "ok".to_string(),
                 reply: parsed.reply.clone().or_else(|| Some(content.clone())),
@@ -380,7 +389,7 @@ fn run_agentic_task_once_with_resolved_targets(
                 fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
                     && used_target.brain_tier == "kleinhirn",
                 retriable_local_failure,
-                model_usage: extract_model_usage(&used_target, &response),
+                model_usage,
             };
             let result =
                 normalize_grosshirn_activation_result(task, resolved, &used_target, result);
@@ -430,7 +439,8 @@ fn run_agentic_task_once_with_resolved_targets(
                     context_block,
                 )?;
                 let retry_context_block = emergency_context_block(context_block, task, 2);
-                match post_model_request_with_fallback(
+                let retry_started = std::time::Instant::now();
+                let retry_response = post_model_request_with_fallback(
                     paths,
                     resolved,
                     Some(task),
@@ -438,7 +448,10 @@ fn run_agentic_task_once_with_resolved_targets(
                     &retry_plan.user_prompt,
                     &retry_context_block,
                     post_timeout,
-                ) {
+                );
+                let retry_duration_ms =
+                    retry_started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+                match retry_response {
                     Ok(response) => {
                         let (used_target, response) = response;
                         let content = match require_model_text_output(&used_target, &response) {
@@ -463,12 +476,17 @@ fn run_agentic_task_once_with_resolved_targets(
                                     &response,
                                     &detail,
                                     output_budget,
+                                    retry_duration_ms,
                                 ));
                             }
                             Err(err) => return Err(err),
                         };
                         let retriable_local_failure = looks_like_incomplete_json_output(&content);
                         let parsed = parse_agent_output_for_task(&content, Some(&task.task_kind));
+                        let mut model_usage = extract_model_usage(&used_target, &response);
+                        if let Some(usage) = model_usage.as_mut() {
+                            usage.duration_ms = Some(retry_duration_ms);
+                        }
                         let result = AgenticRunResult {
                             status: "ok".to_string(),
                             reply: parsed.reply.clone().or_else(|| Some(content.clone())),
@@ -499,7 +517,7 @@ fn run_agentic_task_once_with_resolved_targets(
                             fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
                                 && used_target.brain_tier == "kleinhirn",
                             retriable_local_failure,
-                            model_usage: extract_model_usage(&used_target, &response),
+                            model_usage,
                         };
                         let result = normalize_grosshirn_activation_result(
                             task,
@@ -725,6 +743,7 @@ fn extract_model_usage(target: &ModelTarget, response: &Value) -> Option<ModelUs
         input_tokens,
         output_tokens,
         total_tokens,
+        duration_ms: None,
         estimated_cost_usd: estimate_external_cost_usd(target, input_tokens, output_tokens),
     })
 }
@@ -3094,12 +3113,17 @@ fn build_empty_text_retry_result(
     response: &Value,
     detail: &str,
     output_budget: usize,
+    request_duration_ms: i64,
 ) -> AgenticRunResult {
     let (checkpoint_summary, reply, diagnostic_note) =
         empty_text_retry_messages(used_target, response, output_budget);
     let checkpoint_detail = diagnostic_note
         .map(|note| format!("{detail}\n\n{note}"))
         .unwrap_or_else(|| detail.to_string());
+    let mut model_usage = extract_model_usage(used_target, response);
+    if let Some(usage) = model_usage.as_mut() {
+        usage.duration_ms = Some(request_duration_ms);
+    }
     AgenticRunResult {
         status: "ok".to_string(),
         reply: Some(reply),
@@ -3128,7 +3152,7 @@ fn build_empty_text_retry_result(
         fell_back_to_kleinhirn: resolved.primary.brain_tier == "grosshirn"
             && used_target.brain_tier == "kleinhirn",
         retriable_local_failure: used_target.brain_tier == "kleinhirn",
-        model_usage: extract_model_usage(used_target, response),
+        model_usage,
     }
 }
 
