@@ -4987,6 +4987,42 @@ fn task_should_get_codex_command_exec_guidance(task: &TaskRecord) -> bool {
     )
 }
 
+fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool {
+    if task.task_kind != "owner_interrupt" {
+        return false;
+    }
+    let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
+    [
+        "c++",
+        "cpp",
+        ".cpp",
+        ".hpp",
+        ".h",
+        "cmake",
+        "console app",
+        "konsolenanwendung",
+        "application",
+        "anwendung",
+        "implement",
+        "implementation",
+        "entwick",
+        "code",
+        "repo",
+        "repository",
+        "workspace",
+        "build",
+        "compile",
+        "test",
+        "thread-safe",
+        "threadsicher",
+        "race condition",
+        "persistent",
+        "persisten",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
+}
+
 fn append_owner_operation_inclusions(
     paths: &Paths,
     task: &TaskRecord,
@@ -5027,6 +5063,34 @@ fn append_owner_operation_inclusions(
         2,
         2200,
     );
+    if owner_interrupt_needs_workspace_execution_guidance(task) {
+        push_matching_raw_inclusions(
+            raw_inclusions,
+            "repo_operation_skill",
+            paths.root.join(".agents/skills"),
+            |path| {
+                path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md")
+                    && path
+                        .parent()
+                        .and_then(|parent| parent.file_name())
+                        .and_then(|name| name.to_str())
+                        == Some("workspace-execution-operations")
+            },
+            1,
+            2200,
+        );
+        push_matching_raw_inclusions(
+            raw_inclusions,
+            "system_capability_contract",
+            paths.system_dir.clone(),
+            |path| {
+                path.file_name().and_then(|name| name.to_str())
+                    == Some("workspace-execution-capability-policy.json")
+            },
+            1,
+            2600,
+        );
+    }
 }
 
 fn append_definition_of_done_inclusions(
@@ -5834,6 +5898,38 @@ mod tests {
             .find(|item| item.source_kind == "system_capability_contract")
             .expect("expected a relevant system capability contract");
         assert!(contract.content.contains("repo workspace implementation"));
+    }
+
+    #[test]
+    fn coding_owner_interrupt_forces_workspace_guidance_without_workspace_wording() {
+        let root = temp_root("coding_owner_interrupt_workspace_guidance");
+        std::fs::write(
+            root.join(".agents/skills/workspace-execution-operations/SKILL.md"),
+            "# Workspace Execution Operations\nReuse execSessionAction for multi-step workspace and repo work.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("contracts/system/workspace-execution-capability-policy.json"),
+            "{\"version\":1,\"purpose\":\"repo-local workspace implementation and build verification\"}",
+        )
+        .unwrap();
+        let paths = sample_paths(&root);
+        let task = sample_task(
+            "Chatten",
+            "Erstelle eine C++-Konsolenanwendung mit persistenter Datenspeicherung, threadsicherer Nachrichtenverarbeitung und Build-Verifikation.",
+        );
+        let mut raw_inclusions = Vec::new();
+        append_owner_operation_inclusions(&paths, &task, &mut raw_inclusions);
+        assert!(raw_inclusions.iter().any(|item| {
+            item.source_kind == "repo_operation_skill"
+                && item.content.contains("Workspace Execution Operations")
+        }));
+        assert!(raw_inclusions.iter().any(|item| {
+            item.source_kind == "system_capability_contract"
+                && item.content
+                    .to_ascii_lowercase()
+                    .contains("repo-local workspace")
+        }));
     }
 
     #[test]
