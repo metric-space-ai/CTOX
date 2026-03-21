@@ -719,14 +719,15 @@ impl AttachTui {
             self.push_local_notice("cmd", &trimmed);
             self.push_local_notice("ack", first_visible_line(&response.output));
         } else {
-            self.push_local_notice("you", &trimmed);
+            let visible_input = owner_visible_input_echo(&trimmed);
+            self.push_local_notice("you", &visible_input);
             self.pending_inputs.push(PendingInputItem {
                 task_id: response.queued_task_id,
                 task_title: response
                     .queued_task_title
                     .clone()
-                    .unwrap_or_else(|| trimmed.clone()),
-                message: trimmed.clone(),
+                    .unwrap_or_else(|| visible_input.clone()),
+                message: visible_input.clone(),
                 status: PendingInputStatus::Queued,
                 completed_at: None,
                 seen_open: false,
@@ -735,7 +736,7 @@ impl AttachTui {
                 let task_title = response
                     .queued_task_title
                     .clone()
-                    .unwrap_or_else(|| trimmed.clone());
+                    .unwrap_or_else(|| visible_input.clone());
                 self.push_local_notice("queued", &format!("#{task_id} {task_title}"));
             } else {
                 self.push_local_notice("ack", first_visible_line(&response.output));
@@ -951,9 +952,9 @@ impl AttachTui {
         frame_lines.push(frame_bottom(frame_width));
 
         let input_hint = if self.snapshot.active_turn.is_some() {
-            "Tab Settings · Enter queues chat interrupt for the next safe boundary · Ctrl-P reset · Ctrl-C exit"
+            "Tab Settings · Enter queues chat interrupt for the next safe boundary · Mail setup inline: email: ... password: ... · Ctrl-P reset · Ctrl-C exit"
         } else {
-            "Tab Settings · Enter sends chat now · Ctrl-P reset · Ctrl-C exit"
+            "Tab Settings · Enter sends chat now · Mail setup inline: email: ... password: ... · Ctrl-P reset · Ctrl-C exit"
         };
         let prompt = self.editor_prompt();
         let (input_display, cursor_col) = input_display(self.editor_text(), width, &prompt);
@@ -1099,28 +1100,32 @@ impl AttachTui {
 
     fn task_rows(&self, width: usize) -> Vec<String> {
         let focus = self.snapshot.focus.as_ref();
-        let current_task = focus
+        let background_task = focus
             .map(|focus| describe_active_task(&focus.active_task_id, &focus.active_task_title))
             .unwrap_or_else(|| "no active task".to_string());
-        let turn_summary = self
-            .snapshot
-            .active_turn
-            .as_ref()
-            .and_then(|turn| turn.summary.as_deref())
-            .or_else(|| self.snapshot.last_turn.as_ref().and_then(|turn| turn.summary.as_deref()))
-            .filter(|summary| !summary.trim().is_empty())
-            .unwrap_or("No turn summary stored yet.");
-        let mut rows = vec![
-            frame_row(&format!("Current  {}", compact_text(&current_task, 104)), width),
-            frame_row(
-                &format!(
-                    "Turn     {}",
-                    compact_text(turn_summary, 104)
-                ),
-                width,
-            ),
-        ];
-        rows.extend(self.open_task_rows(width, 2));
+        let active_chat = self
+            .pending_inputs
+            .iter()
+            .find(|item| item.status == PendingInputStatus::Active)
+            .map(|item| {
+                let task_ref = item
+                    .task_id
+                    .map(|task_id| format!("#{task_id} "))
+                    .unwrap_or_default();
+                format!("{task_ref}{}", compact_text(&item.task_title, 88))
+            });
+        let mut rows = vec![frame_row(
+            &match active_chat {
+                Some(active_chat) => format!("Chat     active {}", active_chat),
+                None => "Chat     no active owner chat; new input will reprioritize at the next safe boundary".to_string(),
+            },
+            width,
+        )];
+        rows.push(frame_row(
+            &format!("Loop     {}", compact_text(&background_task, 104)),
+            width,
+        ));
+        rows.extend(self.chat_queue_rows(width, 2));
         rows.extend(self.completed_owner_task_rows(width, 2));
         rows
     }
@@ -1180,39 +1185,6 @@ impl AttachTui {
                 width,
             ));
         }
-        if !self.pending_inputs.is_empty() {
-            for item in self.pending_inputs.iter().rev().take(2).rev() {
-                let status = match item.status {
-                    PendingInputStatus::Queued => "queued",
-                    PendingInputStatus::Active => "active",
-                    PendingInputStatus::Completed => "done",
-                };
-                lines.push(frame_row(
-                    &format!(
-                        "{}  system> chat task {} :: {}",
-                        Local::now().format("%H:%M"),
-                        status,
-                        compact_text(&item.task_title, 86)
-                    ),
-                    width,
-                ));
-            }
-        }
-        for notice in self
-            .local_notices
-            .iter()
-            .rev()
-            .filter(|line| !line.contains("  you"))
-            .take(2)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-        {
-            lines.push(frame_row(
-                &format!("note> {}", compact_text(notice, 92)),
-                width,
-            ));
-        }
         while lines.len() < height {
             lines.insert(0, frame_row(" ", width));
         }
@@ -1253,6 +1225,62 @@ impl AttachTui {
             rows.push(frame_row(" ", width));
         }
         rows.truncate(height);
+        rows
+    }
+
+    fn chat_queue_rows(&self, width: usize, limit: usize) -> Vec<String> {
+        let mut rows = Vec::new();
+        if !self.pending_inputs.is_empty() {
+            for item in self.pending_inputs.iter().take(limit) {
+                let icon = match item.status {
+                    PendingInputStatus::Queued => "queued",
+                    PendingInputStatus::Active => "active",
+                    PendingInputStatus::Completed => "done",
+                };
+                let task_ref = item
+                    .task_id
+                    .map(|task_id| format!("#{task_id} "))
+                    .unwrap_or_default();
+                rows.push(frame_row(
+                    &format!(
+                        "Queue    {:<6} {}{}",
+                        icon,
+                        task_ref,
+                        compact_text(&item.task_title, 84)
+                    ),
+                    width,
+                ));
+            }
+        } else {
+            let owner_open_tasks = self
+                .snapshot
+                .open_tasks
+                .iter()
+                .filter(|task| is_chat_related_task(task))
+                .take(limit)
+                .collect::<Vec<_>>();
+            if owner_open_tasks.is_empty() {
+                rows.push(frame_row(
+                    "Queue    no pending owner chat tasks",
+                    width,
+                ));
+            } else {
+                for task in owner_open_tasks {
+                    rows.push(frame_row(
+                        &format!(
+                            "Queue    #{} {}",
+                            task.id,
+                            compact_text(&task.title, 88)
+                        ),
+                        width,
+                    ));
+                }
+            }
+        }
+        while rows.len() < limit {
+            rows.push(frame_row(" ", width));
+        }
+        rows.truncate(limit);
         rows
     }
 
@@ -1879,19 +1907,27 @@ fn display_setting_value(item: &SettingsItem) -> String {
 }
 
 fn recent_chat_lines(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<String> {
-    let mut lines = snapshot
+    let mut lines = Vec::new();
+    let mut last_signature: Option<(String, String)> = None;
+    for entry in snapshot
         .boot_entries
         .iter()
         .filter(|entry| is_chat_entry(snapshot, entry))
-        .map(|entry| {
-            format!(
-                "{}  {:<9}> {}",
-                short_timestamp(&entry.timestamp),
-                chat_speaker_label(snapshot, &entry.speaker),
-                compact_text(&entry.message, 92)
-            )
-        })
-        .collect::<Vec<_>>();
+    {
+        let speaker_label = chat_speaker_label(snapshot, &entry.speaker).to_string();
+        let message = compact_text(&entry.message, 92);
+        let signature = (speaker_label.clone(), message.clone());
+        if last_signature.as_ref() == Some(&signature) {
+            continue;
+        }
+        lines.push(format!(
+            "{}  {:<9}> {}",
+            short_timestamp(&entry.timestamp),
+            speaker_label,
+            message
+        ));
+        last_signature = Some(signature);
+    }
     if lines.len() > limit {
         lines = lines.split_off(lines.len().saturating_sub(limit));
     }
@@ -1913,7 +1949,10 @@ fn has_recent_owner_chat(snapshot: &AttachUiSnapshot) -> bool {
 }
 
 fn is_chat_entry(snapshot: &AttachUiSnapshot, entry: &BootEntry) -> bool {
-    is_cto_speaker(&entry.speaker) || owner_matches_snapshot(snapshot, &entry.speaker)
+    if owner_matches_snapshot(snapshot, &entry.speaker) {
+        return true;
+    }
+    is_cto_speaker(&entry.speaker) && is_owner_visible_chat_text(&entry.message)
 }
 
 fn chat_speaker_label(snapshot: &AttachUiSnapshot, speaker: &str) -> &'static str {
@@ -1928,6 +1967,72 @@ fn chat_speaker_label(snapshot: &AttachUiSnapshot, speaker: &str) -> &'static st
 
 fn is_cto_speaker(speaker: &str) -> bool {
     speaker.trim().eq_ignore_ascii_case("cto-agent")
+}
+
+fn is_owner_visible_chat_text(message: &str) -> bool {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    !lowered.contains("\"taskstatus\"")
+        && !lowered.contains("\"nextmode\"")
+        && !lowered.contains("\"checkpointsummary\"")
+        && !lowered.contains("the kleinhirn endpoint responded with unusable output")
+        && !lowered.contains("reclassify the task instead")
+        && !lowered.contains("current agent mode: mode=")
+}
+
+fn owner_visible_input_echo(message: &str) -> String {
+    let trimmed = message.trim();
+    if !looks_like_mail_secret_input(trimmed) {
+        return trimmed.to_string();
+    }
+    match first_email_address_in_text(trimmed) {
+        Some(address) => format!(
+            "Mail credentials supplied for {} via chat. Password redacted.",
+            address
+        ),
+        None => "Mail credentials supplied via chat. Password redacted.".to_string(),
+    }
+}
+
+fn looks_like_mail_secret_input(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("password:")
+        || lowered.contains("password=")
+        || lowered.contains("passwort:")
+        || lowered.contains("passwort=")
+        || lowered.contains("pw:")
+        || lowered.contains("pw=")
+        || lowered.contains("cto_email_password")
+}
+
+fn first_email_address_in_text(message: &str) -> Option<String> {
+    for token in message.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(ch, ',' | ';' | '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'')
+    }) {
+        let candidate = token
+            .trim()
+            .trim_matches('.')
+            .trim_matches(':')
+            .trim_matches('=')
+            .trim_matches('/')
+            .trim_matches('\\');
+        if candidate.contains('@') && candidate.split('@').count() == 2 {
+            let mut parts = candidate.split('@');
+            let local = parts.next().unwrap_or_default();
+            let domain = parts.next().unwrap_or_default();
+            if !local.is_empty() && domain.contains('.') {
+                return Some(candidate.to_ascii_lowercase());
+            }
+        }
+    }
+    None
 }
 
 fn owner_matches_snapshot(snapshot: &AttachUiSnapshot, speaker: &str) -> bool {
@@ -1960,6 +2065,12 @@ fn owner_matches_snapshot(snapshot: &AttachUiSnapshot, speaker: &str) -> bool {
     }
 
     !has_named_owner
+}
+
+fn is_chat_related_task(task: &TaskRecord) -> bool {
+    task.source_channel == "attach_terminal"
+        || task.task_kind == "owner_interrupt"
+        || task.title.trim().eq_ignore_ascii_case("Chatten")
 }
 
 fn bios_url(website_path: &str) -> Option<String> {
@@ -2847,6 +2958,60 @@ mod tests {
         };
         assert!(format_activity_line(&event).contains("reply"));
         assert!(format_event_line(&event).contains("INTERRUPT reply"));
+    }
+
+    #[test]
+    fn recent_chat_lines_hide_internal_cto_noise_and_dedup_adjacent_duplicates() {
+        let mut ui = sample_ui();
+        ui.snapshot.boot_entries = vec![
+            BootEntry {
+                timestamp: "2026-03-18T15:09:00+00:00".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                message: "Hast du die Mail schon eingerichtet?".to_string(),
+            },
+            BootEntry {
+                timestamp: "2026-03-18T15:09:30+00:00".to_string(),
+                speaker: "cto-agent".to_string(),
+                message: "Ich prüfe gerade den Mailpfad.".to_string(),
+            },
+            BootEntry {
+                timestamp: "2026-03-18T15:09:31+00:00".to_string(),
+                speaker: "cto-agent".to_string(),
+                message: "Ich prüfe gerade den Mailpfad.".to_string(),
+            },
+            BootEntry {
+                timestamp: "2026-03-18T15:09:40+00:00".to_string(),
+                speaker: "cto-agent".to_string(),
+                message:
+                    "The kleinhirn endpoint responded with unusable output. Reclassify the task instead.".to_string(),
+            },
+            BootEntry {
+                timestamp: "2026-03-18T15:09:50+00:00".to_string(),
+                speaker: "cto-agent".to_string(),
+                message:
+                    "{\"taskStatus\":\"continue\",\"nextMode\":\"execute_task\"}".to_string(),
+            },
+        ];
+
+        let lines = recent_chat_lines(&ui.snapshot, 12).join("\n");
+        assert!(lines.contains("owner"));
+        assert!(lines.contains("cto-agent"));
+        assert!(!lines.contains("unusable output"));
+        assert!(!lines.contains("\"taskStatus\""));
+        assert_eq!(lines.matches("Ich prüfe gerade den Mailpfad.").count(), 1);
+    }
+
+    #[test]
+    fn owner_visible_input_echo_redacts_mail_credentials() {
+        let line = owner_visible_input_echo(
+            "email: cto1@metric-space.ai password: supersecret imap host: imap.one.com",
+        );
+
+        assert_eq!(
+            line,
+            "Mail credentials supplied for cto1@metric-space.ai via chat. Password redacted."
+        );
+        assert!(!line.contains("supersecret"));
     }
 
     #[test]

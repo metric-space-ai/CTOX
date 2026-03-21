@@ -1,6 +1,8 @@
 use crate::browser_agent_bridge::browser_agent_extension_manifest_path;
 use crate::browser_agent_bridge::browser_agent_extension_workspace;
 use crate::browser_agent_bridge::load_browser_agent_bridge_state;
+use crate::brain_runtime::load_runtime_env_map;
+use crate::brain_runtime::save_runtime_env_map;
 use crate::browser_engine::BrowserActionDirective;
 use crate::browser_engine::browser_status_text;
 use crate::browser_engine::run_browser_action;
@@ -57,6 +59,7 @@ use codex_app_server_protocol::CommandExecResizeParams;
 use codex_app_server_protocol::CommandExecTerminalSize;
 use codex_app_server_protocol::CommandExecTerminateParams;
 use codex_app_server_protocol::CommandExecWriteParams;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::io::BufRead;
@@ -498,9 +501,19 @@ fn handle_input_line(
         return terminal_browser_open(paths, rest).map(AttachLineOutcome::text);
     }
 
-    let (speaker, message) = parse_terminal_message(trimmed);
-    let interrupt_id = enqueue_loop_interrupt(paths, source_channel, &speaker, &message)?;
-    queue_interrupt(paths, interrupt_id, source_channel, &speaker, &message)
+    let (speaker, raw_message) = parse_terminal_message(trimmed);
+    let inline_mail_capture =
+        maybe_capture_inline_mail_credentials(paths, source_channel, &speaker, &raw_message)?;
+    let message = inline_mail_capture
+        .as_ref()
+        .map(|capture| capture.sanitized_interrupt_message.as_str())
+        .unwrap_or(raw_message.as_str());
+    let interrupt_id = enqueue_loop_interrupt(paths, source_channel, &speaker, message)?;
+    let mut outcome = queue_interrupt(paths, interrupt_id, source_channel, &speaker, message)?;
+    if let Some(capture) = inline_mail_capture {
+        outcome.output = format!("{} {}", capture.runtime_note, outcome.output);
+    }
+    Ok(outcome)
 }
 
 pub fn maybe_apply_homepage_feedback(
@@ -586,12 +599,302 @@ fn parse_terminal_message(line: &str) -> (String, String) {
     if let Some((speaker, message)) = line.split_once(':') {
         let speaker = speaker.trim();
         let message = message.trim();
-        if !speaker.is_empty() && !message.is_empty() {
+        if !speaker.is_empty()
+            && !message.is_empty()
+            && !looks_like_inline_config_prefix(speaker)
+        {
             return (speaker.to_string(), message.to_string());
         }
     }
 
     ("Michael Welsch".to_string(), line.trim().to_string())
+}
+
+fn looks_like_inline_config_prefix(prefix: &str) -> bool {
+    let lowered = prefix.trim().to_ascii_lowercase();
+    matches!(
+        lowered.as_str(),
+        "email"
+            | "email address"
+            | "mail"
+            | "mailbox"
+            | "mail address"
+            | "address"
+            | "password"
+            | "passwort"
+            | "pw"
+            | "imap"
+            | "imap host"
+            | "imap port"
+            | "smtp"
+            | "smtp host"
+            | "smtp port"
+            | "cto_email_address"
+            | "cto_email_password"
+            | "cto_email_imap_host"
+            | "cto_email_imap_port"
+            | "cto_email_smtp_host"
+            | "cto_email_smtp_port"
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineMailCapture {
+    sanitized_interrupt_message: String,
+    runtime_note: String,
+}
+
+fn maybe_capture_inline_mail_credentials(
+    paths: &Paths,
+    source_channel: &str,
+    speaker: &str,
+    message: &str,
+) -> anyhow::Result<Option<InlineMailCapture>> {
+    if !matches!(source_channel, "terminal" | "attach_terminal") {
+        return Ok(None);
+    }
+    if message.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let mut env_map = load_runtime_env_map(paths).unwrap_or_default();
+    let Some(parsed) = parse_inline_mail_runtime_update(message, &env_map) else {
+        return Ok(None);
+    };
+
+    upsert_runtime_env_value(&mut env_map, "CTO_EMAIL_ADDRESS", Some(&parsed.address));
+    upsert_runtime_env_value(&mut env_map, "CTO_EMAIL_PASSWORD", Some(&parsed.password));
+    upsert_runtime_env_value(
+        &mut env_map,
+        "CTO_EMAIL_IMAP_HOST",
+        parsed.imap_host.as_deref(),
+    );
+    upsert_runtime_env_value(
+        &mut env_map,
+        "CTO_EMAIL_IMAP_PORT",
+        parsed.imap_port.as_deref(),
+    );
+    upsert_runtime_env_value(
+        &mut env_map,
+        "CTO_EMAIL_SMTP_HOST",
+        parsed.smtp_host.as_deref(),
+    );
+    upsert_runtime_env_value(
+        &mut env_map,
+        "CTO_EMAIL_SMTP_PORT",
+        parsed.smtp_port.as_deref(),
+    );
+    save_runtime_env_map(paths, &env_map)?;
+
+    let mut installation = load_installation_bootstrap_state(paths);
+    installation.email_assignment_mode = "assigned_now".to_string();
+    if installation.status.trim().is_empty() || installation.status == "unconfigured" {
+        installation.status = "captured".to_string();
+    }
+    installation.updated_at = now_iso();
+    save_installation_bootstrap_state(paths, &installation)?;
+
+    let owner_label = if speaker.trim().is_empty() {
+        "Owner".to_string()
+    } else {
+        speaker.trim().to_string()
+    };
+    Ok(Some(InlineMailCapture {
+        sanitized_interrupt_message: format!(
+            "{} supplied mail runtime credentials for {} via chat. Password was redacted and the runtime env was updated. Verify the IMAP/SMTP path now and confirm bidirectional mail readiness.",
+            owner_label, parsed.address
+        ),
+        runtime_note: format!(
+            "Mail runtime configuration updated from chat input for {}.",
+            parsed.address
+        ),
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedInlineMailRuntimeUpdate {
+    address: String,
+    password: String,
+    imap_host: Option<String>,
+    imap_port: Option<String>,
+    smtp_host: Option<String>,
+    smtp_port: Option<String>,
+}
+
+fn parse_inline_mail_runtime_update(
+    message: &str,
+    existing_env: &BTreeMap<String, String>,
+) -> Option<ParsedInlineMailRuntimeUpdate> {
+    let address = extract_inline_mail_value(
+        message,
+        &[
+            "CTO_EMAIL_ADDRESS",
+            "mail_address",
+            "email address",
+            "mailbox",
+            "email",
+            "mail",
+            "address",
+        ],
+    )
+    .or_else(|| extract_first_email_address(message))
+    .or_else(|| non_empty_env_value(existing_env, "CTO_EMAIL_ADDRESS"))?;
+    let password = extract_inline_mail_value(
+        message,
+        &["CTO_EMAIL_PASSWORD", "mail_password", "password", "passwort", "pw"],
+    )?;
+    let imap_host = extract_inline_mail_value(
+        message,
+        &["CTO_EMAIL_IMAP_HOST", "imap host", "imap_host", "imap-host", "imap"],
+    )
+    .or_else(|| non_empty_env_value(existing_env, "CTO_EMAIL_IMAP_HOST"));
+    let imap_port = extract_inline_mail_value(
+        message,
+        &["CTO_EMAIL_IMAP_PORT", "imap port", "imap_port", "imap-port"],
+    )
+    .or_else(|| non_empty_env_value(existing_env, "CTO_EMAIL_IMAP_PORT"));
+    let smtp_host = extract_inline_mail_value(
+        message,
+        &["CTO_EMAIL_SMTP_HOST", "smtp host", "smtp_host", "smtp-host", "smtp"],
+    )
+    .or_else(|| non_empty_env_value(existing_env, "CTO_EMAIL_SMTP_HOST"));
+    let smtp_port = extract_inline_mail_value(
+        message,
+        &["CTO_EMAIL_SMTP_PORT", "smtp port", "smtp_port", "smtp-port"],
+    )
+    .or_else(|| non_empty_env_value(existing_env, "CTO_EMAIL_SMTP_PORT"));
+
+    Some(ParsedInlineMailRuntimeUpdate {
+        address,
+        password,
+        imap_host,
+        imap_port,
+        smtp_host,
+        smtp_port,
+    })
+}
+
+fn extract_inline_mail_value(message: &str, labels: &[&str]) -> Option<String> {
+    let normalized = message.replace("\r\n", "\n").replace('\r', "\n");
+    let lowered = normalized.to_ascii_lowercase();
+    for label in labels {
+        let label_lower = label.to_ascii_lowercase();
+        for separator in [":", "="] {
+            let needle = format!("{label_lower}{separator}");
+            let Some(start) = lowered.find(&needle) else {
+                continue;
+            };
+            let raw_value = &normalized[start + needle.len()..];
+            let value = truncate_inline_mail_value(raw_value);
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn truncate_inline_mail_value(raw_value: &str) -> String {
+    let mut value = raw_value
+        .trim_start_matches(|ch: char| ch.is_whitespace())
+        .trim_start_matches(':')
+        .trim_start_matches('=')
+        .trim_start_matches(|ch: char| ch.is_whitespace())
+        .to_string();
+
+    for boundary in [
+        "\n",
+        "\r",
+        ",",
+        ";",
+        " cto_email_",
+        " password:",
+        " password=",
+        " passwort:",
+        " passwort=",
+        " pw:",
+        " pw=",
+        " imap host:",
+        " imap host=",
+        " imap_port=",
+        " imap port:",
+        " imap port=",
+        " imap:",
+        " imap=",
+        " smtp host:",
+        " smtp host=",
+        " smtp_port=",
+        " smtp port:",
+        " smtp port=",
+        " smtp:",
+        " smtp=",
+        " email address:",
+        " email address=",
+        " email:",
+        " email=",
+        " mailbox:",
+        " mailbox=",
+        " mail:",
+        " mail=",
+        " address:",
+        " address=",
+    ] {
+        let lower_value = value.to_ascii_lowercase();
+        if let Some(index) = lower_value.find(boundary) {
+            value.truncate(index);
+        }
+    }
+
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn extract_first_email_address(message: &str) -> Option<String> {
+    for token in message.split(|ch: char| {
+        ch.is_whitespace()
+            || matches!(ch, ',' | ';' | '<' | '>' | '(' | ')' | '[' | ']' | '"' | '\'')
+    }) {
+        let candidate = token
+            .trim()
+            .trim_matches('.')
+            .trim_matches(':')
+            .trim_matches('=')
+            .trim_matches('/')
+            .trim_matches('\\');
+        if candidate.contains('@') && candidate.split('@').count() == 2 {
+            let mut parts = candidate.split('@');
+            let local = parts.next().unwrap_or_default();
+            let domain = parts.next().unwrap_or_default();
+            if !local.is_empty() && domain.contains('.') {
+                return Some(candidate.to_ascii_lowercase());
+            }
+        }
+    }
+    None
+}
+
+fn non_empty_env_value(env_map: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    env_map
+        .get(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn upsert_runtime_env_value(
+    env_map: &mut BTreeMap<String, String>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let value = value.unwrap_or("").trim();
+    if value.is_empty() {
+        env_map.remove(key);
+    } else {
+        env_map.insert(key.to_string(), value.to_string());
+    }
 }
 
 fn looks_like_homepage_feedback(message: &str) -> bool {
@@ -1364,4 +1667,63 @@ pub fn queue_channel_interrupt(
         queued_task_id: None,
         queued_task_title: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_inline_mail_runtime_update_extracts_structured_chat_credentials() {
+        let existing = BTreeMap::new();
+        let parsed = parse_inline_mail_runtime_update(
+            "email: cto1@metric-space.ai, password: supersecret, imap host: imap.one.com, smtp host: send.one.com",
+            &existing,
+        )
+        .expect("structured mail credentials should parse");
+
+        assert_eq!(parsed.address, "cto1@metric-space.ai");
+        assert_eq!(parsed.password, "supersecret");
+        assert_eq!(parsed.imap_host.as_deref(), Some("imap.one.com"));
+        assert_eq!(parsed.smtp_host.as_deref(), Some("send.one.com"));
+    }
+
+    #[test]
+    fn parse_inline_mail_runtime_update_supports_env_style_fields() {
+        let existing = BTreeMap::new();
+        let parsed = parse_inline_mail_runtime_update(
+            "CTO_EMAIL_ADDRESS=cto1@metric-space.ai; CTO_EMAIL_PASSWORD=supersecret; CTO_EMAIL_IMAP_PORT=993; CTO_EMAIL_SMTP_PORT=465",
+            &existing,
+        )
+        .expect("env-style mail credentials should parse");
+
+        assert_eq!(parsed.address, "cto1@metric-space.ai");
+        assert_eq!(parsed.password, "supersecret");
+        assert_eq!(parsed.imap_port.as_deref(), Some("993"));
+        assert_eq!(parsed.smtp_port.as_deref(), Some("465"));
+    }
+
+    #[test]
+    fn parse_inline_mail_runtime_update_reuses_existing_address_for_password_only_update() {
+        let mut existing = BTreeMap::new();
+        existing.insert(
+            "CTO_EMAIL_ADDRESS".to_string(),
+            "cto1@metric-space.ai".to_string(),
+        );
+
+        let parsed = parse_inline_mail_runtime_update("password: rotated-secret", &existing)
+            .expect("password-only update should reuse existing mail address");
+
+        assert_eq!(parsed.address, "cto1@metric-space.ai");
+        assert_eq!(parsed.password, "rotated-secret");
+    }
+
+    #[test]
+    fn parse_terminal_message_does_not_treat_mail_fields_as_speaker_prefix() {
+        let (speaker, message) =
+            parse_terminal_message("email: cto1@metric-space.ai, password: supersecret");
+
+        assert_eq!(speaker, "Michael Welsch");
+        assert_eq!(message, "email: cto1@metric-space.ai, password: supersecret");
+    }
 }

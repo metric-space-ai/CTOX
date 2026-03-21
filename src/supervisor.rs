@@ -5288,6 +5288,27 @@ fn derive_interrupt_reply_text(
     candidate.chars().take(4000).collect()
 }
 
+fn owner_visible_boot_reply_text(reply_text: &str) -> Option<String> {
+    let trimmed = reply_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    if lowered.contains("\"taskstatus\"")
+        || lowered.contains("\"nextmode\"")
+        || lowered.contains("\"checkpointsummary\"")
+        || lowered.contains("the kleinhirn endpoint responded with unusable output")
+        || lowered.contains("reclassify the task instead")
+        || lowered.contains("current agent mode: mode=")
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 fn publish_task_result_to_origin(
     paths: &Paths,
     task: &crate::runtime_db::TaskRecord,
@@ -5326,7 +5347,9 @@ fn publish_task_result_to_origin(
     }
 
     if matches!(task.source_channel.as_str(), "terminal" | "attach_terminal") {
-        let _ = append_boot_entry(paths, "cto-agent", &reply_text);
+        if let Some(visible_reply) = owner_visible_boot_reply_text(&reply_text) {
+            let _ = append_boot_entry(paths, "cto-agent", &visible_reply);
+        }
     }
 
     if task.source_channel == "bios" || is_owner_facing_task(task) {
