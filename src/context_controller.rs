@@ -4788,6 +4788,11 @@ fn choose_mode(
     let task_kind = task.task_kind.to_lowercase();
     let source_channel = task.source_channel.to_lowercase();
     let lowered_detail = task.detail.to_lowercase();
+    let owner_chat_surface = task_kind == "owner_interrupt"
+        && matches!(source_channel.as_str(), "attach_terminal" | "bios" | "homepage");
+    let owner_chat_requires_forensic = lowered_detail.contains("superpassword")
+        || lowered_detail.contains("branding")
+        || lowered_detail.contains("bios");
     let mode_name = if task_kind == "context_preparation" {
         if let Some(phase) = preparation_phase
             && let Some(override_name) = context_phase_policy(optimization_policy, phase)
@@ -4798,6 +4803,8 @@ fn choose_mode(
         } else {
             "preparation"
         }
+    } else if owner_chat_surface && !owner_chat_requires_forensic {
+        "working"
     } else if policy
         .system_channels
         .iter()
@@ -5137,14 +5144,21 @@ fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool
         return false;
     }
     let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
-    [
+    let keywords = extract_keywords(&haystack);
+    let phrase_match = [
+        "console app",
+        "race condition",
+        "thread-safe",
         "c++",
-        "cpp",
         ".cpp",
         ".hpp",
         ".h",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle));
+    let keyword_match = [
+        "cpp",
         "cmake",
-        "console app",
         "konsolenanwendung",
         "application",
         "anwendung",
@@ -5158,14 +5172,13 @@ fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskRecord) -> bool
         "build",
         "compile",
         "test",
-        "thread-safe",
         "threadsicher",
-        "race condition",
         "persistent",
         "persisten",
     ]
     .iter()
-    .any(|needle| haystack.contains(needle))
+    .any(|needle| keywords.contains(*needle));
+    phrase_match || keyword_match
 }
 
 fn append_owner_operation_inclusions(
@@ -5202,13 +5215,19 @@ fn append_owner_operation_inclusions(
             path.file_name()
                 .and_then(|name| name.to_str())
                 .map(|name| name.ends_with("-capability-policy.json"))
+                .map(|matches| {
+                    matches
+                        && path.file_name().and_then(|name| name.to_str())
+                            != Some("workspace-execution-capability-policy.json")
+                })
                 .unwrap_or(false)
         },
         &keywords,
         2,
         2200,
     );
-    if owner_interrupt_needs_workspace_execution_guidance(task) {
+    let needs_workspace_guidance = owner_interrupt_needs_workspace_execution_guidance(task);
+    if needs_workspace_guidance {
         push_matching_raw_inclusions(
             raw_inclusions,
             "repo_operation_skill",
@@ -5235,6 +5254,14 @@ fn append_owner_operation_inclusions(
             1,
             2600,
         );
+    }
+    if !needs_workspace_guidance {
+        raw_inclusions.retain(|item| {
+            !(item.source_ref.ends_with("workspace-execution-capability-policy.json")
+                || item
+                    .source_ref
+                    .contains("workspace-execution-operations/SKILL.md"))
+        });
     }
 }
 
@@ -6075,6 +6102,38 @@ mod tests {
                     .to_ascii_lowercase()
                     .contains("repo-local workspace")
         }));
+    }
+
+    #[test]
+    fn simple_attach_owner_chat_does_not_pull_workspace_contract() {
+        let root = temp_root("simple_owner_chat_no_workspace_contract");
+        std::fs::write(
+            root.join("contracts/system/workspace-execution-capability-policy.json"),
+            "{\"version\":1,\"purpose\":\"repo-local workspace implementation and build verification\"}",
+        )
+        .unwrap();
+        let paths = sample_paths(&root);
+        let task = sample_task("Chatten", "An was arbeitest du gerade?");
+        let mut raw_inclusions = Vec::new();
+        append_owner_operation_inclusions(&paths, &task, &mut raw_inclusions);
+        assert!(!raw_inclusions.iter().any(|item| {
+            item.source_kind == "system_capability_contract"
+                && item
+                    .source_ref
+                    .ends_with("workspace-execution-capability-policy.json")
+        }));
+    }
+
+    #[test]
+    fn attach_owner_chat_prefers_working_mode_over_forensic() {
+        let policy = crate::contracts::default_context_policy();
+        let optimization_policy = crate::contracts::default_context_optimization_policy();
+        let task = TaskRecord {
+            source_channel: "attach_terminal".to_string(),
+            ..sample_task("Chatten", "An was arbeitest du gerade?")
+        };
+        let mode = choose_mode(&policy, &optimization_policy, &task, None);
+        assert_eq!(mode.mode, "working");
     }
 
     #[test]

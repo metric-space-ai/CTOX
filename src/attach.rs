@@ -2633,14 +2633,34 @@ fn is_legacy_chat_command_text(message: &str) -> bool {
 }
 
 fn visible_interrupt_reply(interrupt: &LoopInterruptRecord) -> Option<String> {
-    if interrupt.status != "completed" {
+    match interrupt.status.as_str() {
+        "completed" => {
+            let reply = interrupt.response.as_deref()?.trim();
+            if !is_owner_visible_chat_text(reply) {
+                return None;
+            }
+            Some(reply.to_string())
+        }
+        "queued" | "processing" => queued_interrupt_ack_text(interrupt.response.as_deref()),
+        _ => None,
+    }
+}
+
+fn queued_interrupt_ack_text(response: Option<&str>) -> Option<String> {
+    let response = response?.trim();
+    let suffix = response.strip_prefix("queued as task ")?;
+    let (task_id, tail) = suffix.split_once(' ').unwrap_or((suffix, ""));
+    if task_id.trim().is_empty() {
         return None;
     }
-    let reply = interrupt.response.as_deref()?.trim();
-    if !is_owner_visible_chat_text(reply) {
-        return None;
+    let task_title = tail.trim().trim_start_matches('(').trim_end_matches(')').trim();
+    if task_title.is_empty() {
+        Some(format!("Received. Queued as task #{task_id}."))
+    } else {
+        Some(format!(
+            "Received. Queued as task #{task_id} ({task_title})."
+        ))
     }
-    Some(reply.to_string())
 }
 
 fn parse_iso_utc(value: &str) -> Option<DateTime<Utc>> {
@@ -4059,6 +4079,25 @@ mod tests {
         assert!(first_owner < first_reply);
         assert!(first_reply < second_owner);
         assert!(second_owner < second_reply);
+    }
+
+    #[test]
+    fn recent_chat_lines_show_friendly_queue_ack_for_pending_interrupts() {
+        let mut ui = sample_ui();
+        ui.snapshot.chat_interrupts = vec![LoopInterruptRecord {
+            id: 12,
+            created_at: "2026-03-18T15:11:00+00:00".to_string(),
+            source_channel: "attach_terminal".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            message: "Kannst du das reparieren?".to_string(),
+            status: "queued".to_string(),
+            response: Some("queued as task 4840 (Chatten)".to_string()),
+            error: None,
+        }];
+
+        let rendered = recent_chat_lines(&ui.snapshot, 12).join("\n");
+        assert!(rendered.contains("Kannst du das reparieren?"));
+        assert!(rendered.contains("Received. Queued as task #4840 (Chatten)."));
     }
 
     #[test]

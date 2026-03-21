@@ -302,9 +302,150 @@ pub fn run_agentic_task_once(
             &recovery_plan,
             &recovery_targets,
         )?;
+        if let Some(rescue) = maybe_run_simple_owner_chat_recovery(
+            paths,
+            task,
+            &context_block,
+            &recovery_targets,
+            &recovered,
+        )? {
+            return Ok(annotate_one_turn_grosshirn_recovery(rescue));
+        }
         return Ok(annotate_one_turn_grosshirn_recovery(recovered));
     }
+    if let Some(rescue) =
+        maybe_run_simple_owner_chat_recovery(paths, task, &context_block, &resolved, &result)?
+    {
+        return Ok(rescue);
+    }
     Ok(result)
+}
+
+fn owner_chat_plaintext_recovery_allowed(
+    task: &TaskRecord,
+    context_block: &str,
+    result: &AgenticRunResult,
+) -> bool {
+    if task.task_kind != "owner_interrupt"
+        || !matches!(
+            task.source_channel.as_str(),
+            "attach_terminal" | "bios" | "homepage" | "terminal"
+        )
+        || !result.retriable_local_failure
+        || context_block.contains("workspace-execution-capability-policy.json")
+    {
+        return false;
+    }
+    true
+}
+
+fn owner_chat_plaintext_recovery_visible(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    !(lowered.contains("\"taskstatus\"")
+        || lowered.contains("\"nextmode\"")
+        || lowered.contains("\"checkpointsummary\"")
+        || lowered.contains("the kleinhirn endpoint responded with unusable output")
+        || lowered.contains("reclassify the task instead")
+        || lowered.contains("current agent mode: mode=")
+        || lowered.contains("workspace execution contract is active"))
+}
+
+fn run_simple_owner_chat_recovery_with_targets(
+    paths: &Paths,
+    task: &TaskRecord,
+    context_block: &str,
+    targets: &ResolvedTargets,
+) -> anyhow::Result<AgenticRunResult> {
+    let system_prompt = "You are CTO-Agent in direct owner chat recovery mode. Reply to the owner in plain text only. Do not return JSON, tool directives, markdown code fences, or machine contracts. Keep the answer concise, concrete, and owner-facing.";
+    let user_prompt = format!(
+        "Owner message:\n{}\n\nTask title: {}\nSource channel: {}\n\nUse the provided context block as factual background. If the owner asks what you are currently doing, summarize the active work truthfully from context. If certainty is limited, say what you can confirm now and what remains queued.",
+        task.detail, task.title, task.source_channel
+    );
+    let post_timeout = effective_model_post_timeout(Some(task));
+    let request_started = std::time::Instant::now();
+    let (used_target, response) = post_model_request_with_fallback(
+        paths,
+        targets,
+        Some(task),
+        system_prompt,
+        &user_prompt,
+        context_block,
+        post_timeout,
+    )?;
+    let mut reply = require_model_text_output(&used_target, &response)?;
+    reply = reply.trim().chars().take(1200).collect::<String>();
+    if !owner_chat_plaintext_recovery_visible(&reply) {
+        anyhow::bail!("plain owner chat recovery returned non-owner-visible text");
+    }
+    let mut model_usage = extract_model_usage(&used_target, &response);
+    if let Some(usage) = model_usage.as_mut() {
+        usage.duration_ms = Some(request_started.elapsed().as_millis() as i64);
+    }
+    Ok(AgenticRunResult {
+        status: "ok".to_string(),
+        reply: Some(reply.clone()),
+        final_output: None,
+        blocked_reason: None,
+        model: Some(used_target.model_id.clone()),
+        task_status: Some("done".to_string()),
+        next_mode: Some("reprioritize".to_string()),
+        checkpoint_summary: Some(
+            "Owner chat answered through plain-text recovery after structured-output failure."
+                .to_string(),
+        ),
+        checkpoint_detail: Some(format!(
+            "The structured owner-chat turn did not yield usable machine-readable output, so the kernel requested one bounded plain-text owner reply instead.\n\nOwner message:\n{}\n\nRecovered reply:\n{}",
+            task.detail, reply
+        )),
+        context_directive: None,
+        system_census_action: None,
+        brain_directive: None,
+        exec_session_directive: None,
+        exec_directive: None,
+        browser_directive: None,
+        homepage_update: None,
+        delegate_contract: None,
+        followup_task: None,
+        learning_entries: Vec::new(),
+        proactive_contact_draft: None,
+        proactive_contact_validation: None,
+        completion_review: None,
+        prepared_context_artifact: None,
+        used_grosshirn: used_target.brain_tier == "grosshirn",
+        fell_back_to_kleinhirn: targets.primary.brain_tier == "grosshirn"
+            && used_target.brain_tier == "kleinhirn",
+        retriable_local_failure: false,
+        model_usage,
+    })
+}
+
+fn maybe_run_simple_owner_chat_recovery(
+    paths: &Paths,
+    task: &TaskRecord,
+    context_block: &str,
+    targets: &ResolvedTargets,
+    result: &AgenticRunResult,
+) -> anyhow::Result<Option<AgenticRunResult>> {
+    if !owner_chat_plaintext_recovery_allowed(task, context_block, result) {
+        return Ok(None);
+    }
+    match run_simple_owner_chat_recovery_with_targets(paths, task, context_block, targets) {
+        Ok(result) => Ok(Some(result)),
+        Err(err) => {
+            let _ = record_resource_status(
+                paths,
+                "agentic_loop",
+                "owner_chat_recovery",
+                "error",
+                &err.to_string(),
+            );
+            Ok(None)
+        }
+    }
 }
 
 fn run_agentic_task_once_with_resolved_targets(
@@ -5570,5 +5711,56 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             "Model returned execSessionAction=start without execSessionCommand; completion refused."
         );
         assert!(parsed.exec_session_directive.is_none());
+    }
+
+    #[test]
+    fn simple_owner_chat_recovery_is_allowed_without_workspace_contract() {
+        let task = TaskRecord {
+            id: 901,
+            created_at: crate::contracts::now_iso(),
+            updated_at: crate::contracts::now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: Some(31),
+            source_channel: "attach_terminal".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Chatten".to_string(),
+            detail: "Woran arbeitest du gerade?".to_string(),
+            trust_level: "owner".to_string(),
+            priority_score: 1000,
+            status: "queued".to_string(),
+            run_count: 0,
+            last_checkpoint_summary: None,
+            last_checkpoint_at: None,
+            last_output: None,
+        };
+        let result = AgenticRunResult {
+            retriable_local_failure: true,
+            ..AgenticRunResult::blocked("x")
+        };
+        assert!(owner_chat_plaintext_recovery_allowed(
+            &task,
+            "{\"rawInclusions\":[]}",
+            &result
+        ));
+        assert!(!owner_chat_plaintext_recovery_allowed(
+            &task,
+            "{\"rawInclusions\":[{\"sourceRef\":\"contracts/system/workspace-execution-capability-policy.json\"}]}",
+            &result
+        ));
+    }
+
+    #[test]
+    fn plain_owner_chat_recovery_rejects_internal_noise() {
+        assert!(owner_chat_plaintext_recovery_visible(
+            "Ich arbeite gerade an der Chat-Stabilisierung."
+        ));
+        assert!(!owner_chat_plaintext_recovery_visible(
+            "The kleinhirn endpoint responded with unusable output."
+        ));
+        assert!(!owner_chat_plaintext_recovery_visible(
+            "{\"taskStatus\":\"continue\"}"
+        ));
     }
 }

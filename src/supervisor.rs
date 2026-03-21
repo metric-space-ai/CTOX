@@ -2647,6 +2647,33 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                         }
                                     }
                                 }
+                            } else if owner_interrupt_can_complete_directly(
+                                &loop_paths,
+                                &task,
+                                &task_status,
+                                &normalized_next_mode,
+                                used_machine_path,
+                                &output_text,
+                            ) {
+                                if checkpoint_summary.trim().is_empty() {
+                                    checkpoint_summary = format!(
+                                        "Owner interrupt #{} was answered directly.",
+                                        task.id
+                                    );
+                                }
+                                if let Err(err) = complete_task(
+                                    &loop_paths,
+                                    task_id,
+                                    &checkpoint_summary,
+                                    &checkpoint_detail,
+                                    Some(&output_text),
+                                ) {
+                                    eprintln!(
+                                        "failed to complete direct owner interrupt {task_id}: {err}"
+                                    );
+                                }
+                                task_status = "done".to_string();
+                                normalized_next_mode = "reprioritize".to_string();
                             } else if task_outcome_persisted {
                                 // The context-preparation loop already persisted its own task transition.
                             } else if normalized_next_mode == "review" && task_status == "continue"
@@ -5350,10 +5377,59 @@ fn owner_visible_boot_reply_text(reply_text: &str) -> Option<String> {
         || lowered.contains("the kleinhirn endpoint responded with unusable output")
         || lowered.contains("reclassify the task instead")
         || lowered.contains("current agent mode: mode=")
+        || lowered.contains("workspace execution contract is active")
+        || lowered.contains("all systems nominal. awaiting next command.")
+        || lowered.contains("i am currently unable to produce any new progress")
     {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+fn owner_interrupt_demands_verified_host_action(task: &crate::runtime_db::TaskRecord) -> bool {
+    let lowered = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
+    [
+        "keyboard",
+        "tastatur",
+        "layout",
+        "deutsch",
+        "german",
+        "de/de-latin1",
+        "x11",
+        "wayland",
+        "kde",
+        "systemeinstellung",
+        "localectl",
+        "setxkbmap",
+        "xkb",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn owner_interrupt_can_complete_directly(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+    task_status: &str,
+    next_mode: &str,
+    used_machine_path: bool,
+    output_text: &str,
+) -> bool {
+    if task.task_kind != "owner_interrupt"
+        || task.source_interrupt_id.is_none()
+        || task_status == "blocked"
+        || matches!(
+            next_mode,
+            "delegate" | "blocked" | "await_review" | "request_resources"
+        )
+        || used_machine_path
+        || workspace_execution_contract_active(paths, task.id)
+        || owner_interrupt_demands_verified_host_action(task)
+    {
+        return false;
+    }
+
+    owner_visible_boot_reply_text(output_text).is_some()
 }
 
 fn publish_task_result_to_origin(
@@ -7688,6 +7764,103 @@ mod tests {
         };
 
         assert!(is_owner_facing_task(&task));
+    }
+
+    #[test]
+    fn owner_visible_boot_reply_filters_known_loop_noise() {
+        assert!(owner_visible_boot_reply_text("Ja, ich bin dran.").is_some());
+        assert!(owner_visible_boot_reply_text(
+            "All systems nominal. Awaiting next command."
+        )
+        .is_none());
+        assert!(owner_visible_boot_reply_text(
+            "Workspace execution contract is active and no exec/browser machine path ran in this turn."
+        )
+        .is_none());
+        assert!(owner_visible_boot_reply_text(
+            "I am currently unable to produce any new progress for task #963."
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn simple_owner_chat_can_complete_directly_without_review() {
+        with_temp_runtime("owner-chat-direct-complete", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 777,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(21),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "An was arbeitest du gerade?".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+
+            assert!(owner_interrupt_can_complete_directly(
+                paths,
+                &task,
+                "continue",
+                "reprioritize",
+                false,
+                "Ich arbeite gerade an der Chat- und Interrupt-Stabilisierung."
+            ));
+        });
+    }
+
+    #[test]
+    fn substantive_owner_workspace_task_does_not_complete_directly() {
+        with_temp_runtime("owner-workspace-no-direct-complete", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 778,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(22),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Erstelle eine C++-Konsolenanwendung mit persistenter Speicherung.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "test",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(!owner_interrupt_can_complete_directly(
+                paths,
+                &task,
+                "continue",
+                "reprioritize",
+                false,
+                "Ich habe die Aufgabe aufgenommen."
+            ));
+        });
     }
 
     #[test]
