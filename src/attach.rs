@@ -1185,82 +1185,6 @@ impl AttachTui {
             .map(|item| item.value.as_str())
     }
 
-    fn task_rows(&self, width: usize) -> Vec<String> {
-        let focus = self.snapshot.focus.as_ref();
-        let background_task = focus
-            .map(|focus| describe_active_task(&focus.active_task_id, &focus.active_task_title))
-            .unwrap_or_else(|| "no active task".to_string());
-        let active_chat = self
-            .pending_inputs
-            .iter()
-            .find(|item| item.status == PendingInputStatus::Active)
-            .map(|item| {
-                let task_ref = item
-                    .task_id
-                    .map(|task_id| format!("#{task_id} "))
-                    .unwrap_or_default();
-                format!("{task_ref}{}", compact_text(&item.task_title, 88))
-            });
-        let mut rows = vec![frame_row(
-            &match active_chat {
-                Some(active_chat) => format!("Chat     active {}", active_chat),
-                None => "Chat     no active owner chat; new input will reprioritize at the next safe boundary".to_string(),
-            },
-            width,
-        )];
-        rows.push(frame_row(
-            &format!("Loop     {}", compact_text(&background_task, 104)),
-            width,
-        ));
-        rows.extend(self.chat_queue_rows(width, 2));
-        rows.extend(self.completed_owner_task_rows(width, 2));
-        rows
-    }
-
-    fn open_task_rows(&self, width: usize, limit: usize) -> Vec<String> {
-        let active_id = self
-            .snapshot
-            .focus
-            .as_ref()
-            .and_then(|focus| focus.active_task_id);
-        let open_tasks = self
-            .snapshot
-            .open_tasks
-            .iter()
-            .filter(|task| Some(task.id) != active_id)
-            .collect::<Vec<_>>();
-        if open_tasks.is_empty() {
-            return vec![
-                frame_row("Open     no queued tasks", width),
-                frame_row("Open     new owner chat will appear here immediately", width),
-            ];
-        }
-
-        let mut rows = open_tasks
-            .iter()
-            .take(limit)
-            .enumerate()
-            .map(|(index, task)| {
-                let prefix = if index == 0 { "Open" } else { "Open+" };
-                frame_row(
-                    &format!("{prefix:<8} #{} {}", task.id, compact_text(&task.title, 96)),
-                    width,
-                )
-            })
-            .collect::<Vec<_>>();
-        if open_tasks.len() > limit {
-            rows.push(frame_row(
-                &format!("Open+    {} more queued task(s)", open_tasks.len() - limit),
-                width,
-            ));
-        }
-        while rows.len() < limit {
-            rows.push(frame_row(" ", width));
-        }
-        rows.truncate(limit);
-        rows
-    }
-
     fn chat_rows(&self, width: usize, height: usize) -> Vec<String> {
         let mut raw_lines = recent_chat_lines(&self.snapshot, CHAT_HISTORY_LIMIT);
         for line in self.pending_chat_overlay_lines(CHAT_HISTORY_LIMIT) {
@@ -1341,62 +1265,6 @@ impl AttachTui {
         lines
     }
 
-    fn chat_queue_rows(&self, width: usize, limit: usize) -> Vec<String> {
-        let mut rows = Vec::new();
-        if !self.pending_inputs.is_empty() {
-            for item in self.pending_inputs.iter().take(limit) {
-                let icon = match item.status {
-                    PendingInputStatus::Queued => "queued",
-                    PendingInputStatus::Active => "active",
-                    PendingInputStatus::Completed => "done",
-                };
-                let task_ref = item
-                    .task_id
-                    .map(|task_id| format!("#{task_id} "))
-                    .unwrap_or_default();
-                rows.push(frame_row(
-                    &format!(
-                        "Queue    {:<6} {}{}",
-                        icon,
-                        task_ref,
-                        compact_text(&item.task_title, 84)
-                    ),
-                    width,
-                ));
-            }
-        } else {
-            let owner_open_tasks = self
-                .snapshot
-                .open_tasks
-                .iter()
-                .filter(|task| is_chat_related_task(task))
-                .take(limit)
-                .collect::<Vec<_>>();
-            if owner_open_tasks.is_empty() {
-                rows.push(frame_row(
-                    "Queue    no pending owner chat tasks",
-                    width,
-                ));
-            } else {
-                for task in owner_open_tasks {
-                    rows.push(frame_row(
-                        &format!(
-                            "Queue    #{} {}",
-                            task.id,
-                            compact_text(&task.title, 88)
-                        ),
-                        width,
-                    ));
-                }
-            }
-        }
-        while rows.len() < limit {
-            rows.push(frame_row(" ", width));
-        }
-        rows.truncate(limit);
-        rows
-    }
-
     fn selected_setting_help_line(&self) -> String {
         let Some(item) = self.settings_items.get(self.settings_selected) else {
             return "No field selected.".to_string();
@@ -1459,14 +1327,6 @@ impl AttachTui {
             brain_route_label(&self.snapshot.brain_routing.route_mode),
             queue_depth,
             turn
-        )
-    }
-
-    fn brain_status_line(&self) -> String {
-        format!(
-            "Brain [{}]  |  Model {}",
-            brain_route_label(&self.snapshot.brain_routing.route_mode),
-            current_brain_model_label(&self.snapshot)
         )
     }
 
@@ -2369,12 +2229,6 @@ fn owner_matches_snapshot(snapshot: &AttachUiSnapshot, speaker: &str) -> bool {
     }
 
     !has_named_owner
-}
-
-fn is_chat_related_task(task: &TaskRecord) -> bool {
-    task.source_channel == "attach_terminal"
-        || task.task_kind == "owner_interrupt"
-        || task.title.trim().eq_ignore_ascii_case("Chatten")
 }
 
 fn bios_url(website_path: &str) -> Option<String> {
