@@ -3289,6 +3289,7 @@ fn assess_task_stuck_risk(
         .find(|stage| stage.stage == current_stage)
         .or_else(|| loop_safety.guidance_stages.first())?;
 
+    let owner_interrupt_task = task.task_kind == "owner_interrupt";
     let same_summary = task
         .last_checkpoint_summary
         .as_ref()
@@ -3303,7 +3304,6 @@ fn assess_task_stuck_risk(
             || checkpoint_detail.contains("Bounded exec result:")
             || checkpoint_detail.contains("Exec session result:"));
     let context_preparation_task = task.task_kind == "context_preparation";
-    let owner_interrupt_task = task.task_kind == "owner_interrupt";
     let owner_interrupt_under_grosshirn =
         owner_interrupt_task && task_has_active_grosshirn_boost(paths, task.id);
     let substantive_sticky_task =
@@ -3313,8 +3313,12 @@ fn assess_task_stuck_risk(
     } else {
         0
     };
-    let repeated_same_summary_escalates =
-        repeated_same_summary && (!substantive_sticky_task || repeated_same_summary_streak >= 2);
+    let workspace_non_machine_owner_stall = owner_interrupt_task
+        && repeated_same_summary
+        && repeated_workspace_non_machine_owner_summary(task, checkpoint_summary, checkpoint_detail);
+    let repeated_same_summary_escalates = repeated_same_summary
+        && (!substantive_sticky_task || repeated_same_summary_streak >= 2)
+        && !workspace_non_machine_owner_stall;
     let context_preparation_total_limit = context_preparation_total_max_loops(paths) as i64;
 
     if context_preparation_task
@@ -3426,6 +3430,21 @@ fn consecutive_matching_checkpoint_summaries(paths: &Paths, task_id: i64, summar
         .into_iter()
         .take_while(|checkpoint| checkpoint.summary.trim() == normalized)
         .count()
+}
+
+fn repeated_workspace_non_machine_owner_summary(
+    task: &crate::runtime_db::TaskRecord,
+    checkpoint_summary: &str,
+    checkpoint_detail: &str,
+) -> bool {
+    let grounded_summary = grounded_workspace_non_machine_summary();
+    let last_summary = task.last_checkpoint_summary.as_deref().unwrap_or_default();
+    let detail_lower = checkpoint_detail.to_ascii_lowercase();
+
+    checkpoint_summary.trim() == grounded_summary.trim()
+        && last_summary.trim() == grounded_summary.trim()
+        && detail_lower
+            .contains("workspace execution contract note: no exec/browser machine path ran")
 }
 
 fn find_interrupt_preemption_candidate(
@@ -7689,6 +7708,51 @@ mod tests {
         assert!(summary.contains("planning or inspection only"));
         assert!(!summary.contains("compiled"));
         assert!(!summary.contains("Makefile"));
+    }
+
+    #[test]
+    fn repeated_owner_workspace_non_machine_turn_does_not_trigger_review_loop() {
+        with_temp_runtime("owner-interrupt-non-machine-no-review-loop", |paths| {
+            let loop_safety = default_loop_safety_policy();
+            let summary = grounded_workspace_non_machine_summary();
+            let detail = "Workspace execution contract note: no exec/browser machine path ran in this bounded turn, so code/build/test/exec-session progress is not persisted as verified.";
+            let task = crate::runtime_db::TaskRecord {
+                id: 612,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(77),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Build the C++ console app".to_string(),
+                detail: "Keep implementing the same owner-priority C++ workspace.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 18,
+                last_checkpoint_summary: Some(summary.clone()),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: Some(grounded_workspace_non_machine_output_text("")),
+            };
+
+            let escalation = assess_task_stuck_risk(
+                paths,
+                &task,
+                &loop_safety,
+                "newborn",
+                &summary,
+                detail,
+                "continue",
+                "execute_task",
+            );
+
+            assert!(
+                escalation.is_none(),
+                "repeated non-machine workspace turns should stay on the task instead of spawning endless self-reviews"
+            );
+        });
     }
 
     #[test]
