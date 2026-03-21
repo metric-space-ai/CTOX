@@ -1052,6 +1052,7 @@ fn build_simple_system_prompt() -> String {
         "Never mention that you are starting, reusing, writing to, reading from, or terminating an exec session unless the JSON also contains the exact matching machine fields.",
         "If you set `execSessionAction=start`, you must also return `execSessionCommand` as a non-empty JSON array. If you cannot name the exact command yet, do not emit `execSessionAction` at all.",
         "If you need one exact bounded repo step and can name the command now, prefer a complete `execCommand` over an incomplete exec-session plan.",
+        "If `rawInclusions` contain workspace execution guidance or a repo-local workspace contract, planning-only output is invalid. In that case, return a concrete `execCommand` or `execSessionAction` now unless a specific external blocker truly prevents machine work.",
         "Skills and reviewed raw inclusions are authoritative. Follow them instead of improvising alternate workflows.",
         "Use `brainAction` only when the current task materially needs a local model upgrade or an explicitly justified temporary grosshirn boost.",
         "Respond with strict JSON only.",
