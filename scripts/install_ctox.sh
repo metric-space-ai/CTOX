@@ -29,6 +29,8 @@ exec "$ROOT/target/release/ctox" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/ctox"
 
+"$HOME/.local/bin/ctox" clean-room-bootstrap-deps >/dev/null
+
 cat <<EOF
 CTOX installed.
 

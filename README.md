@@ -30,6 +30,8 @@ Local install:
 ./scripts/install_ctox.sh
 ```
 
+The installer builds `ctox`, installs the wrapper into `~/.local/bin/ctox`, and bootstraps the vendored `openai-codex` and `mistral.rs` dependencies under `references/`.
+
 One-liner remote install:
 
 ```sh
