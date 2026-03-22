@@ -2233,11 +2233,19 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                             let mut used_machine_path = result.exec_session_directive.is_some()
                                 || result.exec_directive.is_some()
                                 || result.browser_directive.is_some();
+                            let observable_workspace_completion =
+                                owner_interrupt_observable_workspace_completion_is_satisfied(
+                                    &loop_paths,
+                                    &task,
+                                    &checkpoint_summary,
+                                    &output_text,
+                                );
                             if !used_machine_path
                                 && workspace_execution_contract_active(&loop_paths, task.id)
                                 && !crate::context_controller::owner_interrupt_is_status_question(
                                     &task,
                                 )
+                                && !observable_workspace_completion
                             {
                                 let prior_summary = checkpoint_summary.clone();
                                 let prior_output_text = output_text.clone();
@@ -2822,6 +2830,32 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                 ) {
                                     eprintln!(
                                         "failed to complete satisfied owner file interrupt {task_id}: {err}"
+                                    );
+                                }
+                                task_outcome_persisted = true;
+                                task_status = "done".to_string();
+                                normalized_next_mode = "reprioritize".to_string();
+                            } else if owner_interrupt_observable_workspace_completion_is_satisfied(
+                                &loop_paths,
+                                &task,
+                                &checkpoint_summary,
+                                &output_text,
+                            ) {
+                                if checkpoint_summary.trim().is_empty() {
+                                    checkpoint_summary = format!(
+                                        "Owner interrupt #{} observable workspace requirements are satisfied.",
+                                        task.id
+                                    );
+                                }
+                                if let Err(err) = complete_task(
+                                    &loop_paths,
+                                    task_id,
+                                    &checkpoint_summary,
+                                    &checkpoint_detail,
+                                    Some(&output_text),
+                                ) {
+                                    eprintln!(
+                                        "failed to complete observably satisfied owner workspace interrupt {task_id}: {err}"
                                     );
                                 }
                                 task_outcome_persisted = true;
@@ -5902,6 +5936,143 @@ fn owner_interrupt_exact_file_request_is_satisfied(
         .unwrap_or(false)
 }
 
+fn owner_interrupt_observable_workspace_completion_is_satisfied(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+    checkpoint_summary: &str,
+    output_text: &str,
+) -> bool {
+    if task.task_kind != "owner_interrupt"
+        || !workspace_execution_contract_active(paths, task.id)
+        || crate::context_controller::owner_interrupt_is_status_question(task)
+        || !owner_output_signals_completion(checkpoint_summary, output_text)
+    {
+        return false;
+    }
+
+    let required_paths = parse_owner_interrupt_observable_paths(paths, task);
+    if required_paths.is_empty() || required_paths.iter().any(|path| !path.exists()) {
+        return false;
+    }
+
+    match parse_owner_interrupt_success_command(task) {
+        Some(command) => observable_shell_command_succeeds(paths, &command),
+        None => true,
+    }
+}
+
+fn owner_output_signals_completion(checkpoint_summary: &str, output_text: &str) -> bool {
+    let combined = format!("{checkpoint_summary}\n{output_text}").to_ascii_lowercase();
+    [
+        "task is complete",
+        "task #",
+        "no further action required",
+        "no further action is needed",
+        "all required files are present",
+        "required files have been created",
+        "build succeeded",
+        "built successfully",
+        "builds successfully",
+        "completed successfully",
+        "ist abgeschlossen",
+        "ist vollständig",
+        "erfolgreich abgeschlossen",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle))
+}
+
+fn parse_owner_interrupt_observable_paths(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    task.detail
+        .split_whitespace()
+        .filter_map(|raw| {
+            let cleaned = raw.trim_matches(|ch: char| {
+                matches!(
+                    ch,
+                    '.' | ',' | ';' | ':' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            });
+            if !looks_like_observable_path(cleaned) {
+                return None;
+            }
+            let resolved = if PathBuf::from(cleaned).is_absolute() {
+                PathBuf::from(cleaned)
+            } else {
+                paths.root.join(cleaned)
+            };
+            let key = resolved.display().to_string();
+            if seen.insert(key) {
+                Some(resolved)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn looks_like_observable_path(token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    token == "CMakeLists.txt"
+        || token.contains('/')
+        || [
+            ".txt",
+            ".md",
+            ".json",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".cpp",
+            ".cc",
+            ".cxx",
+            ".c",
+            ".h",
+            ".hpp",
+            ".cmake",
+        ]
+        .iter()
+        .any(|suffix| token.ends_with(suffix))
+}
+
+fn parse_owner_interrupt_success_command(task: &crate::runtime_db::TaskRecord) -> Option<String> {
+    let detail = task.detail.trim();
+    let lower = detail.to_ascii_lowercase();
+    let marker = "successfully with ";
+    let marker_index = lower.find(marker)?;
+    let after = detail[marker_index + marker.len()..].trim();
+    let command_raw = after
+        .split(['\n', '\r'])
+        .next()
+        .unwrap_or(after)
+        .split(". ")
+        .next()
+        .unwrap_or(after)
+        .trim();
+    let command = command_raw
+        .trim_matches(|ch: char| matches!(ch, '.' | '"' | '\'' | ' ' | '\n' | '\r' | '\t'))
+        .to_string();
+    if command.is_empty() {
+        None
+    } else {
+        Some(command)
+    }
+}
+
+fn observable_shell_command_succeeds(paths: &Paths, command: &str) -> bool {
+    Command::new("/bin/bash")
+        .arg("-lc")
+        .arg(command)
+        .current_dir(&paths.root)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 fn parse_owner_interrupt_exact_file_request(
     paths: &Paths,
     task: &crate::runtime_db::TaskRecord,
@@ -6433,7 +6604,19 @@ fn apply_exec_session_directive(
                         }
                     }
                 }
-                Err(err) => return Err(err),
+                Err(err) => {
+                    if let Some(reused) = recover_existing_exec_session_after_start_conflict(
+                        paths,
+                        &session_id,
+                        &normalized_command,
+                        &cwd,
+                        directive.justification.as_deref(),
+                        &err,
+                    )? {
+                        return Ok(reused);
+                    }
+                    return Err(err);
+                }
             };
             let snapshot = snapshot_session(&session_id)?;
             Ok((
@@ -6594,6 +6777,27 @@ fn reuse_existing_exec_session(
             render_exec_session_snapshot(Some(&snapshot)),
         ),
     )))
+}
+
+fn recover_existing_exec_session_after_start_conflict(
+    paths: &Paths,
+    session_id: &str,
+    requested_command: &[String],
+    cwd: &std::path::Path,
+    justification: Option<&str>,
+    err: &anyhow::Error,
+) -> anyhow::Result<Option<(String, String)>> {
+    if !err.to_string().contains("exec session already exists") {
+        return Ok(None);
+    }
+    reuse_existing_exec_session(
+        paths,
+        session_id,
+        snapshot_session(session_id)?,
+        requested_command,
+        cwd,
+        justification,
+    )
 }
 
 fn shell_input_for_reused_exec_session(
@@ -8684,14 +8888,14 @@ mod tests {
                 &ExecSessionDirective {
                     action: "start".to_string(),
                     session_id: Some(session_id.clone()),
-                    command: vec!["/bin/bash".to_string(), "-l".to_string()],
+                    command: vec!["/bin/bash".to_string()],
                     input: None,
                     workdir: None,
                     timeout_ms: None,
-                    tty: true,
+                    tty: false,
                     close_stdin: false,
-                    rows: Some(24),
-                    cols: Some(120),
+                    rows: None,
+                    cols: None,
                     justification: Some("open reusable shell".to_string()),
                 },
             )
@@ -8717,10 +8921,10 @@ mod tests {
                     input: None,
                     workdir: None,
                     timeout_ms: None,
-                    tty: true,
+                    tty: false,
                     close_stdin: false,
-                    rows: Some(24),
-                    cols: Some(120),
+                    rows: None,
+                    cols: None,
                     justification: Some("bridge the command into the existing shell".to_string()),
                 },
             )
@@ -9085,6 +9289,157 @@ mod tests {
             };
 
             assert!(owner_interrupt_exact_file_request_is_satisfied(paths, &task));
+        });
+    }
+
+    #[test]
+    fn observable_workspace_completion_accepts_existing_files_and_success_command() {
+        with_temp_runtime("observable-workspace-completion-accepted", |paths| {
+            let target_dir = paths.root.join("runtime/observable_probe");
+            fs::create_dir_all(&target_dir).expect("observable probe dir");
+            let cmake_path = target_dir.join("CMakeLists.txt");
+            let main_path = target_dir.join("main.cpp");
+            fs::write(&cmake_path, "cmake_minimum_required(VERSION 3.10)\n")
+                .expect("cmake probe file");
+            fs::write(&main_path, "int main(){return 0;}\n").expect("main probe file");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7811,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(31),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create runtime/observable_probe/CMakeLists.txt and runtime/observable_probe/main.cpp for a tiny probe. Finish only when both files exist and the project builds successfully with test -f runtime/observable_probe/CMakeLists.txt && test -f runtime/observable_probe/main.cpp.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "workspace completion observable test",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(owner_interrupt_observable_workspace_completion_is_satisfied(
+                paths,
+                &task,
+                "Files are ready.",
+                "All required files are present and the build succeeded. Task is complete.",
+            ));
+        });
+    }
+
+    #[test]
+    fn observable_workspace_completion_rejects_missing_required_file() {
+        with_temp_runtime("observable-workspace-completion-rejected", |paths| {
+            let target_dir = paths.root.join("runtime/observable_probe_missing");
+            fs::create_dir_all(&target_dir).expect("observable probe dir");
+            let cmake_path = target_dir.join("CMakeLists.txt");
+            fs::write(&cmake_path, "cmake_minimum_required(VERSION 3.10)\n")
+                .expect("cmake probe file");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7812,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(32),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create runtime/observable_probe_missing/CMakeLists.txt and runtime/observable_probe_missing/main.cpp for a tiny probe. Finish only when both files exist and the project builds successfully with test -f runtime/observable_probe_missing/CMakeLists.txt && test -f runtime/observable_probe_missing/main.cpp.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "workspace completion observable test",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(!owner_interrupt_observable_workspace_completion_is_satisfied(
+                paths,
+                &task,
+                "Files are ready.",
+                "All required files are present and the build succeeded. Task is complete.",
+            ));
+        });
+    }
+
+    #[test]
+    fn observable_workspace_completion_accepts_live_completion_wording() {
+        with_temp_runtime("observable-workspace-completion-live-wording", |paths| {
+            let target_dir = paths.root.join("runtime/observable_probe_live");
+            fs::create_dir_all(&target_dir).expect("observable probe dir");
+            let cmake_path = target_dir.join("CMakeLists.txt");
+            let main_path = target_dir.join("main.cpp");
+            fs::write(&cmake_path, "cmake_minimum_required(VERSION 3.10)\n")
+                .expect("cmake probe file");
+            fs::write(&main_path, "int main(){return 0;}\n").expect("main probe file");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7813,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(33),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create runtime/observable_probe_live/CMakeLists.txt and runtime/observable_probe_live/main.cpp. Finish only when both files exist and the project builds successfully with test -f runtime/observable_probe_live/CMakeLists.txt && test -f runtime/observable_probe_live/main.cpp.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "workspace completion observable test",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(owner_interrupt_observable_workspace_completion_is_satisfied(
+                paths,
+                &task,
+                "Workspace execution contract is active and no machine path ran in this turn, so persisted progress stays at planning or inspection only.",
+                "Workspace execution contract is active and no exec/browser machine path ran in this turn, so this reply remains planning or inspection only.\n\nModel-declared reply before contract grounding:\nThe required files have been created and the project builds successfully. No further action is needed for this task.",
+            ));
         });
     }
 

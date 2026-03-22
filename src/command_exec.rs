@@ -968,7 +968,26 @@ pub(crate) fn terminal_size_from_protocol(
 fn codex_exec_env(
     env_overrides: Option<HashMap<String, Option<String>>>,
 ) -> HashMap<String, String> {
-    let mut env = HashMap::from([
+    let mut env = HashMap::new();
+    for key in [
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "PATH",
+        "SHELL",
+        "CARGO_HOME",
+        "RUSTUP_HOME",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "XDG_RUNTIME_DIR",
+        "XDG_SESSION_TYPE",
+    ] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env.extend(HashMap::from([
         ("NO_COLOR".to_string(), "1".to_string()),
         ("TERM".to_string(), "xterm-256color".to_string()),
         ("LANG".to_string(), "C.UTF-8".to_string()),
@@ -978,7 +997,7 @@ fn codex_exec_env(
         ("GIT_PAGER".to_string(), "cat".to_string()),
         ("GH_PAGER".to_string(), "cat".to_string()),
         ("CODEX_CI".to_string(), "1".to_string()),
-    ]);
+    ]));
     if let Some(env_overrides) = env_overrides {
         for (key, value) in env_overrides {
             match value {
@@ -1035,5 +1054,27 @@ mod tests {
         assert!(snapshot.stream_stdout_stderr);
         assert!(snapshot.stdout.contains("build ok"));
         assert!(snapshot.stderr.contains("warning: sample"));
+    }
+
+    #[test]
+    fn codex_exec_env_preserves_host_shell_basics() {
+        let env = codex_exec_env(None);
+        let home = std::env::var("HOME").expect("HOME should exist in test env");
+        let path = std::env::var("PATH").expect("PATH should exist in test env");
+
+        assert_eq!(env.get("HOME"), Some(&home));
+        assert_eq!(env.get("PATH"), Some(&path));
+        assert_eq!(env.get("CODEX_CI"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn codex_exec_env_applies_overrides_and_removals() {
+        let env = codex_exec_env(Some(HashMap::from([
+            ("HOME".to_string(), Some("/tmp/codex-home".to_string())),
+            ("PATH".to_string(), None),
+        ])));
+
+        assert_eq!(env.get("HOME"), Some(&"/tmp/codex-home".to_string()));
+        assert!(!env.contains_key("PATH"));
     }
 }
