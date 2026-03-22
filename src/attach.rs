@@ -31,10 +31,13 @@ use crate::runtime_db::FocusStateRecord;
 use crate::runtime_db::LoopInterruptRecord;
 use crate::runtime_db::TaskRecord;
 use crate::runtime_db::latest_context_package;
+use crate::runtime_db::latest_context_package_for_task;
 use crate::runtime_db::list_recent_context_packages;
 use crate::runtime_db::load_brain_usage_rollup;
 use crate::runtime_db::list_agent_events_since;
 use crate::runtime_db::list_recent_loop_interrupts;
+use crate::runtime_db::list_task_checkpoints;
+use crate::runtime_db::list_turn_signals_for_task;
 use crate::runtime_db::list_open_tasks;
 use crate::runtime_db::list_recent_agent_events;
 use crate::runtime_db::list_recent_completed_owner_tasks;
@@ -43,6 +46,7 @@ use crate::runtime_db::load_agent_thread;
 use crate::runtime_db::load_brain_routing_state;
 use crate::runtime_db::load_focus_state;
 use crate::runtime_db::load_latest_completed_agent_turn;
+use crate::runtime_db::load_task_by_id;
 use anyhow::Context;
 use chrono::DateTime;
 use chrono::Local;
@@ -2551,6 +2555,12 @@ impl Drop for AttachTui {
 fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
     let bios = load_bios(paths);
     let latest_context_package = latest_context_package(paths).ok().flatten();
+    let focus = load_focus_state(paths).ok();
+    let active_turn = load_active_agent_turn(paths).ok().flatten();
+    let active_context_task_id = active_turn
+        .as_ref()
+        .map(|turn| turn.task_id)
+        .or_else(|| focus.as_ref().and_then(|state| state.active_task_id));
     let mut boot_entries = load_boot_entries(paths);
     if boot_entries.len() > CHAT_HISTORY_LIMIT * 4 {
         boot_entries = boot_entries.split_off(boot_entries.len() - (CHAT_HISTORY_LIMIT * 4));
@@ -2565,21 +2575,91 @@ fn collect_ui_snapshot(paths: &Paths) -> AttachUiSnapshot {
         brain_usage: load_brain_usage_rollup(paths).unwrap_or_default(),
         kleinhirn_runtime: load_kleinhirn_runtime_snapshot(paths),
         grosshirn_runtime: load_grosshirn_runtime_snapshot(paths),
-        focus: load_focus_state(paths).ok(),
-        active_turn: load_active_agent_turn(paths).ok().flatten(),
+        focus,
+        active_turn,
         last_turn: load_latest_completed_agent_turn(paths).ok().flatten(),
         open_tasks: list_open_tasks(paths, 8).unwrap_or_default(),
         completed_owner_tasks: list_recent_completed_owner_tasks(paths, 8).unwrap_or_default(),
-        latest_context_tokens: latest_context_package
-            .as_ref()
-            .map(|record| approx_token_count(&record.package_json))
-            .unwrap_or(0),
+        latest_context_tokens: estimate_display_context_tokens(
+            paths,
+            active_context_task_id,
+            latest_context_package.as_ref(),
+        ),
         latest_continuity: load_latest_continuity_snapshot(paths),
         boot_entries,
         chat_interrupts,
         organigram: load_organigram(paths),
         installation_bootstrap: load_installation_bootstrap_state(paths),
     }
+}
+
+fn estimate_display_context_tokens(
+    paths: &Paths,
+    active_task_id: Option<i64>,
+    fallback_latest_package: Option<&ContextPackageRecord>,
+) -> usize {
+    active_task_id
+        .and_then(|task_id| estimate_task_context_tokens(paths, task_id))
+        .or_else(|| {
+            fallback_latest_package.map(|record| approx_token_count(&record.package_json))
+        })
+        .unwrap_or(0)
+}
+
+fn estimate_task_context_tokens(paths: &Paths, task_id: i64) -> Option<usize> {
+    let task = load_task_by_id(paths, task_id).ok().flatten()?;
+    let package = latest_context_package_for_task(paths, task_id).ok().flatten()?;
+    let threshold = DateTime::parse_from_rfc3339(&package.created_at)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(
+        approx_token_count(&package.package_json)
+            .saturating_add(estimate_pending_context_growth_tokens(paths, &task, threshold)),
+    )
+}
+
+fn estimate_pending_context_growth_tokens(
+    paths: &Paths,
+    task: &TaskRecord,
+    threshold: DateTime<Utc>,
+) -> usize {
+    let checkpoint_tokens = list_task_checkpoints(paths, task.id, 96)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|checkpoint| recorded_after_threshold(&checkpoint.created_at, threshold))
+        .map(|checkpoint| approx_token_count(&format!("{}\n{}", checkpoint.summary, checkpoint.detail)))
+        .sum::<usize>();
+    let signal_tokens = list_turn_signals_for_task(paths, task.id, 48)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|signal| recorded_after_threshold(&signal.created_at, threshold))
+        .map(|signal| {
+            approx_token_count(&format!(
+                "{}\n{}\n{}",
+                signal.signal_kind, signal.speaker, signal.message
+            ))
+        })
+        .sum::<usize>();
+    let latest_output_tokens = task
+        .last_output
+        .as_deref()
+        .filter(|_| {
+            task.last_checkpoint_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|recorded| recorded.with_timezone(&Utc) > threshold)
+                .unwrap_or(false)
+        })
+        .map(approx_token_count)
+        .unwrap_or(0);
+    checkpoint_tokens + signal_tokens + latest_output_tokens
+}
+
+fn recorded_after_threshold(value: &str, threshold: DateTime<Utc>) -> bool {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|recorded| recorded.with_timezone(&Utc) > threshold)
+        .unwrap_or(false)
 }
 
 fn load_latest_continuity_snapshot(paths: &Paths) -> Option<AttachContinuitySnapshot> {
@@ -3335,59 +3415,45 @@ fn render_qr_rows(token: &str, width: usize, height: usize) -> Vec<String> {
     };
     let qr_size = qr.size().max(1) as usize;
     let total_modules = qr_size + (JAMI_QR_QUIET_ZONE * 2);
-    let available_width = (width / 2).max(1);
+    let available_width = width.max(1);
     let available_height = height.max(1);
-    let mut downsample = 1;
-    loop {
-        let scaled_modules = total_modules.div_ceil(downsample);
-        if scaled_modules <= available_width && scaled_modules <= available_height {
-            break;
-        }
-        downsample += 1;
-        if downsample > total_modules {
-            break;
-        }
+    let render_columns = total_modules;
+    let render_pair_rows = total_modules.div_ceil(2);
+    if available_width < render_columns || available_height < render_pair_rows {
+        return frame_wrapped_rows(
+            "QR code does not fit exactly in the current terminal size. Make the terminal taller or wider.",
+            width,
+            height.max(1),
+        );
     }
-    let scaled_modules = total_modules.div_ceil(downsample).max(1);
-    let zoom = (available_width / scaled_modules)
-        .min(available_height / scaled_modules)
-        .max(1)
-        .min(3);
-    let render_modules = scaled_modules.saturating_mul(zoom);
-    let horizontal_padding = available_width.saturating_sub(render_modules) / 2;
-    let vertical_padding = available_height.saturating_sub(render_modules) / 2;
+    let horizontal_padding = available_width.saturating_sub(render_columns) / 2;
+    let vertical_padding = available_height.saturating_sub(render_pair_rows) / 2;
     let mut rows = Vec::new();
     for _ in 0..vertical_padding {
-        rows.push(raw_tui_line(render_qr_blank_line(horizontal_padding, render_modules)));
+        rows.push(raw_tui_line(" ".repeat(width)));
     }
-    for render_y in 0..render_modules {
+    for render_pair_y in 0..render_pair_rows {
         let mut line = String::new();
-        for _ in 0..horizontal_padding {
-            line.push_str(ansi_qr_module_block(false));
+        line.push_str(&" ".repeat(horizontal_padding));
+        let top_y = render_pair_y.saturating_mul(2);
+        let bottom_y = top_y + 1;
+        for render_x in 0..render_columns {
+            let top_dark = jami_qr_module_is_dark(&qr, qr_size, render_x, top_y);
+            let bottom_dark = if bottom_y < total_modules {
+                jami_qr_module_is_dark(&qr, qr_size, render_x, bottom_y)
+            } else {
+                false
+            };
+            line.push_str(ansi_qr_pair_block(top_dark, bottom_dark));
         }
-        for render_x in 0..render_modules {
-            let dark = jami_qr_render_cell_is_dark(
-                &qr,
-                qr_size,
-                total_modules,
-                render_x,
-                render_y,
-                downsample,
-                zoom,
-            );
-            line.push_str(ansi_qr_module_block(dark));
-        }
-        for _ in 0..horizontal_padding {
-            line.push_str(ansi_qr_module_block(false));
-        }
-        line.push_str("\x1b[0m");
+        line.push_str(&" ".repeat(horizontal_padding));
         rows.push(raw_tui_line(line));
         if rows.len() >= height {
             break;
         }
     }
     while rows.len() < height {
-        rows.push(raw_tui_line(render_qr_blank_line(horizontal_padding, render_modules)));
+        rows.push(raw_tui_line(" ".repeat(width)));
     }
     if rows.is_empty() {
         rows.push(frame_row("QR code too small for the current terminal size.", width));
@@ -3395,56 +3461,27 @@ fn render_qr_rows(token: &str, width: usize, height: usize) -> Vec<String> {
     rows
 }
 
-fn jami_qr_render_cell_is_dark(
-    qr: &QrCode,
-    qr_size: usize,
-    total_modules: usize,
-    render_x: usize,
-    render_y: usize,
-    downsample: usize,
-    zoom: usize,
-) -> bool {
-    let scaled_x = render_x / zoom.max(1);
-    let scaled_y = render_y / zoom.max(1);
-    let start_x = scaled_x.saturating_mul(downsample);
-    let start_y = scaled_y.saturating_mul(downsample);
-    for y in start_y..(start_y + downsample).min(total_modules) {
-        for x in start_x..(start_x + downsample).min(total_modules) {
-            if x < JAMI_QR_QUIET_ZONE
-                || y < JAMI_QR_QUIET_ZONE
-                || x >= JAMI_QR_QUIET_ZONE + qr_size
-                || y >= JAMI_QR_QUIET_ZONE + qr_size
-            {
-                continue;
-            }
-            if qr.get_module(
-                (x.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
-                (y.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
-            ) {
-                return true;
-            }
-        }
+fn jami_qr_module_is_dark(qr: &QrCode, qr_size: usize, x: usize, y: usize) -> bool {
+    if x < JAMI_QR_QUIET_ZONE
+        || y < JAMI_QR_QUIET_ZONE
+        || x >= JAMI_QR_QUIET_ZONE + qr_size
+        || y >= JAMI_QR_QUIET_ZONE + qr_size
+    {
+        return false;
     }
-    false
+    qr.get_module(
+        (x.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
+        (y.saturating_sub(JAMI_QR_QUIET_ZONE)) as i32,
+    )
 }
 
-fn ansi_qr_module_block(dark: bool) -> &'static str {
-    if dark { "\x1b[40m  " } else { "\x1b[107m  " }
-}
-
-fn render_qr_blank_line(horizontal_padding: usize, render_modules: usize) -> String {
-    let mut line = String::new();
-    for _ in 0..horizontal_padding {
-        line.push_str(ansi_qr_module_block(false));
+fn ansi_qr_pair_block(top_dark: bool, bottom_dark: bool) -> &'static str {
+    match (top_dark, bottom_dark) {
+        (true, true) => "\x1b[40m \x1b[0m",
+        (false, false) => "\x1b[107m \x1b[0m",
+        (true, false) => "\x1b[30;107m▀\x1b[0m",
+        (false, true) => "\x1b[30;107m▄\x1b[0m",
     }
-    for _ in 0..render_modules {
-        line.push_str(ansi_qr_module_block(false));
-    }
-    for _ in 0..horizontal_padding {
-        line.push_str(ansi_qr_module_block(false));
-    }
-    line.push_str("\x1b[0m");
-    line
 }
 
 fn recent_chat_entries(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<ChatTranscriptEntry> {

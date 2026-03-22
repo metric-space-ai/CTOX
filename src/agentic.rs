@@ -4610,7 +4610,7 @@ fn parse_context_preparation_artifact_only_output(value: &Value) -> Option<Parse
 fn parse_exec_session_directive(
     object: &serde_json::Map<String, Value>,
 ) -> Option<ExecSessionDirective> {
-    let action = object
+    let raw_action = object
         .get("execSessionAction")
         .and_then(Value::as_str)
         .map(str::trim)
@@ -4658,6 +4658,12 @@ fn parse_exec_session_directive(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
+    let action = normalize_exec_session_action(
+        &raw_action,
+        !command.is_empty(),
+        input.is_some(),
+        close_stdin,
+    );
     Some(ExecSessionDirective {
         action,
         session_id,
@@ -4671,6 +4677,26 @@ fn parse_exec_session_directive(
         cols,
         justification,
     })
+}
+
+fn normalize_exec_session_action(
+    action: &str,
+    has_command: bool,
+    has_input: bool,
+    close_stdin: bool,
+) -> String {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "open" => "start".to_string(),
+        "stop" | "close" => "terminate".to_string(),
+        "continue" | "resume" | "reuse" => {
+            if has_input || has_command || close_stdin {
+                "write".to_string()
+            } else {
+                "read".to_string()
+            }
+        }
+        other => other.to_string(),
+    }
 }
 
 fn parse_exec_directive(object: &serde_json::Map<String, Value>) -> Option<ExecCommandDirective> {
@@ -5097,6 +5123,52 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
                 "echo BRIDGE_OK > runtime/live_exec_bridge_probe.txt"
             ]
         );
+    }
+
+    #[test]
+    fn parse_agent_output_normalizes_continue_with_command_to_write() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"continue step","execSessionAction":"continue","execSessionId":"task-170-auto-workspace","execSessionCommand":["pwd"]}"#,
+            Some("owner_interrupt"),
+        );
+        let directive = parsed
+            .exec_session_directive
+            .as_ref()
+            .expect("continue with command should parse");
+        assert_eq!(directive.action, "write");
+        assert_eq!(directive.session_id.as_deref(), Some("task-170-auto-workspace"));
+        assert_eq!(directive.command, vec!["pwd"]);
+    }
+
+    #[test]
+    fn parse_agent_output_normalizes_continue_without_payload_to_read() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"read step","execSessionAction":"continue","execSessionId":"task-170-auto-workspace"}"#,
+            Some("owner_interrupt"),
+        );
+        let directive = parsed
+            .exec_session_directive
+            .as_ref()
+            .expect("continue without payload should parse");
+        assert_eq!(directive.action, "read");
+        assert_eq!(directive.session_id.as_deref(), Some("task-170-auto-workspace"));
+        assert!(directive.command.is_empty());
+        assert!(directive.input.is_none());
+    }
+
+    #[test]
+    fn parse_agent_output_normalizes_reuse_with_command_to_write() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"reuse step","execSessionAction":"reuse","execSessionId":"task-170-auto-workspace","execSessionCommand":["pwd"]}"#,
+            Some("owner_interrupt"),
+        );
+        let directive = parsed
+            .exec_session_directive
+            .as_ref()
+            .expect("reuse with command should parse");
+        assert_eq!(directive.action, "write");
+        assert_eq!(directive.session_id.as_deref(), Some("task-170-auto-workspace"));
+        assert_eq!(directive.command, vec!["pwd"]);
     }
 
     #[test]

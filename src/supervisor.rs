@@ -6553,6 +6553,37 @@ fn apply_exec_session_directive(
                 .unwrap_or_else(|| format!("task-{}-turn-{}", task.id, turn_id));
             let cwd = resolve_exec_session_cwd(paths, directive.workdir.as_deref());
             let normalized_command = normalize_exec_session_command(&directive.command);
+            if start_directive_should_run_as_bounded_command(&normalized_command, directive) {
+                let bounded = ExecCommandDirective {
+                    command: normalized_command.clone(),
+                    workdir: Some(cwd.display().to_string()),
+                    timeout_ms: directive.timeout_ms,
+                    justification: directive.justification.clone(),
+                };
+                let exec_result = run_bounded_command(paths, task, &bounded)?;
+                return Ok((
+                    grounded_exec_command_summary(
+                        &bounded.command,
+                        exec_result.exit_code,
+                        exec_result.timed_out,
+                    ),
+                    format!(
+                        "Requested execSessionAction=start was normalized into one bounded command because the command is non-interactive and does not need session continuity.\nRequested command: {:?}\nNormalized command: {:?}\nCWD: {}\nJustification: {}\nStatus: {}\nExit code: {}\nTimed out: {}\nSTDOUT:\n{}\n\nSTDERR:\n{}",
+                        directive.command,
+                        bounded.command,
+                        exec_result.cwd,
+                        directive.justification.as_deref().unwrap_or("none"),
+                        exec_result.status,
+                        exec_result
+                            .exit_code
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                        exec_result.timed_out,
+                        exec_result.stdout,
+                        exec_result.stderr,
+                    ),
+                ));
+            }
             if let Some(reused) = reuse_existing_exec_session(
                 paths,
                 &session_id,
@@ -6707,6 +6738,16 @@ fn apply_exec_session_directive(
         }
         other => anyhow::bail!("unsupported execSessionAction: {other}"),
     }
+}
+
+fn start_directive_should_run_as_bounded_command(
+    normalized_command: &[String],
+    directive: &ExecSessionDirective,
+) -> bool {
+    !directive.tty
+        && !directive.close_stdin
+        && !normalized_command.is_empty()
+        && !command_is_interactive_shell(normalized_command)
 }
 
 fn reuse_existing_exec_session(
@@ -8947,6 +8988,68 @@ mod tests {
                 },
             )
             .expect("shell session should terminate");
+        });
+    }
+
+    #[test]
+    fn non_interactive_exec_session_start_runs_as_bounded_command() {
+        with_temp_runtime("non-interactive-start-runs-bounded", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 784,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(28),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Erstelle eine Datei in einem bounded command.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            let probe_path = paths.root.join("runtime/non_interactive_start_probe.txt");
+            let result = apply_exec_session_directive(
+                paths,
+                &task,
+                1,
+                &ExecSessionDirective {
+                    action: "start".to_string(),
+                    session_id: Some("task-784-turn-1".to_string()),
+                    command: vec![
+                        "/bin/bash".to_string(),
+                        "-lc".to_string(),
+                        format!(
+                            "printf 'BOUNDED_OK\\n' > {}",
+                            shell_quote_token(probe_path.to_string_lossy().as_ref())
+                        ),
+                    ],
+                    input: None,
+                    workdir: None,
+                    timeout_ms: None,
+                    tty: false,
+                    close_stdin: false,
+                    rows: None,
+                    cols: None,
+                    justification: Some("run a non-interactive shell payload".to_string()),
+                },
+            )
+            .expect("bounded command normalization should succeed");
+
+            assert!(result.0.contains("Executed single bounded command successfully."));
+            assert!(result
+                .1
+                .contains("normalized into one bounded command"));
+            assert_eq!(
+                fs::read_to_string(&probe_path).ok().as_deref(),
+                Some("BOUNDED_OK\n")
+            );
         });
     }
 
