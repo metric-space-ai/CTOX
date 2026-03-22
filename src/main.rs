@@ -1,10 +1,11 @@
 use anyhow::Context;
+use std::path::PathBuf;
 
 mod execution_baseline;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let root = std::env::current_dir().context("failed to resolve CTOX workspace root")?;
+    let root = resolve_workspace_root()?;
 
     match args.first().map(String::as_str) {
         Some("clean-room-bootstrap-deps") => {
@@ -47,4 +48,11 @@ fn main() -> anyhow::Result<()> {
             )
         }
     }
+}
+
+fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
+    if let Some(root) = std::env::var_os("CTOX_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    std::env::current_dir().context("failed to resolve CTOX workspace root")
 }

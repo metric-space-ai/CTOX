@@ -21,7 +21,13 @@ cd "$ROOT"
 "$CARGO_BIN" build --release
 
 mkdir -p "$HOME/.local/bin"
-cp target/release/ctox "$HOME/.local/bin/ctox"
+cat > "$HOME/.local/bin/ctox" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export CTOX_ROOT="$ROOT"
+exec "$ROOT/target/release/ctox" "\$@"
+EOF
+chmod +x "$HOME/.local/bin/ctox"
 
 cat <<EOF
 CTOX installed.
