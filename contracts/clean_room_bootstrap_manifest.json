@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "goal": "Clean-room baseline for CTOX built on vendored codex-cli plus mistral.rs.",
+  "dependencies": [
+    {
+      "name": "openai-codex",
+      "repoUrl": "https://github.com/openai/codex.git",
+      "targetDir": "references/openai-codex",
+      "purpose": "Canonical codex-cli and codex-rs baseline for the execution loop and tool contract."
+    },
+    {
+      "name": "mistral.rs",
+      "repoUrl": "https://github.com/EricLBuehler/mistral.rs.git",
+      "targetDir": "references/mistral.rs",
+      "purpose": "Canonical local runtime and OpenAI-compatible server for GPT-OSS and Qwen3.5 families."
+    }
+  ],
+  "runtimeFamilies": [
+    {
+      "family": "gpt_oss",
+      "modelExamples": [
+        "openai/gpt-oss-20b"
+      ],
+      "mistralrsMode": "serve",
+      "mistralrsAdapter": "gpt_oss",
+      "wireApi": "responses",
+      "bridgeMode": "responses_proxy",
+      "notes": [
+        "The codex-cli baseline must remain on /v1/responses.",
+        "The compatibility layer may rewrite or filter tool schemas so mistral.rs accepts the official codex request shape."
+      ]
+    },
+    {
+      "family": "qwen3_5",
+      "modelExamples": [
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen3.5-35B-A3B"
+      ],
+      "mistralrsMode": "serve vision",
+      "mistralrsAdapter": "vision",
+      "wireApi": "openai_chat_completions",
+      "bridgeMode": "custom_execution",
+      "notes": [
+        "Qwen3.5 support must cover local image-path, URL, or base64 image inputs as documented by mistral.rs.",
+        "The first clean-room version keeps codex-cli as the execution baseline and adds family-specific runtime execution for Qwen3.5."
+      ]
+    }
+  ],
+  "compatibilityTests": [
+    {
+      "name": "execution_baseline_rust_unit_tests",
+      "path": "src/execution_baseline.rs",
+      "purpose": "Verify in Rust that codex-cli tool requests, runtime plans, and mistral.rs response rewrites stay compatible with the clean-room baseline."
+    }
+  ]
+}

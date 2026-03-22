@@ -1,8 +1,8 @@
 target/
+runtime/
 .venv/
 .DS_Store
 __pycache__/
-runtime/
-browser_agent/extension/models/local-extension/Qwen3.5-0.8B-ONNX/onnx/
-browser_agent/extension/models/local-extension/Qwen3.5-0.8B-ONNX/.cache/
+old-legacy-for-transplation-only/
 references/openai-codex/
+references/mistral.rs/
