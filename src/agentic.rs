@@ -1581,6 +1581,10 @@ fn workspace_machine_recovery_note(task: &TaskRecord, context_block: &str) -> St
         lines.push(format!(
             "- Visible task-bound exec session: `{session_id}`. Reuse it now with `execSessionAction=write`, `read`, or `terminate`."
         ));
+        lines.push(
+            "- Do not ask the owner for permission to continue. The requested repo work is already authorized; send the next concrete `write` command into that visible session now."
+                .to_string(),
+        );
     } else {
         lines.push(
             "- No exec session is visible yet. Return `execSessionAction=start` or one exact `execCommand` now."

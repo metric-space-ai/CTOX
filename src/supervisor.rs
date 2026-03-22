@@ -3441,7 +3441,7 @@ fn assess_task_stuck_risk(
         && task.run_count
             < stage_policy
                 .max_run_count_before_self_preservation_review
-                .saturating_add(4);
+                .saturating_add(12);
     let workspace_non_machine_owner_stall = owner_interrupt_task
         && repeated_same_summary
         && repeated_workspace_non_machine_owner_summary(
