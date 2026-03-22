@@ -153,6 +153,7 @@ CTO_JAMI_INBOX_DIR="${CTO_JAMI_INBOX_DIR:-}"
 CTO_JAMI_OUTBOX_DIR="${CTO_JAMI_OUTBOX_DIR:-}"
 CTO_JAMI_ARCHIVE_DIR="${CTO_JAMI_ARCHIVE_DIR:-}"
 CTO_JAMI_DAEMON_ARGS="${CTO_JAMI_DAEMON_ARGS:-}"
+CTO_JAMI_DBUS_ENV_FILE="${CTO_JAMI_DBUS_ENV_FILE:-}"
 CTO_AGENT_INSTALL_JAMI_GUI="${CTO_AGENT_INSTALL_JAMI_GUI:-0}"
 CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-}"
 CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-}"
@@ -490,6 +491,18 @@ discover_local_jami_account_id() {
   ' "$config_file"
 }
 
+default_jami_dbus_env_file() {
+  if [ -n "${XDG_RUNTIME_DIR:-}" ]; then
+    printf '%s\n' "$XDG_RUNTIME_DIR/cto-jami-dbus.env"
+    return 0
+  fi
+  if command -v id >/dev/null 2>&1; then
+    printf '%s\n' "/run/user/$(id -u)/cto-jami-dbus.env"
+    return 0
+  fi
+  printf '%s\n' "/tmp/cto-jami-dbus.env"
+}
+
 adopt_existing_runtime_communication_env() {
   existing_address="$(read_runtime_env_file_value CTO_EMAIL_ADDRESS || true)"
   existing_password="$(read_runtime_env_file_value CTO_EMAIL_PASSWORD || true)"
@@ -504,6 +517,7 @@ adopt_existing_runtime_communication_env() {
   existing_jami_outbox_dir="$(read_runtime_env_file_value CTO_JAMI_OUTBOX_DIR || true)"
   existing_jami_archive_dir="$(read_runtime_env_file_value CTO_JAMI_ARCHIVE_DIR || true)"
   existing_jami_daemon_args="$(read_runtime_env_file_value CTO_JAMI_DAEMON_ARGS || true)"
+  existing_jami_dbus_env_file="$(read_runtime_env_file_value CTO_JAMI_DBUS_ENV_FILE || true)"
   existing_grosshirn_api_key="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_API_KEY || true)"
   existing_grosshirn_model="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_MODEL || true)"
   existing_grosshirn_adapter="$(read_runtime_env_file_value CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER || true)"
@@ -534,6 +548,7 @@ adopt_existing_runtime_communication_env() {
   CTO_JAMI_OUTBOX_DIR="${CTO_JAMI_OUTBOX_DIR:-${existing_jami_outbox_dir:-$jami_runtime_root/outbox}}"
   CTO_JAMI_ARCHIVE_DIR="${CTO_JAMI_ARCHIVE_DIR:-${existing_jami_archive_dir:-$jami_runtime_root/archive}}"
   CTO_JAMI_DAEMON_ARGS="${CTO_JAMI_DAEMON_ARGS:-${existing_jami_daemon_args:--p}}"
+  CTO_JAMI_DBUS_ENV_FILE="${CTO_JAMI_DBUS_ENV_FILE:-${existing_jami_dbus_env_file:-$(default_jami_dbus_env_file)}}"
   CTO_AGENT_GROSSHIRN_API_KEY="${CTO_AGENT_GROSSHIRN_API_KEY:-$existing_grosshirn_api_key}"
   CTO_AGENT_GROSSHIRN_MODEL="${CTO_AGENT_GROSSHIRN_MODEL:-${existing_grosshirn_model:-openai/gpt-5.4}}"
   CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER="${CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER:-${existing_grosshirn_adapter:-openai_responses}}"
@@ -574,6 +589,8 @@ ensure_mail_and_cli_bootstrap_assets() {
   for required in \
     "$ROOT/scripts/communication_mail_cli.mjs" \
     "$ROOT/scripts/communication_jami_cli.mjs" \
+    "$ROOT/scripts/jami_contact_qr_cli.mjs" \
+    "$ROOT/scripts/jami_device_link_cli.mjs" \
     "$ROOT/scripts/communication_schema.sql" \
     "$ROOT/scripts/run_jami_daemon.sh" \
     "$ROOT/.agents/skills/codex-command-exec-operations/SKILL.md" \
@@ -603,6 +620,9 @@ smoke_check_mail_bootstrap() {
     --db "$ROOT/runtime/cto_agent.db" \
     --limit 1 >/tmp/cto_jami_bootstrap_list.out
 
+  node "$ROOT/scripts/jami_contact_qr_cli.mjs" --help >/tmp/cto_jami_contact_bootstrap_help.out
+  node "$ROOT/scripts/jami_device_link_cli.mjs" --help >/tmp/cto_jami_link_bootstrap_help.out
+
   if [ -n "$CTO_EMAIL_ADDRESS" ] && [ -n "$CTO_EMAIL_PASSWORD" ]; then
     CTO_EMAIL_ADDRESS="$CTO_EMAIL_ADDRESS" \
       CTO_EMAIL_PASSWORD="$CTO_EMAIL_PASSWORD" \
@@ -619,6 +639,55 @@ smoke_check_mail_bootstrap() {
 
 smoke_check_cli_tooling() {
   "$ROOT/target/release/cto-agent" command-exec-smoke >/tmp/cto_command_exec_smoke.out
+}
+
+jami_daemon_binary_present() {
+  [ -x /usr/libexec/jamid ] && return 0
+  command -v jamid >/dev/null 2>&1 && return 0
+  command -v jami-daemon >/dev/null 2>&1 && return 0
+  return 1
+}
+
+wait_for_jami_dbus_runtime() {
+  if [ "$(uname -s)" != "Linux" ] || ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! jami_daemon_binary_present; then
+    return 0
+  fi
+  if ! command -v gdbus >/dev/null 2>&1; then
+    echo "Jami daemon was installed but gdbus is unavailable for runtime verification." >&2
+    return 1
+  fi
+
+  jami_dbus_env_file="${CTO_JAMI_DBUS_ENV_FILE:-$(default_jami_dbus_env_file)}"
+  systemctl --user restart cto-jami-daemon.service >/dev/null 2>&1 || true
+
+  attempt=1
+  while [ "$attempt" -le 30 ]; do
+    if systemctl --user is-active --quiet cto-jami-daemon.service && [ -s "$jami_dbus_env_file" ]; then
+      if CTO_INSTALL_JAMI_DBUS_ENV_FILE="$jami_dbus_env_file" sh -eu -c '
+        DBUS_ENV_FILE="$CTO_INSTALL_JAMI_DBUS_ENV_FILE"
+        set -a
+        # shellcheck disable=SC1090
+        . "$DBUS_ENV_FILE"
+        set +a
+        gdbus call --session \
+          --dest cx.ring.Ring \
+          --object-path /cx/ring/Ring/ConfigurationManager \
+          --method cx.ring.Ring.ConfigurationManager.getAccountList >/dev/null 2>&1
+      '; then
+        return 0
+      fi
+    fi
+    sleep 1
+    attempt=$((attempt + 1))
+  done
+
+  echo "Jami daemon runtime failed post-install health verification." >&2
+  echo "Expected a live DBus session via $jami_dbus_env_file and a reachable cx.ring.Ring service." >&2
+  systemctl --user status cto-jami-daemon.service --no-pager -n 40 >&2 || true
+  return 1
 }
 
 write_kleinhirn_env_file() {
@@ -679,6 +748,7 @@ write_kleinhirn_env_file() {
     printf 'CTO_JAMI_OUTBOX_DIR=%s\n' "$(shell_quote "$CTO_JAMI_OUTBOX_DIR")"
     printf 'CTO_JAMI_ARCHIVE_DIR=%s\n' "$(shell_quote "$CTO_JAMI_ARCHIVE_DIR")"
     printf 'CTO_JAMI_DAEMON_ARGS=%s\n' "$(shell_quote "$CTO_JAMI_DAEMON_ARGS")"
+    printf 'CTO_JAMI_DBUS_ENV_FILE=%s\n' "$(shell_quote "$CTO_JAMI_DBUS_ENV_FILE")"
     printf 'CTO_AGENT_GROSSHIRN_API_KEY=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_API_KEY")"
     printf 'CTO_AGENT_GROSSHIRN_MODEL=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_MODEL")"
     printf 'CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER=%s\n' "$(shell_quote "$CTO_AGENT_GROSSHIRN_AGENTIC_ADAPTER")"
@@ -1243,6 +1313,7 @@ ensure_linux_jami_installed() {
   rm -f "$tmp_list"
   apt_update_with_retry
   run_sudo apt-get install -y jami-daemon dbus-x11
+  run_sudo apt-get install -y libglib2.0-bin
   if [ "$CTO_AGENT_INSTALL_JAMI_GUI" = "1" ]; then
     run_sudo apt-get install -y jami
   fi
@@ -1300,6 +1371,7 @@ ensure_mail_and_cli_bootstrap_assets
 chmod +x \
   "$ROOT/scripts/communication_mail_cli.mjs" \
   "$ROOT/scripts/communication_jami_cli.mjs" \
+  "$ROOT/scripts/jami_device_link_cli.mjs" \
   "$ROOT/scripts/install_cto_agent.sh" \
   "$ROOT/scripts/install_browser_engine.sh" \
   "$ROOT/scripts/install_browser_agent_extension.sh" \
@@ -1516,7 +1588,11 @@ if ! cuda_runtime_driver_ready; then
   echo "CTO-Agent installation finished provisioning, but the CUDA runtime is not currently usable. Reboot the host and rerun the installer to complete Kleinhirn startup." >&2
   exit 1
 fi
-systemctl --user restart cto-jami-daemon.service >/dev/null 2>&1 || true
+if ! wait_for_jami_dbus_runtime; then
+  echo "The installer provisioned Jami, but the Jami daemon/runtime bus did not come up cleanly." >&2
+  echo "Fix the local Jami runtime before relying on Jami messaging for the agent." >&2
+  exit 1
+fi
 systemctl --user restart cto-kleinhirn.service
 
 echo "[9/10] Wait for selected Kleinhirn startup readiness (${KLEINHIRN_OFFICIAL_LABEL})"

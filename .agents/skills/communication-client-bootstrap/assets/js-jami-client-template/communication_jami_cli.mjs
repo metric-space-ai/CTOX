@@ -4,6 +4,7 @@ import * as childProcess from "child_process";
 import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import * as readline from "readline";
 import * as url from "url";
 
 const execFileSync = childProcess.execFileSync;
@@ -29,6 +30,10 @@ const randomUUID = crypto.randomUUID
     };
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const JAMI_DBUS_SERVICE = "cx.ring.Ring";
+const JAMI_DBUS_OBJECT_PATH = "/cx/ring/Ring/ConfigurationManager";
+const JAMI_DBUS_INTERFACE = "cx.ring.Ring.ConfigurationManager";
+const JAMI_DBUS_LOAD_TIMEOUT_MS = 12000;
 
 function defaultAgentBinary() {
   if (process.env.CTO_AGENT_BINARY) return process.env.CTO_AGENT_BINARY;
@@ -82,6 +87,236 @@ function toBool(value) {
     .trim()
     .toLowerCase();
   return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function dbusEnvFileCandidates() {
+  const runtimeDir =
+    process.env.XDG_RUNTIME_DIR ||
+    (typeof process.getuid === "function" ? path.join("/run/user", String(process.getuid())) : "");
+  const candidates = [];
+  if (process.env.CTO_JAMI_DBUS_ENV_FILE) candidates.push(process.env.CTO_JAMI_DBUS_ENV_FILE);
+  if (runtimeDir) candidates.push(path.join(runtimeDir, "cto-jami-dbus.env"));
+  candidates.push("/tmp/cto-jami-dbus.env");
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function loadJamiDbusEnvironment() {
+  for (const candidate of dbusEnvFileCandidates()) {
+    if (!fs.existsSync(candidate)) continue;
+    const raw = fs.readFileSync(candidate, "utf8");
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("export ")) continue;
+      const match = trimmed.match(/^([A-Z0-9_]+)=(.*?);?$/);
+      if (!match) continue;
+      const key = match[1];
+      let value = match[2].trim();
+      if (
+        (value.startsWith("'") && value.endsWith("'")) ||
+        (value.startsWith('"') && value.endsWith('"'))
+      ) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+    process.env.CTO_JAMI_DBUS_ENV_FILE = candidate;
+    return candidate;
+  }
+  return null;
+}
+
+function decodeDbusString(value) {
+  return String(value)
+    .replace(/\\'/g, "'")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+class GVariantParser {
+  constructor(input) {
+    this.input = String(input || "");
+    this.index = 0;
+  }
+
+  parse() {
+    const value = this.parseValue();
+    this.skipWhitespace();
+    if (this.peek() === ",") this.index += 1;
+    this.skipWhitespace();
+    return value;
+  }
+
+  peek() {
+    return this.input[this.index];
+  }
+
+  skipWhitespace() {
+    while (this.index < this.input.length && /\s/.test(this.input[this.index])) {
+      this.index += 1;
+    }
+  }
+
+  parseValue() {
+    this.skipWhitespace();
+    while (this.peek() === "@") {
+      this.index += 1;
+      while (this.index < this.input.length && !/\s/.test(this.input[this.index])) this.index += 1;
+      this.skipWhitespace();
+    }
+    if (this.input.startsWith("uint32", this.index)) return this.parsePrefixedNumber("uint32");
+    if (this.input.startsWith("int32", this.index)) return this.parsePrefixedNumber("int32");
+    if (this.input.startsWith("uint64", this.index)) return this.parsePrefixedNumber("uint64");
+    if (this.input.startsWith("int64", this.index)) return this.parsePrefixedNumber("int64");
+    if (this.input.startsWith("true", this.index)) {
+      this.index += 4;
+      return true;
+    }
+    if (this.input.startsWith("false", this.index)) {
+      this.index += 5;
+      return false;
+    }
+    const char = this.peek();
+    if (char === "'") return this.parseString();
+    if (char === "[") return this.parseArray();
+    if (char === "{") return this.parseObject();
+    if (char === "(") return this.parseTuple();
+    return this.parseBareToken();
+  }
+
+  parsePrefixedNumber(prefix) {
+    this.index += prefix.length;
+    this.skipWhitespace();
+    return this.parseBareToken();
+  }
+
+  parseString() {
+    this.index += 1;
+    let value = "";
+    while (this.index < this.input.length) {
+      const char = this.input[this.index];
+      if (char === "\\") {
+        value += this.input.slice(this.index, this.index + 2);
+        this.index += 2;
+        continue;
+      }
+      if (char === "'") {
+        this.index += 1;
+        break;
+      }
+      value += char;
+      this.index += 1;
+    }
+    return decodeDbusString(value);
+  }
+
+  parseArray() {
+    this.index += 1;
+    const values = [];
+    while (this.index < this.input.length) {
+      this.skipWhitespace();
+      if (this.peek() === "]") {
+        this.index += 1;
+        break;
+      }
+      values.push(this.parseValue());
+      this.skipWhitespace();
+      if (this.peek() === ",") this.index += 1;
+    }
+    return values;
+  }
+
+  parseObject() {
+    this.index += 1;
+    const output = {};
+    while (this.index < this.input.length) {
+      this.skipWhitespace();
+      if (this.peek() === "}") {
+        this.index += 1;
+        break;
+      }
+      const key = this.parseValue();
+      this.skipWhitespace();
+      if (this.peek() === ":") this.index += 1;
+      const value = this.parseValue();
+      output[String(key)] = value;
+      this.skipWhitespace();
+      if (this.peek() === ",") this.index += 1;
+    }
+    return output;
+  }
+
+  parseTuple() {
+    this.index += 1;
+    const values = [];
+    while (this.index < this.input.length) {
+      this.skipWhitespace();
+      if (this.peek() === ")") {
+        this.index += 1;
+        break;
+      }
+      values.push(this.parseValue());
+      this.skipWhitespace();
+      if (this.peek() === ",") this.index += 1;
+    }
+    return values;
+  }
+
+  parseBareToken() {
+    const start = this.index;
+    while (this.index < this.input.length && !/[\s,\]\}\)]/.test(this.input[this.index])) {
+      this.index += 1;
+    }
+    const token = this.input.slice(start, this.index);
+    if (/^-?\d+$/.test(token)) return Number.parseInt(token, 10);
+    return token;
+  }
+}
+
+function parseGVariant(text) {
+  return new GVariantParser(text).parse();
+}
+
+function parseTupleOutput(text) {
+  const parsed = parseGVariant(String(text || "").trim());
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function runGdbusCall(method, args = []) {
+  const result = childProcess.spawnSync(
+    "gdbus",
+    [
+      "call",
+      "--session",
+      "--dest",
+      JAMI_DBUS_SERVICE,
+      "--object-path",
+      JAMI_DBUS_OBJECT_PATH,
+      "--method",
+      `${JAMI_DBUS_INTERFACE}.${method}`,
+      ...args.map((value) => String(value)),
+    ],
+    {
+      encoding: "utf8",
+      env: process.env,
+    }
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error((result.stderr || result.stdout || `gdbus ${method} failed`).trim());
+  }
+  return String(result.stdout || "").trim();
+}
+
+function uniqueNonEmpty(values) {
+  return Array.from(new Set(values.map((value) => normalizeText(value)).filter(Boolean)));
+}
+
+function normalizeJamiTimestamp(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return nowIso();
+  if (numeric > 1e12) return new Date(numeric).toISOString();
+  if (numeric > 1e9) return new Date(numeric * 1000).toISOString();
+  return new Date(numeric).toISOString();
 }
 
 function runSql(dbPath, sql, { json = false } = {}) {
@@ -362,6 +597,22 @@ function emitAgentInterrupt(options, speaker, summary) {
   return String(output || "").trim();
 }
 
+function jamiInterruptSummary(inbound) {
+  const speaker = inbound.senderAddress
+    ? `${inbound.senderDisplay} <${inbound.senderAddress}>`
+    : inbound.senderDisplay;
+  return {
+    speaker: speaker || "unknown sender",
+    summary: [
+      `Jami-Nachricht eingegangen von ${speaker || "unknown sender"}.`,
+      inbound.subject ? `Konversation: ${inbound.subject}` : "",
+      inbound.preview ? `Vorschau: ${inbound.preview}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
 async function ensureDir(dirPath) {
   await mkdir(dirPath, { recursive: true });
 }
@@ -372,6 +623,44 @@ async function writeRawPayload(rawDir, remoteId, payload) {
   const fullPath = join(rawDir, `${safeId}.json`);
   await writeFile(fullPath, `${JSON.stringify(payload, null, 2)}\n`);
   return fullPath;
+}
+
+async function storeInboundMessage(options, inbound, rawPayload) {
+  const alreadyKnown = messageExists(options.db, inbound.messageKey);
+  const observedAt = nowIso();
+  const rawPayloadRef = await writeRawPayload(options.rawDir, inbound.remoteId, rawPayload);
+  upsertMessage(options.db, {
+    messageKey: inbound.messageKey,
+    channel: DEFAULTS.channel,
+    accountKey: inbound.accountKey,
+    threadKey: inbound.threadKey,
+    remoteId: inbound.remoteId,
+    direction: "inbound",
+    folderHint: "INBOX",
+    senderDisplay: inbound.senderDisplay,
+    senderAddress: inbound.senderAddress,
+    recipientAddressesJson: JSON.stringify(inbound.recipients),
+    ccAddressesJson: JSON.stringify([]),
+    bccAddressesJson: JSON.stringify([]),
+    subject: inbound.subject,
+    preview: inbound.preview,
+    bodyText: inbound.bodyText,
+    bodyHtml: "",
+    rawPayloadRef,
+    trustLevel: options.trustLevel,
+    status: "received",
+    seen: inbound.seen,
+    hasAttachments: inbound.hasAttachments,
+    externalCreatedAt: inbound.externalCreatedAt,
+    observedAt,
+    metadataJson: inbound.metadataJson,
+  });
+  refreshThread(options.db, inbound.threadKey);
+  if (!alreadyKnown && toBool(options.emitInterrupts)) {
+    const notice = jamiInterruptSummary(inbound);
+    emitAgentInterrupt(options, notice.speaker, notice.summary);
+  }
+  return { alreadyKnown };
 }
 
 function normalizeInboundEntry(options, entry, sourceName, index) {
@@ -419,6 +708,321 @@ function normalizeInboundEntry(options, entry, sourceName, index) {
       rawEntry: entry,
     }),
   };
+}
+
+function getConversationRequests(accountId) {
+  const parsed = parseTupleOutput(runGdbusCall("getConversationRequests", [accountId]));
+  return Array.isArray(parsed[0]) ? parsed[0] : [];
+}
+
+function getTrustRequests(accountId) {
+  const parsed = parseTupleOutput(runGdbusCall("getTrustRequests", [accountId]));
+  return Array.isArray(parsed[0]) ? parsed[0] : [];
+}
+
+function getConversations(accountId) {
+  const parsed = parseTupleOutput(runGdbusCall("getConversations", [accountId]));
+  return Array.isArray(parsed[0]) ? parsed[0].map((value) => normalizeText(value)).filter(Boolean) : [];
+}
+
+function acceptPendingJamiRequests(accountId) {
+  const conversationRequests = getConversationRequests(accountId);
+  const trustRequests = getTrustRequests(accountId);
+  for (const request of trustRequests) {
+    const from = normalizeText(request.from);
+    if (!from) continue;
+    try {
+      runGdbusCall("acceptTrustRequest", [accountId, from]);
+    } catch {
+      // Already accepted or no longer pending.
+    }
+  }
+  for (const request of conversationRequests) {
+    const conversationId = normalizeText(request.id || request.conversationId);
+    if (!conversationId) continue;
+    try {
+      runGdbusCall("acceptConversationRequest", [accountId, conversationId]);
+    } catch {
+      // Already accepted or no longer pending.
+    }
+  }
+  return {
+    trustRequests,
+    conversationRequests,
+  };
+}
+
+function extractSwarmLoadedPayload(line) {
+  const match = String(line || "").trim().match(/\.swarmLoaded\s+(.*)$/);
+  if (!match) return null;
+  const parsed = parseGVariant(match[1]);
+  if (!Array.isArray(parsed) || parsed.length < 4) return null;
+  return {
+    loadId: Number(parsed[0]),
+    accountId: normalizeText(parsed[1]),
+    conversationId: normalizeText(parsed[2]),
+    messages: Array.isArray(parsed[3]) ? parsed[3] : [],
+  };
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function loadConversationMessages(accountId, conversationIds, limit) {
+  const uniqueConversationIds = uniqueNonEmpty(conversationIds);
+  if (!uniqueConversationIds.length) return [];
+
+  const monitor = childProcess.spawn(
+    "gdbus",
+    ["monitor", "--session", "--dest", JAMI_DBUS_SERVICE, "--object-path", JAMI_DBUS_OBJECT_PATH],
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        COLUMNS: "100000",
+      },
+    }
+  );
+
+  const expectedLoadIds = new Map();
+  const loadedByConversation = new Map();
+  const ready = new Promise((resolve) => {
+    let resolved = false;
+    const markReady = () => {
+      if (resolved) return;
+      resolved = true;
+      resolve();
+    };
+    const rl = readline.createInterface({ input: monitor.stdout });
+    rl.on("line", (line) => {
+      const trimmed = String(line || "").trim();
+      if (
+        trimmed.startsWith("Monitoring signals on object") ||
+        trimmed.startsWith("The name ")
+      ) {
+        markReady();
+      }
+      const payload = extractSwarmLoadedPayload(line);
+      if (!payload) return;
+      if (payload.accountId !== normalizeText(accountId)) return;
+      if (!expectedLoadIds.has(payload.loadId)) return;
+      loadedByConversation.set(payload.conversationId, payload.messages);
+    });
+    setTimeout(markReady, 800).unref();
+  });
+
+  await ready;
+
+  for (const conversationId of uniqueConversationIds) {
+    try {
+      const parsed = parseTupleOutput(runGdbusCall("loadConversation", [accountId, conversationId, "", limit]));
+      const loadId = Number(parsed[0]);
+      if (Number.isFinite(loadId)) {
+        expectedLoadIds.set(loadId, conversationId);
+      }
+    } catch {
+      // Skip broken conversations and keep syncing the rest.
+    }
+  }
+
+  const deadline = Date.now() + JAMI_DBUS_LOAD_TIMEOUT_MS;
+  while (Date.now() < deadline && loadedByConversation.size < expectedLoadIds.size) {
+    await sleep(120);
+  }
+
+  monitor.kill("SIGTERM");
+  await sleep(80);
+
+  return uniqueConversationIds.map((conversationId) => ({
+    conversationId,
+    messages: loadedByConversation.get(conversationId) || [],
+  }));
+}
+
+function normalizeJamiDbusMessage(options, conversationId, tuple, index) {
+  if (!Array.isArray(tuple) || tuple.length < 4) return null;
+  const accountKey = accountKeyFromJami(options.accountId);
+  const remoteId = normalizeText(tuple[0] || `jami-${conversationId}-${index}`);
+  const mimeType = normalizeText(tuple[1] || "");
+  const metadata = tuple[3] && typeof tuple[3] === "object" && !Array.isArray(tuple[3]) ? tuple[3] : {};
+  const senderAddress = normalizeAddress(metadata.author || metadata.uri || "");
+  if (normalizeText(senderAddress).toLowerCase() === normalizeText(options.accountId).toLowerCase()) {
+    return null;
+  }
+  if (!senderAddress) return null;
+
+  let bodyText = normalizeText(metadata.body || "");
+  if (!bodyText && mimeType === "initial") {
+    bodyText = `Neue Jami-Konversation von ${senderAddress}.`;
+  }
+  if (!bodyText && mimeType !== "initial") {
+    return null;
+  }
+
+  return {
+    accountKey,
+    threadKey: `${accountKey}::${conversationId}`,
+    messageKey: messageKeyFromRemote(accountKey, "INBOX", remoteId),
+    remoteId,
+    senderDisplay: senderAddress,
+    senderAddress,
+    recipients: [normalizeAddress(options.accountId)].filter(Boolean),
+    subject: normalizeText(metadata.subject || `Jami ${conversationId.slice(0, 8)}`),
+    bodyText,
+    preview: previewText(bodyText),
+    seen: 0,
+    hasAttachments: 0,
+    externalCreatedAt: normalizeJamiTimestamp(metadata.timestamp),
+    metadataJson: JSON.stringify({
+      adapter: "jami-dbus",
+      conversationId,
+      mimeType,
+      rawEntry: tuple,
+    }),
+  };
+}
+
+function jamiStateRoot() {
+  if (process.env.CTO_JAMI_STATE_DIR) return resolve(process.env.CTO_JAMI_STATE_DIR);
+  return resolve(process.env.HOME || "~", ".local/share/jami");
+}
+
+function gitText(cwd, args) {
+  return execFileSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function parseGitLogLine(line) {
+  const parts = String(line || "").split("\u001f");
+  if (parts.length < 4) return null;
+  return {
+    remoteId: normalizeText(parts[0]),
+    timestamp: normalizeText(parts[1]),
+    authorDevice: normalizeText(parts[2]),
+    subject: normalizeText(parts.slice(3).join("\u001f")),
+  };
+}
+
+function conversationRepoRoot(accountId, conversationId) {
+  return join(jamiStateRoot(), accountId, "conversations", conversationId);
+}
+
+function listConversationRepos(accountId, preferredConversationIds) {
+  const preferred = uniqueNonEmpty(preferredConversationIds);
+  if (preferred.length) {
+    return preferred
+      .map((conversationId) => ({
+        conversationId,
+        repoPath: conversationRepoRoot(accountId, conversationId),
+      }))
+      .filter((entry) => fs.existsSync(join(entry.repoPath, ".git")));
+  }
+
+  const root = join(jamiStateRoot(), accountId, "conversations");
+  if (!fs.existsSync(root)) return [];
+  return fs
+    .readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && fs.existsSync(join(root, entry.name, ".git")))
+    .map((entry) => ({
+      conversationId: entry.name,
+      repoPath: join(root, entry.name),
+    }));
+}
+
+function repoParticipantHints(repoPath) {
+  const adminDir = join(repoPath, "admins");
+  if (!fs.existsSync(adminDir)) return [];
+  return fs
+    .readdirSync(adminDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && extname(entry.name) === ".crt")
+    .map((entry) => normalizeText(entry.name.slice(0, -4)))
+    .filter(Boolean);
+}
+
+function normalizeJamiGitCommit(options, conversationId, repoPath, entry, index) {
+  if (!entry || !entry.remoteId) return null;
+  let payload = null;
+  try {
+    payload = entry.subject ? JSON.parse(entry.subject) : null;
+  } catch {
+    payload = null;
+  }
+  if (!payload || typeof payload !== "object") return null;
+
+  const payloadType = normalizeText(payload.type || "");
+  const actionType = normalizeText(payload.action || "");
+  if (payloadType !== "text/plain") return null;
+  if (!normalizeText(payload.body || "")) return null;
+
+  const accountKey = accountKeyFromJami(options.accountId);
+  const repoParticipants = repoParticipantHints(repoPath);
+  const senderAddress = normalizeAddress(
+    payload.author || payload.uri || payload.from || repoParticipants[0] || entry.authorDevice || ""
+  );
+  if (!senderAddress) return null;
+
+  const bodyText = normalizeText(payload.body);
+  const externalCreatedAt = normalizeJamiTimestamp(entry.timestamp);
+  return {
+    accountKey,
+    threadKey: `${accountKey}::${conversationId}`,
+    messageKey: messageKeyFromRemote(accountKey, "INBOX", entry.remoteId),
+    remoteId: entry.remoteId,
+    senderDisplay: senderAddress,
+    senderAddress,
+    recipients: [normalizeAddress(options.accountId)].filter(Boolean),
+    subject: normalizeText(payload.subject || `Jami ${conversationId.slice(0, 8)}`),
+    bodyText,
+    preview: previewText(bodyText),
+    seen: 0,
+    hasAttachments: 0,
+    externalCreatedAt,
+    metadataJson: JSON.stringify({
+      adapter: "jami-git",
+      conversationId,
+      payloadType,
+      actionType,
+      authorDevice: entry.authorDevice,
+      rawEntry: entry,
+      rawPayload: payload,
+    }),
+  };
+}
+
+function loadConversationMessagesFromGit(options, conversationIds, limit) {
+  const repos = listConversationRepos(options.accountId, conversationIds);
+  const loaded = [];
+  for (const repo of repos) {
+    let output = "";
+    try {
+      output = gitText(repo.repoPath, [
+        "log",
+        "--reverse",
+        `-n${Math.max(limit, 1)}`,
+        "--format=%H%x1f%ct%x1f%an%x1f%s",
+        "--all",
+      ]);
+    } catch {
+      loaded.push({ conversationId: repo.conversationId, messages: [] });
+      continue;
+    }
+    const messages = output
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map(parseGitLogLine)
+      .filter(Boolean);
+    loaded.push({
+      conversationId: repo.conversationId,
+      repoPath: repo.repoPath,
+      messages,
+    });
+  }
+  return loaded;
 }
 
 async function archiveSourceFile(sourcePath, archiveDir) {
@@ -593,6 +1197,7 @@ async function syncJami(options) {
   await ensureSchema(options.db, options.schema);
   await ensureDir(options.inboxDir);
   await ensureDir(options.archiveDir);
+  await ensureDir(options.rawDir);
 
   const accountKey = accountKeyFromJami(options.accountId);
   const startedAt = nowIso();
@@ -612,6 +1217,62 @@ async function syncJami(options) {
   });
 
   try {
+    loadJamiDbusEnvironment();
+    let conversationIds = [];
+    if (process.env.DBUS_SESSION_BUS_ADDRESS) {
+      const accepted = acceptPendingJamiRequests(options.accountId);
+      conversationIds = uniqueNonEmpty([
+        ...accepted.conversationRequests.map((request) => request.id || request.conversationId),
+        ...accepted.trustRequests.map((request) => request.conversationId),
+        ...getConversations(options.accountId),
+      ]);
+      const loadedConversations = await loadConversationMessages(
+        options.accountId,
+        conversationIds,
+        options.limit
+      );
+      for (const loaded of loadedConversations) {
+        for (let index = 0; index < loaded.messages.length; index += 1) {
+          const inbound = normalizeJamiDbusMessage(
+            options,
+            loaded.conversationId,
+            loaded.messages[index],
+            index
+          );
+          if (!inbound) continue;
+          await storeInboundMessage(options, inbound, {
+            source: "jami-dbus",
+            conversationId: loaded.conversationId,
+            rawEntry: loaded.messages[index],
+          });
+          fetchedCount += 1;
+          storedCount += 1;
+        }
+      }
+    }
+
+    const gitConversations = loadConversationMessagesFromGit(options, conversationIds, options.limit);
+    for (const loaded of gitConversations) {
+      for (let index = 0; index < loaded.messages.length; index += 1) {
+        const inbound = normalizeJamiGitCommit(
+          options,
+          loaded.conversationId,
+          loaded.repoPath,
+          loaded.messages[index],
+          index
+        );
+        if (!inbound) continue;
+        const stored = await storeInboundMessage(options, inbound, {
+          source: "jami-git",
+          conversationId: loaded.conversationId,
+          repoPath: loaded.repoPath,
+          rawEntry: loaded.messages[index],
+        });
+        fetchedCount += 1;
+        if (!stored.alreadyKnown) storedCount += 1;
+      }
+    }
+
     const sourceFiles = (await readdir(options.inboxDir))
       .filter((name) => [".json", ".jsonl"].includes(extname(name).toLowerCase()))
       .sort()
@@ -623,49 +1284,7 @@ async function syncJami(options) {
       fetchedCount += entries.length;
       for (let index = 0; index < entries.length; index += 1) {
         const inbound = normalizeInboundEntry(options, entries[index], name, index);
-        const alreadyKnown = messageExists(options.db, inbound.messageKey);
-        const observedAt = nowIso();
-        const rawPayloadRef = await writeRawPayload(options.rawDir, inbound.remoteId, entries[index]);
-        upsertMessage(options.db, {
-          messageKey: inbound.messageKey,
-          channel: DEFAULTS.channel,
-          accountKey: inbound.accountKey,
-          threadKey: inbound.threadKey,
-          remoteId: inbound.remoteId,
-          direction: "inbound",
-          folderHint: "INBOX",
-          senderDisplay: inbound.senderDisplay,
-          senderAddress: inbound.senderAddress,
-          recipientAddressesJson: JSON.stringify(inbound.recipients),
-          ccAddressesJson: JSON.stringify([]),
-          bccAddressesJson: JSON.stringify([]),
-          subject: inbound.subject,
-          preview: inbound.preview,
-          bodyText: inbound.bodyText,
-          bodyHtml: "",
-          rawPayloadRef,
-          trustLevel: options.trustLevel,
-          status: "received",
-          seen: inbound.seen,
-          hasAttachments: inbound.hasAttachments,
-          externalCreatedAt: inbound.externalCreatedAt,
-          observedAt,
-          metadataJson: inbound.metadataJson,
-        });
-        refreshThread(options.db, inbound.threadKey);
-        if (!alreadyKnown && toBool(options.emitInterrupts)) {
-          const speaker = inbound.senderAddress
-            ? `${inbound.senderDisplay} <${inbound.senderAddress}>`
-            : inbound.senderDisplay;
-          const summary = [
-            `Jami-Nachricht eingegangen von ${speaker || "unknown sender"}.`,
-            inbound.subject ? `Konversation: ${inbound.subject}` : "",
-            inbound.preview ? `Vorschau: ${inbound.preview}` : "",
-          ]
-            .filter(Boolean)
-            .join("\n");
-          emitAgentInterrupt(options, speaker || "unknown sender", summary);
-        }
+        await storeInboundMessage(options, inbound, entries[index]);
         storedCount += 1;
       }
       await archiveSourceFile(sourcePath, options.archiveDir);
@@ -694,7 +1313,7 @@ async function syncJami(options) {
       fetchedCount,
       storedCount,
       errorText: "",
-      metadataJson: JSON.stringify({ adapter: "js-jami-file-bridge" }),
+      metadataJson: JSON.stringify({ adapter: "js-jami-dbus-and-file-bridge" }),
     });
     return {
       ok: true,
@@ -718,7 +1337,7 @@ async function syncJami(options) {
       fetchedCount,
       storedCount,
       errorText: String((error && error.message) || error),
-      metadataJson: JSON.stringify({ adapter: "js-jami-file-bridge" }),
+      metadataJson: JSON.stringify({ adapter: "js-jami-dbus-and-file-bridge" }),
     });
     throw error;
   }

@@ -815,3 +815,15 @@ That closes the false gap between “Jami installed” and “the owner can actu
 The staged max-context backoff for kleinhirn OOM/runtime failures had drifted into the installer path only, while the live runtime repair path merely restarted the service or fell through to a coarse baseline downgrade.
 That regression left the running agent unhealthy on hosts where the chosen `max_seq_len` was too ambitious for the current GPU layout.
 The runtime self-repair path and watchdog bridge now restore the same principle during normal operation: if kleinhirn fails with OOM/CUDA/runtime crash signatures, the agent reduces `CTO_AGENT_KLEINHIRN_MAX_SEQ_LEN` in steps and retries until READY returns or the minimum floor is reached.
+
+## 2026-03-22 - Jami TUI Switched From Device-Link Tokens To Agent Contact QR
+
+The first Jami QR rollout aimed at device linking through `jami-auth://` tokens, but real phone-side testing showed that this was the wrong interaction for the owner goal and produced a brittle, camera-hostile result in the terminal.
+The attach TUI now prepares or reuses a dedicated local Jami agent account, persists its `CTO_JAMI_ACCOUNT_ID`, and renders the shareable Jami contact identity itself as the QR payload instead of an import token for another device.
+That correction keeps the product honest: the QR in the TUI is now for adding the CTO-Agent as a contact in Jami, not for trying to graft the phone onto the host account as another device.
+
+## 2026-03-22 - Installer Now Verifies Live Jami Runtime Instead Of Blindly Restarting It
+
+The next correction came from hard host testing: the installer could provision Jami packages and systemd units, but still leave behind a stale DBus env file or a dead daemon/runtime combination that looked installed while replies could not actually flow.
+The Linux install path now persists the Jami DBus env path, couples the control plane to the Jami daemon unit, cleans stale Jami DBus runtime state when the daemon exits, and performs a post-install health check that waits for a reachable `cx.ring.Ring` DBus service instead of treating a blind service restart as success.
+That keeps the install story honest: a fresh Jami-enabled setup must now end with a live daemon/bus surface the agent can really use, not just wrapper scripts and optimistic environment files.

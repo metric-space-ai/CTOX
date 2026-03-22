@@ -88,8 +88,8 @@ EOF
 cat > "$SERVICE_DIR/cto-agent.service" <<EOF
 [Unit]
 Description=CTO-Agent Control Plane
-After=cto-kleinhirn.service
-Wants=cto-kleinhirn.service
+After=cto-kleinhirn.service cto-jami-daemon.service
+Wants=cto-kleinhirn.service cto-jami-daemon.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -167,6 +167,14 @@ if [ -f "\$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   . "\$ENV_FILE"
   set +a
+fi
+DBUS_ENV_FILE="\${CTO_JAMI_DBUS_ENV_FILE:-\${XDG_RUNTIME_DIR:-/tmp}/cto-jami-dbus.env}"
+if [ -f "\$DBUS_ENV_FILE" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "\$DBUS_ENV_FILE"
+  set +a
+  export CTO_JAMI_DBUS_ENV_FILE="\$DBUS_ENV_FILE"
 fi
 exec node "\$ROOT/scripts/communication_jami_cli.mjs" "\$@"
 EOF

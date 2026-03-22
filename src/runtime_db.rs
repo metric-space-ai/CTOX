@@ -3916,6 +3916,43 @@ fn owner_interrupt_demands_real_host_change(task: &TaskRecord) -> bool {
             "localectl",
             "setxkbmap",
             "xkb",
+            "create the file",
+            "write the file",
+            "edit the file",
+            "modify the file",
+            "update the file",
+            "delete the file",
+            "touch ",
+            "mkdir ",
+            "erstelle die datei",
+            "schreibe die datei",
+            "bearbeite die datei",
+            "aendere die datei",
+            "ändere die datei",
+            "aktualisiere die datei",
+            "loesche die datei",
+            "lösche die datei",
+            "erzeuge die datei",
+            " file ",
+            " datei ",
+            " folder ",
+            " ordner ",
+            " directory ",
+            " verzeichnis ",
+            " path ",
+            " pfad ",
+            ".txt",
+            ".md",
+            ".json",
+            ".toml",
+            ".yaml",
+            ".yml",
+            ".cpp",
+            ".hpp",
+            ".rs",
+            "runtime/",
+            "src/",
+            "/home/",
         ],
     )
 }
@@ -9235,6 +9272,54 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             Some("Changed keyboard layout to German with setxkbmap de and verified layout=de."),
         );
         assert!(failure.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn owner_interrupt_file_write_without_execution_evidence_fails_completion_gate()
+    -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("test env lock poisoned");
+        let root = unique_test_root("owner_interrupt_file_gate_fail");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+
+        let task = TaskRecord {
+            id: 503,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "bios".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Erzeuge die Datei runtime/worker_probe.txt".to_string(),
+            detail: "Create the file /home/metricspace/cto-agent/runtime/worker_probe.txt containing exactly OK.".to_string(),
+            trust_level: "owner_trust".to_string(),
+            priority_score: 1000,
+            status: "queued".to_string(),
+            run_count: 1,
+            last_checkpoint_summary: Some(
+                "No prior exec session or evidence found for task #503. Awaiting user command to proceed.".to_string(),
+            ),
+            last_checkpoint_at: Some(now_iso()),
+            last_output: Some("File created at /home/metricspace/cto-agent/runtime/worker_probe.txt.".to_string()),
+        };
+
+        let failure = task_completion_gate_failure(
+            &paths,
+            &task,
+            Some("done"),
+            Some("File created at /home/metricspace/cto-agent/runtime/worker_probe.txt."),
+        )
+        .expect("file-writing owner interrupt should fail gate");
+        assert!(failure.contains("real host mutation"));
 
         std::fs::remove_dir_all(&root).ok();
         Ok(())

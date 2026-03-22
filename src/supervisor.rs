@@ -17,6 +17,7 @@ use crate::browser_engine::run_browser_action;
 use crate::browser_subworkers::advance_browser_subworkers;
 use crate::command_exec::read_session;
 use crate::command_exec::snapshot_session;
+use crate::command_exec::snapshot_sessions;
 use crate::command_exec::start_session;
 use crate::command_exec::terminate_session;
 use crate::command_exec::write_session;
@@ -2229,7 +2230,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                     }
                                 }
                             }
-                            let used_machine_path = result.exec_session_directive.is_some()
+                            let mut used_machine_path = result.exec_session_directive.is_some()
                                 || result.exec_directive.is_some()
                                 || result.browser_directive.is_some();
                             if !used_machine_path
@@ -2261,6 +2262,38 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                     task_status = "continue".to_string();
                                     normalized_next_mode =
                                         continue_next_mode_for_task(&task).to_string();
+                                }
+                            }
+                            if should_auto_kickstart_workspace_exec_session(
+                                &loop_paths,
+                                &task,
+                                &task_status,
+                                &normalized_next_mode,
+                                used_machine_path,
+                            ) {
+                                match auto_kickstart_workspace_exec_session(
+                                    &loop_paths,
+                                    &task,
+                                    turn_id,
+                                ) {
+                                    Ok((auto_summary, auto_detail)) => {
+                                        checkpoint_summary = auto_summary;
+                                        checkpoint_detail = format!(
+                                            "{}\n\nKernel workspace auto-recovery:\n{}",
+                                            checkpoint_detail, auto_detail
+                                        );
+                                        output_text.clear();
+                                        task_status = "continue".to_string();
+                                        normalized_next_mode =
+                                            continue_next_mode_for_task(&task).to_string();
+                                        used_machine_path = true;
+                                    }
+                                    Err(err) => {
+                                        checkpoint_detail = format!(
+                                            "{}\n\nKernel workspace auto-recovery failed:\n{}",
+                                            checkpoint_detail, err
+                                        );
+                                    }
                                 }
                             }
                             if let Err(err) = persist_learning_updates(
@@ -3342,9 +3375,15 @@ fn assess_task_stuck_risk(
     } else {
         0
     };
+    let has_visible_exec_session = task_has_visible_exec_session(task.id);
     let workspace_non_machine_owner_stall = owner_interrupt_task
         && repeated_same_summary
-        && repeated_workspace_non_machine_owner_summary(task, checkpoint_summary, checkpoint_detail);
+        && repeated_workspace_non_machine_owner_summary(
+            task,
+            checkpoint_summary,
+            checkpoint_detail,
+            has_visible_exec_session,
+        );
     let repeated_same_summary_escalates = repeated_same_summary
         && (!substantive_sticky_task || repeated_same_summary_streak >= 2)
         && !workspace_non_machine_owner_stall;
@@ -3465,6 +3504,7 @@ fn repeated_workspace_non_machine_owner_summary(
     task: &crate::runtime_db::TaskRecord,
     checkpoint_summary: &str,
     checkpoint_detail: &str,
+    has_visible_exec_session: bool,
 ) -> bool {
     let grounded_summary = grounded_workspace_non_machine_summary();
     let last_summary = task.last_checkpoint_summary.as_deref().unwrap_or_default();
@@ -3474,6 +3514,7 @@ fn repeated_workspace_non_machine_owner_summary(
         && last_summary.trim() == grounded_summary.trim()
         && detail_lower
             .contains("workspace execution contract note: no exec/browser machine path ran")
+        && !has_visible_exec_session
 }
 
 fn find_interrupt_preemption_candidate(
@@ -5737,6 +5778,43 @@ fn owner_interrupt_demands_verified_host_action(task: &crate::runtime_db::TaskRe
         "localectl",
         "setxkbmap",
         "xkb",
+        "create the file",
+        "write the file",
+        "edit the file",
+        "modify the file",
+        "update the file",
+        "delete the file",
+        "touch ",
+        "mkdir ",
+        "erstelle die datei",
+        "schreibe die datei",
+        "bearbeite die datei",
+        "aendere die datei",
+        "ändere die datei",
+        "aktualisiere die datei",
+        "loesche die datei",
+        "lösche die datei",
+        "erzeuge die datei",
+        " file ",
+        " datei ",
+        " folder ",
+        " ordner ",
+        " directory ",
+        " verzeichnis ",
+        " path ",
+        " pfad ",
+        ".txt",
+        ".md",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".cpp",
+        ".hpp",
+        ".rs",
+        "runtime/",
+        "src/",
+        "/home/",
     ]
     .iter()
     .any(|needle| lowered.contains(needle))
@@ -6127,6 +6205,57 @@ fn grounded_workspace_non_machine_output_text(model_output: &str) -> String {
     message
 }
 
+fn auto_workspace_exec_session_id(task_id: i64) -> String {
+    format!("task-{task_id}-auto-workspace")
+}
+
+fn task_has_visible_exec_session(task_id: i64) -> bool {
+    let task_marker = format!("task-{task_id}");
+    snapshot_sessions()
+        .unwrap_or_default()
+        .into_iter()
+        .any(|entry| entry.status == "active" && entry.session_id.contains(&task_marker))
+}
+
+fn should_auto_kickstart_workspace_exec_session(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+    task_status: &str,
+    next_mode: &str,
+    used_machine_path: bool,
+) -> bool {
+    task.task_kind == "owner_interrupt"
+        && task_status == "continue"
+        && mode_keeps_task_active(next_mode)
+        && !used_machine_path
+        && workspace_execution_contract_active(paths, task.id)
+        && !crate::context_controller::owner_interrupt_is_status_question(task)
+        && !task_has_visible_exec_session(task.id)
+}
+
+fn auto_kickstart_workspace_exec_session(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+    turn_id: i64,
+) -> anyhow::Result<(String, String)> {
+    let directive = ExecSessionDirective {
+        action: "start".to_string(),
+        session_id: Some(auto_workspace_exec_session_id(task.id)),
+        command: vec!["/bin/bash".to_string(), "-l".to_string()],
+        input: None,
+        workdir: None,
+        timeout_ms: None,
+        tty: true,
+        close_stdin: false,
+        rows: Some(24),
+        cols: Some(120),
+        justification: Some(
+            "Kernel auto-started a task-bound workspace shell because the owner task produced planning-only output without any exec/browser machine path.".to_string(),
+        ),
+    };
+    apply_exec_session_directive(paths, task, turn_id, &directive)
+}
+
 fn apply_exec_session_directive(
     paths: &Paths,
     task: &crate::runtime_db::TaskRecord,
@@ -6146,12 +6275,13 @@ fn apply_exec_session_directive(
             let cwd = resolve_exec_session_cwd(paths, directive.workdir.as_deref());
             let normalized_command = normalize_exec_session_command(&directive.command);
             if let Some(reused) = reuse_existing_exec_session(
+                paths,
                 &session_id,
                 snapshot_session(&session_id)?,
                 &normalized_command,
                 &cwd,
                 directive.justification.as_deref(),
-            ) {
+            )? {
                 return Ok(reused);
             }
             let mut effective_tty = directive.tty;
@@ -6220,17 +6350,20 @@ fn apply_exec_session_directive(
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
                 .context("execSessionAction=write requires execSessionId")?;
-            if directive.input.is_none() && !directive.close_stdin {
+            let write_input = directive
+                .input
+                .clone()
+                .or_else(|| command_to_exec_session_input(&directive.command));
+            if write_input.is_none() && !directive.close_stdin {
                 anyhow::bail!(
-                    "execSessionAction=write requires execSessionInput or execSessionCloseStdin=true"
+                    "execSessionAction=write requires execSessionInput, execSessionCommand, or execSessionCloseStdin=true"
                 );
             }
             let ack = write_session(
                 paths,
                 CommandExecWriteParams {
                     process_id: session_id.to_string(),
-                    delta_base64: directive
-                        .input
+                    delta_base64: write_input
                         .as_ref()
                         .map(|value| STANDARD.encode(value.as_bytes())),
                     close_stdin: directive.close_stdin,
@@ -6240,14 +6373,11 @@ fn apply_exec_session_directive(
             Ok((
                 format!("Wrote to Codex exec session {}.", session_id),
                 format!(
-                    "{}\nSession: {}\nSent input bytes: {}\nClose stdin: {}\nSnapshot:\n{}",
+                    "{}\nSession: {}\nSent input bytes: {}\nUsed execSessionCommand fallback: {}\nClose stdin: {}\nSnapshot:\n{}",
                     ack,
                     session_id,
-                    directive
-                        .input
-                        .as_ref()
-                        .map(|value| value.len())
-                        .unwrap_or(0),
+                    write_input.as_ref().map(|value| value.len()).unwrap_or(0),
+                    directive.input.is_none() && !directive.command.is_empty(),
                     directive.close_stdin,
                     render_exec_session_snapshot(snapshot.as_ref()),
                 ),
@@ -6289,20 +6419,65 @@ fn apply_exec_session_directive(
 }
 
 fn reuse_existing_exec_session(
+    paths: &Paths,
     session_id: &str,
     snapshot: Option<crate::command_exec::SessionSnapshot>,
     requested_command: &[String],
     cwd: &std::path::Path,
     justification: Option<&str>,
-) -> Option<(String, String)> {
-    let snapshot = snapshot?;
+) -> anyhow::Result<Option<(String, String)>> {
+    let Some(snapshot) = snapshot else {
+        return Ok(None);
+    };
     if snapshot.status != "active" {
-        return None;
+        return Ok(None);
     }
-    Some((
+
+    if snapshot.command == requested_command || requested_command.is_empty() {
+        return Ok(Some((
+            format!("Reused Codex exec session {}.", session_id),
+            format!(
+                "Exec session start skipped because the session already exists and is still active.\nSession: {}\nRequested command: {:?}\nExisting command: {:?}\nCWD: {}\nJustification: {}\nSnapshot:\n{}",
+                session_id,
+                requested_command,
+                snapshot.command,
+                cwd.display(),
+                justification.unwrap_or("none"),
+                render_exec_session_snapshot(Some(&snapshot)),
+            ),
+        )));
+    }
+
+    if let Some(input) = shell_input_for_reused_exec_session(&snapshot, requested_command) {
+        let ack = write_session(
+            paths,
+            CommandExecWriteParams {
+                process_id: session_id.to_string(),
+                delta_base64: Some(STANDARD.encode(input.as_bytes())),
+                close_stdin: false,
+            },
+        )?;
+        let refreshed = snapshot_session(session_id)?;
+        return Ok(Some((
+            format!("Wrote requested command to existing Codex exec session {}.", session_id),
+            format!(
+                "The requested start command was bridged into the already-active task shell instead of spawning a duplicate exec session.\nSession: {}\nRequested command: {:?}\nExisting command: {:?}\nConverted shell input bytes: {}\nCWD: {}\nJustification: {}\nWrite ack: {}\nSnapshot:\n{}",
+                session_id,
+                requested_command,
+                snapshot.command,
+                input.len(),
+                cwd.display(),
+                justification.unwrap_or("none"),
+                ack,
+                render_exec_session_snapshot(refreshed.as_ref()),
+            ),
+        )));
+    }
+
+    Ok(Some((
         format!("Reused Codex exec session {}.", session_id),
         format!(
-            "Exec session start skipped because the session already exists and is still active.\nSession: {}\nRequested command: {:?}\nExisting command: {:?}\nCWD: {}\nJustification: {}\nSnapshot:\n{}",
+            "Exec session start skipped because the session already exists and is still active, but the existing process cannot safely accept the requested start command as shell input.\nSession: {}\nRequested command: {:?}\nExisting command: {:?}\nCWD: {}\nJustification: {}\nSnapshot:\n{}",
             session_id,
             requested_command,
             snapshot.command,
@@ -6310,7 +6485,81 @@ fn reuse_existing_exec_session(
             justification.unwrap_or("none"),
             render_exec_session_snapshot(Some(&snapshot)),
         ),
-    ))
+    )))
+}
+
+fn shell_input_for_reused_exec_session(
+    snapshot: &crate::command_exec::SessionSnapshot,
+    requested_command: &[String],
+) -> Option<String> {
+    if !snapshot.stream_stdin || !command_is_interactive_shell(&snapshot.command) {
+        return None;
+    }
+
+    if requested_command.is_empty() || command_is_interactive_shell(requested_command) {
+        return None;
+    }
+
+    command_to_exec_session_input(requested_command)
+}
+
+fn command_to_exec_session_input(command: &[String]) -> Option<String> {
+    if command.is_empty() {
+        return None;
+    }
+    let input = if command_uses_shell_c_payload(command) {
+        command.get(2)?.to_string()
+    } else {
+        render_shell_command_line(command)
+    };
+    Some(ensure_exec_session_newline(input))
+}
+
+fn command_is_interactive_shell(command: &[String]) -> bool {
+    let Some(program) = command.first() else {
+        return false;
+    };
+    let shell_name = std::path::Path::new(program)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(program.as_str());
+    let is_shell = matches!(shell_name, "bash" | "sh" | "zsh" | "fish");
+    if !is_shell {
+        return false;
+    }
+    !command_uses_shell_c_payload(command)
+}
+
+fn command_uses_shell_c_payload(command: &[String]) -> bool {
+    command.iter().skip(1).any(|arg| arg == "-c" || arg == "-lc" || arg == "-cl")
+}
+
+fn render_shell_command_line(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| shell_quote_token(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote_token(value: &str) -> String {
+    if value.is_empty() {
+        "''".to_string()
+    } else if value
+        .bytes()
+        .all(|byte| matches!(byte, b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'/' | b'.' | b'_' | b'-' | b':' | b'@' | b'%' | b'+' | b',' | b'='))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn ensure_exec_session_newline(mut input: String) -> String {
+    if !input.ends_with('\n') {
+        input.push('\n');
+    }
+    input
 }
 
 fn resolve_exec_session_cwd(paths: &Paths, requested: Option<&str>) -> PathBuf {
@@ -8238,33 +8487,132 @@ mod tests {
 
     #[test]
     fn active_exec_session_start_is_reused_instead_of_erroring() {
-        let snapshot = crate::command_exec::SessionSnapshot {
-            session_id: "task297-kbd".to_string(),
-            created_at: now_iso(),
-            status: "active".to_string(),
-            cwd: "/tmp".to_string(),
-            tty: false,
-            stream_stdin: false,
-            stream_stdout_stderr: false,
-            output_bytes_cap: Some(65536),
-            command: vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
-            exit_code: None,
-            stdout: String::new(),
-            stderr: String::new(),
-        };
+        with_temp_runtime("active-exec-session-reuse", |paths| {
+            let snapshot = crate::command_exec::SessionSnapshot {
+                session_id: "task297-kbd".to_string(),
+                created_at: now_iso(),
+                status: "active".to_string(),
+                cwd: "/tmp".to_string(),
+                tty: false,
+                stream_stdin: false,
+                stream_stdout_stderr: false,
+                output_bytes_cap: Some(65536),
+                command: vec!["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+            };
 
-        let reused = reuse_existing_exec_session(
-            "task297-kbd",
-            Some(snapshot),
-            &["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
-            std::path::Path::new("/tmp"),
-            Some("reuse the active session"),
-        )
-        .expect("active session should be reused");
+            let reused = reuse_existing_exec_session(
+                paths,
+                "task297-kbd",
+                Some(snapshot),
+                &["bash".to_string(), "-lc".to_string(), "echo hi".to_string()],
+                std::path::Path::new("/tmp"),
+                Some("reuse the active session"),
+            )
+            .expect("reuse should not error")
+            .expect("active session should be reused");
 
-        assert!(reused.0.contains("wiederverwendet"));
-        assert!(reused.1.contains("already exists and is still active"));
-        assert!(reused.1.contains("task297-kbd"));
+            assert!(reused.0.contains("Reused Codex exec session"));
+            assert!(reused.1.contains("already exists and is still active"));
+            assert!(reused.1.contains("task297-kbd"));
+        });
+    }
+
+    #[test]
+    fn active_workspace_shell_reused_start_writes_requested_command() {
+        with_temp_runtime("active-workspace-shell-start-bridges-to-write", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 783,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(27),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Erstelle eine Datei als Probe.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            let session_id = "task-783-auto-workspace".to_string();
+            let probe_path = paths.root.join("runtime/reuse_probe.txt");
+
+            let opened = apply_exec_session_directive(
+                paths,
+                &task,
+                1,
+                &ExecSessionDirective {
+                    action: "start".to_string(),
+                    session_id: Some(session_id.clone()),
+                    command: vec!["/bin/bash".to_string(), "-l".to_string()],
+                    input: None,
+                    workdir: None,
+                    timeout_ms: None,
+                    tty: true,
+                    close_stdin: false,
+                    rows: Some(24),
+                    cols: Some(120),
+                    justification: Some("open reusable shell".to_string()),
+                },
+            )
+            .expect("initial shell should start");
+            assert!(opened.0.contains("Started Codex exec session"));
+
+            let write_probe_command = format!(
+                "printf 'PROBE_OK\\n' > {}",
+                shell_quote_token(probe_path.to_string_lossy().as_ref())
+            );
+            let reused = apply_exec_session_directive(
+                paths,
+                &task,
+                2,
+                &ExecSessionDirective {
+                    action: "start".to_string(),
+                    session_id: Some(session_id.clone()),
+                    command: vec![
+                        "/bin/bash".to_string(),
+                        "-lc".to_string(),
+                        write_probe_command,
+                    ],
+                    input: None,
+                    workdir: None,
+                    timeout_ms: None,
+                    tty: true,
+                    close_stdin: false,
+                    rows: Some(24),
+                    cols: Some(120),
+                    justification: Some("bridge the command into the existing shell".to_string()),
+                },
+            )
+            .expect("reused start should bridge into write");
+            assert!(reused.0.contains("Wrote requested command to existing Codex exec session"));
+
+            for _ in 0..20 {
+                if probe_path.is_file() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let probe_text = fs::read_to_string(&probe_path).expect("probe file should be written");
+            assert_eq!(probe_text, "PROBE_OK\n");
+
+            terminate_session(
+                paths,
+                CommandExecTerminateParams {
+                    process_id: session_id,
+                },
+            )
+            .expect("shell session should terminate");
+        });
     }
 
     #[test]
@@ -8433,6 +8781,119 @@ mod tests {
                 "Ich habe den Coding-Task aufgenommen, aber noch keinen verifizierten Build ausgeführt."
             ));
         });
+    }
+
+    #[test]
+    fn owner_file_write_request_does_not_complete_directly() {
+        with_temp_runtime("owner-file-write-no-direct-complete", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 780,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(24),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file /home/metricspace/cto-agent/runtime/worker_probe.txt containing exactly OK.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+
+            assert!(!owner_interrupt_can_complete_directly(
+                paths,
+                &task,
+                "continue",
+                "reprioritize",
+                false,
+                "File created at /home/metricspace/cto-agent/runtime/worker_probe.txt."
+            ));
+        });
+    }
+
+    #[test]
+    fn owner_workspace_turn_without_machine_path_triggers_auto_exec_session_kickstart() {
+        with_temp_runtime("owner-workspace-auto-session-kickstart", |paths| {
+            let task = crate::runtime_db::TaskRecord {
+                id: 781,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(25),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Erstelle eine C++-Konsolenanwendung mit persistenter Speicherung."
+                    .to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 0,
+                last_checkpoint_summary: None,
+                last_checkpoint_at: None,
+                last_output: None,
+            };
+            crate::runtime_db::record_context_package(
+                paths,
+                task.id,
+                &task.title,
+                "working",
+                65536,
+                "workspace package",
+                r#"{"rawInclusions":[{"sourceKind":"system_capability_contract","sourceRef":"contracts/system/workspace-execution-capability-policy.json","content":"workspace policy"}]}"#,
+            )
+            .expect("context package should persist");
+
+            assert!(should_auto_kickstart_workspace_exec_session(
+                paths,
+                &task,
+                "continue",
+                "execute_task",
+                false,
+            ));
+        });
+    }
+
+    #[test]
+    fn repeated_non_machine_owner_stall_only_stays_soft_without_visible_exec_session() {
+        let summary = grounded_workspace_non_machine_summary();
+        let task = crate::runtime_db::TaskRecord {
+            id: 782,
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: Some(26),
+            source_channel: "attach_terminal".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Chatten".to_string(),
+            detail: "Create the file runtime/worker_probe.txt containing exactly OK.".to_string(),
+            trust_level: "owner".to_string(),
+            priority_score: 1000,
+            status: "active".to_string(),
+            run_count: 3,
+            last_checkpoint_summary: Some(summary.clone()),
+            last_checkpoint_at: Some(now_iso()),
+            last_output: None,
+        };
+        let detail = "Workspace execution contract note: no exec/browser machine path ran in this bounded turn, so code/build/test/exec-session progress is not persisted as verified.";
+
+        assert!(repeated_workspace_non_machine_owner_summary(
+            &task, &summary, detail, false
+        ));
+        assert!(!repeated_workspace_non_machine_owner_summary(
+            &task, &summary, detail, true
+        ));
     }
 
     #[test]

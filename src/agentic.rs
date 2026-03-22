@@ -1,4 +1,5 @@
 use crate::browser_engine::BrowserActionDirective;
+use crate::command_exec::snapshot_sessions;
 use crate::context_controller::ContextPreparedArtifact;
 use crate::contracts::Paths;
 use crate::contracts::load_bios;
@@ -264,9 +265,10 @@ pub fn run_agentic_task_once(
         );
     }
 
-    let context_block = latest_context_package_for_task(paths, task.id)?
+    let stored_context_block = latest_context_package_for_task(paths, task.id)?
         .map(|package| package.package_json)
         .unwrap_or_else(|| "{}".to_string());
+    let context_block = refresh_context_block_with_live_task_state(paths, task, &stored_context_block);
 
     let system_prompt = build_system_prompt();
     let prompt_plan = build_prompt_plan(paths, reason, task, &system_prompt, &context_block)?;
@@ -327,18 +329,62 @@ fn owner_chat_plaintext_recovery_allowed(
     result: &AgenticRunResult,
 ) -> bool {
     let status_question = crate::context_controller::owner_interrupt_is_status_question(task);
+    let needs_workspace_guidance =
+        crate::context_controller::owner_interrupt_needs_workspace_execution_guidance(task);
     if task.task_kind != "owner_interrupt"
         || !matches!(
             task.source_channel.as_str(),
             "attach_terminal" | "bios" | "homepage" | "terminal"
         )
         || !result.retriable_local_failure
+        || needs_workspace_guidance
+        || owner_chat_recovery_looks_like_work_request(task)
         || (!status_question
             && context_block.contains("workspace-execution-capability-policy.json"))
     {
         return false;
     }
     true
+}
+
+fn owner_chat_recovery_looks_like_work_request(task: &TaskRecord) -> bool {
+    let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
+    [
+        "create the file",
+        "write the file",
+        "edit the file",
+        "modify the file",
+        "update the file",
+        "create a c++",
+        "build a c++",
+        "implement",
+        "implementiere",
+        "erstelle",
+        "baue",
+        "schreibe",
+        "fix",
+        "patch",
+        "compile",
+        "kompil",
+        "teste",
+        "cmake",
+        "console app",
+        "konsolenanwendung",
+        "workspace",
+        "repo",
+        "repository",
+        "runtime/",
+        "src/",
+        ".cpp",
+        ".hpp",
+        ".rs",
+        ".txt",
+        "datei",
+        "file ",
+        "file/",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle))
 }
 
 fn owner_chat_plaintext_recovery_visible(text: &str) -> bool {
@@ -2162,6 +2208,189 @@ fn trim_prompt_chars(value: &str, limit: usize) -> String {
     }
 }
 
+fn refresh_context_block_with_live_task_state(
+    paths: &Paths,
+    task: &TaskRecord,
+    context_block: &str,
+) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(context_block) else {
+        return context_block.to_string();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return context_block.to_string();
+    };
+
+    let checkpoints = list_task_checkpoints(paths, task.id, 8).unwrap_or_default();
+    if !checkpoints.is_empty() {
+        object.insert(
+            "recentTaskCheckpoints".to_string(),
+            Value::Array(
+                checkpoints
+                    .iter()
+                    .map(|checkpoint| {
+                        serde_json::json!({
+                            "createdAt": checkpoint.created_at,
+                            "checkpointKind": checkpoint.checkpoint_kind,
+                            "summary": trim_prompt_chars(&checkpoint.summary, 260),
+                            "detail": trim_prompt_chars(&checkpoint.detail, 1400),
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+
+    let exec_sessions = live_context_exec_sessions(task.id, 6);
+    if !exec_sessions.is_empty() {
+        object.insert("execSessions".to_string(), Value::Array(exec_sessions));
+    }
+
+    let refreshed_machine_anchor = live_current_task_machine_evidence(task.id, &checkpoints);
+    let raw_inclusions = object
+        .entry("rawInclusions".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(items) = raw_inclusions.as_array_mut() {
+        items.retain(|item| {
+            item.get("sourceKind").and_then(Value::as_str) != Some("current_task_machine_evidence")
+        });
+        if let Some(anchor) = refreshed_machine_anchor {
+            items.push(anchor);
+        }
+    }
+
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| context_block.to_string())
+}
+
+fn live_context_exec_sessions(task_id: i64, limit: usize) -> Vec<Value> {
+    let task_marker = format!("task-{task_id}");
+    let mut entries = snapshot_sessions().unwrap_or_default();
+    entries.retain(|entry| entry.session_id.contains(&task_marker));
+    entries.sort_by(|left, right| {
+        let left_active = left.status == "active";
+        let right_active = right.status == "active";
+        right_active
+            .cmp(&left_active)
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
+    entries
+        .into_iter()
+        .take(limit)
+        .map(|entry| {
+            serde_json::json!({
+                "sessionId": entry.session_id,
+                "status": entry.status,
+                "cwd": entry.cwd,
+                "tty": entry.tty,
+                "command": entry.command,
+                "exitCode": entry.exit_code,
+                "stdout": trim_prompt_chars(&entry.stdout, 900),
+                "stderr": trim_prompt_chars(&entry.stderr, 900),
+            })
+        })
+        .collect()
+}
+
+fn live_current_task_machine_evidence(
+    task_id: i64,
+    checkpoints: &[crate::runtime_db::TaskCheckpointRecord],
+) -> Option<Value> {
+    let checkpoint = checkpoints
+        .iter()
+        .find(|entry| checkpoint_contains_live_machine_evidence(&entry.summary, &entry.detail))?;
+    let mut parts = vec![format!(
+        "Latest verified machine step for task #{}: {}",
+        task_id,
+        trim_prompt_chars(&checkpoint.summary, 180)
+    )];
+    if let Some(workdir) = extract_checkpoint_detail_value(&checkpoint.detail, "Workdir: ")
+        .or_else(|| extract_checkpoint_detail_value(&checkpoint.detail, "CWD: "))
+    {
+        parts.push(format!("Workdir: {}", trim_prompt_chars(&workdir, 160)));
+    }
+    if let Some(command) = extract_checkpoint_detail_value(&checkpoint.detail, "Command: ")
+        .or_else(|| extract_checkpoint_detail_value(&checkpoint.detail, "Requested command: "))
+    {
+        parts.push(format!("Command: {}", trim_prompt_chars(&command, 220)));
+    }
+    let anchors = extract_live_workspace_anchor_lines(&checkpoint.detail, 4);
+    if !anchors.is_empty() {
+        parts.push(format!("Observed anchors: {}", anchors.join(" | ")));
+    }
+    Some(serde_json::json!({
+        "sourceKind": "current_task_machine_evidence",
+        "sourceRef": format!("task:{task_id}:machine_anchor"),
+        "content": trim_prompt_chars(&parts.join("\n"), 1400),
+    }))
+}
+
+fn checkpoint_contains_live_machine_evidence(summary: &str, detail: &str) -> bool {
+    let summary_lower = summary.to_ascii_lowercase();
+    let detail_lower = detail.to_ascii_lowercase();
+    if summary_lower.contains("failed")
+        || summary_lower.contains("no machine path ran")
+        || detail_lower.contains("exec session error:")
+        || detail_lower.contains("workspace execution contract note: no exec/browser machine path ran")
+    {
+        return false;
+    }
+    summary.contains("Bounded command-exec executed:")
+        || summary.contains("Started Codex exec session")
+        || summary.contains("Wrote to Codex exec session")
+        || summary.contains("Read Codex exec session")
+        || summary.contains("Bounded command-exec ausgefuehrt:")
+        || summary.contains("Exec-Session gestartet")
+        || summary.contains("In Codex-Exec-Session geschrieben")
+        || summary.contains("Codex-Exec-Session gelesen")
+        || detail.contains("Bounded exec result:")
+        || detail.contains("Bounded exec session result:")
+        || detail.contains("Exec session result:")
+}
+
+fn extract_checkpoint_detail_value(detail: &str, prefix: &str) -> Option<String> {
+    detail
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn extract_live_workspace_anchor_lines(detail: &str, limit: usize) -> Vec<String> {
+    let mut results = Vec::new();
+    for line in detail.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("---") {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        let looks_like_anchor = trimmed.starts_with("PWD=")
+            || trimmed.contains('/')
+            || trimmed.contains('\\')
+            || lower.contains(".cpp")
+            || lower.contains(".cc")
+            || lower.contains(".cxx")
+            || lower.contains(".h")
+            || lower.contains(".hpp")
+            || lower.contains(".rs")
+            || lower.contains("cmakelists.txt")
+            || lower.contains("makefile")
+            || lower.contains("cargo.toml")
+            || lower.contains("package.json");
+        if !looks_like_anchor {
+            continue;
+        }
+        let normalized = trim_prompt_chars(trimmed, 120);
+        if results.iter().any(|entry| entry == &normalized) {
+            continue;
+        }
+        results.push(normalized);
+        if results.len() >= limit {
+            break;
+        }
+    }
+    results
+}
+
 fn resolve_operating_targets(
     paths: &Paths,
     task: &TaskRecord,
@@ -3591,8 +3820,8 @@ fn invalid_machine_directive_summary(
             "Model returned execSessionAction=write without execSessionId; completion refused."
                 .to_string(),
         ),
-        "write" if directive.input.is_none() && !directive.close_stdin => Some(
-            "Model returned execSessionAction=write without execSessionInput; completion refused."
+        "write" if directive.input.is_none() && directive.command.is_empty() && !directive.close_stdin => Some(
+            "Model returned execSessionAction=write without execSessionInput or execSessionCommand; completion refused."
                 .to_string(),
         ),
         "read" | "terminate" if !has_session_id => Some(format!(
@@ -5696,6 +5925,86 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
     }
 
     #[test]
+    fn refresh_context_block_overlays_live_checkpoints_and_machine_evidence()
+    -> anyhow::Result<()> {
+        let _guard = env_lock().lock().expect("env lock");
+        let root = unique_test_root("refresh-context-live-overlay");
+        std::fs::create_dir_all(&root)?;
+        let _env = EnvGuard::set_cto_root(&root);
+        let paths = Paths::discover()?;
+        paths.ensure_dirs()?;
+        ensure_contract_files(&paths)?;
+        init_runtime_db(&paths)?;
+        write_runtime_env(&paths);
+
+        let task = synthetic_task(91);
+        crate::runtime_db::record_task_checkpoint(
+            &paths,
+            task.id,
+            "continue",
+            "Old planning-only checkpoint",
+            "Still thinking.",
+        )?;
+        crate::runtime_db::record_task_checkpoint(
+            &paths,
+            task.id,
+            "continue",
+            "Started Codex exec session for the C++ workspace",
+            "Workdir: /workspace/chat-app\nCommand: /bin/bash -l\nSTDOUT:\n/workspace/chat-app/src/main.cpp\n/workspace/chat-app/CMakeLists.txt\nSTDERR:\n",
+        )?;
+
+        let stale = serde_json::json!({
+            "taskBrief": {
+                "title": task.title,
+                "detail": task.detail,
+            },
+            "recentTaskCheckpoints": [
+                {
+                    "createdAt": "stale",
+                    "checkpointKind": "continue",
+                    "summary": "stale checkpoint",
+                    "detail": "stale detail"
+                }
+            ],
+            "rawInclusions": [
+                {
+                    "sourceKind": "current_task_machine_evidence",
+                    "sourceRef": "task:91:machine_anchor",
+                    "content": "stale machine anchor"
+                }
+            ]
+        })
+        .to_string();
+
+        let refreshed = refresh_context_block_with_live_task_state(&paths, &task, &stale);
+        let value: Value = serde_json::from_str(&refreshed)?;
+
+        let checkpoints = value["recentTaskCheckpoints"]
+            .as_array()
+            .expect("recentTaskCheckpoints array");
+        assert_eq!(
+            checkpoints[0]["summary"].as_str(),
+            Some("Started Codex exec session for the C++ workspace")
+        );
+        let raw_inclusions = value["rawInclusions"]
+            .as_array()
+            .expect("rawInclusions array");
+        let machine_anchor = raw_inclusions
+            .iter()
+            .find(|item| item["sourceKind"].as_str() == Some("current_task_machine_evidence"))
+            .expect("machine evidence anchor");
+        let anchor_text = machine_anchor["content"]
+            .as_str()
+            .expect("anchor content should be text");
+        assert!(anchor_text.contains("Latest verified machine step for task #91"));
+        assert!(anchor_text.contains("/workspace/chat-app/src/main.cpp"));
+        assert!(!anchor_text.contains("stale machine anchor"));
+
+        std::fs::remove_dir_all(&root).ok();
+        Ok(())
+    }
+
+    #[test]
     fn older_owner_interrupt_does_not_preempt_newer_active_owner_interrupt() -> anyhow::Result<()> {
         let _guard = env_lock().lock().expect("env lock");
         let root = unique_test_root("owner-boundary-preemption-newest-wins");
@@ -5762,6 +6071,18 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
     }
 
     #[test]
+    fn exec_session_write_with_command_fallback_is_not_rejected_as_malformed_output() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"Write step","reply":"Writing into the existing session.","execSessionAction":"write","execSessionId":"task-170-auto-workspace","execSessionCommand":["echo BRIDGE_OK_E > runtime/live_exec_bridge_probe_e.txt"]}"#,
+            Some("owner_interrupt"),
+        );
+        assert_eq!(parsed.task_status, "continue");
+        assert_eq!(parsed.next_mode, "execute_task");
+        assert_eq!(parsed.checkpoint_summary, "Write step");
+        assert!(parsed.exec_session_directive.is_some());
+    }
+
+    #[test]
     fn simple_owner_chat_recovery_is_allowed_without_workspace_contract() {
         let task = TaskRecord {
             id: 901,
@@ -5800,6 +6121,16 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         assert!(!owner_chat_plaintext_recovery_allowed(
             &workspace_task,
             "{\"rawInclusions\":[{\"sourceRef\":\"contracts/system/workspace-execution-capability-policy.json\"}]}",
+            &result
+        ));
+        let file_write_task = TaskRecord {
+            detail: "Create the file runtime/live_exec_bridge_probe.txt containing exactly BRIDGE_OK."
+                .to_string(),
+            ..task.clone()
+        };
+        assert!(!owner_chat_plaintext_recovery_allowed(
+            &file_write_task,
+            "{\"rawInclusions\":[]}",
             &result
         ));
 

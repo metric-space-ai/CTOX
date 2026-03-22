@@ -104,6 +104,7 @@ const CHAT_HISTORY_LIMIT: usize = 14;
 const CHAT_IDLE_SECS: u64 = 180;
 const JAMI_LINK_TIMEOUT_SECS: u64 = 900;
 const JAMI_QR_QUIET_ZONE: usize = 4;
+const RAW_TUI_LINE_PREFIX: &str = "\u{001f}RAW:";
 
 const GPT_OSS_MODEL: &str = "openai/gpt-oss-20b";
 const AUTHORIZED_MODEL_OPTIONS: &[&str] = &[
@@ -308,6 +309,17 @@ enum JamiLinkEvent {
         message: String,
         updated_at: String,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct JamiContactSnapshot {
+    account_id: String,
+    share_value: String,
+    share_label: String,
+    #[serde(default)]
+    registration_status: String,
+    #[serde(default)]
+    display_name: String,
 }
 
 enum TuiControl {
@@ -864,15 +876,7 @@ impl AttachTui {
     }
 
     fn selected_setting_uses_jami_password_editor(&self) -> bool {
-        self.selected_setting_is_jami()
-            && self.jami_link_state.active
-            && !self.jami_link_state.done
-            && self
-                .jami_link_state
-                .auth_scheme
-                .as_deref()
-                .map(|value| value.eq_ignore_ascii_case("password"))
-                .unwrap_or(false)
+        false
     }
 
     fn selected_setting_is_action(&self) -> bool {
@@ -907,22 +911,6 @@ impl AttachTui {
     }
 
     fn handle_jami_link_action(&mut self, paths: &Paths) -> anyhow::Result<()> {
-        if self.jami_link_state.active && !self.jami_link_state.done {
-            if self
-                .jami_link_state
-                .auth_scheme
-                .as_deref()
-                .map(|value| value.eq_ignore_ascii_case("password"))
-                .unwrap_or(false)
-            {
-                return self.submit_jami_link_password();
-            }
-            self.push_local_notice(
-                "jami",
-                "Jami link session already active. Scan the QR code with the phone app and wait for completion.",
-            );
-            return Ok(());
-        }
         self.start_jami_link_session(paths)
     }
 
@@ -930,13 +918,9 @@ impl AttachTui {
         if !self.selected_setting_is_jami() {
             return;
         }
-        if self.jami_saved_account_id.is_some() {
-            return;
-        }
         if self.jami_link_state.active
-            || self.jami_link_state.done
             || self.jami_link_state.token.is_some()
-            || self.jami_link_state.account_id.is_some()
+            || self.jami_link_state.error.is_some()
         {
             return;
         }
@@ -948,16 +932,21 @@ impl AttachTui {
     fn start_jami_link_session(&mut self, paths: &Paths) -> anyhow::Result<()> {
         self.stop_jami_link_worker(false);
         self.jami_link_password_input.clear();
-        self.jami_link_state = JamiLinkState::default();
+        self.jami_link_state = JamiLinkState {
+            active: true,
+            state_label: Some("preparing".to_string()),
+            ..JamiLinkState::default()
+        };
+        self.apply_dynamic_settings_state();
 
         let mut command = Command::new("node");
         command
-            .arg(paths.root.join("scripts/jami_device_link_cli.mjs"))
+            .arg(paths.root.join("scripts/jami_contact_qr_cli.mjs"))
+            .arg("ensure-contact")
             .arg("--timeout-secs")
-            .arg(JAMI_LINK_TIMEOUT_SECS.to_string())
-            .stdin(Stdio::piped())
+            .arg((JAMI_LINK_TIMEOUT_SECS.min(45)).to_string())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let runtime_env = load_runtime_env_map(paths).unwrap_or_default();
         if let Some(display_name) = self
             .settings_items
@@ -975,61 +964,66 @@ impl AttachTui {
         {
             command.arg("--display-name").arg(display_name);
         }
-        let mut child = command
-            .spawn()
-            .with_context(|| "failed to launch Jami device-link helper via Node".to_string())?;
+        if let Some(account_id) = self
+            .jami_saved_account_id
+            .as_deref()
+            .or_else(|| runtime_env.get("CTO_JAMI_ACCOUNT_ID").map(String::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            command.arg("--account-id").arg(account_id);
+        }
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Jami device-link helper did not expose stdout"))?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Jami device-link helper did not expose stdin"))?;
+        let output = command
+            .output()
+            .with_context(|| "failed to launch Jami contact helper via Node".to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let message = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                format!("Jami contact helper exited with status {}.", output.status)
+            };
+            self.jami_link_state.active = false;
+            self.jami_link_state.done = true;
+            self.jami_link_state.success = false;
+            self.jami_link_state.error = Some(message.clone());
+            self.jami_link_state.state_label = Some("failed".to_string());
+            self.jami_link_state.updated_at = Some(now_iso());
+            self.apply_dynamic_settings_state();
+            anyhow::bail!(message);
+        }
+
+        let snapshot = serde_json::from_slice::<JamiContactSnapshot>(&output.stdout)
+            .with_context(|| "failed to parse Jami contact helper output".to_string())?;
+        persist_contact_jami_account(paths, &snapshot)?;
+        self.jami_saved_account_id = Some(snapshot.account_id.clone());
         self.jami_link_state = JamiLinkState {
-            active: true,
+            account_id: Some(snapshot.account_id.clone()),
+            token: Some(snapshot.share_value.clone()),
+            state_label: Some("ready".to_string()),
+            success: true,
+            done: true,
+            updated_at: Some(now_iso()),
             ..JamiLinkState::default()
         };
-        let (tx, rx) = mpsc::channel();
-        thread::spawn(move || {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(payload) if !payload.trim().is_empty() => {
-                        let event = serde_json::from_str::<JamiLinkEvent>(&payload).unwrap_or(
-                            JamiLinkEvent::Error {
-                                message: format!(
-                                    "Failed to parse Jami link helper event: {}",
-                                    payload.trim()
-                                ),
-                                updated_at: now_iso(),
-                            },
-                        );
-                        if tx.send(event).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        let _ = tx.send(JamiLinkEvent::Error {
-                            message: format!("Failed to read Jami link helper output: {err}"),
-                            updated_at: now_iso(),
-                        });
-                        break;
-                    }
-                }
-            }
-        });
-
-        self.jami_link_rx = Some(rx);
-        self.jami_link_stdin = Some(stdin);
-        self.jami_link_child = Some(child);
+        if self.settings_dirty {
+            self.apply_dynamic_settings_state();
+        } else {
+            self.settings_items = load_settings_items(paths);
+        }
+        self.apply_dynamic_settings_state();
         self.push_local_notice(
             "jami",
-            "Started Jami device link. Scan the QR code with the phone app.",
+            &format!(
+                "Jami contact QR ready for {} {}.",
+                snapshot.share_label,
+                snapshot.share_value
+            ),
         );
-        self.apply_dynamic_settings_state();
         Ok(())
     }
 
@@ -1263,36 +1257,22 @@ impl AttachTui {
     }
 
     fn jami_link_action_value(&self) -> String {
-        if self.jami_link_state.active && !self.jami_link_state.done {
-            return match self.jami_link_state.state_code {
-                Some(1) => "QR ready - scan with phone".to_string(),
-                Some(2) => "Phone detected - establishing link".to_string(),
-                Some(3)
-                    if self
-                        .jami_link_state
-                        .auth_scheme
-                        .as_deref()
-                        .map(|value| value.eq_ignore_ascii_case("password"))
-                        .unwrap_or(false) =>
-                {
-                    "Password required - enter below and press Enter".to_string()
-                }
-                Some(3) => "Authenticating linked device".to_string(),
-                Some(4) => "Transferring account archive".to_string(),
-                _ => "Starting Jami device link".to_string(),
-            };
+        if self.jami_link_state.active {
+            return "Preparing CTO-Agent Jami contact".to_string();
         }
-        if self.jami_link_state.done && self.jami_link_state.success {
-            return "Linked - press Enter to generate a new pairing QR".to_string();
+        if self
+            .jami_link_state
+            .token
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return "QR ready - scan to add CTO-Agent".to_string();
         }
         if self.jami_link_state.done {
-            return "Failed - press Enter to retry Jami pairing".to_string();
+            return "Failed - press Enter to retry Jami setup".to_string();
         }
-        if self.jami_saved_account_id.is_some() {
-            "Linked - press Enter to generate a new pairing QR".to_string()
-        } else {
-            "Select row to pair phone via QR".to_string()
-        }
+        "Select row to prepare Jami contact QR".to_string()
     }
 
     fn cycle_selected_setting_choice(&mut self, direction: isize) {
@@ -1974,24 +1954,21 @@ impl AttachTui {
         let Some(item) = self.settings_items.get(self.settings_selected) else {
             return "No field selected.".to_string();
         };
-        let mut line = item.help.to_string();
         if self.selected_setting_is_jami() {
-            if self.selected_setting_uses_jami_password_editor() {
-                line.push_str(
-                    " Type the Jami account password below and press Enter to continue linking.",
-                );
-            } else if self.jami_saved_account_id.is_none()
-                && self.jami_link_state.token.is_none()
-                && !self.jami_link_state.active
-                && !self.jami_link_state.done
+            return if self
+                .jami_link_state
+                .token
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
             {
-                line.push_str(" Selecting Jami starts the QR pairing flow automatically.");
+                "Scan this QR in the Jami phone app to add the CTO-Agent contact. Press Enter to refresh the contact QR.".to_string()
             } else {
-                line.push_str(
-                    " Keep the Jami row selected to inspect link status or press Enter to retry/regenerate.",
-                );
-            }
-        } else if item.action {
+                "Selecting Jami prepares the CTO-Agent contact QR automatically. Press Enter to retry if the local Jami account setup fails.".to_string()
+            };
+        }
+        let mut line = item.help.to_string();
+        if item.action {
             line.push_str(" Press Enter to run the selected Jami action.");
         }
         if matches!(item.key, "simple_model" | "medium_model" | "red_model")
@@ -2031,7 +2008,7 @@ impl AttachTui {
                     self.jami_link_state
                         .state_label
                         .as_deref()
-                        .or_else(|| self.jami_saved_account_id.as_deref().map(|_| "linked"))
+                        .or_else(|| self.jami_saved_account_id.as_deref().map(|_| "ready"))
                         .unwrap_or("idle")
                         .replace('_', " ")
                 ),
@@ -2050,6 +2027,14 @@ impl AttachTui {
             ),
         ];
 
+        if let Some(token) = self
+            .jami_link_state
+            .token
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            rows.push(frame_row(&format!("Jami ID  {token}"), width));
+        }
         if let Some(error) = self
             .jami_link_state
             .error
@@ -2058,39 +2043,18 @@ impl AttachTui {
         {
             rows.push(frame_row(&format!("Error  {error}"), width));
         }
-        if let Some(peer_id) = self
-            .jami_link_state
-            .peer_id
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            rows.push(frame_row(&format!("Peer ID  {peer_id}"), width));
-        }
-        if self.selected_setting_uses_jami_password_editor() {
-            rows.push(frame_row(
-                "Password required by the existing Jami account. Type it below and press Enter.",
-                width,
-            ));
-        }
         if let Some(token) = self
             .jami_link_state
             .token
             .as_deref()
             .filter(|value| !value.trim().is_empty())
         {
-            rows.push(frame_row(
-                &format!(
-                    "Token  {}",
-                    compact_text(token, width.saturating_sub(12).max(8))
-                ),
-                width,
-            ));
             rows.push(frame_row("QR", width));
             let remaining = height.saturating_sub(rows.len()).max(1);
             rows.extend(render_qr_rows(token, width, remaining));
         } else {
             rows.push(frame_row(
-                "No pairing token yet. Select the Jami row to start QR pairing automatically.",
+                "No Jami contact QR yet. Select the Jami row to prepare the CTO-Agent contact.",
                 width,
             ));
         }
@@ -2171,7 +2135,7 @@ impl AttachTui {
             body_lines
                 .into_iter()
                 .take(body_height)
-                .map(|line| fit_line(&line, width)),
+                .map(|line| render_ready_line(&line, width)),
         );
         screen_lines.push("-".repeat(width));
         screen_lines.push(fit_line(help_line, width));
@@ -2390,7 +2354,7 @@ impl AttachTui {
         lines.extend(plain_frame_rows(self.settings_rows(width, list_height)));
         if !jami_panel.is_empty() {
             lines.push(String::new());
-            lines.push("Jami Link".to_string());
+            lines.push("Jami Contact".to_string());
             lines.extend(plain_frame_rows(jami_panel));
         }
         if lines.is_empty() {
@@ -2934,12 +2898,12 @@ fn load_settings_items(paths: &Paths) -> Vec<SettingsItem> {
         SettingsItem {
             key: "jami_link_device",
             label: "Jami",
-            value: "Select row to pair phone via QR".to_string(),
+            value: "Select row to prepare CTO-Agent Jami QR".to_string(),
             secret: false,
             editable: false,
             action: true,
             choices: Vec::new(),
-            help: "Select this row to start Jami QR pairing for the phone app. The manual bridge fields stay internal and are no longer shown here.",
+            help: "Select this row to show the CTO-Agent Jami contact QR for the phone app.",
         },
         SettingsItem {
             key: "openai_api_key",
@@ -3353,52 +3317,77 @@ fn persist_linked_jami_account(paths: &Paths, account_id: &str) -> anyhow::Resul
     save_runtime_env_map(paths, &env_map)
 }
 
+fn persist_contact_jami_account(
+    paths: &Paths,
+    snapshot: &JamiContactSnapshot,
+) -> anyhow::Result<()> {
+    persist_linked_jami_account(paths, &snapshot.account_id)?;
+    let mut env_map = load_runtime_env_map(paths).unwrap_or_default();
+    if !snapshot.display_name.trim().is_empty() {
+        upsert_env_value(&mut env_map, "CTO_JAMI_PROFILE_NAME", &snapshot.display_name);
+    }
+    save_runtime_env_map(paths, &env_map)
+}
+
 fn render_qr_rows(token: &str, width: usize, height: usize) -> Vec<String> {
     let Ok(qr) = QrCode::encode_text(token, QrCodeEcc::Medium) else {
         return frame_wrapped_rows("Failed to render the Jami QR code.", width, height.max(1));
     };
     let qr_size = qr.size().max(1) as usize;
     let total_modules = qr_size + (JAMI_QR_QUIET_ZONE * 2);
-    let available_width = width.max(1);
+    let available_width = (width / 2).max(1);
     let available_height = height.max(1);
-    let mut scale = 1;
+    let mut downsample = 1;
     loop {
-        let scaled_modules = total_modules.div_ceil(scale);
-        let scaled_rows = scaled_modules.div_ceil(2);
-        if scaled_modules <= available_width && scaled_rows <= available_height {
+        let scaled_modules = total_modules.div_ceil(downsample);
+        if scaled_modules <= available_width && scaled_modules <= available_height {
             break;
         }
-        scale += 1;
-        if scale > total_modules {
+        downsample += 1;
+        if downsample > total_modules {
             break;
         }
     }
-    let scaled_modules = total_modules.div_ceil(scale);
+    let scaled_modules = total_modules.div_ceil(downsample).max(1);
+    let zoom = (available_width / scaled_modules)
+        .min(available_height / scaled_modules)
+        .max(1)
+        .min(3);
+    let render_modules = scaled_modules.saturating_mul(zoom);
+    let horizontal_padding = available_width.saturating_sub(render_modules) / 2;
+    let vertical_padding = available_height.saturating_sub(render_modules) / 2;
     let mut rows = Vec::new();
-    for scaled_y in (0..scaled_modules).step_by(2) {
+    for _ in 0..vertical_padding {
+        rows.push(raw_tui_line(render_qr_blank_line(horizontal_padding, render_modules)));
+    }
+    for render_y in 0..render_modules {
         let mut line = String::new();
-        for scaled_x in 0..scaled_modules {
-            let top_dark =
-                jami_qr_scaled_cell_is_dark(&qr, qr_size, total_modules, scaled_x, scaled_y, scale);
-            let bottom_dark = jami_qr_scaled_cell_is_dark(
+        for _ in 0..horizontal_padding {
+            line.push_str(ansi_qr_module_block(false));
+        }
+        for render_x in 0..render_modules {
+            let dark = jami_qr_render_cell_is_dark(
                 &qr,
                 qr_size,
                 total_modules,
-                scaled_x,
-                scaled_y + 1,
-                scale,
+                render_x,
+                render_y,
+                downsample,
+                zoom,
             );
-            line.push(match (top_dark, bottom_dark) {
-                (true, true) => ' ',
-                (true, false) => '▄',
-                (false, true) => '▀',
-                (false, false) => '█',
-            });
+            line.push_str(ansi_qr_module_block(dark));
         }
-        rows.push(line);
+        for _ in 0..horizontal_padding {
+            line.push_str(ansi_qr_module_block(false));
+        }
+        line.push_str("\x1b[0m");
+        rows.push(raw_tui_line(line));
         if rows.len() >= height {
             break;
         }
+    }
+    while rows.len() < height {
+        rows.push(raw_tui_line(render_qr_blank_line(horizontal_padding, render_modules)));
     }
     if rows.is_empty() {
         rows.push(frame_row("QR code too small for the current terminal size.", width));
@@ -3406,18 +3395,21 @@ fn render_qr_rows(token: &str, width: usize, height: usize) -> Vec<String> {
     rows
 }
 
-fn jami_qr_scaled_cell_is_dark(
+fn jami_qr_render_cell_is_dark(
     qr: &QrCode,
     qr_size: usize,
     total_modules: usize,
-    scaled_x: usize,
-    scaled_y: usize,
-    scale: usize,
+    render_x: usize,
+    render_y: usize,
+    downsample: usize,
+    zoom: usize,
 ) -> bool {
-    let start_x = scaled_x.saturating_mul(scale);
-    let start_y = scaled_y.saturating_mul(scale);
-    for y in start_y..(start_y + scale).min(total_modules) {
-        for x in start_x..(start_x + scale).min(total_modules) {
+    let scaled_x = render_x / zoom.max(1);
+    let scaled_y = render_y / zoom.max(1);
+    let start_x = scaled_x.saturating_mul(downsample);
+    let start_y = scaled_y.saturating_mul(downsample);
+    for y in start_y..(start_y + downsample).min(total_modules) {
+        for x in start_x..(start_x + downsample).min(total_modules) {
             if x < JAMI_QR_QUIET_ZONE
                 || y < JAMI_QR_QUIET_ZONE
                 || x >= JAMI_QR_QUIET_ZONE + qr_size
@@ -3434,6 +3426,25 @@ fn jami_qr_scaled_cell_is_dark(
         }
     }
     false
+}
+
+fn ansi_qr_module_block(dark: bool) -> &'static str {
+    if dark { "\x1b[40m  " } else { "\x1b[107m  " }
+}
+
+fn render_qr_blank_line(horizontal_padding: usize, render_modules: usize) -> String {
+    let mut line = String::new();
+    for _ in 0..horizontal_padding {
+        line.push_str(ansi_qr_module_block(false));
+    }
+    for _ in 0..render_modules {
+        line.push_str(ansi_qr_module_block(false));
+    }
+    for _ in 0..horizontal_padding {
+        line.push_str(ansi_qr_module_block(false));
+    }
+    line.push_str("\x1b[0m");
+    line
 }
 
 fn recent_chat_entries(snapshot: &AttachUiSnapshot, limit: usize) -> Vec<ChatTranscriptEntry> {
@@ -4205,6 +4216,16 @@ fn fit_line(text: &str, width: usize) -> String {
     }
     let prefix = text.chars().take(width - 3).collect::<String>();
     format!("{prefix}...")
+}
+
+fn raw_tui_line(text: String) -> String {
+    format!("{RAW_TUI_LINE_PREFIX}{text}")
+}
+
+fn render_ready_line(line: &str, width: usize) -> String {
+    line.strip_prefix(RAW_TUI_LINE_PREFIX)
+        .map(str::to_string)
+        .unwrap_or_else(|| fit_line(line, width))
 }
 
 fn input_display(input: &str, width: usize, prompt: &str) -> (String, usize) {

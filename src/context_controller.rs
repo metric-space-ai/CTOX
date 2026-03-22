@@ -5201,6 +5201,9 @@ pub(crate) fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskReco
         return false;
     }
     let haystack = format!("{} {}", task.title, task.detail).to_ascii_lowercase();
+    if owner_interrupt_looks_like_direct_file_or_repo_work(&haystack) {
+        return true;
+    }
     let keywords = extract_keywords(&haystack);
     let phrase_match = [
         "console app",
@@ -5235,7 +5238,87 @@ pub(crate) fn owner_interrupt_needs_workspace_execution_guidance(task: &TaskReco
     ]
     .iter()
     .any(|needle| keywords.contains(*needle));
-    phrase_match || keyword_match
+    let file_action_match = [
+        "create the file",
+        "write the file",
+        "edit the file",
+        "modify the file",
+        "update the file",
+        "delete the file",
+        "touch ",
+        "mkdir ",
+        "erstelle die datei",
+        "schreibe die datei",
+        "bearbeite die datei",
+        "aendere die datei",
+        "ändere die datei",
+        "aktualisiere die datei",
+        "loesche die datei",
+        "lösche die datei",
+        "erzeuge die datei",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle));
+    let file_target_match = [
+        "file",
+        "datei",
+        "folder",
+        "ordner",
+        "directory",
+        "verzeichnis",
+        "path",
+        "pfad",
+        ".txt",
+        ".md",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".cpp",
+        ".hpp",
+        ".rs",
+        "runtime/",
+        "src/",
+        "/home/",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle) || keywords.contains(*needle));
+    (file_action_match && file_target_match) || phrase_match || keyword_match
+}
+
+fn owner_interrupt_looks_like_direct_file_or_repo_work(haystack: &str) -> bool {
+    let file_action = [
+        "create the file",
+        "write the file",
+        "edit the file",
+        "modify the file",
+        "update the file",
+        "delete the file",
+        "erstelle die datei",
+        "schreibe die datei",
+        "bearbeite die datei",
+        "aktualisiere die datei",
+        "erzeuge die datei",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle));
+    let file_target = [
+        "runtime/",
+        "src/",
+        "/home/",
+        ".txt",
+        ".md",
+        ".json",
+        ".toml",
+        ".yaml",
+        ".yml",
+        ".cpp",
+        ".hpp",
+        ".rs",
+    ]
+    .iter()
+    .any(|needle| haystack.contains(needle));
+    file_action && file_target
 }
 
 fn append_owner_operation_inclusions(
@@ -6158,6 +6241,38 @@ mod tests {
                 && item.content
                     .to_ascii_lowercase()
                     .contains("repo-local workspace")
+        }));
+    }
+
+    #[test]
+    fn direct_file_owner_interrupt_forces_workspace_guidance() {
+        let root = temp_root("direct_file_owner_interrupt_workspace_guidance");
+        std::fs::write(
+            root.join(".agents/skills/workspace-execution-operations/SKILL.md"),
+            "# Workspace Execution Operations\nReuse execSessionAction for multi-step workspace and repo work.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("contracts/system/workspace-execution-capability-policy.json"),
+            "{\"version\":1,\"purpose\":\"repo-local workspace implementation and build verification\"}",
+        )
+        .unwrap();
+        let paths = sample_paths(&root);
+        let task = sample_task(
+            "Chatten",
+            "Michael Welsch: BRIDGE_PROBE_20260322_C: Create the file runtime/live_exec_bridge_probe_c.txt containing exactly BRIDGE_OK_C.",
+        );
+        let mut raw_inclusions = Vec::new();
+        append_owner_operation_inclusions(&paths, &task, &mut raw_inclusions);
+        assert!(raw_inclusions.iter().any(|item| {
+            item.source_kind == "repo_operation_skill"
+                && item.content.contains("Workspace Execution Operations")
+        }));
+        assert!(raw_inclusions.iter().any(|item| {
+            item.source_kind == "system_capability_contract"
+                && item
+                    .source_ref
+                    .ends_with("workspace-execution-capability-policy.json")
         }));
     }
 
@@ -7278,6 +7393,16 @@ mod tests {
         let task = sample_task("Chatten", "Hast du schon an der C++-App gearbeitet?");
         assert!(owner_interrupt_is_status_question(&task));
         assert!(!owner_interrupt_needs_workspace_execution_guidance(&task));
+    }
+
+    #[test]
+    fn owner_file_write_request_needs_workspace_execution_guidance() {
+        let task = sample_task(
+            "Chatten",
+            "Create the file /home/metricspace/cto-agent/runtime/worker_probe.txt containing exactly OK.",
+        );
+        assert!(!owner_interrupt_is_status_question(&task));
+        assert!(owner_interrupt_needs_workspace_execution_guidance(&task));
     }
 
     #[test]
