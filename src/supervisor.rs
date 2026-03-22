@@ -2804,6 +2804,29 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                         }
                                     }
                                 }
+                            } else if owner_interrupt_exact_file_request_is_satisfied(
+                                &loop_paths, &task,
+                            ) {
+                                if checkpoint_summary.trim().is_empty() {
+                                    checkpoint_summary = format!(
+                                        "Owner interrupt #{} exact file request is satisfied.",
+                                        task.id
+                                    );
+                                }
+                                if let Err(err) = complete_task(
+                                    &loop_paths,
+                                    task_id,
+                                    &checkpoint_summary,
+                                    &checkpoint_detail,
+                                    Some(&output_text),
+                                ) {
+                                    eprintln!(
+                                        "failed to complete satisfied owner file interrupt {task_id}: {err}"
+                                    );
+                                }
+                                task_outcome_persisted = true;
+                                task_status = "done".to_string();
+                                normalized_next_mode = "reprioritize".to_string();
                             } else if owner_interrupt_can_complete_directly(
                                 &loop_paths,
                                 &task,
@@ -2829,6 +2852,7 @@ pub fn spawn_supervisor(paths: Paths, started_at: Instant) {
                                         "failed to complete direct owner interrupt {task_id}: {err}"
                                     );
                                 }
+                                task_outcome_persisted = true;
                                 task_status = "done".to_string();
                                 normalized_next_mode = "reprioritize".to_string();
                             } else if task_outcome_persisted {
@@ -3376,6 +3400,14 @@ fn assess_task_stuck_risk(
         0
     };
     let has_visible_exec_session = task_has_visible_exec_session(task.id);
+    let workspace_visible_session_machine_recovery = owner_interrupt_task
+        && repeated_same_summary
+        && repeated_workspace_non_machine_owner_summary_base(task, checkpoint_summary, checkpoint_detail)
+        && has_visible_exec_session
+        && task.run_count
+            < stage_policy
+                .max_run_count_before_self_preservation_review
+                .saturating_add(4);
     let workspace_non_machine_owner_stall = owner_interrupt_task
         && repeated_same_summary
         && repeated_workspace_non_machine_owner_summary(
@@ -3386,7 +3418,8 @@ fn assess_task_stuck_risk(
         );
     let repeated_same_summary_escalates = repeated_same_summary
         && (!substantive_sticky_task || repeated_same_summary_streak >= 2)
-        && !workspace_non_machine_owner_stall;
+        && !workspace_non_machine_owner_stall
+        && !workspace_visible_session_machine_recovery;
     let context_preparation_total_limit = context_preparation_total_max_loops(paths) as i64;
 
     if context_preparation_task
@@ -3506,6 +3539,15 @@ fn repeated_workspace_non_machine_owner_summary(
     checkpoint_detail: &str,
     has_visible_exec_session: bool,
 ) -> bool {
+    repeated_workspace_non_machine_owner_summary_base(task, checkpoint_summary, checkpoint_detail)
+        && !has_visible_exec_session
+}
+
+fn repeated_workspace_non_machine_owner_summary_base(
+    task: &crate::runtime_db::TaskRecord,
+    checkpoint_summary: &str,
+    checkpoint_detail: &str,
+) -> bool {
     let grounded_summary = grounded_workspace_non_machine_summary();
     let last_summary = task.last_checkpoint_summary.as_deref().unwrap_or_default();
     let detail_lower = checkpoint_detail.to_ascii_lowercase();
@@ -3514,7 +3556,6 @@ fn repeated_workspace_non_machine_owner_summary(
         && last_summary.trim() == grounded_summary.trim()
         && detail_lower
             .contains("workspace execution contract note: no exec/browser machine path ran")
-        && !has_visible_exec_session
 }
 
 fn find_interrupt_preemption_candidate(
@@ -5846,6 +5887,73 @@ fn owner_interrupt_can_complete_directly(
     owner_visible_boot_reply_text(output_text).is_some()
 }
 
+fn owner_interrupt_exact_file_request_is_satisfied(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+) -> bool {
+    if task.task_kind != "owner_interrupt" {
+        return false;
+    }
+    let Some((path, expected)) = parse_owner_interrupt_exact_file_request(paths, task) else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .map(|actual| actual == expected || actual == format!("{expected}\n") || actual == format!("{expected}\r\n"))
+        .unwrap_or(false)
+}
+
+fn parse_owner_interrupt_exact_file_request(
+    paths: &Paths,
+    task: &crate::runtime_db::TaskRecord,
+) -> Option<(PathBuf, String)> {
+    let detail = task.detail.trim();
+    let lower = detail.to_ascii_lowercase();
+    let marker = "containing exactly";
+    let marker_index = lower.find(marker)?;
+    let before = detail[..marker_index].trim();
+    let after = detail[marker_index + marker.len()..].trim();
+    let expected_raw = after
+        .split(['\n', '\r'])
+        .next()
+        .unwrap_or(after)
+        .split(". ")
+        .next()
+        .unwrap_or(after)
+        .split("; ")
+        .next()
+        .unwrap_or(after)
+        .trim();
+    let expected = expected_raw
+        .trim_matches(|ch: char| matches!(ch, '.' | '"' | '\'' | ' ' | '\n' | '\r' | '\t'))
+        .to_string();
+    if expected.is_empty() {
+        return None;
+    }
+    let raw_path = before
+        .split_whitespace()
+        .rev()
+        .map(|part| part.trim_matches(|ch: char| matches!(ch, '.' | ',' | ';' | ':' | '"' | '\'' | '(' | ')' )))
+        .find(|part| {
+            !part.is_empty()
+                && (part.contains('/')
+                    || part.ends_with(".txt")
+                    || part.ends_with(".md")
+                    || part.ends_with(".json")
+                    || part.ends_with(".toml")
+                    || part.ends_with(".yaml")
+                    || part.ends_with(".yml")
+                    || part.ends_with(".cpp")
+                    || part.ends_with(".hpp")
+                    || part.ends_with(".rs"))
+        })?;
+    let resolved = if PathBuf::from(raw_path).is_absolute() {
+        PathBuf::from(raw_path)
+    } else {
+        paths.root.join(raw_path)
+    };
+    Some((resolved, expected))
+}
+
 fn review_task_should_retry_without_reopening_parent(
     task: &crate::runtime_db::TaskRecord,
     result: &AgenticRunResult,
@@ -6241,16 +6349,16 @@ fn auto_kickstart_workspace_exec_session(
     let directive = ExecSessionDirective {
         action: "start".to_string(),
         session_id: Some(auto_workspace_exec_session_id(task.id)),
-        command: vec!["/bin/bash".to_string(), "-l".to_string()],
+        command: vec!["/bin/bash".to_string()],
         input: None,
         workdir: None,
         timeout_ms: None,
-        tty: true,
+        tty: false,
         close_stdin: false,
-        rows: Some(24),
-        cols: Some(120),
+        rows: None,
+        cols: None,
         justification: Some(
-            "Kernel auto-started a task-bound workspace shell because the owner task produced planning-only output without any exec/browser machine path.".to_string(),
+            "Kernel auto-started a task-bound non-interactive workspace shell because the owner task produced planning-only output without any exec/browser machine path.".to_string(),
         ),
     };
     apply_exec_session_directive(paths, task, turn_id, &directive)
@@ -6510,7 +6618,7 @@ fn command_to_exec_session_input(command: &[String]) -> Option<String> {
     let input = if command_uses_shell_c_payload(command) {
         command.get(2)?.to_string()
     } else {
-        render_shell_command_line(command)
+        render_exec_session_input_line(command)
     };
     Some(ensure_exec_session_newline(input))
 }
@@ -6534,12 +6642,25 @@ fn command_uses_shell_c_payload(command: &[String]) -> bool {
     command.iter().skip(1).any(|arg| arg == "-c" || arg == "-lc" || arg == "-cl")
 }
 
-fn render_shell_command_line(command: &[String]) -> String {
+fn render_exec_session_input_line(command: &[String]) -> String {
     command
         .iter()
-        .map(|part| shell_quote_token(part))
+        .map(|part| {
+            if is_shell_control_token(part) {
+                part.to_string()
+            } else {
+                shell_quote_token(part)
+            }
+        })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn is_shell_control_token(value: &str) -> bool {
+    matches!(
+        value,
+        "&&" | "||" | ";" | "|" | ">" | ">>" | "<" | "2>" | "2>>"
+    )
 }
 
 fn shell_quote_token(value: &str) -> String {
@@ -6656,12 +6777,7 @@ fn should_shell_wrap_exec_command(command: &[String]) -> bool {
         return true;
     }
 
-    command.iter().any(|token| {
-        matches!(
-            token.as_str(),
-            "&&" | "||" | ";" | "|" | ">" | ">>" | "<" | "2>" | "2>>"
-        )
-    })
+    command.iter().any(|token| is_shell_control_token(token))
 }
 
 fn render_exec_session_snapshot(snapshot: Option<&crate::command_exec::SessionSnapshot>) -> String {
@@ -8050,6 +8166,21 @@ mod tests {
     }
 
     #[test]
+    fn exec_session_command_fallback_preserves_shell_redirect_tokens() {
+        let input = command_to_exec_session_input(&[
+            "echo".to_string(),
+            "BRIDGE_OK".to_string(),
+            ">".to_string(),
+            "runtime/live_exec_bridge_probe.txt".to_string(),
+        ])
+        .expect("fallback input should be rendered");
+        assert_eq!(
+            input,
+            "echo BRIDGE_OK > runtime/live_exec_bridge_probe.txt\n"
+        );
+    }
+
+    #[test]
     fn grounded_workspace_non_machine_summary_stays_planning_only() {
         let summary = grounded_workspace_non_machine_summary();
         assert!(summary.contains("planning or inspection only"));
@@ -8819,6 +8950,145 @@ mod tests {
     }
 
     #[test]
+    fn exact_owner_file_request_detects_satisfied_file() {
+        with_temp_runtime("owner-file-request-satisfied", |paths| {
+            let target = paths.root.join("runtime/worker_probe.txt");
+            fs::create_dir_all(target.parent().expect("runtime dir")).expect("runtime dir");
+            fs::write(&target, "OK").expect("probe file should be written");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7801,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(2401),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file runtime/worker_probe.txt containing exactly OK."
+                    .to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 1,
+                last_checkpoint_summary: Some(
+                    "Executed single bounded command successfully.".to_string(),
+                ),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: Some("File created and verified.".to_string()),
+            };
+
+            assert!(owner_interrupt_exact_file_request_is_satisfied(paths, &task));
+        });
+    }
+
+    #[test]
+    fn exact_owner_file_request_rejects_wrong_content() {
+        with_temp_runtime("owner-file-request-wrong-content", |paths| {
+            let target = paths.root.join("runtime/worker_probe.txt");
+            fs::create_dir_all(target.parent().expect("runtime dir")).expect("runtime dir");
+            fs::write(&target, "WRONG").expect("probe file should be written");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7802,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(2402),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file runtime/worker_probe.txt containing exactly OK."
+                    .to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 1,
+                last_checkpoint_summary: Some(
+                    "Executed single bounded command successfully.".to_string(),
+                ),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: Some("File created and verified.".to_string()),
+            };
+
+            assert!(!owner_interrupt_exact_file_request_is_satisfied(paths, &task));
+        });
+    }
+
+    #[test]
+    fn exact_owner_file_request_ignores_followup_sentence_after_expected_content() {
+        with_temp_runtime("owner-file-request-extra-sentence", |paths| {
+            let target = paths.root.join("runtime/worker_probe.txt");
+            fs::create_dir_all(target.parent().expect("runtime dir")).expect("runtime dir");
+            fs::write(&target, "OK").expect("probe file should be written");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7803,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(2403),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file runtime/worker_probe.txt containing exactly OK. Finish only when the file exists with exactly that content.".to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 1,
+                last_checkpoint_summary: Some(
+                    "Executed single bounded command successfully.".to_string(),
+                ),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: Some("File created and verified.".to_string()),
+            };
+
+            assert!(owner_interrupt_exact_file_request_is_satisfied(paths, &task));
+        });
+    }
+
+    #[test]
+    fn exact_owner_file_request_accepts_single_trailing_newline() {
+        with_temp_runtime("owner-file-request-trailing-newline", |paths| {
+            let target = paths.root.join("runtime/worker_probe.txt");
+            fs::create_dir_all(target.parent().expect("runtime dir")).expect("runtime dir");
+            fs::write(&target, "OK\n").expect("probe file should be written");
+
+            let task = crate::runtime_db::TaskRecord {
+                id: 7804,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(2404),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file runtime/worker_probe.txt containing exactly OK."
+                    .to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 1,
+                last_checkpoint_summary: Some(
+                    "Executed single bounded command successfully.".to_string(),
+                ),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: Some("File created and verified.".to_string()),
+            };
+
+            assert!(owner_interrupt_exact_file_request_is_satisfied(paths, &task));
+        });
+    }
+
+    #[test]
     fn owner_workspace_turn_without_machine_path_triggers_auto_exec_session_kickstart() {
         with_temp_runtime("owner-workspace-auto-session-kickstart", |paths| {
             let task = crate::runtime_db::TaskRecord {
@@ -8894,6 +9164,65 @@ mod tests {
         assert!(!repeated_workspace_non_machine_owner_summary(
             &task, &summary, detail, true
         ));
+    }
+
+    #[test]
+    fn visible_workspace_session_grants_owner_task_extra_machine_recovery_turns() {
+        with_temp_runtime("owner-visible-session-machine-recovery", |paths| {
+            let summary = grounded_workspace_non_machine_summary();
+            let task = crate::runtime_db::TaskRecord {
+                id: 890,
+                created_at: now_iso(),
+                updated_at: now_iso(),
+                parent_task_id: None,
+                worker_job_id: None,
+                source_interrupt_id: Some(31),
+                source_channel: "attach_terminal".to_string(),
+                speaker: "Michael Welsch".to_string(),
+                task_kind: "owner_interrupt".to_string(),
+                title: "Chatten".to_string(),
+                detail: "Create the file runtime/worker_probe.txt containing exactly OK."
+                    .to_string(),
+                trust_level: "owner".to_string(),
+                priority_score: 1000,
+                status: "active".to_string(),
+                run_count: 4,
+                last_checkpoint_summary: Some(summary.clone()),
+                last_checkpoint_at: Some(now_iso()),
+                last_output: None,
+            };
+            let session_id = auto_workspace_exec_session_id(task.id);
+            let _opened = apply_exec_session_directive(
+                paths,
+                &task,
+                1,
+                &ExecSessionDirective {
+                    action: "start".to_string(),
+                    session_id: Some(session_id.clone()),
+                    command: vec!["/bin/bash".to_string(), "-l".to_string()],
+                    input: None,
+                    workdir: None,
+                    timeout_ms: None,
+                    tty: false,
+                    close_stdin: false,
+                    rows: None,
+                    cols: None,
+                    justification: Some("open recovery shell".to_string()),
+                },
+            )
+            .expect("recovery shell should start");
+            let decision = assess_task_stuck_risk(
+                paths,
+                &task,
+                &crate::contracts::load_loop_safety_policy(paths),
+                "newborn",
+                &summary,
+                "Workspace execution contract note: no exec/browser machine path ran in this bounded turn, so code/build/test/exec-session progress is not persisted as verified.",
+                "continue",
+                "execute_task",
+            );
+            assert!(decision.is_none());
+        });
     }
 
     #[test]

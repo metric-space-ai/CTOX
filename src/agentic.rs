@@ -1403,6 +1403,7 @@ fn build_core_task_prompt(reason: &str, task: &TaskRecord, context_block: &str) 
         } else {
             ("", "")
         };
+    let machine_recovery_note = workspace_machine_recovery_note(task, context_block);
     let mode_hint = match task.task_kind.as_str() {
         "self_preservation" => {
             "This task protects loop continuity and host viability. Stabilize the loop instead of drifting into unrelated work."
@@ -1457,6 +1458,7 @@ Speaker: {speaker}\n\
 Detail: {detail}\n\n\
 Task Role:\n\
 {mode_hint}\n\n\
+{machine_recovery_note}\
 Wrapper Reminders:\n\
 - The outer task manager already chose this task. Do not reopen global scheduling.\n\
 - Mail, Jami, terminal/TUI, BIOS, and homepage interrupts already share one reprioritization path.\n\
@@ -1505,9 +1507,101 @@ Context Package:\n\
         speaker = task.speaker,
         detail = task.detail,
         mode_hint = mode_hint,
+        machine_recovery_note = machine_recovery_note,
         context_preparation_note_block = context_preparation_note_block,
         context = context_block,
     )
+}
+
+fn workspace_machine_recovery_note(task: &TaskRecord, context_block: &str) -> String {
+    if task.task_kind != "owner_interrupt"
+        || !crate::context_controller::owner_interrupt_needs_workspace_execution_guidance(task)
+    {
+        return String::new();
+    }
+
+    let Ok(value) = serde_json::from_str::<Value>(context_block) else {
+        return String::new();
+    };
+    let workspace_guidance_active = value
+        .get("rawInclusions")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter().any(|item| {
+                item.get("sourceRef")
+                    .and_then(Value::as_str)
+                    .map(|source_ref| {
+                        source_ref.ends_with("workspace-execution-capability-policy.json")
+                            || source_ref.ends_with("workspace-execution-operations/SKILL.md")
+                    })
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    if !workspace_guidance_active {
+        return String::new();
+    }
+
+    let visible_exec_session = value
+        .get("execSessions")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("sessionId"))
+        .and_then(Value::as_str);
+    let latest_no_machine_turn = value
+        .get("recentTaskCheckpoints")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .map(|item| {
+            let summary = item
+                .get("summary")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let detail = item
+                .get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            summary.contains("no machine path ran")
+                || detail.contains("no exec/browser machine path ran")
+        })
+        .unwrap_or(false);
+
+    if visible_exec_session.is_none() && !latest_no_machine_turn {
+        return String::new();
+    }
+
+    let mut lines = vec![
+        "Machine-Recovery Override:".to_string(),
+        "- This owner task requires verified workspace progress, not another prose-only answer."
+            .to_string(),
+    ];
+    if let Some(session_id) = visible_exec_session {
+        lines.push(format!(
+            "- Visible task-bound exec session: `{session_id}`. Reuse it now with `execSessionAction=write`, `read`, or `terminate`."
+        ));
+    } else {
+        lines.push(
+            "- No exec session is visible yet. Return `execSessionAction=start` or one exact `execCommand` now."
+                .to_string(),
+        );
+    }
+    if latest_no_machine_turn {
+        lines.push(
+            "- The last bounded turn had no verified machine path. Another plain-text claim will be rejected."
+                .to_string(),
+        );
+    }
+    lines.push(
+        "- If the task asks for a file or repo change, default to one exact shell step that changes the target path now."
+            .to_string(),
+    );
+    lines.push(
+        "- Do not claim that a file, code edit, build, or runtime result already exists unless the matching machine directive actually runs in this turn."
+            .to_string(),
+    );
+    format!("{}\n\n", lines.join("\n"))
 }
 
 fn build_task_prompt_legacy(reason: &str, task: &TaskRecord, context_block: &str) -> String {
@@ -4524,19 +4618,7 @@ fn parse_exec_session_directive(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
-    let command = object
-        .get("execSessionCommand")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let command = parse_exec_command_value(object.get("execSessionCommand"));
     let input = object
         .get("execSessionInput")
         .and_then(Value::as_str)
@@ -4588,19 +4670,10 @@ fn parse_exec_session_directive(
 }
 
 fn parse_exec_directive(object: &serde_json::Map<String, Value>) -> Option<ExecCommandDirective> {
-    let command = object
-        .get("execCommand")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .filter(|items| !items.is_empty())?;
+    let command = parse_exec_command_value(object.get("execCommand"));
+    if command.is_empty() {
+        return None;
+    }
     let workdir = object
         .get("execWorkdir")
         .and_then(Value::as_str)
@@ -4620,6 +4693,31 @@ fn parse_exec_directive(object: &serde_json::Map<String, Value>) -> Option<ExecC
         timeout_ms,
         justification,
     })
+}
+
+fn parse_exec_command_value(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .map(ToOwned::to_owned)
+            .collect(),
+        Some(Value::String(command)) => {
+            let command = command.trim();
+            if command.is_empty() {
+                Vec::new()
+            } else {
+                vec![
+                    "/bin/bash".to_string(),
+                    "-lc".to_string(),
+                    command.to_string(),
+                ]
+            }
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn parse_browser_directive(
@@ -4953,6 +5051,48 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
             .map(|directive| directive.command.clone())
             .expect("exec directive should parse");
         assert_eq!(command, vec!["bash", "-lc", "echo hi"]);
+    }
+
+    #[test]
+    fn parse_agent_output_accepts_string_exec_command() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"write file","execCommand":"mkdir -p runtime && echo OK > runtime/parser_probe.txt"}"#,
+            Some("owner_interrupt"),
+        );
+        let command = parsed
+            .exec_directive
+            .as_ref()
+            .map(|directive| directive.command.clone())
+            .expect("string exec command should parse");
+        assert_eq!(
+            command,
+            vec![
+                "/bin/bash",
+                "-lc",
+                "mkdir -p runtime && echo OK > runtime/parser_probe.txt"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_agent_output_accepts_string_exec_session_command_for_write() {
+        let parsed = parse_agent_output_for_task(
+            r#"{"taskStatus":"continue","nextMode":"execute_task","checkpointSummary":"write step","execSessionAction":"write","execSessionId":"task-170-auto-workspace","execSessionCommand":"echo BRIDGE_OK > runtime/live_exec_bridge_probe.txt"}"#,
+            Some("owner_interrupt"),
+        );
+        let directive = parsed
+            .exec_session_directive
+            .as_ref()
+            .expect("string exec session command should parse");
+        assert_eq!(directive.action, "write");
+        assert_eq!(
+            directive.command,
+            vec![
+                "/bin/bash",
+                "-lc",
+                "echo BRIDGE_OK > runtime/live_exec_bridge_probe.txt"
+            ]
+        );
     }
 
     #[test]
@@ -5372,6 +5512,58 @@ CTO_AGENT_GROSSHIRN_BASE_URL=https://api.openai.com/v1\n",
         ));
         assert!(prompt.contains("Do not put raw literal newlines into `execCommand`"));
         assert!(prompt.contains("use exec-session writes instead"));
+    }
+
+    #[test]
+    fn workspace_prompt_adds_machine_recovery_override_when_session_is_visible() {
+        let task = TaskRecord {
+            id: 38,
+            created_at: String::new(),
+            updated_at: String::new(),
+            parent_task_id: None,
+            worker_job_id: None,
+            source_interrupt_id: None,
+            source_channel: "attach_terminal".to_string(),
+            speaker: "Michael Welsch".to_string(),
+            task_kind: "owner_interrupt".to_string(),
+            title: "Chatten".to_string(),
+            detail:
+                "Create the file runtime/live_exec_bridge_probe.txt containing exactly BRIDGE_OK."
+                    .to_string(),
+            trust_level: "owner".to_string(),
+            priority_score: 1000,
+            status: "active".to_string(),
+            run_count: 2,
+            last_checkpoint_summary: Some(
+                "Workspace execution contract is active and no machine path ran in this turn, so persisted progress stays at planning or inspection only."
+                    .to_string(),
+            ),
+            last_checkpoint_at: None,
+            last_output: None,
+        };
+        let prompt = build_task_prompt(
+            "test",
+            &task,
+            r#"{
+              "recentTaskCheckpoints":[
+                {
+                  "summary":"Workspace execution contract is active and no machine path ran in this turn, so persisted progress stays at planning or inspection only.",
+                  "detail":"Workspace execution contract note: no exec/browser machine path ran in this bounded turn."
+                }
+              ],
+              "execSessions":[
+                {"sessionId":"task-38-auto-workspace","status":"active","cwd":"/home/metricspace/cto-agent","tty":false,"command":["/bin/bash","-l"]}
+              ],
+              "rawInclusions":[
+                {"sourceKind":"system_capability_contract","sourceRef":"/tmp/workspace-execution-capability-policy.json","content":"workspace contract"},
+                {"sourceKind":"repo_operation_skill","sourceRef":"/tmp/workspace-execution-operations/SKILL.md","content":"workspace skill"}
+              ]
+            }"#,
+        );
+        assert!(prompt.contains("Machine-Recovery Override:"));
+        assert!(prompt.contains("task-38-auto-workspace"));
+        assert!(prompt.contains("Another plain-text claim will be rejected"));
+        assert!(prompt.contains("changes the target path now"));
     }
 
     #[test]
