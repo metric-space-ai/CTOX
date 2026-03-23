@@ -337,6 +337,16 @@ latest_apt_package_matching() {
   apt-cache pkgnames 2>/dev/null | grep -E "$pattern" | sort -V | tail -n 1
 }
 
+nvidia_gpu_present() {
+  command -v lspci >/dev/null 2>&1 || return 1
+  lspci | grep -qi 'NVIDIA Corporation'
+}
+
+nvidia_driver_ready() {
+  command -v nvidia-smi >/dev/null 2>&1 || return 1
+  nvidia-smi -L >/dev/null 2>&1
+}
+
 cuda_toolchain_ready() {
   command -v nvcc >/dev/null 2>&1 || return 1
   command -v ldconfig >/dev/null 2>&1 || return 1
@@ -345,6 +355,64 @@ cuda_toolchain_ready() {
   ldconfig -p 2>/dev/null | grep -q 'libcublasLt' || return 1
   ldconfig -p 2>/dev/null | grep -q 'libcublas' || return 1
   return 0
+}
+
+ensure_nvidia_cuda_stack() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! nvidia_gpu_present; then
+    return 0
+  fi
+  if nvidia_driver_ready && cuda_toolchain_ready; then
+    return 0
+  fi
+
+  local packages=()
+  local driver_pkg=""
+  local cuda_pkg=""
+
+  if ! apt_package_installed ubuntu-drivers-common; then
+    packages+=(ubuntu-drivers-common)
+  fi
+
+  driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
+  fi
+  if [[ -n "$driver_pkg" ]] && ! apt_package_installed "$driver_pkg"; then
+    packages+=("$driver_pkg")
+  fi
+
+  cuda_pkg="$(latest_apt_package_matching '^cuda-toolkit-[0-9]+-[0-9]+$' || true)"
+  if [[ -z "$cuda_pkg" ]]; then
+    cuda_pkg="nvidia-cuda-toolkit"
+  fi
+  if apt-cache policy "$cuda_pkg" 2>/dev/null | grep -q 'Candidate:' && ! apt_package_installed "$cuda_pkg"; then
+    packages+=("$cuda_pkg")
+  fi
+
+  if [[ "${#packages[@]}" -gt 0 ]]; then
+    echo "[prep] Install NVIDIA driver and CUDA toolkit for detected NVIDIA GPUs"
+    apt_update_with_retry
+    run_sudo apt-get install -y "${packages[@]}"
+  fi
+
+  if ! nvidia_driver_ready || ! cuda_toolchain_ready; then
+    cat >&2 <<EOF
+Detected NVIDIA GPUs on this host, but the proprietary NVIDIA/CUDA stack is still not ready.
+
+Observed state:
+  - NVIDIA PCI devices are present
+  - nvidia-smi available: $(command -v nvidia-smi >/dev/null 2>&1 && echo yes || echo no)
+  - nvcc available: $(command -v nvcc >/dev/null 2>&1 && echo yes || echo no)
+
+CTOX will not fall back to CPU-only mode on GPU hosts.
+Finish bringing up the NVIDIA driver/CUDA stack first, then rerun the installer.
+If a kernel driver package was just installed, a reboot is likely required.
+EOF
+    return 1
+  fi
 }
 
 vllm_serve_uses_cuda() {
@@ -370,6 +438,11 @@ detect_vllm_serve_features() {
   if [[ -n "${CTOX_VLLM_SERVE_FEATURES:-}" ]]; then
     printf '%s\n' "$CTOX_VLLM_SERVE_FEATURES"
     return
+  fi
+
+  if nvidia_gpu_present && ! cuda_toolchain_ready; then
+    echo "Detected NVIDIA GPUs, but CUDA tooling is not ready. Refusing CPU-only fallback." >&2
+    return 1
   fi
 
   if ! cuda_toolchain_ready; then
@@ -569,6 +642,7 @@ exec "$ROOT/target/release/ctox" "\$@"
 EOF
 chmod +x "$HOME/.local/bin/ctox"
 
+ensure_nvidia_cuda_stack
 MISTRALRS_FEATURES="$(detect_vllm_serve_features)"
 ensure_cuda_build_prereqs
 configure_cuda_env
@@ -584,7 +658,6 @@ echo "[build] Build vendored vllm-serve engine with features: $MISTRALRS_FEATURE
   if [[ -n "$MISTRALRS_FEATURES" ]]; then
     "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs --features "$MISTRALRS_FEATURES"
   else
-    echo "[build] No CUDA toolchain detected; build mistralrs in CPU-only mode"
     "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs
   fi
 )
