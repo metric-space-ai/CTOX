@@ -64,6 +64,26 @@ ensure_rust_build_toolchain() {
   source "$HOME/.cargo/env"
 }
 
+ensure_codex_linux_build_prereqs() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local packages=()
+  local package=""
+  for package in libcap-dev; do
+    apt_package_installed "$package" || packages+=("$package")
+  done
+
+  if [[ "${#packages[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "[prep] Install Linux prerequisites for vendored Codex sandbox binaries"
+  apt_update_with_retry
+  run_sudo apt-get install -y "${packages[@]}"
+}
+
 ensure_project_references_present() {
   local missing=0
   local required_paths=(
@@ -572,6 +592,7 @@ echo "[build] Build vendored vllm-serve engine with features: $MISTRALRS_FEATURE
 echo "[build] Build vendored codex binaries"
 (
   cd "$ROOT/references/openai-codex/codex-rs"
+  ensure_codex_linux_build_prereqs
   "$CARGO_BIN" build --release -p codex-exec --bin codex-exec
   "$CARGO_BIN" build --release -p codex-cli --bin codex
 )
