@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "goal": "Clean-room baseline for CTOX built on vendored codex-cli plus mistral.rs.",
+  "goal": "Clean-room baseline for CTOX built on vendored codex-cli plus the forked ctox-vllm-serve engine.",
   "dependencies": [
     {
       "name": "openai-codex",
@@ -9,10 +9,10 @@
       "purpose": "Canonical codex-cli and codex-rs baseline for the execution loop and tool contract."
     },
     {
-      "name": "mistral.rs",
+      "name": "ctox-vllm-serve",
       "repoUrl": "https://github.com/EricLBuehler/mistral.rs.git",
-      "targetDir": "references/mistral.rs",
-      "purpose": "Canonical local runtime and OpenAI-compatible server for GPT-OSS and Qwen3.5 families."
+      "targetDir": "ctox-vllm-serve",
+      "purpose": "Forked CTOX local runtime and OpenAI-compatible server for the verified GPT-OSS and Qwen3.5 families."
     }
   ],
   "runtimeFamilies": [
@@ -21,27 +21,26 @@
       "modelExamples": [
         "openai/gpt-oss-20b"
       ],
-      "mistralrsMode": "serve",
-      "mistralrsAdapter": "gpt_oss",
+      "engineMode": "serve",
+      "engineAdapter": "gpt_oss",
       "wireApi": "responses",
       "bridgeMode": "responses_proxy",
       "notes": [
         "The codex-cli baseline must remain on /v1/responses.",
-        "The compatibility layer may rewrite or filter tool schemas so mistral.rs accepts the official codex request shape."
+        "The compatibility layer may rewrite or filter tool schemas so the CTOX vllm-serve engine accepts the official codex request shape."
       ]
     },
     {
       "family": "qwen3_5",
       "modelExamples": [
-        "Qwen/Qwen3.5-27B",
-        "Qwen/Qwen3.5-35B-A3B"
+        "Qwen/Qwen3.5-27B"
       ],
-      "mistralrsMode": "serve vision",
-      "mistralrsAdapter": "vision",
+      "engineMode": "serve vision",
+      "engineAdapter": "vision",
       "wireApi": "openai_chat_completions",
       "bridgeMode": "custom_execution",
       "notes": [
-        "Qwen3.5 support must cover local image-path, URL, or base64 image inputs as documented by mistral.rs.",
+        "Qwen3.5 support must cover local image-path, URL, or base64 image inputs as supported by the CTOX vllm-serve engine.",
         "The first clean-room version keeps codex-cli as the execution baseline and adds family-specific runtime execution for Qwen3.5."
       ]
     }
@@ -50,7 +49,7 @@
     {
       "name": "execution_baseline_rust_unit_tests",
       "path": "src/execution_baseline.rs",
-      "purpose": "Verify in Rust that codex-cli tool requests, runtime plans, and mistral.rs response rewrites stay compatible with the clean-room baseline."
+      "purpose": "Verify in Rust that codex-cli tool requests, runtime plans, and vllm-serve response rewrites stay compatible with the clean-room baseline."
     }
   ]
 }
