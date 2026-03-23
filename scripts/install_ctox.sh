@@ -483,6 +483,18 @@ detect_vllm_serve_features() {
     return
   fi
 
+  if nvidia_driver_ready && command -v nvcc >/dev/null 2>&1; then
+    local features="cuda flash-attn"
+    if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libnccl'; then
+      features="$features nccl"
+    fi
+    if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libcudnn'; then
+      features="$features cudnn"
+    fi
+    printf '%s\n' "$features"
+    return
+  fi
+
   if nvidia_gpu_present && ! cuda_toolchain_ready; then
     echo "Detected NVIDIA GPUs, but CUDA tooling is not ready. Refusing CPU-only fallback." >&2
     return 1
