@@ -11,6 +11,10 @@ apt_package_installed() {
   dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
+apt_package_available() {
+  apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate:'
+}
+
 apt_update_with_retry() {
   if ! command -v apt-get >/dev/null 2>&1; then
     return 0
@@ -369,7 +373,12 @@ ensure_nvidia_cuda_stack() {
   fi
 
   local packages=()
+  local headless_pkg=""
   local driver_pkg=""
+  local kernel_module_pkg=""
+  local kernel_release=""
+  local package_root=""
+  local utils_pkg=""
   local cuda_pkg=""
   local package=""
 
@@ -377,25 +386,52 @@ ensure_nvidia_cuda_stack() {
     packages+=(ubuntu-drivers-common)
   fi
 
-  driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
-  if [[ -z "$driver_pkg" ]]; then
-    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
+  headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-server-open$' || true)"
+  if [[ -z "$headless_pkg" ]]; then
+    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-server$' || true)"
   fi
-  if [[ -z "$driver_pkg" ]]; then
-    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-open$' || true)"
+  if [[ -z "$headless_pkg" ]]; then
+    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-open$' || true)"
   fi
-  if [[ -z "$driver_pkg" ]]; then
-    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
+  if [[ -z "$headless_pkg" ]]; then
+    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+$' || true)"
   fi
-  if [[ -n "$driver_pkg" ]] && ! apt_package_installed "$driver_pkg"; then
-    packages+=("$driver_pkg")
+
+  if [[ -n "$headless_pkg" ]]; then
+    kernel_release="$(uname -r)"
+    package_root="${headless_pkg#nvidia-headless-no-dkms-}"
+    kernel_module_pkg="linux-modules-nvidia-${package_root}-${kernel_release}"
+    if apt_package_available "$kernel_module_pkg" && ! apt_package_installed "$kernel_module_pkg"; then
+      packages+=("$kernel_module_pkg")
+    fi
+    if ! apt_package_installed "$headless_pkg"; then
+      packages+=("$headless_pkg")
+    fi
+    utils_pkg="nvidia-utils-${package_root%-open}"
+    if apt_package_available "$utils_pkg" && ! apt_package_installed "$utils_pkg"; then
+      packages+=("$utils_pkg")
+    fi
+  else
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
+    if [[ -z "$driver_pkg" ]]; then
+      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
+    fi
+    if [[ -z "$driver_pkg" ]]; then
+      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-open$' || true)"
+    fi
+    if [[ -z "$driver_pkg" ]]; then
+      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
+    fi
+    if [[ -n "$driver_pkg" ]] && ! apt_package_installed "$driver_pkg"; then
+      packages+=("$driver_pkg")
+    fi
   fi
 
   cuda_pkg="$(latest_apt_package_matching '^cuda-toolkit-[0-9]+-[0-9]+$' || true)"
   if [[ -z "$cuda_pkg" ]]; then
     cuda_pkg="nvidia-cuda-toolkit"
   fi
-  if apt-cache policy "$cuda_pkg" 2>/dev/null | grep -q 'Candidate:' && ! apt_package_installed "$cuda_pkg"; then
+  if apt_package_available "$cuda_pkg" && ! apt_package_installed "$cuda_pkg"; then
     packages+=("$cuda_pkg")
   fi
 
