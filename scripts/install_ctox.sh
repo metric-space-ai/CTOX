@@ -371,12 +371,19 @@ ensure_nvidia_cuda_stack() {
   local packages=()
   local driver_pkg=""
   local cuda_pkg=""
+  local package=""
 
   if ! apt_package_installed ubuntu-drivers-common; then
     packages+=(ubuntu-drivers-common)
   fi
 
-  driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
+  driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
+  fi
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-open$' || true)"
+  fi
   if [[ -z "$driver_pkg" ]]; then
     driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
   fi
