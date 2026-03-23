@@ -1,7 +1,5 @@
 target/
-runtime/
-!references/openai-codex/codex-rs/artifacts/src/runtime/
-!references/openai-codex/codex-rs/artifacts/src/runtime/**
+/runtime/
 .venv/
 .DS_Store
 __pycache__/
