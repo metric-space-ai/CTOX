@@ -317,6 +317,16 @@ latest_apt_package_matching() {
   apt-cache pkgnames 2>/dev/null | grep -E "$pattern" | sort -V | tail -n 1
 }
 
+cuda_toolchain_ready() {
+  command -v nvcc >/dev/null 2>&1 || return 1
+  command -v ldconfig >/dev/null 2>&1 || return 1
+  ldconfig -p 2>/dev/null | grep -q 'libnvrtc' || return 1
+  ldconfig -p 2>/dev/null | grep -q 'libcurand' || return 1
+  ldconfig -p 2>/dev/null | grep -q 'libcublasLt' || return 1
+  ldconfig -p 2>/dev/null | grep -q 'libcublas' || return 1
+  return 0
+}
+
 vllm_serve_uses_cuda() {
   case " ${MISTRALRS_FEATURES:-} " in
     *" cuda "*) return 0 ;;
@@ -342,6 +352,11 @@ detect_vllm_serve_features() {
     return
   fi
 
+  if ! cuda_toolchain_ready; then
+    printf '%s\n' ""
+    return
+  fi
+
   local features="cuda flash-attn"
   if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libnccl'; then
     features="$features nccl"
@@ -353,13 +368,7 @@ detect_vllm_serve_features() {
 }
 
 cuda_linker_prereqs_ready() {
-  command -v nvcc >/dev/null 2>&1 || return 1
-  command -v ldconfig >/dev/null 2>&1 || return 1
-  ldconfig -p 2>/dev/null | grep -q 'libnvrtc' || return 1
-  ldconfig -p 2>/dev/null | grep -q 'libcurand' || return 1
-  ldconfig -p 2>/dev/null | grep -q 'libcublasLt' || return 1
-  ldconfig -p 2>/dev/null | grep -q 'libcublas' || return 1
-  return 0
+  cuda_toolchain_ready
 }
 
 ensure_cuda_build_prereqs() {
@@ -552,7 +561,12 @@ fi
 echo "[build] Build vendored vllm-serve engine with features: $MISTRALRS_FEATURES"
 (
   cd "$ROOT/ctox-vllm-serve"
-  "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs --features "$MISTRALRS_FEATURES"
+  if [[ -n "$MISTRALRS_FEATURES" ]]; then
+    "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs --features "$MISTRALRS_FEATURES"
+  else
+    echo "[build] No CUDA toolchain detected; build mistralrs in CPU-only mode"
+    "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs
+  fi
 )
 
 echo "[build] Build vendored codex binaries"
