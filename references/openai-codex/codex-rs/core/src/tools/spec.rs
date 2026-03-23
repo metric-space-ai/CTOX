@@ -484,6 +484,10 @@ pub enum JsonSchema {
     Number {
         #[serde(skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        minimum: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        maximum: Option<f64>,
     },
     Array {
         items: Box<JsonSchema>,
@@ -681,6 +685,8 @@ fn create_exec_command_tool(
                 description: Some(
                     "How long to wait (in milliseconds) for output before yielding.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -690,6 +696,8 @@ fn create_exec_command_tool(
                     "Maximum number of tokens to return. Excess output will be truncated."
                         .to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -729,6 +737,8 @@ fn create_write_stdin_tool() -> ToolSpec {
             "session_id".to_string(),
             JsonSchema::Number {
                 description: Some("Identifier of the running unified exec session.".to_string()),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -743,6 +753,8 @@ fn create_write_stdin_tool() -> ToolSpec {
                 description: Some(
                     "How long to wait (in milliseconds) for output before yielding.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -752,6 +764,8 @@ fn create_write_stdin_tool() -> ToolSpec {
                     "Maximum number of tokens to return. Excess output will be truncated."
                         .to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -787,6 +801,8 @@ fn create_wait_tool() -> ToolSpec {
                     "How long to wait (in milliseconds) for more output before yielding again."
                         .to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -795,6 +811,8 @@ fn create_wait_tool() -> ToolSpec {
                 description: Some(
                     "Maximum number of output tokens to return for this wait call.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -841,6 +859,8 @@ fn create_shell_tool(exec_permission_approvals_enabled: bool) -> ToolSpec {
             "timeout_ms".to_string(),
             JsonSchema::Number {
                 description: Some("The timeout for the command in milliseconds".to_string()),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -902,6 +922,8 @@ fn create_shell_command_tool(
             "timeout_ms".to_string(),
             JsonSchema::Number {
                 description: Some("The timeout for the command in milliseconds".to_string()),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -1475,6 +1497,8 @@ fn create_spawn_agents_on_csv_tool() -> ToolSpec {
                 "Maximum concurrent workers for this job. Defaults to 16 and is capped by config."
                     .to_string(),
             ),
+            minimum: None,
+            maximum: None,
         },
     );
     properties.insert(
@@ -1483,6 +1507,8 @@ fn create_spawn_agents_on_csv_tool() -> ToolSpec {
             description: Some(
                 "Alias for max_concurrency. Set to 1 to run sequentially.".to_string(),
             ),
+            minimum: None,
+            maximum: None,
         },
     );
     properties.insert(
@@ -1492,6 +1518,8 @@ fn create_spawn_agents_on_csv_tool() -> ToolSpec {
                 "Maximum runtime per worker before it is failed. Defaults to 1800 seconds."
                     .to_string(),
             ),
+            minimum: None,
+            maximum: None,
         },
     );
     properties.insert(
@@ -1655,6 +1683,8 @@ fn create_wait_agent_tool() -> ToolSpec {
             description: Some(format!(
                 "Optional timeout in milliseconds. Defaults to {DEFAULT_WAIT_TIMEOUT_MS}, min {MIN_WAIT_TIMEOUT_MS}, max {MAX_WAIT_TIMEOUT_MS}. Prefer longer waits (minutes) to avoid busy polling."
             )),
+            minimum: None,
+            maximum: None,
         },
     );
 
@@ -1828,6 +1858,8 @@ fn create_test_sync_tool() -> ToolSpec {
                 description: Some(
                     "Number of tool calls that must arrive before the barrier opens".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -1836,6 +1868,8 @@ fn create_test_sync_tool() -> ToolSpec {
                 description: Some(
                     "Maximum time in milliseconds to wait at the barrier".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -1847,6 +1881,8 @@ fn create_test_sync_tool() -> ToolSpec {
                 description: Some(
                     "Optional delay in milliseconds before any other action".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -1855,6 +1891,8 @@ fn create_test_sync_tool() -> ToolSpec {
                 description: Some(
                     "Optional delay in milliseconds after completing the barrier".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -1914,6 +1952,8 @@ fn create_grep_files_tool() -> ToolSpec {
                 description: Some(
                     "Maximum number of file paths to return (defaults to 100).".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -1948,6 +1988,8 @@ fn create_tool_search_tool(app_tools: &HashMap<String, ToolInfo>) -> ToolSpec {
                 description: Some(format!(
                     "Maximum number of tools to return (defaults to {TOOL_SEARCH_DEFAULT_LIMIT})."
                 )),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -2150,6 +2192,8 @@ fn create_read_file_tool() -> ToolSpec {
                     "Anchor line to center the indentation lookup on (defaults to offset)."
                         .to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -2158,6 +2202,8 @@ fn create_read_file_tool() -> ToolSpec {
                 description: Some(
                     "How many parent indentation levels (smaller indents) to include.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -2185,6 +2231,8 @@ fn create_read_file_tool() -> ToolSpec {
                     "Hard cap on the number of lines returned when using indentation mode."
                         .to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);
@@ -2202,12 +2250,16 @@ fn create_read_file_tool() -> ToolSpec {
                 description: Some(
                     "The line number to start reading from. Must be 1 or greater.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
             "limit".to_string(),
             JsonSchema::Number {
                 description: Some("The maximum number of lines to return.".to_string()),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -2260,12 +2312,16 @@ fn create_list_dir_tool() -> ToolSpec {
                 description: Some(
                     "The entry number to start listing from. Must be 1 or greater.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
             "limit".to_string(),
             JsonSchema::Number {
                 description: Some("The maximum number of entries to return.".to_string()),
+                minimum: None,
+                maximum: None,
             },
         ),
         (
@@ -2274,6 +2330,8 @@ fn create_list_dir_tool() -> ToolSpec {
                 description: Some(
                     "The maximum directory depth to traverse. Must be 1 or greater.".to_string(),
                 ),
+                minimum: None,
+                maximum: None,
             },
         ),
     ]);

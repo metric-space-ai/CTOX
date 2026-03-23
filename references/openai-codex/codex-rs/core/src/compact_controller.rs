@@ -1618,9 +1618,9 @@ async fn run_structured_prompt<T: DeserializeOwned>(
             Err(CodexErr::Interrupted) => return Err(CodexErr::Interrupted),
             Err(CodexErr::ContextWindowExceeded) => return Err(CodexErr::ContextWindowExceeded),
             Err(err) => {
-                if retries < max_retries {
+                if retries < max_retries as usize {
                     retries += 1;
-                    let delay = backoff(retries);
+                    let delay = backoff(retries as u64);
                     sess.notify_stream_error(
                         turn_context,
                         format!("Reconnecting... {retries}/{max_retries}"),

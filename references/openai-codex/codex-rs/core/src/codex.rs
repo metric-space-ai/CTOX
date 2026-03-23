@@ -21,7 +21,6 @@ use crate::auth_env_telemetry::collect_auth_env_telemetry;
 use crate::commit_attribution::commit_message_trailer_instruction;
 use crate::compact;
 use crate::compact::InitialContextInjection;
-use crate::compact::run_inline_interrupt_compact_task;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
@@ -4341,6 +4340,8 @@ fn submission_dispatch_span(sub: &Submission) -> tracing::Span {
 
 /// Operation handlers
 mod handlers {
+    use crate::compact::InitialContextInjection;
+    use crate::compact::run_inline_interrupt_compact_task;
     use crate::codex::Session;
     use crate::codex::SessionSettingsUpdate;
     use crate::codex::SteerInputError;
