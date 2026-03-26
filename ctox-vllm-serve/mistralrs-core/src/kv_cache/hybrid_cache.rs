@@ -153,17 +153,19 @@ impl RecurrentStatePool {
 
     /// Gather conv states for the given slot indices
     pub fn gather_conv_state(&self, state_indices: &Tensor) -> Result<Tensor> {
-        self.conv_state.index_select(state_indices, 0)
+        let state_indices = state_indices.to_device(&self.device)?;
+        self.conv_state.index_select(&state_indices, 0)
     }
 
     /// Gather recurrent states for the given slot indices
     pub fn gather_recurrent_state(&self, state_indices: &Tensor) -> Result<Tensor> {
-        self.recurrent_state.index_select(state_indices, 0)
+        let state_indices = state_indices.to_device(&self.device)?;
+        self.recurrent_state.index_select(&state_indices, 0)
     }
 
     /// Scatter conv states back to the pool for the given slot indices
     pub fn scatter_conv_state(&mut self, state_indices: &Tensor, values: &Tensor) -> Result<()> {
-        let indices: Vec<u32> = state_indices.to_vec1()?;
+        let indices: Vec<u32> = state_indices.to_device(&Device::Cpu)?.to_vec1()?;
         for (batch_idx, &slot_idx) in indices.iter().enumerate() {
             let value = values.i(batch_idx)?.unsqueeze(0)?.contiguous()?;
             self.conv_state.slice_set(&value, 0, slot_idx as usize)?;
@@ -177,7 +179,7 @@ impl RecurrentStatePool {
         state_indices: &Tensor,
         values: &Tensor,
     ) -> Result<()> {
-        let indices: Vec<u32> = state_indices.to_vec1()?;
+        let indices: Vec<u32> = state_indices.to_device(&Device::Cpu)?.to_vec1()?;
         for (batch_idx, &slot_idx) in indices.iter().enumerate() {
             let value = values.i(batch_idx)?.unsqueeze(0)?.contiguous()?;
             self.recurrent_state
@@ -345,9 +347,18 @@ impl HybridCache {
         dtype: candle_core::DType,
         device: &Device,
     ) -> Result<Self> {
+        Self::new_mapped(config, dtype, device, &[])
+    }
+
+    pub fn new_mapped(
+        config: HybridCacheConfig,
+        dtype: candle_core::DType,
+        default_device: &Device,
+        recurrent_layer_devices: &[Device],
+    ) -> Result<Self> {
         let mut caches = Vec::with_capacity(config.layer_types.len());
 
-        for layer_type in &config.layer_types {
+        for (layer_idx, layer_type) in config.layer_types.iter().enumerate() {
             let cache = match layer_type {
                 HybridLayerType::Attention => HybridLayerCache::Attention(KvCache::new_normal(
                     2,
@@ -359,7 +370,9 @@ impl HybridCache {
                     config.recurrent.conv_width,
                     config.recurrent.state_dims.clone(),
                     dtype,
-                    device,
+                    recurrent_layer_devices
+                        .get(layer_idx)
+                        .unwrap_or(default_device),
                 )?),
             };
             caches.push(cache);

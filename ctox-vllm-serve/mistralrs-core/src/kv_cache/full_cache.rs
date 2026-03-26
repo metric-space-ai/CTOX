@@ -14,6 +14,13 @@ pub enum EitherCache {
 }
 
 impl EitherCache {
+    fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+        match mutex.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Panics otherwise!
     pub fn full(&self) -> &Cache {
         match self {
@@ -26,7 +33,7 @@ impl EitherCache {
     /// Panics otherwise!
     pub fn normal(&self) -> MutexGuard<'_, NormalCache> {
         match self {
-            Self::Normal(normal) => normal.lock().unwrap(),
+            Self::Normal(normal) => Self::recover_lock(normal),
             Self::Full(_) => panic!("Got full cache, expected normal cache."),
             Self::Hybrid(_) => panic!("Got hybrid cache, expected normal cache."),
         }
@@ -35,7 +42,7 @@ impl EitherCache {
     /// Panics otherwise!
     pub fn hybrid(&self) -> MutexGuard<'_, HybridCache> {
         match self {
-            Self::Hybrid(hybrid) => hybrid.lock().unwrap(),
+            Self::Hybrid(hybrid) => Self::recover_lock(hybrid),
             Self::Normal(_) => panic!("Got normal cache, expected hybrid cache."),
             Self::Full(_) => panic!("Got full cache, expected hybrid cache."),
         }

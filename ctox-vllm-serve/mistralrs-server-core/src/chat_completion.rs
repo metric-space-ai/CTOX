@@ -285,10 +285,12 @@ pub async fn parse_request(
                                         "name".to_string(),
                                         Value::String(tc.function.name.clone()),
                                     );
-                                    function_map.insert(
-                                        "arguments".to_string(),
-                                        Value::String(tc.function.arguments.clone()),
-                                    );
+                                    let arguments_value =
+                                        serde_json::from_str::<Value>(&tc.function.arguments)
+                                            .unwrap_or_else(|_| {
+                                                Value::String(tc.function.arguments.clone())
+                                            });
+                                    function_map.insert("arguments".to_string(), arguments_value);
                                     tc_map.insert(
                                         "function".to_string(),
                                         Value::Object(function_map),

@@ -20,7 +20,7 @@ use axum::{
     },
 };
 use either::Either;
-use mistralrs_core::{ChatCompletionResponse, MistralRs, Request, Response};
+use mistralrs_core::{ChatCompletionResponse, CompletionResponse, MistralRs, Request, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -1302,6 +1302,68 @@ fn chat_response_to_response_resource(
     resource
 }
 
+fn completion_response_to_response_resource(
+    completion_resp: &CompletionResponse,
+    request_id: String,
+    metadata: Option<Value>,
+    request_ctx: &RequestContext,
+) -> ResponseResource {
+    let created_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let mut resource = ResponseResource::new(request_id, completion_resp.model.clone(), created_at);
+    let mut output_items = Vec::new();
+    let mut output_text_parts = Vec::new();
+
+    for choice in &completion_resp.choices {
+        if !choice.text.is_empty() {
+            output_text_parts.push(choice.text.clone());
+            output_items.push(OutputItem::message(
+                format!("msg_{}", Uuid::new_v4()),
+                vec![OutputContent::text(choice.text.clone())],
+                ItemStatus::Completed,
+            ));
+        }
+    }
+
+    resource.status = ResponseStatus::Completed;
+    resource.output = output_items;
+    resource.output_text = if output_text_parts.is_empty() {
+        None
+    } else {
+        Some(output_text_parts.join(""))
+    };
+    resource.usage = Some(ResponseUsage::new(
+        completion_resp.usage.prompt_tokens,
+        completion_resp.usage.completion_tokens,
+    ));
+    resource.metadata = metadata;
+    resource.completed_at = Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    );
+
+    resource.tools = request_ctx.tools.clone();
+    resource.tool_choice = request_ctx.tool_choice.clone();
+    resource.parallel_tool_calls = request_ctx.parallel_tool_calls;
+    resource.text = request_ctx.text.clone();
+    resource.temperature = request_ctx.temperature;
+    resource.top_p = request_ctx.top_p;
+    resource.presence_penalty = request_ctx.presence_penalty;
+    resource.frequency_penalty = request_ctx.frequency_penalty;
+    resource.top_logprobs = request_ctx.top_logprobs;
+    resource.max_output_tokens = request_ctx.max_output_tokens;
+    resource.max_tool_calls = request_ctx.max_tool_calls;
+    resource.store = request_ctx.store;
+    resource.background = request_ctx.background;
+
+    resource
+}
+
 /// Parse OpenResponses request into internal format
 async fn parse_openresponses_request(
     oairequest: OpenResponsesCreateRequest,
@@ -1594,6 +1656,49 @@ pub async fn create_response(
                     task_manager
                         .mark_failed(&task_id, ResponseError::new("model_error", msg.to_string()));
                 }
+                Some(Response::CompletionDone(completion_resp)) => {
+                    let response = completion_response_to_response_resource(
+                        &completion_resp,
+                        task_id.clone(),
+                        metadata_clone,
+                        &request_context,
+                    );
+
+                    if store {
+                        let cache = get_response_cache();
+                        let _ = cache.store_response(task_id.clone(), response.clone());
+
+                        if let Some(mut history) = conversation_history {
+                            for choice in &completion_resp.choices {
+                                if !choice.text.is_empty() {
+                                    history.push(Message {
+                                        content: Some(MessageContent::from_text(
+                                            choice.text.clone(),
+                                        )),
+                                        role: "assistant".to_string(),
+                                        name: None,
+                                        tool_calls: None,
+                                        tool_call_id: None,
+                                    });
+                                }
+                            }
+                            let _ = cache.store_conversation_history(task_id.clone(), history);
+                        }
+                    }
+
+                    task_manager.mark_completed(&task_id, response);
+                }
+                Some(Response::CompletionModelError(msg, partial_resp)) => {
+                    let mut response = completion_response_to_response_resource(
+                        &partial_resp,
+                        task_id.clone(),
+                        metadata_clone,
+                        &request_context,
+                    );
+                    response.error = Some(ResponseError::new("model_error", msg.to_string()));
+                    response.status = ResponseStatus::Failed;
+                    task_manager.mark_completed(&task_id, response);
+                }
                 Some(Response::ValidationError(e)) => {
                     task_manager.mark_failed(
                         &task_id,
@@ -1680,8 +1785,55 @@ pub async fn create_response(
 
                 OpenResponsesResponder::Json(response)
             }
+            Some(Response::CompletionDone(completion_resp)) => {
+                let response = completion_response_to_response_resource(
+                    &completion_resp,
+                    request_id.clone(),
+                    metadata,
+                    &request_context,
+                );
+
+                if store {
+                    let cache = get_response_cache();
+                    let _ = cache.store_response(request_id.clone(), response.clone());
+
+                    if let Some(mut history) = conversation_history {
+                        for choice in &completion_resp.choices {
+                            if !choice.text.is_empty() {
+                                history.push(Message {
+                                    content: Some(MessageContent::from_text(choice.text.clone())),
+                                    role: "assistant".to_string(),
+                                    name: None,
+                                    tool_calls: None,
+                                    tool_call_id: None,
+                                });
+                            }
+                        }
+                        let _ = cache.store_conversation_history(request_id, history);
+                    }
+                }
+
+                OpenResponsesResponder::Json(response)
+            }
             Some(Response::ModelError(msg, partial_resp)) => {
                 let mut response = chat_response_to_response_resource(
+                    &partial_resp,
+                    request_id.clone(),
+                    metadata,
+                    &request_context,
+                );
+                response.error = Some(ResponseError::new("model_error", msg.to_string()));
+                response.status = ResponseStatus::Failed;
+
+                if store {
+                    let cache = get_response_cache();
+                    let _ = cache.store_response(request_id.clone(), response.clone());
+                }
+
+                OpenResponsesResponder::ModelError(msg.to_string(), response)
+            }
+            Some(Response::CompletionModelError(msg, partial_resp)) => {
+                let mut response = completion_response_to_response_resource(
                     &partial_resp,
                     request_id.clone(),
                     metadata,

@@ -958,18 +958,65 @@ impl AudioResponseFormat {
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct SpeechGenerationRequest {
     /// The TTS model to use for audio generation.
-    #[schema(example = "nari-labs/Dia-1.6B")]
+    #[schema(example = "Qwen/Qwen3-TTS-12Hz-0.6B-Base")]
     #[serde(default = "default_model")]
     pub model: String,
     /// The text content to convert to speech.
-    #[schema(
-        example = "[S1] Dia is an open weights text to dialogue model. [S2] You get full control over scripts and voices. [S1] Wow. Amazing. (laughs) [S2] Try it now on Git hub or Hugging Face."
-    )]
+    #[schema(example = "Please read this line in a calm, clear voice.")]
     pub input: String,
-    // `voice` and `instructions` are ignored.
     /// The desired audio format for the generated speech.
     #[schema(example = "mp3")]
     pub response_format: AudioResponseFormat,
+    /// Optional speaker id for Qwen3-TTS custom-voice models.
+    #[schema(example = json!(Option::Some("Vivian")))]
+    #[serde(alias = "voice")]
+    pub speaker: Option<String>,
+    /// Optional language hint for TTS systems that support it.
+    #[schema(example = json!(Option::Some("English")))]
+    pub language: Option<String>,
+    /// Optional style or speaking instruction.
+    #[schema(example = json!(Option::Some("Speak with great enthusiasm.")))]
+    pub instructions: Option<String>,
+    /// Optional task type for TTS systems with multiple modes.
+    #[schema(example = json!(Option::Some("Base")))]
+    pub task_type: Option<String>,
+    /// Optional reference audio URL or base64 data for voice-clone tasks.
+    #[schema(example = json!(Option::None::<String>))]
+    pub ref_audio: Option<String>,
+    /// Optional transcript for reference audio in voice-clone tasks.
+    #[schema(example = json!(Option::None::<String>))]
+    pub ref_text: Option<String>,
+    /// Optional pre-encoded reference codec frames for voice-clone ICL mode.
+    #[schema(example = json!(Option::None::<Vec<Vec<u32>>>))]
+    pub ref_code: Option<Vec<Vec<u32>>>,
+    /// Optional explicit ICL-mode toggle for voice-clone prompting.
+    #[schema(example = json!(Option::Some(true)))]
+    pub icl_mode: Option<bool>,
+    /// Optional x-vector only mode for TTS systems that support it.
+    #[schema(example = json!(Option::Some(false)))]
+    pub x_vector_only_mode: Option<bool>,
+    /// Optional maximum number of generated tokens for TTS systems that support it.
+    #[schema(example = json!(Option::Some(2048usize)))]
+    pub max_new_tokens: Option<usize>,
+    /// Optional sampling temperature for TTS talker generation.
+    #[schema(example = json!(Option::Some(0.9f64)))]
+    pub temperature: Option<f64>,
+    /// Optional nucleus sampling threshold for TTS talker generation.
+    #[schema(example = json!(Option::Some(1.0f64)))]
+    pub top_p: Option<f64>,
+    /// Optional top-k cutoff for TTS talker generation.
+    #[schema(example = json!(Option::Some(50usize)))]
+    pub top_k: Option<usize>,
+    /// Optional repetition penalty for TTS talker sampling.
+    #[schema(example = json!(Option::Some(1.05f32)))]
+    pub repetition_penalty: Option<f32>,
+}
+
+/// Simple transcription response payload.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct AudioTranscriptionResponse {
+    #[schema(example = "Hello, how are you?")]
+    pub text: String,
 }
 
 /// Helper type for messages field in ResponsesCreateRequest

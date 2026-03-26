@@ -23,7 +23,7 @@ use crate::{
         mla_cache_forward, mla_decode_forward, should_use_mla_cache, should_use_mla_decode,
         MlaWeights,
     },
-    moe::{MoEExperts, MoEExpertsConfig},
+    moe::{MoEExperts, MoEExpertsBackend, MoEExpertsConfig},
     ops::{SplitOp, TopKLastDimOp},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
@@ -34,6 +34,53 @@ use crate::{
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
+
+fn glm_debug_enabled() -> bool {
+    std::env::var_os("MISTRALRS_GLM_DEBUG").is_some()
+}
+
+fn glm_debug_log(message: impl AsRef<str>) {
+    if glm_debug_enabled() {
+        tracing::info!(target: "mistralrs_core::models::glm4_moe_lite_debug", "{}", message.as_ref());
+    }
+}
+
+fn glm_non_repeating_devices(
+    mapper: &dyn DeviceMapper,
+    num_hidden_layers: usize,
+    fallback: &Device,
+) -> (Device, Device) {
+    let mut counts: Vec<(Device, usize)> = Vec::new();
+    for layer_idx in 0..num_hidden_layers {
+        let device = mapper
+            .device_for(layer_idx, false)
+            .cloned()
+            .unwrap_or_else(|| fallback.clone());
+        if let Some((_, count)) = counts.iter_mut().find(|(seen, _)| seen.same_device(&device)) {
+            *count += 1;
+        } else {
+            counts.push((device, 1));
+        }
+    }
+
+    if counts.is_empty() {
+        return (fallback.clone(), fallback.clone());
+    }
+
+    counts.sort_by_key(|(_, count)| *count);
+
+    let embed_device = counts
+        .first()
+        .map(|(device, _)| device.clone())
+        .unwrap_or_else(|| fallback.clone());
+    let head_device = counts
+        .get(1)
+        .or_else(|| counts.first())
+        .map(|(device, _)| device.clone())
+        .unwrap_or_else(|| fallback.clone());
+
+    (embed_device, head_device)
+}
 
 serde_default_fn!(f64, routed_scaling_factor, 1.0);
 serde_default_fn!(usize, moe_layer_freq, 1);
@@ -138,6 +185,10 @@ impl Attention {
         comm: &Arc<mistralrs_quant::Comm>,
     ) -> Result<Self> {
         let q_head_dim = cfg.q_head_dim();
+        let layer_device = mapper
+            .device_for(layer_idx, false)
+            .cloned()
+            .unwrap_or(Device::Cpu);
 
         // GLM4MoeLite always uses LoRA for Q projection
         let q = {
@@ -196,7 +247,7 @@ impl Attention {
 
         let mla_weights = MlaWeights::new(
             paged_attn.is_some(),
-            mapper.device_for(layer_idx, loading_isq),
+            Some(&layer_device),
         );
 
         Ok(Self {
@@ -231,6 +282,13 @@ impl Attention {
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
         let (bs, seq_len, _) = xs.dims3()?;
+        let is_decode = attention_mask.is_none();
+        if glm_debug_enabled() {
+            glm_debug_log(format!(
+                "attention.enter bs={bs} seq_len={seq_len} decode={is_decode} paged_attn={}",
+                self.paged_attn.is_some()
+            ));
+        }
 
         let mut q = self.q.forward(xs)?;
         q = q
@@ -265,8 +323,14 @@ impl Attention {
             q_nope.device(),
             &metadata,
         );
+        if glm_debug_enabled() {
+            glm_debug_log(format!(
+                "attention.branch seq_len={seq_len} decode={is_decode} use_mla_decode={use_mla_decode}"
+            ));
+        }
 
         let mut attn_out = if use_mla_decode {
+            glm_debug_log("attention.mla_decode.start");
             mla_decode_forward(
                 &q_nope,
                 &q_pe,
@@ -285,6 +349,7 @@ impl Attention {
                 seq_len,
             )?
         } else {
+            glm_debug_log("attention.non_mla.start");
             let mut kv = self.kv_b_proj.forward_autocast(&ckv)?;
             kv = kv
                 .reshape((
@@ -308,8 +373,15 @@ impl Attention {
             .contiguous()?;
 
             let use_mla_cache = should_use_mla_cache(self.paged_attn.is_some(), q.device());
+            if glm_debug_enabled() {
+                glm_debug_log(format!(
+                    "attention.non_mla.cache seq_len={seq_len} decode={is_decode} use_mla_cache={use_mla_cache} paged_attn={}",
+                    self.paged_attn.is_some()
+                ));
+            }
 
             if use_mla_cache {
+                glm_debug_log("attention.mla_cache.start");
                 mla_cache_forward(
                     &q,
                     &k,
@@ -334,6 +406,7 @@ impl Attention {
                 match &self.paged_attn {
                     Some(paged_attn) => match metadata {
                         Some(((key_cache, value_cache), input_metadata)) => {
+                            glm_debug_log("attention.paged_attn.start");
                             let v = v
                                 .pad_with_zeros(
                                     D::Minus1,
@@ -356,6 +429,7 @@ impl Attention {
                                 .narrow(D::Minus1, 0, self.cfg.v_head_dim)?
                         }
                         None => {
+                            glm_debug_log("attention.paged_attn.dummy_metadata.start");
                             // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
                             // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                             let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
@@ -384,6 +458,7 @@ impl Attention {
                         }
                     },
                     None => {
+                        glm_debug_log("attention.sdpa.start");
                         (k, v) = kv_cache.append(&k, &v)?;
 
                         Sdpa.run_attention(
@@ -404,6 +479,9 @@ impl Attention {
         } else {
             attn_out.reshape((bs, seq_len, ()))?
         };
+        if glm_debug_enabled() {
+            glm_debug_log(format!("attention.exit bs={bs} seq_len={seq_len} decode={is_decode}"));
+        }
 
         self.o_proj.forward_autocast(&attn_out)
     }
@@ -589,16 +667,31 @@ impl Moe {
             moe_intermediate_size: cfg.moe_intermediate_size,
         };
 
-        // Use the optimized MoEExperts with automatic backend selection
-        let experts = MoEExperts::new(
-            &moe_cfg,
-            mapper.set_device(layer_idx, vb.clone(), loading_isq),
-            layer_device,
-            comm,
-            loading_isq,
-            &cfg.quantization_config,
-            cfg.hidden_act,
-        )?;
+        let experts_vb = mapper.set_device(layer_idx, vb.clone(), loading_isq);
+        let experts = if loading_isq {
+            // With loading_isq=true, expert weights are CPU-staged already.
+            // Prefer the fast path so GLM per-expert routed experts are materialized
+            // correctly instead of falling into PackedExperts dummy placeholders.
+            MoEExperts::new_with_backend(
+                &moe_cfg,
+                experts_vb,
+                layer_device,
+                comm,
+                MoEExpertsBackend::Fast,
+                &cfg.quantization_config,
+                cfg.hidden_act,
+            )?
+        } else {
+            MoEExperts::new(
+                &moe_cfg,
+                experts_vb,
+                layer_device,
+                comm,
+                loading_isq,
+                &cfg.quantization_config,
+                cfg.hidden_act,
+            )?
+        };
 
         // Shared experts are handled separately
         let shared_experts = if n_shared_experts > 0 {
@@ -628,19 +721,29 @@ impl Moe {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let identity = xs.clone();
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
+        if glm_debug_enabled() {
+            glm_debug_log(format!("moe.enter bs={b_size} seq_len={seq_len} hidden={hidden_dim}"));
+        }
 
         // Get routing weights from custom gate (NoAuxTc with e_score_correction_bias)
+        glm_debug_log("moe.gate.start");
         let (topk_idx, topk_weight) = self.gate.forward(xs)?;
+        glm_debug_log("moe.gate.done");
 
         // Forward through routed experts using optimized MoEExperts
+        glm_debug_log("moe.experts.start");
         let mut y = self.experts.forward(xs, topk_weight, &topk_idx)?;
+        glm_debug_log("moe.experts.done");
         y = y.reshape((b_size, seq_len, hidden_dim))?;
 
         // Add shared expert output
         if let Some(ref shared_experts) = self.shared_experts {
+            glm_debug_log("moe.shared.start");
             y = (y + shared_experts.forward(&identity)?)?;
+            glm_debug_log("moe.shared.done");
         }
 
+        glm_debug_log("moe.exit");
         Ok(y)
     }
 
@@ -752,6 +855,9 @@ impl DecoderLayer {
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
+        if glm_debug_enabled() {
+            glm_debug_log("layer.enter");
+        }
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
         let xs = self.attn.forward(
@@ -767,6 +873,9 @@ impl DecoderLayer {
         let xs = self
             .moe_or_mlp
             .forward(&xs.apply(&self.post_attention_layernorm)?)?;
+        if glm_debug_enabled() {
+            glm_debug_log("layer.exit");
+        }
         residual + xs
     }
 }
@@ -794,35 +903,58 @@ impl Glm4MoeLite {
         let vb_m = vb.pp("model");
 
         let mapper = normal_loading_metadata.mapper;
+        let (embed_device, head_device) = glm_non_repeating_devices(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+        );
+        let non_repeating_device = head_device.clone();
 
+        glm_debug_log(format!(
+            "model.new.start loading_isq={} embed_device={:?} head_device={:?}",
+            normal_loading_metadata.loading_isq,
+            embed_device.location(),
+            head_device.location()
+        ));
+        glm_debug_log("model.new.embed_tokens.start");
         let embed_tokens = embedding(
             cfg.vocab_size,
             cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), false),
+            vb_m.pp("embed_tokens").set_device(embed_device.clone()),
             &cfg.quantization_config,
         )?;
+        glm_debug_log("model.new.embed_tokens.done");
+        glm_debug_log("model.new.lm_head.start");
         let lm_head = if !cfg.tie_word_embeddings {
             ReplicatedLayer::new(
                 cfg.hidden_size,
                 cfg.vocab_size,
                 &cfg.quantization_config,
                 false,
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
+                if normal_loading_metadata.loading_isq {
+                    vb.pp("lm_head").set_device(Device::Cpu)
+                } else {
+                    vb.pp("lm_head").set_device(head_device.clone())
+                },
             )?
         } else {
             ReplicatedLayer::from_linear(candle_nn::Linear::new(
-                mapper.cast_nm_device(
-                    embed_tokens.embeddings(),
-                    normal_loading_metadata.loading_isq,
-                )?,
+                if normal_loading_metadata.loading_isq {
+                    embed_tokens.embeddings().to_device(&Device::Cpu)?
+                } else {
+                    embed_tokens.embeddings().to_device(&head_device)?
+                },
                 None,
             ))?
         };
+        glm_debug_log("model.new.lm_head.done");
+        glm_debug_log("model.new.norm.start");
         let norm = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
+            vb_m.pp("norm").set_device(head_device.clone()),
         )?;
+        glm_debug_log("model.new.norm.done");
 
         let mut ropes = HashMap::new();
         let rope_cfg = DeepSeekV2RopeConfig {
@@ -844,6 +976,7 @@ impl Glm4MoeLite {
                 )?),
             );
         }
+        glm_debug_log("model.new.ropes.done");
 
         let vb_l = vb_m.pp("layers");
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(
@@ -859,6 +992,10 @@ impl Glm4MoeLite {
                 .get(&device.location())
                 .expect("No RoPE for device location!")
                 .clone();
+            glm_debug_log(format!(
+                "model.new.layer.start idx={layer_idx} device={:?}",
+                device.location()
+            ));
             let paged_attn = match &attention_mechanism {
                 AttentionImplementation::Eager => None,
                 AttentionImplementation::PagedAttention => Some(
@@ -878,7 +1015,11 @@ impl Glm4MoeLite {
                 &comm,
                 normal_loading_metadata.real_device.clone(),
             )
+            .inspect(|_| {
+                glm_debug_log(format!("model.new.layer.done idx={layer_idx}"));
+            })
         })?;
+        glm_debug_log("model.new.layers.done");
 
         Ok(Self {
             lm_head,
@@ -889,7 +1030,7 @@ impl Glm4MoeLite {
                 cfg.num_hidden_layers,
                 cfg.max_position_embeddings,
             )),
-            device: normal_loading_metadata.real_device.clone(),
+            device: non_repeating_device,
             max_seq_len: cfg.max_position_embeddings,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
@@ -943,10 +1084,26 @@ impl Glm4MoeLite {
         metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
-        let mut xs = self.embed_tokens.forward(input_ids)?;
+        let input_ids = if input_ids
+            .device()
+            .same_device(self.embed_tokens.embeddings().device())
+        {
+            input_ids.clone()
+        } else {
+            input_ids.to_device(self.embed_tokens.embeddings().device())?
+        };
+        let mut xs = self.embed_tokens.forward(&input_ids)?;
+        if glm_debug_enabled() {
+            let is_decode = metadata.is_some() && input_ids.dims2().map(|(_, s)| s == 1).unwrap_or(false);
+            glm_debug_log(format!(
+                "model.forward.enter decode={is_decode} input_shape={:?} layers={}",
+                input_ids.shape().dims(),
+                self.layers.len()
+            ));
+        }
         let cache = &mut self.cache.normal().0;
         let attention_mask = CausalMasker.make_causal_mask_matrix(
-            input_ids,
+            &input_ids,
             metadata
                 .as_ref()
                 .map(|(_, _)| &seqlen_offsets as &dyn PastKvLenCache)
@@ -963,6 +1120,9 @@ impl Glm4MoeLite {
         });
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         for (i, layer) in self.layers.iter().enumerate() {
+            if glm_debug_enabled() {
+                glm_debug_log(format!("model.layer.start idx={i}"));
+            }
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
@@ -974,10 +1134,16 @@ impl Glm4MoeLite {
                     .map(|(kv_cache, metadata)| (kv_cache[i].clone(), *metadata)),
                 flash_params,
             )?;
+            if glm_debug_enabled() {
+                glm_debug_log(format!("model.layer.done idx={i}"));
+            }
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
         let xs = extract_logits(&xs, context_lens)?;
+        if glm_debug_enabled() {
+            glm_debug_log("model.forward.logits_ready");
+        }
         self.lm_head.forward_autocast(&xs)
     }
 }

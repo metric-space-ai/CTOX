@@ -11,10 +11,6 @@ apt_package_installed() {
   dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q "install ok installed"
 }
 
-apt_package_available() {
-  apt-cache policy "$1" 2>/dev/null | grep -q 'Candidate:'
-}
-
 apt_update_with_retry() {
   if ! command -v apt-get >/dev/null 2>&1; then
     return 0
@@ -86,6 +82,42 @@ ensure_codex_linux_build_prereqs() {
   echo "[prep] Install Linux prerequisites for vendored Codex sandbox binaries"
   apt_update_with_retry
   run_sudo apt-get install -y "${packages[@]}"
+}
+
+ensure_linux_discovery_prereqs() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local packages=()
+  local package=""
+  for package in ripgrep sqlite3 sysstat dnsutils iputils-ping openssl; do
+    apt_package_installed "$package" || packages+=("$package")
+  done
+
+  if [[ "${#packages[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "[prep] Install Linux ops skill prerequisites"
+  apt_update_with_retry
+  run_sudo apt-get install -y "${packages[@]}"
+}
+
+ensure_uv_runtime() {
+  if command -v uv >/dev/null 2>&1 || command -v uvx >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "[prep] curl missing; skipping uv install" >&2
+    return 0
+  fi
+
+  echo "[prep] Install uv for CPU STT/TTS sidecars"
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  if [[ -x "$HOME/.local/bin/uv" ]]; then
+    export PATH="$HOME/.local/bin:$PATH"
+  fi
 }
 
 ensure_project_references_present() {
@@ -293,6 +325,48 @@ EOF
   systemctl --user restart cto-jami-daemon.service >/dev/null 2>&1 || true
 }
 
+install_ctox_user_service() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local service_dir service_file marker_file
+  service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  service_file="$service_dir/ctox.service"
+  marker_file="$ROOT/runtime/ctox_systemd_user.installed"
+  mkdir -p "$service_dir" "$ROOT/runtime"
+
+  cat > "$service_file" <<EOF
+[Unit]
+Description=CTOX Background Service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=$ROOT
+Environment=CTOX_ROOT=$ROOT
+ExecStart=$HOME/.local/bin/ctox service --foreground
+Restart=always
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target
+EOF
+
+  : > "$marker_file"
+  systemctl --user daemon-reload
+  systemctl --user enable ctox.service >/dev/null 2>&1 || true
+  systemctl --user restart ctox.service >/dev/null 2>&1 || true
+
+  if command -v loginctl >/dev/null 2>&1 && command -v sudo >/dev/null 2>&1; then
+    sudo loginctl enable-linger "$USER" >/dev/null 2>&1 || true
+  fi
+}
+
 wait_for_jami_dbus_runtime() {
   if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null 2>&1; then
     return 0
@@ -373,12 +447,7 @@ ensure_nvidia_cuda_stack() {
   fi
 
   local packages=()
-  local headless_pkg=""
   local driver_pkg=""
-  local kernel_module_pkg=""
-  local kernel_release=""
-  local package_root=""
-  local utils_pkg=""
   local cuda_pkg=""
   local package=""
 
@@ -386,52 +455,25 @@ ensure_nvidia_cuda_stack() {
     packages+=(ubuntu-drivers-common)
   fi
 
-  headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-server-open$' || true)"
-  if [[ -z "$headless_pkg" ]]; then
-    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-server$' || true)"
+  driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
   fi
-  if [[ -z "$headless_pkg" ]]; then
-    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+-open$' || true)"
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-open$' || true)"
   fi
-  if [[ -z "$headless_pkg" ]]; then
-    headless_pkg="$(latest_apt_package_matching '^nvidia-headless-no-dkms-[0-9]+$' || true)"
+  if [[ -z "$driver_pkg" ]]; then
+    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
   fi
-
-  if [[ -n "$headless_pkg" ]]; then
-    kernel_release="$(uname -r)"
-    package_root="${headless_pkg#nvidia-headless-no-dkms-}"
-    kernel_module_pkg="linux-modules-nvidia-${package_root}-${kernel_release}"
-    if apt_package_available "$kernel_module_pkg" && ! apt_package_installed "$kernel_module_pkg"; then
-      packages+=("$kernel_module_pkg")
-    fi
-    if ! apt_package_installed "$headless_pkg"; then
-      packages+=("$headless_pkg")
-    fi
-    utils_pkg="nvidia-utils-${package_root%-open}"
-    if apt_package_available "$utils_pkg" && ! apt_package_installed "$utils_pkg"; then
-      packages+=("$utils_pkg")
-    fi
-  else
-    driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
-    if [[ -z "$driver_pkg" ]]; then
-      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server$' || true)"
-    fi
-    if [[ -z "$driver_pkg" ]]; then
-      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-open$' || true)"
-    fi
-    if [[ -z "$driver_pkg" ]]; then
-      driver_pkg="$(latest_apt_package_matching '^nvidia-driver-[0-9]+$' || true)"
-    fi
-    if [[ -n "$driver_pkg" ]] && ! apt_package_installed "$driver_pkg"; then
-      packages+=("$driver_pkg")
-    fi
+  if [[ -n "$driver_pkg" ]] && ! apt_package_installed "$driver_pkg"; then
+    packages+=("$driver_pkg")
   fi
 
   cuda_pkg="$(latest_apt_package_matching '^cuda-toolkit-[0-9]+-[0-9]+$' || true)"
   if [[ -z "$cuda_pkg" ]]; then
     cuda_pkg="nvidia-cuda-toolkit"
   fi
-  if apt_package_available "$cuda_pkg" && ! apt_package_installed "$cuda_pkg"; then
+  if apt-cache policy "$cuda_pkg" 2>/dev/null | grep -q 'Candidate:' && ! apt_package_installed "$cuda_pkg"; then
     packages+=("$cuda_pkg")
   fi
 
@@ -480,18 +522,6 @@ nccl_runtime_missing() {
 detect_vllm_serve_features() {
   if [[ -n "${CTOX_VLLM_SERVE_FEATURES:-}" ]]; then
     printf '%s\n' "$CTOX_VLLM_SERVE_FEATURES"
-    return
-  fi
-
-  if nvidia_driver_ready && command -v nvcc >/dev/null 2>&1; then
-    local features="cuda flash-attn"
-    if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libnccl'; then
-      features="$features nccl"
-    fi
-    if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libcudnn'; then
-      features="$features cudnn"
-    fi
-    printf '%s\n' "$features"
     return
   fi
 
@@ -627,11 +657,7 @@ write_vllm_serve_env_file() {
   mkdir -p "$ROOT/runtime"
   local model
   model="${CTOX_VLLM_SERVE_MODEL:-openai/gpt-oss-20b}"
-  local is_qwen35=0
-  case "$model" in
-    Qwen/Qwen3.5-*) is_qwen35=1 ;;
-  esac
-
+  local default_port="1234"
   local default_arch="gpt_oss"
   local default_max_seq_len="131072"
   local default_paged_attn="auto"
@@ -640,21 +666,67 @@ write_vllm_serve_env_file() {
   local default_pa_cache_type="f8e4m3"
   local default_pa_memory_fraction="0.80"
   local default_disable_nccl="1"
+  local default_world_size=""
+  local default_chat_model="$model"
+  local default_proxy_port="12434"
+  local default_embedding_model="Qwen/Qwen3-Embedding-0.6B"
+  local default_embedding_port="1237"
+  local default_embedding_isq="Q4K"
+  local default_stt_model="mistralai/Voxtral-Mini-4B-Realtime-2602"
+  local default_stt_port="1238"
+  local default_stt_isq="Q4K"
+  local default_tts_model="Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+  local default_tts_port="1239"
+  local default_tts_isq="Q4K"
 
-  if [[ "$is_qwen35" == "1" ]]; then
-    default_arch=""
-    default_max_seq_len="32768"
-    default_paged_attn="auto"
-    default_tp_backend="nccl"
-    default_isq="Q6K"
-    default_pa_cache_type="f8e4m3"
-    default_pa_memory_fraction="0.80"
-    default_disable_nccl=""
-  fi
+  case "$model" in
+    openai/gpt-oss-20b)
+      ;;
+    Qwen/Qwen3.5-27B)
+      default_port="1235"
+      default_arch=""
+      default_max_seq_len="4096"
+      default_tp_backend="disabled"
+      default_isq="Q4K"
+      default_disable_nccl="1"
+      default_world_size=""
+      ;;
+    Qwen/Qwen3.5-35B-A3B)
+      default_port="1235"
+      default_arch=""
+      default_max_seq_len="2048"
+      default_tp_backend="disabled"
+      default_isq="Q4K"
+      default_paged_attn="off"
+      default_pa_cache_type=""
+      default_pa_memory_fraction=""
+      default_disable_nccl="1"
+      default_world_size=""
+      ;;
+    Qwen/Qwen3.5-9B|Qwen/Qwen3.5-4B)
+      default_port="1235"
+      default_arch=""
+      default_max_seq_len="65536"
+      default_tp_backend="disabled"
+      default_isq="Q4K"
+      default_disable_nccl="1"
+      default_world_size=""
+      ;;
+    zai-org/GLM-4.7-Flash)
+      default_port="1236"
+      default_arch="glm4moelite"
+      default_max_seq_len="2048"
+      default_tp_backend="disabled"
+      default_isq="Q4K"
+      default_pa_memory_fraction="0.45"
+      default_disable_nccl="1"
+      default_world_size=""
+      ;;
+  esac
 
   cat > "$ROOT/runtime/vllm_serve.env" <<EOF
 CTOX_VLLM_SERVE_MODEL=${model}
-CTOX_VLLM_SERVE_PORT=${CTOX_VLLM_SERVE_PORT:-1234}
+CTOX_VLLM_SERVE_PORT=${CTOX_VLLM_SERVE_PORT:-$default_port}
 CTOX_VLLM_SERVE_ARCH=${CTOX_VLLM_SERVE_ARCH:-$default_arch}
 CTOX_VLLM_SERVE_MAX_SEQS=${CTOX_VLLM_SERVE_MAX_SEQS:-1}
 CTOX_VLLM_SERVE_MAX_BATCH_SIZE=${CTOX_VLLM_SERVE_MAX_BATCH_SIZE:-1}
@@ -667,13 +739,39 @@ CTOX_VLLM_SERVE_PA_MEMORY_FRACTION=${CTOX_VLLM_SERVE_PA_MEMORY_FRACTION:-$defaul
 CTOX_VLLM_SERVE_PA_CONTEXT_LEN=${CTOX_VLLM_SERVE_PA_CONTEXT_LEN:-}
 CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES=${CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES:-}
 CTOX_VLLM_SERVE_DISABLE_NCCL=${CTOX_VLLM_SERVE_DISABLE_NCCL:-$default_disable_nccl}
-CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE=${CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE:-}
+CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE=${CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE:-$default_world_size}
 CTOX_VLLM_SERVE_TOPOLOGY=${CTOX_VLLM_SERVE_TOPOLOGY:-}
 CTOX_VLLM_SERVE_NUM_DEVICE_LAYERS=${CTOX_VLLM_SERVE_NUM_DEVICE_LAYERS:-}
+CTOX_CHAT_MODEL=${CTOX_CHAT_MODEL:-$default_chat_model}
+CTOX_CHAT_MODEL_MAX_CONTEXT=${CTOX_CHAT_MODEL_MAX_CONTEXT:-131072}
+CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT=${CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT:-75}
+CTOX_ACTIVE_MODEL=${CTOX_ACTIVE_MODEL:-$default_chat_model}
+CTOX_PROXY_HOST=${CTOX_PROXY_HOST:-127.0.0.1}
+CTOX_PROXY_PORT=${CTOX_PROXY_PORT:-$default_proxy_port}
+CTOX_UPSTREAM_BASE_URL=${CTOX_UPSTREAM_BASE_URL:-http://127.0.0.1:$default_port}
+CTOX_EMBEDDING_MODEL=${CTOX_EMBEDDING_MODEL:-$default_embedding_model}
+CTOX_EMBEDDING_PORT=${CTOX_EMBEDDING_PORT:-$default_embedding_port}
+CTOX_EMBEDDING_ISQ=${CTOX_EMBEDDING_ISQ:-$default_embedding_isq}
+CTOX_STT_MODEL=${CTOX_STT_MODEL:-$default_stt_model}
+CTOX_STT_PORT=${CTOX_STT_PORT:-$default_stt_port}
+CTOX_STT_ISQ=${CTOX_STT_ISQ:-$default_stt_isq}
+CTOX_TTS_MODEL=${CTOX_TTS_MODEL:-$default_tts_model}
+CTOX_TTS_PORT=${CTOX_TTS_PORT:-$default_tts_port}
+CTOX_TTS_ISQ=${CTOX_TTS_ISQ:-$default_tts_isq}
+CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES=${CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES:-}
+CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES=${CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES:-}
+CTOX_STT_CUDA_VISIBLE_DEVICES=${CTOX_STT_CUDA_VISIBLE_DEVICES:-}
+CTOX_TTS_CUDA_VISIBLE_DEVICES=${CTOX_TTS_CUDA_VISIBLE_DEVICES:-}
+CTOX_CHAT_SHARE_AUXILIARY_GPUS=${CTOX_CHAT_SHARE_AUXILIARY_GPUS:-1}
+CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP=${CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP:-}
+CTOX_EMBEDDING_GPU_LAYER_RESERVATION=${CTOX_EMBEDDING_GPU_LAYER_RESERVATION:-0.30}
+CTOX_STT_GPU_LAYER_RESERVATION=${CTOX_STT_GPU_LAYER_RESERVATION:-0.55}
+CTOX_TTS_GPU_LAYER_RESERVATION=${CTOX_TTS_GPU_LAYER_RESERVATION:-0.35}
 EOF
 }
 
 ensure_rust_build_toolchain
+ensure_uv_runtime
 
 CARGO_BIN="$(resolve_cargo_bin)"
 if [[ -z "$CARGO_BIN" ]]; then
@@ -684,6 +782,7 @@ fi
 ensure_linux_jami_installed
 
 cd "$ROOT"
+ensure_linux_discovery_prereqs
 ensure_project_references_present
 sync_repo_system_skills_into_vendored_codex
 "$CARGO_BIN" build --release
@@ -730,7 +829,9 @@ ln -sf "$ROOT/references/openai-codex/codex-rs/target/release/codex" "$HOME/.loc
 write_vllm_serve_env_file
 sync_repo_skills_into_codex_home
 chmod +x "$ROOT/scripts/run_vllm_serve_backend.sh"
+chmod +x "$ROOT/scripts/run_speaches_cpu_backend.sh"
 chmod +x "$ROOT/scripts/communication_mail_cli.mjs" "$ROOT/scripts/communication_jami_cli.mjs" "$ROOT/scripts/run_jami_daemon.sh"
+install_ctox_user_service
 install_jami_user_service
 wait_for_jami_dbus_runtime
 
@@ -748,6 +849,10 @@ Baseline binaries:
 Runtime launcher:
   $ROOT/scripts/run_vllm_serve_backend.sh
 
+CTOX background service:
+  systemctl --user status ctox.service
+  ctox status
+
 Bundled skills:
   $(resolve_codex_home)/skills
   $(resolve_codex_home)/skills/.system
@@ -757,6 +862,9 @@ Jami runtime:
   systemctl --user status cto-jami-daemon.service
 
 Try:
+  ctox status
+  ctox stop
+  ctox start
   ctox clean-room-baseline-plan gpt_oss "Reply with CTOX_OK and nothing else."
   $ROOT/scripts/run_vllm_serve_backend.sh
 EOF

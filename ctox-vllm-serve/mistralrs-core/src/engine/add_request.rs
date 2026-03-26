@@ -1,29 +1,28 @@
 use crate::{
+    ModelCategory, RequestMessage, Response,
     pipeline::NormalCache,
     prefix_cacher::MatchingCache,
     request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
     sequence::SeqStepType,
     tools::{ToolCallingMatcher, ToolChoice},
-    ModelCategory, RequestMessage, Response,
 };
 use candle_core::Tensor;
 use either::Either;
 use std::{
     ops::Deref,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
 
 use crate::{
-    get_mut_arcmutex, handle_seq_error,
-    request::Request,
+    StopTokens, get_mut_arcmutex, handle_seq_error,
+    request::{Request, SpeechGenerationRequest},
     sampler::Sampler,
     sequence::{Sequence, SequenceGroup},
-    StopTokens,
 };
 
-use super::{search_request, Engine, TERMINATE_ALL_NEXT_STEP};
+use super::{Engine, TERMINATE_ALL_NEXT_STEP, search_request};
 
 impl Engine {
     pub async fn handle_request(self: Arc<Self>, request: Request) {
@@ -58,6 +57,10 @@ impl Engine {
     }
 
     pub(super) async fn add_request(&self, request: NormalRequest) {
+        let speech_request: Option<SpeechGenerationRequest> = match &request.messages {
+            RequestMessage::SpeechGeneration { request } => Some(request.clone()),
+            _ => None,
+        };
         let is_chat = matches!(
             request.messages,
             RequestMessage::Chat { .. } | RequestMessage::VisionChat { .. }
@@ -216,8 +219,8 @@ impl Engine {
                     text,
                 )
             }
-            RequestMessage::ImageGeneration { prompt, .. }
-            | RequestMessage::SpeechGeneration { prompt } => (vec![u32::MAX], prompt),
+            RequestMessage::ImageGeneration { prompt, .. } => (vec![u32::MAX], prompt),
+            RequestMessage::SpeechGeneration { request } => (vec![u32::MAX], request.input),
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
@@ -286,14 +289,20 @@ impl Engine {
                 let slice_start = prompt_len.saturating_sub(tokens_to_keep);
 
                 prompt_tokens = prompt_tokens[slice_start..].to_vec();
-                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.", request.id);
+                warn!(
+                    "Prompt for request {} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.",
+                    request.id
+                );
             } else {
                 let prompt_len = prompt_tokens.len();
                 let max_len = get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len;
                 let currently_over = prompt_len - max_len;
 
                 prompt_tokens = prompt_tokens[..max_len].to_vec();
-                warn!("Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.", request.id);
+                warn!(
+                    "Prompt for request {} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.",
+                    request.id
+                );
             }
         }
 
@@ -563,6 +572,9 @@ impl Engine {
                 request.return_raw_logits,
                 eos_toks,
             );
+            if let Some(speech_request) = speech_request.clone() {
+                seq.set_speech_request(speech_request);
+            }
 
             // Only "track" a new sequence if it is a traditional one
             if matches!(seq_step_type, SeqStepType::PromptAndDecode) {

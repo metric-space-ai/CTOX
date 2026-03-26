@@ -143,8 +143,14 @@ impl FullAttention {
             o_proj,
             q_norm,
             k_norm,
-            num_heads: num_heads / comm.world_size(),
-            num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
+            num_heads: mistralrs_quant::shard_bounds(num_heads, comm.rank(), comm.world_size()).1,
+            num_kv_heads: mistralrs_quant::shard_bounds(
+                num_kv_heads,
+                comm.rank(),
+                comm.world_size(),
+            )
+            .1
+            .max(1),
             head_dim,
             rotary_emb,
             rot_dim,
@@ -211,6 +217,11 @@ impl FullAttention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
+        let cos_sin = &(
+            cos_sin.0.to_device(q.device())?,
+            cos_sin.1.to_device(q.device())?,
+        );
+
         // Apply partial MRoPE: split into rotated and pass-through portions
         if self.rot_dim < self.head_dim {
             let mut q_rot = q.narrow(D::Minus1, 0, self.rot_dim)?;
@@ -224,6 +235,10 @@ impl FullAttention {
         } else {
             self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
         }
+
+        let q = q.contiguous()?;
+        let k = k.contiguous()?;
+        let v = v.contiguous()?;
 
         // Standard attention
         let mut y = match &self.paged_attn {
@@ -613,12 +628,24 @@ impl Qwen3_5TextModel {
                 ],
             },
         };
+        let recurrent_layer_devices: Vec<Device> = layer_types
+            .iter()
+            .enumerate()
+            .map(|(layer_idx, layer_type)| match layer_type {
+                LayerType::LinearAttention => mapper
+                    .device_for(layer_idx, false)
+                    .unwrap_or(&normal_loading_metadata.real_device)
+                    .clone(),
+                LayerType::FullAttention => normal_loading_metadata.real_device.clone(),
+            })
+            .collect();
 
         let pipeline_cache = Arc::new(Mutex::new(
-            HybridCache::new(
+            HybridCache::new_mapped(
                 hybrid_cache_config,
                 vb_m.dtype(),
                 &normal_loading_metadata.real_device,
+                &recurrent_layer_devices,
             )
             .map_err(|e| {
                 candle_core::Error::Msg(format!("Failed to create hybrid cache: {}", e))
@@ -637,9 +664,19 @@ impl Qwen3_5TextModel {
                 max_seq_len: cfg.max_position_embeddings,
                 num_layers: cfg.num_hidden_layers,
                 hidden_size: cfg.hidden_size,
-                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
-                num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
-                    .max(1),
+                num_attn_heads: mistralrs_quant::shard_bounds(
+                    cfg.num_attention_heads,
+                    mapper.get_comm_for(0)?.rank(),
+                    mapper.get_comm_for(0)?.world_size(),
+                )
+                .1,
+                num_kv_heads: mistralrs_quant::shard_bounds(
+                    cfg.num_key_value_heads,
+                    mapper.get_comm_for(0)?.rank(),
+                    mapper.get_comm_for(0)?.world_size(),
+                )
+                .1
+                .max(1),
                 sliding_window: None,
                 k_head_dim: cfg.head_dim,
                 v_head_dim: cfg.head_dim,

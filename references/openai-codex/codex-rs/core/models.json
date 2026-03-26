@@ -855,6 +855,128 @@
         "team"
       ],
       "supports_reasoning_summaries": true
+    },
+    {
+      "prefer_websockets": false,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": null,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": false,
+      "context_window": 8192,
+      "reasoning_summary_format": "none",
+      "default_reasoning_summary": "auto",
+      "slug": "Qwen/Qwen3.5-27B",
+      "display_name": "Qwen/Qwen3.5-27B",
+      "description": "Local Qwen 3.5 27B CTOX profile.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Balances speed with some reasoning; useful for straightforward queries and short explanations"
+        },
+        {
+          "effort": "medium",
+          "description": "Provides a solid balance of reasoning depth and latency for general-purpose tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Maximizes reasoning depth for complex or ambiguous problems"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "hide",
+      "minimal_client_version": "0.0.1",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 14,
+      "base_instructions": "You are Codex running through CTOX on a local Qwen model. Be concise and tool-accurate. Prefer exec_command for shell work and simple file edits. Return only the exact marker requested after any required tool calls.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "available_in_plans": [
+        "business",
+        "edu",
+        "education",
+        "enterprise",
+        "finserv",
+        "free",
+        "go",
+        "hc",
+        "plus",
+        "pro",
+        "team"
+      ],
+      "supports_reasoning_summaries": false
+    },
+    {
+      "prefer_websockets": false,
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": null,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supports_image_detail_original": false,
+      "truncation_policy": {
+        "mode": "tokens",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": false,
+      "context_window": 2048,
+      "reasoning_summary_format": "none",
+      "default_reasoning_summary": "auto",
+      "slug": "zai-org/GLM-4.7-Flash",
+      "display_name": "zai-org/GLM-4.7-Flash",
+      "description": "Local GLM 4.7 Flash CTOX profile.",
+      "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Balances speed with some reasoning; useful for straightforward queries and short explanations"
+        },
+        {
+          "effort": "medium",
+          "description": "Provides a solid balance of reasoning depth and latency for general-purpose tasks"
+        },
+        {
+          "effort": "high",
+          "description": "Maximizes reasoning depth for complex or ambiguous problems"
+        }
+      ],
+      "shell_type": "default",
+      "visibility": "hide",
+      "minimal_client_version": "0.0.1",
+      "supported_in_api": true,
+      "availability_nux": null,
+      "upgrade": null,
+      "priority": 15,
+      "base_instructions": "You are Codex running through CTOX on a local GLM model. Be concise and tool-accurate. Prefer exec_command for shell work and simple file edits. Return only the exact marker requested after any required tool calls.",
+      "model_messages": null,
+      "experimental_supported_tools": [],
+      "available_in_plans": [
+        "business",
+        "edu",
+        "education",
+        "enterprise",
+        "finserv",
+        "free",
+        "go",
+        "hc",
+        "plus",
+        "pro",
+        "team"
+      ],
+      "supports_reasoning_summaries": false
     }
   ]
 }

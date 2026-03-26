@@ -405,6 +405,14 @@ pub enum Shard {
     },
 }
 
+pub fn shard_bounds(size: usize, rank: usize, world_size: usize) -> (usize, usize) {
+    let base = size / world_size;
+    let remainder = size % world_size;
+    let extra = usize::from(rank < remainder);
+    let start = rank * base + remainder.min(rank);
+    (start, base + extra)
+}
+
 impl Shard {
     pub fn apply_to(&self, tensor: &Tensor) -> Result<Tensor> {
         match *self {
@@ -414,18 +422,8 @@ impl Shard {
                 world_size,
             } => {
                 let size = tensor.dim(dim)?;
-                let shape = tensor.dims().to_vec();
-
-                if size % world_size != 0 {
-                    return Err(Error::ShapeMismatchSplit {
-                        shape: shape.into(),
-                        dim,
-                        n_parts: world_size,
-                    });
-                }
-                let block_size = size / world_size;
-                let start = rank * block_size;
-                let stop = (rank + 1) * block_size;
+                let (start, block_size) = shard_bounds(size, rank, world_size);
+                let stop = start + block_size;
 
                 if dim == 0 {
                     tensor.i(start..stop)
@@ -564,17 +562,8 @@ impl Backend for ShardedSafeTensors {
                         let view_dtype = view.dtype();
                         let mut shape = view.shape().to_vec();
                         let size = shape[dim];
-
-                        if size % world_size != 0 {
-                            return Err(Error::ShapeMismatchSplit {
-                                shape: shape.into(),
-                                dim,
-                                n_parts: world_size,
-                            });
-                        }
-                        let block_size = size / world_size;
-                        let start = rank * block_size;
-                        let stop = (rank + 1) * block_size;
+                        let (start, block_size) = shard_bounds(size, rank, world_size);
+                        let stop = start + block_size;
 
                         // Everything is expressed in tensor dimension
                         // bytes offsets is handled automatically for safetensors.

@@ -102,9 +102,12 @@ impl InputsProcessor for VoxtralInputsProcessor {
             ));
         };
 
-        // Early call (add_request): replaces tokens for scheduler allocation.
-        // Step call (pipeline.step): processes audio into mel features for forward pass.
-        // Prompt is always [BOS, PAD*(N_LEFT_PAD + N_DELAY)] = 39 tokens.
+        // Early call (add_request): replace tokens with the streaming-audio prefill
+        // sequence used by Voxtral realtime tokenization for offline transcription:
+        // [BOS, PAD*(N_LEFT_PAD + N_DELAY)].
+        //
+        // Unlike normal chat prompting there is no trailing text/chat suffix here.
+        // The model-specific audio path injects the actual mel features on the step call.
         let mel_features = if is_prompt {
             let mut mel_accum = Vec::new();
             for seq in input_seqs.iter_mut() {

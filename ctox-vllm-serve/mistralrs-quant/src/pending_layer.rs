@@ -17,6 +17,7 @@ use crate::{
 enum PendingState {
     Pending(Receiver<Result<Arc<dyn QuantMethod>>>),
     Ready(Arc<dyn QuantMethod>),
+    Failed(String),
     /// Transitional state used during resolve to avoid holding both the old
     /// receiver and the new layer simultaneously.
     Taken,
@@ -39,32 +40,45 @@ impl PendingIsqLayer {
     /// Block until the background quantization task completes and return the
     /// resolved layer. Subsequent calls return the cached result immediately.
     fn resolve(&self) -> Result<Arc<dyn QuantMethod>> {
-        let mut state = self.inner.lock().expect("PendingIsqLayer lock poisoned");
-        match &*state {
-            PendingState::Ready(layer) => Ok(layer.clone()),
-            PendingState::Taken => {
-                candle_core::bail!("PendingIsqLayer is in an invalid transitional state")
-            }
-            PendingState::Pending(_) => {
-                // Take the receiver out so we can receive without holding the
-                // lock on the enum variant (swap to Taken first).
-                let old = std::mem::replace(&mut *state, PendingState::Taken);
-                if let PendingState::Pending(rx) = old {
-                    let result = rx
-                        .recv()
-                        .map_err(|e| candle_core::Error::Msg(format!("ISQ channel error: {e}")))?;
-                    match result {
-                        Ok(layer) => {
-                            *state = PendingState::Ready(layer.clone());
-                            Ok(layer)
+        loop {
+            let mut state = self.inner.lock().expect("PendingIsqLayer lock poisoned");
+            match &*state {
+                PendingState::Ready(layer) => return Ok(layer.clone()),
+                PendingState::Failed(message) => {
+                    candle_core::bail!("PendingIsqLayer failed to resolve: {message}");
+                }
+                PendingState::Taken => {
+                    // Another thread is currently resolving this layer. Release the
+                    // lock and retry until the transition completes instead of
+                    // surfacing a spurious runtime error to the caller.
+                    drop(state);
+                    std::thread::yield_now();
+                    continue;
+                }
+                PendingState::Pending(_) => {
+                    // Take the receiver out so we can receive without holding the
+                    // lock on the enum variant (swap to Taken first).
+                    let old = std::mem::replace(&mut *state, PendingState::Taken);
+                    drop(state);
+                    if let PendingState::Pending(rx) = old {
+                        let result = rx.recv().map_err(|e| {
+                            candle_core::Error::Msg(format!("ISQ channel error: {e}"))
+                        })?;
+
+                        let mut state = self.inner.lock().expect("PendingIsqLayer lock poisoned");
+                        match result {
+                            Ok(layer) => {
+                                *state = PendingState::Ready(layer.clone());
+                                return Ok(layer);
+                            }
+                            Err(e) => {
+                                *state = PendingState::Failed(format!("{e:#}"));
+                                return Err(e);
+                            }
                         }
-                        Err(e) => {
-                            // Leave in Taken state; the error is propagated.
-                            Err(e)
-                        }
+                    } else {
+                        unreachable!()
                     }
-                } else {
-                    unreachable!()
                 }
             }
         }
@@ -76,6 +90,7 @@ impl Debug for PendingIsqLayer {
         let state_str = match &*self.inner.lock().unwrap() {
             PendingState::Pending(_) => "Pending",
             PendingState::Ready(_) => "Ready",
+            PendingState::Failed(_) => "Failed",
             PendingState::Taken => "Taken",
         };
         write!(f, "PendingIsqLayer({state_str})")

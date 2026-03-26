@@ -211,6 +211,13 @@ impl Attention {
         let sinks = mapper
             .set_device(layer_idx, vb.clone(), false)
             .get((num_heads,), "sinks")?;
+        let (local_sink_offset, local_num_heads) =
+            mistralrs_quant::shard_bounds(num_heads, comm.rank(), comm.world_size());
+        let sinks = if comm.world_size() > 1 {
+            sinks.narrow(0, local_sink_offset, local_num_heads)?
+        } else {
+            sinks
+        };
 
         let is_sliding = matches!(
             cfg.layer_types.get(layer_idx),
@@ -223,8 +230,14 @@ impl Attention {
             k_proj,
             v_proj,
             o_proj,
-            num_heads: num_heads / comm.world_size(),
-            num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
+            num_heads: local_num_heads,
+            num_kv_heads: mistralrs_quant::shard_bounds(
+                num_kv_heads,
+                comm.rank(),
+                comm.world_size(),
+            )
+            .1
+            .max(1),
             head_dim,
             rotary_emb,
             paged_attn,

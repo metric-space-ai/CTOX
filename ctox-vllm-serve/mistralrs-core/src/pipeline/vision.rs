@@ -555,6 +555,7 @@ impl Loader for VisionLoader {
         }
         loading_isq |= topology_requires_post_quant;
         loading_isq |= self.config.from_uqff.is_some();
+        let mut staged_isq_load = loading_isq || use_immediate;
 
         if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
             anyhow::bail!(
@@ -567,8 +568,8 @@ impl Loader for VisionLoader {
         // device per-layer, and linear constructors will override to CPU for ISQ-targeted weights.
         // On integrated/unified memory systems (e.g. Grace Blackwell), CPU and GPU share memory,
         // so we load directly to the device.
-        let load_device = if !loading_isq || self.config.calibration_file.is_some() {
-            loading_isq = false;
+        let load_device = if !staged_isq_load || self.config.calibration_file.is_some() {
+            staged_isq_load = false;
             if use_immediate && !crate::utils::normal::is_integrated_gpu(&device) {
                 Device::Cpu
             } else {
@@ -593,7 +594,7 @@ impl Loader for VisionLoader {
                 &available_devices,
                 silent,
                 &config,
-                loading_isq,
+                staged_isq_load,
                 self.config.from_uqff.is_some(),
                 self.config.organization,
                 &*self.inner,
@@ -607,7 +608,7 @@ impl Loader for VisionLoader {
                     config,
                     self.inner,
                     mapper,
-                    loading_isq,
+                    staged_isq_load,
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
@@ -626,7 +627,7 @@ impl Loader for VisionLoader {
                     self.inner,
                     silent,
                     mapper,
-                    loading_isq,
+                    staged_isq_load,
                     self.config.from_uqff.is_some(),
                     device.clone(),
                     attention_mechanism,

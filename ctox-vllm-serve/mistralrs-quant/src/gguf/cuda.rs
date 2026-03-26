@@ -277,9 +277,20 @@ pub fn qtensor_indexed_moe_forward(qtensor: &QTensor, x: &Tensor, ids: &Tensor) 
         );
     }
 
-    // Ensure tensors are on CUDA
+    // Ensure tensors are on the same CUDA device as the quantized weights.
     let Device::Cuda(dev) = qtensor.device() else {
         candle_core::bail!("indexed_moe_forward requires CUDA device for weights");
+    };
+
+    let x = if x.device().same_device(&qtensor.device()) {
+        x.clone()
+    } else {
+        x.to_device(&qtensor.device())?
+    };
+    let ids = if ids.device().same_device(&qtensor.device()) {
+        ids.clone()
+    } else {
+        ids.to_device(&qtensor.device())?
     };
 
     let (x_storage, _x_layout) = x.storage_and_layout();

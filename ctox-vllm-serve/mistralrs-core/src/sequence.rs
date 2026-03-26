@@ -1,19 +1,19 @@
 use crate::{
-    get_mut_arcmutex, get_mut_group,
+    AudioInput, ChatCompletionResponse, Usage, get_mut_arcmutex, get_mut_group,
     harmony::HarmonyContext,
     paged_attention::block_hash::MultiModalFeature,
-    pipeline::{text_models_inputs_processor::PagedAttentionMeta, LayerCaches},
+    pipeline::{LayerCaches, text_models_inputs_processor::PagedAttentionMeta},
+    request::SpeechGenerationRequest,
     response::{ChatCompletionChunkResponse, Choice, ChunkChoice, Response, SYSTEM_FINGERPRINT},
     sampler::{Logprobs, Sampler},
     think_tags::ThinkTagContext,
-    AudioInput, ChatCompletionResponse, Usage,
 };
 use crate::{
+    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, ImageChoice,
+    ImageGenerationResponse, ImageGenerationResponseFormat,
     pipeline::{DiffusionGenerationParams, KvCache},
     response::CompletionChoice,
     tools::ToolCallingMatcher,
-    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, ImageChoice,
-    ImageGenerationResponse, ImageGenerationResponseFormat,
 };
 use candle_core::Tensor;
 use std::{
@@ -24,8 +24,8 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{
-    mpsc::{error::SendError, Sender},
     Mutex, MutexGuard,
+    mpsc::{Sender, error::SendError},
 };
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -418,6 +418,7 @@ pub struct Sequence {
     pub(crate) return_raw_logits: bool,
     token_offset: usize,
     eos_tokens: Vec<u32>,
+    speech_request: Option<SpeechGenerationRequest>,
 
     // Multimodal data (images, diffusion settings, pixel caches)
     pub multimodal: MultimodalData,
@@ -574,6 +575,7 @@ impl Sequence {
             return_raw_logits,
             token_offset: 0,
             eos_tokens,
+            speech_request: None,
             total_prompt_time: None,
             step_start_instant: None,
             harmony_context: None,
@@ -686,6 +688,14 @@ impl Sequence {
 
     pub fn set_initial_prompt(&mut self, new: String) {
         self.prompt = new;
+    }
+
+    pub fn speech_request(&self) -> Option<&SpeechGenerationRequest> {
+        self.speech_request.as_ref()
+    }
+
+    pub fn set_speech_request(&mut self, request: SpeechGenerationRequest) {
+        self.speech_request = Some(request);
     }
 
     pub fn token_offset(&self) -> usize {

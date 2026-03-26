@@ -14,6 +14,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 const DEFAULT_CONTEXT_THRESHOLD: f64 = 0.75;
+const DEFAULT_MIN_COMPACTION_TOKENS: i64 = 12_288;
 const DEFAULT_FRESH_TAIL_COUNT: usize = 8;
 const DEFAULT_LEAF_CHUNK_TOKENS: i64 = 20_000;
 const DEFAULT_LEAF_TARGET_TOKENS: usize = 600;
@@ -325,6 +326,7 @@ pub struct LcmFixture {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct LcmFixtureConfig {
     pub context_threshold: Option<f64>,
+    pub min_compaction_tokens: Option<i64>,
     pub fresh_tail_count: Option<usize>,
     pub leaf_chunk_tokens: Option<i64>,
     pub leaf_target_tokens: Option<usize>,
@@ -345,6 +347,7 @@ pub struct FixtureRunOutput {
 #[derive(Debug, Clone)]
 pub struct LcmConfig {
     pub context_threshold: f64,
+    pub min_compaction_tokens: i64,
     pub fresh_tail_count: usize,
     pub leaf_chunk_tokens: i64,
     pub leaf_target_tokens: usize,
@@ -358,6 +361,7 @@ impl Default for LcmConfig {
     fn default() -> Self {
         Self {
             context_threshold: DEFAULT_CONTEXT_THRESHOLD,
+            min_compaction_tokens: DEFAULT_MIN_COMPACTION_TOKENS,
             fresh_tail_count: DEFAULT_FRESH_TAIL_COUNT,
             leaf_chunk_tokens: DEFAULT_LEAF_CHUNK_TOKENS,
             leaf_target_tokens: DEFAULT_LEAF_TARGET_TOKENS,
@@ -382,6 +386,18 @@ impl GrepMode {
             "full_text" | "full-text" | "fts" => Ok(Self::FullText),
             other => anyhow::bail!("unsupported grep mode: {other}"),
         }
+    }
+}
+
+impl LcmConfig {
+    fn compaction_threshold(&self, token_budget: i64) -> i64 {
+        if token_budget <= 0 {
+            return 0;
+        }
+        let percent_threshold = ((token_budget as f64) * self.context_threshold).floor() as i64;
+        percent_threshold
+            .max(self.min_compaction_tokens.min(token_budget))
+            .max(0)
     }
 }
 
@@ -415,7 +431,13 @@ struct ContextEntry {
 }
 
 pub trait Summarizer {
-    fn summarize(&self, kind: SummaryKind, depth: i64, lines: &[String], target_tokens: usize) -> Result<String>;
+    fn summarize(
+        &self,
+        kind: SummaryKind,
+        depth: i64,
+        lines: &[String],
+        target_tokens: usize,
+    ) -> Result<String>;
 }
 
 struct EscalatedSummary {
@@ -425,7 +447,13 @@ struct EscalatedSummary {
 pub struct HeuristicSummarizer;
 
 impl Summarizer for HeuristicSummarizer {
-    fn summarize(&self, kind: SummaryKind, depth: i64, lines: &[String], target_tokens: usize) -> Result<String> {
+    fn summarize(
+        &self,
+        kind: SummaryKind,
+        depth: i64,
+        lines: &[String],
+        target_tokens: usize,
+    ) -> Result<String> {
         let mut header = match kind {
             SummaryKind::Leaf => format!("LCM leaf summary at depth {depth}:"),
             SummaryKind::Condensed => format!("LCM condensed summary at depth {depth}:"),
@@ -463,6 +491,8 @@ impl LcmEngine {
     pub fn open(path: &Path, config: LcmConfig) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .context("failed to configure SQLite busy_timeout for LCM")?;
         let engine = Self { conn, config };
         engine.init_schema()?;
         Ok(engine)
@@ -472,6 +502,7 @@ impl LcmEngine {
         self.conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
+            PRAGMA journal_mode = WAL;
 
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -567,7 +598,12 @@ impl LcmEngine {
         Ok(())
     }
 
-    pub fn add_message(&self, conversation_id: i64, role: &str, content: &str) -> Result<MessageRecord> {
+    pub fn add_message(
+        &self,
+        conversation_id: i64,
+        role: &str,
+        content: &str,
+    ) -> Result<MessageRecord> {
         let _ = self.continuity_init_documents(conversation_id)?;
         let now = iso_now();
         let seq = self
@@ -606,9 +642,13 @@ impl LcmEngine {
         })
     }
 
-    pub fn evaluate_compaction(&self, conversation_id: i64, token_budget: i64) -> Result<CompactionDecision> {
+    pub fn evaluate_compaction(
+        &self,
+        conversation_id: i64,
+        token_budget: i64,
+    ) -> Result<CompactionDecision> {
         let current_tokens = self.context_token_count(conversation_id)?;
-        let threshold = ((token_budget as f64) * self.config.context_threshold).floor() as i64;
+        let threshold = self.config.compaction_threshold(token_budget);
         Ok(CompactionDecision {
             should_compact: current_tokens > threshold,
             reason: if current_tokens > threshold {
@@ -629,7 +669,7 @@ impl LcmEngine {
         force: bool,
     ) -> Result<CompactionResult> {
         let tokens_before = self.context_token_count(conversation_id)?;
-        let threshold = ((token_budget as f64) * self.config.context_threshold).floor() as i64;
+        let threshold = self.config.compaction_threshold(token_budget);
         if !force && tokens_before <= threshold {
             return Ok(CompactionResult {
                 action_taken: false,
@@ -646,7 +686,8 @@ impl LcmEngine {
 
         while rounds < self.config.max_rounds {
             rounds += 1;
-            let Some(summary_id) = self.compact_leaf_pass(conversation_id, summarizer, force)? else {
+            let Some(summary_id) = self.compact_leaf_pass(conversation_id, summarizer, force)?
+            else {
                 break;
             };
             created.push(summary_id);
@@ -697,11 +738,15 @@ impl LcmEngine {
         limit: usize,
     ) -> Result<GrepResult> {
         let messages = match scope {
-            GrepScope::Messages | GrepScope::Both => self.search_messages(conversation_id, mode, query, limit)?,
+            GrepScope::Messages | GrepScope::Both => {
+                self.search_messages(conversation_id, mode, query, limit)?
+            }
             GrepScope::Summaries => Vec::new(),
         };
         let summaries = match scope {
-            GrepScope::Summaries | GrepScope::Both => self.search_summaries(conversation_id, mode, query, limit)?,
+            GrepScope::Summaries | GrepScope::Both => {
+                self.search_summaries(conversation_id, mode, query, limit)?
+            }
             GrepScope::Messages => Vec::new(),
         };
         Ok(GrepResult {
@@ -834,7 +879,10 @@ impl LcmEngine {
         );
         let created_at = std::cmp::max(
             show_all.narrative.updated_at.clone(),
-            std::cmp::max(show_all.anchors.updated_at.clone(), show_all.focus.updated_at.clone()),
+            std::cmp::max(
+                show_all.anchors.updated_at.clone(),
+                show_all.focus.updated_at.clone(),
+            ),
         );
         Ok(Some(ContinuityRevision {
             revision_id,
@@ -842,14 +890,23 @@ impl LcmEngine {
             narrative: show_all.narrative.content,
             anchors: show_all.anchors.content,
             focus: show_all.focus.content,
-            source_summary_ids: snapshot.summaries.iter().map(|summary| summary.summary_id.clone()).collect(),
-            source_message_ids: snapshot.messages.iter().map(|message| message.message_id).collect(),
+            source_summary_ids: snapshot
+                .summaries
+                .iter()
+                .map(|summary| summary.summary_id.clone())
+                .collect(),
+            source_message_ids: snapshot
+                .messages
+                .iter()
+                .map(|message| message.message_id)
+                .collect(),
             created_at,
         }))
     }
 
     pub fn continuity_init_documents(&self, conversation_id: i64) -> Result<ContinuityShowAll> {
-        let narrative = self.ensure_continuity_document(conversation_id, ContinuityKind::Narrative)?;
+        let narrative =
+            self.ensure_continuity_document(conversation_id, ContinuityKind::Narrative)?;
         let anchors = self.ensure_continuity_document(conversation_id, ContinuityKind::Anchors)?;
         let focus = self.ensure_continuity_document(conversation_id, ContinuityKind::Focus)?;
         Ok(ContinuityShowAll {
@@ -860,7 +917,11 @@ impl LcmEngine {
         })
     }
 
-    pub fn continuity_show(&self, conversation_id: i64, kind: ContinuityKind) -> Result<ContinuityDocumentState> {
+    pub fn continuity_show(
+        &self,
+        conversation_id: i64,
+        kind: ContinuityKind,
+    ) -> Result<ContinuityDocumentState> {
         self.ensure_continuity_document(conversation_id, kind)
     }
 
@@ -877,11 +938,19 @@ impl LcmEngine {
         let kinds = if let Some(kind) = kind {
             vec![kind]
         } else {
-            vec![ContinuityKind::Narrative, ContinuityKind::Anchors, ContinuityKind::Focus]
+            vec![
+                ContinuityKind::Narrative,
+                ContinuityKind::Anchors,
+                ContinuityKind::Focus,
+            ]
         };
         for kind in kinds {
             let document = self.ensure_continuity_document(conversation_id, kind)?;
-            let mut commits = self.continuity_commits_for_document(&document.head_commit_id, conversation_id, kind)?;
+            let mut commits = self.continuity_commits_for_document(
+                &document.head_commit_id,
+                conversation_id,
+                kind,
+            )?;
             out.append(&mut commits);
         }
         out.sort_by(|left, right| left.created_at.cmp(&right.created_at));
@@ -897,7 +966,8 @@ impl LcmEngine {
         let document = self.ensure_continuity_document(conversation_id, kind)?;
         let rendered = apply_continuity_diff(&document.content, diff_text)?;
         let created_at = iso_now();
-        let commit_id = continuity_commit_id(conversation_id, kind, diff_text, &rendered, &created_at);
+        let commit_id =
+            continuity_commit_id(conversation_id, kind, diff_text, &rendered, &created_at);
         let document_id = continuity_document_id(conversation_id, kind);
         self.conn.execute(
             "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
@@ -924,7 +994,8 @@ impl LcmEngine {
         kind: ContinuityKind,
     ) -> Result<ContinuityDocumentState> {
         let document_id = continuity_document_id(conversation_id, kind);
-        let commits = self.continuity_commits_for_document_id(&document_id, conversation_id, kind)?;
+        let commits =
+            self.continuity_commits_for_document_id(&document_id, conversation_id, kind)?;
         let base = continuity_template(kind).to_string();
         let rebuilt = commits.iter().skip(1).try_fold(base, |current, commit| {
             apply_continuity_diff(&current, &commit.diff_text)
@@ -998,14 +1069,28 @@ impl LcmEngine {
             .iter()
             .rev()
             .take(8)
-            .map(|message| format!("[{} #{}] {}", message.role, message.seq, sentence_fragment(&message.content, 220)))
+            .map(|message| {
+                format!(
+                    "[{} #{}] {}",
+                    message.role,
+                    message.seq,
+                    sentence_fragment(&message.content, 220)
+                )
+            })
             .collect::<Vec<_>>();
         let recent_summaries = snapshot
             .summaries
             .iter()
             .rev()
             .take(4)
-            .map(|summary| format!("[{} depth={}] {}", summary.kind.as_str(), summary.depth, sentence_fragment(&summary.content, 240)))
+            .map(|summary| {
+                format!(
+                    "[{} depth={}] {}",
+                    summary.kind.as_str(),
+                    summary.depth,
+                    sentence_fragment(&summary.content, 240)
+                )
+            })
             .collect::<Vec<_>>();
         let prompt = build_continuity_prompt_text(
             conversation_id,
@@ -1064,7 +1149,9 @@ impl LcmEngine {
                 break;
             }
 
-            if selected_tokens > 0 && selected_tokens + entry.token_count > self.config.leaf_chunk_tokens {
+            if selected_tokens > 0
+                && selected_tokens + entry.token_count > self.config.leaf_chunk_tokens
+            {
                 break;
             }
             selected_tokens += entry.token_count;
@@ -1091,7 +1178,10 @@ impl LcmEngine {
         let source_message_token_count = selected
             .iter()
             .filter_map(|entry| entry.message_id)
-            .map(|message_id| self.get_message(message_id).map(|message| message.token_count))
+            .map(|message_id| {
+                self.get_message(message_id)
+                    .map(|message| message.token_count)
+            })
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .sum();
@@ -1104,14 +1194,21 @@ impl LcmEngine {
             0,
             source_message_token_count,
             &[],
-            selected.iter().filter_map(|entry| entry.message_id).collect(),
+            selected
+                .iter()
+                .filter_map(|entry| entry.message_id)
+                .collect(),
             first_ordinal,
             selected.iter().map(|entry| entry.ordinal).collect(),
         )?;
         Ok(Some(summary_id))
     }
 
-    fn compact_condensed_pass<S: Summarizer>(&self, conversation_id: i64, summarizer: &S) -> Result<Option<String>> {
+    fn compact_condensed_pass<S: Summarizer>(
+        &self,
+        conversation_id: i64,
+        summarizer: &S,
+    ) -> Result<Option<String>> {
         let entries = self.context_entries(conversation_id)?;
         let message_entries: Vec<_> = entries
             .iter()
@@ -1127,7 +1224,11 @@ impl LcmEngine {
         };
         let eligible_entries: Vec<_> = entries
             .into_iter()
-            .take_while(|entry| tail_start_ordinal.map(|ordinal| entry.ordinal < ordinal).unwrap_or(true))
+            .take_while(|entry| {
+                tail_start_ordinal
+                    .map(|ordinal| entry.ordinal < ordinal)
+                    .unwrap_or(true)
+            })
             .collect();
         let min_chunk_tokens = self.resolve_condensed_min_chunk_tokens();
 
@@ -1162,7 +1263,9 @@ impl LcmEngine {
                 .sum();
             let descendant_tokens = child_ids
                 .iter()
-                .map(|id| Ok(self.summary_token_count(id)? + self.summary_descendant_token_count(id)?))
+                .map(|id| {
+                    Ok(self.summary_token_count(id)? + self.summary_descendant_token_count(id)?)
+                })
                 .collect::<Result<Vec<_>>>()?
                 .into_iter()
                 .sum();
@@ -1246,7 +1349,8 @@ impl LcmEngine {
                 }
                 continue;
             }
-            if token_count > 0 && token_count + summary.token_count > self.config.leaf_chunk_tokens {
+            if token_count > 0 && token_count + summary.token_count > self.config.leaf_chunk_tokens
+            {
                 break;
             }
             token_count += summary.token_count;
@@ -1460,31 +1564,34 @@ impl LcmEngine {
         let input_tokens = estimate_tokens(trimmed) as i64;
         let lines: Vec<String> = trimmed.lines().map(str::to_string).collect();
         let summary = summarizer.summarize(kind, depth, &lines, target_tokens)?;
-        let content = if summary.trim().is_empty() || estimate_tokens(&summary) as i64 >= input_tokens {
-            build_deterministic_fallback(trimmed, input_tokens)
-        } else {
-            summary.trim().to_string()
-        };
+        let content =
+            if summary.trim().is_empty() || estimate_tokens(&summary) as i64 >= input_tokens {
+                build_deterministic_fallback(trimmed, input_tokens)
+            } else {
+                summary.trim().to_string()
+            };
         Ok(EscalatedSummary { content })
     }
 
     fn get_message(&self, message_id: i64) -> Result<MessageRecord> {
-        self.conn.query_row(
-            "SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+        self.conn
+            .query_row(
+                "SELECT message_id, conversation_id, seq, role, content, token_count, created_at
              FROM messages WHERE message_id = ?1",
-            [message_id],
-            |row| {
-                Ok(MessageRecord {
-                    message_id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    seq: row.get(2)?,
-                    role: row.get(3)?,
-                    content: row.get(4)?,
-                    token_count: row.get(5)?,
-                    created_at: row.get(6)?,
-                })
-            },
-        ).context("message not found")
+                [message_id],
+                |row| {
+                    Ok(MessageRecord {
+                        message_id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        seq: row.get(2)?,
+                        role: row.get(3)?,
+                        content: row.get(4)?,
+                        token_count: row.get(5)?,
+                        created_at: row.get(6)?,
+                    })
+                },
+            )
+            .context("message not found")
     }
 
     fn messages_for_conversation(&self, conversation_id: i64) -> Result<Vec<MessageRecord>> {
@@ -1507,26 +1614,29 @@ impl LcmEngine {
     }
 
     fn get_summary(&self, summary_id: &str) -> Result<Option<SummaryRecord>> {
-        self.conn.query_row(
-            "SELECT summary_id, conversation_id, kind, depth, content, token_count,
+        self.conn
+            .query_row(
+                "SELECT summary_id, conversation_id, kind, depth, content, token_count,
                     descendant_count, descendant_token_count, source_message_token_count, created_at
              FROM summaries WHERE summary_id = ?1",
-            [summary_id],
-            |row| {
-                Ok(SummaryRecord {
-                    summary_id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    kind: parse_summary_kind(&row.get::<_, String>(2)?),
-                    depth: row.get(3)?,
-                    content: row.get(4)?,
-                    token_count: row.get(5)?,
-                    descendant_count: row.get(6)?,
-                    descendant_token_count: row.get(7)?,
-                    source_message_token_count: row.get(8)?,
-                    created_at: row.get(9)?,
-                })
-            },
-        ).optional().map_err(Into::into)
+                [summary_id],
+                |row| {
+                    Ok(SummaryRecord {
+                        summary_id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        kind: parse_summary_kind(&row.get::<_, String>(2)?),
+                        depth: row.get(3)?,
+                        content: row.get(4)?,
+                        token_count: row.get(5)?,
+                        descendant_count: row.get(6)?,
+                        descendant_token_count: row.get(7)?,
+                        source_message_token_count: row.get(8)?,
+                        created_at: row.get(9)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     fn summaries_for_conversation(&self, conversation_id: i64) -> Result<Vec<SummaryRecord>> {
@@ -1552,7 +1662,10 @@ impl LcmEngine {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn summary_edges_for_conversation(&self, conversation_id: i64) -> Result<Vec<(String, String)>> {
+    fn summary_edges_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT e.parent_summary_id, e.child_summary_id
@@ -1567,7 +1680,10 @@ impl LcmEngine {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    fn summary_message_links_for_conversation(&self, conversation_id: i64) -> Result<Vec<(String, i64)>> {
+    fn summary_message_links_for_conversation(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Vec<(String, i64)>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT sm.summary_id, sm.message_id
@@ -1691,7 +1807,8 @@ impl LcmEngine {
     }
 
     fn resolve_condensed_min_chunk_tokens(&self) -> i64 {
-        let ratio_floor = ((self.config.leaf_chunk_tokens as f64) * CONDENSED_MIN_INPUT_RATIO).floor() as i64;
+        let ratio_floor =
+            ((self.config.leaf_chunk_tokens as f64) * CONDENSED_MIN_INPUT_RATIO).floor() as i64;
         std::cmp::max(self.config.condensed_target_tokens as i64, ratio_floor)
     }
 
@@ -1878,7 +1995,12 @@ impl LcmEngine {
         }
     }
 
-    fn search_messages_fts(&self, conversation_id: Option<i64>, query: &str, limit: usize) -> Result<Vec<MessageSearchResult>> {
+    fn search_messages_fts(
+        &self,
+        conversation_id: Option<i64>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageSearchResult>> {
         let sql = if conversation_id.is_some() {
             r#"
             SELECT m.message_id, m.conversation_id, m.role, m.content, m.created_at
@@ -1900,15 +2022,18 @@ impl LcmEngine {
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = if let Some(conversation_id) = conversation_id {
-            stmt.query_map(params![sanitize_fts_query(query), conversation_id, limit as i64], |row| {
-                Ok(MessageSearchResult {
-                    message_id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    role: row.get(2)?,
-                    snippet: snippet(&row.get::<_, String>(3)?, query),
-                    created_at: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![sanitize_fts_query(query), conversation_id, limit as i64],
+                |row| {
+                    Ok(MessageSearchResult {
+                        message_id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        role: row.get(2)?,
+                        snippet: snippet(&row.get::<_, String>(3)?, query),
+                        created_at: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             stmt.query_map(params![sanitize_fts_query(query), limit as i64], |row| {
@@ -1925,7 +2050,12 @@ impl LcmEngine {
         Ok(rows)
     }
 
-    fn search_messages_regex(&self, conversation_id: Option<i64>, query: &str, limit: usize) -> Result<Vec<MessageSearchResult>> {
+    fn search_messages_regex(
+        &self,
+        conversation_id: Option<i64>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<MessageSearchResult>> {
         let regex = Regex::new(query).with_context(|| format!("invalid regex: {query}"))?;
         let mut stmt = if conversation_id.is_some() {
             self.conn.prepare(
@@ -1993,7 +2123,12 @@ impl LcmEngine {
         Ok(out)
     }
 
-    fn search_summaries_fts(&self, conversation_id: Option<i64>, query: &str, limit: usize) -> Result<Vec<SummarySearchResult>> {
+    fn search_summaries_fts(
+        &self,
+        conversation_id: Option<i64>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SummarySearchResult>> {
         let sql = if conversation_id.is_some() {
             r#"
             SELECT s.summary_id, s.conversation_id, s.kind, s.content, s.created_at
@@ -2015,15 +2150,18 @@ impl LcmEngine {
         };
         let mut stmt = self.conn.prepare(sql)?;
         let rows = if let Some(conversation_id) = conversation_id {
-            stmt.query_map(params![sanitize_fts_query(query), conversation_id, limit as i64], |row| {
-                Ok(SummarySearchResult {
-                    summary_id: row.get(0)?,
-                    conversation_id: row.get(1)?,
-                    kind: parse_summary_kind(&row.get::<_, String>(2)?),
-                    snippet: snippet(&row.get::<_, String>(3)?, query),
-                    created_at: row.get(4)?,
-                })
-            })?
+            stmt.query_map(
+                params![sanitize_fts_query(query), conversation_id, limit as i64],
+                |row| {
+                    Ok(SummarySearchResult {
+                        summary_id: row.get(0)?,
+                        conversation_id: row.get(1)?,
+                        kind: parse_summary_kind(&row.get::<_, String>(2)?),
+                        snippet: snippet(&row.get::<_, String>(3)?, query),
+                        created_at: row.get(4)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?
         } else {
             stmt.query_map(params![sanitize_fts_query(query), limit as i64], |row| {
@@ -2040,7 +2178,12 @@ impl LcmEngine {
         Ok(rows)
     }
 
-    fn search_summaries_regex(&self, conversation_id: Option<i64>, query: &str, limit: usize) -> Result<Vec<SummarySearchResult>> {
+    fn search_summaries_regex(
+        &self,
+        conversation_id: Option<i64>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SummarySearchResult>> {
         let regex = Regex::new(query).with_context(|| format!("invalid regex: {query}"))?;
         let mut stmt = if conversation_id.is_some() {
             self.conn.prepare(
@@ -2114,12 +2257,22 @@ pub fn run_init(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn run_add_message(db_path: &Path, conversation_id: i64, role: &str, content: &str) -> Result<MessageRecord> {
+pub fn run_add_message(
+    db_path: &Path,
+    conversation_id: i64,
+    role: &str,
+    content: &str,
+) -> Result<MessageRecord> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     engine.add_message(conversation_id, role, content)
 }
 
-pub fn run_compact(db_path: &Path, conversation_id: i64, token_budget: i64, force: bool) -> Result<CompactionResult> {
+pub fn run_compact(
+    db_path: &Path,
+    conversation_id: i64,
+    token_budget: i64,
+    force: bool,
+) -> Result<CompactionResult> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     engine.compact(conversation_id, token_budget, &HeuristicSummarizer, force)
 }
@@ -2133,7 +2286,13 @@ pub fn run_grep(
     limit: usize,
 ) -> Result<GrepResult> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
-    engine.grep(conversation_id, GrepScope::parse(scope)?, GrepMode::parse(mode)?, query, limit)
+    engine.grep(
+        conversation_id,
+        GrepScope::parse(scope)?,
+        GrepMode::parse(mode)?,
+        query,
+        limit,
+    )
 }
 
 pub fn run_describe(db_path: &Path, id: &str) -> Result<Option<DescribeResult>> {
@@ -2162,7 +2321,10 @@ pub fn run_refresh_continuity(db_path: &Path, conversation_id: i64) -> Result<Co
     engine.refresh_continuity(conversation_id)
 }
 
-pub fn run_show_continuity(db_path: &Path, conversation_id: i64) -> Result<Option<ContinuityRevision>> {
+pub fn run_show_continuity(
+    db_path: &Path,
+    conversation_id: i64,
+) -> Result<Option<ContinuityRevision>> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     engine.latest_continuity(conversation_id)
 }
@@ -2179,9 +2341,14 @@ pub fn run_continuity_show(
 ) -> Result<serde_json::Value> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
     if let Some(kind) = kind {
-        Ok(serde_json::to_value(engine.continuity_show(conversation_id, ContinuityKind::parse(kind)?)?)?)
+        Ok(serde_json::to_value(engine.continuity_show(
+            conversation_id,
+            ContinuityKind::parse(kind)?,
+        )?)?)
     } else {
-        Ok(serde_json::to_value(engine.continuity_show_all(conversation_id)?)?)
+        Ok(serde_json::to_value(
+            engine.continuity_show_all(conversation_id)?,
+        )?)
     }
 }
 
@@ -2203,7 +2370,10 @@ pub fn run_continuity_log(
     kind: Option<&str>,
 ) -> Result<Vec<ContinuityCommitRecord>> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
-    engine.continuity_log(conversation_id, kind.map(ContinuityKind::parse).transpose()?)
+    engine.continuity_log(
+        conversation_id,
+        kind.map(ContinuityKind::parse).transpose()?,
+    )
 }
 
 pub fn run_continuity_rebuild(
@@ -2366,6 +2536,9 @@ fn merge_fixture_config(config: Option<LcmFixtureConfig>) -> LcmConfig {
         if let Some(value) = config.context_threshold {
             merged.context_threshold = value;
         }
+        if let Some(value) = config.min_compaction_tokens {
+            merged.min_compaction_tokens = value;
+        }
         if let Some(value) = config.fresh_tail_count {
             merged.fresh_tail_count = value;
         }
@@ -2472,7 +2645,9 @@ fn apply_continuity_diff(base: &str, diff_text: &str) -> Result<String> {
         let section = current_section
             .as_ref()
             .context("continuity diff requires a section header before +/- lines")?;
-        let entry = sections.get_mut(section).context("diff section missing in document")?;
+        let entry = sections
+            .get_mut(section)
+            .context("diff section missing in document")?;
         if let Some(added) = line.strip_prefix('+') {
             let value = collapse_whitespace(added);
             if !value.is_empty() && !entry.contains(&value) {
@@ -2488,7 +2663,9 @@ fn apply_continuity_diff(base: &str, diff_text: &str) -> Result<String> {
     render_continuity_sections(base, &sections)
 }
 
-fn parse_continuity_sections(base: &str) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
+fn parse_continuity_sections(
+    base: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>> {
     let mut sections = std::collections::BTreeMap::new();
     let mut current_section: Option<String> = None;
     for raw_line in base.lines() {
@@ -2720,16 +2897,20 @@ mod tests {
     #[test]
     fn compacts_messages_and_supports_retrieval() -> Result<()> {
         let db_path = temp_db();
-        let engine = LcmEngine::open(&db_path, LcmConfig {
-            context_threshold: 0.4,
-            fresh_tail_count: 2,
-            leaf_chunk_tokens: 20,
-            leaf_target_tokens: 120,
-            condensed_target_tokens: 120,
-            leaf_min_fanout: 3,
-            condensed_min_fanout: 2,
-            max_rounds: 4,
-        })?;
+        let engine = LcmEngine::open(
+            &db_path,
+            LcmConfig {
+                context_threshold: 0.4,
+                min_compaction_tokens: 0,
+                fresh_tail_count: 2,
+                leaf_chunk_tokens: 20,
+                leaf_target_tokens: 120,
+                condensed_target_tokens: 120,
+                leaf_min_fanout: 3,
+                condensed_min_fanout: 2,
+                max_rounds: 4,
+            },
+        )?;
 
         for idx in 0..8 {
             engine.add_message(
@@ -2759,16 +2940,20 @@ mod tests {
     #[test]
     fn creates_condensed_summary_from_leaf_summaries() -> Result<()> {
         let db_path = temp_db();
-        let engine = LcmEngine::open(&db_path, LcmConfig {
-            context_threshold: 0.2,
-            fresh_tail_count: 0,
-            leaf_chunk_tokens: 60,
-            leaf_target_tokens: 10,
-            condensed_target_tokens: 10,
-            leaf_min_fanout: 2,
-            condensed_min_fanout: 2,
-            max_rounds: 6,
-        })?;
+        let engine = LcmEngine::open(
+            &db_path,
+            LcmConfig {
+                context_threshold: 0.2,
+                min_compaction_tokens: 0,
+                fresh_tail_count: 0,
+                leaf_chunk_tokens: 60,
+                leaf_target_tokens: 10,
+                condensed_target_tokens: 10,
+                leaf_min_fanout: 2,
+                condensed_min_fanout: 2,
+                max_rounds: 6,
+            },
+        )?;
 
         let leaf_a = engine.insert_summary(
             7,
@@ -2800,7 +2985,9 @@ mod tests {
         let condensed_id = engine
             .compact_condensed_pass(7, &HeuristicSummarizer)?
             .context("expected condensed summary")?;
-        let condensed = engine.get_summary(&condensed_id)?.context("missing condensed summary")?;
+        let condensed = engine
+            .get_summary(&condensed_id)?
+            .context("missing condensed summary")?;
 
         assert_eq!(condensed.kind, SummaryKind::Condensed);
         assert_eq!(condensed.depth, 1);
@@ -2823,7 +3010,9 @@ mod tests {
 
         engine.add_message(9, "user", "First session message.")?;
 
-        let current = engine.latest_continuity(9)?.context("expected continuity state")?;
+        let current = engine
+            .latest_continuity(9)?
+            .context("expected continuity state")?;
         assert!(current.narrative.contains("# CONTINUITY NARRATIVE"));
         assert!(current.narrative.contains("## Ausgangslage"));
         assert!(current.anchors.contains("# CONTINUITY ANCHORS"));
@@ -2847,8 +3036,12 @@ mod tests {
             ContinuityKind::Narrative,
             "## Ausgangslage\n+ Service started with a fragile migration plan.\n## Ursache\n+ Cache warmer timing caused the breakage.\n",
         )?;
-        assert!(updated.content.contains("Service started with a fragile migration plan."));
-        assert!(updated.content.contains("Cache warmer timing caused the breakage."));
+        assert!(updated
+            .content
+            .contains("Service started with a fragile migration plan."));
+        assert!(updated
+            .content
+            .contains("Cache warmer timing caused the breakage."));
 
         let updated_again = engine.continuity_apply_diff(
             11,
@@ -2862,9 +3055,15 @@ mod tests {
             .content
             .contains("Cache warmer timing caused the breakage."));
 
-        let forgotten = engine.continuity_forgotten(11, Some(ContinuityKind::Narrative), Some("Cache warmer"))?;
+        let forgotten = engine.continuity_forgotten(
+            11,
+            Some(ContinuityKind::Narrative),
+            Some("Cache warmer"),
+        )?;
         assert_eq!(forgotten.len(), 1);
-        assert!(forgotten[0].line.contains("Cache warmer timing caused the breakage."));
+        assert!(forgotten[0]
+            .line
+            .contains("Cache warmer timing caused the breakage."));
 
         let rebuilt = engine.continuity_rebuild(11, ContinuityKind::Narrative)?;
         assert_eq!(rebuilt.content, updated_again.content);
@@ -2878,10 +3077,16 @@ mod tests {
         let db_path = temp_db();
         let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
         let _ = engine.continuity_init_documents(12)?;
-        engine.add_message(12, "user", "Keep the rollout gate active until validation passes on db-prod.internal.")?;
+        engine.add_message(
+            12,
+            "user",
+            "Keep the rollout gate active until validation passes on db-prod.internal.",
+        )?;
 
         let payload = engine.continuity_build_prompt(12, ContinuityKind::Narrative)?;
-        assert!(payload.prompt.contains("Output only a strict section-based diff."));
+        assert!(payload
+            .prompt
+            .contains("Output only a strict section-based diff."));
         assert!(payload.prompt.contains("<CURRENT_DOCUMENT>"));
         assert!(payload.prompt.contains("<RECENT_MESSAGES>"));
         assert!(payload.prompt.contains("## Ausgangslage"));

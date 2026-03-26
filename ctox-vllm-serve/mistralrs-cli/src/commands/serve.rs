@@ -1,6 +1,7 @@
 //! Server command implementation
 
 use anyhow::{Context, Result};
+use std::path::Path;
 use tracing::info;
 
 use mistralrs_core::{
@@ -82,14 +83,18 @@ pub async fn run_server(
         builder = builder.with_search_embedding_model(model.into());
     }
 
+    info!("Starting mistralrs server build.");
     let mistralrs = builder.build().await?;
+    info!("Finished mistralrs server build.");
     let mistralrs_for_ui = mistralrs.clone();
 
     // Build and run the server
+    info!("Building HTTP router.");
     let mut app = MistralRsServerRouterBuilder::new()
         .with_mistralrs(mistralrs)
         .build()
         .await?;
+    info!("Finished HTTP router build.");
 
     if server.ui {
         let ui_router = build_ui_router(
@@ -102,6 +107,7 @@ pub async fn run_server(
         info!("UI available at http://{}:{}/ui", server.host, server.port);
     }
 
+    info!("Binding HTTP listener on {}:{}.", server.host, server.port);
     let listener =
         tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port)).await?;
 
@@ -110,6 +116,33 @@ pub async fn run_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn detect_speech_arch(model_id: &str) -> Result<SpeechLoaderType> {
+    let lowered = model_id.trim().to_ascii_lowercase();
+    if lowered.contains("qwen3-tts") {
+        return Ok(SpeechLoaderType::Qwen3Tts);
+    }
+    if lowered.contains("dia") {
+        return Ok(SpeechLoaderType::Dia);
+    }
+
+    let config_path = Path::new(model_id).join("config.json");
+    if config_path.is_file() {
+        let config = std::fs::read_to_string(&config_path).with_context(|| {
+            format!(
+                "failed to read local speech model config at {}",
+                config_path.display()
+            )
+        })?;
+        if let Some(arch) = SpeechLoaderType::auto_detect_from_config(&config) {
+            return Ok(arch);
+        }
+    }
+
+    anyhow::bail!(
+        "unable to determine speech architecture for `{model_id}`; supported native speech loaders are currently `qwen3_tts` and `dia`"
+    )
 }
 
 /// Convert our clean ModelType to the legacy ModelSelected enum
@@ -238,7 +271,7 @@ pub(crate) fn convert_to_model_selected(model_type: &ModelType) -> Result<ModelS
         ModelType::Speech { model, device: _ } => Ok(ModelSelected::Speech {
             model_id: model.model_id.clone(),
             dac_model_id: None,
-            arch: SpeechLoaderType::Dia,
+            arch: detect_speech_arch(&model.model_id)?,
             dtype: model.dtype,
         }),
 

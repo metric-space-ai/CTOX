@@ -229,6 +229,24 @@ pub struct GatedDeltaNet {
     pub conv_kernel_size: usize,
     pub key_dim: usize,
     pub value_dim: usize,
+    pub out_proj_input_offset: usize,
+    pub out_proj_input_dim: usize,
+}
+
+fn grouped_value_shard(
+    num_k_heads: usize,
+    v_per_group: usize,
+    head_v_dim: usize,
+    rank: usize,
+    world_size: usize,
+) -> (usize, usize) {
+    let (group_offset, group_len) = mistralrs_quant::shard_bounds(num_k_heads, rank, world_size);
+    let value_heads_before = group_offset * v_per_group;
+    let local_value_heads = group_len * v_per_group;
+    (
+        value_heads_before * head_v_dim,
+        local_value_heads * head_v_dim,
+    )
 }
 
 /// Whether to try merged weight names first or separate HF names with fallback.
@@ -240,6 +258,11 @@ pub enum GdnWeightMode {
 }
 
 impl GatedDeltaNet {
+    #[cfg(feature = "cuda")]
+    fn use_custom_cuda_recurrence() -> bool {
+        std::env::var_os("MISTRALRS_FORCE_GDN_CUDA_KERNEL").is_some()
+    }
+
     pub fn load(
         vb: ShardedVarBuilder,
         cfg: &dyn GdnConfig,
@@ -264,6 +287,13 @@ impl GatedDeltaNet {
         let conv_kernel_size = cfg.linear_conv_kernel_dim();
         let hidden_size = cfg.hidden_size();
         let v_per_group = num_v_heads / num_k_heads;
+        let (out_proj_input_offset, out_proj_input_dim) = grouped_value_shard(
+            num_k_heads,
+            v_per_group,
+            head_v_dim,
+            comm.rank(),
+            comm.world_size(),
+        );
 
         let vb_la = mapper.set_device(layer_idx, vb.pp("linear_attn"), loading_isq);
 
@@ -337,12 +367,17 @@ impl GatedDeltaNet {
             isq_target_device.as_ref(),
         )?;
 
-        let out_proj = RowParallelLayer::new(
+        let out_proj = RowParallelLayer::new_with_shard(
             value_dim,
             hidden_size,
             cfg.quantization_config(),
             false,
             comm,
+            mistralrs_quant::Shard::Offset {
+                dim: 1,
+                offset: out_proj_input_offset,
+                len: out_proj_input_dim,
+            },
             vb_la.pp("out_proj"),
         )?;
 
@@ -361,6 +396,8 @@ impl GatedDeltaNet {
             conv_kernel_size,
             key_dim,
             value_dim,
+            out_proj_input_offset,
+            out_proj_input_dim,
         })
     }
 
@@ -524,6 +561,16 @@ impl GatedDeltaNet {
         let y = self.norm.forward(&y, &z)?;
         let y = y.reshape(z_shape)?;
         let y = y.reshape((batch_size, seq_len, self.value_dim))?;
+        let y = if self.out_proj_input_dim < self.value_dim {
+            y.narrow(
+                D::Minus1,
+                self.out_proj_input_offset,
+                self.out_proj_input_dim,
+            )?
+            .contiguous()?
+        } else {
+            y
+        };
 
         // 11. Output projection
         let original_dtype = x.dtype();
@@ -571,6 +618,11 @@ impl GatedDeltaNet {
         cache: &mut GdnLayerCache,
         dtype: DType,
     ) -> Result<Tensor> {
+        if !Self::use_custom_cuda_recurrence() {
+            return gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)?
+                .to_dtype(dtype);
+        }
+
         let num_heads = self.num_v_heads;
         let k_head = self.head_k_dim;
         let v_head = self.head_v_dim;

@@ -58,6 +58,9 @@ const DEFAULTS = {
   trustLevel: "low",
   emitInterrupts: "false",
   interruptChannel: "jami",
+  proxyHost: process.env.CTOX_PROXY_HOST || "127.0.0.1",
+  proxyPort: process.env.CTOX_PROXY_PORT || "12434",
+  transcriptionModel: process.env.CTOX_STT_MODEL || "",
 };
 
 function nowIso() {
@@ -307,6 +310,128 @@ function runGdbusCall(method, args = []) {
   return String(result.stdout || "").trim();
 }
 
+function getAccountList() {
+  const parsed = parseTupleOutput(runGdbusCall("getAccountList"));
+  return Array.isArray(parsed[0]) ? parsed[0].map((value) => normalizeText(value)).filter(Boolean) : [];
+}
+
+function getAccountDetails(accountId) {
+  const parsed = parseTupleOutput(runGdbusCall("getAccountDetails", [accountId]));
+  return parsed[0] && typeof parsed[0] === "object" ? parsed[0] : {};
+}
+
+function getVolatileAccountDetails(accountId) {
+  const parsed = parseTupleOutput(runGdbusCall("getVolatileAccountDetails", [accountId]));
+  return parsed[0] && typeof parsed[0] === "object" ? parsed[0] : {};
+}
+
+function jamiAccountType(details) {
+  return normalizeText(details["Account.type"] || "").toUpperCase();
+}
+
+function jamiAccountEnabled(details) {
+  return normalizeText(details["Account.enable"] || "true").toLowerCase() !== "false";
+}
+
+function jamiShareUri(details) {
+  const explicit = normalizeText(details["RingNS.uri"] || "");
+  if (explicit) return explicit.startsWith("jami:") ? explicit : `jami:${explicit}`;
+  const username = normalizeText(details["Account.username"] || "");
+  if (username) return username.startsWith("jami:") ? username : `jami:${username}`;
+  return "";
+}
+
+function jamiAccountLabel(details, accountId, preferredProfileName = "") {
+  return (
+    normalizeText(details["Account.displayName"] || "") ||
+    normalizeText(details["Account.alias"] || "") ||
+    normalizeText(details["Account.deviceName"] || "") ||
+    normalizeText(preferredProfileName || "") ||
+    normalizeText(accountId)
+  );
+}
+
+function jamiAccountSnapshot(accountId, preferredProfileName = "") {
+  const details = getAccountDetails(accountId);
+  const volatileDetails = getVolatileAccountDetails(accountId);
+  return {
+    accountId,
+    accountType: jamiAccountType(details),
+    enabled: jamiAccountEnabled(details),
+    registrationStatus: normalizeText(volatileDetails["Account.registrationStatus"] || ""),
+    username: normalizeText(details["Account.username"] || ""),
+    shareUri: jamiShareUri(details),
+    displayName: jamiAccountLabel(details, accountId, preferredProfileName),
+    details,
+    volatileDetails,
+  };
+}
+
+function toGVariantString(value) {
+  return `'${String(value == null ? "" : value).replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+}
+
+function dictToGVariant(details) {
+  return `{${Object.entries(details)
+    .map(([key, value]) => `${toGVariantString(key)}: <${toGVariantString(value)}>` )
+    .join(", ")}}`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function provisionRingAccount(profileName) {
+  const templateTuple = parseTupleOutput(runGdbusCall("getAccountTemplate", ["RING"]));
+  const details = templateTuple[0] && typeof templateTuple[0] === "object" ? { ...templateTuple[0] } : {};
+  const label = normalizeText(profileName || "CTOX");
+  details["Account.type"] = "RING";
+  details["Account.enable"] = "true";
+  details["Account.deviceName"] = label;
+  details["Account.displayName"] = label;
+  details["Account.alias"] = label;
+  const createdTuple = parseTupleOutput(runGdbusCall("addAccount", [dictToGVariant(details)]));
+  const accountId = normalizeText(createdTuple[0] || "");
+  if (!accountId) fail("Jami account creation returned no account id.");
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const snapshot = jamiAccountSnapshot(accountId, label);
+    if (snapshot.shareUri) return { ...snapshot, provisioned: true };
+    await delay(500);
+  }
+  return { ...jamiAccountSnapshot(accountId, label), provisioned: true };
+}
+
+async function resolveJamiAccount(options, { provisionIfMissing = false } = {}) {
+  loadJamiDbusEnvironment();
+  const preferredAccountId = normalizeText(options.accountId || "").replace(/^jami:/i, "");
+  const preferredProfileName = normalizeText(options.profileName || "");
+  const snapshots = getAccountList().map((accountId) => jamiAccountSnapshot(accountId, preferredProfileName));
+  const ringAccounts = snapshots.filter((snapshot) => snapshot.accountType === "RING" && snapshot.enabled);
+  let selected = null;
+  if (preferredAccountId) {
+    selected =
+      ringAccounts.find((snapshot) => snapshot.accountId === preferredAccountId) ||
+      ringAccounts.find((snapshot) => snapshot.username === preferredAccountId) ||
+      ringAccounts.find((snapshot) => snapshot.shareUri.replace(/^jami:/i, "") === preferredAccountId);
+  }
+  if (!selected) {
+    selected =
+      ringAccounts.find((snapshot) => snapshot.registrationStatus === "REGISTERED" && snapshot.shareUri) ||
+      ringAccounts.find((snapshot) => snapshot.shareUri) ||
+      ringAccounts[0] ||
+      null;
+  }
+  if (!selected && provisionIfMissing) {
+    selected = await provisionRingAccount(preferredProfileName);
+  }
+  if (!selected) return null;
+  options.accountId = selected.accountId;
+  if (!normalizeText(options.profileName)) {
+    options.profileName = selected.displayName || selected.accountId;
+  }
+  return selected;
+}
+
 function uniqueNonEmpty(values) {
   return Array.from(new Set(values.map((value) => normalizeText(value)).filter(Boolean)));
 }
@@ -368,6 +493,228 @@ function normalizeList(value) {
       .filter(Boolean);
   }
   return [];
+}
+
+function proxyBaseUrl(options) {
+  const explicit = normalizeText(options.proxyBaseUrl || "");
+  if (explicit) return explicit.replace(/\/+$/, "");
+  const host = normalizeText(options.proxyHost || DEFAULTS.proxyHost) || DEFAULTS.proxyHost;
+  const port = normalizeText(options.proxyPort || DEFAULTS.proxyPort) || DEFAULTS.proxyPort;
+  return `http://${host}:${port}/v1`;
+}
+
+function isAudioMimeType(value) {
+  const mimeType = normalizeText(value).toLowerCase();
+  return (
+    mimeType.startsWith("audio/") ||
+    mimeType === "application/ogg" ||
+    mimeType === "application/x-flac" ||
+    mimeType === "application/vnd.wave"
+  );
+}
+
+function looksLikeAudioPath(value) {
+  const lowered = normalizeText(value).toLowerCase();
+  if (!lowered) return false;
+  return [".wav", ".mp3", ".m4a", ".ogg", ".opus", ".flac", ".aac", ".webm"].some((suffix) =>
+    lowered.endsWith(suffix)
+  );
+}
+
+function sanitizePersistentValue(value, depth = 0) {
+  if (depth > 8 || value == null) return value == null ? value : normalizeText(value);
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitizePersistentValue(entry, depth + 1))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value !== "object") return value;
+
+  const object = {};
+  for (const [key, entry] of Object.entries(value)) {
+    const normalizedKey = normalizeText(key).toLowerCase();
+    if (
+      [
+        "path",
+        "filepath",
+        "localpath",
+        "tmppath",
+        "temppath",
+        "downloadpath",
+        "audiopath",
+        "voicepath",
+        "ref_audio",
+        "data",
+        "bytes",
+        "buffer",
+        "base64",
+      ].includes(normalizedKey)
+    ) {
+      continue;
+    }
+    if (normalizedKey === "attachments" && Array.isArray(entry)) {
+      object[key] = entry
+        .map((attachment) => {
+          if (!attachment || typeof attachment !== "object") return undefined;
+          const candidatePath = normalizeText(
+            attachment.path ||
+              attachment.filePath ||
+              attachment.localPath ||
+              attachment.audioPath ||
+              attachment.voicePath ||
+              ""
+          );
+          const candidateMime = normalizeText(
+            attachment.mimeType || attachment.mimetype || attachment.contentType || attachment.type || ""
+          );
+          const candidateName = normalizeText(
+            attachment.name || attachment.fileName || attachment.filename || path.basename(candidatePath || "")
+          );
+          const summarized = {
+            kind: isAudioMimeType(candidateMime) || looksLikeAudioPath(candidatePath) ? "audio" : "attachment",
+          };
+          if (candidateName) summarized.name = candidateName;
+          if (candidateMime) summarized.mimeType = candidateMime;
+          return summarized;
+        })
+        .filter(Boolean);
+      continue;
+    }
+    const sanitized = sanitizePersistentValue(entry, depth + 1);
+    if (sanitized !== undefined) object[key] = sanitized;
+  }
+  return object;
+}
+
+function collectAudioAttachmentCandidates(value, results = [], depth = 0) {
+  if (depth > 8 || value == null) return results;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectAudioAttachmentCandidates(entry, results, depth + 1);
+    return results;
+  }
+  if (typeof value !== "object") return results;
+
+  const candidatePath = normalizeText(
+    value.path || value.filePath || value.localPath || value.audioPath || value.voicePath || ""
+  );
+  const candidateMime = normalizeText(value.mimeType || value.mimetype || value.contentType || value.type || "");
+  const candidateName = normalizeText(
+    value.name || value.fileName || value.filename || path.basename(candidatePath || "")
+  );
+  if (candidatePath && (looksLikeAudioPath(candidatePath) || isAudioMimeType(candidateMime))) {
+    results.push({
+      path: candidatePath,
+      mimeType: candidateMime,
+      name: candidateName,
+    });
+  }
+
+  for (const entry of Object.values(value)) {
+    collectAudioAttachmentCandidates(entry, results, depth + 1);
+  }
+  return results;
+}
+
+function firstReadableAudioAttachment(value) {
+  const seen = new Set();
+  for (const candidate of collectAudioAttachmentCandidates(value)) {
+    const candidatePath = normalizeText(candidate.path);
+    if (!candidatePath || seen.has(candidatePath)) continue;
+    seen.add(candidatePath);
+    if (!fs.existsSync(candidatePath)) continue;
+    return candidate;
+  }
+  return null;
+}
+
+function mergeTranscriptIntoBody(existingBody, transcript) {
+  const normalizedBody = normalizeText(existingBody);
+  const normalizedTranscript = normalizeText(transcript);
+  if (!normalizedTranscript) return normalizedBody;
+  if (!normalizedBody) return normalizedTranscript;
+  if (normalizedBody === normalizedTranscript) return normalizedBody;
+  return `${normalizedBody}\n\n[Transcript]\n${normalizedTranscript}`;
+}
+
+function transcribeAudioAttachment(options, audio) {
+  if (!audio || !normalizeText(audio.path)) return null;
+  const args = [
+    "-sS",
+    "-X",
+    "POST",
+    `${proxyBaseUrl(options)}/audio/transcriptions`,
+    "-F",
+    `file=@${audio.path}`,
+  ];
+  const model = normalizeText(options.transcriptionModel || "");
+  if (model) {
+    args.push("-F", `model=${model}`);
+  }
+  const output = execFileSync("curl", args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const parsed = JSON.parse(output);
+  return normalizeText(parsed.text || parsed.transcript || "");
+}
+
+async function prepareInboundMessage(options, inbound, rawPayload) {
+  const sanitizedRawPayload = sanitizePersistentValue(rawPayload);
+  let metadata = {};
+  try {
+    metadata = JSON.parse(inbound.metadataJson || "{}");
+  } catch {
+    metadata = {};
+  }
+  metadata = sanitizePersistentValue(metadata) || {};
+
+  const audio = firstReadableAudioAttachment(rawPayload);
+  if (audio) {
+    let transcript = "";
+    let transcriptionError = "";
+    try {
+      transcript = transcribeAudioAttachment(options, audio);
+    } catch (error) {
+      transcriptionError = String((error && error.message) || error || "");
+    }
+    const mergedBody = mergeTranscriptIntoBody(inbound.bodyText, transcript);
+    inbound.bodyText = mergedBody || "Voice message received.";
+    inbound.preview = previewText(inbound.bodyText || inbound.subject);
+    inbound.hasAttachments = 0;
+    metadata.messageModality = "voice";
+    metadata.preferredReplyModality = "voice";
+    metadata.transcription = {
+      ok: transcript.length > 0,
+      textLength: transcript.length,
+      error: transcriptionError,
+    };
+    metadata.audioAttachment = sanitizePersistentValue({
+      kind: "audio",
+      mimeType: audio.mimeType,
+      name: audio.name,
+    });
+    return {
+      inbound: {
+        ...inbound,
+        metadataJson: JSON.stringify(metadata),
+      },
+      rawPayload: {
+        ...sanitizedRawPayload,
+        messageModality: "voice",
+        transcriptText: transcript,
+      },
+    };
+  }
+
+  metadata.messageModality = metadata.messageModality || "text";
+  return {
+    inbound: {
+      ...inbound,
+      metadataJson: JSON.stringify(metadata),
+    },
+    rawPayload: sanitizedRawPayload,
+  };
 }
 
 function accountKeyFromJami(accountId) {
@@ -705,7 +1052,7 @@ function normalizeInboundEntry(options, entry, sourceName, index) {
       sourceFile: sourceName,
       conversationId: entry.conversationId || entry.conversationUri || "",
       threadLabel: entry.threadLabel || entry.conversationLabel || "",
-      rawEntry: entry,
+      rawEntry: sanitizePersistentValue(entry),
     }),
   };
 }
@@ -846,6 +1193,7 @@ function normalizeJamiDbusMessage(options, conversationId, tuple, index) {
   const remoteId = normalizeText(tuple[0] || `jami-${conversationId}-${index}`);
   const mimeType = normalizeText(tuple[1] || "");
   const metadata = tuple[3] && typeof tuple[3] === "object" && !Array.isArray(tuple[3]) ? tuple[3] : {};
+  const hasVoicePayload = isAudioMimeType(mimeType) || !!firstReadableAudioAttachment(tuple);
   const senderAddress = normalizeAddress(metadata.author || metadata.uri || "");
   if (normalizeText(senderAddress).toLowerCase() === normalizeText(options.accountId).toLowerCase()) {
     return null;
@@ -856,7 +1204,10 @@ function normalizeJamiDbusMessage(options, conversationId, tuple, index) {
   if (!bodyText && mimeType === "initial") {
     bodyText = `Neue Jami-Konversation von ${senderAddress}.`;
   }
-  if (!bodyText && mimeType !== "initial") {
+  if (!bodyText && hasVoicePayload) {
+    bodyText = "Voice message received.";
+  }
+  if (!bodyText && mimeType !== "initial" && !hasVoicePayload) {
     return null;
   }
 
@@ -872,13 +1223,13 @@ function normalizeJamiDbusMessage(options, conversationId, tuple, index) {
     bodyText,
     preview: previewText(bodyText),
     seen: 0,
-    hasAttachments: 0,
+    hasAttachments: hasVoicePayload ? 1 : 0,
     externalCreatedAt: normalizeJamiTimestamp(metadata.timestamp),
     metadataJson: JSON.stringify({
       adapter: "jami-dbus",
       conversationId,
       mimeType,
-      rawEntry: tuple,
+      rawEntry: sanitizePersistentValue(tuple),
     }),
   };
 }
@@ -955,8 +1306,8 @@ function normalizeJamiGitCommit(options, conversationId, repoPath, entry, index)
 
   const payloadType = normalizeText(payload.type || "");
   const actionType = normalizeText(payload.action || "");
-  if (payloadType !== "text/plain") return null;
-  if (!normalizeText(payload.body || "")) return null;
+  const hasVoicePayload = isAudioMimeType(payloadType) || !!firstReadableAudioAttachment(payload);
+  if (payloadType !== "text/plain" && !hasVoicePayload) return null;
 
   const accountKey = accountKeyFromJami(options.accountId);
   const repoParticipants = repoParticipantHints(repoPath);
@@ -965,7 +1316,8 @@ function normalizeJamiGitCommit(options, conversationId, repoPath, entry, index)
   );
   if (!senderAddress) return null;
 
-  const bodyText = normalizeText(payload.body);
+  const bodyText = normalizeText(payload.body || (hasVoicePayload ? "Voice message received." : ""));
+  if (!bodyText) return null;
   const externalCreatedAt = normalizeJamiTimestamp(entry.timestamp);
   return {
     accountKey,
@@ -979,7 +1331,7 @@ function normalizeJamiGitCommit(options, conversationId, repoPath, entry, index)
     bodyText,
     preview: previewText(bodyText),
     seen: 0,
-    hasAttachments: 0,
+    hasAttachments: hasVoicePayload ? 1 : 0,
     externalCreatedAt,
     metadataJson: JSON.stringify({
       adapter: "jami-git",
@@ -987,8 +1339,8 @@ function normalizeJamiGitCommit(options, conversationId, repoPath, entry, index)
       payloadType,
       actionType,
       authorDevice: entry.authorDevice,
-      rawEntry: entry,
-      rawPayload: payload,
+      rawEntry: sanitizePersistentValue(entry),
+      rawPayload: sanitizePersistentValue(payload),
     }),
   };
 }
@@ -1025,7 +1377,7 @@ function loadConversationMessagesFromGit(options, conversationIds, limit) {
   return loaded;
 }
 
-async function archiveSourceFile(sourcePath, archiveDir) {
+async function archiveSourceFile(sourcePath, archiveDir, sanitizedEntries = []) {
   await ensureDir(archiveDir);
   const destinationBase = join(archiveDir, basename(sourcePath));
   let destination = destinationBase;
@@ -1035,12 +1387,13 @@ async function archiveSourceFile(sourcePath, archiveDir) {
       `${path.parse(basename(sourcePath)).name}-${Date.now()}${extname(sourcePath)}`
     );
   }
-  try {
-    await rename(sourcePath, destination);
-  } catch {
-    await copyFile(sourcePath, destination);
-    await unlink(sourcePath);
-  }
+  const ext = extname(sourcePath).toLowerCase();
+  const archiveBody =
+    ext === ".jsonl"
+      ? `${sanitizedEntries.map((entry) => JSON.stringify(entry)).join("\n")}${sanitizedEntries.length ? "\n" : ""}`
+      : `${JSON.stringify(sanitizedEntries.length === 1 ? sanitizedEntries[0] : sanitizedEntries, null, 2)}\n`;
+  await writeFile(destination, archiveBody);
+  await unlink(sourcePath);
   return destination;
 }
 
@@ -1061,7 +1414,7 @@ async function loadSourceEntries(filePath) {
 function normalizeOptions(rawArgv) {
   const argv = [...rawArgv];
   const command = argv.shift();
-  if (!command) fail("Usage: communication_jami_cli.mjs <sync|send|test|list> [options]");
+  if (!command) fail("Usage: communication_jami_cli.mjs <sync|send|test|list|resolve-account> [options]");
 
   const options = {
     command,
@@ -1080,6 +1433,9 @@ function normalizeOptions(rawArgv) {
     interruptChannel: DEFAULTS.interruptChannel,
     accountId: DEFAULTS.accountId,
     profileName: DEFAULTS.profileName,
+    proxyHost: DEFAULTS.proxyHost,
+    proxyPort: DEFAULTS.proxyPort,
+    transcriptionModel: DEFAULTS.transcriptionModel,
   };
 
   while (argv.length) {
@@ -1106,6 +1462,7 @@ function requireAccount(options) {
 }
 
 async function sendJami(options) {
+  await resolveJamiAccount(options, { provisionIfMissing: true });
   requireAccount(options);
   if (!options.to.length) fail("Need at least one --to recipient.");
   if (!options.body) fail("Missing --body for send.");
@@ -1126,9 +1483,11 @@ async function sendJami(options) {
     to: options.to,
     subject,
     bodyText: options.body,
+    deliveryMode: toBool(options.sendVoice) ? "voice" : "text",
     createdAt: timestamp,
     metadata: {
       queuedBy: "communication_jami_cli",
+      requestedModality: toBool(options.sendVoice) ? "voice" : "text",
     },
   };
   const outboxPath = join(
@@ -1176,6 +1535,7 @@ async function sendJami(options) {
     metadataJson: JSON.stringify({
       bridge: "jami-file-bridge",
       delivery: "queued_for_bridge",
+      requestedModality: toBool(options.sendVoice) ? "voice" : "text",
       outboxPath,
     }),
   });
@@ -1189,6 +1549,7 @@ async function sendJami(options) {
       confirmed: false,
       method: "jami-file-bridge",
       state: "queued_for_bridge",
+      requestedModality: toBool(options.sendVoice) ? "voice" : "text",
       outboxPath,
     },
     accountKey,
@@ -1200,6 +1561,7 @@ async function sendJami(options) {
 }
 
 async function testJamiSetup(options) {
+  const resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
   requireAccount(options);
   await ensureSchema(options.db, options.schema);
   await ensureDir(options.inboxDir);
@@ -1244,12 +1606,14 @@ async function testJamiSetup(options) {
     ok: checks.every((item) => item.ok),
     channel: DEFAULTS.channel,
     accountKey,
+    resolvedAccount: resolved,
     checks,
     dbPath: options.db,
   };
 }
 
 async function syncJami(options) {
+  await resolveJamiAccount(options, { provisionIfMissing: true });
   requireAccount(options);
   await ensureSchema(options.db, options.schema);
   await ensureDir(options.inboxDir);
@@ -1297,11 +1661,12 @@ async function syncJami(options) {
             index
           );
           if (!inbound) continue;
-          await storeInboundMessage(options, inbound, {
+          const prepared = await prepareInboundMessage(options, inbound, {
             source: "jami-dbus",
             conversationId: loaded.conversationId,
             rawEntry: loaded.messages[index],
           });
+          await storeInboundMessage(options, prepared.inbound, prepared.rawPayload);
           fetchedCount += 1;
           storedCount += 1;
         }
@@ -1319,12 +1684,13 @@ async function syncJami(options) {
           index
         );
         if (!inbound) continue;
-        const stored = await storeInboundMessage(options, inbound, {
+        const prepared = await prepareInboundMessage(options, inbound, {
           source: "jami-git",
           conversationId: loaded.conversationId,
           repoPath: loaded.repoPath,
           rawEntry: loaded.messages[index],
         });
+        const stored = await storeInboundMessage(options, prepared.inbound, prepared.rawPayload);
         fetchedCount += 1;
         if (!stored.alreadyKnown) storedCount += 1;
       }
@@ -1338,13 +1704,16 @@ async function syncJami(options) {
     for (const name of sourceFiles) {
       const sourcePath = join(options.inboxDir, name);
       const entries = await loadSourceEntries(sourcePath);
+      const sanitizedEntries = [];
       fetchedCount += entries.length;
       for (let index = 0; index < entries.length; index += 1) {
         const inbound = normalizeInboundEntry(options, entries[index], name, index);
-        await storeInboundMessage(options, inbound, entries[index]);
+        const prepared = await prepareInboundMessage(options, inbound, entries[index]);
+        await storeInboundMessage(options, prepared.inbound, prepared.rawPayload);
+        sanitizedEntries.push(prepared.rawPayload);
         storedCount += 1;
       }
-      await archiveSourceFile(sourcePath, options.archiveDir);
+      await archiveSourceFile(sourcePath, options.archiveDir, sanitizedEntries);
     }
 
     const finishedAt = nowIso();
@@ -1423,6 +1792,15 @@ async function listMessages(options) {
   };
 }
 
+async function resolveAccountCommand(options) {
+  const resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
+  return {
+    ok: !!resolved,
+    resolvedAccount: resolved,
+    dbusEnvFile: process.env.CTO_JAMI_DBUS_ENV_FILE || "",
+  };
+}
+
 async function main() {
   const options = normalizeOptions(process.argv.slice(2));
   let result;
@@ -1434,6 +1812,8 @@ async function main() {
     result = await testJamiSetup(options);
   } else if (options.command === "list") {
     result = await listMessages(options);
+  } else if (options.command === "resolve-account") {
+    result = await resolveAccountCommand(options);
   } else {
     fail(`Unsupported command: ${options.command}`);
   }

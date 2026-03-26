@@ -366,6 +366,21 @@ pub fn get_model_paths(
                 .clone()
                 .filter(|x| x.ends_with(".safetensors"))
                 .collect::<Vec<_>>();
+            let sharded_safetensors = safetensors
+                .iter()
+                .filter(|x| safetensor_match.is_match(x))
+                .cloned()
+                .collect::<Vec<_>>();
+            let consolidated_safetensors = safetensors
+                .iter()
+                .filter(|x| consolidated_safetensor_match.is_match(x))
+                .cloned()
+                .collect::<Vec<_>>();
+            let monolithic_safetensors = safetensors
+                .iter()
+                .filter(|x| quant_safetensor_match.is_match(x))
+                .cloned()
+                .collect::<Vec<_>>();
             let pickles = listing
                 .clone()
                 .filter(|x| x.ends_with(".pth") || x.ends_with(".pt") || x.ends_with(".bin"))
@@ -375,8 +390,18 @@ pub fn get_model_paths(
                 .filter(|x| x == UQFF_RESIDUAL_SAFETENSORS)
                 .collect::<Vec<_>>();
             let files = if !safetensors.is_empty() {
-                // Always prefer safetensors
-                safetensors
+                // Prefer one consistent safetensors family instead of mixing duplicate exports
+                // from the same repo (for example `consolidated.safetensors` and
+                // `model.safetensors` side-by-side).
+                if !sharded_safetensors.is_empty() {
+                    sharded_safetensors
+                } else if !consolidated_safetensors.is_empty() {
+                    consolidated_safetensors
+                } else if !monolithic_safetensors.is_empty() {
+                    monolithic_safetensors
+                } else {
+                    safetensors
+                }
             } else if !pickles.is_empty() {
                 // Fall back to pickle
                 pickles

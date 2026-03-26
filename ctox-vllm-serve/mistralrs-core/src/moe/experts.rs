@@ -36,19 +36,53 @@ pub enum MoEExpertsBackend {
 }
 
 impl MoEExpertsBackend {
+    fn from_env_override() -> Option<Self> {
+        let raw = std::env::var("MISTRALRS_MOE_EXPERTS_BACKEND").ok()?;
+        let normalized = raw.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "fused" => Some(Self::Fused),
+            "fast" => Some(Self::Fast),
+            "slow" => Some(Self::Slow),
+            other => {
+                tracing::warn!(
+                    "Ignoring invalid MISTRALRS_MOE_EXPERTS_BACKEND={other:?}; expected fused|fast|slow."
+                );
+                None
+            }
+        }
+    }
+
     /// Determine the best backend based on device and quantization settings
     pub fn select(
         device: &Device,
         loading_isq: bool,
         quantization_config: &Option<QuantizedConfig>,
     ) -> Self {
-        let has_immediate_isq = mistralrs_quant::get_immediate_isq().is_some();
-        let use_fast = device.is_metal()
-            || (device.is_cuda()
-                && (loading_isq || quantization_config.is_some() || has_immediate_isq));
+        if let Some(backend) = Self::from_env_override() {
+            tracing::info!(
+                "Using MoE experts backend override {:?} for device {:?}.",
+                match backend {
+                    Self::Fused => "fused",
+                    Self::Fast => "fast",
+                    Self::Slow => "slow",
+                },
+                device.location()
+            );
+            return backend;
+        }
 
-        if use_fast {
+        let has_immediate_isq = mistralrs_quant::get_immediate_isq().is_some();
+        let use_fast = device.is_metal();
+        let use_fused_cuda_quantized =
+            device.is_cuda() && (loading_isq || quantization_config.is_some() || has_immediate_isq);
+
+        let selected = if use_fast {
             Self::Fast
+        } else if use_fused_cuda_quantized {
+            // The CUDA gather-based path can hang during the first decode step for
+            // quantized multi-GPU MoE models. Prefer the fused CUDA experts path,
+            // which supports the stacked Qwen3.5 MoE weight layout directly.
+            Self::Fused
         } else if quantization_config.is_none()
             && !loading_isq
             && !has_immediate_isq
@@ -57,7 +91,22 @@ impl MoEExpertsBackend {
             Self::Fused
         } else {
             Self::Slow
-        }
+        };
+
+        tracing::info!(
+            "Selected MoE experts backend {:?} for device {:?} (loading_isq={} quantized={} immediate_isq={}).",
+            match selected {
+                Self::Fused => "fused",
+                Self::Fast => "fast",
+                Self::Slow => "slow",
+            },
+            device.location(),
+            loading_isq,
+            quantization_config.is_some(),
+            has_immediate_isq
+        );
+
+        selected
     }
 }
 
@@ -140,7 +189,10 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
-        let experts_vb = vb.pp("experts").set_device(layer_device.clone());
+        let experts_vb = match backend {
+            MoEExpertsBackend::Fused => vb.pp("experts").set_device(layer_device.clone()),
+            MoEExpertsBackend::Fast | MoEExpertsBackend::Slow => vb.pp("experts"),
+        };
 
         // Detect format: stacked has "gate_up_proj", per-expert has "0.gate_proj"
         let is_stacked = experts_vb.contains_tensor("gate_up_proj");
@@ -354,6 +406,15 @@ impl MoEExperts {
             experts_vb,
         )?;
 
+        let dummy_gate = experts.gate_proj.iter().filter(|layer| layer.name() == "dummy").count();
+        let dummy_up = experts.up_proj.iter().filter(|layer| layer.name() == "dummy").count();
+        let dummy_down = experts.down_proj.iter().filter(|layer| layer.name() == "dummy").count();
+        if dummy_gate != 0 || dummy_up != 0 || dummy_down != 0 {
+            candle_core::bail!(
+                "PackedExperts produced dummy layers: gate={dummy_gate} up={dummy_up} down={dummy_down}"
+            );
+        }
+
         Ok(SlowExpertsWeights { experts })
     }
 
@@ -487,21 +548,55 @@ impl MoEExperts {
         let original_dtype = xs.dtype();
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let num_tokens = b_size * seq_len;
+        let (_, gate_device) = weights.fused_gate_proj.dtype_and_device();
+        let (_, up_device) = weights.fused_up_proj.dtype_and_device();
+        let (_, down_device) = weights.fused_down_proj.dtype_and_device();
+        if !xs.device().same_device(&gate_device) {
+            candle_core::bail!(
+                "moe fast fused_gate_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                gate_device.location()
+            );
+        }
+        if !xs.device().same_device(&up_device) {
+            candle_core::bail!(
+                "moe fast fused_up_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                up_device.location()
+            );
+        }
+        if !xs.device().same_device(&down_device) {
+            candle_core::bail!(
+                "moe fast fused_down_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                down_device.location()
+            );
+        }
 
         let xs_flat = xs.reshape((num_tokens, hidden_dim))?;
+        let topk_ids = if topk_ids.device().same_device(xs.device()) {
+            topk_ids.clone()
+        } else {
+            topk_ids.to_device(xs.device())?
+        };
+        let topk_weights = if topk_weights.device().same_device(xs.device()) {
+            topk_weights.clone()
+        } else {
+            topk_weights.to_device(xs.device())?
+        };
 
         let ys = if xs.device().is_cuda() {
             // CUDA path: use indexed_moe_forward compatible shapes
             let xs = xs_flat.reshape((num_tokens, 1, hidden_dim))?;
             let gate = weights
                 .fused_gate_proj
-                .gather_forward_autocast(&xs, topk_ids)?;
+                .gather_forward_autocast(&xs, &topk_ids)?;
             let up = weights
                 .fused_up_proj
-                .gather_forward_autocast(&xs, topk_ids)?;
+                .gather_forward_autocast(&xs, &topk_ids)?;
             weights
                 .fused_down_proj
-                .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, topk_ids)?
+                .gather_forward_autocast(&(up * gate.apply(&self.act)?)?, &topk_ids)?
         } else {
             // Metal path: use broadcast gather shapes
             let xs = xs.reshape((b_size, seq_len, 1, 1, hidden_dim))?;

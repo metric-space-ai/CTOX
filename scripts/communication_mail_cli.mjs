@@ -4,6 +4,7 @@ import * as childProcess from "child_process";
 import * as crypto from "crypto";
 import * as events from "events";
 import * as fs from "fs";
+import * as net from "net";
 import * as path from "path";
 import * as tls from "tls";
 import * as url from "url";
@@ -3861,6 +3862,20 @@ function previewText(input = "") {
   return String(input || "").replace(/\s+/g, " ").trim().slice(0, 280);
 }
 
+function isCtoxMailSelfTest({ subject = "", bodyText = "", senderAddress = "", accountEmail = "" } = {}) {
+  const normalizedSubject = String(subject || "").trim().toLowerCase();
+  const normalizedBody = String(bodyText || "").trim().toLowerCase();
+  const normalizedSender = String(senderAddress || "").trim().toLowerCase();
+  const normalizedAccount = String(accountEmail || "").trim().toLowerCase();
+  return (
+    normalizedSubject.startsWith("[ctox mail self-test]") &&
+    normalizedBody.startsWith("ctox self-test ") &&
+    normalizedSender !== "" &&
+    normalizedAccount !== "" &&
+    normalizedSender === normalizedAccount
+  );
+}
+
 function decodeQuotedPrintable(input = "") {
   const normalized = String(input || "")
     .replace(/=\r?\n/g, "")
@@ -4375,6 +4390,25 @@ class ImapClient {
     await this.command(`SELECT ${imapQuote(folder)}`);
   }
 
+  async listMailboxes(reference = "", pattern = "*") {
+    const response = await this.command(`LIST ${imapQuote(reference)} ${imapQuote(pattern)}`);
+    const mailboxes = [];
+    for (const line of String(response.text || "").split(/\r?\n/)) {
+      if (!line.startsWith("* LIST ")) continue;
+      const match = line.match(/\* LIST \(([^)]*)\) "([^"]*)" (?:"((?:[^"\\]|\\.)*)"|([^\r\n]+))$/);
+      if (!match) continue;
+      const flags = String(match[1] || "")
+        .split(/\s+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const delimiter = match[2] || ".";
+      const rawName = match[3] != null ? match[3] : String(match[4] || "").trim();
+      const name = rawName.replace(/\\"/g, '"');
+      mailboxes.push({ name, delimiter, flags });
+    }
+    return mailboxes;
+  }
+
   async searchAllUids() {
     const response = await this.command("UID SEARCH ALL");
     const match = response.text.match(/\* SEARCH ?([0-9 ]*)/);
@@ -4409,18 +4443,28 @@ class SmtpClient {
     this.config = config;
     this.socket = null;
     this.reader = null;
+    this.connectionMode = "implicit-tls";
   }
 
-  async connect() {
+  async connect({ port = this.config.smtpPort, secure = true } = {}) {
+    this.connectionMode = secure ? "implicit-tls" : "plain";
     this.socket = await new Promise((resolveSocket, rejectSocket) => {
-      const socket = tlsConnect(
-        {
-          host: this.config.smtpHost,
-          port: this.config.smtpPort,
-          servername: this.config.smtpHost,
-        },
-        () => resolveSocket(socket)
-      );
+      const socket = secure
+        ? tlsConnect(
+            {
+              host: this.config.smtpHost,
+              port,
+              servername: this.config.smtpHost,
+            },
+            () => resolveSocket(socket)
+          )
+        : net.connect(
+            {
+              host: this.config.smtpHost,
+              port,
+            },
+            () => resolveSocket(socket)
+          );
       socket.setTimeout(20000, () => socket.destroy(new Error("SMTP socket timeout")));
       socket.once("error", rejectSocket);
     });
@@ -4451,10 +4495,55 @@ class SmtpClient {
     return this.expect(allowedCodes);
   }
 
-  async login(emailAddress, password) {
-    await this.sendCommand(`EHLO localhost`, [250]);
+  async upgradeToStartTls() {
+    await this.sendCommand("STARTTLS", [220]);
+    const priorSocket = this.socket;
+    this.socket = await new Promise((resolveSocket, rejectSocket) => {
+      const socket = tlsConnect(
+        {
+          socket: priorSocket,
+          servername: this.config.smtpHost,
+        },
+        () => resolveSocket(socket)
+      );
+      socket.setTimeout(20000, () => socket.destroy(new Error("SMTP socket timeout")));
+      socket.once("error", rejectSocket);
+    });
+    this.reader = new BufferSocket(this.socket);
+    this.connectionMode = "starttls";
+  }
+
+  async authenticate(emailAddress, password) {
     const payload = Buffer.from(`\u0000${emailAddress}\u0000${password}`, "utf8").toString("base64");
-    await this.sendCommand(`AUTH PLAIN ${payload}`, [235]);
+    try {
+      await this.sendCommand(`AUTH PLAIN ${payload}`, [235]);
+      return;
+    } catch (error) {
+      debugLog("smtp-auth-plain-failed", String(error?.message || error || "unknown"));
+    }
+    await this.sendCommand("AUTH LOGIN", [334]);
+    await this.sendCommand(Buffer.from(emailAddress, "utf8").toString("base64"), [334]);
+    await this.sendCommand(Buffer.from(password, "utf8").toString("base64"), [235]);
+  }
+
+  async login(emailAddress, password) {
+    try {
+      await this.sendCommand(`EHLO localhost`, [250]);
+      if (this.connectionMode === "plain") {
+        await this.upgradeToStartTls();
+        await this.sendCommand(`EHLO localhost`, [250]);
+      }
+      await this.authenticate(emailAddress, password);
+      return;
+    } catch (error) {
+      debugLog("smtp-login-primary-failed", String(error?.message || error || "unknown"));
+    }
+    await this.close();
+    await this.connect({ port: 587, secure: false });
+    await this.sendCommand(`EHLO localhost`, [250]);
+    await this.upgradeToStartTls();
+    await this.sendCommand(`EHLO localhost`, [250]);
+    await this.authenticate(emailAddress, password);
   }
 
   async sendMail(message) {
@@ -4485,6 +4574,8 @@ class SmtpClient {
     try {
       this.socket.end("QUIT\r\n");
     } catch {}
+    this.socket = null;
+    this.reader = null;
   }
 }
 
@@ -4534,6 +4625,7 @@ function normalizeOptions(rawArgv) {
       process.env.CTO_EMAIL_ACTIVESYNC_POLICY_KEY || DEFAULTS.activeSyncPolicyKey,
     verifySend: process.env.CTO_EMAIL_VERIFY_SEND || DEFAULTS.verifySend,
     sentVerifyWindowSeconds: process.env.CTO_EMAIL_SENT_VERIFY_WINDOW_SECONDS || DEFAULTS.sentVerifyWindowSeconds,
+    threadKey: "",
   };
 
   while (argv.length) {
@@ -4919,20 +5011,20 @@ function normalizeMailboxMessage(provider, raw, folderHint) {
 }
 
 async function verifyImapSentCopy(options, messageId) {
-  const sentFolders = [
-    "Sent",
-    "Sent Items",
-    "Sent Messages",
-    "Gesendet",
-    "INBOX.Sent",
-    "INBOX.Sent Items",
-  ];
   const verifyWindowSeconds = Math.max(1, Number.parseInt(options.sentVerifyWindowSeconds, 10) || 1);
   const attempts = Math.max(1, Math.min(verifyWindowSeconds, 30));
   const imap = new ImapClient(options);
   try {
     await imap.connect();
     await imap.login(options.email, options.password);
+    const sentFolders = await resolveImapSentFolders(imap);
+    if (!sentFolders.length) {
+      return {
+        confirmed: false,
+        method: "imap-sent-folder",
+        detail: "no sent mailbox detected",
+      };
+    }
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       for (const folder of sentFolders) {
         try {
@@ -4968,6 +5060,79 @@ async function verifyImapSentCopy(options, messageId) {
   }
 }
 
+async function verifyImapInboxDelivery(options, messageId, earliestIso = null) {
+  const verifyWindowSeconds = Math.max(1, Number.parseInt(options.sentVerifyWindowSeconds, 10) || 1);
+  const attempts = Math.max(1, Math.min(verifyWindowSeconds, 30));
+  const imap = new ImapClient(options);
+  try {
+    await imap.connect();
+    await imap.login(options.email, options.password);
+    await imap.select("INBOX");
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const uids = await imap.searchAllUids();
+      for (const uid of uids.slice(-25).reverse()) {
+        const fetched = await imap.fetchRaw(uid);
+        const parsed = parseRfc822(fetched.raw.toString("utf8"));
+        if (String(parsed.messageId || "").trim() !== String(messageId || "").trim()) continue;
+        const observedAt = parsed.date ? new Date(parsed.date).toISOString() : nowIso();
+        if (earliestIso) {
+          const earliestTs = Date.parse(earliestIso);
+          const observedTs = Date.parse(observedAt);
+          if (Number.isFinite(earliestTs) && Number.isFinite(observedTs) && observedTs + 1000 < earliestTs) {
+            continue;
+          }
+        }
+        return {
+          confirmed: true,
+          method: "imap-inbox-roundtrip",
+          folder: "INBOX",
+          remoteId: messageId,
+          observedAt,
+        };
+      }
+      if (attempt + 1 < attempts) {
+        await sleep(1000);
+      }
+    }
+    return {
+      confirmed: false,
+      method: "imap-inbox-roundtrip",
+      detail: "message-id not found in inbox",
+    };
+  } finally {
+    await imap.logout();
+  }
+}
+
+async function resolveImapSentFolders(imap) {
+  const fallback = [
+    "Sent",
+    "Sent Items",
+    "Sent Messages",
+    "Gesendet",
+    "INBOX.Sent",
+    "INBOX.Sent Items",
+  ];
+  const discovered = [];
+  try {
+    const mailboxes = await imap.listMailboxes("", "*");
+    for (const mailbox of mailboxes) {
+      const name = String(mailbox?.name || "").trim();
+      if (!name) continue;
+      const lower = name.toLowerCase();
+      const flags = new Set((mailbox?.flags || []).map((value) => String(value || "").toLowerCase()));
+      if (
+        flags.has("\\sent")
+        || /(^|[.\/])(sent|sent items|sent messages|gesendet)$/.test(lower)
+      ) {
+        discovered.push(name);
+      }
+    }
+  } catch {}
+  const merged = [...discovered, ...fallback];
+  return Array.from(new Set(merged));
+}
+
 function mailboxRecipientSet(normalized) {
   return new Set([...(normalized.recipientAddresses || []), ...(normalized.ccAddresses || [])]);
 }
@@ -4977,6 +5142,96 @@ function verificationRecipientSet(options) {
     ...options.to.map((value) => String(value || "").trim().toLowerCase()),
     ...options.cc.map((value) => String(value || "").trim().toLowerCase()),
   ]);
+}
+
+function runPythonSmtp(options, payload) {
+  const script = `
+import json, smtplib, ssl, sys
+
+payload = json.load(sys.stdin)
+host = payload["smtpHost"]
+port = int(payload["smtpPort"])
+email = payload["email"]
+password = payload["password"]
+action = payload["action"]
+timeout = float(payload.get("timeoutSeconds", 20))
+connection_mode = "implicit-tls" if port != 587 else "starttls"
+
+def open_client():
+    if port == 587:
+        client = smtplib.SMTP(host, port, timeout=timeout)
+        client.ehlo()
+        client.starttls(context=ssl.create_default_context())
+        client.ehlo()
+        return client
+    client = smtplib.SMTP_SSL(host, port, timeout=timeout)
+    client.ehlo()
+    return client
+
+with open_client() as client:
+    client.login(email, password)
+    if action == "send":
+        client.sendmail(
+            payload["from"],
+            payload["recipients"],
+            payload["rawMessage"].encode("utf-8"),
+        )
+    json.dump({"ok": True, "connectionMode": connection_mode}, sys.stdout)
+`;
+  const input = JSON.stringify({
+    action: payload.action,
+    smtpHost: options.smtpHost,
+    smtpPort: options.smtpPort,
+    email: options.email,
+    password: options.password,
+    from: payload.from || options.email,
+    recipients: payload.recipients || [],
+    rawMessage: payload.rawMessage || "",
+    timeoutSeconds: 20,
+  });
+  const result = childProcess.spawnSync("python3", ["-c", script], {
+    input,
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error) {
+    fail(`Python SMTP helper failed: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const stderr = String(result.stderr || "").trim();
+    fail(`Python SMTP helper failed: ${stderr || `exit ${result.status}`}`);
+  }
+  try {
+    return JSON.parse(String(result.stdout || "{}"));
+  } catch (error) {
+    fail(`Python SMTP helper returned invalid JSON: ${error.message}`);
+  }
+}
+
+function buildSmtpRawMessage({ from, to, cc = [], subject, body, messageId, threadKey = "" }) {
+  const lines = [
+    `From: ${from}`,
+    `To: ${to.join(", ")}`,
+    ...(cc.length ? [`Cc: ${cc.join(", ")}`] : []),
+    `Subject: ${mimeHeaderValue(subject)}`,
+    `Message-ID: ${messageId}`,
+    ...(threadKey ? [`In-Reply-To: ${threadKey}`, `References: ${threadKey}`] : []),
+    `Date: ${new Date().toUTCString()}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/plain; charset=utf-8",
+    "Content-Transfer-Encoding: 8bit",
+    "",
+    ...String(body || "").split(/\r?\n/).map((line) => (line.startsWith(".") ? `.${line}` : line)),
+    "",
+  ];
+  return lines.join("\r\n");
+}
+
+function mimeHeaderValue(value) {
+  const text = String(value || "");
+  return /[^\x20-\x7E]/.test(text)
+    ? `=?UTF-8?B?${Buffer.from(text, "utf8").toString("base64")}?=`
+    : text;
 }
 
 function messageLooksLikeSentCopy(normalized, options, earliestIso) {
@@ -5037,7 +5292,17 @@ async function verifySentDelivery(options, messageId, earliestIso) {
     return { confirmed: false, skipped: true, method: "disabled" };
   }
   if (options.provider === "imap") {
-    return verifyImapSentCopy(options, messageId);
+    const normalizedSelf = String(options.email || "").trim().toLowerCase();
+    const recipients = verificationRecipientSet(options);
+    if (normalizedSelf && recipients.has(normalizedSelf)) {
+      return verifyImapInboxDelivery(options, messageId, earliestIso);
+    }
+    return {
+      confirmed: false,
+      skipped: true,
+      method: "smtp-accepted-external",
+      detail: "external recipient delivery was accepted over SMTP; sent-folder confirmation is skipped for normal outbound mail",
+    };
   }
   return verifyProviderSentCopy(options, earliestIso);
 }
@@ -5117,7 +5382,7 @@ function outboundMessageRecord(options, body, messageId, delivery) {
   const accountKey = accountKeyFromEmail(options.email);
   const observedAt = nowIso();
   const remoteId = messageId;
-  const threadKey = String(delivery?.threadKey || remoteId);
+  const threadKey = String(options.threadKey || delivery?.threadKey || remoteId);
   const status = delivery?.confirmed ? "confirmed" : "accepted";
   return {
     accountKey,
@@ -5167,29 +5432,30 @@ async function sendMail(options) {
     createdAt: timestamp,
     updatedAt: timestamp,
     lastInboundOkAt: null,
-    lastOutboundOkAt: timestamp,
+    lastOutboundOkAt: null,
   });
 
   const emailParts = options.email.split("@");
   const messageId = `<${randomUUID()}@${emailParts[emailParts.length - 1]}>`;
   const sendStartedAt = nowIso();
   if (options.provider === "imap") {
-    const smtp = new SmtpClient(options);
-    try {
-      await smtp.connect();
-      await smtp.login(options.email, options.password);
-      await smtp.sendMail({
+    const to = options.to.map((value) => value.toLowerCase());
+    const cc = options.cc.map((value) => value.toLowerCase());
+    const bcc = options.bcc.map((value) => value.toLowerCase());
+    runPythonSmtp(options, {
+      action: "send",
+      from: options.email,
+      recipients: [...to, ...cc, ...bcc],
+      rawMessage: buildSmtpRawMessage({
         from: options.email,
-        to: options.to.map((value) => value.toLowerCase()),
-        cc: options.cc.map((value) => value.toLowerCase()),
-        bcc: options.bcc.map((value) => value.toLowerCase()),
+        to,
+        cc,
         subject: options.subject || "(ohne Betreff)",
         body: options.body || "",
         messageId,
-      });
-    } finally {
-      await smtp.close();
-    }
+        threadKey: options.threadKey || "",
+      }),
+    });
   } else {
     const { provider, client } = await createMailboxClient(options);
     if (provider === "activesync") {
@@ -5207,6 +5473,17 @@ async function sendMail(options) {
   }
 
   const delivery = await verifySentDelivery(options, messageId, sendStartedAt);
+  upsertAccount(options.db, {
+    accountKey,
+    channel: DEFAULTS.channel,
+    address: options.email.toLowerCase(),
+    provider: options.provider,
+    profileJson: buildProfileJson(options),
+    createdAt: timestamp,
+    updatedAt: nowIso(),
+    lastInboundOkAt: null,
+    lastOutboundOkAt: nowIso(),
+  });
   const record = outboundMessageRecord(options, options.body || "", messageId, delivery);
   upsertMessage(options.db, record.message);
   refreshThread(options.db, record.message.threadKey);
@@ -5257,14 +5534,47 @@ async function testMailSetup(options) {
       result.checks.push({ name: "imap_login", ok: true });
       await imap.select("INBOX");
       result.checks.push({ name: "imap_inbox_select", ok: true });
-      const sentCheck = await verifyImapSentCopy(options, "<ctox-test-probe@invalid>");
+      const sentFolders = await resolveImapSentFolders(imap);
       result.checks.push({
         name: "imap_sent_folder_probe",
-        ok: sentCheck.confirmed || sentCheck.detail === "message-id not found in checked sent folders",
-        detail: sentCheck.detail || sentCheck.folder || sentCheck.method,
+        ok: true,
+        detail: sentFolders.length ? sentFolders.join(", ") : "no sent mailbox detected",
       });
     } finally {
       await imap.logout();
+    }
+    const emailParts = options.email.split("@");
+    const messageId = `<${randomUUID()}@${emailParts[emailParts.length - 1]}>`;
+    const subject = `[CTOX mail self-test] ${new Date().toISOString()}`;
+    const body = `CTOX self-test ${messageId}`;
+    const sendStartedAt = nowIso();
+    const smtpLogin = runPythonSmtp(options, {
+      action: "login",
+    });
+    result.checks.push({ name: "smtp_login", ok: true, detail: smtpLogin.connectionMode || "python-smtp" });
+    runPythonSmtp(options, {
+      action: "send",
+      from: options.email,
+      recipients: [options.email.toLowerCase()],
+      rawMessage: buildSmtpRawMessage({
+        from: options.email,
+        to: [options.email.toLowerCase()],
+        cc: [],
+        subject,
+        body,
+        messageId,
+        threadKey: "",
+      }),
+    });
+    result.checks.push({ name: "smtp_self_send", ok: true });
+    const inboxCheck = await verifyImapInboxDelivery(options, messageId, sendStartedAt);
+    result.checks.push({
+      name: "imap_self_delivery",
+      ok: inboxCheck.confirmed,
+      detail: inboxCheck.detail || inboxCheck.folder || inboxCheck.method,
+    });
+    if (!inboxCheck.confirmed) {
+      fail(`Mail self-test did not roundtrip into inbox: ${inboxCheck.detail || "unknown error"}`);
     }
   } else {
     const { provider, client } = await createMailboxClient(options);
@@ -5321,6 +5631,12 @@ async function syncMail(options) {
           const rawPayloadRef = await writeRawPayload(options.rawDir, remoteId, fetched.raw);
           const observedAt = nowIso();
           const preview = previewText(parsed.bodyText || parsed.subject);
+          const technicalSelfTest = isCtoxMailSelfTest({
+            subject: parsed.subject,
+            bodyText: parsed.bodyText,
+            senderAddress,
+            accountEmail: options.email,
+          });
 
           upsertMessage(options.db, {
             messageKey,
@@ -5340,8 +5656,8 @@ async function syncMail(options) {
             bodyText: parsed.bodyText,
             bodyHtml: parsed.bodyHtml || "",
             rawPayloadRef,
-            trustLevel: options.trustLevel,
-            status: "received",
+            trustLevel: technicalSelfTest ? "system_probe" : options.trustLevel,
+            status: technicalSelfTest ? "self_test_received" : "received",
             seen: fetched.flags.includes("\\Seen") ? 1 : 0,
             hasAttachments: parsed.hasAttachments ? 1 : 0,
             externalCreatedAt: parsed.sentAt || observedAt,
@@ -5351,10 +5667,11 @@ async function syncMail(options) {
               references: parsed.references,
               inReplyTo: parsed.inReplyTo,
               imapFlags: fetched.flags,
+              technicalSelfTest,
             }),
           });
           refreshThread(options.db, threadKey);
-          if (!alreadyKnown && toBool(options.emitInterrupts)) {
+          if (!technicalSelfTest && !alreadyKnown && toBool(options.emitInterrupts)) {
             const speaker = senderAddress ? `${senderDisplay} <${senderAddress}>` : senderDisplay;
             const summary = [
               `E-Mail eingegangen von ${speaker || "unknown sender"}.`,
@@ -5456,6 +5773,35 @@ async function listMessages(options) {
   };
 }
 
+function resolveThreadSubject(dbPath, threadKey, subject) {
+  const normalized = String(subject || "").trim();
+  if (normalized && normalized !== "(no subject)" && normalized !== "(ohne Betreff)") {
+    return normalized;
+  }
+  const thread = String(threadKey || "").trim();
+  if (!dbPath || !thread) {
+    return '';
+  }
+  try {
+    const rows = parseJsonOutput(
+      runSql(
+        dbPath,
+        `
+        SELECT subject
+        FROM communication_threads
+        WHERE thread_key = ${sqlValue(thread)}
+        LIMIT 1
+        `,
+        { json: true }
+      )
+    );
+    const existing = String(rows?.[0]?.subject || "").trim();
+    if (existing && existing !== "(no subject)" && existing !== "(ohne Betreff)") return existing;
+  } catch (_error) {
+  }
+  return '';
+}
+
 async function main() {
   const options = normalizeOptions(process.argv.slice(2));
   let result;
@@ -5463,6 +5809,10 @@ async function main() {
     if (!options.subject) fail("Missing --subject for send.");
     if (!options.body) fail("Missing --body for send.");
     if (!options.to.length) fail("Need at least one --to recipient.");
+    options.subject = resolveThreadSubject(options.db, options.threadKey, options.subject);
+    if (!options.subject || options.subject === "(no subject)" || options.subject === "(ohne Betreff)") {
+      fail("Missing real subject for send.");
+    }
     result = await sendMail(options);
   } else if (options.command === "sync") {
     result = await syncMail(options);

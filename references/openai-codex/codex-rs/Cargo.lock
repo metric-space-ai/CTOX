@@ -2697,7 +2697,6 @@ version = "0.0.0"
 dependencies = [
  "lru 0.16.3",
  "sha1",
- "tokio",
 ]
 
 [[package]]

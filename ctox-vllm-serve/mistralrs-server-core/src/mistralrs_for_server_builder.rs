@@ -998,15 +998,19 @@ impl MistralRsForServerBuilder {
 fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<candle_core::Device> {
     let runtime_no_nccl = std::env::var("MISTRALRS_NO_NCCL").ok();
     let runtime_world_size = std::env::var("MISTRALRS_MN_LOCAL_WORLD_SIZE").ok();
+    let requested_base_ordinal = std::env::var("MISTRALRS_BASE_DEVICE_ORDINAL")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok());
     tracing::info!(
-        "Device init flags: force_cpu={} use_nccl={} cuda_feature={} nccl_feature={} metal_feature={} runtime_no_nccl={:?} runtime_world_size={:?}",
+        "Device init flags: force_cpu={} use_nccl={} cuda_feature={} nccl_feature={} metal_feature={} runtime_no_nccl={:?} runtime_world_size={:?} requested_base_ordinal={:?}",
         force_cpu,
         mistralrs_core::distributed::use_nccl(),
         cfg!(feature = "cuda"),
         cfg!(feature = "nccl"),
         cfg!(feature = "metal"),
         runtime_no_nccl,
-        runtime_world_size
+        runtime_world_size,
+        requested_base_ordinal
     );
     #[cfg(feature = "metal")]
     let device = if force_cpu {
@@ -1023,11 +1027,12 @@ fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<candle_core::Device
     } else {
         #[cfg(feature = "cuda")]
         {
-            match Device::new_cuda(0) {
+            match Device::new_cuda(requested_base_ordinal.unwrap_or(0)) {
                 Ok(device) => device,
                 Err(err) => {
                     tracing::warn!(
-                        "CUDA initialization failed for device 0, falling back to CPU: {err:?}"
+                        "CUDA initialization failed for requested device {:?}, falling back to CPU: {err:?}",
+                        requested_base_ordinal.unwrap_or(0)
                     );
                     Device::Cpu
                 }
@@ -1073,11 +1078,6 @@ fn init_mapper(
                 let num = split[1]
                     .parse::<usize>()
                     .unwrap_or_else(|_| panic!("Failed to parse {} as integer.", split[1]));
-                for DeviceLayerMapMetadata { ordinal, layers: _ } in &mapping {
-                    if *ordinal == ord {
-                        panic!("Duplicate ordinal {ord}");
-                    }
-                }
                 mapping.push(DeviceLayerMapMetadata {
                     ordinal: ord,
                     layers: num,

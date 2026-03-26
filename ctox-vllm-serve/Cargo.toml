@@ -32,6 +32,7 @@ rust-version = "1.88"
 # candle-metal-kernels = { version = "0.9.2" }
 candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }
 candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }
+candle-transformers = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }
 candle-flash-attn-v3 = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }
 candle-flash-attn = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }
 candle-metal-kernels = { git = "https://github.com/huggingface/candle.git", version = "0.9.2", rev = "c3bb5bf" }

@@ -16,6 +16,7 @@ homepage.workspace = true
 anyhow.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
+candle-transformers.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 candle-flash-attn = { workspace = true, optional = true }
@@ -117,6 +118,7 @@ pyo3_macros = ["pyo3", "mistralrs-mcp/pyo3_macros"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
+    "candle-transformers/cuda",
     "dep:cudaforge",
     "mistralrs-quant/cuda",
     "dep:mistralrs-paged-attn",
@@ -126,6 +128,7 @@ cudnn = ["candle-core/cudnn"]
 metal = [
     "candle-core/metal",
     "candle-nn/metal",
+    "candle-transformers/metal",
     "mistralrs-quant/metal",
     "dep:candle-metal-kernels",
     "dep:objc",
@@ -135,8 +138,8 @@ metal = [
 ]
 flash-attn = ["cuda", "dep:candle-flash-attn"]
 flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3"]
-accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "mistralrs-quant/accelerate"]
-mkl = ["candle-core/mkl", "candle-nn/mkl"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "candle-transformers/accelerate", "mistralrs-quant/accelerate"]
+mkl = ["candle-core/mkl", "candle-nn/mkl", "candle-transformers/mkl"]
 nccl = ["cuda", "mistralrs-quant/nccl"]
 utoipa = ["dep:utoipa"]
 ring = ["mistralrs-quant/ring"]

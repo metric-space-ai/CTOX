@@ -1,0 +1,30 @@
+#!/usr/bin/expect -f
+
+set timeout 3600
+set jump_host "metricspace@100.96.1.7"
+set target_host "metricspace@192.168.1.22"
+set password "metricspace"
+
+if {$argc < 1} {
+    puts stderr "usage: gpu4testrig_exec.exp <remote-command>"
+    exit 2
+}
+
+set remote_cmd [lindex $argv 0]
+
+spawn ssh -J $jump_host -o StrictHostKeyChecking=no $target_host $remote_cmd
+expect {
+    -re {(?i)are you sure you want to continue connecting.*} {
+        send -- "yes\r"
+        exp_continue
+    }
+    -re {(?i)(?:password|passphrase).*: ?} {
+        send -- "$password\r"
+        exp_continue
+    }
+    eof {}
+    timeout {
+        puts stderr "timeout during remote command"
+        exit 1
+    }
+}

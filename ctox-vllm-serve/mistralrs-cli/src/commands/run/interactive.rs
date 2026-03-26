@@ -8,7 +8,8 @@ use indexmap::IndexMap;
 use mistralrs_core::{
     speech_utils, Constraint, DiffusionGenerationParams, DrySamplingParams,
     ImageGenerationResponseFormat, MessageContent, MistralRs, ModelCategory, NormalRequest,
-    Request, RequestMessage, Response, ResponseOk, SamplingParams, Usage, WebSearchOptions,
+    Request, RequestMessage, Response, ResponseOk, SamplingParams, SpeechGenerationRequest,
+    Usage, WebSearchOptions,
     TERMINATE_ALL_NEXT_STEP,
 };
 use regex::Regex;
@@ -873,7 +874,24 @@ async fn speech_interactive_mode(mistralrs: Arc<MistralRs>, do_search: bool) {
         let req = Request::Normal(Box::new(NormalRequest {
             id: 0,
             messages: RequestMessage::SpeechGeneration {
-                prompt: prompt.to_string(),
+                request: SpeechGenerationRequest {
+                    input: prompt.to_string(),
+                    speaker: None,
+                    language: None,
+                    instructions: None,
+                    task_type: None,
+                    ref_audio: None,
+                    ref_audio_input: None,
+                    ref_text: None,
+                    ref_code: None,
+                    icl_mode: None,
+                    x_vector_only_mode: None,
+                    max_new_tokens: None,
+                    temperature: None,
+                    top_p: None,
+                    top_k: None,
+                    repetition_penalty: None,
+                },
             },
             sampling_params: SamplingParams::deterministic(),
             response: tx,

@@ -1,11 +1,22 @@
 use anyhow::Context;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Read;
+use std::io::Write;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tiny_http::Header;
 use tiny_http::Method;
 use tiny_http::Response;
@@ -14,6 +25,7 @@ use tiny_http::StatusCode;
 
 use crate::execution_baseline;
 use crate::runtime_config;
+use crate::runtime_planner;
 
 const HOP_BY_HOP_HEADERS: &[&str] = &[
     "connection",
@@ -27,6 +39,8 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "host",
     "content-length",
 ];
+const OPENAI_RESPONSES_BASE_URL: &str = "https://api.openai.com";
+const DEFAULT_BOOST_MINUTES: u64 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HarmonyRelayMode {
@@ -35,26 +49,93 @@ enum HarmonyRelayMode {
     Sse,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalResponsesRelayMode {
+    Disabled,
+    QwenChatJson,
+    QwenChatSse,
+    GlmChatJson,
+    GlmChatSse,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyConfig {
+    pub root: PathBuf,
     pub listen_host: String,
     pub listen_port: u16,
     pub upstream_base_url: String,
     pub active_model: Option<String>,
+    pub embedding_base_url: String,
+    pub embedding_model: Option<String>,
+    pub transcription_base_url: String,
+    pub transcription_model: Option<String>,
+    pub speech_base_url: String,
+    pub speech_model: Option<String>,
 }
 
 impl ProxyConfig {
     pub fn from_env_with_root(root: &std::path::Path) -> Self {
+        let active_model = runtime_config::effective_chat_model(root);
+        let embedding_selection = execution_baseline::auxiliary_model_selection(
+            execution_baseline::AuxiliaryRole::Embedding,
+            runtime_config::env_or_config(root, "CTOX_EMBEDDING_MODEL").as_deref(),
+        );
+        let stt_selection = execution_baseline::auxiliary_model_selection(
+            execution_baseline::AuxiliaryRole::Stt,
+            runtime_config::env_or_config(root, "CTOX_STT_MODEL").as_deref(),
+        );
+        let tts_selection = execution_baseline::auxiliary_model_selection(
+            execution_baseline::AuxiliaryRole::Tts,
+            runtime_config::env_or_config(root, "CTOX_TTS_MODEL").as_deref(),
+        );
         Self {
+            root: root.to_path_buf(),
             listen_host: runtime_config::env_or_config(root, "CTOX_PROXY_HOST")
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
             listen_port: runtime_config::env_or_config(root, "CTOX_PROXY_PORT")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(12434),
             upstream_base_url: runtime_config::env_or_config(root, "CTOX_UPSTREAM_BASE_URL")
-                .unwrap_or_else(|| "http://127.0.0.1:1234".to_string()),
-            active_model: runtime_config::env_or_config(root, "CTOX_ACTIVE_MODEL")
-                .or_else(|| runtime_config::env_or_config(root, "CTOX_CHAT_MODEL")),
+                .unwrap_or_else(|| match active_model.as_deref() {
+                    Some(model) if execution_baseline::is_openai_api_chat_model(model) => {
+                        OPENAI_RESPONSES_BASE_URL.to_string()
+                    }
+                    Some(model) => execution_baseline::runtime_config_for_model(model)
+                        .map(|runtime| format!("http://127.0.0.1:{}", runtime.port))
+                        .unwrap_or_else(|_| "http://127.0.0.1:1234".to_string()),
+                    None => "http://127.0.0.1:1234".to_string(),
+                }),
+            active_model,
+            embedding_base_url: runtime_config::env_or_config(root, "CTOX_EMBEDDING_BASE_URL")
+                .unwrap_or_else(|| {
+                    format!(
+                        "http://127.0.0.1:{}",
+                        runtime_config::env_or_config(root, "CTOX_EMBEDDING_PORT")
+                            .and_then(|value| value.parse::<u16>().ok())
+                            .unwrap_or(embedding_selection.default_port)
+                    )
+                }),
+            embedding_model: Some(embedding_selection.request_model.to_string()),
+            transcription_base_url: runtime_config::env_or_config(root, "CTOX_STT_BASE_URL")
+                .unwrap_or_else(|| {
+                    format!(
+                        "http://127.0.0.1:{}",
+                        runtime_config::env_or_config(root, "CTOX_STT_PORT")
+                            .and_then(|value| value.parse::<u16>().ok())
+                            .unwrap_or(stt_selection.default_port)
+                    )
+                }),
+            transcription_model: Some(stt_selection.request_model.to_string()),
+            speech_base_url: runtime_config::env_or_config(root, "CTOX_TTS_BASE_URL")
+                .unwrap_or_else(|| {
+                    format!(
+                        "http://127.0.0.1:{}",
+                        runtime_config::env_or_config(root, "CTOX_TTS_PORT")
+                            .and_then(|value| value.parse::<u16>().ok())
+                            .unwrap_or(tts_selection.default_port)
+                    )
+                }),
+            speech_model: Some(tts_selection.request_model.to_string()),
         }
     }
 
@@ -69,11 +150,49 @@ impl ProxyConfig {
             request_url
         )
     }
+
+    pub fn routed_base_url(&self, request_url: &str) -> &str {
+        match request_url {
+            "/v1/embeddings" => &self.embedding_base_url,
+            "/v1/audio/transcriptions" => &self.transcription_base_url,
+            "/v1/audio/speech" | "/v1/audio/voices" => &self.speech_base_url,
+            _ => &self.upstream_base_url,
+        }
+    }
+
+    pub fn routed_model(&self, request_url: &str) -> Option<&str> {
+        match request_url {
+            "/v1/embeddings" => self.embedding_model.as_deref(),
+            "/v1/audio/transcriptions" => self.transcription_model.as_deref(),
+            "/v1/audio/speech" | "/v1/audio/voices" => self.speech_model.as_deref(),
+            _ => self.active_model.as_deref(),
+        }
+    }
+
+    pub fn join_routed_url(&self, request_url: &str) -> String {
+        format!(
+            "{}{}",
+            self.routed_base_url(request_url).trim_end_matches('/'),
+            request_url
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
 pub struct ProxyTelemetry {
     pub active_model: Option<String>,
+    pub base_model: Option<String>,
+    pub boost_model: Option<String>,
+    pub boost_active: bool,
+    pub boost_active_until_epoch: Option<u64>,
+    pub boost_remaining_seconds: Option<u64>,
+    pub boost_reason: Option<String>,
+    pub upstream_base_url: Option<String>,
+    pub last_known_good_model: Option<String>,
+    pub backend_healthy: bool,
+    pub last_switch_status: Option<String>,
+    pub last_switch_error: Option<String>,
+    pub recovery_count: u64,
     pub last_request_path: Option<String>,
     pub last_response_at: Option<String>,
     pub last_latency_ms: Option<u64>,
@@ -83,12 +202,157 @@ pub struct ProxyTelemetry {
     pub last_tokens_per_second: Option<f64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ProxySwitchRequest {
+    model: String,
+    #[serde(default)]
+    preset: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoostStatus {
+    pub active: bool,
+    pub base_model: Option<String>,
+    pub boost_model: Option<String>,
+    pub active_model: Option<String>,
+    pub active_until_epoch: Option<u64>,
+    pub remaining_seconds: Option<u64>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ProxySwitchResponse {
+    ok: bool,
+    active_model: String,
+    upstream_base_url: String,
+    rolled_back: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone)]
+struct ProxyState {
+    root: PathBuf,
+    config: ProxyConfig,
+    last_known_good: Option<ProxyConfig>,
+    last_switch_error: Option<String>,
+    recovery_count: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BoostLeaseState {
+    active: bool,
+    expired: bool,
+    base_model: Option<String>,
+    boost_model: Option<String>,
+    active_until_epoch: Option<u64>,
+    remaining_seconds: Option<u64>,
+    reason: Option<String>,
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn boost_lease_state_from_env(
+    env_map: &BTreeMap<String, String>,
+    active_model: Option<&str>,
+) -> BoostLeaseState {
+    let base_model = runtime_config::configured_chat_model_from_map(env_map);
+    let boost_model = env_map
+        .get("CTOX_CHAT_MODEL_BOOST")
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let active_until_epoch = env_map
+        .get("CTOX_BOOST_ACTIVE_UNTIL_EPOCH")
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let reason = env_map
+        .get("CTOX_BOOST_REASON")
+        .cloned()
+        .filter(|value| !value.trim().is_empty());
+    let now = now_epoch_seconds();
+    let expired = active_until_epoch.is_some_and(|until| until <= now);
+    let remaining_seconds = active_until_epoch
+        .and_then(|until| until.checked_sub(now))
+        .filter(|value| *value > 0);
+    let active = remaining_seconds.is_some()
+        && boost_model.is_some()
+        && active_model
+            .zip(boost_model.as_deref())
+            .is_some_and(|(active_model, boost_model)| active_model.trim() == boost_model.trim());
+    BoostLeaseState {
+        active,
+        expired,
+        base_model,
+        boost_model,
+        active_until_epoch,
+        remaining_seconds,
+        reason,
+    }
+}
+
+fn sync_boost_telemetry_fields(
+    telemetry_state: &mut ProxyTelemetry,
+    root: &std::path::Path,
+    active_model: Option<&str>,
+) {
+    let env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let boost = boost_lease_state_from_env(&env_map, active_model);
+    telemetry_state.base_model = boost.base_model.clone();
+    telemetry_state.boost_model = boost.boost_model.clone();
+    telemetry_state.boost_active = boost.active;
+    telemetry_state.boost_active_until_epoch = boost.active_until_epoch;
+    telemetry_state.boost_remaining_seconds = boost.remaining_seconds;
+    telemetry_state.boost_reason = boost.reason.clone();
+}
+
+fn current_boost_status(root: &std::path::Path, active_model: Option<&str>) -> BoostStatus {
+    let env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let boost = boost_lease_state_from_env(&env_map, active_model);
+    BoostStatus {
+        active: boost.active,
+        base_model: boost.base_model,
+        boost_model: boost.boost_model,
+        active_model: active_model.map(ToOwned::to_owned),
+        active_until_epoch: boost.active_until_epoch,
+        remaining_seconds: boost.remaining_seconds,
+        reason: boost.reason,
+    }
+}
+
 pub fn serve_proxy(config: ProxyConfig) -> anyhow::Result<()> {
     let server = Server::http(config.listen_addr())
         .map_err(|err| anyhow::anyhow!("failed to bind CTOX responses proxy: {err}"))?;
-    let shared = Arc::new(config);
+    let shared = Arc::new(Mutex::new(ProxyState {
+        root: config.root.clone(),
+        last_known_good: Some(config.clone()),
+        last_switch_error: None,
+        recovery_count: 0,
+        config,
+    }));
+    let initial_config = {
+        shared
+            .lock()
+            .expect("proxy state lock poisoned")
+            .config
+            .clone()
+    };
     let telemetry = Arc::new(Mutex::new(ProxyTelemetry {
-        active_model: shared.active_model.clone(),
+        active_model: initial_config.active_model.clone(),
+        base_model: runtime_config::configured_chat_model(&initial_config.root),
+        boost_model: runtime_config::env_or_config(&initial_config.root, "CTOX_CHAT_MODEL_BOOST"),
+        boost_active: false,
+        boost_active_until_epoch: None,
+        boost_remaining_seconds: None,
+        boost_reason: runtime_config::env_or_config(&initial_config.root, "CTOX_BOOST_REASON"),
+        upstream_base_url: Some(initial_config.upstream_base_url.clone()),
+        last_known_good_model: initial_config.active_model.clone(),
+        backend_healthy: true,
+        last_switch_status: Some("ready".to_string()),
+        last_switch_error: None,
+        recovery_count: 0,
         ..ProxyTelemetry::default()
     }));
     let response_state = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
@@ -106,13 +370,39 @@ pub fn serve_proxy(config: ProxyConfig) -> anyhow::Result<()> {
 }
 
 fn handle_request(
-    config: &ProxyConfig,
+    state: &Arc<Mutex<ProxyState>>,
     telemetry: &Arc<Mutex<ProxyTelemetry>>,
     response_state: &Arc<Mutex<HashMap<String, Value>>>,
     mut request: tiny_http::Request,
 ) -> anyhow::Result<()> {
+    maybe_expire_boost_lease(state, telemetry)?;
     if matches!(request.method(), Method::Get) && request.url() == "/ctox/telemetry" {
-        let snapshot = telemetry.lock().expect("proxy telemetry lock poisoned").clone();
+        let config = state
+            .lock()
+            .expect("proxy state lock poisoned")
+            .config
+            .clone();
+        let backend_healthy = probe_upstream_health(&config);
+        let snapshot = {
+            let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+            telemetry_state.active_model = config.active_model.clone();
+            telemetry_state.upstream_base_url = Some(config.upstream_base_url.clone());
+            telemetry_state.backend_healthy = backend_healthy;
+            sync_boost_telemetry_fields(
+                &mut telemetry_state,
+                &config.root,
+                config.active_model.as_deref(),
+            );
+            if !backend_healthy
+                && telemetry_state
+                    .last_switch_status
+                    .as_deref()
+                    .is_some_and(|status| matches!(status, "ready" | "switched" | "recovered"))
+            {
+                telemetry_state.last_switch_status = Some("backend_unhealthy".to_string());
+            }
+            telemetry_state.clone()
+        };
         let response = Response::from_string(serde_json::to_string(&snapshot)?)
             .with_status_code(StatusCode(200))
             .with_header(json_header());
@@ -122,48 +412,101 @@ fn handle_request(
         return Ok(());
     }
 
+    if matches!(request.method(), Method::Post) && request.url() == "/ctox/switch" {
+        let mut body = Vec::new();
+        request
+            .as_reader()
+            .read_to_end(&mut body)
+            .context("failed to read proxy switch request body")?;
+        let payload: ProxySwitchRequest =
+            serde_json::from_slice(&body).context("failed to parse proxy switch request")?;
+        let response = match switch_active_model(
+            state,
+            telemetry,
+            &payload.model,
+            payload.preset.as_deref(),
+        ) {
+            Ok(result) => Response::from_string(serde_json::to_string(&result)?)
+                .with_status_code(StatusCode(200))
+                .with_header(json_header()),
+            Err(err) => Response::from_string(
+                serde_json::json!({
+                    "ok": false,
+                    "error": { "message": err.to_string() }
+                })
+                .to_string(),
+            )
+            .with_status_code(StatusCode(502))
+            .with_header(json_header()),
+        };
+        request
+            .respond(response)
+            .context("failed to write proxy switch response")?;
+        return Ok(());
+    }
+
     let started = Instant::now();
     let method = request.method().as_str().to_string();
     let url = request.url().to_string();
+    let config = state
+        .lock()
+        .expect("proxy state lock poisoned")
+        .config
+        .clone();
     let mut body = Vec::new();
     request
         .as_reader()
         .read_to_end(&mut body)
         .context("failed to read proxy request body")?;
 
-    let materialized_request = if matches!(request.method(), Method::Post) && url == "/v1/responses" && !body.is_empty() {
-        let previous_conversation = serde_json::from_slice::<Value>(&body)
-            .ok()
-            .and_then(|payload| {
-                payload
-                    .get("previous_response_id")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            })
-            .and_then(|response_id| {
-                response_state
-                    .lock()
-                    .expect("proxy response state lock poisoned")
-                    .get(&response_id)
-                    .cloned()
-            });
-        Some(execution_baseline::materialize_responses_request(
-            &body,
-            previous_conversation.as_ref(),
-        )?)
-    } else {
-        None
-    };
+    let materialized_request =
+        if matches!(request.method(), Method::Post) && url == "/v1/responses" && !body.is_empty() {
+            let previous_conversation = serde_json::from_slice::<Value>(&body)
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("previous_response_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .and_then(|response_id| {
+                    response_state
+                        .lock()
+                        .expect("proxy response state lock poisoned")
+                        .get(&response_id)
+                        .cloned()
+                });
+            previous_conversation
+                .as_ref()
+                .map(|conversation| {
+                    execution_baseline::materialize_responses_request(&body, Some(conversation))
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
     let effective_body = materialized_request
         .as_ref()
         .map(serde_json::to_vec)
         .transpose()?
         .unwrap_or_else(|| body.clone());
+    let effective_body = if matches!(request.method(), Method::Post) && !effective_body.is_empty() {
+        rewrite_auxiliary_request_body(&config, &url, &effective_body)
+    } else {
+        effective_body
+    };
 
-    let use_gpt_oss_harmony_proxy =
-        matches!(request.method(), Method::Post) && url == "/v1/responses" && !body.is_empty()
-            && execution_baseline::should_use_gpt_oss_harmony_proxy(&effective_body)?;
+    let use_gpt_oss_harmony_proxy = matches!(request.method(), Method::Post)
+        && url == "/v1/responses"
+        && !body.is_empty()
+        && execution_baseline::should_use_gpt_oss_harmony_proxy(&effective_body)?;
+    let use_openai_passthrough = matches!(request.method(), Method::Post)
+        && url == "/v1/responses"
+        && !body.is_empty()
+        && config
+            .upstream_base_url
+            .starts_with(OPENAI_RESPONSES_BASE_URL);
     let harmony_relay_mode = if use_gpt_oss_harmony_proxy {
         if execution_baseline::responses_request_streams(&effective_body)? {
             HarmonyRelayMode::Sse
@@ -173,6 +516,37 @@ fn handle_request(
     } else {
         HarmonyRelayMode::Disabled
     };
+    let use_qwen_chat_proxy = matches!(request.method(), Method::Post)
+        && url == "/v1/responses"
+        && !body.is_empty()
+        && config
+            .active_model
+            .as_deref()
+            .map(execution_baseline::is_qwen_chat_model_id)
+            .unwrap_or(false);
+    let use_glm_chat_proxy = matches!(request.method(), Method::Post)
+        && url == "/v1/responses"
+        && !body.is_empty()
+        && config
+            .active_model
+            .as_deref()
+            .map(execution_baseline::is_glm_chat_model_id)
+            .unwrap_or(false);
+    let local_responses_relay_mode = if use_qwen_chat_proxy {
+        if execution_baseline::responses_request_streams(&effective_body)? {
+            LocalResponsesRelayMode::QwenChatSse
+        } else {
+            LocalResponsesRelayMode::QwenChatJson
+        }
+    } else if use_glm_chat_proxy {
+        if execution_baseline::responses_request_streams(&effective_body)? {
+            LocalResponsesRelayMode::GlmChatSse
+        } else {
+            LocalResponsesRelayMode::GlmChatJson
+        }
+    } else {
+        LocalResponsesRelayMode::Disabled
+    };
     eprintln!(
         "ctox proxy request method={} url={} harmony_proxy={}",
         method, url, use_gpt_oss_harmony_proxy
@@ -180,15 +554,59 @@ fn handle_request(
 
     let forwarded_body = if use_gpt_oss_harmony_proxy {
         execution_baseline::rewrite_responses_to_gpt_oss_completion(&effective_body)?
+    } else if use_qwen_chat_proxy {
+        let rewritten =
+            execution_baseline::rewrite_responses_to_qwen_chat_completions(&effective_body)?;
+        if let Ok(value) = serde_json::from_slice::<Value>(&rewritten) {
+            if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+                let roles = messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("ctox proxy qwen message roles={roles:?}");
+            }
+        }
+        rewritten
+    } else if use_glm_chat_proxy {
+        let rewritten =
+            execution_baseline::rewrite_responses_to_glm_chat_completions(&effective_body)?;
+        if let Ok(value) = serde_json::from_slice::<Value>(&rewritten) {
+            if let Some(messages) = value.get("messages").and_then(Value::as_array) {
+                let roles = messages
+                    .iter()
+                    .map(|message| {
+                        message
+                            .get("role")
+                            .and_then(Value::as_str)
+                            .unwrap_or("?")
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("ctox proxy glm message roles={roles:?}");
+            }
+        }
+        rewritten
+    } else if use_openai_passthrough {
+        execution_baseline::rewrite_openai_responses_request(&body)?
     } else if matches!(request.method(), Method::Post) && url == "/v1/responses" && !body.is_empty()
     {
         execution_baseline::rewrite_vllm_serve_responses_request(&effective_body)?
+    } else if matches!(request.method(), Method::Post) && !body.is_empty() {
+        rewrite_auxiliary_request_body(&config, &url, &body)
     } else {
         body
     };
 
     let upstream_path = if use_gpt_oss_harmony_proxy {
         "/v1/completions".to_string()
+    } else if use_qwen_chat_proxy || use_glm_chat_proxy {
+        "/v1/chat/completions".to_string()
     } else {
         url.clone()
     };
@@ -199,7 +617,34 @@ fn handle_request(
             String::from_utf8_lossy(&forwarded_body)
         );
     }
-    let upstream_url = config.join_url(&upstream_path);
+    let upstream_url = if use_gpt_oss_harmony_proxy {
+        config.join_url(&upstream_path)
+    } else {
+        config.join_routed_url(&upstream_path)
+    };
+    if matches!(request.method(), Method::Post) && url == "/v1/audio/transcriptions" {
+        let content_type = request
+            .headers()
+            .iter()
+            .find(|header| {
+                header
+                    .field
+                    .as_str()
+                    .as_str()
+                    .eq_ignore_ascii_case("content-type")
+            })
+            .map(|header| header.value.as_str().to_string())
+            .unwrap_or_else(|| "multipart/form-data".to_string());
+        return relay_transcription_via_curl(
+            telemetry,
+            request,
+            &upstream_url,
+            &content_type,
+            forwarded_body,
+            &url,
+            started,
+        );
+    }
     let agent = ureq::AgentBuilder::new().build();
     let mut upstream = agent.request(&method, &upstream_url);
 
@@ -211,15 +656,40 @@ fn handle_request(
         {
             continue;
         }
+        // Local mistralrs backends are sensitive to extra forwarded client headers
+        // on /v1/responses. Keep the local bridge minimal and only preserve the
+        // content type needed to parse the JSON payload. OpenAI passthrough keeps
+        // the broader upstream-compatible header set.
+        if !use_openai_passthrough && !field.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
         upstream = upstream.set(field, header.value.as_str());
     }
-    if let Some(active_model) = &config.active_model {
-        upstream = upstream.set("x-ctox-active-model", active_model);
+    if config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+        && request.headers().iter().all(|header| {
+            !header
+                .field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("authorization")
+        })
+    {
+        if let Some(api_key) = runtime_config::env_or_config(&config.root, "OPENAI_API_KEY") {
+            upstream = upstream.set("authorization", &format!("Bearer {api_key}"));
+        }
+    }
+    if use_gpt_oss_harmony_proxy {
+        if let Some(routed_model) = config.routed_model(&url) {
+            upstream = upstream.set("x-ctox-active-model", routed_model);
+        }
     }
 
     if use_gpt_oss_harmony_proxy {
         return relay_gpt_oss_harmony_response(
-            config,
+            state,
+            &config,
             telemetry,
             response_state,
             request,
@@ -242,11 +712,29 @@ fn handle_request(
     };
 
     match upstream_response {
-        Ok(response) => relay_response(config, telemetry, request, response, harmony_relay_mode, &url, started),
-        Err(ureq::Error::Status(_, response)) => {
-            relay_response(config, telemetry, request, response, harmony_relay_mode, &url, started)
-        }
+        Ok(response) => relay_response(
+            &config,
+            telemetry,
+            request,
+            response,
+            harmony_relay_mode,
+            local_responses_relay_mode,
+            &url,
+            started,
+        ),
+        Err(ureq::Error::Status(_, response)) => relay_response(
+            &config,
+            telemetry,
+            request,
+            response,
+            harmony_relay_mode,
+            local_responses_relay_mode,
+            &url,
+            started,
+        ),
         Err(err) => {
+            let _ =
+                attempt_auto_recovery(state, telemetry, &format!("upstream request failed: {err}"));
             let response = Response::from_string(
                 serde_json::json!({
                     "error": {
@@ -265,7 +753,119 @@ fn handle_request(
     }
 }
 
+fn relay_transcription_via_curl(
+    telemetry: &Arc<Mutex<ProxyTelemetry>>,
+    request: tiny_http::Request,
+    upstream_url: &str,
+    content_type: &str,
+    body: Vec<u8>,
+    request_path: &str,
+    started: Instant,
+) -> anyhow::Result<()> {
+    let sentinel = "\n__CTOX_HTTP_STATUS__:";
+    let mut child = Command::new("curl")
+        .arg("-sS")
+        .arg("--max-time")
+        .arg("120")
+        .arg("-X")
+        .arg("POST")
+        .arg("-H")
+        .arg(format!("content-type: {content_type}"))
+        .arg("--data-binary")
+        .arg("@-")
+        .arg("-w")
+        .arg(format!("{sentinel}%{{http_code}}"))
+        .arg(upstream_url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to launch curl for transcription relay")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(&body)
+            .context("failed to write transcription relay request body")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for transcription relay curl")?;
+
+    if !output.status.success() {
+        let response = Response::from_string(
+            serde_json::json!({
+                "error": {
+                    "message": String::from_utf8_lossy(&output.stderr).trim().to_string()
+                }
+            })
+            .to_string(),
+        )
+        .with_status_code(StatusCode(502))
+        .with_header(json_header());
+        request
+            .respond(response)
+            .context("failed to write transcription relay error response")?;
+        return Ok(());
+    }
+
+    let stdout = output.stdout;
+    let stdout_text = String::from_utf8_lossy(&stdout);
+    let Some(marker_index) = stdout_text.rfind(sentinel) else {
+        let response = Response::from_string(
+            serde_json::json!({
+                "error": {
+                    "message": "transcription relay did not return an HTTP status marker"
+                }
+            })
+            .to_string(),
+        )
+        .with_status_code(StatusCode(502))
+        .with_header(json_header());
+        request
+            .respond(response)
+            .context("failed to write transcription relay marker error response")?;
+        return Ok(());
+    };
+
+    let body_bytes = stdout[..marker_index].to_vec();
+    let status_code = stdout_text[marker_index + sentinel.len()..]
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(502);
+
+    update_proxy_telemetry(
+        telemetry,
+        &ProxyConfig {
+            root: PathBuf::new(),
+            listen_host: String::new(),
+            listen_port: 0,
+            upstream_base_url: String::new(),
+            active_model: None,
+            embedding_base_url: String::new(),
+            embedding_model: None,
+            transcription_base_url: String::new(),
+            transcription_model: None,
+            speech_base_url: String::new(),
+            speech_model: None,
+        },
+        request_path,
+        status_code,
+        &body_bytes,
+        started.elapsed().as_millis() as u64,
+    );
+
+    let response = Response::from_data(body_bytes)
+        .with_status_code(StatusCode(status_code))
+        .with_header(json_header());
+    request
+        .respond(response)
+        .context("failed to write transcription relay response")?;
+    Ok(())
+}
+
 fn relay_gpt_oss_harmony_response(
+    state: &Arc<Mutex<ProxyState>>,
     config: &ProxyConfig,
     telemetry: &Arc<Mutex<ProxyTelemetry>>,
     response_state: &Arc<Mutex<HashMap<String, Value>>>,
@@ -273,7 +873,7 @@ fn relay_gpt_oss_harmony_response(
     agent: &ureq::Agent,
     method: &str,
     upstream_url: &str,
-    mut upstream: ureq::Request,
+    upstream: ureq::Request,
     materialized_request: Option<Value>,
     forwarded_body: Vec<u8>,
     harmony_relay_mode: HarmonyRelayMode,
@@ -285,8 +885,8 @@ fn relay_gpt_oss_harmony_response(
     } else {
         upstream.send_bytes(&forwarded_body)
     };
-    let mut status_code = 200u16;
-    let mut response_headers: Vec<(String, String)> = Vec::new();
+    let mut status_code: u16;
+    let mut response_headers: Vec<(String, String)>;
     let mut body = match first_response {
         Ok(response) => {
             status_code = response.status();
@@ -337,6 +937,8 @@ fn relay_gpt_oss_harmony_response(
             body
         }
         Err(err) => {
+            let _ =
+                attempt_auto_recovery(state, telemetry, &format!("harmony upstream failed: {err}"));
             let response = Response::from_string(
                 serde_json::json!({
                     "error": { "message": err.to_string() }
@@ -345,7 +947,9 @@ fn relay_gpt_oss_harmony_response(
             )
             .with_status_code(StatusCode(502))
             .with_header(json_header());
-            request.respond(response).context("failed to write proxy error response")?;
+            request
+                .respond(response)
+                .context("failed to write proxy error response")?;
             return Ok(());
         }
     };
@@ -375,7 +979,9 @@ fn relay_gpt_oss_harmony_response(
                             response
                                 .all(&header_name)
                                 .into_iter()
-                                .map(move |header_value| (header_name.clone(), header_value.to_string()))
+                                .map(move |header_value| {
+                                    (header_name.clone(), header_value.to_string())
+                                })
                         })
                         .collect();
                     body.clear();
@@ -402,7 +1008,9 @@ fn relay_gpt_oss_harmony_response(
                             response
                                 .all(&header_name)
                                 .into_iter()
-                                .map(move |header_value| (header_name.clone(), header_value.to_string()))
+                                .map(move |header_value| {
+                                    (header_name.clone(), header_value.to_string())
+                                })
                         })
                         .collect();
                     body.clear();
@@ -412,6 +1020,11 @@ fn relay_gpt_oss_harmony_response(
                         .context("failed to read GPT-OSS continuation error body")?;
                 }
                 Err(err) => {
+                    let _ = attempt_auto_recovery(
+                        state,
+                        telemetry,
+                        &format!("harmony continuation failed: {err}"),
+                    );
                     let response = Response::from_string(
                         serde_json::json!({
                             "error": { "message": err.to_string() }
@@ -420,7 +1033,9 @@ fn relay_gpt_oss_harmony_response(
                     )
                     .with_status_code(StatusCode(502))
                     .with_header(json_header());
-                    request.respond(response).context("failed to write proxy error response")?;
+                    request
+                        .respond(response)
+                        .context("failed to write proxy error response")?;
                     return Ok(());
                 }
             }
@@ -429,12 +1044,15 @@ fn relay_gpt_oss_harmony_response(
 
     if status_code < 400 {
         if let Some(materialized_request) = materialized_request.as_ref() {
-            let response_payload: Value =
-                serde_json::from_slice(&execution_baseline::rewrite_gpt_oss_completion_to_responses(&body, None)?)
-                    .context("failed to parse rewritten responses payload for proxy state")?;
+            let response_payload: Value = serde_json::from_slice(
+                &execution_baseline::rewrite_gpt_oss_completion_to_responses(&body, None)?,
+            )
+            .context("failed to parse rewritten responses payload for proxy state")?;
             if let Some(response_id) = response_payload.get("id").and_then(Value::as_str) {
-                let conversation =
-                    execution_baseline::extend_conversation_with_response(materialized_request, &response_payload)?;
+                let conversation = execution_baseline::extend_conversation_with_response(
+                    materialized_request,
+                    &response_payload,
+                )?;
                 response_state
                     .lock()
                     .expect("proxy response state lock poisoned")
@@ -451,9 +1069,151 @@ fn relay_gpt_oss_harmony_response(
         response_headers,
         body,
         harmony_relay_mode,
+        LocalResponsesRelayMode::Disabled,
         request_path,
         started,
     )
+}
+
+fn maybe_expire_boost_lease(
+    state: &Arc<Mutex<ProxyState>>,
+    telemetry: &Arc<Mutex<ProxyTelemetry>>,
+) -> anyhow::Result<()> {
+    let (root, active_model) = {
+        let guard = state.lock().expect("proxy state lock poisoned");
+        (guard.root.clone(), guard.config.active_model.clone())
+    };
+    let env_map = runtime_config::load_runtime_env_map(&root).unwrap_or_default();
+    let boost = boost_lease_state_from_env(&env_map, active_model.as_deref());
+    {
+        let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+        sync_boost_telemetry_fields(&mut telemetry_state, &root, active_model.as_deref());
+    }
+    if !boost.expired {
+        return Ok(());
+    }
+    let Some(base_model) = boost.base_model.as_deref() else {
+        return Ok(());
+    };
+    let mut next_env = env_map.clone();
+    next_env.remove("CTOX_BOOST_ACTIVE_UNTIL_EPOCH");
+    next_env.remove("CTOX_BOOST_REASON");
+    runtime_config::save_runtime_env_map(&root, &next_env)?;
+    let _ = switch_active_model(state, telemetry, base_model, None)?;
+    {
+        let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+        telemetry_state.last_switch_status = Some("boost_expired".to_string());
+        sync_boost_telemetry_fields(&mut telemetry_state, &root, Some(base_model));
+    }
+    Ok(())
+}
+
+pub fn boost_status(root: &std::path::Path) -> anyhow::Result<BoostStatus> {
+    let telemetry = fetch_proxy_telemetry(root)?;
+    Ok(BoostStatus {
+        active: telemetry.boost_active,
+        base_model: telemetry.base_model,
+        boost_model: telemetry.boost_model,
+        active_model: telemetry.active_model,
+        active_until_epoch: telemetry.boost_active_until_epoch,
+        remaining_seconds: telemetry.boost_remaining_seconds,
+        reason: telemetry.boost_reason,
+    })
+}
+
+pub fn start_boost_lease(
+    root: &std::path::Path,
+    model_override: Option<&str>,
+    minutes_override: Option<u64>,
+    reason: Option<&str>,
+) -> anyhow::Result<BoostStatus> {
+    let mut env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let base_model = runtime_config::configured_chat_model_from_map(&env_map)
+        .or_else(|| runtime_config::effective_chat_model(root))
+        .unwrap_or_else(|| "openai/gpt-oss-20b".to_string());
+    let boost_model = model_override
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            env_map
+                .get("CTOX_CHAT_MODEL_BOOST")
+                .cloned()
+                .filter(|value| !value.trim().is_empty())
+        })
+        .context("boost start requires CTOX_CHAT_MODEL_BOOST or --model")?;
+    let default_minutes = env_map
+        .get("CTOX_BOOST_DEFAULT_MINUTES")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_BOOST_MINUTES);
+    let minutes = minutes_override.filter(|value| *value > 0).unwrap_or(default_minutes);
+    env_map.insert("CTOX_CHAT_MODEL_BASE".to_string(), base_model);
+    env_map.insert("CTOX_CHAT_MODEL_BOOST".to_string(), boost_model.clone());
+    env_map.insert("CTOX_BOOST_DEFAULT_MINUTES".to_string(), default_minutes.to_string());
+    env_map.insert(
+        "CTOX_BOOST_ACTIVE_UNTIL_EPOCH".to_string(),
+        (now_epoch_seconds() + minutes.saturating_mul(60)).to_string(),
+    );
+    if let Some(reason) = reason.map(str::trim).filter(|value| !value.is_empty()) {
+        env_map.insert("CTOX_BOOST_REASON".to_string(), reason.to_string());
+    } else {
+        env_map.remove("CTOX_BOOST_REASON");
+    }
+    runtime_config::save_runtime_env_map(root, &env_map)?;
+    let _ = request_proxy_switch(root, &boost_model, None)?;
+    boost_status(root)
+}
+
+pub fn stop_boost_lease(root: &std::path::Path) -> anyhow::Result<BoostStatus> {
+    let mut env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let base_model = runtime_config::configured_chat_model_from_map(&env_map)
+        .or_else(|| runtime_config::effective_chat_model(root))
+        .unwrap_or_else(|| "openai/gpt-oss-20b".to_string());
+    env_map.remove("CTOX_BOOST_ACTIVE_UNTIL_EPOCH");
+    env_map.remove("CTOX_BOOST_REASON");
+    runtime_config::save_runtime_env_map(root, &env_map)?;
+    let _ = request_proxy_switch(root, &base_model, None)?;
+    boost_status(root)
+}
+
+fn request_proxy_switch(
+    root: &std::path::Path,
+    model: &str,
+    preset: Option<&str>,
+) -> anyhow::Result<ProxySwitchResponse> {
+    let host = runtime_config::env_or_config(root, "CTOX_PROXY_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = runtime_config::env_or_config(root, "CTOX_PROXY_PORT")
+        .unwrap_or_else(|| "12434".to_string());
+    let url = format!("http://{host}:{port}/ctox/switch");
+    let payload = match preset.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(preset) => serde_json::json!({ "model": model, "preset": preset }),
+        None => serde_json::json!({ "model": model }),
+    };
+    let response = ureq::post(&url)
+        .set("content-type", "application/json")
+        .send_string(&payload.to_string())
+        .with_context(|| format!("failed to reach proxy switch endpoint at {url}"))?;
+    let body = response
+        .into_string()
+        .context("failed to read proxy switch response body")?;
+    serde_json::from_str(&body).context("failed to parse proxy switch response")
+}
+
+fn fetch_proxy_telemetry(root: &std::path::Path) -> anyhow::Result<ProxyTelemetry> {
+    let host = runtime_config::env_or_config(root, "CTOX_PROXY_HOST")
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = runtime_config::env_or_config(root, "CTOX_PROXY_PORT")
+        .unwrap_or_else(|| "12434".to_string());
+    let url = format!("http://{host}:{port}/ctox/telemetry");
+    let response = ureq::get(&url)
+        .call()
+        .with_context(|| format!("failed to reach proxy telemetry endpoint at {url}"))?;
+    let body = response
+        .into_string()
+        .context("failed to read proxy telemetry body")?;
+    serde_json::from_str(&body).context("failed to parse proxy telemetry body")
 }
 
 fn relay_response(
@@ -462,6 +1222,7 @@ fn relay_response(
     request: tiny_http::Request,
     response: ureq::Response,
     harmony_relay_mode: HarmonyRelayMode,
+    local_responses_relay_mode: LocalResponsesRelayMode,
     request_path: &str,
     started: Instant,
 ) -> anyhow::Result<()> {
@@ -494,6 +1255,7 @@ fn relay_response(
         response_headers,
         body,
         harmony_relay_mode,
+        local_responses_relay_mode,
         request_path,
         started,
     )
@@ -507,22 +1269,91 @@ fn relay_response_from_parts(
     response_headers: Vec<(String, String)>,
     body: Vec<u8>,
     harmony_relay_mode: HarmonyRelayMode,
+    local_responses_relay_mode: LocalResponsesRelayMode,
     request_path: &str,
     started: Instant,
 ) -> anyhow::Result<()> {
     let status = StatusCode(status_code);
+    if !matches!(
+        local_responses_relay_mode,
+        LocalResponsesRelayMode::Disabled
+    ) {
+        eprintln!(
+            "ctox proxy qwen upstream status={} body={}",
+            status.0,
+            String::from_utf8_lossy(&body)
+        );
+    }
     let mut content_type_override: Option<&'static str> = None;
     let body = match harmony_relay_mode {
-        HarmonyRelayMode::Disabled => body,
+        HarmonyRelayMode::Disabled => match local_responses_relay_mode {
+            LocalResponsesRelayMode::Disabled => body,
+            LocalResponsesRelayMode::QwenChatJson if status.0 < 400 => {
+                eprintln!(
+                    "ctox proxy qwen upstream body={}",
+                    String::from_utf8_lossy(&body)
+                );
+                content_type_override = Some("application/json");
+                execution_baseline::rewrite_qwen_chat_completions_to_responses(
+                    &body,
+                    config.active_model.as_deref(),
+                )?
+            }
+            LocalResponsesRelayMode::QwenChatSse if status.0 < 400 => {
+                eprintln!(
+                    "ctox proxy qwen upstream body={}",
+                    String::from_utf8_lossy(&body)
+                );
+                content_type_override = Some("text/event-stream");
+                let json_payload = execution_baseline::rewrite_qwen_chat_completions_to_responses(
+                    &body,
+                    config.active_model.as_deref(),
+                )?;
+                execution_baseline::rewrite_responses_payload_to_sse(&json_payload)?
+            }
+            LocalResponsesRelayMode::GlmChatJson if status.0 < 400 => {
+                eprintln!(
+                    "ctox proxy glm upstream body={}",
+                    String::from_utf8_lossy(&body)
+                );
+                content_type_override = Some("application/json");
+                execution_baseline::rewrite_glm_chat_completions_to_responses(
+                    &body,
+                    config.active_model.as_deref(),
+                )?
+            }
+            LocalResponsesRelayMode::GlmChatSse if status.0 < 400 => {
+                eprintln!(
+                    "ctox proxy glm upstream body={}",
+                    String::from_utf8_lossy(&body)
+                );
+                content_type_override = Some("text/event-stream");
+                let json_payload = execution_baseline::rewrite_glm_chat_completions_to_responses(
+                    &body,
+                    config.active_model.as_deref(),
+                )?;
+                execution_baseline::rewrite_responses_payload_to_sse(&json_payload)?
+            }
+            LocalResponsesRelayMode::QwenChatJson => body,
+            LocalResponsesRelayMode::QwenChatSse => body,
+            LocalResponsesRelayMode::GlmChatJson => body,
+            LocalResponsesRelayMode::GlmChatSse => body,
+        },
         HarmonyRelayMode::Json if status.0 < 400 => {
             eprintln!("ctox proxy rewriting harmony completion response into responses payload");
-            eprintln!("ctox proxy raw harmony body={}", String::from_utf8_lossy(&body));
+            eprintln!(
+                "ctox proxy raw harmony body={}",
+                String::from_utf8_lossy(&body)
+            );
             content_type_override = Some("application/json");
             execution_baseline::rewrite_gpt_oss_completion_to_responses(&body, None)?
         }
         HarmonyRelayMode::Sse if status.0 < 400 => {
             eprintln!("ctox proxy rewriting harmony completion response into SSE payload");
-            eprintln!("ctox proxy raw harmony body={}", String::from_utf8_lossy(&body));
+            eprintln!(
+                "ctox proxy raw harmony body={}",
+                String::from_utf8_lossy(&body)
+            );
             content_type_override = Some("text/event-stream");
             execution_baseline::rewrite_gpt_oss_completion_to_sse(&body, None)?
         }
@@ -561,6 +1392,510 @@ fn json_header() -> Header {
     Header::from_bytes(b"content-type", b"application/json").expect("static content-type header")
 }
 
+fn rewrite_auxiliary_request_body(
+    config: &ProxyConfig,
+    request_path: &str,
+    body: &[u8],
+) -> Vec<u8> {
+    let Some(model) = config.routed_model(request_path) else {
+        return body.to_vec();
+    };
+    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
+        return body.to_vec();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.to_vec();
+    };
+    let should_override = match object.get("model") {
+        None => true,
+        Some(Value::String(existing)) => {
+            existing.trim().is_empty()
+                || existing == "default"
+                || request_path == "/v1/audio/speech"
+                || request_path == "/v1/embeddings"
+        }
+        _ => true,
+    };
+    if should_override {
+        object.insert("model".to_string(), Value::String(model.to_string()));
+    }
+    serde_json::to_vec(&value).unwrap_or_else(|_| body.to_vec())
+}
+
+fn switch_active_model(
+    state: &Arc<Mutex<ProxyState>>,
+    telemetry: &Arc<Mutex<ProxyTelemetry>>,
+    model: &str,
+    preset: Option<&str>,
+) -> anyhow::Result<ProxySwitchResponse> {
+    let requested_model = model.trim();
+    if requested_model.is_empty() {
+        anyhow::bail!("model switch request must not be empty");
+    }
+
+    let (root, previous_config) = {
+        let guard = state.lock().expect("proxy state lock poisoned");
+        (guard.root.clone(), guard.config.clone())
+    };
+    let next_config = if execution_baseline::is_openai_api_chat_model(requested_model) {
+        ProxyConfig {
+            root: root.clone(),
+            listen_host: previous_config.listen_host.clone(),
+            listen_port: previous_config.listen_port,
+            upstream_base_url: OPENAI_RESPONSES_BASE_URL.to_string(),
+            active_model: Some(requested_model.to_string()),
+            embedding_base_url: previous_config.embedding_base_url.clone(),
+            embedding_model: previous_config.embedding_model.clone(),
+            transcription_base_url: previous_config.transcription_base_url.clone(),
+            transcription_model: previous_config.transcription_model.clone(),
+            speech_base_url: previous_config.speech_base_url.clone(),
+            speech_model: previous_config.speech_model.clone(),
+        }
+    } else {
+        let runtime = execution_baseline::runtime_config_for_model(requested_model)?;
+        ProxyConfig {
+            root: root.clone(),
+            listen_host: previous_config.listen_host.clone(),
+            listen_port: previous_config.listen_port,
+            upstream_base_url: format!("http://127.0.0.1:{}", runtime.port),
+            active_model: Some(runtime.model.clone()),
+            embedding_base_url: previous_config.embedding_base_url.clone(),
+            embedding_model: previous_config.embedding_model.clone(),
+            transcription_base_url: previous_config.transcription_base_url.clone(),
+            transcription_model: previous_config.transcription_model.clone(),
+            speech_base_url: previous_config.speech_base_url.clone(),
+            speech_model: previous_config.speech_model.clone(),
+        }
+    };
+
+    let previous_env = runtime_config::load_runtime_env_map(&root).unwrap_or_default();
+    persist_proxy_runtime_config(&root, &next_config, preset)?;
+    let next_env = runtime_config::load_runtime_env_map(&root).unwrap_or_default();
+    let current_backend_healthy = probe_upstream_health(&previous_config);
+
+    let force_restart = !execution_baseline::is_openai_api_chat_model(requested_model)
+        && (!current_backend_healthy
+            || previous_config.active_model != next_config.active_model
+            || previous_env.get("CTOX_CHAT_RUNTIME_PLAN_DIGEST")
+                != next_env.get("CTOX_CHAT_RUNTIME_PLAN_DIGEST"));
+    if previous_config
+        .active_model
+        .as_deref()
+        .is_some_and(|active_model| !execution_baseline::is_openai_api_chat_model(active_model))
+        && (previous_config.upstream_base_url != next_config.upstream_base_url
+            || previous_config.active_model != next_config.active_model)
+    {
+        stop_backend_process(&root, &previous_config);
+    }
+    if let Err(err) = ensure_backend_ready(&root, &next_config, force_restart) {
+        let _ = persist_proxy_runtime_config(&root, &previous_config, None);
+        let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+        telemetry_state.backend_healthy = false;
+        telemetry_state.last_switch_status = Some("switch_failed".to_string());
+        telemetry_state.last_switch_error = Some(err.to_string());
+        drop(telemetry_state);
+        anyhow::bail!("{err}");
+    }
+
+    {
+        let mut guard = state.lock().expect("proxy state lock poisoned");
+        guard.config = next_config.clone();
+        guard.last_known_good = Some(next_config.clone());
+        guard.last_switch_error = None;
+    }
+
+    {
+        let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+        telemetry_state.active_model = next_config.active_model.clone();
+        telemetry_state.upstream_base_url = Some(next_config.upstream_base_url.clone());
+        telemetry_state.last_known_good_model = next_config.active_model.clone();
+        telemetry_state.backend_healthy = true;
+        telemetry_state.last_switch_status = Some("switched".to_string());
+        telemetry_state.last_switch_error = None;
+        sync_boost_telemetry_fields(
+            &mut telemetry_state,
+            &root,
+            next_config.active_model.as_deref(),
+        );
+    }
+
+    Ok(ProxySwitchResponse {
+        ok: true,
+        active_model: next_config
+            .active_model
+            .clone()
+            .unwrap_or_else(|| requested_model.to_string()),
+        upstream_base_url: next_config.upstream_base_url,
+        rolled_back: false,
+        message: format!("proxy switched to {}", requested_model),
+    })
+}
+
+fn attempt_auto_recovery(
+    state: &Arc<Mutex<ProxyState>>,
+    telemetry: &Arc<Mutex<ProxyTelemetry>>,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let (root, fallback_config, active_config, next_recovery_count) = {
+        let mut guard = state.lock().expect("proxy state lock poisoned");
+        guard.last_switch_error = Some(reason.to_string());
+        guard.recovery_count = guard.recovery_count.saturating_add(1);
+        (
+            guard.root.clone(),
+            guard.last_known_good.clone(),
+            guard.config.clone(),
+            guard.recovery_count,
+        )
+    };
+
+    let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+    telemetry_state.backend_healthy = false;
+    telemetry_state.last_switch_error = Some(reason.to_string());
+    telemetry_state.recovery_count = next_recovery_count;
+
+    let Some(fallback_config) = fallback_config else {
+        telemetry_state.last_switch_status = Some("recovery_unavailable".to_string());
+        return Ok(());
+    };
+
+    if same_backend(&active_config, &fallback_config) {
+        telemetry_state.last_switch_status = Some("backend_unhealthy".to_string());
+        telemetry_state.active_model = active_config.active_model.clone();
+        telemetry_state.upstream_base_url = Some(active_config.upstream_base_url.clone());
+        return Ok(());
+    }
+
+    let ensure_result = persist_proxy_runtime_config(&root, &fallback_config, None)
+        .and_then(|_| ensure_backend_ready(&root, &fallback_config, true));
+    if ensure_result.is_err() {
+        telemetry_state.last_switch_status = Some("recovery_failed".to_string());
+        telemetry_state.last_switch_error = ensure_result.err().map(|err| err.to_string());
+        return Ok(());
+    }
+    drop(telemetry_state);
+
+    {
+        let mut guard = state.lock().expect("proxy state lock poisoned");
+        guard.config = fallback_config.clone();
+    }
+
+    let mut telemetry_state = telemetry.lock().expect("proxy telemetry lock poisoned");
+    telemetry_state.active_model = fallback_config.active_model.clone();
+    telemetry_state.upstream_base_url = Some(fallback_config.upstream_base_url.clone());
+    telemetry_state.last_known_good_model = fallback_config.active_model.clone();
+    telemetry_state.backend_healthy = true;
+    telemetry_state.last_switch_status = Some("recovered".to_string());
+    sync_boost_telemetry_fields(
+        &mut telemetry_state,
+        &root,
+        fallback_config.active_model.as_deref(),
+    );
+    Ok(())
+}
+
+fn persist_proxy_runtime_config(
+    root: &std::path::Path,
+    config: &ProxyConfig,
+    preset: Option<&str>,
+) -> anyhow::Result<()> {
+    let mut env_map =
+        runtime_config::load_runtime_env_map(root).unwrap_or_else(|_| BTreeMap::new());
+    if let Some(active_model) = &config.active_model {
+        env_map.insert("CTOX_ACTIVE_MODEL".to_string(), active_model.clone());
+        env_map.insert("CTOX_CHAT_MODEL".to_string(), active_model.clone());
+        if let Some(preset) = preset.map(str::trim).filter(|value| !value.is_empty()) {
+            env_map.insert("CTOX_CHAT_LOCAL_PRESET".to_string(), preset.to_string());
+        }
+        env_map.remove("CTOX_VLLM_SERVE_REALIZED_MAX_SEQ_LEN");
+        env_map.remove("CTOX_CHAT_MODEL_REALIZED_CONTEXT");
+        env_map.remove("CTOX_VLLM_SERVE_REALIZED_MODEL");
+        if execution_baseline::is_openai_api_chat_model(active_model) {
+            env_map.remove("CTOX_VLLM_SERVE_MODEL");
+            env_map.remove("CTOX_VLLM_SERVE_PORT");
+            env_map.remove("CTOX_VLLM_SERVE_MAX_SEQS");
+            env_map.remove("CTOX_VLLM_SERVE_MAX_BATCH_SIZE");
+            env_map.remove("CTOX_VLLM_SERVE_MAX_SEQ_LEN");
+            env_map.remove("CTOX_VLLM_SERVE_ARCH");
+            env_map.remove("CTOX_VLLM_SERVE_PAGED_ATTN");
+            env_map.remove("CTOX_VLLM_SERVE_PA_CACHE_TYPE");
+            env_map.remove("CTOX_VLLM_SERVE_PA_MEMORY_FRACTION");
+            env_map.remove("CTOX_VLLM_SERVE_PA_CONTEXT_LEN");
+            env_map.remove("CTOX_VLLM_SERVE_ISQ");
+            env_map.remove("CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND");
+            env_map.remove("CTOX_VLLM_SERVE_DISABLE_NCCL");
+            env_map.remove("CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE");
+            runtime_planner::clear_chat_plan_env(&mut env_map);
+        } else {
+            let runtime = execution_baseline::runtime_config_for_model(active_model)?;
+            let family_profile = execution_baseline::runtime_profile_for_model(active_model)?;
+            env_map.insert("CTOX_VLLM_SERVE_MODEL".to_string(), runtime.model.clone());
+            env_map.insert("CTOX_VLLM_SERVE_PORT".to_string(), runtime.port.to_string());
+            env_map.insert(
+                "CTOX_VLLM_SERVE_MAX_SEQS".to_string(),
+                runtime.max_seqs.to_string(),
+            );
+            env_map.insert(
+                "CTOX_VLLM_SERVE_MAX_BATCH_SIZE".to_string(),
+                runtime.max_batch_size.to_string(),
+            );
+            if let Some(max_seq_len) = runtime.max_seq_len {
+                env_map.insert(
+                    "CTOX_VLLM_SERVE_MAX_SEQ_LEN".to_string(),
+                    max_seq_len.to_string(),
+                );
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_MAX_SEQ_LEN");
+            }
+            if let Some(arch) = family_profile.arch {
+                env_map.insert("CTOX_VLLM_SERVE_ARCH".to_string(), arch);
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_ARCH");
+            }
+            env_map.insert(
+                "CTOX_VLLM_SERVE_PAGED_ATTN".to_string(),
+                family_profile.paged_attn,
+            );
+            if let Some(cache_type) = family_profile.pa_cache_type {
+                env_map.insert("CTOX_VLLM_SERVE_PA_CACHE_TYPE".to_string(), cache_type);
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_PA_CACHE_TYPE");
+            }
+            if let Some(memory_fraction) = family_profile.pa_memory_fraction {
+                env_map.insert(
+                    "CTOX_VLLM_SERVE_PA_MEMORY_FRACTION".to_string(),
+                    memory_fraction,
+                );
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_PA_MEMORY_FRACTION");
+            }
+            if let Some(context_len) = family_profile.pa_context_len {
+                env_map.insert(
+                    "CTOX_VLLM_SERVE_PA_CONTEXT_LEN".to_string(),
+                    context_len.to_string(),
+                );
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_PA_CONTEXT_LEN");
+            }
+            if let Some(isq) = family_profile.isq {
+                env_map.insert("CTOX_VLLM_SERVE_ISQ".to_string(), isq);
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_ISQ");
+            }
+            if let Some(backend) = family_profile.tensor_parallel_backend {
+                env_map.insert(
+                    "CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND".to_string(),
+                    backend,
+                );
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND");
+            }
+            env_map.insert(
+                "CTOX_VLLM_SERVE_DISABLE_NCCL".to_string(),
+                if family_profile.disable_nccl {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            );
+            if let Some(world_size) = family_profile.target_world_size {
+                env_map.insert(
+                    "CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE".to_string(),
+                    world_size.to_string(),
+                );
+            } else {
+                env_map.remove("CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE");
+            }
+        }
+    }
+    let _ = runtime_planner::apply_chat_runtime_plan(root, &mut env_map);
+    env_map.insert(
+        "CTOX_UPSTREAM_BASE_URL".to_string(),
+        config.upstream_base_url.clone(),
+    );
+    env_map.insert("CTOX_PROXY_HOST".to_string(), config.listen_host.clone());
+    env_map.insert(
+        "CTOX_PROXY_PORT".to_string(),
+        config.listen_port.to_string(),
+    );
+    runtime_config::save_runtime_env_map(root, &env_map)
+}
+
+fn probe_upstream_health(config: &ProxyConfig) -> bool {
+    if config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+    {
+        return runtime_config::env_or_config(&config.root, "OPENAI_API_KEY")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    }
+    let health_url = config.join_url("/health");
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(1))
+        .timeout_read(std::time::Duration::from_secs(2))
+        .timeout_write(std::time::Duration::from_secs(2))
+        .build();
+
+    match agent.get(&health_url).call() {
+        Ok(response) => response.status() < 500,
+        Err(ureq::Error::Status(code, _)) => code < 500,
+        Err(_) => false,
+    }
+}
+
+fn backend_startup_wait_secs(config: &ProxyConfig) -> u64 {
+    let Some(active_model) = config.active_model.as_deref() else {
+        return 120;
+    };
+
+    match active_model {
+        "openai/gpt-oss-20b" => 240,
+        "Qwen/Qwen3.5-4B" | "Qwen/Qwen3.5-9B" => 240,
+        // Large local models can spend several minutes in initial HF fetch / shard discovery
+        // before they expose /health on a cold host. Keep the proxy patient enough to avoid
+        // reporting false startup failures while the backend is still progressing.
+        "Qwen/Qwen3.5-27B" => 1_200,
+        "Qwen/Qwen3.5-35B-A3B" => 1_500,
+        "zai-org/GLM-4.7-Flash" => 900,
+        _ => match execution_baseline::runtime_config_for_model(active_model) {
+            Ok(runtime) if runtime.family == execution_baseline::LocalModelFamily::Glm47Flash => {
+                900
+            }
+            Ok(_) => 120,
+            Err(_) => 120,
+        },
+    }
+}
+
+fn ensure_backend_ready(
+    root: &std::path::Path,
+    config: &ProxyConfig,
+    force_restart: bool,
+) -> anyhow::Result<()> {
+    if config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+    {
+        if runtime_config::env_or_config(root, "OPENAI_API_KEY")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        anyhow::bail!("OPENAI_API_KEY is required for OpenAI API models");
+    }
+    if !force_restart && probe_upstream_health(config) {
+        return Ok(());
+    }
+
+    start_backend_process(root, config)?;
+    for _ in 0..backend_startup_wait_secs(config) {
+        if probe_upstream_health(config) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    anyhow::bail!(
+        "backend for model {} is not reachable at {} after startup",
+        config.active_model.as_deref().unwrap_or("unknown"),
+        config.upstream_base_url
+    )
+}
+
+fn start_backend_process(root: &std::path::Path, config: &ProxyConfig) -> anyhow::Result<()> {
+    let runtime_dir = root.join("runtime");
+    std::fs::create_dir_all(&runtime_dir)
+        .with_context(|| format!("failed to create runtime dir {}", runtime_dir.display()))?;
+
+    let port_slug = config
+        .upstream_base_url
+        .rsplit(':')
+        .next()
+        .unwrap_or("backend");
+    let log_path = runtime_dir.join(format!("vllm_serve_{port_slug}.log"));
+    let active_model = config
+        .active_model
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_string();
+    let launch_stamp = format!(
+        "\n===== CTOX backend launch =====\nmodel={active_model}\nupstream={}\n",
+        config.upstream_base_url
+    );
+    std::fs::write(&log_path, launch_stamp.as_bytes())
+        .with_context(|| format!("failed to reset backend log {}", log_path.display()))?;
+    let log_file = File::options()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open backend log {}", log_path.display()))?;
+    let log_file_err = log_file
+        .try_clone()
+        .with_context(|| format!("failed to clone backend log {}", log_path.display()))?;
+
+    let script_path = root.join("scripts/run_vllm_serve_backend.sh");
+    if !script_path.exists() {
+        anyhow::bail!("backend launcher missing: {}", script_path.display());
+    }
+
+    let _ = Command::new("bash")
+        .arg("-lc")
+        .arg(format!("fuser -k {port_slug}/tcp 2>/dev/null || true"))
+        .current_dir(root)
+        .status();
+
+    writeln!(
+        &log_file_err,
+        "ctox spawn: script={} cwd={} model={} upstream={} port={}",
+        script_path.display(),
+        root.display(),
+        active_model,
+        config.upstream_base_url,
+        port_slug,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write backend launch preamble {}",
+            log_path.display()
+        )
+    })?;
+
+    Command::new("bash")
+        .arg(script_path)
+        .current_dir(root)
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(log_file_err))
+        .spawn()
+        .context("failed to launch backend process")?;
+
+    Ok(())
+}
+
+fn stop_backend_process(root: &std::path::Path, config: &ProxyConfig) {
+    if config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+    {
+        return;
+    }
+    let port_slug = config
+        .upstream_base_url
+        .rsplit(':')
+        .next()
+        .unwrap_or("backend");
+    let _ = Command::new("bash")
+        .arg("-lc")
+        .arg(format!("fuser -k {port_slug}/tcp 2>/dev/null || true"))
+        .current_dir(root)
+        .status();
+}
+
+fn same_backend(left: &ProxyConfig, right: &ProxyConfig) -> bool {
+    left.upstream_base_url == right.upstream_base_url && left.active_model == right.active_model
+}
+
 fn update_proxy_telemetry(
     telemetry: &Arc<Mutex<ProxyTelemetry>>,
     config: &ProxyConfig,
@@ -578,6 +1913,8 @@ fn update_proxy_telemetry(
         .as_ref()
         .and_then(|usage| usage.model.clone())
         .or_else(|| config.active_model.clone());
+    state.upstream_base_url = Some(config.upstream_base_url.clone());
+    state.backend_healthy = true;
     state.last_request_path = Some(request_path.to_string());
     state.last_response_at = Some(iso_now());
     state.last_latency_ms = Some(latency_ms);
@@ -633,12 +1970,20 @@ fn extract_usage_from_json(value: &serde_json::Value) -> Option<UsageTelemetry> 
     let input_tokens = usage
         .get("input_tokens")
         .and_then(serde_json::Value::as_u64)
-        .or_else(|| usage.get("prompt_tokens").and_then(serde_json::Value::as_u64))
+        .or_else(|| {
+            usage
+                .get("prompt_tokens")
+                .and_then(serde_json::Value::as_u64)
+        })
         .unwrap_or(0);
     let output_tokens = usage
         .get("output_tokens")
         .and_then(serde_json::Value::as_u64)
-        .or_else(|| usage.get("completion_tokens").and_then(serde_json::Value::as_u64))
+        .or_else(|| {
+            usage
+                .get("completion_tokens")
+                .and_then(serde_json::Value::as_u64)
+        })
         .unwrap_or(0);
     let total_tokens = usage
         .get("total_tokens")
@@ -663,4 +2008,94 @@ fn iso_now() -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(now as i64, 0)
         .map(|timestamp| timestamp.to_rfc3339())
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proxy_config(model: &str, upstream_base_url: &str) -> ProxyConfig {
+        ProxyConfig {
+            root: PathBuf::from("/tmp/ctox"),
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 12434,
+            upstream_base_url: upstream_base_url.to_string(),
+            active_model: Some(model.to_string()),
+            embedding_base_url: "http://127.0.0.1:1237".to_string(),
+            embedding_model: Some("Qwen/Qwen3-Embedding-0.6B".to_string()),
+            transcription_base_url: "http://127.0.0.1:1238".to_string(),
+            transcription_model: Some("mistralai/Voxtral-Mini-4B-Realtime-2602".to_string()),
+            speech_base_url: "http://127.0.0.1:1239".to_string(),
+            speech_model: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string()),
+        }
+    }
+
+    #[test]
+    fn switch_target_uses_model_family_runtime_port() {
+        let gpt_oss = proxy_config("openai/gpt-oss-20b", "http://127.0.0.1:1234");
+        let qwen_runtime =
+            execution_baseline::runtime_config_for_model("Qwen/Qwen3.5-35B-A3B").unwrap();
+        let qwen = ProxyConfig {
+            upstream_base_url: format!("http://127.0.0.1:{}", qwen_runtime.port),
+            active_model: Some(qwen_runtime.model),
+            ..gpt_oss.clone()
+        };
+
+        assert_eq!(qwen.upstream_base_url, "http://127.0.0.1:1235");
+        assert_ne!(gpt_oss.upstream_base_url, qwen.upstream_base_url);
+    }
+
+    #[test]
+    fn same_backend_requires_matching_model_and_upstream() {
+        let left = proxy_config("openai/gpt-oss-20b", "http://127.0.0.1:1234");
+        let same = proxy_config("openai/gpt-oss-20b", "http://127.0.0.1:1234");
+        let different_model = ProxyConfig {
+            active_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
+            ..same.clone()
+        };
+
+        assert!(same_backend(&left, &same));
+        assert!(!same_backend(&left, &different_model));
+    }
+
+    #[test]
+    fn auxiliary_routes_select_dedicated_upstreams() {
+        let config = proxy_config("openai/gpt-oss-20b", "http://127.0.0.1:1234");
+
+        assert_eq!(
+            config.join_routed_url("/v1/responses"),
+            "http://127.0.0.1:1234/v1/responses"
+        );
+        assert_eq!(
+            config.join_routed_url("/v1/embeddings"),
+            "http://127.0.0.1:1237/v1/embeddings"
+        );
+        assert_eq!(
+            config.join_routed_url("/v1/audio/transcriptions"),
+            "http://127.0.0.1:1238/v1/audio/transcriptions"
+        );
+        assert_eq!(
+            config.join_routed_url("/v1/audio/speech"),
+            "http://127.0.0.1:1239/v1/audio/speech"
+        );
+        assert_eq!(
+            config.join_routed_url("/v1/audio/voices"),
+            "http://127.0.0.1:1239/v1/audio/voices"
+        );
+    }
+
+    #[test]
+    fn responses_requests_without_model_inherit_active_local_model() {
+        let config = proxy_config("Qwen/Qwen3.5-4B", "http://127.0.0.1:1235");
+        let body =
+            br#"{"input":"Reply with CTOX_MATRIX_OK and nothing else.","max_output_tokens":24}"#;
+
+        let rewritten = rewrite_auxiliary_request_body(&config, "/v1/responses", body);
+        let payload: Value = serde_json::from_slice(&rewritten).unwrap();
+
+        assert_eq!(
+            payload.get("model").and_then(Value::as_str),
+            Some("Qwen/Qwen3.5-4B")
+        );
+    }
 }

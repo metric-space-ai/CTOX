@@ -512,7 +512,7 @@ impl SparseMoeBlock {
 
         // Shared expert
         let shared_expert = Mlp::new(
-            vb.pp("shared_expert"),
+            mapper.set_device(layer_idx, vb.pp("shared_expert"), loading_isq),
             cfg.hidden_size,
             cfg.shared_expert_intermediate_size,
             &cfg.quantization_config,
@@ -524,7 +524,7 @@ impl SparseMoeBlock {
         let mut seg_w = vb
             .pp("shared_expert_gate")
             .get((1, cfg.hidden_size), "weight")?;
-        if loading_isq {
+        if !seg_w.device().same_device(&layer_device) {
             seg_w = seg_w.to_device(&layer_device)?;
         }
         let shared_expert_gate = Linear::new(seg_w, None);
@@ -860,12 +860,24 @@ impl Model {
                 ],
             },
         };
+        let recurrent_layer_devices: Vec<Device> = layer_types
+            .iter()
+            .enumerate()
+            .map(|(layer_idx, layer_type)| match layer_type {
+                LayerType::LinearAttention => mapper
+                    .device_for(layer_idx, false)
+                    .unwrap_or(&normal_loading_metadata.real_device)
+                    .clone(),
+                LayerType::FullAttention => normal_loading_metadata.real_device.clone(),
+            })
+            .collect();
 
         let pipeline_cache = Arc::new(Mutex::new(
-            HybridCache::new(
+            HybridCache::new_mapped(
                 hybrid_cache_config,
                 vb_m.dtype(),
                 &normal_loading_metadata.real_device,
+                &recurrent_layer_devices,
             )
             .map_err(|e| {
                 candle_core::Error::Msg(format!("Failed to create hybrid cache: {}", e))

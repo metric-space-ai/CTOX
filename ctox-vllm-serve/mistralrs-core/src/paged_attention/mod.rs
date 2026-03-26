@@ -132,23 +132,16 @@ pub fn calculate_cache_config(
         let mem_gpu = match mem_gpu {
             MemoryGpuConfig::MbAmount(v) => v,
             MemoryGpuConfig::Utilization(f) => {
-                let total = MemoryUsage.get_total_memory(device)? as f32 / SIZE_IN_MB as f32;
                 if model_weight_size_in_bytes.is_some() {
+                    let total = MemoryUsage.get_total_memory(device)? as f32 / SIZE_IN_MB as f32;
                     // Pre-loading: compute budget from total memory and known model size.
                     (total * f - model_weight_per_device_mb as f32).max(0.0) as usize
                 } else {
                     let free = MemoryUsage.get_memory_available(device)? as f32 / SIZE_IN_MB as f32;
-                    #[allow(unused_mut)]
-                    let mut used = total - free;
-                    // On Metal, get_total_memory (wired limit) and get_memory_available
-                    // (recommendedMaxWorkingSetSize - allocated) have different bases,
-                    // so `total - free` is incorrect. Use the device's tracked
-                    // allocation size directly.
-                    #[cfg(feature = "metal")]
-                    if let Device::Metal(dev) = device {
-                        used = dev.current_allocated_size() as f32 / SIZE_IN_MB as f32;
-                    }
-                    (total * f - used).max(0.0) as usize
+                    // Post-load, utilization should scale the actually free memory budget.
+                    // This avoids collapsing to zero KV cache on hosts where the loaded
+                    // model legitimately occupies more than `f * total_memory`.
+                    (free * f).max(0.0) as usize
                 }
             }
             MemoryGpuConfig::ContextSize(toks) => {

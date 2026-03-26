@@ -4,10 +4,21 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 
-const DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH: &str = "runtime/ctox.env";
+const DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH: &str = "runtime/vllm_serve.env";
+
+pub const DEFAULT_RUNTIME_PID_RELATIVE_PATH: &str = "runtime/vllm_serve.pid";
+pub const DEFAULT_RUNTIME_LOG_RELATIVE_PATH: &str = "runtime/vllm_serve.log";
 
 pub fn runtime_config_path(root: &Path) -> PathBuf {
     root.join(DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH)
+}
+
+pub fn runtime_pid_path(root: &Path) -> PathBuf {
+    root.join(DEFAULT_RUNTIME_PID_RELATIVE_PATH)
+}
+
+pub fn runtime_log_path(root: &Path) -> PathBuf {
+    root.join(DEFAULT_RUNTIME_LOG_RELATIVE_PATH)
 }
 
 pub fn load_runtime_env_map(root: &Path) -> Result<BTreeMap<String, String>> {
@@ -52,6 +63,39 @@ pub fn env_or_config(root: &Path, key: &str) -> Option<String> {
         })
 }
 
+pub fn configured_chat_model(root: &Path) -> Option<String> {
+    std::env::var("CTOX_CHAT_MODEL_BASE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            env_or_config(root, "CTOX_CHAT_MODEL_BASE")
+                .or_else(|| env_or_config(root, "CTOX_CHAT_MODEL"))
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+pub fn effective_chat_model(root: &Path) -> Option<String> {
+    env_or_config(root, "CTOX_ACTIVE_MODEL")
+        .or_else(|| configured_chat_model(root))
+        .filter(|value| !value.trim().is_empty())
+}
+
+pub fn configured_chat_model_from_map(env_map: &BTreeMap<String, String>) -> Option<String> {
+    env_map
+        .get("CTOX_CHAT_MODEL_BASE")
+        .or_else(|| env_map.get("CTOX_CHAT_MODEL"))
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+}
+
+pub fn effective_chat_model_from_map(env_map: &BTreeMap<String, String>) -> Option<String> {
+    env_map
+        .get("CTOX_ACTIVE_MODEL")
+        .cloned()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| configured_chat_model_from_map(env_map))
+}
+
 fn parse_env_map(raw: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for line in raw.lines() {
@@ -72,7 +116,12 @@ fn parse_env_map(raw: &str) -> BTreeMap<String, String> {
 }
 
 fn escape_env_value(value: &str) -> String {
-    if value.contains(char::is_whitespace) || value.contains('#') || value.contains('"') {
+    if value.is_empty()
+        || value.chars().any(|ch| {
+            !(ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '-' | '.' | '/' | ':' | ',' | '@' | '%' | '+'))
+        })
+    {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     } else {
         value.to_string()

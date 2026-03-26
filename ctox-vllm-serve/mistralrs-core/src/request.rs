@@ -14,6 +14,27 @@ use tokio::sync::mpsc::Sender;
 
 pub type LlguidanceGrammar = llguidance::api::TopLevelGrammar;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SpeechGenerationRequest {
+    pub input: String,
+    pub speaker: Option<String>,
+    pub language: Option<String>,
+    pub instructions: Option<String>,
+    pub task_type: Option<String>,
+    pub ref_audio: Option<String>,
+    #[serde(skip)]
+    pub ref_audio_input: Option<AudioInput>,
+    pub ref_text: Option<String>,
+    pub ref_code: Option<Vec<Vec<u32>>>,
+    pub icl_mode: Option<bool>,
+    pub x_vector_only_mode: Option<bool>,
+    pub max_new_tokens: Option<usize>,
+    pub temperature: Option<f32>,
+    pub top_p: Option<f32>,
+    pub top_k: Option<usize>,
+    pub repetition_penalty: Option<f32>,
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 /// Control the constraint with llguidance.
 pub enum Constraint {
@@ -94,7 +115,7 @@ pub enum RequestMessage {
         save_file: Option<PathBuf>,
     },
     SpeechGeneration {
-        prompt: String,
+        request: SpeechGenerationRequest,
     },
     Embedding {
         prompt: String,

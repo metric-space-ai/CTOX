@@ -12,6 +12,7 @@ use axum::{
 use mistralrs_core::{
     speech_utils::{self, Sample},
     Constraint, MistralRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    SpeechGenerationRequest as CoreSpeechGenerationRequest,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -22,8 +23,114 @@ use crate::{
     },
     openai::{AudioResponseFormat, SpeechGenerationRequest},
     types::SharedMistralRsState,
-    util::{sanitize_error_message, validate_model_name},
+    util::{parse_audio_url, sanitize_error_message, validate_model_name},
 };
+
+fn trimmed_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn infer_qwen3_tts_task_type(
+    model: &str,
+    task_type: Option<&str>,
+    speaker: Option<&str>,
+    instructions: Option<&str>,
+    ref_audio: Option<&str>,
+) -> &'static str {
+    if let Some(task_type) = task_type {
+        let normalized = task_type.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "customvoice" | "custom_voice" => return "CustomVoice",
+            "voicedesign" | "voice_design" => return "VoiceDesign",
+            "base" | "voiceclone" | "voice_clone" => return "Base",
+            _ => {}
+        }
+    }
+
+    let lowered = model.trim().to_ascii_lowercase();
+    if lowered.contains("customvoice") {
+        return "CustomVoice";
+    }
+    if lowered.contains("voicedesign") {
+        return "VoiceDesign";
+    }
+    if speaker.is_some() {
+        return "CustomVoice";
+    }
+    if instructions.is_some() && ref_audio.is_none() {
+        return "VoiceDesign";
+    }
+    "Base"
+}
+
+fn normalize_qwen3_tts_request(
+    oairequest: SpeechGenerationRequest,
+) -> Result<SpeechGenerationRequest> {
+    let input = oairequest.input.trim().to_string();
+    if input.is_empty() {
+        anyhow::bail!("Speech generation input must not be empty.");
+    }
+
+    let speaker = trimmed_optional(oairequest.speaker);
+    let language = trimmed_optional(oairequest.language).or(Some("Auto".to_string()));
+    let instructions = trimmed_optional(oairequest.instructions);
+    let ref_audio = trimmed_optional(oairequest.ref_audio);
+    let ref_text = trimmed_optional(oairequest.ref_text);
+    let x_vector_only_mode = oairequest.x_vector_only_mode.unwrap_or(false);
+    let task_type = infer_qwen3_tts_task_type(
+        &oairequest.model,
+        oairequest.task_type.as_deref(),
+        speaker.as_deref(),
+        instructions.as_deref(),
+        ref_audio.as_deref(),
+    );
+
+    match task_type {
+        "CustomVoice" => {
+            if speaker.is_none() {
+                anyhow::bail!("Qwen3-TTS CustomVoice requests require `speaker`.");
+            }
+        }
+        "VoiceDesign" => {
+            if instructions.is_none() {
+                anyhow::bail!("Qwen3-TTS VoiceDesign requests require `instructions`.");
+            }
+        }
+        "Base" => {
+            if ref_audio.is_none() {
+                anyhow::bail!("Qwen3-TTS Base voice-clone requests require `ref_audio`.");
+            }
+            if !x_vector_only_mode && ref_text.is_none() {
+                anyhow::bail!(
+                    "Qwen3-TTS Base voice-clone requests require `ref_text` unless `x_vector_only_mode=true`."
+                );
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    Ok(SpeechGenerationRequest {
+        model: oairequest.model,
+        input,
+        response_format: oairequest.response_format,
+        speaker,
+        language,
+        instructions,
+        task_type: Some(task_type.to_string()),
+        ref_audio,
+        ref_text,
+        ref_code: oairequest.ref_code,
+        icl_mode: oairequest.icl_mode,
+        x_vector_only_mode: Some(x_vector_only_mode),
+        max_new_tokens: oairequest.max_new_tokens,
+        temperature: oairequest.temperature,
+        top_p: oairequest.top_p,
+        top_k: oairequest.top_k,
+        repetition_penalty: oairequest.repetition_penalty,
+    })
+}
 
 /// Represents different types of speech generation responses.
 pub enum SpeechGenerationResponder {
@@ -53,21 +160,44 @@ impl IntoResponse for SpeechGenerationResponder {
 ///
 /// This function transforms a speech generation request into the
 /// request format used by mistral.rs.
-pub fn parse_request(
+pub async fn parse_request(
     oairequest: SpeechGenerationRequest,
     state: Arc<MistralRs>,
     tx: Sender<Response>,
 ) -> Result<(Request, AudioResponseFormat)> {
+    let oairequest = normalize_qwen3_tts_request(oairequest)?;
     let repr = serde_json::to_string(&oairequest).expect("Serialization of request failed.");
     MistralRs::maybe_log_request(state.clone(), repr);
 
     // Validate that the requested model matches the loaded model
     validate_model_name(&oairequest.model, state.clone())?;
 
+    let ref_audio_input = match &oairequest.ref_audio {
+        Some(ref_audio) => Some(parse_audio_url(ref_audio).await?),
+        None => None,
+    };
+
     let request = Request::Normal(Box::new(NormalRequest {
         id: state.next_request_id(),
         messages: RequestMessage::SpeechGeneration {
-            prompt: oairequest.input,
+            request: CoreSpeechGenerationRequest {
+                input: oairequest.input,
+                speaker: oairequest.speaker,
+                language: oairequest.language,
+                instructions: oairequest.instructions,
+                task_type: oairequest.task_type,
+                ref_audio: oairequest.ref_audio,
+                ref_audio_input,
+                ref_text: oairequest.ref_text,
+                ref_code: oairequest.ref_code,
+                icl_mode: oairequest.icl_mode,
+                x_vector_only_mode: oairequest.x_vector_only_mode,
+                max_new_tokens: oairequest.max_new_tokens,
+                temperature: oairequest.temperature.map(|v| v as f32),
+                top_p: oairequest.top_p.map(|v| v as f32),
+                top_k: oairequest.top_k,
+                repetition_penalty: oairequest.repetition_penalty,
+            },
         },
         sampling_params: SamplingParams::deterministic(),
         response: tx,
@@ -91,6 +221,64 @@ pub fn parse_request(
     Ok((request, oairequest.response_format))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::openai::AudioResponseFormat;
+
+    fn base_request() -> SpeechGenerationRequest {
+        SpeechGenerationRequest {
+            model: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
+            input: "Hello world".to_string(),
+            response_format: AudioResponseFormat::Wav,
+            speaker: None,
+            language: None,
+            instructions: None,
+            task_type: None,
+            ref_audio: Some("https://example.com/ref.wav".to_string()),
+            ref_text: Some("Hello".to_string()),
+            ref_code: None,
+            icl_mode: None,
+            x_vector_only_mode: Some(false),
+            max_new_tokens: Some(512),
+            repetition_penalty: None,
+        }
+    }
+
+    #[test]
+    fn normalizes_qwen_base_defaults() {
+        let normalized = normalize_qwen3_tts_request(base_request()).unwrap();
+        assert_eq!(normalized.task_type.as_deref(), Some("Base"));
+        assert_eq!(normalized.language.as_deref(), Some("Auto"));
+    }
+
+    #[test]
+    fn custom_voice_requires_speaker() {
+        let mut request = base_request();
+        request.model = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice".to_string();
+        request.ref_audio = None;
+        request.ref_text = None;
+        request.task_type = Some("CustomVoice".to_string());
+        let error = normalize_qwen3_tts_request(request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("require `speaker`"));
+    }
+
+    #[test]
+    fn voice_design_requires_instructions() {
+        let mut request = base_request();
+        request.model = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign".to_string();
+        request.ref_audio = None;
+        request.ref_text = None;
+        request.task_type = Some("VoiceDesign".to_string());
+        let error = normalize_qwen3_tts_request(request)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("require `instructions`"));
+    }
+}
+
 /// Speech generation endpoint handler.
 #[utoipa::path(
     post,
@@ -105,7 +293,7 @@ pub async fn speech_generation(
 ) -> SpeechGenerationResponder {
     let (tx, mut rx) = create_response_channel(None);
 
-    let (request, response_format) = match parse_request(oairequest, state.clone(), tx) {
+    let (request, response_format) = match parse_request(oairequest, state.clone(), tx).await {
         Ok(x) => x,
         Err(e) => return handle_error(state, e.into()),
     };

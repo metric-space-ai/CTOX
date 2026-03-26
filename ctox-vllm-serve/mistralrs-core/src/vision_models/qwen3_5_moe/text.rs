@@ -62,6 +62,7 @@ impl GdnConfig for TextConfig {
 
 #[allow(dead_code)]
 struct FullAttention {
+    layer_idx: usize,
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
@@ -138,6 +139,7 @@ impl FullAttention {
         let rot_dim = cfg.rot_dim();
 
         Ok(Self {
+            layer_idx,
             q_proj,
             k_proj,
             v_proj,
@@ -175,6 +177,33 @@ impl FullAttention {
         let mut x = x.clone();
         if let Some(t) = self.q_proj.quantized_act_type() {
             x = x.to_dtype(t)?;
+        }
+        let (_, q_device) = self.q_proj.dtype_and_device();
+        let (_, k_device) = self.k_proj.dtype_and_device();
+        let (_, v_device) = self.v_proj.dtype_and_device();
+        if !x.device().same_device(&q_device) {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} q_proj device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                x.device().location(),
+                q_device.location()
+            );
+        }
+        if !x.device().same_device(&k_device) {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} k_proj device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                x.device().location(),
+                k_device.location()
+            );
+        }
+        if !x.device().same_device(&v_device) {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} v_proj device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                x.device().location(),
+                v_device.location()
+            );
         }
         let mut q_gate = mistralrs_quant::MatMul.qmethod_matmul(&x, &*self.q_proj)?;
         let mut k = mistralrs_quant::MatMul.qmethod_matmul(&x, &*self.k_proj)?;
@@ -282,6 +311,15 @@ impl FullAttention {
         let gate = candle_nn::ops::sigmoid(&gate.to_dtype(y.dtype())?)?;
         y = y.broadcast_mul(&gate)?;
 
+        let (_, o_device) = self.o_proj.dtype_and_device();
+        if !y.device().same_device(&o_device) {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} o_proj device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                y.device().location(),
+                o_device.location()
+            );
+        }
         let mut res = mistralrs_quant::MatMul.qmethod_matmul(&y, &*self.o_proj)?;
         if self.q_proj.quantized_act_type().is_some() {
             res = res.to_dtype(original_dtype)?;
@@ -342,6 +380,30 @@ impl Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (_, gate_device) = self.gate_proj.dtype_and_device();
+        let (_, up_device) = self.up_proj.dtype_and_device();
+        let (_, down_device) = self.down_proj.dtype_and_device();
+        if !xs.device().same_device(&gate_device) {
+            candle_core::bail!(
+                "qwen3.5_moe shared_expert gate_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                gate_device.location()
+            );
+        }
+        if !xs.device().same_device(&up_device) {
+            candle_core::bail!(
+                "qwen3.5_moe shared_expert up_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                up_device.location()
+            );
+        }
+        if !xs.device().same_device(&down_device) {
+            candle_core::bail!(
+                "qwen3.5_moe shared_expert down_proj device mismatch: input={:?} weight={:?}",
+                xs.device().location(),
+                down_device.location()
+            );
+        }
         let original_dtype = xs.dtype();
         let mut xs = xs.clone();
         if let Some(t) = self.gate_proj.quantized_act_type() {
@@ -363,6 +425,7 @@ impl Mlp {
 }
 
 struct SparseMoeBlock {
+    layer_idx: usize,
     gate: Linear,
     experts: MoEExperts,
     shared_expert: Mlp,
@@ -411,7 +474,9 @@ impl SparseMoeBlock {
         )?;
 
         let shared_expert = Mlp::new(
-            vb.pp("shared_expert"),
+            // Shared expert weights must target the repeating layer device even when
+            // staged/immediate ISQ keeps the outer VarBuilder on CPU.
+            vb.pp("shared_expert").set_device(layer_device.clone()),
             cfg.hidden_size,
             cfg.shared_expert_intermediate_size,
             &cfg.quantization_config,
@@ -422,12 +487,13 @@ impl SparseMoeBlock {
         let mut seg_w = vb
             .pp("shared_expert_gate")
             .get((1, cfg.hidden_size), "weight")?;
-        if loading_isq {
+        if !seg_w.device().same_device(&layer_device) {
             seg_w = seg_w.to_device(&layer_device)?;
         }
         let shared_expert_gate = Linear::new(seg_w, None);
 
         Ok(Self {
+            layer_idx,
             gate,
             experts,
             shared_expert,
@@ -440,6 +506,17 @@ impl SparseMoeBlock {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs_flat = xs.reshape(((), hidden_dim))?;
+        if !xs_flat
+            .device()
+            .same_device(self.gate.weight().device())
+        {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} router gate device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                xs_flat.device().location(),
+                self.gate.weight().device().location()
+            );
+        }
 
         let router_logits = self.gate.forward(&xs_flat)?;
         let routing_weights =
@@ -460,6 +537,17 @@ impl SparseMoeBlock {
         y = y.reshape((b_size, seq_len, hidden_dim))?;
 
         let shared_out = self.shared_expert.forward(xs)?;
+        if !xs_flat
+            .device()
+            .same_device(self.shared_expert_gate.weight().device())
+        {
+            candle_core::bail!(
+                "qwen3.5_moe layer {} shared_expert_gate device mismatch: input={:?} weight={:?}",
+                self.layer_idx,
+                xs_flat.device().location(),
+                self.shared_expert_gate.weight().device().location()
+            );
+        }
         let shared_gate = candle_nn::ops::sigmoid(
             &self
                 .shared_expert_gate
@@ -557,6 +645,15 @@ pub struct Qwen3_5MoeTextModel {
 }
 
 impl Qwen3_5MoeTextModel {
+    fn runtime_max_seq_len(cfg: &TextConfig) -> usize {
+        std::env::var("MISTRALRS_MAX_SEQ_LEN_OVERRIDE")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value.min(cfg.max_position_embeddings))
+            .unwrap_or(cfg.max_position_embeddings)
+    }
+
     pub fn new(
         cfg: &TextConfig,
         vb: ShardedVarBuilder,
@@ -724,9 +821,11 @@ impl Qwen3_5MoeTextModel {
             })
             .collect();
 
+        let runtime_max_seq_len = Self::runtime_max_seq_len(cfg);
+
         let hybrid_cache_config = HybridCacheConfig {
             layer_types: pipeline_layer_types,
-            max_seq_len: cfg.max_position_embeddings,
+            max_seq_len: runtime_max_seq_len,
             recurrent: RecurrentLayerConfig {
                 conv_dim: cfg.linear_conv_dim(),
                 conv_width: cfg.linear_conv_kernel_dim,
@@ -756,9 +855,9 @@ impl Qwen3_5MoeTextModel {
             layer_types: layer_types.clone(),
             lm_head,
             cache: EitherCache::Hybrid(pipeline_cache),
-            max_seq_len: cfg.max_position_embeddings,
+            max_seq_len: runtime_max_seq_len,
             cfg: ModelConfigMetadata {
-                max_seq_len: cfg.max_position_embeddings,
+                max_seq_len: runtime_max_seq_len,
                 num_layers: cfg.num_hidden_layers,
                 hidden_size: cfg.hidden_size,
                 num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
@@ -922,11 +1021,20 @@ impl Qwen3_5MoeTextModel {
                 }
             }
         }
-        let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
+        let norm_device = self.norm.weight().device().clone();
+        let mut xs = if xs.device().same_device(&norm_device) {
+            xs
+        } else {
+            xs.to_device(&norm_device)?
+        };
+        xs = xs.apply(&self.norm)?;
         let mut xs = extract_logits(&xs, context_lens)?;
         if let Some(t) = self.lm_head.quantized_act_type() {
             xs = xs.to_dtype(t)?;
+        }
+        let (_, lm_head_device) = self.lm_head.dtype_and_device();
+        if !xs.device().same_device(&lm_head_device) {
+            xs = xs.to_device(&lm_head_device)?;
         }
         mistralrs_quant::MatMul.qmethod_matmul(&xs, &*self.lm_head)
     }

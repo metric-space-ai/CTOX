@@ -379,6 +379,14 @@ pub struct VoxtralModel {
 }
 
 impl VoxtralModel {
+    fn cast_audio_conditioned_text_embeds(&self, text_embeds: Tensor) -> Result<Tensor> {
+        if text_embeds.dtype() == DType::F32 {
+            Ok(text_embeds)
+        } else {
+            text_embeds.to_dtype(DType::F32)
+        }
+    }
+
     pub fn new(
         cfg: &VoxtralConfig,
         vb: ShardedVarBuilder,
@@ -538,9 +546,23 @@ impl VoxtralModel {
         let input_embeds = if let Some(mel) = mel_features {
             // Prompt phase: encode audio, store embeddings for generation steps.
             self.encoder.reset_cache();
-            let audio_hidden = self.encoder.forward(mel)?;
-            let audio_embeds = self.adapter.forward(&audio_hidden)?;
-            let audio_embeds = audio_embeds.to_dtype(text_embeds.dtype())?;
+            let audio_hidden = self
+                .encoder
+                .forward(mel)
+                .map_err(|e| candle_core::Error::Msg(format!("voxtral prompt encoder: {e}")))?;
+            let audio_embeds = self
+                .adapter
+                .forward(&audio_hidden)
+                .map_err(|e| candle_core::Error::Msg(format!("voxtral prompt adapter: {e}")))?
+                .to_dtype(DType::F32)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("voxtral prompt adapter->f32: {e}"))
+                })?;
+            let text_embeds = self
+                .cast_audio_conditioned_text_embeds(text_embeds)
+                .map_err(|e| {
+                    candle_core::Error::Msg(format!("voxtral prompt text_embeds->f32: {e}"))
+                })?;
 
             // Store for per-step conditioning during autoregressive generation.
             *self
@@ -557,10 +579,14 @@ impl VoxtralModel {
             let overlap = text_len.min(audio_len);
             let text_prefix = text_embeds.narrow(1, 0, overlap)?;
             let audio_prefix = audio_embeds.narrow(1, 0, overlap)?;
-            let combined_prefix = (text_prefix + audio_prefix)?;
+            let combined_prefix = (text_prefix + audio_prefix).map_err(|e| {
+                candle_core::Error::Msg(format!("voxtral prompt combine prefix: {e}"))
+            })?;
             if overlap < text_len {
                 let text_suffix = text_embeds.narrow(1, overlap, text_len - overlap)?;
-                Tensor::cat(&[&combined_prefix, &text_suffix], 1)?
+                Tensor::cat(&[&combined_prefix, &text_suffix], 1).map_err(|e| {
+                    candle_core::Error::Msg(format!("voxtral prompt concat suffix: {e}"))
+                })?
             } else {
                 combined_prefix
             }
@@ -573,6 +599,7 @@ impl VoxtralModel {
             if let Some(ref audio_embeds) = *cache {
                 let audio_len = audio_embeds.dim(1)?;
                 let pos = seqlen_offsets[0];
+                let text_embeds = self.cast_audio_conditioned_text_embeds(text_embeds)?;
                 let seq_len = text_embeds.dim(1)?;
                 let end_pos = (pos + seq_len).min(audio_len);
                 if pos < end_pos {
@@ -596,6 +623,14 @@ impl VoxtralModel {
             }
         };
 
+        let input_embeds = if input_embeds.dtype() == self.dtype {
+            input_embeds
+        } else {
+            input_embeds.to_dtype(self.dtype).map_err(|e| {
+                candle_core::Error::Msg(format!("voxtral input_embeds->model dtype: {e}"))
+            })?
+        };
+
         let total_len = input_embeds.dim(1)?;
         let b_sz = input_embeds.dim(0)?;
 
@@ -605,7 +640,7 @@ impl VoxtralModel {
                 n_delay_tokens,
                 self.model_dim,
                 input_embeds.device(),
-                self.dtype,
+                input_embeds.dtype(),
             )?)
         } else {
             None

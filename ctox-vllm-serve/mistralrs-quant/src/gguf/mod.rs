@@ -8,13 +8,13 @@ mod ffi;
 use std::{
     borrow::Cow,
     io::{Cursor, Read},
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{atomic::AtomicUsize, Arc, Mutex},
 };
 
 use byteorder::{LittleEndian, ReadBytesExt};
 use candle_core::{
-    quantized::{ggml_file::qtensor_from_ggml, GgmlDType, QMatMul, QTensor},
-    DType, Device, Result, Tensor,
+    quantized::{ggml_file::qtensor_from_ggml, GgmlDType, QMatMul, QStorage, QTensor},
+    DType, Device, DeviceLocation, Result, Tensor,
 };
 use candle_nn::Module;
 
@@ -28,6 +28,7 @@ use crate::{
 pub struct GgufMatMul {
     pub(crate) w: QMatMul,
     pub(crate) b: Option<Tensor>,
+    relocated_qweights: Mutex<Vec<(DeviceLocation, Arc<QTensor>)>>,
 }
 
 impl QuantMethod for GgufMatMul {
@@ -39,6 +40,7 @@ impl QuantMethod for GgufMatMul {
             QuantMethodConfig::Gguf { q_weight, b } => Ok(Self {
                 w: QMatMul::from_arc(q_weight)?,
                 b,
+                relocated_qweights: Mutex::new(Vec::new()),
             }),
             QuantMethodConfig::GptqAwq { .. }
             | QuantMethodConfig::Unquantized(_)
@@ -58,11 +60,27 @@ impl QuantMethod for GgufMatMul {
     }
 
     fn forward(&self, a: &Tensor) -> Result<Tensor> {
-        let x = self.w.forward(a)?;
-        if let Some(ref b) = self.b {
-            x.broadcast_add(b)
-        } else {
-            Ok(x)
+        match &self.w {
+            QMatMul::QTensor(q) => {
+                let q = self.qtensor_for_device(q, a.device())?;
+                self.forward_with_weight(QMatMul::from_arc(q)?, a)
+            }
+            QMatMul::Tensor(t) => {
+                let t = if t.device().same_device(a.device()) {
+                    t.clone()
+                } else {
+                    t.to_device(a.device())?
+                };
+                self.forward_with_weight(QMatMul::Tensor(t), a)
+            }
+            QMatMul::TensorF16(t) => {
+                let t = if t.device().same_device(a.device()) {
+                    t.clone()
+                } else {
+                    t.to_device(a.device())?
+                };
+                self.forward_with_weight(QMatMul::TensorF16(t), a)
+            }
         }
     }
 
@@ -77,7 +95,31 @@ impl QuantMethod for GgufMatMul {
         // - indices: (n_tokens, n_experts_per_tok)
         // - weights (self): (n_experts, out_features, in_features)
         #[cfg(feature = "cuda")]
-        let res = cuda::qmatmul_indexed_moe_forward(&self.w, x, indices)?;
+        let res = match &self.w {
+            QMatMul::QTensor(q) => {
+                let q = self.qtensor_for_device(q, x.device())?;
+                let weight = QMatMul::from_arc(q)?;
+                cuda::qmatmul_indexed_moe_forward(&weight, x, indices)?
+            }
+            QMatMul::Tensor(t) => {
+                let t = if t.device().same_device(x.device()) {
+                    t.clone()
+                } else {
+                    t.to_device(x.device())?
+                };
+                let weight = QMatMul::Tensor(t);
+                cuda::qmatmul_indexed_moe_forward(&weight, x, indices)?
+            }
+            QMatMul::TensorF16(t) => {
+                let t = if t.device().same_device(x.device()) {
+                    t.clone()
+                } else {
+                    t.to_device(x.device())?
+                };
+                let weight = QMatMul::TensorF16(t);
+                cuda::qmatmul_indexed_moe_forward(&weight, x, indices)?
+            }
+        };
 
         // For CPU and Metal: use dequantize-then-matmul approach
         #[cfg(not(feature = "cuda"))]
@@ -99,26 +141,35 @@ impl QuantMethod for GgufMatMul {
             Self {
                 w: QMatMul::Tensor(w),
                 b,
+                ..
             } => Ok(Arc::new(Self {
                 w: QMatMul::Tensor((w + delta)?),
                 b: b.clone(),
+                relocated_qweights: Mutex::new(Vec::new()),
             })),
             Self {
                 w: QMatMul::TensorF16(w),
                 b,
+                ..
             } => Ok(Arc::new(Self {
                 w: QMatMul::TensorF16((w + delta)?),
                 b: b.clone(),
+                relocated_qweights: Mutex::new(Vec::new()),
             })),
             Self {
                 w: QMatMul::QTensor(w),
                 b,
+                ..
             } => {
                 let (w, dtype) = (w.dequantize(&w.device())?, w.dtype());
                 let w = QMatMul::QTensor(std::sync::Arc::new(
                     candle_core::quantized::QTensor::quantize(&(w + delta)?, dtype)?,
                 ));
-                Ok(Arc::new(Self { w, b: b.clone() }))
+                Ok(Arc::new(Self {
+                    w,
+                    b: b.clone(),
+                    relocated_qweights: Mutex::new(Vec::new()),
+                }))
             }
         }
     }
@@ -180,8 +231,49 @@ impl QuantMethod for GgufMatMul {
             } else {
                 None
             };
-            Ok(Arc::new(GgufMatMul { w, b }))
+            Ok(Arc::new(GgufMatMul {
+                w,
+                b,
+                relocated_qweights: Mutex::new(Vec::new()),
+            }))
         }
+    }
+}
+
+impl GgufMatMul {
+    fn forward_with_weight(&self, weight: QMatMul, a: &Tensor) -> Result<Tensor> {
+        let x = weight.forward(a)?;
+        if let Some(ref b) = self.b {
+            let b = if b.device().same_device(a.device()) {
+                b.clone()
+            } else {
+                b.to_device(a.device())?
+            };
+            x.broadcast_add(&b)
+        } else {
+            Ok(x)
+        }
+    }
+
+    fn qtensor_for_device(&self, q: &Arc<QTensor>, device: &Device) -> Result<Arc<QTensor>> {
+        if q.device().same_device(device) {
+            return Ok(q.clone());
+        }
+
+        let target_location = device.location();
+        let mut cache = self
+            .relocated_qweights
+            .lock()
+            .expect("GgufMatMul relocation cache poisoned");
+        if let Some((_, cached)) = cache.iter().find(|(location, _)| *location == target_location) {
+            return Ok(cached.clone());
+        }
+
+        let data = q.data()?;
+        let storage = QStorage::from_data(data, device, q.dtype())?;
+        let relocated = Arc::new(QTensor::new(storage, q.shape())?);
+        cache.push((target_location, relocated.clone()));
+        Ok(relocated)
     }
 }
 
@@ -354,6 +446,7 @@ impl QuantizedSerde for GgufMatMul {
         Ok(Arc::new(Self {
             w: QMatMul::QTensor(w.into()),
             b,
+            relocated_qweights: Mutex::new(Vec::new()),
         }))
     }
     fn deserialize_ext_bias(
@@ -425,6 +518,7 @@ impl QuantizedSerde for GgufMatMul {
             Arc::new(Self {
                 w: QMatMul::QTensor(w.into()),
                 b: None,
+                relocated_qweights: Mutex::new(Vec::new()),
             }),
             b,
         ))

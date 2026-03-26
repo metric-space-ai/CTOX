@@ -388,7 +388,10 @@ impl DiaPipeline {
             temperature,
             top_p,
             top_k,
-        } = cfg;
+        } = cfg
+        else {
+            candle_core::bail!("Dia pipeline received a non-Dia speech generation config.")
+        };
 
         let audio_pad_value = self.cfg.data.audio_pad_value as u32;
         let audio_eos_value = self.cfg.data.audio_eos_value as u32;

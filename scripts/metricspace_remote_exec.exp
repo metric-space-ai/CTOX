@@ -1,0 +1,27 @@
+#!/usr/bin/expect -f
+
+set timeout 3600
+set host "metricspace@100.96.1.7"
+set password "metricspace"
+
+if {$argc < 1} {
+    puts stderr "usage: metricspace_remote_exec.exp <ssh-args...>"
+    exit 2
+}
+
+spawn ssh -tt -o StrictHostKeyChecking=no $host {*}$argv
+expect {
+    -re {(?i)are you sure you want to continue connecting.*} {
+        send -- "yes\r"
+        exp_continue
+    }
+    -re {(?i)(?:password|passphrase).*: ?} {
+        send -- "$password\r"
+        exp_continue
+    }
+    eof {}
+    timeout {
+        puts stderr "timeout during remote command"
+        exit 1
+    }
+}

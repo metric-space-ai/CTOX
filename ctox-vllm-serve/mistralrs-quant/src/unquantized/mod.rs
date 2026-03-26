@@ -139,6 +139,17 @@ impl QuantMethod for UnquantLinear {
     }
 
     fn gather_forward(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        let a = if a.device().same_device(&self.w.device()) {
+            a.clone()
+        } else {
+            a.to_device(&self.w.device())?
+        };
+        let indices = if indices.device().same_device(&self.w.device()) {
+            indices.clone()
+        } else {
+            indices.to_device(&self.w.device())?
+        };
+
         // Weights are [num_experts, out_features, in_features]
         // For Metal path:
         //   - a: (b_size, seq_len, 1, 1, hidden_dim) - 5D
@@ -311,10 +322,24 @@ impl QuantMethod for UnquantLinear {
                 | IsqType::Q8_1,
             ) => {
                 let dtype: GgmlDType = dtype.unwrap().try_into()?;
-                let res = if let Some(imatrix_weight) = imatrix_weight {
-                    generate_isq_imatrix!(self.w, imatrix_weight, device, dtype, n_quantized, guard)
+                // Immediate ISQ must quantize from CPU tensors first; otherwise large CUDA
+                // intermediates can be materialized before the compact qstorage exists.
+                let weight_for_isq = if self.w.device().is_cpu() {
+                    self.w.clone()
                 } else {
-                    generate_isq!(self.w, device, dtype, n_quantized, guard)
+                    self.w.to_device(&Device::Cpu)?
+                };
+                let res = if let Some(imatrix_weight) = imatrix_weight {
+                    generate_isq_imatrix!(
+                        weight_for_isq,
+                        imatrix_weight,
+                        device,
+                        dtype,
+                        n_quantized,
+                        guard
+                    )
+                } else {
+                    generate_isq!(weight_for_isq, device, dtype, n_quantized, guard)
                 };
                 Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
                     q_weight: res,

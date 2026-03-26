@@ -174,13 +174,13 @@ macro_rules! handle_pipeline_forward_error {
                             usage: group.get_usage(),
                         };
 
-                        seq.responder()
+                        let _ = seq
+                            .responder()
                             .send(Response::ModelError(
                                 e.to_string(),
-                                partial_completion_response
+                                partial_completion_response,
                             ))
-                            .await
-                            .unwrap();
+                            .await;
                     } else {
                         let partial_completion_response = CompletionResponse {
                             id: seq.id().to_string(),
@@ -192,13 +192,13 @@ macro_rules! handle_pipeline_forward_error {
                             usage: group.get_usage(),
                         };
 
-                        seq.responder()
+                        let _ = seq
+                            .responder()
                             .send(Response::CompletionModelError(
                                 e.to_string(),
-                                partial_completion_response
+                                partial_completion_response,
                             ))
-                            .await
-                            .unwrap();
+                            .await;
                     }
                 }
                 for seq in $seq_slice.iter_mut() {
@@ -257,12 +257,12 @@ pub const fn paged_attn_supported() -> bool {
 
 /// `true` if built with the `flash-attn` or `flash-attn-v3` features, false otherwise.
 #[cfg(not(any(feature = "flash-attn", feature = "flash-attn-v3")))]
-pub const fn using_flash_attn() -> bool {
+pub fn using_flash_attn() -> bool {
     false
 }
 
 /// `true` if built with the `flash-attn` or `flash-attn-v3` features, false otherwise.
 #[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
-pub const fn using_flash_attn() -> bool {
-    true
+pub fn using_flash_attn() -> bool {
+    std::env::var_os("MISTRALRS_DISABLE_FLASH_ATTN").is_none()
 }

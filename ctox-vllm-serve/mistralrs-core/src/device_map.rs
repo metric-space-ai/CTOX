@@ -87,6 +87,7 @@ impl DeviceMapSetting {
         topology: Option<&Topology>,
         all_devices: &[Device],
     ) -> Result<Box<dyn DeviceMapper + Send + Sync>> {
+        let resolved_nm_device = resolve_nm_device(device, all_devices);
         match self {
             Self::Nccl { nm_device, comm } => {
                 once_log_info("Loading model using a NCCL-parallelized pipeline.");
@@ -111,11 +112,7 @@ impl DeviceMapSetting {
                 host_layers,
             }) => {
                 if let Some(topology) = topology {
-                    if topology.layers.iter().all(|x| x.is_none()) {
-                        return Ok(Box::new(DummyDeviceMapper {
-                            nm_device: device.clone(),
-                        }));
-                    } else {
+                    if !topology.layers.iter().all(|x| x.is_none()) {
                         let layers = topology
                             .layers
                             .iter()
@@ -134,9 +131,19 @@ impl DeviceMapSetting {
 
                         return Ok(Box::new(LayerDeviceMapper {
                             mappings: layers,
-                            nm_device: device.clone(),
+                            nm_device: resolved_nm_device.clone(),
                         }));
                     }
+
+                    if device_layers.is_none() {
+                        return Ok(Box::new(DummyDeviceMapper {
+                            nm_device: resolved_nm_device.clone(),
+                        }));
+                    }
+
+                    once_log_info(
+                        "Topology only defines tensor-pattern overrides; retaining manual repeating layer mapping.",
+                    );
                 }
 
                 // How many device layers
@@ -149,7 +156,7 @@ impl DeviceMapSetting {
                         .clamp(0, model_layers)
                 } else {
                     return Ok(Box::new(DummyDeviceMapper {
-                        nm_device: device.clone(),
+                        nm_device: resolved_nm_device.clone(),
                     }));
                 };
                 // How many host (cpu) layers, defaulting to automatically filling the rest.
@@ -269,13 +276,40 @@ impl DeviceMapSetting {
 
                 Ok(Box::new(LayerDeviceMapper {
                     mappings: combined,
-                    nm_device: device.clone(),
+                    nm_device: resolved_nm_device,
                 }))
             }
             Self::Auto(_) => {
                 candle_core::bail!(".into_mapper does not work on Auto device map, convert it to a Map with DeviceMappedModelLoader::get_device_layers")
             }
         }
+    }
+}
+
+fn resolve_nm_device(default_device: &Device, all_devices: &[Device]) -> Device {
+    let ordinal = std::env::var("MISTRALRS_NM_DEVICE_ORDINAL")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok());
+
+    match ordinal {
+        Some(ord) if ord < all_devices.len() => {
+            let selected = all_devices[ord].clone();
+            info!(
+                "Overriding non-repeating tensor device to ordinal {} ({:?}).",
+                ord,
+                selected.location()
+            );
+            selected
+        }
+        Some(ord) => {
+            info!(
+                "Ignoring invalid MISTRALRS_NM_DEVICE_ORDINAL={} for {} visible devices.",
+                ord,
+                all_devices.len()
+            );
+            default_device.clone()
+        }
+        None => default_device.clone(),
     }
 }
 

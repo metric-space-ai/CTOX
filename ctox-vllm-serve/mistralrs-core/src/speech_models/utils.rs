@@ -2,7 +2,7 @@
 
 use std::io::Write;
 
-use candle_core::{Result, Tensor};
+use candle_core::{DType, Result, Tensor};
 
 use super::bs1770;
 
@@ -11,16 +11,21 @@ pub(crate) fn normalize_loudness(
     sample_rate: u32,
     loudness_compressor: bool,
 ) -> Result<Tensor> {
+    let wav = if wav.dtype() == DType::F32 {
+        wav.clone()
+    } else {
+        wav.to_dtype(DType::F32)?
+    };
     let energy = wav.sqr()?.mean_all()?.sqrt()?.to_vec0::<f32>()?;
     if energy < 2e-3 {
-        return Ok(wav.clone());
+        return Ok(wav);
     }
     let wav_array = wav.to_vec1::<f32>()?;
     let mut meter = bs1770::ChannelLoudnessMeter::new(sample_rate);
     meter.push(wav_array.into_iter());
     let power = meter.as_100ms_windows();
     let loudness = match bs1770::gated_mean(power) {
-        None => return Ok(wav.clone()),
+        None => return Ok(wav),
         Some(gp) => gp.loudness_lkfs() as f64,
     };
     let delta_loudness = -14. - loudness;

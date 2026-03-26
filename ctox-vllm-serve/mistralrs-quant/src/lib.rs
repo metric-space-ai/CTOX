@@ -42,7 +42,7 @@ mod vector_fp8;
 use gptq::gptq_linear;
 use lora::merge_lora_weights;
 use regex::Regex;
-pub use safetensors::{Shard, ShardedSafeTensors, ShardedVarBuilder};
+pub use safetensors::{shard_bounds, Shard, ShardedSafeTensors, ShardedVarBuilder};
 
 pub use afq::{AfqBits, AfqGroupSize, AfqLayer};
 pub use bitsandbytes::{BnbLinear, BnbQuantParams, BnbQuantType};
@@ -141,6 +141,22 @@ pub fn set_immediate_isq_with_pool(
     });
 }
 
+pub fn set_immediate_isq_serial(
+    isq: Option<IsqType>,
+    predicates: Vec<Regex>,
+    overrides: Vec<ImmediateIsqOverride>,
+) {
+    ENGINE_IMMEDIATE_ISQ.with(|cell| {
+        *cell.borrow_mut() = Some(ImmediateIsqParams {
+            guard: QuantizeOntoGuard::new(),
+            ty: isq,
+            predicates,
+            overrides,
+            pool: None,
+        });
+    });
+}
+
 /// Create a rayon thread pool for parallel immediate ISQ.
 /// Returns `(pool, num_threads)` so callers can log the thread count.
 ///
@@ -148,7 +164,28 @@ pub fn set_immediate_isq_with_pool(
 /// - GGML types (Q2K-Q8K) and F8E4M3: `rayon::current_num_threads()` (CPU quantization)
 /// - HQQ/AFQ: 1 thread (GPU quantization, serialized by `QuantizeOntoGuard`)
 pub fn create_isq_thread_pool(ty: Option<IsqType>) -> (rayon::ThreadPool, usize) {
-    let num_threads = if std::env::var("MISTRALRS_ISQ_SINGLETHREAD").is_ok() {
+    let is_distributed = std::env::var("MISTRALRS_MN_GLOBAL_WORLD_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|world_size| world_size > 1)
+        || std::env::var("MISTRALRS_MN_LOCAL_WORLD_SIZE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .is_some_and(|world_size| world_size > 1);
+
+    let explicit_thread_limit = std::env::var("MISTRALRS_ISQ_CPU_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+
+    let num_threads = if let Some(num_threads) = explicit_thread_limit {
+        num_threads
+    } else if std::env::var("MISTRALRS_ISQ_SINGLETHREAD").is_ok() {
+        1
+    } else if is_distributed {
+        // Multi-rank immediate ISQ can spike memory usage badly because multiple tensors are
+        // quantized concurrently while NCCL ranks are still loading. Keep the default serialized
+        // on distributed starts unless the operator explicitly overrides it.
         1
     } else if let Some(ty) = ty {
         ty.get_max_isq_cpu_threads()
@@ -474,7 +511,17 @@ impl MatMul {
 
     /// Compute quantized matrix-matrix product.
     pub fn qmethod_matmul(&self, x: &Tensor, matmul: &dyn QuantMethod) -> Result<Tensor> {
-        matmul.forward(x)
+        matmul.forward(x).map_err(|err| {
+            let (weight_dtype, weight_device) = matmul.dtype_and_device();
+            err.with_path(format!(
+                "qmethod_matmul(name={}, input_dtype={:?}, input_device={:?}, weight_dtype={:?}, weight_device={:?})",
+                matmul.name(),
+                x.dtype(),
+                x.device().location(),
+                weight_dtype,
+                weight_device.location(),
+            ))
+        })
     }
 }
 

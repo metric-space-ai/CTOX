@@ -15,6 +15,11 @@ use crate::{
 
 use super::config::WhisperEncoderArgs;
 
+fn encoder_rms_norm_f32(size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<RmsNorm> {
+    let weight = vb.get(size, "weight")?.to_dtype(DType::F32)?;
+    RmsNorm::from_w(weight, eps)
+}
+
 pub(super) struct EncoderAttention {
     pub(super) wq: Arc<dyn QuantMethod>,
     pub(super) wk: Arc<dyn QuantMethod>,
@@ -78,9 +83,36 @@ impl EncoderAttention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let q = MatMul.qmethod_matmul(xs, &*self.wq)?;
-        let k = MatMul.qmethod_matmul(xs, &*self.wk)?;
-        let v = MatMul.qmethod_matmul(xs, &*self.wv)?;
+        let xs = if xs.dtype() == DType::F32 {
+            xs.clone()
+        } else {
+            xs.to_dtype(DType::F32)?
+        };
+
+        let q = MatMul
+            .qmethod_matmul(&xs, &*self.wq)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention wq: {e}")))?;
+        let q = if q.dtype() == DType::F32 {
+            q
+        } else {
+            q.to_dtype(DType::F32)?
+        };
+        let k = MatMul
+            .qmethod_matmul(&xs, &*self.wk)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention wk: {e}")))?;
+        let k = if k.dtype() == DType::F32 {
+            k
+        } else {
+            k.to_dtype(DType::F32)?
+        };
+        let v = MatMul
+            .qmethod_matmul(&xs, &*self.wv)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention wv: {e}")))?;
+        let v = if v.dtype() == DType::F32 {
+            v
+        } else {
+            v.to_dtype(DType::F32)?
+        };
 
         let (q, k, v) = if q_len != 1 {
             let q = q
@@ -100,25 +132,32 @@ impl EncoderAttention {
             (q, k, v)
         };
 
-        let (q, k) = self.rotary_emb.forward(&q, &k, seqlen_offsets)?;
+        let (q, k) = self
+            .rotary_emb
+            .forward(&q, &k, seqlen_offsets)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention rope: {e}")))?;
 
-        let (k, v) = kv_cache.append(&k, &v)?;
+        let (k, v) = kv_cache.append(&k, &v).map_err(|e| {
+            candle_core::Error::Msg(format!("voxtral encoder attention kv append: {e}"))
+        })?;
 
-        let attn_output = Sdpa.run_attention(
-            &q,
-            &k,
-            &v,
-            attention_mask,
-            None, // no flash params for encoder (causal via mask)
-            &self.sdpa_params,
-        )?;
+        let attn_output = Sdpa
+            .run_attention(&q, &k, &v, attention_mask, None, &self.sdpa_params)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention sdpa: {e}")))?;
 
         let attn_output = if attention_mask.is_some() {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
         } else {
             attn_output.reshape((b_sz, q_len, ()))?
         };
-        MatMul.qmethod_matmul(&attn_output, &*self.wo)
+        let out = MatMul
+            .qmethod_matmul(&attn_output, &*self.wo)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention wo: {e}")))?;
+        if out.dtype() == DType::F32 {
+            Ok(out)
+        } else {
+            out.to_dtype(DType::F32)
+        }
     }
 }
 
@@ -144,11 +183,40 @@ impl EncoderMlp {
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         // SwiGLU: silu(w1(x)) * w3(x), then w2
-        let gate = MatMul.qmethod_matmul(xs, &*self.w1)?;
-        let gate = candle_nn::ops::silu(&gate)?;
-        let up = MatMul.qmethod_matmul(xs, &*self.w3)?;
-        let xs = (gate * up)?;
-        MatMul.qmethod_matmul(&xs, &*self.w2)
+        let xs = if xs.dtype() == DType::F32 {
+            xs.clone()
+        } else {
+            xs.to_dtype(DType::F32)?
+        };
+
+        let gate = MatMul
+            .qmethod_matmul(&xs, &*self.w1)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mlp w1: {e}")))?;
+        let gate = if gate.dtype() == DType::F32 {
+            gate
+        } else {
+            gate.to_dtype(DType::F32)?
+        };
+        let gate = candle_nn::ops::silu(&gate)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mlp silu: {e}")))?;
+        let up = MatMul
+            .qmethod_matmul(&xs, &*self.w3)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mlp w3: {e}")))?;
+        let up = if up.dtype() == DType::F32 {
+            up
+        } else {
+            up.to_dtype(DType::F32)?
+        };
+        let xs = (gate * up)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mlp mul: {e}")))?;
+        let out = MatMul
+            .qmethod_matmul(&xs, &*self.w2)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mlp w2: {e}")))?;
+        if out.dtype() == DType::F32 {
+            Ok(out)
+        } else {
+            out.to_dtype(DType::F32)
+        }
     }
 }
 
@@ -167,8 +235,8 @@ impl EncoderLayer {
     ) -> Result<Self> {
         let attention = EncoderAttention::new(cfg, rotary_emb, vb.pp("attention"))?;
         let feed_forward = EncoderMlp::new(cfg, vb.pp("feed_forward"))?;
-        let attention_norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("attention_norm"))?;
-        let ffn_norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("ffn_norm"))?;
+        let attention_norm = encoder_rms_norm_f32(cfg.dim, cfg.norm_eps, vb.pp("attention_norm"))?;
+        let ffn_norm = encoder_rms_norm_f32(cfg.dim, cfg.norm_eps, vb.pp("ffn_norm"))?;
         Ok(Self {
             attention,
             feed_forward,
@@ -185,23 +253,35 @@ impl EncoderLayer {
         kv_cache: &mut KvCache,
     ) -> Result<Tensor> {
         let residual = xs;
-        let xs = self.attention_norm.forward(xs)?;
+        let xs = self
+            .attention_norm
+            .forward(xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder attention_norm: {e}")))?;
         let xs = self
             .attention
             .forward(&xs, attention_mask, seqlen_offsets, kv_cache)?;
-        let xs = (xs + residual)?;
+        let xs = (xs + residual).map_err(|e| {
+            candle_core::Error::Msg(format!("voxtral encoder attention residual add: {e}"))
+        })?;
         let residual = &xs;
-        let xs = self.ffn_norm.forward(&xs)?;
-        let xs = self.feed_forward.forward(&xs)?;
-        residual + xs
+        let xs = self
+            .ffn_norm
+            .forward(&xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder ffn_norm: {e}")))?;
+        let xs = self
+            .feed_forward
+            .forward(&xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder feed_forward: {e}")))?;
+        (residual + xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder ffn residual add: {e}")))
     }
 }
 
-/// Causal Whisper-based audio encoder for Voxtral.
+/// Causal Whisper-style audio encoder for Voxtral.
 ///
 /// Unlike standard Whisper, this uses:
 /// - Two Conv1d layers to project mel features to encoder dim
-/// - Causal attention with sliding window (750 frames)
+/// - Causal self-attention with sliding window
 /// - RoPE positional embeddings
 /// - SwiGLU FFN
 /// - RMSNorm
@@ -214,15 +294,11 @@ pub struct VoxtralEncoder {
     num_heads: usize,
     sliding_window: Option<usize>,
     n_layers: usize,
-    /// Model dtype (e.g. BF16) for the transformer layers.
-    /// Conv1d weights are stored as F32 for CUDA compatibility.
-    model_dtype: DType,
 }
 
 impl VoxtralEncoder {
     pub fn new(cfg: &WhisperEncoderArgs, vb: ShardedVarBuilder) -> Result<Self> {
         let device = vb.device().clone();
-        let dtype = vb.dtype();
         let n_mels = cfg.audio_encoding_args.num_mel_bins;
 
         // Conv1d weights stored as F32 (CUDA Conv1d does not support BF16).
@@ -262,7 +338,7 @@ impl VoxtralEncoder {
                 1_000_000, // large max_position for encoder
                 &device,
                 false, // !is_gptx: consolidated.safetensors stores Q/K in interleaved layout
-                dtype,
+                DType::F32,
             )?),
         );
 
@@ -276,7 +352,7 @@ impl VoxtralEncoder {
             layers.push(EncoderLayer::new(cfg, rotary_emb, vb_layers.pp(i))?);
         }
 
-        let norm = RmsNorm::new(cfg.dim, cfg.norm_eps, vb.pp("transformer").pp("norm"))?;
+        let norm = encoder_rms_norm_f32(cfg.dim, cfg.norm_eps, vb.pp("transformer").pp("norm"))?;
 
         Ok(Self {
             conv1,
@@ -287,7 +363,6 @@ impl VoxtralEncoder {
             num_heads: cfg.n_heads,
             sliding_window: cfg.sliding_window,
             n_layers: cfg.n_layers,
-            model_dtype: dtype,
         })
     }
 
@@ -297,30 +372,37 @@ impl VoxtralEncoder {
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b_sz, _t, _mel) = xs.dims3()?;
 
-        let xs = xs.to_dtype(DType::F32)?;
+        let xs = xs
+            .to_dtype(DType::F32)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder mel->f32: {e}")))?;
 
         // Transpose [B, T, mel] -> [B, mel, T] for Conv1d
         let xs = xs.transpose(1, 2)?;
 
         // Causal Conv1: left-pad by 2, then conv(kernel=3, stride=1, padding=0)
         let xs = xs.pad_with_zeros(2, 2, 0)?;
-        let xs = self.conv1.forward(&xs)?.gelu_erf()?;
+        let xs = self
+            .conv1
+            .forward(&xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder conv1: {e}")))?
+            .gelu_erf()
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder conv1 gelu: {e}")))?;
 
         // Causal Conv2: left-pad by 1, then conv(kernel=3, stride=2, padding=0)
         // HF VoxtralRealtimeCausalConv1d stores left_pad=1 for this layer.
         let xs = xs.pad_with_zeros(2, 1, 0)?;
-        let xs = self.conv2.forward(&xs)?.gelu_erf()?;
+        let xs = self
+            .conv2
+            .forward(&xs)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder conv2: {e}")))?
+            .gelu_erf()
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder conv2 gelu: {e}")))?;
 
         // Transpose back [B, dim, T/2] -> [B, T/2, dim]
         let xs = xs.transpose(1, 2)?.contiguous()?;
-        // Cast from F32 to model dtype for transformer layers
-        let xs = xs.to_dtype(self.model_dtype)?;
-
         let seq_len = xs.dim(1)?;
 
         let mut cache = self.cache.lock().expect("Encoder cache lock poisoned");
-
-        // Create causal mask with sliding window for the encoder
         let seqlen_offsets = vec![0usize; b_sz];
         let dummy_toks = Tensor::zeros((b_sz, seq_len), DType::U32, xs.device())?;
         let attention_mask = CausalMasker.make_sliding_window_causal_mask_matrix(
@@ -333,15 +415,19 @@ impl VoxtralEncoder {
 
         let mut hidden = xs;
         for (i, layer) in self.layers.iter().enumerate() {
-            hidden = layer.forward(
-                &hidden,
-                attention_mask.as_ref(),
-                &seqlen_offsets,
-                &mut cache.0[i],
-            )?;
+            hidden = layer
+                .forward(
+                    &hidden,
+                    attention_mask.as_ref(),
+                    &seqlen_offsets,
+                    &mut cache.0[i],
+                )
+                .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder layer {i}: {e}")))?;
         }
 
-        self.norm.forward(&hidden)
+        self.norm
+            .forward(&hidden)
+            .map_err(|e| candle_core::Error::Msg(format!("voxtral encoder final norm: {e}")))
     }
 
     /// Reset the encoder KV cache (call between different audio inputs).

@@ -1,10 +1,15 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::{f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
+use std::{
+    f32::consts::PI,
+    ops::Mul,
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use candle_core::{
-    quantized::{QMatMul, QTensor},
-    Context, DType, Device, IndexOp, Result, Tensor, D,
+    quantized::{QMatMul, QStorage, QTensor},
+    Context, DType, Device, DeviceLocation, IndexOp, Result, Tensor, D,
 };
 use candle_nn::{
     BatchNorm, BatchNormConfig, Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, Embedding, GroupNorm,
@@ -2079,6 +2084,7 @@ pub struct QLinear {
     inner: QMatMul,
     bias: Option<Tensor>,
     dtype: DType,
+    relocated_qweights: Arc<Mutex<Vec<(DeviceLocation, Arc<QTensor>)>>>,
 }
 
 impl QLinear {
@@ -2095,6 +2101,7 @@ impl QLinear {
             inner,
             bias: Some(bias),
             dtype: DType::F32,
+            relocated_qweights: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -2103,6 +2110,7 @@ impl QLinear {
             inner: QMatMul::Tensor(linear.weight().clone()),
             bias: linear.bias().cloned(),
             dtype: linear.weight().dtype(),
+            relocated_qweights: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -2112,6 +2120,7 @@ impl QLinear {
             inner: QMatMul::Tensor(w),
             bias: b,
             dtype,
+            relocated_qweights: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -2123,6 +2132,7 @@ impl QLinear {
             inner: QMatMul::QTensor(Arc::new(w)),
             bias: b,
             dtype: DType::F32,
+            relocated_qweights: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -2131,6 +2141,7 @@ impl QLinear {
             inner,
             bias: old.bias.clone(),
             dtype: old.dtype,
+            relocated_qweights: old.relocated_qweights.clone(),
         }
     }
 
@@ -2162,14 +2173,63 @@ impl Module for QLinear {
         } else {
             xs.clone()
         };
+        let inner = self.inner_for_device(xs.device())?;
         if let Some(bias) = &self.bias {
-            self.inner
+            inner
                 .forward(&xs)?
                 .broadcast_add(bias)?
                 .to_dtype(self.dtype)
         } else {
-            self.inner.forward(&xs)?.to_dtype(self.dtype)
+            inner.forward(&xs)?.to_dtype(self.dtype)
         }
+    }
+}
+
+impl QLinear {
+    fn inner_for_device(&self, device: &Device) -> Result<QMatMul> {
+        match &self.inner {
+            QMatMul::QTensor(q) => {
+                let q = self.qtensor_for_device(q, device)?;
+                QMatMul::from_arc(q)
+            }
+            QMatMul::Tensor(t) => {
+                let t = if t.device().same_device(device) {
+                    t.clone()
+                } else {
+                    t.to_device(device)?
+                };
+                Ok(QMatMul::Tensor(t))
+            }
+            QMatMul::TensorF16(t) => {
+                let t = if t.device().same_device(device) {
+                    t.clone()
+                } else {
+                    t.to_device(device)?
+                };
+                Ok(QMatMul::TensorF16(t))
+            }
+        }
+    }
+
+    fn qtensor_for_device(&self, q: &Arc<QTensor>, device: &Device) -> Result<Arc<QTensor>> {
+        if q.device().same_device(device) {
+            return Ok(q.clone());
+        }
+
+        let target_location = device.location();
+        let mut cache = self
+            .relocated_qweights
+            .lock()
+            .expect("QLinear relocation cache poisoned");
+        if let Some((_, cached)) = cache.iter().find(|(location, _)| *location == target_location) {
+            return Ok(cached.clone());
+        }
+
+        let data = q.data()?;
+        let storage = QStorage::from_data(data, device, q.dtype())?;
+        let relocated = Arc::new(QTensor::new(storage, q.shape())?);
+        cache.push((target_location, relocated.clone()));
+        Ok(relocated)
     }
 }
 
@@ -2989,6 +3049,7 @@ impl ReflectionPad2d {
 
 impl Module for ReflectionPad2d {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = xs.contiguous()?;
         let (pad_left, pad_right, pad_top, pad_bottom) = self.padding;
 
         let (_n, _c, h, w) = xs.dims4()?;
@@ -2998,7 +3059,7 @@ impl Module for ReflectionPad2d {
         let left_pad = if pad_left > 0 {
             // Create indices: [pad_left, pad_left-1, ..., 1]
             let indices: Vec<i64> = (1..=pad_left as i64).rev().collect();
-            Some(xs.index_select(&Tensor::new(indices, &Device::Cpu)?, 3)?)
+            Some(xs.index_select(&Tensor::new(indices, xs.device())?, 3)?)
         } else {
             None
         };
@@ -3008,7 +3069,7 @@ impl Module for ReflectionPad2d {
             // For pad_right == 2, generate indices: [w-2, w-3, ... , w-1-pad_right]
             let start = w as i64 - 2;
             let indices: Vec<i64> = (0..pad_right as i64).map(|i| start - i).collect();
-            Some(xs.index_select(&Tensor::new(indices, &Device::Cpu)?, 3)?)
+            Some(xs.index_select(&Tensor::new(indices, xs.device())?, 3)?)
         } else {
             None
         };
@@ -3019,13 +3080,14 @@ impl Module for ReflectionPad2d {
             (Some(l), None) => Tensor::cat(&[l, xs.clone()], 3)?,
             (None, Some(r)) => Tensor::cat(&[xs.clone(), r], 3)?,
             (None, None) => xs.clone(),
-        };
+        }
+        .contiguous()?;
 
         // --- Vertical Padding (along height, axis = 2) ---
         // For top padding, reflect rows 1..=pad_top (in reverse order)
         let top_pad = if pad_top > 0 {
             let indices: Vec<i64> = (1..=pad_top as i64).rev().collect();
-            Some(x_padded_width.index_select(&Tensor::new(indices, &Device::Cpu)?, 2)?)
+            Some(x_padded_width.index_select(&Tensor::new(indices, x_padded_width.device())?, 2)?)
         } else {
             None
         };
@@ -3034,7 +3096,7 @@ impl Module for ReflectionPad2d {
         let bottom_pad = if pad_bottom > 0 {
             let start = h as i64 - 2;
             let indices: Vec<i64> = (0..pad_bottom as i64).map(|i| start - i).collect();
-            Some(x_padded_width.index_select(&Tensor::new(indices, &Device::Cpu)?, 2)?)
+            Some(x_padded_width.index_select(&Tensor::new(indices, x_padded_width.device())?, 2)?)
         } else {
             None
         };
@@ -3048,6 +3110,48 @@ impl Module for ReflectionPad2d {
         };
 
         Ok(x_padded)
+    }
+}
+
+/// Applies 1D reflection padding to a tensor of shape (N, C, W).
+pub struct ReflectionPad1d {
+    padding: (usize, usize),
+}
+
+impl ReflectionPad1d {
+    pub fn new(padding: (usize, usize)) -> Self {
+        Self { padding }
+    }
+}
+
+impl Module for ReflectionPad1d {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = xs.contiguous()?;
+        let (pad_left, pad_right) = self.padding;
+        let (_n, _c, w) = xs.dims3()?;
+
+        let left_pad = if pad_left > 0 {
+            let indices: Vec<i64> = (1..=pad_left as i64).rev().collect();
+            Some(xs.index_select(&Tensor::new(indices, xs.device())?, 2)?)
+        } else {
+            None
+        };
+
+        let right_pad = if pad_right > 0 {
+            let start = w as i64 - 2;
+            let indices: Vec<i64> = (0..pad_right as i64).map(|i| start - i).collect();
+            Some(xs.index_select(&Tensor::new(indices, xs.device())?, 2)?)
+        } else {
+            None
+        };
+
+        match (left_pad, right_pad) {
+            (Some(l), Some(r)) => Tensor::cat(&[l, xs.clone(), r], 2),
+            (Some(l), None) => Tensor::cat(&[l, xs.clone()], 2),
+            (None, Some(r)) => Tensor::cat(&[xs.clone(), r], 2),
+            (None, None) => Ok(xs.clone()),
+        }?
+        .contiguous()
     }
 }
 

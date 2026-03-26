@@ -26,6 +26,14 @@ fn shard(dim: usize, rank: usize, world_size: usize) -> Shard {
     }
 }
 
+fn uneven_shard_bounds(size: usize, rank: usize, world_size: usize) -> (usize, usize) {
+    let base = size / world_size;
+    let remainder = size % world_size;
+    let extra = usize::from(rank < remainder);
+    let start = rank * base + remainder.min(rank);
+    (start, base + extra)
+}
+
 /// This layer has a weight that is parallelized along the input dimension,
 /// returning the "full" output dimension.
 #[derive(Debug)]
@@ -47,8 +55,29 @@ impl RowParallelLayer {
     ) -> Result<Arc<dyn QuantMethod>> {
         let rank = comm.rank();
         let world_size = comm.world_size();
-        let shard = shard(1, rank, world_size);
+        let shard = if in_dim % world_size == 0 {
+            shard(1, rank, world_size)
+        } else {
+            let (offset, len) = uneven_shard_bounds(in_dim, rank, world_size);
+            Shard::Offset {
+                dim: 1,
+                offset,
+                len,
+            }
+        };
+        Self::new_with_shard(in_dim, out_dim, config, bias, comm, shard, vb)
+    }
 
+    #[allow(clippy::new_ret_no_self)]
+    pub fn new_with_shard(
+        in_dim: usize,
+        out_dim: usize,
+        config: &Option<QuantizedConfig>,
+        bias: bool,
+        comm: &Arc<crate::Comm>,
+        shard: Shard,
+        vb: ShardedVarBuilder,
+    ) -> Result<Arc<dyn QuantMethod>> {
         let base_vb = vb.clone();
         let vb = if should_apply_immediate_isq(&vb) {
             vb.set_device(Device::Cpu)
@@ -443,7 +472,16 @@ impl ColumnParallelLayer {
     ) -> Result<Arc<dyn QuantMethod>> {
         let rank = comm.rank();
         let world_size = comm.world_size();
-        let shard = shard(0, rank, world_size);
+        let shard = if out_dim % world_size == 0 {
+            shard(0, rank, world_size)
+        } else {
+            let (offset, len) = uneven_shard_bounds(out_dim, rank, world_size);
+            Shard::Offset {
+                dim: 0,
+                offset,
+                len,
+            }
+        };
 
         Self::new_with_shard(in_dim, out_dim, config, bias, comm, shard, vb)
     }
@@ -963,6 +1001,9 @@ impl PackedExperts {
             candle_core::bail!("PackedExperts does not support bias.");
         }
 
+        let has_stacked_gate_up =
+            vb.contains_tensor("gate_up_proj") || vb.contains_tensor("gate_up_proj.weight");
+
         let (gate_proj, up_proj, down_proj) = if let Some(quant_conf) = &config {
             // GPTQ and BNB do not support tensor parallelism
             if comm.world_size() != 1 {
@@ -974,9 +1015,7 @@ impl PackedExperts {
 
             match quant_conf {
                 QuantizedConfig::Afq { .. } => {
-                    if !vb.contains_tensor("gate_up_proj")
-                        || !vb.contains_tensor("gate_up_proj.weight")
-                    {
+                    if !has_stacked_gate_up || !vb.contains_tensor("gate_up_proj.weight") {
                         candle_core::bail!("PackedExperts with AFQ quantization config does not support `gate_up_proj` format.");
                     }
 
@@ -1042,7 +1081,7 @@ impl PackedExperts {
 
                     // Check if we have stacked format (gate_up_proj) or per-expert format
                     // Note: vb already has the "experts" prefix from the caller (experts.rs)
-                    let is_stacked_format = vb.contains_tensor("gate_up_proj");
+                    let is_stacked_format = has_stacked_gate_up;
 
                     if is_stacked_format {
                         // Stacked format: load FP8 tensors and split
@@ -1294,7 +1333,7 @@ impl PackedExperts {
                     "PackedExperts with quantization config only allows AFQ, FP8, or MXFP4 quantization"
                 ),
             }
-        } else if !vb.contains_tensor("gate_up_proj") {
+        } else if !has_stacked_gate_up {
             // Handle the case where the layer is dummy (no tensors) during UQFF loading. Deserialize will handle it.
             let mut gs: Vec<Arc<dyn QuantMethod>> = Vec::new();
             let mut us: Vec<Arc<dyn QuantMethod>> = Vec::new();
@@ -1344,7 +1383,7 @@ impl PackedExperts {
                 vb.pp("down_proj")
             };
 
-            let gate_proj = vb
+            let gate_proj = vb_gate_up_proj
                 .get_with_hints(
                     (num_local_experts, hidden_size, intermediate_size * 2),
                     "gate_up_proj",
@@ -1352,7 +1391,7 @@ impl PackedExperts {
                 )?
                 .t()?
                 .contiguous()?;
-            let up_proj = vb
+            let up_proj = vb_gate_up_proj
                 .get_with_hints(
                     (num_local_experts, hidden_size, intermediate_size * 2),
                     "gate_up_proj",
@@ -1360,7 +1399,7 @@ impl PackedExperts {
                 )?
                 .t()?
                 .contiguous()?;
-            let down_proj = vb
+            let down_proj = vb_down_proj
                 .get_with_hints(
                     (num_local_experts, intermediate_size, hidden_size),
                     "down_proj",
@@ -1947,10 +1986,12 @@ pub fn compute_kv_shard(total_num_kv_heads: usize, head_dim: usize, comm: &Comm)
     let kv_replicate = if comm.world_size() > total_num_kv_heads {
         comm.world_size() / total_num_kv_heads
     } else {
-        return Shard::Simple {
+        let (offset_heads, local_heads) =
+            crate::shard_bounds(total_num_kv_heads, comm.rank(), comm.world_size());
+        return Shard::Offset {
             dim: 0,
-            rank: comm.rank(),
-            world_size: comm.world_size(),
+            offset: offset_heads * head_dim,
+            len: local_heads * head_dim,
         };
     };
 
@@ -1974,7 +2015,14 @@ pub fn compute_n_kv_groups(
     } else {
         1
     };
-    if kv_replicate != 0 {
+
+    if comm.world_size() <= total_num_kv_heads {
+        let (_, local_attn_heads) =
+            crate::shard_bounds(num_attention_heads, comm.rank(), comm.world_size());
+        let (_, local_kv_heads) =
+            crate::shard_bounds(total_num_kv_heads, comm.rank(), comm.world_size());
+        local_attn_heads / local_kv_heads.max(1)
+    } else if kv_replicate != 0 {
         (num_attention_heads / total_num_kv_heads) / kv_replicate
     } else {
         num_attention_heads / total_num_kv_heads

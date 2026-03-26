@@ -559,18 +559,27 @@ impl Loader for NormalLoader {
         let use_immediate = allow_immediate_cli || has_override_isq;
         if use_immediate {
             let (pool, num_threads) = mistralrs_quant::create_isq_thread_pool(immediate_ty);
-            info!("Applying immediate ISQ in parallel on {num_threads} threads.");
-            mistralrs_quant::set_immediate_isq_with_pool(
-                immediate_ty,
-                immediate_predicates.clone(),
-                topology_overrides.clone(),
-                pool,
-            );
+            if num_threads <= 1 {
+                info!("Applying immediate ISQ synchronously.");
+                mistralrs_quant::set_immediate_isq_serial(
+                    immediate_ty,
+                    immediate_predicates.clone(),
+                    topology_overrides.clone(),
+                );
+            } else {
+                info!("Applying immediate ISQ in parallel on {num_threads} threads.");
+                mistralrs_quant::set_immediate_isq_with_pool(
+                    immediate_ty,
+                    immediate_predicates.clone(),
+                    topology_overrides.clone(),
+                    pool,
+                );
+            }
         }
 
         // Logic for ISQ here: if no calibration (i.e imatrix), then allow immediate ISQ. Otherwise, back to normal.
         let mut loading_isq = if use_immediate {
-            false
+            true
         } else {
             in_situ_quant.is_some()
         };
@@ -579,7 +588,6 @@ impl Loader for NormalLoader {
         }
         loading_isq |= topology_requires_post_quant;
         loading_isq |= self.config.from_uqff.is_some();
-
         if self.config.imatrix.is_some() && self.config.calibration_file.is_some() {
             anyhow::bail!(
                 "`imatrix` and `calibration_file` were both specified, this is not allowed."

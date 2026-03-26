@@ -458,14 +458,15 @@ impl Loader for EmbeddingLoader {
         };
         loading_isq |= topology_requires_post_quant;
         loading_isq |= self.config.from_uqff.is_some();
+        let mut staged_isq_load = loading_isq || use_immediate;
 
         // Load onto the regular device if not using isq.
         // For immediate ISQ on discrete GPUs, load to CPU: the mapper will set the correct target
         // device per-layer, and linear constructors will override to CPU for ISQ-targeted weights.
         // On integrated/unified memory systems (e.g. Grace Blackwell), CPU and GPU share memory,
         // so we load directly to the device.
-        let load_device = if !loading_isq {
-            loading_isq = false;
+        let load_device = if !staged_isq_load {
+            staged_isq_load = false;
             if use_immediate && !crate::utils::normal::is_integrated_gpu(&device) {
                 Device::Cpu
             } else {
@@ -531,7 +532,7 @@ impl Loader for EmbeddingLoader {
                 &available_devices,
                 silent,
                 &config,
-                loading_isq,
+                staged_isq_load,
                 self.config.from_uqff.is_some(),
                 IsqOrganization::Default,
                 &*self.inner,
@@ -545,7 +546,7 @@ impl Loader for EmbeddingLoader {
                     config,
                     self.inner,
                     mapper,
-                    loading_isq,
+                    staged_isq_load,
                     device.clone(),
                     attention_mechanism,
                     multi_progress.clone(),
@@ -563,7 +564,7 @@ impl Loader for EmbeddingLoader {
                     self.inner,
                     silent,
                     mapper,
-                    loading_isq,
+                    staged_isq_load,
                     self.config.from_uqff.is_some(),
                     device.clone(),
                     attention_mechanism,

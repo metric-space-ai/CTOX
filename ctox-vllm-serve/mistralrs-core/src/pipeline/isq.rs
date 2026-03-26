@@ -580,7 +580,13 @@ pub trait IsqModel {
                         current_rayon_threads
                     }
                 };
-                if env::var("MISTRALRS_ISQ_SINGLETHREAD").is_ok() {
+                if let Some(explicit_thread_limit) = env::var("MISTRALRS_ISQ_CPU_THREADS")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                {
+                    minimum_max_threads = explicit_thread_limit;
+                } else if env::var("MISTRALRS_ISQ_SINGLETHREAD").is_ok() {
                     minimum_max_threads = 1;
                 }
 

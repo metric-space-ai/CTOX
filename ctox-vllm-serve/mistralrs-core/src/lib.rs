@@ -123,7 +123,8 @@ pub use pipeline::{
 pub use request::{
     ApproximateUserLocation, Constraint, DetokenizationRequest, ImageGenerationResponseFormat,
     LlguidanceGrammar, MessageContent, NormalRequest, ReasoningEffort, Request, RequestMessage,
-    SearchContextSize, TokenizationRequest, WebSearchOptions, WebSearchUserLocation,
+    SearchContextSize, SpeechGenerationRequest, TokenizationRequest, WebSearchOptions,
+    WebSearchUserLocation,
 };
 pub use response::*;
 pub use sampler::{
@@ -756,7 +757,9 @@ impl MistralRs {
             .is_ok_and(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread);
 
         // Do a dummy run
-        if !distributed::is_daemon()
+        let force_dummy_run = std::env::var_os("MISTRALRS_FORCE_DUMMY_RUN").is_some();
+        if force_dummy_run
+            && !distributed::is_daemon()
             && is_multi_threaded
             && matches!(
                 engine_instance.category,
@@ -813,6 +816,8 @@ impl MistralRs {
 
             // Reset logger counters so the dummy run doesn't pollute stats
             engine_instance.logger.reset();
+        } else {
+            info!("Skipping dummy run during startup.");
         }
 
         // Create engines map with the first engine

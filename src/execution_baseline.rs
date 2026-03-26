@@ -21,6 +21,64 @@ const DISALLOWED_VLLM_SERVE_FUNCTION_TOOLS: &[&str] = &["spawn_agent", "send_inp
 pub enum LocalModelFamily {
     GptOss,
     Qwen35Vision,
+    Glm47Flash,
+    Qwen3Embedding,
+    VoxtralTranscription,
+    Qwen3Speech,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryRole {
+    Embedding,
+    Stt,
+    Tts,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ComputeTarget {
+    Gpu,
+    Cpu,
+}
+
+impl ComputeTarget {
+    pub fn as_env_value(self) -> &'static str {
+        match self {
+            Self::Gpu => "gpu",
+            Self::Cpu => "cpu",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuxiliaryBackendKind {
+    MistralRs,
+    Speaches,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct AuxiliaryModelSelection {
+    pub role: AuxiliaryRole,
+    pub choice: &'static str,
+    pub request_model: &'static str,
+    pub backend_kind: AuxiliaryBackendKind,
+    pub compute_target: ComputeTarget,
+    pub default_port: u16,
+}
+
+impl AuxiliaryModelSelection {
+    pub fn gpu_reserve_mb(self) -> u64 {
+        if self.compute_target == ComputeTarget::Cpu {
+            return 0;
+        }
+        match self.role {
+            AuxiliaryRole::Embedding => 1100,
+            AuxiliaryRole::Stt => 4200,
+            AuxiliaryRole::Tts => 1400,
+        }
+    }
 }
 
 impl FromStr for LocalModelFamily {
@@ -32,6 +90,13 @@ impl FromStr for LocalModelFamily {
             "qwen3_5" | "qwen3.5" | "qwen3-5" | "qwen35" | "qwen3_5_vision" => {
                 Ok(Self::Qwen35Vision)
             }
+            "glm4moelite" | "glm4_flash" | "glm4.7flash" | "glm-4.7-flash" | "gln-4.7-flash"
+            | "gln4.7flash" => Ok(Self::Glm47Flash),
+            "qwen3_embedding" | "qwen3-embedding" | "qwen3embedding" => Ok(Self::Qwen3Embedding),
+            "voxtral" | "voxtral_realtime" | "voxtral-transcription" | "stt" => {
+                Ok(Self::VoxtralTranscription)
+            }
+            "qwen3_tts" | "qwen3-tts" | "qwen3speech" | "tts" => Ok(Self::Qwen3Speech),
             other => anyhow::bail!("unsupported clean-room model family: {other}"),
         }
     }
@@ -78,7 +143,7 @@ pub struct DependencyBootstrapOutcome {
     pub results: Vec<DependencyBootstrapResult>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct VllmServeRuntimeConfig {
     pub family: LocalModelFamily,
     pub model: String,
@@ -106,6 +171,12 @@ pub struct VllmServeFamilyProfile {
     pub disable_nccl: bool,
     pub target_world_size: Option<u32>,
     pub preferred_gpu_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct LocalModelProfile {
+    pub runtime: VllmServeRuntimeConfig,
+    pub family_profile: VllmServeFamilyProfile,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -156,6 +227,403 @@ pub struct CleanRoomBaselinePlan {
     pub bridge_mode: String,
 }
 
+pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+    "openai/gpt-oss-20b",
+    "Qwen/Qwen3.5-4B",
+    "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen3.5-35B-A3B",
+    "zai-org/GLM-4.7-Flash",
+];
+
+pub const SUPPORTED_OPENAI_API_CHAT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"];
+
+pub const SUPPORTED_EMBEDDING_MODELS: &[&str] = &[
+    "Qwen/Qwen3-Embedding-0.6B [GPU]",
+    "Qwen/Qwen3-Embedding-0.6B [CPU]",
+];
+
+pub const SUPPORTED_STT_MODELS: &[&str] = &[
+    "mistralai/Voxtral-Mini-4B-Realtime-2602 [GPU]",
+    "Systran/faster-whisper-small [CPU]",
+];
+
+pub const SUPPORTED_TTS_MODELS: &[&str] = &[
+    "Qwen/Qwen3-TTS-12Hz-0.6B-Base [GPU]",
+    "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice [GPU]",
+    "speaches-ai/piper-de_DE-thorsten-high [CPU DE]",
+    "speaches-ai/piper-fr_FR-siwis-medium [CPU FR]",
+    "speaches-ai/piper-en_US-lessac-medium [CPU EN]",
+];
+
+pub fn auxiliary_model_selection(
+    role: AuxiliaryRole,
+    configured_model: Option<&str>,
+) -> AuxiliaryModelSelection {
+    let value = configured_model.map(str::trim).unwrap_or("");
+    match role {
+        AuxiliaryRole::Embedding => match value.to_ascii_lowercase().as_str() {
+            "qwen/qwen3-embedding-0.6b [cpu]"
+            | "qwen/qwen3-embedding-0.6b (cpu)"
+            | "qwen3-embedding-0.6b [cpu]"
+            | "qwen3-embedding-0.6b (cpu)" => AuxiliaryModelSelection {
+                role,
+                choice: "Qwen/Qwen3-Embedding-0.6B [CPU]",
+                request_model: "Qwen/Qwen3-Embedding-0.6B",
+                backend_kind: AuxiliaryBackendKind::MistralRs,
+                compute_target: ComputeTarget::Cpu,
+                default_port: 1237,
+            },
+            _ => AuxiliaryModelSelection {
+                role,
+                choice: "Qwen/Qwen3-Embedding-0.6B [GPU]",
+                request_model: "Qwen/Qwen3-Embedding-0.6B",
+                backend_kind: AuxiliaryBackendKind::MistralRs,
+                compute_target: ComputeTarget::Gpu,
+                default_port: 1237,
+            },
+        },
+        AuxiliaryRole::Stt => match value.to_ascii_lowercase().as_str() {
+            "systran/faster-whisper-small [cpu]"
+            | "systran/faster-whisper-small (cpu)"
+            | "systran/faster-whisper-small" => AuxiliaryModelSelection {
+                role,
+                choice: "Systran/faster-whisper-small [CPU]",
+                request_model: "Systran/faster-whisper-small",
+                backend_kind: AuxiliaryBackendKind::Speaches,
+                compute_target: ComputeTarget::Cpu,
+                default_port: 1238,
+            },
+            _ => AuxiliaryModelSelection {
+                role,
+                choice: "mistralai/Voxtral-Mini-4B-Realtime-2602 [GPU]",
+                request_model: "mistralai/Voxtral-Mini-4B-Realtime-2602",
+                backend_kind: AuxiliaryBackendKind::MistralRs,
+                compute_target: ComputeTarget::Gpu,
+                default_port: 1238,
+            },
+        },
+        AuxiliaryRole::Tts => match value.to_ascii_lowercase().as_str() {
+            "qwen/qwen3-tts-12hz-0.6b-customvoice [gpu]"
+            | "qwen/qwen3-tts-12hz-0.6b-customvoice (gpu)"
+            | "qwen/qwen3-tts-12hz-0.6b-customvoice" => AuxiliaryModelSelection {
+                role,
+                choice: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice [GPU]",
+                request_model: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                backend_kind: AuxiliaryBackendKind::MistralRs,
+                compute_target: ComputeTarget::Gpu,
+                default_port: 1239,
+            },
+            "speaches-ai/piper-de_de-thorsten-high [cpu de]"
+            | "speaches-ai/piper-de_de-thorsten-high (cpu de)"
+            | "speaches-ai/piper-de_de-thorsten-high" => AuxiliaryModelSelection {
+                role,
+                choice: "speaches-ai/piper-de_DE-thorsten-high [CPU DE]",
+                request_model: "speaches-ai/piper-de_DE-thorsten-high",
+                backend_kind: AuxiliaryBackendKind::Speaches,
+                compute_target: ComputeTarget::Cpu,
+                default_port: 1239,
+            },
+            "speaches-ai/piper-fr_fr-siwis-medium [cpu fr]"
+            | "speaches-ai/piper-fr_fr-siwis-medium (cpu fr)"
+            | "speaches-ai/piper-fr_fr-siwis-medium" => AuxiliaryModelSelection {
+                role,
+                choice: "speaches-ai/piper-fr_FR-siwis-medium [CPU FR]",
+                request_model: "speaches-ai/piper-fr_FR-siwis-medium",
+                backend_kind: AuxiliaryBackendKind::Speaches,
+                compute_target: ComputeTarget::Cpu,
+                default_port: 1239,
+            },
+            "speaches-ai/piper-en_us-lessac-medium [cpu en]"
+            | "speaches-ai/piper-en_us-lessac-medium (cpu en)"
+            | "speaches-ai/piper-en_us-lessac-medium" => AuxiliaryModelSelection {
+                role,
+                choice: "speaches-ai/piper-en_US-lessac-medium [CPU EN]",
+                request_model: "speaches-ai/piper-en_US-lessac-medium",
+                backend_kind: AuxiliaryBackendKind::Speaches,
+                compute_target: ComputeTarget::Cpu,
+                default_port: 1239,
+            },
+            _ => AuxiliaryModelSelection {
+                role,
+                choice: "Qwen/Qwen3-TTS-12Hz-0.6B-Base [GPU]",
+                request_model: "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                backend_kind: AuxiliaryBackendKind::MistralRs,
+                compute_target: ComputeTarget::Gpu,
+                default_port: 1239,
+            },
+        },
+    }
+}
+
+pub fn supported_local_model_profiles() -> Vec<LocalModelProfile> {
+    vec![
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::GptOss,
+                model: "openai/gpt-oss-20b".to_string(),
+                port: 1234,
+                proxy_port: Some(12434),
+                max_seq_len: Some(131_072),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::GptOss,
+                launcher_mode: "text".to_string(),
+                arch: Some("gpt_oss".to_string()),
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.80".to_string()),
+                pa_context_len: None,
+                max_seq_len: 131_072,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: None,
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen35Vision,
+                model: "Qwen/Qwen3.5-4B".to_string(),
+                port: 1235,
+                proxy_port: Some(12434),
+                max_seq_len: Some(65_536),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen35Vision,
+                launcher_mode: "vision".to_string(),
+                arch: None,
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.80".to_string()),
+                pa_context_len: None,
+                max_seq_len: 65_536,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen35Vision,
+                model: "Qwen/Qwen3.5-9B".to_string(),
+                port: 1235,
+                proxy_port: Some(12434),
+                max_seq_len: Some(65_536),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen35Vision,
+                launcher_mode: "vision".to_string(),
+                arch: None,
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.80".to_string()),
+                pa_context_len: None,
+                max_seq_len: 65_536,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen35Vision,
+                model: "Qwen/Qwen3.5-27B".to_string(),
+                port: 1235,
+                proxy_port: Some(12434),
+                max_seq_len: Some(4_096),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen35Vision,
+                launcher_mode: "vision".to_string(),
+                arch: None,
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.80".to_string()),
+                pa_context_len: None,
+                max_seq_len: 4_096,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(3),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen35Vision,
+                model: "Qwen/Qwen3.5-35B-A3B".to_string(),
+                port: 1235,
+                proxy_port: Some(12434),
+                max_seq_len: Some(2_048),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen35Vision,
+                launcher_mode: "vision".to_string(),
+                arch: None,
+                paged_attn: "off".to_string(),
+                pa_cache_type: None,
+                pa_memory_fraction: None,
+                pa_context_len: None,
+                max_seq_len: 2_048,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(3),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Glm47Flash,
+                model: "zai-org/GLM-4.7-Flash".to_string(),
+                port: 1236,
+                proxy_port: Some(12434),
+                max_seq_len: Some(2_048),
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Glm47Flash,
+                launcher_mode: "text".to_string(),
+                arch: Some("glm4moelite".to_string()),
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.45".to_string()),
+                pa_context_len: None,
+                max_seq_len: 2_048,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(3),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen3Embedding,
+                model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                port: 1237,
+                proxy_port: None,
+                max_seq_len: Some(32_768),
+                max_seqs: 8,
+                max_batch_size: 8,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen3Embedding,
+                launcher_mode: "embedding".to_string(),
+                arch: None,
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.30".to_string()),
+                pa_context_len: None,
+                max_seq_len: 32_768,
+                max_batch_size: 8,
+                max_seqs: 8,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::VoxtralTranscription,
+                model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                port: 1238,
+                proxy_port: None,
+                max_seq_len: Some(32_768),
+                max_seqs: 2,
+                max_batch_size: 2,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::VoxtralTranscription,
+                launcher_mode: "vision".to_string(),
+                arch: None,
+                paged_attn: "auto".to_string(),
+                pa_cache_type: Some("f8e4m3".to_string()),
+                pa_memory_fraction: Some("0.55".to_string()),
+                pa_context_len: None,
+                max_seq_len: 32_768,
+                max_batch_size: 2,
+                max_seqs: 2,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+        LocalModelProfile {
+            runtime: VllmServeRuntimeConfig {
+                family: LocalModelFamily::Qwen3Speech,
+                model: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
+                port: 1239,
+                proxy_port: None,
+                max_seq_len: None,
+                max_seqs: 1,
+                max_batch_size: 1,
+            },
+            family_profile: VllmServeFamilyProfile {
+                family: LocalModelFamily::Qwen3Speech,
+                launcher_mode: "speech".to_string(),
+                arch: None,
+                paged_attn: "off".to_string(),
+                pa_cache_type: None,
+                pa_memory_fraction: None,
+                pa_context_len: None,
+                max_seq_len: 4_096,
+                max_batch_size: 1,
+                max_seqs: 1,
+                isq: Some("Q4K".to_string()),
+                tensor_parallel_backend: None,
+                disable_nccl: true,
+                target_world_size: None,
+                preferred_gpu_count: Some(1),
+            },
+        },
+    ]
+}
+
+pub fn model_profile_for_model(model: &str) -> anyhow::Result<LocalModelProfile> {
+    let normalized = normalize_supported_model(model);
+    supported_local_model_profiles()
+        .into_iter()
+        .find(|profile| profile.runtime.model == normalized)
+        .ok_or_else(|| anyhow::anyhow!("unsupported local model profile: {normalized}"))
+}
+
 pub fn load_clean_room_bootstrap_manifest(
     root: &Path,
 ) -> anyhow::Result<CleanRoomBootstrapManifest> {
@@ -197,10 +665,90 @@ pub fn default_runtime_config(family: LocalModelFamily) -> VllmServeRuntimeConfi
             model: "Qwen/Qwen3.5-27B".to_string(),
             port: 1235,
             proxy_port: None,
-            max_seq_len: Some(32_768),
+            max_seq_len: Some(8_192),
             max_seqs: 1,
             max_batch_size: 1,
         },
+        LocalModelFamily::Glm47Flash => VllmServeRuntimeConfig {
+            family,
+            model: "zai-org/GLM-4.7-Flash".to_string(),
+            port: 1236,
+            proxy_port: None,
+            max_seq_len: Some(65_536),
+            max_seqs: 1,
+            max_batch_size: 1,
+        },
+        LocalModelFamily::Qwen3Embedding => VllmServeRuntimeConfig {
+            family,
+            model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+            port: 1237,
+            proxy_port: None,
+            max_seq_len: Some(32_768),
+            max_seqs: 8,
+            max_batch_size: 8,
+        },
+        LocalModelFamily::VoxtralTranscription => VllmServeRuntimeConfig {
+            family,
+            model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+            port: 1238,
+            proxy_port: None,
+            max_seq_len: Some(32_768),
+            max_seqs: 2,
+            max_batch_size: 2,
+        },
+        LocalModelFamily::Qwen3Speech => VllmServeRuntimeConfig {
+            family,
+            model: "Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string(),
+            port: 1239,
+            proxy_port: None,
+            max_seq_len: None,
+            max_seqs: 1,
+            max_batch_size: 1,
+        },
+    }
+}
+
+pub fn runtime_config_for_model(model: &str) -> anyhow::Result<VllmServeRuntimeConfig> {
+    Ok(model_profile_for_model(model)?.runtime)
+}
+
+pub fn is_openai_api_chat_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    SUPPORTED_OPENAI_API_CHAT_MODELS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+}
+
+pub fn uses_ctox_proxy_model(model: &str) -> bool {
+    runtime_config_for_model(model).is_ok()
+}
+
+fn normalize_supported_model(model: &str) -> &str {
+    let trimmed = model.trim();
+    match trimmed.to_ascii_lowercase().as_str() {
+        "glm-4.7-flash"
+        | "glm 4.7 flash"
+        | "gln-4.7-flash"
+        | "gln 4.7 flash"
+        | "zai/glm-4.7b-flash"
+        | "zai-org/glm-4.7b-flash"
+        | "zai/glm-4.7-flash"
+        | "zai-org/glm-4.7-flash" => "zai-org/GLM-4.7-Flash",
+        "qwen/qwen3-embedding-0.6b" | "qwen3-embedding-0.6b" | "qwen3 embedding 0.6b" => {
+            "Qwen/Qwen3-Embedding-0.6B"
+        }
+        "mistralai/voxtral-mini-4b-realtime-2602" | "voxtral-mini-4b-realtime-2602" => {
+            "mistralai/Voxtral-Mini-4B-Realtime-2602"
+        }
+        "qwen/qwen3-tts-12hz-0.6b-base"
+        | "qwen3-tts-12hz-0.6b-base"
+        | "qwen3 tts 0.6b base"
+        | "qwen3-tts 0.6b base" => "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+        "qwen/qwen3-tts-12hz-0.6b-customvoice"
+        | "qwen3-tts-12hz-0.6b-customvoice"
+        | "qwen3 tts 0.6b customvoice"
+        | "qwen3-tts 0.6b customvoice" => "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        _ => trimmed,
     }
 }
 
@@ -218,10 +766,10 @@ pub fn default_family_profile(family: LocalModelFamily) -> VllmServeFamilyProfil
             max_batch_size: 1,
             max_seqs: 1,
             isq: None,
-            tensor_parallel_backend: Some("disabled".to_string()),
-            disable_nccl: true,
-            target_world_size: None,
-            preferred_gpu_count: None,
+            tensor_parallel_backend: Some("nccl".to_string()),
+            disable_nccl: false,
+            target_world_size: Some(2),
+            preferred_gpu_count: Some(2),
         },
         LocalModelFamily::Qwen35Vision => VllmServeFamilyProfile {
             family,
@@ -235,22 +783,95 @@ pub fn default_family_profile(family: LocalModelFamily) -> VllmServeFamilyProfil
             max_batch_size: 1,
             max_seqs: 1,
             isq: Some("Q4K".to_string()),
-            tensor_parallel_backend: Some("disabled".to_string()),
+            tensor_parallel_backend: None,
             disable_nccl: true,
             target_world_size: None,
             preferred_gpu_count: Some(3),
         },
+        LocalModelFamily::Glm47Flash => VllmServeFamilyProfile {
+            family,
+            launcher_mode: "text".to_string(),
+            arch: Some("glm4moelite".to_string()),
+            paged_attn: "auto".to_string(),
+            pa_cache_type: Some("f8e4m3".to_string()),
+            pa_memory_fraction: Some("0.65".to_string()),
+            pa_context_len: None,
+            max_seq_len: 4_096,
+            max_batch_size: 1,
+            max_seqs: 1,
+            isq: Some("Q4K".to_string()),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(3),
+        },
+        LocalModelFamily::Qwen3Embedding => VllmServeFamilyProfile {
+            family,
+            launcher_mode: "embedding".to_string(),
+            arch: None,
+            paged_attn: "auto".to_string(),
+            pa_cache_type: Some("f8e4m3".to_string()),
+            pa_memory_fraction: Some("0.30".to_string()),
+            pa_context_len: None,
+            max_seq_len: 32_768,
+            max_batch_size: 8,
+            max_seqs: 8,
+            isq: Some("Q4K".to_string()),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(1),
+        },
+        LocalModelFamily::VoxtralTranscription => VllmServeFamilyProfile {
+            family,
+            launcher_mode: "vision".to_string(),
+            arch: None,
+            paged_attn: "auto".to_string(),
+            pa_cache_type: Some("f8e4m3".to_string()),
+            pa_memory_fraction: Some("0.55".to_string()),
+            pa_context_len: None,
+            max_seq_len: 32_768,
+            max_batch_size: 2,
+            max_seqs: 2,
+            isq: Some("Q4K".to_string()),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(1),
+        },
+        LocalModelFamily::Qwen3Speech => VllmServeFamilyProfile {
+            family,
+            launcher_mode: "speech".to_string(),
+            arch: None,
+            paged_attn: "off".to_string(),
+            pa_cache_type: None,
+            pa_memory_fraction: None,
+            pa_context_len: None,
+            max_seq_len: 4_096,
+            max_batch_size: 1,
+            max_seqs: 1,
+            isq: Some("Q4K".to_string()),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(1),
+        },
     }
+}
+
+pub fn runtime_profile_for_model(model: &str) -> anyhow::Result<VllmServeFamilyProfile> {
+    Ok(model_profile_for_model(model)?.family_profile)
 }
 
 pub fn build_vllm_serve_command(
     dependencies: &VendoredDependencyPaths,
     runtime: &VllmServeRuntimeConfig,
 ) -> Vec<String> {
-    let family_profile = default_family_profile(runtime.family);
+    let family_profile = runtime_profile_for_model(&runtime.model)
+        .unwrap_or_else(|_| default_family_profile(runtime.family));
     let mut command = vec![dependencies.ctox_vllm_serve_binary.display().to_string()];
     match runtime.family {
-        LocalModelFamily::GptOss => {
+        LocalModelFamily::GptOss | LocalModelFamily::Glm47Flash => {
             command.extend([
                 "serve".to_string(),
                 "--port".to_string(),
@@ -278,6 +899,41 @@ pub fn build_vllm_serve_command(
                 "-p".to_string(),
                 runtime.port.to_string(),
                 "vision".to_string(),
+                "-m".to_string(),
+                runtime.model.clone(),
+            ]);
+        }
+        LocalModelFamily::Qwen3Embedding => {
+            command.extend([
+                "serve".to_string(),
+                "-p".to_string(),
+                runtime.port.to_string(),
+                "embedding".to_string(),
+                "-m".to_string(),
+                runtime.model.clone(),
+            ]);
+        }
+        LocalModelFamily::VoxtralTranscription => {
+            command.extend([
+                "serve".to_string(),
+                "-p".to_string(),
+                runtime.port.to_string(),
+                "vision".to_string(),
+                "-m".to_string(),
+                runtime.model.clone(),
+            ]);
+        }
+        LocalModelFamily::Qwen3Speech => {
+            command.extend([
+                "serve".to_string(),
+                "-p".to_string(),
+                runtime.port.to_string(),
+            ]);
+            if let Some(isq) = family_profile.isq.clone() {
+                command.extend(["--isq".to_string(), isq]);
+            }
+            command.extend([
+                "speech".to_string(),
                 "-m".to_string(),
                 runtime.model.clone(),
             ]);
@@ -326,14 +982,15 @@ pub fn build_clean_room_baseline_plan(
     let runtime = default_runtime_config(family);
     let family_profile = default_family_profile(family);
     let vllm_serve_command = build_vllm_serve_command(&dependencies, &runtime);
-    let codex_exec_command = build_codex_exec_command(
-        &dependencies,
-        &runtime,
-        &CodexExecInvocation { prompt },
-    );
+    let codex_exec_command =
+        build_codex_exec_command(&dependencies, &runtime, &CodexExecInvocation { prompt });
     let bridge_mode = match family {
         LocalModelFamily::GptOss => "codex_responses_proxy".to_string(),
         LocalModelFamily::Qwen35Vision => "qwen_custom_execution".to_string(),
+        LocalModelFamily::Glm47Flash => "codex_responses_proxy".to_string(),
+        LocalModelFamily::Qwen3Embedding => "embedding_server".to_string(),
+        LocalModelFamily::VoxtralTranscription => "transcription_server".to_string(),
+        LocalModelFamily::Qwen3Speech => "speech_server".to_string(),
     };
     CleanRoomBaselinePlan {
         dependencies,
@@ -357,7 +1014,9 @@ pub fn build_clean_room_baseline_plan(
 // This keeps codex-cli pointed at one stable local responses endpoint while
 // the proxy manages backend compatibility per family.
 
-pub fn bootstrap_clean_room_dependencies(root: &Path) -> anyhow::Result<DependencyBootstrapOutcome> {
+pub fn bootstrap_clean_room_dependencies(
+    root: &Path,
+) -> anyhow::Result<DependencyBootstrapOutcome> {
     let manifest = load_clean_room_bootstrap_manifest(root)?;
     let mut results = Vec::new();
     for dependency in manifest.dependencies {
@@ -389,8 +1048,22 @@ fn default_git_ref(name: &str) -> &'static str {
 fn ensure_git_checkout(repo_url: &str, git_ref: &str, target_dir: &Path) -> anyhow::Result<String> {
     if target_dir.join(".git").exists() {
         ensure_git_worktree_clean(target_dir)?;
-        run_git(["-C", path_arg(target_dir), "fetch", "--depth", "1", "origin", git_ref])?;
-        run_git(["-C", path_arg(target_dir), "checkout", "--detach", "FETCH_HEAD"])?;
+        run_git([
+            "-C",
+            path_arg(target_dir),
+            "fetch",
+            "--depth",
+            "1",
+            "origin",
+            git_ref,
+        ])?;
+        run_git([
+            "-C",
+            path_arg(target_dir),
+            "checkout",
+            "--detach",
+            "FETCH_HEAD",
+        ])?;
         return Ok("updated".to_string());
     }
 
@@ -402,13 +1075,31 @@ fn ensure_git_checkout(repo_url: &str, git_ref: &str, target_dir: &Path) -> anyh
     }
 
     if let Some(parent) = target_dir.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create dependency parent dir {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create dependency parent dir {}",
+                parent.display()
+            )
+        })?;
     }
 
     run_git(["clone", "--no-checkout", repo_url, path_arg(target_dir)])?;
-    run_git(["-C", path_arg(target_dir), "fetch", "--depth", "1", "origin", git_ref])?;
-    run_git(["-C", path_arg(target_dir), "checkout", "--detach", "FETCH_HEAD"])?;
+    run_git([
+        "-C",
+        path_arg(target_dir),
+        "fetch",
+        "--depth",
+        "1",
+        "origin",
+        git_ref,
+    ])?;
+    run_git([
+        "-C",
+        path_arg(target_dir),
+        "checkout",
+        "--detach",
+        "FETCH_HEAD",
+    ])?;
     Ok("cloned".to_string())
 }
 
@@ -451,7 +1142,8 @@ fn path_arg(path: &Path) -> &str {
 }
 
 pub fn rewrite_vllm_serve_responses_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut payload: Value = serde_json::from_slice(raw).context("failed to parse responses request")?;
+    let mut payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
 
     if let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) {
         let mut rewritten = Vec::new();
@@ -461,30 +1153,6 @@ pub fn rewrite_vllm_serve_responses_request(raw: &[u8]) -> anyhow::Result<Vec<u8
             }
         }
         *tools = rewritten;
-    }
-
-    if let Some(input) = payload.get("input").cloned() {
-        if let Some(flattened) = flatten_input_items(&input) {
-            payload["input"] = Value::String(flattened);
-        }
-    }
-
-    if let Some(instructions) = payload
-        .get("instructions")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-    {
-        let prefix = format!("[instructions]\n{instructions}");
-        let merged = match payload.get("input").and_then(Value::as_str) {
-            Some(existing) if !existing.trim().is_empty() => format!("{prefix}\n\n{existing}"),
-            _ => prefix,
-        };
-        payload["input"] = Value::String(merged);
-        if let Some(object) = payload.as_object_mut() {
-            object.remove("instructions");
-        }
     }
 
     if payload.get("parallel_tool_calls") == Some(&Value::Bool(false)) {
@@ -497,6 +1165,971 @@ pub fn rewrite_vllm_serve_responses_request(raw: &[u8]) -> anyhow::Result<Vec<u8
     serde_json::to_vec(&payload).context("failed to encode rewritten responses request")
 }
 
+pub fn rewrite_openai_responses_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
+
+    if let Some(tools) = payload.get_mut("tools").and_then(Value::as_array_mut) {
+        let mut rewritten = Vec::new();
+        for tool in tools.drain(..) {
+            rewritten.extend(rewrite_openai_tool(tool));
+        }
+        *tools = rewritten;
+    }
+
+    serde_json::to_vec(&payload).context("failed to encode OpenAI responses request")
+}
+
+pub fn is_qwen_chat_model_id(model_id: &str) -> bool {
+    let lowered = model_id.trim().to_ascii_lowercase();
+    lowered.contains("qwen3.5") || lowered.contains("qwen/qwen3.5")
+}
+
+pub fn is_glm_chat_model_id(model_id: &str) -> bool {
+    let lowered = model_id.trim().to_ascii_lowercase();
+    lowered.contains("glm-4.7") || lowered.contains("glm 4.7") || lowered.contains("glm4.7")
+}
+
+pub fn rewrite_responses_to_qwen_chat_completions(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("Qwen/Qwen3.5-4B")
+        .to_string();
+    let instructions = payload
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let messages = build_qwen_chat_messages(
+        &normalize_responses_input(payload.get("input")),
+        instructions.as_deref(),
+    );
+    let mut merged_system_parts = Vec::new();
+    let mut merged_messages = Vec::new();
+    for message in messages {
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("user");
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if role == "system" {
+            if !content.is_empty() {
+                merged_system_parts.push(content);
+            }
+        } else {
+            merged_messages.push(message);
+        }
+    }
+    let mut messages = Vec::new();
+    if !merged_system_parts.is_empty() {
+        messages.push(json!({
+            "role": "system",
+            "content": merged_system_parts.join("\n\n"),
+        }));
+    }
+    messages.extend(merged_messages);
+
+    let tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .flat_map(|tool| rewrite_qwen_chat_tool(tool.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut request = serde_json::Map::new();
+    request.insert("model".to_string(), Value::String(model));
+    request.insert("messages".to_string(), Value::Array(messages));
+    if !tools.is_empty() {
+        request.insert("tools".to_string(), Value::Array(tools));
+    }
+    for key in [
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "max_output_tokens",
+    ] {
+        if let Some(value) = payload.get(key) {
+            let mapped_key = if key == "max_output_tokens" {
+                "max_tokens"
+            } else {
+                key
+            };
+            request.insert(mapped_key.to_string(), value.clone());
+        }
+    }
+    request.insert("stream".to_string(), Value::Bool(false));
+    if payload.get("parallel_tool_calls") == Some(&Value::Bool(false)) {
+        request.insert("parallel_tool_calls".to_string(), Value::Bool(true));
+    } else if let Some(value) = payload.get("parallel_tool_calls") {
+        request.insert("parallel_tool_calls".to_string(), value.clone());
+    }
+
+    serde_json::to_vec(&Value::Object(request))
+        .context("failed to encode Qwen chat-completions payload")
+}
+
+pub fn rewrite_responses_to_glm_chat_completions(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("zai-org/GLM-4.7-Flash")
+        .to_string();
+    let instructions = payload
+        .get("instructions")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let messages = build_glm_chat_messages(
+        &normalize_responses_input(payload.get("input")),
+        instructions.as_deref(),
+    );
+    let tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .flat_map(|tool| rewrite_glm_chat_tool(tool.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut request = serde_json::Map::new();
+    request.insert("model".to_string(), Value::String(model));
+    request.insert("messages".to_string(), Value::Array(messages));
+    if !tools.is_empty() {
+        request.insert("tools".to_string(), Value::Array(tools));
+    }
+    for key in [
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "max_output_tokens",
+    ] {
+        if let Some(value) = payload.get(key) {
+            let mapped_key = if key == "max_output_tokens" {
+                "max_tokens"
+            } else {
+                key
+            };
+            request.insert(mapped_key.to_string(), value.clone());
+        }
+    }
+    request.insert("stream".to_string(), Value::Bool(false));
+    if payload.get("parallel_tool_calls") == Some(&Value::Bool(false)) {
+        request.insert("parallel_tool_calls".to_string(), Value::Bool(true));
+    } else if let Some(value) = payload.get("parallel_tool_calls") {
+        request.insert("parallel_tool_calls".to_string(), value.clone());
+    }
+
+    serde_json::to_vec(&Value::Object(request))
+        .context("failed to encode GLM chat-completions payload")
+}
+
+fn build_qwen_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = instructions {
+        messages.push(json!({
+            "role": "system",
+            "content": instructions,
+        }));
+    }
+
+    let mut pending_assistant: Option<serde_json::Map<String, Value>> = None;
+    let flush_pending_assistant =
+        |pending_assistant: &mut Option<serde_json::Map<String, Value>>,
+         messages: &mut Vec<Value>| {
+            if let Some(assistant) = pending_assistant.take() {
+                messages.push(Value::Object(assistant));
+            }
+        };
+
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let item_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        match item_type {
+            "message" => {
+                let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+                let mapped_role = match role {
+                    "developer" => "system",
+                    other => other,
+                };
+                let text = extract_message_content_text(object.get("content"));
+                if mapped_role == "assistant" {
+                    flush_pending_assistant(&mut pending_assistant, &mut messages);
+                    let mut assistant = serde_json::Map::new();
+                    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+                    let (reasoning, content) = split_qwen_reasoning_and_content(&text);
+                    assistant.insert("content".to_string(), Value::String(content));
+                    if let Some(reasoning) = reasoning {
+                        assistant.insert("reasoning_content".to_string(), Value::String(reasoning));
+                    }
+                    pending_assistant = Some(assistant);
+                } else {
+                    flush_pending_assistant(&mut pending_assistant, &mut messages);
+                    messages.push(json!({
+                        "role": mapped_role,
+                        "content": text,
+                    }));
+                }
+            }
+            "function_call" => {
+                let call_id = object
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("call_ctox_proxy");
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let arguments = object
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                let assistant = pending_assistant.get_or_insert_with(|| {
+                    let mut assistant = serde_json::Map::new();
+                    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+                    assistant.insert("content".to_string(), Value::String(String::new()));
+                    assistant
+                });
+                let existing = assistant
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let rendered = render_qwen_xml_tool_call(name, arguments);
+                let combined = if existing.trim().is_empty() {
+                    rendered
+                } else {
+                    format!("{existing}{rendered}")
+                };
+                assistant.insert("content".to_string(), Value::String(combined));
+            }
+            "function_call_output" => {
+                flush_pending_assistant(&mut pending_assistant, &mut messages);
+                let call_id = object
+                    .get("call_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("call_ctox_proxy");
+                let output = extract_function_call_output_text(object.get("output"));
+                messages.push(json!({
+                    "role": "user",
+                    "content": format!("<tool_response>\n{}\n</tool_response>", output.trim_end()),
+                    "tool_call_id": call_id,
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    flush_pending_assistant(&mut pending_assistant, &mut messages);
+    messages
+}
+
+fn build_glm_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value> {
+    let mut messages = Vec::new();
+    if let Some(instructions) = instructions {
+        messages.push(json!({
+            "role": "system",
+            "content": instructions,
+        }));
+    }
+
+    let mut pending_assistant: Option<serde_json::Map<String, Value>> = None;
+    let flush_pending_assistant =
+        |pending_assistant: &mut Option<serde_json::Map<String, Value>>,
+         messages: &mut Vec<Value>| {
+            if let Some(assistant) = pending_assistant.take() {
+                messages.push(Value::Object(assistant));
+            }
+        };
+
+    for item in items {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let item_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("message");
+        match item_type {
+            "message" => {
+                let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+                let mapped_role = match role {
+                    "developer" => "system",
+                    other => other,
+                };
+                let text = extract_message_content_text(object.get("content"));
+                if mapped_role == "assistant" {
+                    flush_pending_assistant(&mut pending_assistant, &mut messages);
+                    let mut assistant = serde_json::Map::new();
+                    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+                    let (reasoning, content) = split_qwen_reasoning_and_content(&text);
+                    assistant.insert("content".to_string(), Value::String(content));
+                    if let Some(reasoning) = reasoning {
+                        assistant.insert("reasoning_content".to_string(), Value::String(reasoning));
+                    }
+                    pending_assistant = Some(assistant);
+                } else {
+                    flush_pending_assistant(&mut pending_assistant, &mut messages);
+                    messages.push(json!({
+                        "role": mapped_role,
+                        "content": text,
+                    }));
+                }
+            }
+            "function_call" => {
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let arguments = object
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                let assistant = pending_assistant.get_or_insert_with(|| {
+                    let mut assistant = serde_json::Map::new();
+                    assistant.insert("role".to_string(), Value::String("assistant".to_string()));
+                    assistant.insert("content".to_string(), Value::String(String::new()));
+                    assistant.insert("tool_calls".to_string(), Value::Array(Vec::new()));
+                    assistant
+                });
+                let tool_calls = assistant
+                    .entry("tool_calls".to_string())
+                    .or_insert_with(|| Value::Array(Vec::new()));
+                if let Some(tool_calls) = tool_calls.as_array_mut() {
+                    let parsed_arguments = serde_json::from_str::<Value>(arguments)
+                        .unwrap_or_else(|_| json!({ "input": arguments }));
+                    tool_calls.push(json!({
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": parsed_arguments
+                        }
+                    }));
+                }
+            }
+            "function_call_output" => {
+                flush_pending_assistant(&mut pending_assistant, &mut messages);
+                let output = extract_function_call_output_text(object.get("output"));
+                messages.push(json!({
+                    "role": "tool",
+                    "content": output.trim_end(),
+                }));
+            }
+            _ => {}
+        }
+    }
+
+    flush_pending_assistant(&mut pending_assistant, &mut messages);
+    messages
+}
+
+fn render_qwen_xml_tool_call(name: &str, raw_arguments: &str) -> String {
+    let argument_pairs = serde_json::from_str::<Value>(raw_arguments)
+        .ok()
+        .and_then(|parsed| parsed.as_object().cloned())
+        .unwrap_or_else(|| {
+            let mut fallback = serde_json::Map::new();
+            fallback.insert(
+                "input".to_string(),
+                Value::String(raw_arguments.to_string()),
+            );
+            fallback
+        });
+
+    let mut rendered = format!("\n\n<tool_call>\n<function={name}>\n");
+    for (argument_name, argument_value) in argument_pairs {
+        rendered.push_str(&format!("<parameter={argument_name}>\n"));
+        if argument_value.is_object() || argument_value.is_array() {
+            rendered.push_str(&argument_value.to_string());
+        } else if let Some(text) = argument_value.as_str() {
+            rendered.push_str(text);
+        } else {
+            rendered.push_str(&argument_value.to_string());
+        }
+        rendered.push_str("\n</parameter>\n");
+    }
+    rendered.push_str("</function>\n</tool_call>");
+    rendered
+}
+
+fn rewrite_qwen_chat_tool(tool: Value) -> Vec<Value> {
+    let Some(object) = tool.as_object() else {
+        return Vec::new();
+    };
+    let Some(tool_type) = object.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    match tool_type {
+        "function" => {
+            let Some(name) = object.get("name").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            if name == "apply_patch" {
+                return Vec::new();
+            }
+            rewrite_tool(Value::Object(object.clone()))
+                .into_iter()
+                .collect()
+        }
+        "namespace" => object
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(|children| {
+                children
+                    .iter()
+                    .flat_map(|child| rewrite_qwen_chat_tool(child.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+fn rewrite_glm_chat_tool(tool: Value) -> Vec<Value> {
+    let Some(object) = tool.as_object() else {
+        return Vec::new();
+    };
+    let Some(tool_type) = object.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    match tool_type {
+        "function" => {
+            let Some(name) = object.get("name").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            if name == "apply_patch" {
+                return Vec::new();
+            }
+            rewrite_tool(Value::Object(object.clone()))
+                .into_iter()
+                .collect()
+        }
+        "namespace" => object
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(|children| {
+                children
+                    .iter()
+                    .flat_map(|child| rewrite_glm_chat_tool(child.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+pub fn rewrite_qwen_chat_completions_to_responses(
+    raw: &[u8],
+    fallback_model: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse chat completion response")?;
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .or(fallback_model)
+        .unwrap_or("Qwen/Qwen3.5-4B")
+        .to_string();
+    let response_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|value| format!("resp_{value}"))
+        .unwrap_or_else(|| "resp_ctox_proxy".to_string());
+    let created_at = payload
+        .get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(current_unix_ts);
+
+    let mut output_items = Vec::new();
+    let mut output_text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            let message = choice.get("message").and_then(Value::as_object);
+            if let Some(text) = message
+                .and_then(|msg| msg.get("content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|text| !text.is_empty())
+            {
+                let (plain_text, xml_tool_calls) = parse_qwen_xml_tool_calls(&text);
+                if let Some(plain_text) = plain_text.filter(|text| !text.is_empty()) {
+                    output_text_parts.push(plain_text.clone());
+                    output_items.push(json!({
+                        "type": "message",
+                        "id": "msg_ctox_proxy",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": plain_text, "annotations": []}]
+                    }));
+                }
+                for tool_call in xml_tool_calls {
+                    output_items.push(json!({
+                        "type": "function_call",
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }));
+                }
+            }
+            if let Some(reasoning) = message
+                .and_then(|msg| msg.get("reasoning_content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|text| !text.is_empty())
+            {
+                reasoning_parts.push(reasoning);
+            }
+            if let Some(tool_calls) = message
+                .and_then(|msg| msg.get("tool_calls"))
+                .and_then(Value::as_array)
+            {
+                for tool_call in tool_calls {
+                    let name = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let arguments = tool_call
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("{}");
+                    let call_id = tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("call_ctox_proxy");
+                    output_items.push(json!({
+                        "type": "function_call",
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": arguments
+                    }));
+                }
+            }
+        }
+    }
+    let usage = payload.get("usage").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        })
+    });
+    let response_payload = serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "completed_at": current_unix_ts(),
+        "model": model,
+        "status": "completed",
+        "output": output_items,
+        "output_text": if output_text_parts.is_empty() { Value::Null } else { Value::String(output_text_parts.join("")) },
+        "reasoning": if reasoning_parts.is_empty() { Value::Null } else { Value::String(reasoning_parts.join("\n")) },
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or_else(|| usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)),
+            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or_else(|| usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)),
+            "total_tokens": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0)
+        }
+    });
+    serde_json::to_vec(&response_payload).context("failed to encode Qwen responses payload")
+}
+
+pub fn rewrite_glm_chat_completions_to_responses(
+    raw: &[u8],
+    fallback_model: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse chat completion response")?;
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .or(fallback_model)
+        .unwrap_or("zai-org/GLM-4.7-Flash")
+        .to_string();
+    let response_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|value| format!("resp_{value}"))
+        .unwrap_or_else(|| "resp_ctox_proxy".to_string());
+    let created_at = payload
+        .get("created")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(current_unix_ts);
+
+    let mut output_items = Vec::new();
+    let mut output_text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
+        for choice in choices {
+            let message = choice.get("message").and_then(Value::as_object);
+            if let Some(text) = message
+                .and_then(|msg| msg.get("content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|text| !text.is_empty())
+            {
+                let (plain_text, xml_tool_calls) = parse_glm_xml_tool_calls(&text);
+                if let Some(plain_text) = plain_text.filter(|text| !text.is_empty()) {
+                    output_text_parts.push(plain_text.clone());
+                    output_items.push(json!({
+                        "type": "message",
+                        "id": "msg_ctox_proxy",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": plain_text, "annotations": []}]
+                    }));
+                }
+                for tool_call in xml_tool_calls {
+                    output_items.push(json!({
+                        "type": "function_call",
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }));
+                }
+            }
+            if let Some(reasoning) = message
+                .and_then(|msg| msg.get("reasoning_content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .filter(|text| !text.is_empty())
+            {
+                reasoning_parts.push(reasoning);
+            }
+            if let Some(tool_calls) = message
+                .and_then(|msg| msg.get("tool_calls"))
+                .and_then(Value::as_array)
+            {
+                for tool_call in tool_calls {
+                    let function = tool_call.get("function").unwrap_or(tool_call);
+                    let name = function
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let arguments = function
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    output_items.push(json!({
+                        "type": "function_call",
+                        "call_id": format!("call_ctox_proxy_{}", output_items.len()),
+                        "name": name,
+                        "arguments": if arguments.is_string() { arguments } else { Value::String(arguments.to_string()) }
+                    }));
+                }
+            }
+        }
+    }
+    let usage = payload.get("usage").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        })
+    });
+    let response_payload = serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "completed_at": current_unix_ts(),
+        "model": model,
+        "status": "completed",
+        "output": output_items,
+        "output_text": if output_text_parts.is_empty() { Value::Null } else { Value::String(output_text_parts.join("")) },
+        "reasoning": if reasoning_parts.is_empty() { Value::Null } else { Value::String(reasoning_parts.join("\n")) },
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or_else(|| usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0)),
+            "output_tokens": usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or_else(|| usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0)),
+            "total_tokens": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0)
+        }
+    });
+    serde_json::to_vec(&response_payload).context("failed to encode GLM responses payload")
+}
+
+fn split_qwen_reasoning_and_content(text: &str) -> (Option<String>, String) {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("<think>") {
+        if let Some((reasoning, content)) = rest.split_once("</think>") {
+            let reasoning = reasoning.trim().to_string();
+            let content = content.trim().to_string();
+            return (
+                if reasoning.is_empty() {
+                    None
+                } else {
+                    Some(reasoning)
+                },
+                content,
+            );
+        }
+    }
+    (None, trimmed.to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QwenXmlToolCall {
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
+fn parse_qwen_xml_tool_calls(text: &str) -> (Option<String>, Vec<QwenXmlToolCall>) {
+    let tool_call_re = Regex::new(
+        r"(?s)<tool_call>\s*<function=([A-Za-z0-9_-]+)>\s*(.*?)\s*</function>\s*</tool_call>",
+    )
+    .expect("valid Qwen tool call regex");
+    let param_re = Regex::new(r"(?s)<parameter=([A-Za-z0-9_-]+)>\s*(.*?)\s*</parameter>")
+        .expect("valid parameter regex");
+    let mut tool_calls = Vec::new();
+    let mut plain_text = String::new();
+    let mut last_end = 0usize;
+    for (index, captures) in tool_call_re.captures_iter(text).enumerate() {
+        let Some(matched) = captures.get(0) else {
+            continue;
+        };
+        plain_text.push_str(&text[last_end..matched.start()]);
+        last_end = matched.end();
+        let name = captures
+            .get(1)
+            .map(|capture| capture.as_str().trim().to_string())
+            .unwrap_or_default();
+        let body = captures
+            .get(2)
+            .map(|capture| capture.as_str())
+            .unwrap_or_default();
+        let mut arguments = serde_json::Map::new();
+        for param in param_re.captures_iter(body) {
+            let Some(param_name) = param.get(1).map(|capture| capture.as_str().trim()) else {
+                continue;
+            };
+            let value = param
+                .get(2)
+                .map(|capture| capture.as_str().trim().to_string())
+                .unwrap_or_default();
+            arguments.insert(param_name.to_string(), Value::String(value));
+        }
+        tool_calls.push(QwenXmlToolCall {
+            call_id: format!("call_ctox_proxy_{index}"),
+            name,
+            arguments: Value::Object(arguments).to_string(),
+        });
+    }
+    plain_text.push_str(&text[last_end..]);
+    let plain_text = plain_text.trim().to_string();
+    (
+        if plain_text.is_empty() {
+            None
+        } else {
+            Some(plain_text)
+        },
+        tool_calls,
+    )
+}
+
+fn parse_glm_xml_tool_calls(text: &str) -> (Option<String>, Vec<QwenXmlToolCall>) {
+    let tool_call_re = Regex::new(r"(?s)<tool_call>\s*([A-Za-z0-9_.-]+)\s*(.*?)\s*</tool_call>")
+        .expect("valid GLM tool call regex");
+    let arg_re =
+        Regex::new(r"(?s)<arg_key>\s*(.*?)\s*</arg_key>\s*<arg_value>\s*(.*?)\s*</arg_value>")
+            .expect("valid GLM arg regex");
+    let mut tool_calls = Vec::new();
+    let mut plain_text = String::new();
+    let mut last_end = 0usize;
+    for (index, captures) in tool_call_re.captures_iter(text).enumerate() {
+        let Some(matched) = captures.get(0) else {
+            continue;
+        };
+        plain_text.push_str(&text[last_end..matched.start()]);
+        last_end = matched.end();
+        let name = captures
+            .get(1)
+            .map(|capture| capture.as_str().trim().to_string())
+            .unwrap_or_default();
+        let body = captures
+            .get(2)
+            .map(|capture| capture.as_str())
+            .unwrap_or_default();
+        let mut arguments = serde_json::Map::new();
+        for arg in arg_re.captures_iter(body) {
+            let Some(key) = arg.get(1).map(|capture| capture.as_str().trim()) else {
+                continue;
+            };
+            let value = arg
+                .get(2)
+                .map(|capture| capture.as_str().trim().to_string())
+                .unwrap_or_default();
+            arguments.insert(key.to_string(), Value::String(value));
+        }
+        tool_calls.push(QwenXmlToolCall {
+            call_id: format!("call_ctox_proxy_{index}"),
+            name,
+            arguments: Value::Object(arguments).to_string(),
+        });
+    }
+    plain_text.push_str(&text[last_end..]);
+    let plain_text = plain_text.replace("<|observation|>", "").trim().to_string();
+    (
+        if plain_text.is_empty() {
+            None
+        } else {
+            Some(plain_text)
+        },
+        tool_calls,
+    )
+}
+
+pub fn rewrite_responses_payload_to_sse(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses payload")?;
+    let response_id = payload
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("resp_ctox_proxy");
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let usage = payload.get("usage").cloned().unwrap_or_else(|| {
+        json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0
+        })
+    });
+    let mut frames = Vec::new();
+    frames.push((
+        "response.created",
+        json!({
+            "type": "response.created",
+            "response": {
+                "id": response_id,
+                "model": model
+            }
+        })
+        .to_string(),
+    ));
+    if let Some(items) = payload.get("output").and_then(Value::as_array) {
+        for item in items {
+            frames.push((
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "item": item
+                })
+                .to_string(),
+            ));
+        }
+    }
+    frames.push((
+        "response.completed",
+        json!({
+            "type": "response.completed",
+            "response": {
+                "id": response_id,
+                "model": model,
+                "usage": {
+                    "input_tokens": usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    "output_tokens": usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0),
+                    "total_tokens": usage.get("total_tokens").and_then(Value::as_u64).unwrap_or(0)
+                }
+            }
+        })
+        .to_string(),
+    ));
+    Ok(frames
+        .into_iter()
+        .map(|(event, frame)| format!("event: {event}\ndata: {frame}\n\n"))
+        .chain(std::iter::once("data: [DONE]\n\n".to_string()))
+        .collect::<String>()
+        .into_bytes())
+}
+
+fn responses_input_item_to_chat_message(item: &Value) -> Option<Value> {
+    let object = item.as_object()?;
+    let item_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("message");
+    match item_type {
+        "message" => {
+            let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
+            let mapped_role = match role {
+                "developer" => "system",
+                other => other,
+            };
+            let text = extract_message_content_text(object.get("content"));
+            Some(json!({
+                "role": mapped_role,
+                "content": text,
+            }))
+        }
+        "function_call" => {
+            let call_id = object
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("call_ctox_proxy");
+            let name = object
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let arguments = object
+                .get("arguments")
+                .and_then(Value::as_str)
+                .unwrap_or("{}");
+            Some(json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "arguments": arguments
+                    }
+                }]
+            }))
+        }
+        "function_call_output" => {
+            let call_id = object
+                .get("call_id")
+                .and_then(Value::as_str)
+                .unwrap_or("call_ctox_proxy");
+            let output = extract_function_call_output_text(object.get("output"));
+            Some(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": output,
+            }))
+        }
+        _ => None,
+    }
+}
+
 pub fn should_use_gpt_oss_harmony_proxy(raw: &[u8]) -> anyhow::Result<bool> {
     Ok(parse_harmony_proxy_request(raw)
         .map(|request| is_gpt_oss_model_id(&request.model))
@@ -504,7 +2137,8 @@ pub fn should_use_gpt_oss_harmony_proxy(raw: &[u8]) -> anyhow::Result<bool> {
 }
 
 pub fn responses_request_streams(raw: &[u8]) -> anyhow::Result<bool> {
-    let payload: Value = serde_json::from_slice(raw).context("failed to parse responses request")?;
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
     Ok(payload
         .get("stream")
         .and_then(Value::as_bool)
@@ -534,7 +2168,8 @@ pub fn rewrite_gpt_oss_completion_to_responses(
     raw: &[u8],
     fallback_model: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let payload: Value = serde_json::from_slice(raw).context("failed to parse completion response")?;
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse completion response")?;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -595,7 +2230,8 @@ pub fn rewrite_gpt_oss_completion_to_sse(
     raw: &[u8],
     fallback_model: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    let payload: Value = serde_json::from_slice(raw).context("failed to parse completion response")?;
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse completion response")?;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -668,7 +2304,8 @@ pub fn rewrite_gpt_oss_completion_to_sse(
 }
 
 pub fn gpt_oss_completion_needs_followup(raw: &[u8]) -> anyhow::Result<bool> {
-    let payload: Value = serde_json::from_slice(raw).context("failed to parse completion response")?;
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse completion response")?;
     let raw_text = payload
         .get("choices")
         .and_then(Value::as_array)
@@ -688,10 +2325,10 @@ pub fn build_gpt_oss_followup_completion_request(
         return Ok(None);
     }
 
-    let mut request: Value =
-        serde_json::from_slice(initial_request_raw).context("failed to parse initial completion request")?;
-    let first_payload: Value =
-        serde_json::from_slice(first_completion_raw).context("failed to parse first completion response")?;
+    let mut request: Value = serde_json::from_slice(initial_request_raw)
+        .context("failed to parse initial completion request")?;
+    let first_payload: Value = serde_json::from_slice(first_completion_raw)
+        .context("failed to parse first completion response")?;
     let first_text = first_payload
         .get("choices")
         .and_then(Value::as_array)
@@ -754,8 +2391,51 @@ fn rewrite_tool(tool: Value) -> Option<Value> {
     }
 }
 
+fn rewrite_openai_tool(tool: Value) -> Vec<Value> {
+    let Some(object) = tool.as_object() else {
+        return Vec::new();
+    };
+    let Some(tool_type) = object.get("type").and_then(Value::as_str) else {
+        return Vec::new();
+    };
+    match tool_type {
+        "function" => {
+            let function = object
+                .get("function")
+                .and_then(Value::as_object)
+                .unwrap_or(object);
+            let Some(name) = function.get("name").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            if DISALLOWED_VLLM_SERVE_FUNCTION_TOOLS.contains(&name) {
+                return Vec::new();
+            }
+            let mut flattened = serde_json::Map::new();
+            flattened.insert("type".to_string(), Value::String("function".to_string()));
+            for key in ["name", "description", "parameters", "strict"] {
+                if let Some(value) = function.get(key) {
+                    flattened.insert(key.to_string(), value.clone());
+                }
+            }
+            vec![Value::Object(flattened)]
+        }
+        "namespace" => object
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(|children| {
+                children
+                    .iter()
+                    .flat_map(|child| rewrite_openai_tool(child.clone()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 fn parse_harmony_proxy_request(raw: &[u8]) -> anyhow::Result<HarmonyProxyRequest> {
-    let payload: Value = serde_json::from_slice(raw).context("failed to parse responses request")?;
+    let payload: Value =
+        serde_json::from_slice(raw).context("failed to parse responses request")?;
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -787,7 +2467,8 @@ fn parse_harmony_proxy_request(raw: &[u8]) -> anyhow::Result<HarmonyProxyRequest
         .get("tools")
         .and_then(Value::as_array)
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(|tool| rewrite_tool(tool.clone()))
                 .collect::<Vec<_>>()
         })
@@ -861,7 +2542,7 @@ fn build_gpt_oss_harmony_prompt(
     let assistant_prefix = if tools.is_empty() {
         "<|start|>assistant<|channel|>final<|message|>"
     } else {
-        "<|start|>assistant"
+        "<|start|>assistant<|channel|>"
     };
     let conversation = render_harmony_conversation(conversation_items);
     format!(
@@ -898,10 +2579,7 @@ fn render_harmony_conversation(conversation_items: &[Value]) -> String {
             .unwrap_or("message");
         match item_type {
             "message" => {
-                let role = object
-                    .get("role")
-                    .and_then(Value::as_str)
-                    .unwrap_or("user");
+                let role = object.get("role").and_then(Value::as_str).unwrap_or("user");
                 let text = extract_message_content_text(object.get("content"));
                 if text.trim().is_empty() {
                     continue;
@@ -925,7 +2603,10 @@ fn render_harmony_conversation(conversation_items: &[Value]) -> String {
                 }
             }
             "function_call" => {
-                let name = object.get("name").and_then(Value::as_str).unwrap_or_default();
+                let name = object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 let arguments = object
                     .get("arguments")
                     .and_then(Value::as_str)
@@ -1032,8 +2713,8 @@ pub fn materialize_responses_request(
     raw: &[u8],
     previous_conversation: Option<&Value>,
 ) -> anyhow::Result<Value> {
-    let mut payload: Value =
-        serde_json::from_slice(raw).context("failed to parse responses request for materialization")?;
+    let mut payload: Value = serde_json::from_slice(raw)
+        .context("failed to parse responses request for materialization")?;
     let current_items = normalize_responses_input(payload.get("input"));
     let merged_items = if let Some(previous) = previous_conversation.and_then(Value::as_array) {
         let mut merged = previous.clone();
@@ -1072,14 +2753,19 @@ fn build_harmony_developer_block(system_prompt: &str, tools: &[HarmonyToolSpec])
         block.push_str("When tools are available, emit exactly one next step per completion.\n");
         block.push_str("Either emit one tool call on the commentary channel or one final answer on the final channel.\n");
         block.push_str("Do not emit multiple tool calls in a single completion.\n");
-        block.push_str("After emitting a tool call, stop immediately.\n\n");
-        block.push_str("## functions\n\n");
-        block.push_str("namespace functions {\n");
-        for tool in tools {
-            block.push_str(&render_harmony_tool_signature(tool));
-            block.push('\n');
-        }
-        block.push_str("} // namespace functions\n");
+        block.push_str("After emitting a tool call, stop immediately.\n");
+        block.push_str(
+            "Use only the provided function tool definitions from the request metadata.\n",
+        );
+        block.push_str("Available tools: ");
+        block.push_str(
+            &tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        block.push('\n');
     }
     block.trim_end().to_string()
 }
@@ -1089,7 +2775,8 @@ fn json_schema_to_typescript(schema: &Value) -> String {
         .get("required")
         .and_then(Value::as_array)
         .map(|items| {
-            items.iter()
+            items
+                .iter()
                 .filter_map(Value::as_str)
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
@@ -1113,7 +2800,10 @@ fn json_schema_to_typescript(schema: &Value) -> String {
                         line.push_str(description.trim());
                         line.push('\n');
                     }
-                    line.push_str(&format!("{key}{optional}: {}", json_schema_type_to_typescript(value)));
+                    line.push_str(&format!(
+                        "{key}{optional}: {}",
+                        json_schema_type_to_typescript(value)
+                    ));
                     if let Some(default) = value.get("default") {
                         line.push_str(&format!(", // default: {}", default));
                     }
@@ -1194,7 +2884,7 @@ fn sanitize_harmony_completion_text(raw: &str) -> String {
     if let Some(idx) = text.find("<|start|>") {
         text.truncate(idx);
     }
-    text.trim().to_string()
+    sanitize_harmony_channel_leakage(&text)
 }
 
 fn parse_harmony_response_items(raw_text: &str) -> Vec<HarmonyResponseItem> {
@@ -1283,8 +2973,9 @@ fn normalize_function_call_arguments(name: &str, arguments: &str) -> String {
 
     match value {
         Value::Object(_) => serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string()),
-        Value::String(text) => serde_json::to_string(&json!({ "cmd": text }))
-            .unwrap_or_else(|_| arguments.to_string()),
+        Value::String(text) => {
+            serde_json::to_string(&json!({ "cmd": text })).unwrap_or_else(|_| arguments.to_string())
+        }
         _ => serde_json::to_string(&value).unwrap_or_else(|_| arguments.to_string()),
     }
 }
@@ -1397,7 +3088,7 @@ fn parse_relaxed_write_stdin_arguments(arguments: &str) -> Option<Value> {
 }
 
 fn extract_relaxed_json_string_field(source: &str, key: &str) -> Option<Value> {
-    let key_re = Regex::new(&format!(r#""{}"\s*:"# , regex::escape(key))).ok()?;
+    let key_re = Regex::new(&format!(r#""{}"\s*:"#, regex::escape(key))).ok()?;
     let key_match = key_re.find(source)?;
     let remainder = &source[key_match.end()..];
     let value = remainder.trim_start();
@@ -1411,7 +3102,7 @@ fn extract_relaxed_json_string_field(source: &str, key: &str) -> Option<Value> {
 }
 
 fn extract_relaxed_json_array_field(source: &str, key: &str) -> Option<Vec<Value>> {
-    let key_re = Regex::new(&format!(r#""{}"\s*:"# , regex::escape(key))).ok()?;
+    let key_re = Regex::new(&format!(r#""{}"\s*:"#, regex::escape(key))).ok()?;
     let key_match = key_re.find(source)?;
     let remainder = &source[key_match.end()..];
     let value = remainder.trim_start();
@@ -1425,11 +3116,7 @@ fn extract_relaxed_json_array_field(source: &str, key: &str) -> Option<Vec<Value
 
 fn extract_relaxed_json_integer_field(source: &str, key: &str) -> Option<i64> {
     let re = Regex::new(&format!(r#""{}"\s*:\s*(-?\d+)"#, regex::escape(key))).ok()?;
-    re.captures(source)?
-        .get(1)?
-        .as_str()
-        .parse::<i64>()
-        .ok()
+    re.captures(source)?.get(1)?.as_str().parse::<i64>().ok()
 }
 
 fn extract_relaxed_json_bool_field(source: &str, key: &str) -> Option<bool> {
@@ -1500,8 +3187,11 @@ fn find_matching_bracket(source: &str, open: char, close: char) -> Option<usize>
 }
 
 fn unescape_relaxed_string(text: &str) -> String {
-    serde_json::from_str::<String>(&format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\"")))
-        .unwrap_or_else(|_| text.to_string())
+    serde_json::from_str::<String>(&format!(
+        "\"{}\"",
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+    .unwrap_or_else(|_| text.to_string())
 }
 
 fn extract_harmony_message_text(raw_text: &str) -> String {
@@ -1521,6 +3211,92 @@ fn extract_harmony_message_text(raw_text: &str) -> String {
         }
     }
     sanitize_harmony_completion_text(raw_text)
+}
+
+fn sanitize_harmony_channel_leakage(raw: &str) -> String {
+    let mut text = raw.trim().to_string();
+    let saw_plaintext_harmony = contains_plaintext_harmony_marker(&text);
+
+    loop {
+        let mut stripped_any = false;
+        for prefix in [
+            "assistantfinal",
+            "final",
+            "assistantcommentary",
+            "commentary",
+            "assistantanalysis",
+            "analysis",
+        ] {
+            if let Some(stripped) = text.strip_prefix(prefix) {
+                text = stripped.trim_start().to_string();
+                stripped_any = true;
+            }
+        }
+        if !stripped_any {
+            break;
+        }
+    }
+
+    if let Some(idx) = find_plaintext_harmony_marker(&text) {
+        text.truncate(idx);
+    }
+
+    if saw_plaintext_harmony {
+        text = trim_trailing_incomplete_harmony_token(&text).to_string();
+    }
+
+    text.trim().to_string()
+}
+
+fn find_plaintext_harmony_marker(text: &str) -> Option<usize> {
+    let markers = [
+        "assistantanalysis",
+        "assistantfinal",
+        "assistantcommentary",
+        "analysis",
+        "final",
+        "commentary",
+    ];
+    markers
+        .iter()
+        .filter_map(|marker| text.find(marker).map(|idx| (idx, *marker)))
+        .filter(|(idx, marker)| {
+            if *idx == 0 {
+                return false;
+            }
+            let preceding = text[..*idx].chars().last();
+            let following = text[idx + marker.len()..].chars().next();
+            let preceding_is_payload = preceding
+                .map(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | ')' | ']' | '"' | '\''))
+                .unwrap_or(false);
+            let following_looks_like_channel = following
+                .map(|ch| ch.is_ascii_uppercase() || ch == '<' || ch == '{' || ch == '[')
+                .unwrap_or(false);
+            preceding_is_payload && following_looks_like_channel
+        })
+        .map(|(idx, _)| idx)
+        .min()
+}
+
+fn contains_plaintext_harmony_marker(text: &str) -> bool {
+    [
+        "assistantanalysis",
+        "assistantfinal",
+        "assistantcommentary",
+        "analysis",
+        "final",
+        "commentary",
+    ]
+    .iter()
+    .any(|marker| text.contains(marker))
+}
+
+fn trim_trailing_incomplete_harmony_token(text: &str) -> &str {
+    text.strip_suffix("assistant")
+        .or_else(|| text.strip_suffix("analysis"))
+        .or_else(|| text.strip_suffix("commentary"))
+        .or_else(|| text.strip_suffix("final"))
+        .unwrap_or(text)
 }
 
 fn harmony_item_to_responses_output(item: HarmonyResponseItem) -> Value {
@@ -1610,15 +3386,113 @@ mod tests {
     }
 
     #[test]
+    fn auxiliary_profiles_use_dedicated_mistralrs_subcommands() {
+        let deps = discover_vendored_dependency_paths(Path::new("/tmp/ctox"));
+
+        let embedding = build_vllm_serve_command(
+            &deps,
+            &default_runtime_config(LocalModelFamily::Qwen3Embedding),
+        );
+        assert_eq!(embedding[4], "embedding");
+        assert!(embedding
+            .iter()
+            .any(|part| part == "Qwen/Qwen3-Embedding-0.6B"));
+
+        let stt = build_vllm_serve_command(
+            &deps,
+            &default_runtime_config(LocalModelFamily::VoxtralTranscription),
+        );
+        assert_eq!(stt[4], "vision");
+        assert!(stt
+            .iter()
+            .any(|part| part == "mistralai/Voxtral-Mini-4B-Realtime-2602"));
+
+        let tts = build_vllm_serve_command(
+            &deps,
+            &default_runtime_config(LocalModelFamily::Qwen3Speech),
+        );
+        assert!(tts[0].ends_with("mistralrs"));
+        assert_eq!(tts[1], "serve");
+        assert_eq!(tts[2], "-p");
+        assert!(tts.iter().any(|part| part == "speech"));
+        assert!(tts.windows(2).any(|pair| pair == ["--isq", "Q4K"]));
+        assert!(tts
+            .iter()
+            .any(|part| part == "Qwen/Qwen3-TTS-12Hz-0.6B-Base"));
+    }
+
+    #[test]
+    fn auxiliary_model_choices_resolve_cpu_and_gpu_variants() {
+        let embedding_cpu = auxiliary_model_selection(
+            AuxiliaryRole::Embedding,
+            Some("Qwen/Qwen3-Embedding-0.6B [CPU]"),
+        );
+        assert_eq!(embedding_cpu.request_model, "Qwen/Qwen3-Embedding-0.6B");
+        assert_eq!(embedding_cpu.compute_target, ComputeTarget::Cpu);
+        assert_eq!(embedding_cpu.backend_kind, AuxiliaryBackendKind::MistralRs);
+        assert_eq!(embedding_cpu.gpu_reserve_mb(), 0);
+
+        let stt_gpu = auxiliary_model_selection(
+            AuxiliaryRole::Stt,
+            Some("mistralai/Voxtral-Mini-4B-Realtime-2602"),
+        );
+        assert_eq!(
+            stt_gpu.choice,
+            "mistralai/Voxtral-Mini-4B-Realtime-2602 [GPU]"
+        );
+        assert_eq!(stt_gpu.compute_target, ComputeTarget::Gpu);
+        assert_eq!(stt_gpu.backend_kind, AuxiliaryBackendKind::MistralRs);
+        assert_eq!(stt_gpu.gpu_reserve_mb(), 4200);
+
+        let tts_cpu = auxiliary_model_selection(
+            AuxiliaryRole::Tts,
+            Some("speaches-ai/piper-fr_FR-siwis-medium [CPU FR]"),
+        );
+        assert_eq!(
+            tts_cpu.request_model,
+            "speaches-ai/piper-fr_FR-siwis-medium"
+        );
+        assert_eq!(tts_cpu.compute_target, ComputeTarget::Cpu);
+        assert_eq!(tts_cpu.backend_kind, AuxiliaryBackendKind::Speaches);
+        assert_eq!(tts_cpu.default_port, 1239);
+
+        let tts_de = auxiliary_model_selection(
+            AuxiliaryRole::Tts,
+            Some("speaches-ai/piper-de_DE-thorsten-high [CPU DE]"),
+        );
+        assert_eq!(
+            tts_de.request_model,
+            "speaches-ai/piper-de_DE-thorsten-high"
+        );
+        assert_eq!(tts_de.compute_target, ComputeTarget::Cpu);
+        assert_eq!(tts_de.backend_kind, AuxiliaryBackendKind::Speaches);
+    }
+
+    #[test]
     fn family_profiles_drive_nccl_policy() {
-        let gpt_oss = default_family_profile(LocalModelFamily::GptOss);
-        let qwen = default_family_profile(LocalModelFamily::Qwen35Vision);
+        let gpt_oss = runtime_profile_for_model("openai/gpt-oss-20b").unwrap();
+        let qwen = runtime_profile_for_model("Qwen/Qwen3.5-27B").unwrap();
+        let glm = runtime_profile_for_model("zai-org/GLM-4.7-Flash").unwrap();
+        let embedding = runtime_profile_for_model("Qwen/Qwen3-Embedding-0.6B").unwrap();
+        let stt = runtime_profile_for_model("mistralai/Voxtral-Mini-4B-Realtime-2602").unwrap();
+        let tts = runtime_profile_for_model("Qwen/Qwen3-TTS-12Hz-0.6B-Base").unwrap();
         assert!(gpt_oss.disable_nccl);
-        assert_eq!(gpt_oss.tensor_parallel_backend.as_deref(), Some("disabled"));
+        assert_eq!(gpt_oss.tensor_parallel_backend, None);
+        assert_eq!(gpt_oss.target_world_size, None);
+        assert_eq!(gpt_oss.preferred_gpu_count, Some(1));
         assert!(qwen.disable_nccl);
-        assert_eq!(qwen.tensor_parallel_backend.as_deref(), Some("disabled"));
+        assert_eq!(qwen.tensor_parallel_backend, None);
         assert_eq!(qwen.target_world_size, None);
         assert_eq!(qwen.preferred_gpu_count, Some(3));
+        assert!(glm.disable_nccl);
+        assert_eq!(glm.tensor_parallel_backend, None);
+        assert_eq!(glm.preferred_gpu_count, Some(3));
+        assert!(embedding.disable_nccl);
+        assert_eq!(embedding.preferred_gpu_count, Some(1));
+        assert!(stt.disable_nccl);
+        assert_eq!(stt.preferred_gpu_count, Some(1));
+        assert!(tts.disable_nccl);
+        assert_eq!(tts.preferred_gpu_count, Some(1));
     }
 
     #[test]
@@ -1630,7 +3504,23 @@ mod tests {
         );
         assert_eq!(plan.family_profile.family, LocalModelFamily::Qwen35Vision);
         assert_eq!(plan.family_profile.launcher_mode, "vision");
-        assert_eq!(plan.family_profile.tensor_parallel_backend.as_deref(), Some("disabled"));
+        assert_eq!(plan.family_profile.tensor_parallel_backend, None);
+    }
+
+    #[test]
+    fn model_specific_runtime_profiles_match_size_class() {
+        let qwen_small = runtime_profile_for_model("Qwen/Qwen3.5-4B").unwrap();
+        assert!(qwen_small.disable_nccl);
+        assert_eq!(qwen_small.preferred_gpu_count, Some(1));
+        assert_eq!(qwen_small.max_seq_len, 65_536);
+
+        let qwen_large = runtime_profile_for_model("Qwen/Qwen3.5-35B-A3B").unwrap();
+        assert!(qwen_large.disable_nccl);
+        assert_eq!(qwen_large.target_world_size, None);
+        assert_eq!(qwen_large.preferred_gpu_count, Some(3));
+
+        let glm = runtime_profile_for_model("GLN 4.7 flash").unwrap();
+        assert_eq!(glm.arch.as_deref(), Some("glm4moelite"));
     }
 
     #[test]
@@ -1651,6 +3541,30 @@ mod tests {
     }
 
     #[test]
+    fn harmony_prompt_does_not_inline_full_tool_schemas() {
+        let prompt = build_gpt_oss_harmony_prompt(
+            "Be precise.",
+            &[json!({
+                "type":"message",
+                "role":"user",
+                "content":[{"text":"Reply with OK"}]
+            })],
+            "medium",
+            &[HarmonyToolSpec {
+                name: "exec_command".to_string(),
+                description: Some("Runs a shell command".to_string()),
+                parameters: Some(json!({"type":"object"})),
+            }],
+        );
+        assert!(prompt.contains("Available tools: exec_command"));
+        assert!(prompt.contains(
+            "Use only the provided function tool definitions from the request metadata."
+        ));
+        assert!(!prompt.contains("namespace functions"));
+        assert!(!prompt.contains("type exec_command"));
+    }
+
+    #[test]
     fn qwen_plan_has_no_direct_codex_exec_baseline() {
         let deps = discover_vendored_dependency_paths(Path::new("/tmp/ctox"));
         let runtime = default_runtime_config(LocalModelFamily::Qwen35Vision);
@@ -1658,6 +3572,21 @@ mod tests {
             prompt: "ignored".to_string(),
         };
         assert!(build_codex_exec_command(&deps, &runtime, &invocation).is_none());
+    }
+
+    #[test]
+    fn recognizes_openai_api_chat_models() {
+        assert!(is_openai_api_chat_model("gpt-5.4"));
+        assert!(is_openai_api_chat_model("GPT-5.4-MINI"));
+        assert!(!is_openai_api_chat_model("openai/gpt-oss-20b"));
+    }
+
+    #[test]
+    fn only_local_runtime_models_use_ctox_proxy_path() {
+        assert!(!uses_ctox_proxy_model("gpt-5.4"));
+        assert!(!uses_ctox_proxy_model("gpt-5.4-nano"));
+        assert!(uses_ctox_proxy_model("Qwen/Qwen3.5-4B"));
+        assert!(!uses_ctox_proxy_model("not-a-real-model"));
     }
 
     #[test]
@@ -1671,10 +3600,9 @@ mod tests {
             "parallel_tool_calls": false,
             "max_tool_calls": 1,
         });
-        let rewritten = rewrite_vllm_serve_responses_request(
-            serde_json::to_vec(&payload).unwrap().as_slice(),
-        )
-        .unwrap();
+        let rewritten =
+            rewrite_vllm_serve_responses_request(serde_json::to_vec(&payload).unwrap().as_slice())
+                .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(
             value["tools"],
@@ -1687,7 +3615,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_rewrite_flattens_input_and_merges_instructions() {
+    fn responses_rewrite_preserves_structured_input_and_instructions() {
         let payload = serde_json::json!({
             "instructions": "System rule",
             "input": [
@@ -1695,19 +3623,40 @@ mod tests {
                 {"role": "user", "content": [{"text": "User text"}]}
             ]
         });
-        let rewritten = rewrite_vllm_serve_responses_request(
-            serde_json::to_vec(&payload).unwrap().as_slice(),
-        )
-        .unwrap();
+        let rewritten =
+            rewrite_vllm_serve_responses_request(serde_json::to_vec(&payload).unwrap().as_slice())
+                .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(
-            value["input"],
-            Value::String(
-                "[instructions]\nSystem rule\n\n[developer]\nDev text\n\n[user]\nUser text"
-                    .to_string()
-            )
+            value["instructions"],
+            Value::String("System rule".to_string())
         );
-        assert!(value.get("instructions").is_none());
+        assert_eq!(value["input"], payload["input"]);
+    }
+
+    #[test]
+    fn openai_responses_rewrite_flattens_namespace_tools() {
+        let payload = serde_json::json!({
+            "tools": [
+                {
+                    "type": "namespace",
+                    "tools": [
+                        {"type":"function","name":"exec_command","description":"run","parameters":{"type":"object"}},
+                        {"type":"function","name":"spawn_agent","parameters":{"type":"object"}}
+                    ]
+                }
+            ]
+        });
+        let rewritten =
+            rewrite_openai_responses_request(serde_json::to_vec(&payload).unwrap().as_slice())
+                .unwrap();
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(
+            value["tools"],
+            serde_json::json!([
+                {"type":"function","name":"exec_command","description":"run","parameters":{"type":"object"}}
+            ])
+        );
     }
 
     #[test]
@@ -1733,13 +3682,18 @@ mod tests {
             "max_output_tokens": 333,
             "reasoning": {"effort":"high"}
         });
-        let rewritten = rewrite_responses_to_gpt_oss_completion(&serde_json::to_vec(&payload).unwrap()).unwrap();
+        let rewritten =
+            rewrite_responses_to_gpt_oss_completion(&serde_json::to_vec(&payload).unwrap())
+                .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(value["model"], "openai/gpt-oss-20b");
         assert_eq!(value["max_tokens"], 333);
         assert!(value["prompt"].as_str().unwrap().contains("System rules"));
         assert!(value["prompt"].as_str().unwrap().contains("Do the thing"));
-        assert!(value["prompt"].as_str().unwrap().contains("<|start|>assistant"));
+        assert!(value["prompt"]
+            .as_str()
+            .unwrap()
+            .contains("<|start|>assistant"));
     }
 
     #[test]
@@ -1751,13 +3705,69 @@ mod tests {
             "choices":[{"text":"<|start|>assistant<|channel|>final<|message|>CTOX_OK<|end|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
-        let rewritten = rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None).unwrap();
+        let rewritten =
+            rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(value["status"], "completed");
         assert_eq!(value["output_text"], "CTOX_OK");
         assert_eq!(value["output"][0]["content"][0]["text"], "CTOX_OK");
         assert_eq!(value["usage"]["input_tokens"], 11);
         assert_eq!(value["usage"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn strips_plaintext_harmony_channel_leakage_from_gpt_oss() {
+        let payload = serde_json::json!({
+            "id":"123",
+            "created":42,
+            "model":"openai/gpt-oss-20b",
+            "choices":[{"text":"GPTOSS_OKanalysisThe user says assistantfinalGPTOSS_OK"}],
+            "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+        });
+        let rewritten =
+            rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output_text"], "GPTOSS_OK");
+        assert_eq!(value["output"][0]["content"][0]["text"], "GPTOSS_OK");
+    }
+
+    #[test]
+    fn strips_real_world_plaintext_harmony_channel_leakage_from_gpt_oss() {
+        let payload = serde_json::json!({
+            "id":"123",
+            "created":42,
+            "model":"openai/gpt-oss-20b",
+            "choices":[{"text":"GPTOSS_OKassistantanalysisThe user says: \"Reply with GPTOSS_OK and nothing else.\"assistantfinalGPTOSS_OKassistantcommentaryto=functions.exec_command{\"cmd\":\"printf GPTOSS_OK\"}"}],
+            "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+        });
+        let rewritten =
+            rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output_text"], "GPTOSS_OK");
+        assert_eq!(value["output"][0]["content"][0]["text"], "GPTOSS_OK");
+    }
+
+    #[test]
+    fn strips_real_world_plaintext_harmony_channel_leakage_with_trailing_assistant() {
+        let payload = serde_json::json!({
+            "id":"123",
+            "created":42,
+            "model":"openai/gpt-oss-20b",
+            "choices":[{"text":"GPTOSS_OKassistantanalysisThe user says: \"Reply with GPTOSS_OK and nothing else.\" So we should output exactly \"GPTOSS_OK\" with no other text.assistantfinalGPTOSS_OKassistantcommentaryWe have complied.assistantanalysisWe are done.assistantfinalGPTOSS_OKassistant"}],
+            "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+        });
+        let rewritten =
+            rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
+        let value: Value = serde_json::from_slice(&rewritten).unwrap();
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["output_text"], "GPTOSS_OK");
+        assert_eq!(value["output"][0]["content"][0]["text"], "GPTOSS_OK");
     }
 
     #[test]
@@ -1769,7 +3779,9 @@ mod tests {
             "choices":[{"text":"<|channel|>commentary to=functions.shell_command<|constrain|>json<|message|>{\"command\":\"printf CTOX_TOOL\"}<|call|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
-        let rewritten = rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None).unwrap();
+        let rewritten =
+            rewrite_gpt_oss_completion_to_responses(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
         assert_eq!(value["status"], "completed");
         assert!(value["output_text"].is_null());
@@ -1816,7 +3828,9 @@ mod tests {
             "choices":[{"text":"<|channel|>final<|message|>CTOX_STREAM_OK<|end|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
-        let rewritten = rewrite_gpt_oss_completion_to_sse(&serde_json::to_vec(&payload).unwrap(), None).unwrap();
+        let rewritten =
+            rewrite_gpt_oss_completion_to_sse(&serde_json::to_vec(&payload).unwrap(), None)
+                .unwrap();
         let text = String::from_utf8(rewritten).unwrap();
         assert!(text.contains("\"type\":\"response.created\""));
         assert!(text.contains("\"type\":\"response.output_item.done\""));

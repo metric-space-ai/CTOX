@@ -128,6 +128,17 @@ impl QuantMethod for BlockwiseFP8Linear {
     /// If `a` is (n_tokens, 1, cols), `self` weights are (n_experts, rows, cols),
     /// then the indices are (n_tokens, n_experts_per_tok).
     fn gather_forward(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        let x = if x.device().same_device(&self.weight.device()) {
+            x.clone()
+        } else {
+            x.to_device(&self.weight.device())?
+        };
+        let indices = if indices.device().same_device(&self.weight.device()) {
+            indices.clone()
+        } else {
+            indices.to_device(&self.weight.device())?
+        };
+
         // Try to use native FP8 indexed MoE GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
@@ -136,10 +147,10 @@ impl QuantMethod for BlockwiseFP8Linear {
             {
                 // Use native FP8 indexed MoE GEMM kernel (expects U32 indices)
                 let result = ops::fp8_indexed_moe_gemm(
-                    x,
+                    &x,
                     &self.weight,
                     &self.weight_scale_inv,
-                    indices,
+                    &indices,
                     &self.weight_block_size,
                 )?;
                 // Apply bias if present (broadcast over tokens and topk)
