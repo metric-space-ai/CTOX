@@ -19,6 +19,8 @@ Prefer active lookup over passive wrapper context.
 
 1. Read the current thread:
    - `ctox channel history --thread-key <key> --limit 12`
+1a. Prefer the structured reconstruction view first when available:
+   - `ctox channel context --thread-key <key> --query <text> --sender <addr> --limit 12`
 2. Search for related communication across channels:
    - `ctox channel search --query <text> --limit 12`
    - add `--channel <name>` or `--sender <addr>` when you need to narrow the search
@@ -28,6 +30,7 @@ Prefer active lookup over passive wrapper context.
 ## Query Heuristics
 
 - Start with the exact `thread_key` for direct history.
+- When possible, build one structured communication-state view first with `ctox channel context` and then drill into the raw hits only if needed.
 - Search by sender address plus the operational topic or service name.
 - Search by concrete blocker or approval terms when the new message looks like a follow-up.
 - If you already know a queue title, service name, host, or deployment target, include that in the search query.
@@ -41,6 +44,7 @@ Before replying, explicitly decide whether earlier communication changed any of 
 - whether CTOX already promised follow-up work
 - whether the owner already supplied missing values
 - whether a prior answer is now stale or contradicted
+- whether there are still unanswered owner questions in the active thread
 
 If yes, answer from the updated state, not from the newest inbound line alone.
 

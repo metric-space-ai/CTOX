@@ -25,6 +25,9 @@ pub struct FollowUpRequest {
     pub open_items: Vec<String>,
     pub requirements_changed: bool,
     pub owner_visible: bool,
+    pub review_required: bool,
+    pub review_verdict: Option<String>,
+    pub review_summary: Option<String>,
 }
 
 pub fn handle_follow_up_command(args: &[String]) -> Result<()> {
@@ -37,7 +40,7 @@ pub fn handle_follow_up_command(args: &[String]) -> Result<()> {
             Ok(())
         }
         _ => anyhow::bail!(
-            "usage:\n  ctox follow-up evaluate --goal <text> --result <text> [--step-title <text>] [--skill <name>] [--thread-key <key>] [--blocker <text>] [--open-item <text>]... [--requirements-changed] [--owner-visible]"
+            "usage:\n  ctox follow-up evaluate --goal <text> --result <text> [--step-title <text>] [--skill <name>] [--thread-key <key>] [--blocker <text>] [--open-item <text>]... [--requirements-changed] [--owner-visible] [--review-required] [--review-verdict <pass|fail|partial|unavailable>] [--review-summary <text>]"
         ),
     }
 }
@@ -66,7 +69,6 @@ fn evaluate_follow_up(request: FollowUpRequest) -> FollowUpDecision {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| infer_blocker_from_result(&request.result))
     {
         let blocked_on_user = blocker_mentions_user(&blocker);
         return FollowUpDecision {
@@ -88,12 +90,16 @@ fn evaluate_follow_up(request: FollowUpRequest) -> FollowUpDecision {
         };
     }
 
-    if !request.open_items.is_empty() || result_looks_incomplete(&request.result) {
-        let open_items = if request.open_items.is_empty() {
-            vec!["Continue the next unfinished slice implied by the latest result.".to_string()]
-        } else {
-            request.open_items.clone()
-        };
+    let mut open_items = request.open_items.clone();
+    if let Some(review_item) = review_gate_open_item(
+        request.review_required,
+        request.review_verdict.as_deref(),
+        request.review_summary.as_deref(),
+    ) {
+        open_items.push(review_item);
+    }
+
+    if !open_items.is_empty() {
         let title = if let Some(step_title) = request
             .step_title
             .as_deref()
@@ -128,10 +134,6 @@ fn evaluate_follow_up(request: FollowUpRequest) -> FollowUpDecision {
         owner_communication_recommended: false,
         owner_note: None,
     }
-}
-
-pub fn evaluate_follow_up_request(request: FollowUpRequest) -> FollowUpDecision {
-    evaluate_follow_up(request)
 }
 
 fn render_follow_up_prompt(goal: &str, result: &str, open_items: &[String]) -> String {
@@ -173,6 +175,9 @@ fn parse_evaluate_request(args: &[String]) -> Result<FollowUpRequest> {
         open_items: find_all_flag_values(args, "--open-item"),
         requirements_changed: args.iter().any(|arg| arg == "--requirements-changed"),
         owner_visible: args.iter().any(|arg| arg == "--owner-visible"),
+        review_required: args.iter().any(|arg| arg == "--review-required"),
+        review_verdict: find_flag_value(args, "--review-verdict").map(ToOwned::to_owned),
+        review_summary: find_flag_value(args, "--review-summary").map(ToOwned::to_owned),
     })
 }
 
@@ -215,57 +220,43 @@ fn blocker_mentions_user(value: &str) -> bool {
     .any(|needle| lowered.contains(needle))
 }
 
-fn result_looks_incomplete(result: &str) -> bool {
-    let lowered = result.to_lowercase();
-    [
-        "remaining",
-        "follow-up",
-        "follow up",
-        "not finished",
-        "incomplete",
-        "next step",
-        "still need",
-        "pending",
-        "todo",
-        "left to do",
-        "nächster schritt",
-        "naechster schritt",
-        "noch offen",
-        "noch nicht fertig",
-        "ich werde",
-        "anschließend",
-        "als nächster schritt",
-        "folgt als nächster schritt",
-    ]
-    .iter()
-    .any(|needle| lowered.contains(needle))
+fn review_gate_open_item(
+    review_required: bool,
+    review_verdict: Option<&str>,
+    review_summary: Option<&str>,
+) -> Option<String> {
+    if !review_required || review_verdict_passed(review_verdict) {
+        return None;
+    }
+    let summary = review_summary
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| clip_text(value, 180));
+    let prefix = match normalize_review_verdict(review_verdict).as_deref() {
+        Some("fail") => "Resolve review findings before treating the slice as done",
+        Some("partial") => "Complete the missing verification before treating the slice as done",
+        Some("unavailable") => "Re-run completion review before treating the slice as done",
+        _ => "Run or complete the required completion review before treating the slice as done",
+    };
+    Some(match summary {
+        Some(summary) => format!("{prefix}: {summary}"),
+        None => prefix.to_string(),
+    })
 }
 
-fn infer_blocker_from_result(result: &str) -> Option<String> {
-    for line in result.lines() {
-        let trimmed = line.trim();
-        let lowered = trimmed.to_lowercase();
-        if lowered.starts_with("blocked:") || lowered.starts_with("blockiert:") {
-            let blocker = trimmed
-                .split_once(':')
-                .map(|(_, rest)| rest.trim())
-                .filter(|value| !value.is_empty())
-                .unwrap_or(trimmed);
-            return Some(blocker.to_string());
-        }
+fn review_verdict_passed(value: Option<&str>) -> bool {
+    matches!(normalize_review_verdict(value).as_deref(), Some("pass"))
+}
+
+fn normalize_review_verdict(value: Option<&str>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "pass" | "passed" | "ok" => Some("pass".to_string()),
+        "fail" | "failed" => Some("fail".to_string()),
+        "partial" => Some("partial".to_string()),
+        "unavailable" | "missing" => Some("unavailable".to_string()),
+        _ => None,
     }
-    let lowered = result.to_lowercase();
-    if lowered.contains("**state**") && lowered.contains("blocked") {
-        return Some(clip_text(result, 240));
-    }
-    if lowered.contains("still blocked")
-        || lowered.contains("remains blocked")
-        || lowered.contains("bleibt blockiert")
-        || lowered.contains("weiter blockiert")
-    {
-        return Some(clip_text(result, 240));
-    }
-    None
 }
 
 fn owner_note(enabled: bool, note: &str) -> Option<String> {
@@ -360,6 +351,9 @@ mod tests {
             open_items: Vec::new(),
             requirements_changed: false,
             owner_visible: false,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
         assert_eq!(decision.status, "done");
     }
@@ -376,6 +370,9 @@ mod tests {
             open_items: vec!["Run the remote smoke check".to_string()],
             requirements_changed: false,
             owner_visible: false,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
         assert_eq!(decision.status, "needs_followup");
         assert!(decision
@@ -396,13 +393,16 @@ mod tests {
             open_items: Vec::new(),
             requirements_changed: false,
             owner_visible: true,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
         assert_eq!(decision.status, "blocked_on_user");
         assert!(decision.owner_communication_recommended);
     }
 
     #[test]
-    fn evaluates_followup_for_german_next_step_language() {
+    fn result_text_alone_does_not_force_follow_up() {
         let decision = evaluate_follow_up(FollowUpRequest {
             goal: "Installiere Nextcloud".to_string(),
             result: "Die Vorarbeiten sind erledigt. Nextcloud folgt als nächster Schritt."
@@ -414,22 +414,31 @@ mod tests {
             open_items: Vec::new(),
             requirements_changed: false,
             owner_visible: true,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
-        assert_eq!(decision.status, "needs_followup");
+        assert_eq!(decision.status, "done");
     }
 
     #[test]
-    fn infers_blocked_followup_from_result_text() {
+    fn explicit_blocker_controls_blocked_status() {
         let decision = evaluate_follow_up(FollowUpRequest {
             goal: "Installiere Nextcloud".to_string(),
             result: "Blocked: NEXTCLOUD_URL, username, and password are missing, so the rollout cannot finish safely.".to_string(),
             step_title: None,
             suggested_skill: Some("change-lifecycle".to_string()),
             thread_key: Some("email/thread".to_string()),
-            blocker: None,
+            blocker: Some(
+                "NEXTCLOUD_URL, username, and password are missing, so the rollout cannot finish safely."
+                    .to_string(),
+            ),
             open_items: Vec::new(),
             requirements_changed: false,
             owner_visible: true,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
         assert_eq!(decision.status, "blocked_on_user");
         assert!(decision.owner_communication_recommended);
@@ -443,15 +452,65 @@ mod tests {
             step_title: None,
             suggested_skill: Some("change-lifecycle".to_string()),
             thread_key: Some("email/thread".to_string()),
-            blocker: None,
+            blocker: Some(
+                "NEXTCLOUD_URL, username, and password are missing, so the rollout cannot finish safely."
+                    .to_string(),
+            ),
             open_items: Vec::new(),
             requirements_changed: false,
             owner_visible: true,
+            review_required: false,
+            review_verdict: None,
+            review_summary: None,
         });
         let note = decision.owner_note.expect("owner note");
         assert!(note.contains("NEXTCLOUD_URL"));
         assert!(note.contains("username"));
         assert!(note.contains("password"));
         assert!(note.contains("Reply in TUI or answer the current owner message"));
+    }
+
+    #[test]
+    fn review_required_without_pass_keeps_slice_open() {
+        let decision = evaluate_follow_up(FollowUpRequest {
+            goal: "Deploy the service".to_string(),
+            result: "Deployment completed successfully.".to_string(),
+            step_title: Some("deploy".to_string()),
+            suggested_skill: None,
+            thread_key: None,
+            blocker: None,
+            open_items: Vec::new(),
+            requirements_changed: false,
+            owner_visible: false,
+            review_required: true,
+            review_verdict: Some("partial".to_string()),
+            review_summary: Some(
+                "HTTP health check was not exercised from the live service.".to_string(),
+            ),
+        });
+        assert_eq!(decision.status, "needs_followup");
+        assert!(decision
+            .follow_up_prompt
+            .expect("follow-up prompt")
+            .contains("HTTP health check"));
+    }
+
+    #[test]
+    fn review_pass_allows_done() {
+        let decision = evaluate_follow_up(FollowUpRequest {
+            goal: "Deploy the service".to_string(),
+            result: "Deployment completed successfully.".to_string(),
+            step_title: Some("deploy".to_string()),
+            suggested_skill: None,
+            thread_key: None,
+            blocker: None,
+            open_items: Vec::new(),
+            requirements_changed: false,
+            owner_visible: false,
+            review_required: true,
+            review_verdict: Some("pass".to_string()),
+            review_summary: Some("Live health check and smoke test both passed.".to_string()),
+        });
+        assert_eq!(decision.status, "done");
     }
 }

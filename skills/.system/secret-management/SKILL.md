@@ -15,7 +15,8 @@ Treat this skill as:
 
 1. credential classification
 2. local secret material generation or reference capture
-3. durable secret reference output
+3. secret metadata classification
+4. durable secret reference output
 
 Preferred helper script under `scripts/`:
 
@@ -32,6 +33,13 @@ For every credential-like value, decide one of:
 - `owner_supplied`
 - `external_reference`
 
+Track secret status as well:
+
+- `present`
+- `missing`
+- `rotated`
+- `invalid`
+
 Never default to `owner_supplied` when CTOX can safely generate a local admin secret itself.
 
 ## Workflow
@@ -40,13 +48,19 @@ Never default to `owner_supplied` when CTOX can safely generate a local admin se
 2. Decide whether it is local or external.
 3. Generate a local secret when safe.
 4. Store the secret material in a local secret file reference.
-5. Return the secret reference path and keys, not vague prose.
+5. Store secret metadata that says:
+   - kind
+   - status
+   - accepted reply path such as `tui_only` or `email_safe`
+   - service or deployment bindings
+6. Return the secret reference path and keys, not vague prose.
 
 ## Guardrails
 
 - Do not print live secret material into owner-facing reports unless explicitly required for handoff.
 - Do not forget generated admin credentials. Persist a local reference before reporting success.
 - Do not ask the owner for a secret unless the value truly cannot be generated or discovered locally.
+- Secret-bearing inbound mail must move to TUI; do not normalize it as regular email work.
 
 ## Resources
 

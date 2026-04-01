@@ -263,6 +263,71 @@ pub struct ContinuityShowAll {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct MissionStateRecord {
+    pub conversation_id: i64,
+    pub mission: String,
+    pub mission_status: String,
+    pub continuation_mode: String,
+    pub trigger_intensity: String,
+    pub blocker: String,
+    pub next_slice: String,
+    pub done_gate: String,
+    pub closure_confidence: String,
+    pub is_open: bool,
+    pub allow_idle: bool,
+    pub focus_head_commit_id: String,
+    pub last_synced_at: String,
+    pub watcher_last_triggered_at: Option<String>,
+    pub watcher_trigger_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VerificationRunRecord {
+    pub run_id: String,
+    pub conversation_id: i64,
+    pub source_label: String,
+    pub goal: String,
+    pub preview: String,
+    pub result_excerpt: String,
+    pub blocker: Option<String>,
+    pub review_required: bool,
+    pub review_verdict: String,
+    pub review_summary: String,
+    pub review_score: i64,
+    pub review_reasons: Vec<String>,
+    pub report_excerpt: String,
+    pub claim_count: i64,
+    pub open_claim_count: i64,
+    pub closure_blocking_claim_count: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionClaimRecord {
+    pub claim_key: String,
+    pub conversation_id: i64,
+    pub last_run_id: String,
+    pub claim_kind: String,
+    pub claim_status: String,
+    pub blocks_closure: bool,
+    pub subject: String,
+    pub summary: String,
+    pub evidence_summary: String,
+    pub recheck_policy: String,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionAssuranceSnapshot {
+    pub conversation_id: i64,
+    pub latest_run: Option<VerificationRunRecord>,
+    pub open_claims: Vec<MissionClaimRecord>,
+    pub closure_blocking_claims: Vec<MissionClaimRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ContinuityPromptPayload {
     pub conversation_id: i64,
     pub kind: ContinuityKind,
@@ -487,22 +552,73 @@ pub struct LcmEngine {
     config: LcmConfig,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JournalMode {
+    Wal,
+    Delete,
+    Truncate,
+}
+
+impl JournalMode {
+    fn from_env() -> Self {
+        let value = std::env::var("CTOX_LCM_JOURNAL_MODE")
+            .ok()
+            .or_else(|| std::env::var("CTOX_SQLITE_JOURNAL_MODE").ok())
+            .unwrap_or_else(|| "wal".to_string());
+        match value.trim().to_ascii_lowercase().as_str() {
+            "delete" => Self::Delete,
+            "truncate" => Self::Truncate,
+            _ => Self::Wal,
+        }
+    }
+
+    fn as_sql(self) -> &'static str {
+        match self {
+            Self::Wal => "WAL",
+            Self::Delete => "DELETE",
+            Self::Truncate => "TRUNCATE",
+        }
+    }
+}
+
 impl LcmEngine {
     pub fn open(path: &Path, config: LcmConfig) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .context("failed to configure SQLite busy_timeout for LCM")?;
-        let engine = Self { conn, config };
-        engine.init_schema()?;
+        let engine = Self {
+            conn,
+            config: config.clone(),
+        };
+        let journal_mode = JournalMode::from_env();
+        if let Err(err) = engine.init_schema(journal_mode) {
+            if journal_mode == JournalMode::Wal && is_shared_memory_io_error(&err) {
+                let conn = Connection::open(path).with_context(|| {
+                    format!(
+                        "failed to reopen SQLite database {} after WAL error",
+                        path.display()
+                    )
+                })?;
+                conn.busy_timeout(std::time::Duration::from_secs(5))
+                    .context("failed to configure SQLite busy_timeout for LCM fallback")?;
+                let fallback = Self {
+                    conn,
+                    config: config.clone(),
+                };
+                fallback.init_schema(JournalMode::Delete)?;
+                return Ok(fallback);
+            }
+            return Err(err);
+        }
         Ok(engine)
     }
 
-    fn init_schema(&self) -> Result<()> {
-        self.conn.execute_batch(
+    fn init_schema(&self, journal_mode: JournalMode) -> Result<()> {
+        self.conn.execute_batch(&format!(
             r#"
             PRAGMA foreign_keys = ON;
-            PRAGMA journal_mode = WAL;
+            PRAGMA journal_mode = {};
 
             CREATE TABLE IF NOT EXISTS messages (
                 message_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -593,8 +709,67 @@ impl LcmEngine {
                 rendered_text TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS mission_states (
+                conversation_id INTEGER PRIMARY KEY,
+                mission TEXT NOT NULL,
+                mission_status TEXT NOT NULL,
+                continuation_mode TEXT NOT NULL,
+                trigger_intensity TEXT NOT NULL,
+                blocker TEXT NOT NULL,
+                next_slice TEXT NOT NULL,
+                done_gate TEXT NOT NULL,
+                closure_confidence TEXT NOT NULL,
+                is_open INTEGER NOT NULL,
+                allow_idle INTEGER NOT NULL,
+                focus_head_commit_id TEXT NOT NULL,
+                last_synced_at TEXT NOT NULL,
+                watcher_last_triggered_at TEXT,
+                watcher_trigger_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS verification_runs (
+                run_id TEXT PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                source_label TEXT NOT NULL,
+                goal TEXT NOT NULL,
+                preview TEXT NOT NULL,
+                result_excerpt TEXT NOT NULL,
+                blocker TEXT,
+                review_required INTEGER NOT NULL,
+                review_verdict TEXT NOT NULL,
+                review_summary TEXT NOT NULL,
+                review_score INTEGER NOT NULL,
+                review_reasons TEXT NOT NULL,
+                report_excerpt TEXT NOT NULL,
+                claim_count INTEGER NOT NULL,
+                open_claim_count INTEGER NOT NULL,
+                closure_blocking_claim_count INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_verification_runs_conversation_created_at
+                ON verification_runs(conversation_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS mission_claims (
+                claim_key TEXT PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                last_run_id TEXT NOT NULL,
+                claim_kind TEXT NOT NULL,
+                claim_status TEXT NOT NULL,
+                blocks_closure INTEGER NOT NULL,
+                subject TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                evidence_summary TEXT NOT NULL,
+                recheck_policy TEXT NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_mission_claims_conversation_status
+                ON mission_claims(conversation_id, claim_status, updated_at DESC);
             "#,
-        )?;
+            journal_mode.as_sql()
+        ))?;
         Ok(())
     }
 
@@ -909,12 +1084,18 @@ impl LcmEngine {
             self.ensure_continuity_document(conversation_id, ContinuityKind::Narrative)?;
         let anchors = self.ensure_continuity_document(conversation_id, ContinuityKind::Anchors)?;
         let focus = self.ensure_continuity_document(conversation_id, ContinuityKind::Focus)?;
-        Ok(ContinuityShowAll {
+        let show_all = ContinuityShowAll {
             conversation_id,
             narrative,
             anchors,
             focus,
-        })
+        };
+        let previous = self.load_mission_state(conversation_id)?;
+        self.persist_mission_state(&derive_mission_state_from_continuity(
+            &show_all,
+            previous.as_ref(),
+        ))?;
+        Ok(show_all)
     }
 
     pub fn continuity_show(
@@ -985,7 +1166,211 @@ impl LcmEngine {
             "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
             params![commit_id, created_at, document_id],
         )?;
-        self.continuity_show(conversation_id, kind)
+        let document = self.continuity_show(conversation_id, kind)?;
+        let _ = self.sync_mission_state_from_continuity(conversation_id)?;
+        Ok(document)
+    }
+
+    pub fn mission_state(&self, conversation_id: i64) -> Result<MissionStateRecord> {
+        self.sync_mission_state_from_continuity(conversation_id)
+    }
+
+    pub fn sync_mission_state_from_continuity(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionStateRecord> {
+        let continuity = self.continuity_init_documents(conversation_id)?;
+        let previous = self.load_mission_state(conversation_id)?;
+        let record = derive_mission_state_from_continuity(&continuity, previous.as_ref());
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    pub fn note_mission_watcher_triggered(
+        &self,
+        conversation_id: i64,
+        triggered_at: &str,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        record.watcher_last_triggered_at = Some(triggered_at.to_string());
+        record.watcher_trigger_count += 1;
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    pub fn persist_verification_run(
+        &self,
+        run: &VerificationRunRecord,
+        claims: &[MissionClaimRecord],
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO verification_runs (
+                run_id,
+                conversation_id,
+                source_label,
+                goal,
+                preview,
+                result_excerpt,
+                blocker,
+                review_required,
+                review_verdict,
+                review_summary,
+                review_score,
+                review_reasons,
+                report_excerpt,
+                claim_count,
+                open_claim_count,
+                closure_blocking_claim_count,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                run.run_id,
+                run.conversation_id,
+                run.source_label,
+                run.goal,
+                run.preview,
+                run.result_excerpt,
+                run.blocker,
+                if run.review_required { 1 } else { 0 },
+                run.review_verdict,
+                run.review_summary,
+                run.review_score,
+                serde_json::to_string(&run.review_reasons)?,
+                run.report_excerpt,
+                run.claim_count,
+                run.open_claim_count,
+                run.closure_blocking_claim_count,
+                run.created_at,
+            ],
+        )?;
+
+        for claim in claims {
+            self.conn.execute(
+                "INSERT INTO mission_claims (
+                    claim_key,
+                    conversation_id,
+                    last_run_id,
+                    claim_kind,
+                    claim_status,
+                    blocks_closure,
+                    subject,
+                    summary,
+                    evidence_summary,
+                    recheck_policy,
+                    expires_at,
+                    created_at,
+                    updated_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                ON CONFLICT(claim_key) DO UPDATE SET
+                    conversation_id = excluded.conversation_id,
+                    last_run_id = excluded.last_run_id,
+                    claim_kind = excluded.claim_kind,
+                    claim_status = excluded.claim_status,
+                    blocks_closure = excluded.blocks_closure,
+                    subject = excluded.subject,
+                    summary = excluded.summary,
+                    evidence_summary = excluded.evidence_summary,
+                    recheck_policy = excluded.recheck_policy,
+                    expires_at = excluded.expires_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    claim.claim_key,
+                    claim.conversation_id,
+                    claim.last_run_id,
+                    claim.claim_kind,
+                    claim.claim_status,
+                    if claim.blocks_closure { 1 } else { 0 },
+                    claim.subject,
+                    claim.summary,
+                    claim.evidence_summary,
+                    claim.recheck_policy,
+                    claim.expires_at,
+                    claim.created_at,
+                    claim.updated_at,
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn list_verification_runs(
+        &self,
+        conversation_id: i64,
+        limit: usize,
+    ) -> Result<Vec<VerificationRunRecord>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT run_id, source_label, goal, preview, result_excerpt, blocker, review_required, review_verdict, review_summary, review_score, review_reasons, report_excerpt, claim_count, open_claim_count, closure_blocking_claim_count, created_at
+             FROM verification_runs
+             WHERE conversation_id = ?1
+             ORDER BY CAST(created_at AS INTEGER) DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+            Ok(map_verification_run_row(row, conversation_id)?)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn latest_verification_run(
+        &self,
+        conversation_id: i64,
+    ) -> Result<Option<VerificationRunRecord>> {
+        self.list_verification_runs(conversation_id, 1)
+            .map(|mut runs| runs.pop())
+    }
+
+    pub fn list_mission_claims(
+        &self,
+        conversation_id: i64,
+        include_verified: bool,
+        limit: usize,
+    ) -> Result<Vec<MissionClaimRecord>> {
+        if include_verified {
+            let mut stmt = self.conn.prepare(
+                "SELECT claim_key, last_run_id, claim_kind, claim_status, blocks_closure, subject, summary, evidence_summary, recheck_policy, expires_at, created_at, updated_at
+                 FROM mission_claims
+                 WHERE conversation_id = ?1
+                 ORDER BY CAST(updated_at AS INTEGER) DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![conversation_id, limit as i64], |row| {
+                Ok(map_mission_claim_row(row, conversation_id)?)
+            })?;
+            return Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?);
+        }
+
+        let now = iso_now();
+        let mut stmt = self.conn.prepare(
+            "SELECT claim_key, last_run_id, claim_kind, claim_status, blocks_closure, subject, summary, evidence_summary, recheck_policy, expires_at, created_at, updated_at
+             FROM mission_claims
+             WHERE conversation_id = ?1
+               AND (claim_status != 'verified' OR (expires_at IS NOT NULL AND CAST(expires_at AS INTEGER) <= ?2))
+             ORDER BY CAST(updated_at AS INTEGER) DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![conversation_id, now, limit as i64], |row| {
+            Ok(map_mission_claim_row(row, conversation_id)?)
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn mission_assurance_snapshot(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionAssuranceSnapshot> {
+        let latest_run = self.latest_verification_run(conversation_id)?;
+        let open_claims = self.list_mission_claims(conversation_id, false, 64)?;
+        let closure_blocking_claims = open_claims
+            .iter()
+            .filter(|claim| claim.blocks_closure)
+            .cloned()
+            .collect();
+        Ok(MissionAssuranceSnapshot {
+            conversation_id,
+            latest_run,
+            open_claims,
+            closure_blocking_claims,
+        })
     }
 
     pub fn continuity_rebuild(
@@ -2252,6 +2637,13 @@ impl LcmEngine {
     }
 }
 
+fn is_shared_memory_io_error(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("xShmMap")
+        || text.contains("shared-memory")
+        || (text.contains("disk I/O error") && text.contains("resize"))
+}
+
 pub fn run_init(db_path: &Path) -> Result<()> {
     let _ = LcmEngine::open(db_path, LcmConfig::default())?;
     Ok(())
@@ -2564,6 +2956,419 @@ fn merge_fixture_config(config: Option<LcmFixtureConfig>) -> LcmConfig {
     merged
 }
 
+impl LcmEngine {
+    fn load_mission_state(&self, conversation_id: i64) -> Result<Option<MissionStateRecord>> {
+        self.conn
+            .query_row(
+                "SELECT mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count FROM mission_states WHERE conversation_id = ?1",
+                [conversation_id],
+                |row| {
+                    Ok(MissionStateRecord {
+                        conversation_id,
+                        mission: row.get(0)?,
+                        mission_status: row.get(1)?,
+                        continuation_mode: row.get(2)?,
+                        trigger_intensity: row.get(3)?,
+                        blocker: row.get(4)?,
+                        next_slice: row.get(5)?,
+                        done_gate: row.get(6)?,
+                        closure_confidence: row.get(7)?,
+                        is_open: row.get::<_, i64>(8)? != 0,
+                        allow_idle: row.get::<_, i64>(9)? != 0,
+                        focus_head_commit_id: row.get(10)?,
+                        last_synced_at: row.get(11)?,
+                        watcher_last_triggered_at: row.get(12)?,
+                        watcher_trigger_count: row.get(13)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load mission state")
+    }
+
+    fn persist_mission_state(&self, record: &MissionStateRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mission_states (
+                conversation_id,
+                mission,
+                mission_status,
+                continuation_mode,
+                trigger_intensity,
+                blocker,
+                next_slice,
+                done_gate,
+                closure_confidence,
+                is_open,
+                allow_idle,
+                focus_head_commit_id,
+                last_synced_at,
+                watcher_last_triggered_at,
+                watcher_trigger_count
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(conversation_id) DO UPDATE SET
+                mission = excluded.mission,
+                mission_status = excluded.mission_status,
+                continuation_mode = excluded.continuation_mode,
+                trigger_intensity = excluded.trigger_intensity,
+                blocker = excluded.blocker,
+                next_slice = excluded.next_slice,
+                done_gate = excluded.done_gate,
+                closure_confidence = excluded.closure_confidence,
+                is_open = excluded.is_open,
+                allow_idle = excluded.allow_idle,
+                focus_head_commit_id = excluded.focus_head_commit_id,
+                last_synced_at = excluded.last_synced_at,
+                watcher_last_triggered_at = excluded.watcher_last_triggered_at,
+                watcher_trigger_count = excluded.watcher_trigger_count",
+            params![
+                record.conversation_id,
+                record.mission,
+                record.mission_status,
+                record.continuation_mode,
+                record.trigger_intensity,
+                record.blocker,
+                record.next_slice,
+                record.done_gate,
+                record.closure_confidence,
+                if record.is_open { 1 } else { 0 },
+                if record.allow_idle { 1 } else { 0 },
+                record.focus_head_commit_id,
+                record.last_synced_at,
+                record.watcher_last_triggered_at,
+                record.watcher_trigger_count,
+            ],
+        )?;
+        Ok(())
+    }
+}
+
+fn derive_mission_state_from_continuity(
+    continuity: &ContinuityShowAll,
+    previous: Option<&MissionStateRecord>,
+) -> MissionStateRecord {
+    let status_lines = continuity_section_lines(&continuity.focus.content, "Status");
+    let blocker_lines = continuity_section_lines(&continuity.focus.content, "Blocker");
+    let next_lines = continuity_section_lines(&continuity.focus.content, "Next");
+    let gate_lines = continuity_section_lines(&continuity.focus.content, "Done / Gate");
+
+    let mission = first_named_value(&status_lines, &["Mission"])
+        .or_else(|| first_non_meta_line(&status_lines))
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| previous.map(|record| record.mission.clone()))
+        .unwrap_or_default();
+    let mission_status = canonicalize_mission_status(
+        first_named_value(&status_lines, &["Mission state"]).as_deref(),
+    )
+    .or_else(|| previous.map(|record| record.mission_status.clone()))
+    .unwrap_or_else(|| "active".to_string());
+    let continuation_mode = canonicalize_continuation_mode(
+        first_named_value(&status_lines, &["Continuation mode"]).as_deref(),
+    )
+    .or_else(|| previous.map(|record| record.continuation_mode.clone()))
+    .unwrap_or_else(|| "continuous".to_string());
+    let trigger_intensity = canonicalize_trigger_intensity(
+        first_named_value(&status_lines, &["Trigger intensity"]).as_deref(),
+    )
+    .or_else(|| previous.map(|record| record.trigger_intensity.clone()))
+    .unwrap_or_else(|| "hot".to_string());
+    let blocker = first_named_value(&blocker_lines, &["Current blocker"])
+        .or_else(|| first_meaningful_line(&blocker_lines))
+        .unwrap_or_default();
+    let next_slice = first_named_value(&next_lines, &["Next slice"])
+        .or_else(|| first_meaningful_line(&next_lines))
+        .unwrap_or_default();
+    let done_gate = first_named_value(&gate_lines, &["Done gate"])
+        .or_else(|| first_non_meta_line(&gate_lines))
+        .unwrap_or_default();
+    let closure_confidence = canonicalize_closure_confidence(
+        first_named_value(&gate_lines, &["Closure confidence"]).as_deref(),
+    )
+    .or_else(|| previous.map(|record| record.closure_confidence.clone()))
+    .unwrap_or_else(|| "low".to_string());
+    let is_open = mission_is_open(
+        &mission,
+        &mission_status,
+        &continuation_mode,
+        &next_slice,
+        &done_gate,
+        &closure_confidence,
+    );
+    let allow_idle = mission_allows_idle(&mission_status, &continuation_mode, &trigger_intensity);
+
+    MissionStateRecord {
+        conversation_id: continuity.conversation_id,
+        mission,
+        mission_status,
+        continuation_mode,
+        trigger_intensity,
+        blocker,
+        next_slice,
+        done_gate,
+        closure_confidence,
+        is_open,
+        allow_idle,
+        focus_head_commit_id: continuity.focus.head_commit_id.clone(),
+        last_synced_at: iso_now(),
+        watcher_last_triggered_at: previous
+            .and_then(|record| record.watcher_last_triggered_at.clone()),
+        watcher_trigger_count: previous
+            .map(|record| record.watcher_trigger_count)
+            .unwrap_or(0),
+    }
+}
+
+fn map_verification_run_row(
+    row: &rusqlite::Row<'_>,
+    conversation_id: i64,
+) -> rusqlite::Result<VerificationRunRecord> {
+    let review_reasons: Vec<String> =
+        serde_json::from_str(&row.get::<_, String>(10)?).unwrap_or_default();
+    Ok(VerificationRunRecord {
+        run_id: row.get(0)?,
+        conversation_id,
+        source_label: row.get(1)?,
+        goal: row.get(2)?,
+        preview: row.get(3)?,
+        result_excerpt: row.get(4)?,
+        blocker: row.get(5)?,
+        review_required: row.get::<_, i64>(6)? != 0,
+        review_verdict: row.get(7)?,
+        review_summary: row.get(8)?,
+        review_score: row.get(9)?,
+        review_reasons,
+        report_excerpt: row.get(11)?,
+        claim_count: row.get(12)?,
+        open_claim_count: row.get(13)?,
+        closure_blocking_claim_count: row.get(14)?,
+        created_at: row.get(15)?,
+    })
+}
+
+fn map_mission_claim_row(
+    row: &rusqlite::Row<'_>,
+    conversation_id: i64,
+) -> rusqlite::Result<MissionClaimRecord> {
+    Ok(MissionClaimRecord {
+        claim_key: row.get(0)?,
+        conversation_id,
+        last_run_id: row.get(1)?,
+        claim_kind: row.get(2)?,
+        claim_status: row.get(3)?,
+        blocks_closure: row.get::<_, i64>(4)? != 0,
+        subject: row.get(5)?,
+        summary: row.get(6)?,
+        evidence_summary: row.get(7)?,
+        recheck_policy: row.get(8)?,
+        expires_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn continuity_section_lines(content: &str, section_name: &str) -> Vec<String> {
+    let mut active = false;
+    let mut lines = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed.strip_prefix("## ") {
+            active = header == section_name;
+            continue;
+        }
+        if active && !trimmed.is_empty() && !trimmed.starts_with('#') {
+            lines.push(trimmed.trim_start_matches("- ").trim().to_string());
+        }
+    }
+    lines
+}
+
+fn first_named_value(lines: &[String], names: &[&str]) -> Option<String> {
+    for line in lines {
+        if let Some((prefix, value)) = line.split_once(':') {
+            if names
+                .iter()
+                .any(|name| prefix.trim().eq_ignore_ascii_case(name))
+            {
+                let value = value.trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn first_non_meta_line(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .find(|line| !line.contains(':'))
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+}
+
+fn first_meaningful_line(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .map(|line| line.trim())
+        .find(|line| {
+            !line.is_empty()
+                && !line.eq_ignore_ascii_case("none")
+                && !line.eq_ignore_ascii_case("kein")
+                && !line.eq_ignore_ascii_case("keiner")
+                && !line.eq_ignore_ascii_case("no blocker")
+                && !line.eq_ignore_ascii_case("n/a")
+                && !line.eq_ignore_ascii_case("na")
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn canonicalize_mission_status(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let normalized = normalize_mission_text(raw);
+    if normalized.contains("done")
+        || normalized.contains("complete")
+        || normalized.contains("completed")
+        || normalized.contains("closed")
+        || normalized.contains("abgeschlossen")
+    {
+        return Some("done".to_string());
+    }
+    if normalized.contains("maintenance") {
+        return Some("maintenance".to_string());
+    }
+    if normalized.contains("scheduled") {
+        return Some("scheduled".to_string());
+    }
+    if normalized.contains("dormant") {
+        return Some("dormant".to_string());
+    }
+    if normalized.contains("open")
+        || normalized.contains("active")
+        || normalized.contains("ongoing")
+        || normalized.contains("in progress")
+        || normalized.contains("remain")
+        || normalized.contains("remains")
+        || normalized.contains("main thread")
+        || normalized.contains("main mission thread")
+        || normalized.contains("still open")
+        || normalized.contains("still")
+    {
+        return Some("active".to_string());
+    }
+    None
+}
+
+fn canonicalize_continuation_mode(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let normalized = normalize_mission_text(raw);
+    if normalized.contains("maintenance") {
+        return Some("maintenance".to_string());
+    }
+    if normalized.contains("scheduled") || normalized.contains("cron") {
+        return Some("scheduled".to_string());
+    }
+    if normalized.contains("dormant") || normalized.contains("archive") {
+        return Some("dormant".to_string());
+    }
+    if normalized.contains("closed") {
+        return Some("closed".to_string());
+    }
+    if normalized.contains("continuous")
+        || normalized.contains("continue")
+        || normalized.contains("same durable slice")
+        || normalized.contains("keep")
+        || normalized.contains("ongoing")
+        || normalized.contains("stay attached")
+    {
+        return Some("continuous".to_string());
+    }
+    None
+}
+
+fn canonicalize_trigger_intensity(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let normalized = normalize_mission_text(raw);
+    if normalized.contains("archive") {
+        return Some("archive".to_string());
+    }
+    if normalized.contains("cold") || normalized.contains("low") {
+        return Some("cold".to_string());
+    }
+    if normalized.contains("warm")
+        || normalized.contains("medium")
+        || normalized.contains("moderate")
+    {
+        return Some("warm".to_string());
+    }
+    if normalized.contains("hot") || normalized.contains("high") || normalized.contains("urgent") {
+        return Some("hot".to_string());
+    }
+    None
+}
+
+fn canonicalize_closure_confidence(raw: Option<&str>) -> Option<String> {
+    let raw = raw?;
+    let normalized = normalize_mission_text(raw);
+    if normalized.contains("complete") || normalized.contains("certain") {
+        return Some("complete".to_string());
+    }
+    if normalized.contains("high") {
+        return Some("high".to_string());
+    }
+    if normalized.contains("medium") || normalized.contains("moderate") {
+        return Some("medium".to_string());
+    }
+    if normalized.contains("low")
+        || normalized.contains("unclear")
+        || normalized.contains("unknown")
+    {
+        return Some("low".to_string());
+    }
+    None
+}
+
+fn mission_is_open(
+    mission: &str,
+    mission_status: &str,
+    continuation_mode: &str,
+    next_slice: &str,
+    done_gate: &str,
+    closure_confidence: &str,
+) -> bool {
+    let status = normalize_mission_text(mission_status);
+    let mode = normalize_mission_text(continuation_mode);
+    let _ = closure_confidence;
+    if status == "done" || mode == "closed" || mode == "dormant" {
+        return false;
+    }
+    !mission.trim().is_empty() || !next_slice.trim().is_empty() || !done_gate.trim().is_empty()
+}
+
+fn mission_allows_idle(
+    mission_status: &str,
+    continuation_mode: &str,
+    trigger_intensity: &str,
+) -> bool {
+    let status = normalize_mission_text(mission_status);
+    let mode = normalize_mission_text(continuation_mode);
+    let intensity = normalize_mission_text(trigger_intensity);
+    status == "done"
+        || mode == "closed"
+        || mode == "dormant"
+        || (mode == "scheduled" && intensity != "hot")
+}
+
+fn normalize_mission_text(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn continuity_template(kind: ContinuityKind) -> &'static str {
     match kind {
         ContinuityKind::Narrative => {
@@ -2573,13 +3378,49 @@ fn continuity_template(kind: ContinuityKind) -> &'static str {
             "# CONTINUITY ANCHORS\n\n## Artefakte\n\n## Hosts / Ports\n\n## Skripte / Commands\n\n## Invarianten / Verbote\n\n## Gates / Pruefpfade\n"
         }
         ContinuityKind::Focus => {
-            "# ACTIVE FOCUS\n\n## Status\n\n## Blocker\n\n## Next\n\n## Done / Gate\n"
+            "# ACTIVE FOCUS\n\n## Status\nMission:\nMission state:\nContinuation mode:\nTrigger intensity:\n\n## Blocker\nCurrent blocker:\n\n## Next\nNext slice:\n\n## Done / Gate\nDone gate:\nClosure confidence:\n"
         }
     }
 }
 
 fn continuity_document_id(conversation_id: i64, kind: ContinuityKind) -> String {
     format!("contdoc_{}_{}", conversation_id, kind.as_str())
+}
+
+fn verification_run_id(
+    conversation_id: i64,
+    source_label: &str,
+    goal: &str,
+    preview: &str,
+    result_excerpt: &str,
+    created_at: &str,
+) -> String {
+    let mut hash = Sha256::new();
+    hash.update(conversation_id.to_string().as_bytes());
+    hash.update(source_label.as_bytes());
+    hash.update(goal.as_bytes());
+    hash.update(preview.as_bytes());
+    hash.update(result_excerpt.as_bytes());
+    hash.update(created_at.as_bytes());
+    let digest = hash.finalize();
+    let prefix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("vrun_{prefix}")
+}
+
+fn mission_claim_key(conversation_id: i64, claim_kind: &str, subject: &str) -> String {
+    let mut hash = Sha256::new();
+    hash.update(conversation_id.to_string().as_bytes());
+    hash.update(claim_kind.as_bytes());
+    hash.update(normalize_mission_text(subject).as_bytes());
+    let digest = hash.finalize();
+    let prefix = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("claim_{prefix}")
 }
 
 fn continuity_base_commit_id(conversation_id: i64, kind: ContinuityKind) -> String {
@@ -2735,10 +3576,22 @@ fn build_continuity_prompt_text(
         ContinuityKind::Anchors => "CONTINUITY ANCHORS",
         ContinuityKind::Focus => "ACTIVE FOCUS",
     };
+    let kind_expectations = match kind {
+        ContinuityKind::Narrative => {
+            "Narrative expectations: preserve cause analysis, turning points, and any concrete evidence explaining why a retry should or should not happen."
+        }
+        ContinuityKind::Anchors => {
+            "Anchors expectations: keep durable constraints, prohibitions, scripts, and retry boundaries that define what the loop must not silently forget."
+        }
+        ContinuityKind::Focus => {
+            "Focus expectations: keep the mission contract crisp through the active mission, mission state, continuation mode, trigger intensity, blocker, next slice, done gate, and closure confidence. Sidequests must not replace the underlying mission."
+        }
+    };
     [
         format!("You are updating the CTOX continuity document for conversation {}.", conversation_id),
         format!("Document kind: {}.", kind.as_str()),
         "Output only a strict section-based diff.".to_string(),
+        kind_expectations.to_string(),
         "Rules:".to_string(),
         "1. Use only existing `##` section headers from the current template.".to_string(),
         "2. Inside a section, emit only lines starting with `+` or `-`.".to_string(),
@@ -2746,6 +3599,8 @@ fn build_continuity_prompt_text(
         "4. Do not rewrite unchanged lines. Do not output prose, explanations, markdown fences, or summaries.".to_string(),
         "5. Prefer minimal diffs. If nothing changes, output an empty string.".to_string(),
         "6. Never invent facts not supported by recent messages or summaries.".to_string(),
+        "7. When recent work failed or repeated, preserve the failed tactic, blocker, or retry condition in the appropriate existing sections instead of dropping it.".to_string(),
+        "8. For ACTIVE FOCUS, prefer explicit `Mission:`, `Mission state:`, `Continuation mode:`, `Trigger intensity:`, `Current blocker:`, `Next slice:`, `Done gate:`, and `Closure confidence:` lines inside the existing sections.".to_string(),
         String::new(),
         format!("<DOCUMENT_KIND>\n{}\n</DOCUMENT_KIND>", kind_label),
         String::new(),
@@ -3017,7 +3872,183 @@ mod tests {
         assert!(current.narrative.contains("## Ausgangslage"));
         assert!(current.anchors.contains("# CONTINUITY ANCHORS"));
         assert!(current.focus.contains("# ACTIVE FOCUS"));
+        assert!(current.focus.contains("Mission:"));
         assert!(!current.narrative.contains("- "));
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn mission_state_tracks_focus_contract_and_preserves_watcher_metadata() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let _ = engine.continuity_init_documents(13)?;
+        engine.continuity_apply_diff(
+            13,
+            ContinuityKind::Focus,
+            "## Status\n+ Mission: Build and operate the Airbnb clone.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: hot.\n## Blocker\n+ Current blocker: none.\n## Next\n+ Next slice: implement the host onboarding shell.\n## Done / Gate\n+ Done gate: never claim completion while the capability audit is still open.\n+ Closure confidence: low.\n",
+        )?;
+
+        let mission = engine.mission_state(13)?;
+        assert_eq!(mission.mission, "Build and operate the Airbnb clone.");
+        assert_eq!(mission.mission_status, "active");
+        assert_eq!(mission.continuation_mode, "continuous");
+        assert_eq!(mission.trigger_intensity, "hot");
+        assert!(mission.is_open);
+        assert!(!mission.allow_idle);
+
+        let triggered = engine.note_mission_watcher_triggered(13, "2026-03-31T12:00:00Z")?;
+        assert_eq!(triggered.watcher_trigger_count, 1);
+        assert_eq!(
+            triggered.watcher_last_triggered_at.as_deref(),
+            Some("2026-03-31T12:00:00Z")
+        );
+
+        let synced = engine.sync_mission_state_from_continuity(13)?;
+        assert_eq!(synced.watcher_trigger_count, 1);
+        assert_eq!(
+            synced.watcher_last_triggered_at.as_deref(),
+            Some("2026-03-31T12:00:00Z")
+        );
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn mission_state_normalizes_free_form_focus_controls_and_preserves_mission() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let _ = engine.continuity_init_documents(17)?;
+        engine.continuity_apply_diff(
+            17,
+            ContinuityKind::Focus,
+            "## Status\n+ Mission: Keep the marketplace benchmark durable.\n+ Mission state: Still open; roadmap and progress docs were updated, but the mission has not reached a stable stopping point.\n+ Continuation mode: Keep the discovery work attached to the marketplace core and continue the same durable slice.\n+ Trigger intensity: High while the mission remains open and idle-watch pressure is present.\n## Blocker\n+ Current blocker: Keep the discovery work attached to the marketplace core.\n## Next\n+ Next slice: Carry the discovery expectations through the roadmap slice.\n## Done / Gate\n+ Done gate: Preserve mission continuity while advancing durable slices.\n+ Closure confidence: Low until the marketplace core reaches a stable stopping point.\n",
+        )?;
+        let initial = engine.mission_state(17)?;
+        assert_eq!(initial.mission, "Keep the marketplace benchmark durable.");
+        assert_eq!(initial.mission_status, "active");
+        assert_eq!(initial.continuation_mode, "continuous");
+        assert_eq!(initial.trigger_intensity, "hot");
+        assert_eq!(initial.closure_confidence, "low");
+        assert!(initial.is_open);
+        assert!(!initial.allow_idle);
+
+        engine.continuity_apply_diff(
+            17,
+            ContinuityKind::Focus,
+            "## Status\n- Mission: Keep the marketplace benchmark durable.\n## Next\n+ Next slice: Continue the same durable slice.\n",
+        )?;
+        let synced = engine.sync_mission_state_from_continuity(17)?;
+        assert_eq!(synced.mission, "Keep the marketplace benchmark durable.");
+        assert_eq!(synced.continuation_mode, "continuous");
+        assert_eq!(synced.trigger_intensity, "hot");
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn mission_state_does_not_close_when_done_gate_mentions_completed_slice() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let _ = engine.continuity_init_documents(23)?;
+        engine.continuity_apply_diff(
+            23,
+            ContinuityKind::Focus,
+            "## Status\n+ Mission: Keep the marketplace core as the main thread, with discovery features folded into the same slice.\n+ Mission state: Slice 2 remains the main marketplace thread; a trust-and-safety response slice is now tracked alongside it for the suspicious host cluster.\n+ Continuation mode: Keep the main mission thread intact, advance Slice 2, and keep the trust-and-safety response slice as a contained response path.\n+ Trigger intensity: High until Slice 2 and the trust-and-safety response slice are both advanced and recorded.\n## Blocker\n+ Current blocker: Suspicious new host cluster with repeated near-duplicate listings and mismatched identity signals needs a concrete response without derailing the marketplace core.\n## Next\n+ Next slice: Advance the marketplace core slice with mobile-first search, map-based discovery, and saved-search support, while keeping the trust-and-safety response slice contained and tracked.\n## Done / Gate\n+ Done gate: Slice completed cleanly with continuity preserved, discovery kept inside the marketplace core thread, and the trust-and-safety response slice documented without displacing the main roadmap.\n+ Closure confidence: Low until Slice 2 and the trust-and-safety response path are both stable.\n",
+        )?;
+
+        let mission = engine.mission_state(23)?;
+        assert_eq!(mission.mission_status, "active");
+        assert_eq!(mission.continuation_mode, "continuous");
+        assert_eq!(mission.trigger_intensity, "hot");
+        assert_eq!(mission.closure_confidence, "low");
+        assert!(mission.is_open);
+        assert!(!mission.allow_idle);
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn verification_runs_and_open_claims_persist_in_lcm_db() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let created_at = iso_now();
+        let run = VerificationRunRecord {
+            run_id: verification_run_id(
+                41,
+                "queue",
+                "Repair deployment",
+                "Repair deployment",
+                "Deployment still looked broken after the patch.",
+                &created_at,
+            ),
+            conversation_id: 41,
+            source_label: "queue".to_string(),
+            goal: "Repair deployment".to_string(),
+            preview: "Repair deployment".to_string(),
+            result_excerpt: "Deployment still looked broken after the patch.".to_string(),
+            blocker: None,
+            review_required: true,
+            review_verdict: "fail".to_string(),
+            review_summary: "HTTP health check still returns 502.".to_string(),
+            review_score: 4,
+            review_reasons: vec![
+                "closure_claim".to_string(),
+                "runtime_or_infra_change".to_string(),
+            ],
+            report_excerpt: "VERDICT: FAIL".to_string(),
+            claim_count: 2,
+            open_claim_count: 2,
+            closure_blocking_claim_count: 2,
+            created_at: created_at.clone(),
+        };
+        let claims = vec![
+            MissionClaimRecord {
+                claim_key: mission_claim_key(41, "operational_state", "Repair deployment"),
+                conversation_id: 41,
+                last_run_id: run.run_id.clone(),
+                claim_kind: "operational_state".to_string(),
+                claim_status: "needs_recheck".to_string(),
+                blocks_closure: true,
+                subject: "Repair deployment".to_string(),
+                summary: "Operational state still needs live revalidation.".to_string(),
+                evidence_summary: "Review FAIL: HTTP health check still returns 502.".to_string(),
+                recheck_policy: "revalidate_live_state_before_close".to_string(),
+                expires_at: None,
+                created_at: created_at.clone(),
+                updated_at: created_at.clone(),
+            },
+            MissionClaimRecord {
+                claim_key: mission_claim_key(41, "completion_gate", "Repair deployment"),
+                conversation_id: 41,
+                last_run_id: run.run_id.clone(),
+                claim_kind: "completion_gate".to_string(),
+                claim_status: "needs_recheck".to_string(),
+                blocks_closure: true,
+                subject: "Repair deployment".to_string(),
+                summary: "Completion gate must stay open.".to_string(),
+                evidence_summary: "Review FAIL: HTTP health check still returns 502.".to_string(),
+                recheck_policy: "keep_open_until_supporting_claims_verified".to_string(),
+                expires_at: None,
+                created_at: created_at.clone(),
+                updated_at: created_at.clone(),
+            },
+        ];
+        engine.persist_verification_run(&run, &claims)?;
+
+        let latest = engine
+            .latest_verification_run(41)?
+            .context("expected latest verification run")?;
+        assert_eq!(latest.run_id, run.run_id);
+        assert_eq!(latest.open_claim_count, 2);
+
+        let assurance = engine.mission_assurance_snapshot(41)?;
+        assert_eq!(assurance.open_claims.len(), 2);
+        assert_eq!(assurance.closure_blocking_claims.len(), 2);
 
         let _ = std::fs::remove_file(db_path);
         Ok(())
@@ -3090,6 +4121,11 @@ mod tests {
         assert!(payload.prompt.contains("<CURRENT_DOCUMENT>"));
         assert!(payload.prompt.contains("<RECENT_MESSAGES>"));
         assert!(payload.prompt.contains("## Ausgangslage"));
+
+        let focus_payload = engine.continuity_build_prompt(12, ContinuityKind::Focus)?;
+        assert!(focus_payload.prompt.contains("Mission state:"));
+        assert!(focus_payload.prompt.contains("Continuation mode:"));
+        assert!(focus_payload.prompt.contains("Next slice:"));
 
         let _ = std::fs::remove_file(db_path);
         Ok(())

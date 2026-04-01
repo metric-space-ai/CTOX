@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_URL="${CTOX_REPO_URL:-https://github.com/metric-space-ai/CTOX.git}"
 INSTALL_DIR="${CTOX_INSTALL_DIR:-$HOME/ctox}"
+WIPE_EXISTING="${CTOX_REMOTE_WIPE_EXISTING:-1}"
 
 run_sudo() {
   if command -v sudo >/dev/null 2>&1; then
@@ -57,15 +58,57 @@ ensure_rust_toolchain() {
   source "$HOME/.cargo/env"
 }
 
+stop_ctox_user_services() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  systemctl --user stop ctox.service >/dev/null 2>&1 || true
+  systemctl --user disable ctox.service >/dev/null 2>&1 || true
+  systemctl --user stop cto-jami-daemon.service >/dev/null 2>&1 || true
+  systemctl --user disable cto-jami-daemon.service >/dev/null 2>&1 || true
+  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/ctox.service"
+  rm -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/cto-jami-daemon.service"
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+}
+
+kill_residual_ctox_processes() {
+  if ! command -v pkill >/dev/null 2>&1; then
+    return 0
+  fi
+
+  pkill -x ctox >/dev/null 2>&1 || true
+  pkill -x ctox-engine >/dev/null 2>&1 || true
+  pkill -x codex-exec >/dev/null 2>&1 || true
+  pkill -f "$INSTALL_DIR/scripts/engine/run_engine.sh" >/dev/null 2>&1 || true
+  pkill -f "$INSTALL_DIR/scripts/run_jami_daemon.sh" >/dev/null 2>&1 || true
+  pkill -f "$INSTALL_DIR/runtime/browser/interactive-reference" >/dev/null 2>&1 || true
+}
+
+wipe_existing_installation() {
+  if [[ ! -e "$INSTALL_DIR" ]]; then
+    return 0
+  fi
+
+  echo "[prep] Wipe existing CTOX install at $INSTALL_DIR"
+  stop_ctox_user_services
+  kill_residual_ctox_processes
+  rm -rf "$INSTALL_DIR"
+}
+
 ensure_apt_bootstrap_packages
 ensure_rust_toolchain
 
+if [[ "$WIPE_EXISTING" != "0" && "$WIPE_EXISTING" != "false" && "$WIPE_EXISTING" != "FALSE" && "$WIPE_EXISTING" != "no" && "$WIPE_EXISTING" != "NO" ]]; then
+  wipe_existing_installation
+fi
+
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  git -C "$INSTALL_DIR" pull --ff-only
+  git -C "$INSTALL_DIR" fetch --all --prune
+  git -C "$INSTALL_DIR" reset --hard origin/main
 else
   if [[ -e "$INSTALL_DIR" ]]; then
-    backup_dir="${INSTALL_DIR}-backup-$(date +%Y%m%d-%H%M%S)"
-    mv "$INSTALL_DIR" "$backup_dir"
+    wipe_existing_installation
   fi
   git clone "$REPO_URL" "$INSTALL_DIR"
 fi

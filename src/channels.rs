@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::runtime_config;
+use crate::inference::runtime_env;
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const DEFAULT_TAKE_LIMIT: usize = 10;
@@ -184,6 +184,12 @@ pub fn sync_prompt_identity(root: &Path, settings: &BTreeMap<String, String>) ->
         )?;
     }
 
+    Ok(())
+}
+
+pub fn ensure_store(root: &Path) -> Result<()> {
+    let db_path = resolve_db_path(root, None);
+    let _conn = open_channel_db(&db_path)?;
     Ok(())
 }
 
@@ -485,9 +491,25 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 "messages": messages,
             }))
         }
+        "context" => {
+            let db_path = resolve_db_path(root, find_flag_value(args, "--db"));
+            let limit = find_flag_value(args, "--limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_TAKE_LIMIT);
+            let thread_key = required_flag_value(args, "--thread-key")?;
+            let query = find_flag_value(args, "--query");
+            let sender = find_flag_value(args, "--sender");
+            let conn = open_channel_db(&db_path)?;
+            let context = build_communication_context(&conn, thread_key, query, sender, limit)?;
+            print_json(&json!({
+                "ok": true,
+                "db_path": db_path,
+                "context": context,
+            }))
+        }
         _ => {
             anyhow::bail!(
-                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--send-voice]\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]"
+                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--send-voice]\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]\n  ctox channel context --thread-key <key> [--db <path>] [--query <text>] [--sender <addr>] [--limit <n>]"
             )
         }
     }
@@ -973,6 +995,29 @@ struct ChannelMessageView {
     routing: RoutingView,
 }
 
+#[derive(Debug, Serialize)]
+struct CommunicationStateCandidate {
+    kind: String,
+    message_key: String,
+    channel: String,
+    thread_key: String,
+    created_at: String,
+    summary: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CommunicationContextView {
+    thread_key: String,
+    latest_subject: Option<String>,
+    latest_inbound: Option<CommunicationStateCandidate>,
+    latest_outbound: Option<CommunicationStateCandidate>,
+    thread_messages: Vec<ChannelMessageView>,
+    related_messages: Vec<ChannelMessageView>,
+    candidate_blockers: Vec<CommunicationStateCandidate>,
+    candidate_promises: Vec<CommunicationStateCandidate>,
+    open_owner_questions: Vec<CommunicationStateCandidate>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutedInboundMessage {
     pub message_key: String,
@@ -1049,6 +1094,7 @@ fn sync_channel(root: &Path, db_path: &Path, channel: &str, args: &[String]) -> 
         "jami" => {
             let adapter = root.join("scripts/communication_jami_cli.mjs");
             let mut cmd = Command::new(node_binary(root));
+            push_jami_runtime_env(root, &mut cmd);
             cmd.arg(&adapter)
                 .arg("sync")
                 .arg("--db")
@@ -1147,7 +1193,10 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
                 .sender_address
                 .clone()
                 .unwrap_or_else(|| jami_address_from_account_key(&request.account_key));
+            let send_voice =
+                request.send_voice || thread_prefers_voice_reply(&conn, &request.thread_key)?;
             let mut cmd = Command::new(node_binary(root));
+            push_jami_runtime_env(root, &mut cmd);
             cmd.arg(&adapter)
                 .arg("send")
                 .arg("--db")
@@ -1168,7 +1217,7 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
             if let Some(profile_name) = &request.sender_display {
                 cmd.arg("--profile-name").arg(profile_name);
             }
-            if request.send_voice {
+            if send_voice {
                 cmd.arg("--send-voice");
             }
             let adapter_json = run_json_command(&mut cmd)
@@ -1246,6 +1295,7 @@ fn test_channel(
                 })?;
             let adapter = root.join("scripts/communication_jami_cli.mjs");
             let mut cmd = Command::new(node_binary(root));
+            push_jami_runtime_env(root, &mut cmd);
             cmd.arg(&adapter)
                 .arg("test")
                 .arg("--db")
@@ -1317,23 +1367,46 @@ fn resolve_outbound_subject(
     Ok(request)
 }
 
+fn thread_prefers_voice_reply(conn: &Connection, thread_key: &str) -> Result<bool> {
+    let metadata_json = conn
+        .query_row(
+            r#"
+            SELECT metadata_json
+            FROM communication_messages
+            WHERE thread_key = ?1
+              AND direction = 'inbound'
+            ORDER BY external_created_at DESC, observed_at DESC
+            LIMIT 1
+            "#,
+            params![thread_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(metadata_json) = metadata_json else {
+        return Ok(false);
+    };
+    let parsed = serde_json::from_str::<Value>(&metadata_json).unwrap_or_else(|_| Value::Null);
+    Ok(parsed
+        .get("preferredReplyModality")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("voice")))
+}
+
 fn load_thread_subject(conn: &Connection, thread_key: &str) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-        "SELECT subject FROM communication_threads WHERE thread_key = ?1 LIMIT 1",
-        params![thread_key],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .context("failed to load existing thread subject")?
-    .filter(|subject| !subject_is_placeholder(subject.trim())))
+            "SELECT subject FROM communication_threads WHERE thread_key = ?1 LIMIT 1",
+            params![thread_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("failed to load existing thread subject")?
+        .filter(|subject| !subject_is_placeholder(subject.trim())))
 }
 
 fn subject_is_placeholder(subject: &str) -> bool {
     let normalized = subject.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || normalized == "(no subject)"
-        || normalized == "(ohne betreff)"
+    normalized.is_empty() || normalized == "(no subject)" || normalized == "(ohne betreff)"
 }
 
 fn parse_tui_ingest_request(args: &[String]) -> Result<TuiIngestRequest> {
@@ -1937,7 +2010,7 @@ fn search_messages(
     sender: Option<&str>,
     limit: usize,
 ) -> Result<Vec<ChannelMessageView>> {
-    let normalized_query = format!("%{}%", query.trim().to_ascii_lowercase());
+    let normalized_query = format!("%{}%", search_query_seed(query));
     let normalized_sender = sender
         .map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty());
@@ -1989,6 +2062,152 @@ fn search_messages(
     )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)
+}
+
+fn search_query_seed(query: &str) -> String {
+    let compact = query.trim().to_ascii_lowercase();
+    compact
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
+        .find(|token| token.len() >= 3)
+        .unwrap_or(compact.as_str())
+        .to_string()
+}
+
+fn build_communication_context(
+    conn: &Connection,
+    thread_key: &str,
+    query: Option<&str>,
+    sender: Option<&str>,
+    limit: usize,
+) -> Result<CommunicationContextView> {
+    let thread_messages = list_thread_messages(conn, thread_key, limit)?;
+    let latest_subject = thread_messages
+        .iter()
+        .find(|item| !item.subject.trim().is_empty())
+        .map(|item| item.subject.clone());
+    let mut related_messages = Vec::new();
+    if let Some(query) = query.map(str::trim).filter(|value| !value.is_empty()) {
+        let mut seen = std::collections::BTreeSet::new();
+        for message in search_messages(conn, query, None, None, limit)?
+            .into_iter()
+            .chain(
+                sender
+                    .map(|value| search_messages(conn, query, None, Some(value), limit))
+                    .transpose()?
+                    .unwrap_or_default()
+                    .into_iter(),
+            )
+        {
+            if seen.insert(message.message_key.clone()) {
+                related_messages.push(message);
+            }
+        }
+    }
+    related_messages.retain(|item| item.thread_key != thread_key);
+    let latest_inbound = thread_messages
+        .iter()
+        .find(|item| item.direction == "inbound")
+        .map(|item| candidate_from_message("latest_inbound", item));
+    let latest_outbound = thread_messages
+        .iter()
+        .find(|item| item.direction == "outbound")
+        .map(|item| candidate_from_message("latest_outbound", item));
+    let mut candidate_blockers = collect_candidates(&thread_messages, &related_messages, "blocker");
+    let mut candidate_promises = collect_candidates(&thread_messages, &related_messages, "promise");
+    let open_owner_questions = collect_open_owner_questions(&thread_messages);
+    candidate_blockers.truncate(limit.min(8));
+    candidate_promises.truncate(limit.min(8));
+    Ok(CommunicationContextView {
+        thread_key: thread_key.to_string(),
+        latest_subject,
+        latest_inbound,
+        latest_outbound,
+        thread_messages,
+        related_messages,
+        candidate_blockers,
+        candidate_promises,
+        open_owner_questions,
+    })
+}
+
+fn collect_candidates(
+    thread_messages: &[ChannelMessageView],
+    related_messages: &[ChannelMessageView],
+    candidate_kind: &str,
+) -> Vec<CommunicationStateCandidate> {
+    let mut out = Vec::new();
+    for message in thread_messages.iter().chain(related_messages.iter()) {
+        if message.direction != "outbound" {
+            continue;
+        }
+        let body = format!(
+            "{}\n{}\n{}",
+            message.subject.to_ascii_lowercase(),
+            message.preview.to_ascii_lowercase(),
+            message.body_text.to_ascii_lowercase()
+        );
+        let is_match = match candidate_kind {
+            "blocker" => {
+                body.contains("blocked")
+                    || body.contains("blocker")
+                    || body.contains("need ")
+                    || body.contains("missing ")
+                    || body.contains("requires ")
+                    || body.contains("cannot ")
+            }
+            "promise" => {
+                body.contains("next step")
+                    || body.contains("i will")
+                    || body.contains("i'll")
+                    || body.contains("follow-up")
+                    || body.contains("queued")
+                    || body.contains("review")
+                    || body.contains("continue")
+            }
+            _ => false,
+        };
+        if is_match {
+            out.push(candidate_from_message(candidate_kind, message));
+        }
+    }
+    out
+}
+
+fn collect_open_owner_questions(
+    thread_messages: &[ChannelMessageView],
+) -> Vec<CommunicationStateCandidate> {
+    let latest_outbound_at = thread_messages
+        .iter()
+        .find(|item| item.direction == "outbound")
+        .map(|item| item.external_created_at.clone());
+    thread_messages
+        .iter()
+        .filter(|item| item.direction == "inbound")
+        .filter(|item| {
+            let text = format!("{}\n{}", item.subject, item.body_text);
+            text.contains('?')
+                || text.to_ascii_lowercase().contains("please")
+                || text.to_ascii_lowercase().contains("can you")
+        })
+        .filter(|item| {
+            latest_outbound_at
+                .as_ref()
+                .map(|outbound| item.external_created_at >= *outbound)
+                .unwrap_or(true)
+        })
+        .map(|item| candidate_from_message("open_question", item))
+        .collect()
+}
+
+fn candidate_from_message(kind: &str, message: &ChannelMessageView) -> CommunicationStateCandidate {
+    CommunicationStateCandidate {
+        kind: kind.to_string(),
+        message_key: message.message_key.clone(),
+        channel: message.channel.clone(),
+        thread_key: message.thread_key.clone(),
+        created_at: message.external_created_at.clone(),
+        summary: preview_text(&message.body_text, &message.subject),
+    }
 }
 
 fn map_channel_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelMessageView> {
@@ -2403,7 +2622,10 @@ fn upsert_owner_profile(conn: &mut Connection, display_name: &str) -> Result<()>
     Ok(())
 }
 
-fn sync_identity_profiles(conn: &mut Connection, settings: &BTreeMap<String, String>) -> Result<()> {
+fn sync_identity_profiles(
+    conn: &mut Connection,
+    settings: &BTreeMap<String, String>,
+) -> Result<()> {
     let owner_name = settings
         .get("CTOX_OWNER_NAME")
         .map(|value| value.trim())
@@ -2545,7 +2767,11 @@ fn parse_admin_email_policies(settings: &BTreeMap<String, String>) -> Vec<AdminE
 }
 
 fn normalize_email_address(value: &str) -> String {
-    value.trim().trim_matches('<').trim_matches('>').to_lowercase()
+    value
+        .trim()
+        .trim_matches('<')
+        .trim_matches('>')
+        .to_lowercase()
 }
 
 fn normalized_allowed_email_domain(settings: &BTreeMap<String, String>) -> Option<String> {
@@ -2764,7 +2990,7 @@ fn email_address_from_account_key(account_key: &str) -> String {
 }
 
 fn node_binary(root: &Path) -> String {
-    runtime_config::load_runtime_env_map(root)
+    runtime_env::load_runtime_env_map(root)
         .ok()
         .and_then(|settings| settings.get("CTOX_NODE_BIN").cloned())
         .map(|value| value.trim().to_string())
@@ -2773,7 +2999,7 @@ fn node_binary(root: &Path) -> String {
 }
 
 fn push_mail_runtime_env(root: &Path, cmd: &mut Command) {
-    let Ok(settings) = runtime_config::load_runtime_env_map(root) else {
+    let Ok(settings) = runtime_env::load_runtime_env_map(root) else {
         return;
     };
     for key in [
@@ -2796,6 +3022,34 @@ fn push_mail_runtime_env(root: &Path, cmd: &mut Command) {
         "CTO_EMAIL_ACTIVESYNC_POLICY_KEY",
         "CTO_EMAIL_VERIFY_SEND",
         "CTO_EMAIL_SENT_VERIFY_WINDOW_SECONDS",
+    ] {
+        if let Some(value) = settings
+            .get(key)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            cmd.env(key, value);
+        }
+    }
+}
+
+fn push_jami_runtime_env(root: &Path, cmd: &mut Command) {
+    let Ok(settings) = runtime_env::load_runtime_env_map(root) else {
+        return;
+    };
+    for key in [
+        "CTOX_PROXY_HOST",
+        "CTOX_PROXY_PORT",
+        "CTOX_STT_MODEL",
+        "CTOX_STT_BASE_URL",
+        "CTOX_TTS_MODEL",
+        "CTOX_TTS_BASE_URL",
+        "CTO_JAMI_DBUS_ENV_FILE",
+        "CTO_JAMI_INBOX_DIR",
+        "CTO_JAMI_OUTBOX_DIR",
+        "CTO_JAMI_ARCHIVE_DIR",
+        "CTO_JAMI_PROFILE_NAME",
+        "CTO_JAMI_ACCOUNT_ID",
     ] {
         if let Some(value) = settings
             .get(key)
@@ -3248,6 +3502,47 @@ mod tests {
     }
 
     #[test]
+    fn thread_prefers_voice_reply_for_voice_jami_inbound() {
+        let db_path = unique_test_db_path("ctox-channel-jami-voice");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "msg-jami-voice-1",
+                channel: "jami",
+                account_key: "jami:test-account",
+                thread_key: "jami/thread-voice-1",
+                remote_id: "remote-jami-voice-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Owner",
+                sender_address: "jami:owner",
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Voice subject",
+                preview: "voice preview",
+                body_text: "voice body",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "owner_verified",
+                status: "received",
+                seen: false,
+                has_attachments: true,
+                external_created_at: "2026-03-29T08:00:00Z",
+                observed_at: "2026-03-29T08:00:00Z",
+                metadata_json: r#"{"preferredReplyModality":"voice"}"#,
+            },
+        )
+        .expect("failed to upsert jami voice message");
+
+        assert!(thread_prefers_voice_reply(&conn, "jami/thread-voice-1")
+            .expect("failed to resolve jami voice preference"));
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
     fn system_probe_inbound_messages_are_marked_handled() {
         let db_path = unique_test_db_path("ctox-channel-system-probe");
         let mut conn = open_channel_db(&db_path).expect("failed to open db");
@@ -3416,10 +3711,12 @@ mod tests {
         assert_eq!(thread_history.len(), 2);
         assert_eq!(thread_history[0].message_key, "msg-2");
 
-        let search =
-            search_messages(&conn, "nextcloud endpoint", Some("email"), None, 10).expect("failed to search");
+        let search = search_messages(&conn, "nextcloud endpoint", Some("email"), None, 10)
+            .expect("failed to search");
         assert_eq!(search.len(), 2);
-        assert!(search.iter().all(|item| item.thread_key == "email/thread-a"));
+        assert!(search
+            .iter()
+            .all(|item| item.thread_key == "email/thread-a"));
 
         let sender_search = search_messages(
             &conn,
@@ -3431,6 +3728,156 @@ mod tests {
         .expect("failed to search sender-scoped messages");
         assert_eq!(sender_search.len(), 1);
         assert_eq!(sender_search[0].message_key, "msg-3");
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn channel_context_groups_thread_state_blockers_and_open_questions() {
+        let db_path = unique_test_db_path("ctox-channel-context");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        for (
+            message_key,
+            thread_key,
+            direction,
+            sender_display,
+            sender_address,
+            subject,
+            preview,
+            body_text,
+            created_at,
+        ) in [
+            (
+                "ctx-1",
+                "email/thread-zammad",
+                "inbound",
+                "Michael",
+                "michael@metric-space.ai",
+                "Zammad status",
+                "Please finish it",
+                "Can you finish Zammad and report the blocker?",
+                "2026-03-26T10:00:00Z",
+            ),
+            (
+                "ctx-2",
+                "email/thread-zammad",
+                "outbound",
+                "CTOX",
+                "cto1@metric-space.ai",
+                "Zammad status",
+                "Still blocked",
+                "Blocked: the admin API still returns 401 and I need to repair auth.",
+                "2026-03-26T10:05:00Z",
+            ),
+            (
+                "ctx-3",
+                "email/thread-zammad",
+                "inbound",
+                "Michael",
+                "michael@metric-space.ai",
+                "Zammad status",
+                "Please continue",
+                "Please continue and tell me if you need anything else?",
+                "2026-03-26T10:10:00Z",
+            ),
+            (
+                "ctx-4",
+                "tui/main",
+                "inbound",
+                "Michael",
+                "tui:local",
+                "TUI",
+                "Freigabe",
+                "Die Freigabe fuer die Zammad-Reparatur ist erteilt.",
+                "2026-03-26T10:12:00Z",
+            ),
+            (
+                "ctx-5",
+                "email/thread-redis",
+                "outbound",
+                "CTOX",
+                "cto1@metric-space.ai",
+                "Redis repaired",
+                "Follow-up queued",
+                "I queued a follow-up review for Redis and will continue after verification.",
+                "2026-03-26T09:00:00Z",
+            ),
+        ] {
+            upsert_communication_message(
+                &mut conn,
+                UpsertMessage {
+                    message_key,
+                    channel: if thread_key.starts_with("tui/") {
+                        "tui"
+                    } else {
+                        "email"
+                    },
+                    account_key: "email:cto1@metric-space.ai",
+                    thread_key,
+                    remote_id: message_key,
+                    direction,
+                    folder_hint: if direction == "inbound" {
+                        "INBOX"
+                    } else {
+                        "Sent"
+                    },
+                    sender_display,
+                    sender_address,
+                    recipient_addresses_json: "[]",
+                    cc_addresses_json: "[]",
+                    bcc_addresses_json: "[]",
+                    subject,
+                    preview,
+                    body_text,
+                    body_html: "",
+                    raw_payload_ref: "",
+                    trust_level: "owner_verified",
+                    status: "received",
+                    seen: false,
+                    has_attachments: false,
+                    external_created_at: created_at,
+                    observed_at: created_at,
+                    metadata_json: "{}",
+                },
+            )
+            .expect("failed to insert context message");
+        }
+
+        let context = build_communication_context(
+            &conn,
+            "email/thread-zammad",
+            Some("zammad blocker repair"),
+            Some("michael@metric-space.ai"),
+            10,
+        )
+        .expect("failed to build communication context");
+
+        assert_eq!(context.thread_messages.len(), 3);
+        assert_eq!(context.latest_subject.as_deref(), Some("Zammad status"));
+        assert_eq!(
+            context
+                .latest_inbound
+                .as_ref()
+                .map(|item| item.message_key.as_str()),
+            Some("ctx-3")
+        );
+        assert_eq!(
+            context
+                .latest_outbound
+                .as_ref()
+                .map(|item| item.message_key.as_str()),
+            Some("ctx-2")
+        );
+        assert!(!context.candidate_blockers.is_empty());
+        assert!(context
+            .candidate_blockers
+            .iter()
+            .any(|item| item.message_key == "ctx-2"));
+        assert!(!context.open_owner_questions.is_empty());
+        assert!(context
+            .related_messages
+            .iter()
+            .any(|item| item.message_key == "ctx-4"));
 
         let _ = fs::remove_file(&db_path);
     }

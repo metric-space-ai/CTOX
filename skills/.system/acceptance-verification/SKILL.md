@@ -22,6 +22,7 @@ Preferred helper under `scripts/`:
 - `verify_contract.py`
 
 The helper is inspectable. Patch it when the service exposes unusual verification surfaces.
+Use `--required-profile` and `--minimum-layer` to make the expected proof explicit instead of assuming that any highest observed layer is sufficient.
 
 ## Verification Layers
 
@@ -44,6 +45,13 @@ Do not stop at a lower layer if a higher safe layer is available.
 3. Prove them in order until either:
    - the deployment is truly usable
    - or the first failing layer is identified
+4. Declare the expected minimum proof before summarizing:
+   - `read_only_service`
+   - `operator_managed`
+   - `admin_managed`
+   - `safe_mutation`
+   - `durable_mutation`
+   - or an explicit `--minimum-layer`
 4. If a lower layer passes but a higher layer fails, return `needs_repair`.
 5. Name the exact failed layer and likely cause.
 6. Hand control back to `service-deployment` or the concrete service skill for repair.
@@ -73,6 +81,7 @@ Use these headings:
 - A web login page alone is never enough when CTOX is expected to administer the service.
 - If authenticated admin or API access is expected and fails, the result is not complete.
 - If a safe mutating smoke check is available and has not passed yet, do not claim full success.
+- If the service is only proven to a lower layer than the declared minimum proof, return `needs_repair` with `cause=verification_incomplete`.
 
 ## Resources
 

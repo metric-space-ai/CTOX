@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ENV_FILE="${CTOX_VLLM_SERVE_ENV_FILE:-$ROOT/runtime/vllm_serve.env}"
+ENV_FILE="${CTOX_ENGINE_ENV_FILE:-$ROOT/runtime/engine.env}"
 
 if [[ -f "$ENV_FILE" ]]; then
   set -a
@@ -44,7 +44,7 @@ wait_for_http() {
   return 1
 }
 
-ROLE="${CTOX_AUX_CPU_ROLE:-${CTOX_VLLM_SERVE_ROLE:-}}"
+ROLE="${CTOX_AUX_CPU_ROLE:-${CTOX_ENGINE_ROLE:-}}"
 HOST="${CTOX_AUX_HOST:-127.0.0.1}"
 PORT="${CTOX_AUX_PORT:-}"
 MODEL="${CTOX_AUX_REQUEST_MODEL:-}"

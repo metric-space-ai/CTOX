@@ -1,0 +1,10 @@
+{
+  "model": "Qwen/Qwen3-Embedding-0.6B",
+  "role": "embedding",
+  "gpu_reserve_mb": 1100,
+  "placement": {
+    "primary_gpu_index": 0,
+    "use_primary_gpu_by_default": true,
+    "supports_multi_gpu_expansion": false
+  }
+}

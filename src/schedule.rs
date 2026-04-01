@@ -311,7 +311,11 @@ pub fn ensure_task(root: &Path, request: ScheduleEnsureRequest) -> Result<Schedu
     }
     let task_id = format!(
         "sched_{}",
-        stable_digest(&format!("{}:{}", request.name.trim(), request.thread_key.trim()))
+        stable_digest(&format!(
+            "{}:{}",
+            request.name.trim(),
+            request.thread_key.trim()
+        ))
     );
     conn.execute(
         r#"
@@ -546,6 +550,7 @@ fn now_utc() -> DateTime<Utc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn ensure_task_upserts_existing_schedule_by_name_and_thread() {
@@ -587,6 +592,59 @@ mod tests {
 
         let tasks = list_tasks(&root).expect("list tasks");
         assert_eq!(tasks.len(), 1);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn emit_task_now_persists_observable_cron_message_with_scrape_prompt() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox_schedule_emit_test_{}",
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("runtime")).expect("runtime dir");
+
+        let task = ensure_task(
+            &root,
+            ScheduleEnsureRequest {
+                name: "refresh scrape fixture".to_string(),
+                cron_expr: "0 * * * *".to_string(),
+                prompt: "Run target_key=fixture-multi-feed. Expect schema=articles.v1.".to_string(),
+                thread_key: "scrape/fixture-multi-feed".to_string(),
+                skill: Some("universal-scraping".to_string()),
+            },
+        )
+        .expect("ensure task");
+
+        let run = emit_task_now(&root, &task.task_id).expect("emit run");
+        let db = Connection::open(root.join("runtime/cto_agent.db")).expect("open channel db");
+        let row = db
+            .query_row(
+                "SELECT thread_key, subject, body_text, metadata_json FROM communication_messages WHERE message_key = ?1",
+                params![run.message_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("load cron message");
+
+        assert_eq!(row.0, "scrape/fixture-multi-feed");
+        assert_eq!(row.1, "refresh scrape fixture");
+        assert!(row.2.contains("Scheduled task: refresh scrape fixture"));
+        assert!(row.2.contains("target_key=fixture-multi-feed"));
+        assert!(row
+            .2
+            .contains("Preferred skill/tooling: universal-scraping"));
+        assert!(row.3.contains("\"skill\":\"universal-scraping\""));
+        assert!(row.3.contains("\"source\":\"ctox-schedule\""));
 
         let _ = std::fs::remove_dir_all(root);
     }

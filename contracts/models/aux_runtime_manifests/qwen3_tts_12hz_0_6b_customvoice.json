@@ -1,0 +1,10 @@
+{
+  "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "role": "tts",
+  "gpu_reserve_mb": 1400,
+  "placement": {
+    "primary_gpu_index": 0,
+    "use_primary_gpu_by_default": true,
+    "supports_multi_gpu_expansion": false
+  }
+}

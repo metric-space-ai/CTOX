@@ -25,7 +25,7 @@ mkdir -p "$RUN_DIR"
 
 is_local_qwen_model() {
   case "$1" in
-    Qwen/Qwen3.5-4B|Qwen/Qwen3.5-9B|Qwen/Qwen3.5-27B|Qwen/Qwen3.5-35B-A3B)
+    Qwen/Qwen3.5-4B|Qwen/Qwen3.5-9B|Qwen/Qwen3.5-27B|Qwen/Qwen3.5-35B-A3B|nvidia/Nemotron-Cascade-2-30B-A3B)
       return 0
       ;;
     *)
@@ -53,6 +53,9 @@ qwen_context_window() {
     Qwen/Qwen3.5-35B-A3B)
       printf '2048'
       ;;
+    nvidia/Nemotron-Cascade-2-30B-A3B)
+      printf '8192'
+      ;;
     *)
       printf '4096'
       ;;
@@ -65,6 +68,9 @@ qwen_compact_limit() {
       printf '3584'
       ;;
     Qwen/Qwen3.5-35B-A3B)
+      printf '1536'
+      ;;
+    nvidia/Nemotron-Cascade-2-30B-A3B)
       printf '1536'
       ;;
     *)

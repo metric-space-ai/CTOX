@@ -1,0 +1,92 @@
+{
+  "model": "zai-org/GLM-4.7-Flash",
+  "sizing": {
+    "non_repeating_weight_mb_q4": 3190,
+    "repeating_layer_weight_mb_q4": 400,
+    "load_peak_slack_mb_q4": 1800,
+    "kv_mb_per_1k_tokens_q4": 275,
+    "base_toks_per_sec_q4": 48.0,
+    "repeating_layers": 47,
+    "context_cap": 65536
+  },
+  "runtime_defaults": {
+    "paged_attn": "auto",
+    "pa_cache_type": "turboquant3",
+    "pa_memory_fraction": "0.65",
+    "force_no_mmap": true,
+    "force_language_model_only": false,
+    "disable_flash_attn": true,
+    "isq_singlethread": true,
+    "isq_cpu_threads": null
+  },
+  "placement": {
+    "primary_gpu_index": 0,
+    "primary_gpu_holds_non_repeating": true,
+    "primary_gpu_desktop_reserve_mb": 1024
+  },
+  "quality": {
+    "objective": "quality",
+    "candidates": [
+      {
+        "quantization": "q6k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 768
+      },
+      {
+        "quantization": "q5k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 768
+      },
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 768
+      }
+    ]
+  },
+  "max_context": {
+    "objective": "max_context",
+    "candidates": [
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 512
+      }
+    ]
+  },
+  "performance": {
+    "objective": "performance",
+    "candidates": [
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 2,
+        "max_seqs": 2,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 16384,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 768
+      }
+    ]
+  }
+}

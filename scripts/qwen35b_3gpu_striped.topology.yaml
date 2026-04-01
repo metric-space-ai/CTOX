@@ -1,9 +1,3 @@
-'/^model\.language_model\.layers\.(0|1|3|6|9|12|13|15|18|21|24|25|27|30|33|36|37|39)\./':
-  device: cuda[0]
-'/^model\.language_model\.layers\.(4|7|10|16|19|22|28|31|34)\./':
-  device: cuda[1]
-'/^model\.language_model\.layers\.(2|5|8|11|14|17|20|23|26|29|32|35|38)\./':
-  device: cuda[2]
 '/^model\.language_model\.embed_tokens\./':
   device: cuda[0]
 '/^lm_head\./':

@@ -1,194 +1,28 @@
 use anyhow::Context;
 use std::path::PathBuf;
 
-mod backend_manager;
+mod browser;
 mod channels;
-mod chat_runtime;
-mod execution_baseline;
+mod context_health;
+mod context_stress;
 mod follow_up;
+mod governance;
+mod inference;
 mod lcm;
+mod mission_governor;
 mod plan;
 mod queue;
-mod responses_proxy;
-mod runtime_config;
-mod runtime_planner;
+mod review;
 mod schedule;
+mod scrape;
 mod service;
 mod tui;
+mod verification;
 
-fn apply_legacy_chat_runtime(root: &std::path::Path, model: &str) -> anyhow::Result<()> {
-    let runtime = execution_baseline::runtime_config_for_model(model)?;
-    let family_profile = execution_baseline::runtime_profile_for_model(model)?;
-    let mut env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
-    runtime_planner::clear_persisted_chat_plan(root, &mut env_map)?;
-    env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
-    env_map.insert("CTOX_CHAT_MODEL_BASE".to_string(), runtime.model.clone());
-    env_map.insert("CTOX_ACTIVE_MODEL".to_string(), runtime.model.clone());
-    env_map.insert("CTOX_CHAT_MODEL".to_string(), runtime.model.clone());
-    env_map.remove("CTOX_BOOST_ACTIVE_UNTIL_EPOCH");
-    env_map.remove("CTOX_BOOST_REASON");
-    env_map.remove("CTOX_CHAT_LOCAL_PRESET");
-    env_map.remove("CTOX_VLLM_SERVE_REALIZED_MAX_SEQ_LEN");
-    env_map.remove("CTOX_CHAT_MODEL_REALIZED_CONTEXT");
-    env_map.remove("CTOX_VLLM_SERVE_REALIZED_MODEL");
-    for key in [
-        "CTOX_VLLM_SERVE_NO_MMAP",
-        "CTOX_VLLM_SERVE_LANGUAGE_MODEL_ONLY",
-        "CTOX_VLLM_SERVE_ISQ_SINGLETHREAD",
-        "CTOX_VLLM_SERVE_ISQ_CPU_THREADS",
-        "CTOX_VLLM_SERVE_DISABLE_FLASH_ATTN",
-        "CTOX_VLLM_SERVE_TOPOLOGY",
-        "CTOX_VLLM_SERVE_ALLOW_DEVICE_LAYERS_WITH_TOPOLOGY",
-        "CTOX_VLLM_SERVE_NM_DEVICE_ORDINAL",
-        "CTOX_VLLM_SERVE_BASE_DEVICE_ORDINAL",
-        "CTOX_VLLM_SERVE_MOE_EXPERTS_BACKEND",
-        "CTOX_VLLM_SERVE_DEVICE_LAYERS",
-        "CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES",
-    ] {
-        env_map.remove(key);
-    }
-    env_map.insert("CTOX_VLLM_SERVE_ROLE".to_string(), "chat".to_string());
-    env_map.insert("CTOX_VLLM_SERVE_MODEL".to_string(), runtime.model.clone());
-    env_map.insert("CTOX_VLLM_SERVE_PORT".to_string(), runtime.port.to_string());
-    env_map.insert(
-        "CTOX_VLLM_SERVE_MAX_SEQS".to_string(),
-        runtime.max_seqs.to_string(),
-    );
-    env_map.insert(
-        "CTOX_VLLM_SERVE_MAX_BATCH_SIZE".to_string(),
-        runtime.max_batch_size.to_string(),
-    );
-    if let Some(max_seq_len) = runtime.max_seq_len {
-        env_map.insert(
-            "CTOX_VLLM_SERVE_MAX_SEQ_LEN".to_string(),
-            max_seq_len.to_string(),
-        );
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_MAX_SEQ_LEN");
-    }
-    if let Some(arch) = family_profile.arch {
-        env_map.insert("CTOX_VLLM_SERVE_ARCH".to_string(), arch);
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_ARCH");
-    }
-    env_map.insert(
-        "CTOX_VLLM_SERVE_PAGED_ATTN".to_string(),
-        family_profile.paged_attn,
-    );
-    if let Some(cache_type) = family_profile.pa_cache_type {
-        env_map.insert("CTOX_VLLM_SERVE_PA_CACHE_TYPE".to_string(), cache_type);
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_PA_CACHE_TYPE");
-    }
-    if let Some(memory_fraction) = family_profile.pa_memory_fraction {
-        env_map.insert(
-            "CTOX_VLLM_SERVE_PA_MEMORY_FRACTION".to_string(),
-            memory_fraction,
-        );
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_PA_MEMORY_FRACTION");
-    }
-    if let Some(context_len) = family_profile.pa_context_len {
-        env_map.insert(
-            "CTOX_VLLM_SERVE_PA_CONTEXT_LEN".to_string(),
-            context_len.to_string(),
-        );
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_PA_CONTEXT_LEN");
-    }
-    if let Some(isq) = family_profile.isq {
-        env_map.insert("CTOX_VLLM_SERVE_ISQ".to_string(), isq);
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_ISQ");
-    }
-    if let Some(backend) = family_profile.tensor_parallel_backend {
-        env_map.insert(
-            "CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND".to_string(),
-            backend,
-        );
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND");
-    }
-    env_map.insert(
-        "CTOX_VLLM_SERVE_DISABLE_NCCL".to_string(),
-        if family_profile.disable_nccl {
-            "1"
-        } else {
-            "0"
-        }
-        .to_string(),
-    );
-    match model {
-        "Qwen/Qwen3.5-35B-A3B" => {
-            env_map.insert("CTOX_VLLM_SERVE_NO_MMAP".to_string(), "1".to_string());
-            env_map.insert(
-                "CTOX_VLLM_SERVE_LANGUAGE_MODEL_ONLY".to_string(),
-                "1".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_ISQ_SINGLETHREAD".to_string(),
-                "1".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_DISABLE_FLASH_ATTN".to_string(),
-                "1".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_TOPOLOGY".to_string(),
-                root.join("scripts/qwen35b_3gpu_striped.topology.yaml")
-                    .display()
-                    .to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_ALLOW_DEVICE_LAYERS_WITH_TOPOLOGY".to_string(),
-                "1".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_NM_DEVICE_ORDINAL".to_string(),
-                "2".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_BASE_DEVICE_ORDINAL".to_string(),
-                "2".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_MOE_EXPERTS_BACKEND".to_string(),
-                "fast".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_DEVICE_LAYERS".to_string(),
-                "0:2;1:4;2:4;0:2;1:4;2:4;0:2;1:4;2:4;0:2;1:3;2:5".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES".to_string(),
-                "0,1,2".to_string(),
-            );
-        }
-        "zai-org/GLM-4.7-Flash" => {
-            env_map.insert("CTOX_VLLM_SERVE_NO_MMAP".to_string(), "1".to_string());
-            env_map.insert(
-                "CTOX_VLLM_SERVE_DISABLE_FLASH_ATTN".to_string(),
-                "1".to_string(),
-            );
-            env_map.insert(
-                "CTOX_VLLM_SERVE_ISQ_CPU_THREADS".to_string(),
-                "4".to_string(),
-            );
-        }
-        _ => {}
-    }
-    if let Some(world_size) = family_profile.target_world_size {
-        env_map.insert(
-            "CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE".to_string(),
-            world_size.to_string(),
-        );
-    } else {
-        env_map.remove("CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE");
-    }
-    runtime_config::save_runtime_env_map(root, &env_map)?;
-    println!("{}", serde_json::to_string_pretty(&env_map)?);
-    Ok(())
-}
+use crate::inference::engine;
+use crate::inference::gateway;
+use crate::inference::runtime_env;
+use crate::inference::runtime_plan;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -197,7 +31,7 @@ fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         None => tui::run_tui(&root),
         Some("clean-room-bootstrap-deps") => {
-            let outcome = execution_baseline::bootstrap_clean_room_dependencies(&root)?;
+            let outcome = engine::bootstrap_clean_room_dependencies(&root)?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(())
         }
@@ -212,7 +46,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 "Reply with CTOX_BASELINE_OK and nothing else.".to_string()
             };
-            let plan = execution_baseline::build_clean_room_baseline_plan(&root, family, prompt);
+            let plan = engine::build_clean_room_baseline_plan(&root, family, prompt);
             println!("{}", serde_json::to_string_pretty(&plan)?);
             Ok(())
         }
@@ -222,7 +56,7 @@ fn main() -> anyhow::Result<()> {
                 .context("usage: ctox clean-room-rewrite-responses <json-path>")?;
             let raw = std::fs::read(input_path)
                 .with_context(|| format!("failed to read responses payload from {}", input_path))?;
-            let rewritten = execution_baseline::rewrite_vllm_serve_responses_request(&raw)?;
+            let rewritten = engine::rewrite_engine_responses_request(&raw)?;
             println!("{}", String::from_utf8_lossy(&rewritten));
             Ok(())
         }
@@ -233,7 +67,7 @@ fn main() -> anyhow::Result<()> {
             let preset = args.get(2).context(
                 "usage: ctox chat-runtime-apply <model> <quality|max_context|performance>",
             )?;
-            let mut env_map = runtime_config::load_runtime_env_map(&root).unwrap_or_default();
+            let mut env_map = runtime_env::effective_runtime_env_map(&root).unwrap_or_default();
             env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
             env_map.insert("CTOX_CHAT_MODEL_BASE".to_string(), model.clone());
             env_map.insert("CTOX_CHAT_MODEL".to_string(), model.clone());
@@ -242,32 +76,26 @@ fn main() -> anyhow::Result<()> {
             env_map.remove("CTOX_BOOST_REASON");
             env_map.insert(
                 "CTOX_CHAT_LOCAL_PRESET".to_string(),
-                runtime_planner::ChatPreset::from_label(preset)
+                runtime_plan::ChatPreset::from_label(preset)
                     .label()
                     .to_string(),
             );
-            let plan = runtime_planner::apply_chat_runtime_plan(&root, &mut env_map)?
+            let plan = runtime_plan::apply_chat_runtime_plan(&root, &mut env_map)?
                 .context("failed to resolve chat runtime plan")?;
-            runtime_config::save_runtime_env_map(&root, &env_map)?;
+            runtime_env::save_runtime_env_map(&root, &env_map)?;
             println!("{}", serde_json::to_string_pretty(&plan)?);
             Ok(())
         }
-        Some("chat-runtime-apply-legacy") => {
-            let model = args
-                .get(1)
-                .context("usage: ctox chat-runtime-apply-legacy <model>")?;
-            apply_legacy_chat_runtime(&root, model)
-        }
         Some("serve-responses-proxy") => {
-            let config = responses_proxy::ProxyConfig::from_env_with_root(&root);
+            let config = gateway::ProxyConfig::from_env_with_root(&root);
             eprintln!("{}", serde_json::to_string_pretty(&config)?);
-            responses_proxy::serve_proxy(config)
+            gateway::serve_proxy(config)
         }
         Some("boost") => match args.get(1).map(String::as_str) {
             Some("status") => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&responses_proxy::boost_status(&root)?)?
+                    serde_json::to_string_pretty(&gateway::boost_status(&root)?)?
                 );
                 Ok(())
             }
@@ -276,7 +104,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|value| value.parse::<u64>().ok());
                 let model = find_flag_value(&args[2..], "--model");
                 let reason = find_flag_value(&args[2..], "--reason");
-                let result = responses_proxy::start_boost_lease(
+                let result = gateway::start_boost_lease(
                     &root,
                     model,
                     minutes,
@@ -288,7 +116,7 @@ fn main() -> anyhow::Result<()> {
             Some("stop") => {
                 println!(
                     "{}",
-                    serde_json::to_string_pretty(&responses_proxy::stop_boost_lease(&root)?)?
+                    serde_json::to_string_pretty(&gateway::stop_boost_lease(&root)?)?
                 );
                 Ok(())
             }
@@ -319,11 +147,15 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("tui") => tui::run_tui(&root),
+        Some("browser") => browser::handle_browser_command(&root, &args[1..]),
         Some("channel") => channels::handle_channel_command(&root, &args[1..]),
         Some("follow-up") => follow_up::handle_follow_up_command(&args[1..]),
+        Some("governance") => governance::handle_governance_command(&root, &args[1..]),
         Some("plan") => plan::handle_plan_command(&root, &args[1..]),
         Some("queue") => queue::handle_queue_command(&root, &args[1..]),
+        Some("scrape") => scrape::handle_scrape_command(&root, &args[1..]),
         Some("schedule") => schedule::handle_schedule_command(&root, &args[1..]),
+        Some("verification") => verification::handle_verification_command(&root, &args[1..]),
         Some("lcm-init") => {
             let db_path = args.get(1).context("usage: ctox lcm-init <db-path>")?;
             lcm::run_init(PathBuf::from(db_path).as_path())
@@ -664,6 +496,66 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
+        Some("context-health") => {
+            let db_path = args
+                .get(1)
+                .context("usage: ctox context-health <db-path> <conversation-id> [latest-user-prompt] [token-budget]")?;
+            let conversation_id: i64 = args
+                .get(2)
+                .context("usage: ctox context-health <db-path> <conversation-id> [latest-user-prompt] [token-budget]")?
+                .parse()
+                .context("failed to parse conversation id")?;
+            let tail = args.get(3..).unwrap_or(&[]);
+            let (latest_prompt, token_budget) = if let Some(last) = tail.last() {
+                if let Ok(token_budget) = last.parse::<i64>() {
+                    (
+                        (!tail[..tail.len().saturating_sub(1)].is_empty())
+                            .then(|| tail[..tail.len().saturating_sub(1)].join(" ")),
+                        token_budget,
+                    )
+                } else {
+                    (Some(tail.join(" ")), 131_072_i64)
+                }
+            } else {
+                (None, 131_072_i64)
+            };
+            let result = context_health::assess_for_conversation(
+                PathBuf::from(db_path).as_path(),
+                conversation_id,
+                token_budget,
+                latest_prompt.as_deref(),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+        Some("context-stress") => {
+            let db_path = args
+                .get(1)
+                .context("usage: ctox context-stress <db-path> [conversation-id] [iterations] [token-budget]")?;
+            let conversation_id = args
+                .get(2)
+                .map(|value| value.parse::<i64>())
+                .transpose()
+                .context("failed to parse conversation id")?;
+            let iterations = args
+                .get(3)
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .context("failed to parse iterations")?;
+            let token_budget = args
+                .get(4)
+                .map(|value| value.parse::<i64>())
+                .transpose()
+                .context("failed to parse token budget")?;
+            let result = context_stress::run_context_stress(
+                PathBuf::from(db_path).as_path(),
+                conversation_id,
+                iterations,
+                token_budget,
+            )?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         Some("context-retrieve") => {
             let conversation_id: i64 = find_flag_value(&args[1..], "--conversation-id")
                 .unwrap_or("1")
@@ -709,7 +601,7 @@ fn main() -> anyhow::Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "usage:\n  ctox\n  ctox start\n  ctox stop\n  ctox status\n  ctox service --foreground\n  ctox clean-room-bootstrap-deps\n  ctox clean-room-baseline-plan <gpt_oss|qwen3_5> [prompt]\n  ctox clean-room-rewrite-responses <json-path>\n  ctox chat-runtime-apply <model> <quality|max_context|performance>\n  ctox chat-runtime-apply-legacy <model>\n  ctox serve-responses-proxy\n  ctox boost status\n  ctox boost start [--minutes <n>] [--model <id>] [--reason <text>]\n  ctox boost stop\n  ctox tui\n  ctox channel <subcommand> ...\n  ctox follow-up <subcommand> ...\n  ctox plan <subcommand> ...\n  ctox schedule <subcommand> ...\n  ctox lcm-init <db-path>\n  ctox lcm-add-message <db-path> <conversation-id> <role> <content>\n  ctox lcm-compact <db-path> <conversation-id> [token-budget] [--force]\n  ctox lcm-grep <db-path> <conversation-id|all> <scope> <mode> <query> [limit]\n  ctox lcm-describe <db-path> <summary-id>\n  ctox lcm-expand <db-path> <summary-id> [depth] [--messages] [token-cap]\n  ctox lcm-dump <db-path> <conversation-id>\n  ctox lcm-refresh-continuity <db-path> <conversation-id>\n  ctox lcm-show-continuity <db-path> <conversation-id>\n  ctox lcm-run-fixture <db-path> <fixture-path>\n  ctox continuity-init <db-path> <conversation-id>\n  ctox continuity-show <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-apply <db-path> <conversation-id> <narrative|anchors|focus> <diff-path>\n  ctox continuity-log <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-rebuild <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox continuity-forgotten <db-path> <conversation-id> [narrative|anchors|focus] [query]\n  ctox continuity-build-prompt <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox context-retrieve [--db <path>] [--conversation-id <id>] --mode <current|continuity|forgotten|search|describe|expand> [--kind <narrative|anchors|focus>] [--query <text>] [--summary-id <id>] [--limit <n>] [--depth <n>] [--messages] [--token-cap <n>]"
+                "usage:\n  ctox\n  ctox start\n  ctox stop\n  ctox status\n  ctox service --foreground\n  ctox clean-room-bootstrap-deps\n  ctox clean-room-baseline-plan <gpt_oss|qwen3_5> [prompt]\n  ctox clean-room-rewrite-responses <json-path>\n  ctox chat-runtime-apply <model> <quality|max_context|performance>\n  ctox serve-responses-proxy\n  ctox boost status\n  ctox boost start [--minutes <n>] [--model <id>] [--reason <text>]\n  ctox boost stop\n  ctox tui\n  ctox channel <subcommand> ...\n  ctox follow-up <subcommand> ...\n  ctox plan <subcommand> ...\n  ctox schedule <subcommand> ...\n  ctox lcm-init <db-path>\n  ctox lcm-add-message <db-path> <conversation-id> <role> <content>\n  ctox lcm-compact <db-path> <conversation-id> [token-budget] [--force]\n  ctox lcm-grep <db-path> <conversation-id|all> <scope> <mode> <query> [limit]\n  ctox lcm-describe <db-path> <summary-id>\n  ctox lcm-expand <db-path> <summary-id> [depth] [--messages] [token-cap]\n  ctox lcm-dump <db-path> <conversation-id>\n  ctox lcm-refresh-continuity <db-path> <conversation-id>\n  ctox lcm-show-continuity <db-path> <conversation-id>\n  ctox lcm-run-fixture <db-path> <fixture-path>\n  ctox continuity-init <db-path> <conversation-id>\n  ctox continuity-show <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-apply <db-path> <conversation-id> <narrative|anchors|focus> <diff-path>\n  ctox continuity-log <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-rebuild <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox continuity-forgotten <db-path> <conversation-id> [narrative|anchors|focus] [query]\n  ctox continuity-build-prompt <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox context-health <db-path> <conversation-id> [latest-user-prompt] [token-budget]\n  ctox context-stress <db-path> [conversation-id] [iterations] [token-budget]\n  ctox context-retrieve [--db <path>] [--conversation-id <id>] --mode <current|continuity|forgotten|search|describe|expand> [--kind <narrative|anchors|focus>] [--query <text>] [--summary-id <id>] [--limit <n>] [--depth <n>] [--messages] [--token-cap <n>]"
             )
         }
     }
@@ -717,6 +609,9 @@ fn main() -> anyhow::Result<()> {
 
 fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
     if let Some(root) = std::env::var_os("CTOX_ROOT") {
+        return Ok(PathBuf::from(root));
+    }
+    if let Some(root) = std::env::var_os("CTOX_HOME") {
         return Ok(PathBuf::from(root));
     }
     std::env::current_dir().context("failed to resolve CTOX workspace root")

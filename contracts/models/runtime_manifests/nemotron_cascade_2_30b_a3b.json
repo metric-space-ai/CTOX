@@ -1,0 +1,112 @@
+{
+  "model": "nvidia/Nemotron-Cascade-2-30B-A3B",
+  "sizing": {
+    "non_repeating_weight_mb_q4": 2800,
+    "repeating_layer_weight_mb_q4": 390,
+    "load_peak_slack_mb_q4": 1600,
+    "kv_mb_per_1k_tokens_q4": 140,
+    "base_toks_per_sec_q4": 42.0,
+    "repeating_layers": 52,
+    "context_cap": 262144
+  },
+  "runtime_defaults": {
+    "paged_attn": "auto",
+    "pa_cache_type": "turboquant3",
+    "pa_memory_fraction": "0.45",
+    "force_no_mmap": false,
+    "force_language_model_only": false,
+    "disable_flash_attn": true,
+    "isq_singlethread": true,
+    "isq_cpu_threads": null
+  },
+  "placement": {
+    "primary_gpu_index": 0,
+    "primary_gpu_holds_non_repeating": true,
+    "primary_gpu_desktop_reserve_mb": 1024
+  },
+  "quality": {
+    "objective": "quality",
+    "candidates": [
+      {
+        "quantization": "q6k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 262144,
+        "min_context_required": 24576,
+        "per_gpu_headroom_mb": 768
+      },
+      {
+        "quantization": "q5k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 262144,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 512
+      },
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 262144,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 0
+      }
+    ]
+  },
+  "max_context": {
+    "objective": "max_context",
+    "candidates": [
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 262144,
+        "min_context_required": 32768,
+        "per_gpu_headroom_mb": 0
+      },
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 900,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 2048
+      }
+    ]
+  },
+  "performance": {
+    "objective": "performance",
+    "candidates": [
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 2,
+        "max_seqs": 2,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 32768,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 512
+      },
+      {
+        "quantization": "q4k",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 768
+      }
+    ]
+  }
+}

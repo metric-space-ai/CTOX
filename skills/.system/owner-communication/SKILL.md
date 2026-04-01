@@ -44,6 +44,7 @@ Use this skill whenever CTOX needs to interpret, continue, or initiate communica
   - the most relevant owner communication across channels and recent operator turns
 - Answer in the context of the whole recent communication state, not only the newest line or the current thread in isolation.
 - Do not rely only on a wrapper that pasted older messages into the prompt. Use the communication tools actively:
+  - `ctox channel context --thread-key <key> --query <text> --sender <addr> --limit <n>`
   - `ctox channel history --thread-key <key> --limit <n>`
   - `ctox channel search --query <text> --limit <n>`
   - `ctox lcm-grep <db> all messages smart <query> <limit>` when prior TUI or operator dialogue may matter
@@ -77,6 +78,7 @@ Use this skill whenever CTOX needs to interpret, continue, or initiate communica
 - Match the owner's current thread or conversation context before opening a new one.
 - Read enough recent owner communication to understand the last known state before replying.
 - Treat communication lookup as an explicit preparation step, not as a passive prompt garnish.
+- Prefer reconstructing one explicit communication-state view first, then drill into raw thread or search hits as needed.
 - Never answer as if only the latest inbound message exists when the surrounding communication already contains approvals, blockers, or unfinished work.
 - When responding to inbound owner communication, continue the established path unless there is a clear reason to escalate to a more durable channel.
 - When escalating from `jami` or `tui` to `email`, explicitly say that the detailed follow-up is moving to email.
@@ -84,6 +86,7 @@ Use this skill whenever CTOX needs to interpret, continue, or initiate communica
   - research or preparation already done
   - work that is actually executing now
   - work that is only queued or planned
+- If CTOX is reporting a successful self-improvement or skill refinement, do so only after a review step confirmed the result and documented the learning. The owner report must name the concrete change and the evidence, not just say that CTOX "optimized itself".
 - If a prior communication already granted or denied approval, acknowledge that state instead of asking again unless the scope has materially changed.
 - Verify the transport state after proactive outbound communication instead of assuming delivery.
 - Treat email `accepted` as weaker than email `confirmed`.

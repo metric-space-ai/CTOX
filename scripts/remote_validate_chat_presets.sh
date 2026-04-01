@@ -17,6 +17,7 @@ MODELS=(
   "Qwen/Qwen3.5-9B"
   "Qwen/Qwen3.5-27B"
   "Qwen/Qwen3.5-35B-A3B"
+  "nvidia/Nemotron-Cascade-2-30B-A3B"
   "zai-org/GLM-4.7-Flash"
 )
 PRESETS=(
@@ -54,16 +55,27 @@ print(json.dumps(rows))
 PY
 }
 
+telemetry_json() {
+  local payload
+  if payload="$(curl -fsS --max-time 3 "$PROXY_URL/ctox/telemetry" 2>/dev/null)"; then
+    printf '%s\n' "$payload"
+  else
+    printf 'null\n'
+  fi
+}
+
 append_result() {
   local status="$1"
   local model="$2"
   local preset="$3"
   local switch_body="$4"
   local response_body="$5"
-  local plan_path="$RUNTIME_DIR/chat_runtime_plan.json"
+  local plan_path="$RUNTIME_DIR/chat_plan.json"
   local plan_json='null'
   local gpu_json
+  local telemetry_payload
   gpu_json="$(gpu_sample_json)"
+  telemetry_payload="$(telemetry_json)"
   if [[ -f "$plan_path" ]]; then
     plan_json="$(python3 - "$plan_path" <<'PY'
 import json, sys
@@ -72,9 +84,10 @@ with open(sys.argv[1], "r", encoding="utf-8") as handle:
 PY
 )"
   fi
-  python3 - "$RESULTS_PATH" "$status" "$model" "$preset" "$switch_body" "$response_body" "$plan_json" "$gpu_json" <<'PY'
+  python3 - "$RESULTS_PATH" "$status" "$model" "$preset" "$switch_body" "$response_body" "$plan_json" "$gpu_json" "$telemetry_payload" <<'PY'
 import json, sys, datetime
-path, status, model, preset, switch_body, response_body, plan_json, gpu_json = sys.argv[1:]
+path, status, model, preset, switch_body, response_body, plan_json, gpu_json, telemetry_payload = sys.argv[1:]
+telemetry = None if telemetry_payload == "null" else json.loads(telemetry_payload)
 record = {
     "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
     "status": status,
@@ -84,6 +97,8 @@ record = {
     "response_body": response_body,
     "plan": json.loads(plan_json),
     "gpus": json.loads(gpu_json),
+    "telemetry": telemetry,
+    "load_observation": None if telemetry is None else telemetry.get("load_observation"),
 }
 with open(path, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
@@ -115,6 +130,9 @@ switch_timeout_secs() {
     "Qwen/Qwen3.5-35B-A3B")
       echo 1500
       ;;
+    "nvidia/Nemotron-Cascade-2-30B-A3B")
+      echo 1800
+      ;;
     "zai-org/GLM-4.7-Flash")
       echo 900
       ;;
@@ -129,7 +147,7 @@ response_timeout_secs() {
     "openai/gpt-oss-20b"|"Qwen/Qwen3.5-4B"|"Qwen/Qwen3.5-9B")
       echo 120
       ;;
-    "Qwen/Qwen3.5-27B"|"Qwen/Qwen3.5-35B-A3B"|"zai-org/GLM-4.7-Flash")
+    "Qwen/Qwen3.5-27B"|"Qwen/Qwen3.5-35B-A3B"|"nvidia/Nemotron-Cascade-2-30B-A3B"|"zai-org/GLM-4.7-Flash")
       echo 180
       ;;
     *)
@@ -140,8 +158,8 @@ response_timeout_secs() {
 
 restart_proxy() {
   pkill -f "ctox serve-responses-proxy" || true
-  pkill -f "mistralrs serve" || true
-  pkill -f "run_vllm_serve_backend.sh" || true
+  pkill -f "ctox-engine serve" || true
+  pkill -f "run_engine.sh" || true
   fuser -k 1235/tcp 2>/dev/null || true
   sleep 2
   : > "$PROXY_LOG"

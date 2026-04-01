@@ -1,0 +1,72 @@
+{
+  "model": "openai/gpt-oss-20b",
+  "sizing": {
+    "non_repeating_weight_mb_q4": 3400,
+    "repeating_layer_weight_mb_q4": 516,
+    "load_peak_slack_mb_q4": 512,
+    "kv_mb_per_1k_tokens_q4": 220,
+    "base_toks_per_sec_q4": 90.0,
+    "repeating_layers": 24,
+    "context_cap": 131072
+  },
+  "runtime_defaults": {
+    "paged_attn": "auto",
+    "pa_cache_type": "turboquant3",
+    "pa_memory_fraction": "0.80",
+    "force_no_mmap": false,
+    "force_language_model_only": false,
+    "disable_flash_attn": false,
+    "isq_singlethread": false,
+    "isq_cpu_threads": null
+  },
+  "placement": {
+    "primary_gpu_index": 0,
+    "primary_gpu_holds_non_repeating": true,
+    "primary_gpu_desktop_reserve_mb": 1024
+  },
+  "quality": {
+    "objective": "quality",
+    "candidates": [
+      {
+        "quantization": "native_mxfp4",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 131072,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 0
+      }
+    ]
+  },
+  "max_context": {
+    "objective": "max_context",
+    "candidates": [
+      {
+        "quantization": "native_mxfp4",
+        "backend": "device_layers",
+        "max_batch_size": 1,
+        "max_seqs": 1,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 131072,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 0
+      }
+    ]
+  },
+  "performance": {
+    "objective": "performance",
+    "candidates": [
+      {
+        "quantization": "native_mxfp4",
+        "backend": "nccl",
+        "max_batch_size": 2,
+        "max_seqs": 2,
+        "context_fraction_milli": 1000,
+        "context_target_cap": 65536,
+        "min_context_required": 16384,
+        "per_gpu_headroom_mb": 0
+      }
+    ]
+  }
+}

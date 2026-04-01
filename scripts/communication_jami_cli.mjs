@@ -61,6 +61,8 @@ const DEFAULTS = {
   proxyHost: process.env.CTOX_PROXY_HOST || "127.0.0.1",
   proxyPort: process.env.CTOX_PROXY_PORT || "12434",
   transcriptionModel: process.env.CTOX_STT_MODEL || "",
+  speechModel: process.env.CTOX_TTS_MODEL || "",
+  speechVoice: process.env.CTO_JAMI_TTS_VOICE || "",
 };
 
 function nowIso() {
@@ -69,6 +71,22 @@ function nowIso() {
 
 function fail(message) {
   throw new Error(message);
+}
+
+function commandExists(name) {
+  const pathValue = process.env.PATH || "";
+  return pathValue
+    .split(path.delimiter)
+    .filter(Boolean)
+    .some((entry) => {
+      const candidate = join(entry, name);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    });
 }
 
 function sqlValue(value) {
@@ -482,6 +500,80 @@ function normalizeAddress(value) {
   return normalizeText(value);
 }
 
+function collectJamiDoctorChecks(options = {}) {
+  const checks = [];
+  const platform = process.platform;
+  checks.push({
+    name: "platform",
+    ok: true,
+    detail: platform,
+  });
+
+  const backendOk = platform !== "darwin";
+  checks.push({
+    name: "automation_backend",
+    ok: backendOk,
+    detail: backendOk
+      ? "DBus-style automation backend available on this platform"
+      : "Official Jami macOS builds use libwrap, not a separate DBus daemon; the current CTOX Jami adapter cannot automate them yet",
+  });
+
+  const gdbusOk = commandExists("gdbus");
+  checks.push({
+    name: "gdbus",
+    ok: gdbusOk,
+    detail: gdbusOk ? "gdbus available" : "Missing gdbus (install via `brew install glib` on macOS)",
+  });
+
+  const dbusLaunchOk = commandExists("dbus-launch");
+  checks.push({
+    name: "dbus_launch",
+    ok: dbusLaunchOk,
+    detail: dbusLaunchOk
+      ? "dbus-launch available"
+      : "Missing dbus-launch (install via `brew install dbus` and start the session bus)",
+  });
+
+  const envFile = loadJamiDbusEnvironment();
+  checks.push({
+    name: "dbus_env_file",
+    ok: !!envFile,
+    detail: envFile || "No Jami DBus env file loaded",
+  });
+
+  const appCandidates =
+    platform === "darwin"
+      ? ["/Applications/Jami.app", join(process.env.HOME || "", "Applications/Jami.app")]
+      : [];
+  const appPresent = appCandidates.some((candidate) => candidate && fs.existsSync(candidate));
+  const daemonPresent =
+    commandExists("jamid") || commandExists("jami-daemon") || commandExists("jami-cli");
+  checks.push({
+    name: "jami_runtime",
+    ok: appPresent || daemonPresent,
+    detail:
+      appPresent || daemonPresent
+        ? appPresent
+          ? "Jami app present"
+          : "Jami daemon/cli present"
+        : platform === "darwin"
+          ? "Jami app missing (install via `brew install --cask jami`)"
+          : "No Jami runtime detected",
+  });
+
+  const configuredAccountId = normalizeText(options.accountId || "");
+  const configuredProfileName = normalizeText(options.profileName || "");
+  checks.push({
+    name: "configured_identity",
+    ok: !!configuredAccountId || !!configuredProfileName,
+    detail:
+      configuredAccountId || configuredProfileName
+        ? `configured ${configuredAccountId || configuredProfileName}`
+        : "No configured Jami account id or profile",
+  });
+  return checks;
+}
+
 function normalizeList(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => normalizeAddress(entry)).filter(Boolean);
@@ -657,6 +749,78 @@ function transcribeAudioAttachment(options, audio) {
   });
   const parsed = JSON.parse(output);
   return normalizeText(parsed.text || parsed.transcript || "");
+}
+
+async function synthesizeVoiceAttachment(options, text, remoteId) {
+  const input = normalizeText(text);
+  if (!input) fail("Voice delivery requires non-empty text.");
+  const outDir = join(options.outboxDir, "voice");
+  await ensureDir(outDir);
+  const safeId = sanitizeFileComponent(remoteId || randomUUID()) || randomUUID();
+  const outputPath = join(outDir, `${safeId}.wav`);
+  const payload = {
+    input,
+    response_format: "wav",
+  };
+  const model = normalizeText(options.speechModel || "");
+  if (model) payload.model = model;
+  const voice = normalizeText(options.speechVoice || "");
+  if (voice) payload.voice = voice;
+
+  let status = "";
+  try {
+    status = execFileSync(
+      "curl",
+      [
+        "-sS",
+        "-o",
+        outputPath,
+        "-w",
+        "%{http_code}",
+        "-X",
+        "POST",
+        `${proxyBaseUrl(options)}/audio/speech`,
+        "-H",
+        "content-type: application/json",
+        "--data-binary",
+        JSON.stringify(payload),
+      ],
+      {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 16 * 1024 * 1024,
+      }
+    );
+  } catch (error) {
+    try {
+      await unlink(outputPath);
+    } catch {}
+    throw new Error(`voice synthesis failed: ${String((error && error.message) || error)}`);
+  }
+
+  const httpStatus = Number.parseInt(normalizeText(status), 10);
+  if (!Number.isFinite(httpStatus) || httpStatus < 200 || httpStatus >= 300) {
+    let errorBody = "";
+    try {
+      errorBody = normalizeText(await readFile(outputPath, "utf8"));
+    } catch {}
+    try {
+      await unlink(outputPath);
+    } catch {}
+    fail(
+      `voice synthesis returned HTTP ${normalizeText(status) || "unknown"}${
+        errorBody ? `: ${errorBody.slice(0, 240)}` : ""
+      }`
+    );
+  }
+
+  return {
+    path: outputPath,
+    mimeType: "audio/wav",
+    name: basename(outputPath),
+    model,
+    voice,
+  };
 }
 
 async function prepareInboundMessage(options, inbound, rawPayload) {
@@ -1414,7 +1578,7 @@ async function loadSourceEntries(filePath) {
 function normalizeOptions(rawArgv) {
   const argv = [...rawArgv];
   const command = argv.shift();
-  if (!command) fail("Usage: communication_jami_cli.mjs <sync|send|test|list|resolve-account> [options]");
+  if (!command) fail("Usage: communication_jami_cli.mjs <sync|send|test|doctor|list|resolve-account> [options]");
 
   const options = {
     command,
@@ -1436,6 +1600,8 @@ function normalizeOptions(rawArgv) {
     proxyHost: DEFAULTS.proxyHost,
     proxyPort: DEFAULTS.proxyPort,
     transcriptionModel: DEFAULTS.transcriptionModel,
+    speechModel: DEFAULTS.speechModel,
+    speechVoice: DEFAULTS.speechVoice,
   };
 
   while (argv.length) {
@@ -1490,6 +1656,22 @@ async function sendJami(options) {
       requestedModality: toBool(options.sendVoice) ? "voice" : "text",
     },
   };
+  let voiceAttachment = null;
+  if (toBool(options.sendVoice)) {
+    voiceAttachment = await synthesizeVoiceAttachment(options, options.body, remoteId);
+    payload.audioPath = voiceAttachment.path;
+    payload.voicePath = voiceAttachment.path;
+    payload.attachments = [
+      {
+        kind: "audio",
+        path: voiceAttachment.path,
+        audioPath: voiceAttachment.path,
+        voicePath: voiceAttachment.path,
+        mimeType: voiceAttachment.mimeType,
+        name: voiceAttachment.name,
+      },
+    ];
+  }
   const outboxPath = join(
     options.outboxDir,
     `${new Date().toISOString().replace(/[:.]/g, "-")}-${sanitizeFileComponent(remoteId)}.json`
@@ -1529,7 +1711,7 @@ async function sendJami(options) {
     trustLevel: options.trustLevel,
     status: "queued",
     seen: 1,
-    hasAttachments: 0,
+    hasAttachments: voiceAttachment ? 1 : 0,
     externalCreatedAt: timestamp,
     observedAt: timestamp,
     metadataJson: JSON.stringify({
@@ -1537,6 +1719,14 @@ async function sendJami(options) {
       delivery: "queued_for_bridge",
       requestedModality: toBool(options.sendVoice) ? "voice" : "text",
       outboxPath,
+      synthesizedVoiceAttachment: voiceAttachment
+        ? {
+            mimeType: voiceAttachment.mimeType,
+            name: voiceAttachment.name,
+            model: voiceAttachment.model,
+            voice: voiceAttachment.voice,
+          }
+        : null,
     }),
   });
   refreshThread(options.db, threadKey);
@@ -1561,38 +1751,54 @@ async function sendJami(options) {
 }
 
 async function testJamiSetup(options) {
-  const resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
-  requireAccount(options);
+  const checks = collectJamiDoctorChecks(options);
   await ensureSchema(options.db, options.schema);
   await ensureDir(options.inboxDir);
   await ensureDir(options.outboxDir);
   await ensureDir(options.archiveDir);
 
-  const accountKey = accountKeyFromJami(options.accountId);
   const timestamp = nowIso();
-  upsertAccount(options.db, {
-    accountKey,
-    channel: DEFAULTS.channel,
-    address: options.accountId,
-    provider: options.provider,
-    profileJson: buildProfileJson(options),
-    createdAt: timestamp,
-    updatedAt: timestamp,
-    lastInboundOkAt: null,
-    lastOutboundOkAt: null,
+  checks.push({ name: "inbox_dir", ok: true, path: options.inboxDir });
+  checks.push({ name: "outbox_dir", ok: true, path: options.outboxDir });
+  checks.push({ name: "archive_dir", ok: true, path: options.archiveDir });
+
+  let resolved = null;
+  let resolveError = "";
+  try {
+    resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
+  } catch (error) {
+    resolveError = String((error && error.message) || error);
+  }
+  checks.push({
+    name: "account_resolution",
+    ok: !!resolved,
+    detail: resolved
+      ? `resolved ${resolved.shareUri || resolved.username || resolved.accountId}`
+      : resolveError || "Jami account could not be resolved",
   });
 
-  const checks = [
-    { name: "inbox_dir", ok: true, path: options.inboxDir },
-    { name: "outbox_dir", ok: true, path: options.outboxDir },
-    { name: "archive_dir", ok: true, path: options.archiveDir },
-  ];
+  const accountKey = normalizeText(options.accountId)
+    ? accountKeyFromJami(options.accountId)
+    : "";
+  if (accountKey) {
+    upsertAccount(options.db, {
+      accountKey,
+      channel: DEFAULTS.channel,
+      address: options.accountId,
+      provider: options.provider,
+      profileJson: buildProfileJson(options),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      lastInboundOkAt: null,
+      lastOutboundOkAt: null,
+    });
+  }
 
   let dbusOk = false;
   let dbusDetail = "DBus session unavailable";
   try {
     loadJamiDbusEnvironment();
-    if (process.env.DBUS_SESSION_BUS_ADDRESS) {
+    if (process.env.DBUS_SESSION_BUS_ADDRESS && normalizeText(options.accountId)) {
       getConversations(options.accountId);
       dbusOk = true;
       dbusDetail = "conversation probe succeeded";
@@ -1608,6 +1814,7 @@ async function testJamiSetup(options) {
     accountKey,
     resolvedAccount: resolved,
     checks,
+    error: resolveError || undefined,
     dbPath: options.db,
   };
 }
@@ -1793,11 +2000,74 @@ async function listMessages(options) {
 }
 
 async function resolveAccountCommand(options) {
-  const resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
+  const checks = collectJamiDoctorChecks(options);
+  if (process.platform === "darwin") {
+    return {
+      ok: false,
+      resolvedAccount: null,
+      error:
+        "Official Jami macOS builds use the libwrap API, while the current CTOX Jami adapter expects a DBus-compatible backend. Configure a share URI manually for QR onboarding or use a Linux Jami runtime for automation.",
+      dbusEnvFile: process.env.CTO_JAMI_DBUS_ENV_FILE || "",
+      checks,
+    };
+  }
+  let resolved = null;
+  let error = "";
+  try {
+    resolved = await resolveJamiAccount(options, { provisionIfMissing: true });
+  } catch (resolveError) {
+    error = String((resolveError && resolveError.message) || resolveError);
+  }
+  checks.push({
+    name: "account_resolution",
+    ok: !!resolved,
+    detail: resolved
+      ? `resolved ${resolved.shareUri || resolved.username || resolved.accountId}`
+      : error || "Jami account could not be resolved",
+  });
   return {
     ok: !!resolved,
     resolvedAccount: resolved,
+    error: error || undefined,
     dbusEnvFile: process.env.CTO_JAMI_DBUS_ENV_FILE || "",
+    checks,
+  };
+}
+
+async function doctorJami(options) {
+  const checks = collectJamiDoctorChecks(options);
+  if (process.platform === "darwin") {
+    return {
+      ok: false,
+      channel: DEFAULTS.channel,
+      resolvedAccount: null,
+      error:
+        "Official Jami macOS builds use the libwrap API instead of a separate DBus daemon, so the current CTOX Jami adapter cannot automate them yet.",
+      dbusEnvFile: process.env.CTO_JAMI_DBUS_ENV_FILE || "",
+      checks,
+    };
+  }
+  let resolved = null;
+  let error = "";
+  try {
+    resolved = await resolveJamiAccount(options, { provisionIfMissing: false });
+  } catch (resolveError) {
+    error = String((resolveError && resolveError.message) || resolveError);
+  }
+  checks.push({
+    name: "account_resolution",
+    ok: !!resolved,
+    detail: resolved
+      ? `resolved ${resolved.shareUri || resolved.username || resolved.accountId}`
+      : error || "Jami account could not be resolved",
+  });
+  return {
+    ok: checks.every((item) => item.ok),
+    channel: DEFAULTS.channel,
+    resolvedAccount: resolved,
+    error: error || undefined,
+    dbusEnvFile: process.env.CTO_JAMI_DBUS_ENV_FILE || "",
+    checks,
   };
 }
 
@@ -1810,6 +2080,8 @@ async function main() {
     result = await syncJami(options);
   } else if (options.command === "test") {
     result = await testJamiSetup(options);
+  } else if (options.command === "doctor") {
+    result = await doctorJami(options);
   } else if (options.command === "list") {
     result = await listMessages(options);
   } else if (options.command === "resolve-account") {

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BROWSER_REFERENCE_DIR="$ROOT/runtime/browser/interactive-reference"
+BROWSER_INSTALL_STATUS="not prepared"
 
 run_sudo() {
   sudo "$@"
@@ -104,6 +106,90 @@ ensure_linux_discovery_prereqs() {
   run_sudo apt-get install -y "${packages[@]}"
 }
 
+ensure_linux_browser_prereqs() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local packages=()
+  local package=""
+  for package in nodejs npm; do
+    apt_package_installed "$package" || packages+=("$package")
+  done
+
+  if [[ "${#packages[@]}" -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "[prep] Install Node.js prerequisites for interactive browser sessions"
+  apt_update_with_retry
+  run_sudo apt-get install -y "${packages[@]}"
+}
+
+browser_toolchain_ready() {
+  command -v node >/dev/null 2>&1 &&
+    command -v npm >/dev/null 2>&1 &&
+    command -v npx >/dev/null 2>&1
+}
+
+install_playwright_browser_runtime() {
+  if [[ "$(uname -s)" == "Linux" ]]; then
+    (
+      cd "$BROWSER_REFERENCE_DIR"
+      npx playwright install --with-deps chromium >/dev/null
+    )
+    return 0
+  fi
+
+  "$ROOT/target/release/ctox" browser install-reference --skip-npm-install --install-browser >/dev/null
+}
+
+setup_interactive_browser_reference() {
+  ensure_linux_browser_prereqs
+
+  if ! browser_toolchain_ready; then
+    BROWSER_INSTALL_STATUS="skipped: node/npm/npx unavailable"
+    echo "[browser] Skip interactive browser reference setup because node/npm/npx are unavailable" >&2
+    return 0
+  fi
+
+  echo "[browser] Install interactive browser reference workspace"
+  "$ROOT/target/release/ctox" browser install-reference >/dev/null
+
+  echo "[browser] Verify Playwright reference import"
+  (
+    cd "$BROWSER_REFERENCE_DIR"
+    npm run doctor >/dev/null
+  )
+
+  local doctor_output
+  local browser_policy
+  doctor_output="$("$ROOT/target/release/ctox" browser doctor)"
+  browser_policy="${CTOX_INSTALL_PLAYWRIGHT_BROWSER:-auto}"
+
+  if printf '%s' "$doctor_output" | grep -q '"chromium_fallback_executable": null'; then
+    case "$browser_policy" in
+      0|false|FALSE|no|NO)
+        echo "[browser] No Chromium runtime detected; skip browser download because CTOX_INSTALL_PLAYWRIGHT_BROWSER=$browser_policy" >&2
+        ;;
+      *)
+        echo "[browser] No Chromium runtime detected; install Playwright Chromium runtime"
+        if install_playwright_browser_runtime; then
+          doctor_output="$("$ROOT/target/release/ctox" browser doctor)"
+        else
+          echo "[browser] Playwright Chromium runtime install failed; continuing with the reference workspace only" >&2
+        fi
+        ;;
+    esac
+  fi
+
+  if printf '%s' "$doctor_output" | grep -q '"chromium_fallback_executable": null'; then
+    BROWSER_INSTALL_STATUS="reference ready at $BROWSER_REFERENCE_DIR (Chromium runtime not preinstalled)"
+  else
+    BROWSER_INSTALL_STATUS="ready at $BROWSER_REFERENCE_DIR"
+  fi
+}
+
 ensure_uv_runtime() {
   if command -v uv >/dev/null 2>&1 || command -v uvx >/dev/null 2>&1; then
     return 0
@@ -124,7 +210,7 @@ ensure_project_references_present() {
   local missing=0
   local required_paths=(
     "$ROOT/references/openai-codex/codex-rs/Cargo.toml"
-    "$ROOT/ctox-vllm-serve/Cargo.toml"
+    "$ROOT/engine/candle/Cargo.toml"
   )
   local path=""
   for path in "${required_paths[@]}"; do
@@ -137,10 +223,10 @@ ensure_project_references_present() {
   if [[ "$missing" -ne 0 ]]; then
     cat >&2 <<EOF
 CTOX install now expects the vendored references to already be present inside the project tree.
-The installer no longer clones openai/codex or the CTOX vllm-serve fork from upstream during install.
+The installer no longer clones openai/codex or the CTOX Candle engine tree from upstream during install.
 Make sure this checkout already contains:
   references/openai-codex
-  ctox-vllm-serve
+  engine/candle
 EOF
     exit 1
   fi
@@ -172,7 +258,7 @@ sync_repo_system_skills_into_vendored_codex() {
 
 sync_repo_skills_into_codex_home() {
   local codex_home target_root system_target_root src_system_root src_curated_root
-  local skill_dir skill_name installed_curated=0 skipped_curated=0
+  local skill_dir skill_name installed_curated=0
 
   codex_home="$(resolve_codex_home)"
   target_root="$codex_home/skills"
@@ -195,17 +281,45 @@ sync_repo_skills_into_codex_home() {
     for skill_dir in "$src_curated_root"/*; do
       [[ -d "$skill_dir" ]] || continue
       skill_name="$(basename "$skill_dir")"
-      if [[ -d "$src_system_root/$skill_name" ]] || [[ -e "$target_root/$skill_name" ]]; then
-        skipped_curated=$((skipped_curated + 1))
+      if [[ -d "$src_system_root/$skill_name" ]]; then
         continue
       fi
+      rm -rf "$target_root/$skill_name"
       cp -R "$skill_dir" "$target_root/$skill_name"
       installed_curated=$((installed_curated + 1))
     done
   fi
 
   echo "[skills] Bundled skills synced to $target_root"
-  echo "[skills] Curated skills installed: $installed_curated, skipped: $skipped_curated"
+  echo "[skills] Curated skills installed or refreshed: $installed_curated"
+}
+
+stop_ctox_user_services() {
+  if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null 2>&1; then
+    return 0
+  fi
+
+  systemctl --user stop ctox.service >/dev/null 2>&1 || true
+  systemctl --user disable ctox.service >/dev/null 2>&1 || true
+  systemctl --user stop cto-jami-daemon.service >/dev/null 2>&1 || true
+  systemctl --user disable cto-jami-daemon.service >/dev/null 2>&1 || true
+}
+
+kill_residual_ctox_processes() {
+  if ! command -v pkill >/dev/null 2>&1; then
+    return 0
+  fi
+
+  pkill -x ctox >/dev/null 2>&1 || true
+  pkill -x ctox-engine >/dev/null 2>&1 || true
+  pkill -x codex-exec >/dev/null 2>&1 || true
+  pkill -f "$ROOT/scripts/engine/run_engine.sh" >/dev/null 2>&1 || true
+  pkill -f "$ROOT/scripts/run_jami_daemon.sh" >/dev/null 2>&1 || true
+  pkill -f "$ROOT/runtime/browser/interactive-reference" >/dev/null 2>&1 || true
+}
+
+wipe_previous_ctox_runtime_state() {
+  rm -rf "$ROOT/runtime"
 }
 
 resolve_jami_linux_repo_suffix() {
@@ -298,8 +412,11 @@ install_jami_user_service() {
     return 0
   fi
 
-  local service_dir
+  local service_dir jami_launcher
   service_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "$service_dir" "$HOME/.local/bin"
+  jami_launcher="$HOME/.local/bin/ctox-jami-daemon"
+  ln -sf "$ROOT/scripts/run_jami_daemon.sh" "$jami_launcher"
   mkdir -p "$service_dir"
   cat > "$service_dir/cto-jami-daemon.service" <<EOF
 [Unit]
@@ -311,7 +428,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=$ROOT
-ExecStart=$ROOT/scripts/run_jami_daemon.sh
+EnvironmentFile=-$ROOT/runtime/engine.env
+ExecStart=$jami_launcher
 Restart=always
 RestartSec=5
 KillMode=control-group
@@ -500,8 +618,8 @@ EOF
   fi
 }
 
-vllm_serve_uses_cuda() {
-  case " ${MISTRALRS_FEATURES:-} " in
+engine_uses_cuda() {
+  case " ${ENGINE_FEATURES:-} " in
     *" cuda "*) return 0 ;;
     *) return 1 ;;
   esac
@@ -519,9 +637,9 @@ nccl_runtime_missing() {
   return 0
 }
 
-detect_vllm_serve_features() {
-  if [[ -n "${CTOX_VLLM_SERVE_FEATURES:-}" ]]; then
-    printf '%s\n' "$CTOX_VLLM_SERVE_FEATURES"
+detect_engine_features() {
+  if [[ -n "${CTOX_ENGINE_FEATURES:-}" ]]; then
+    printf '%s\n' "$CTOX_ENGINE_FEATURES"
     return
   fi
 
@@ -553,7 +671,7 @@ ensure_cuda_build_prereqs() {
   if [[ "$(uname -s)" != "Linux" ]] || ! command -v apt-get >/dev/null 2>&1 || ! command -v sudo >/dev/null 2>&1; then
     return
   fi
-  if ! vllm_serve_uses_cuda; then
+  if ! engine_uses_cuda; then
     return
   fi
   if cuda_linker_prereqs_ready; then
@@ -577,7 +695,7 @@ ensure_cuda_build_prereqs() {
   done
 
   if [[ -n "$cuda_packages" ]]; then
-    echo "[prep] Install CUDA build prerequisites for CTOX vllm-serve"
+    echo "[prep] Install CUDA build prerequisites for the CTOX Candle engine"
     sudo apt-get update
     # shellcheck disable=SC2086
     sudo apt-get install -y $cuda_packages
@@ -632,7 +750,7 @@ detect_cuda_compute_cap() {
 }
 
 configure_cuda_env() {
-  if ! vllm_serve_uses_cuda; then
+  if ! engine_uses_cuda; then
     return
   fi
 
@@ -653,10 +771,10 @@ configure_cuda_env() {
   fi
 }
 
-write_vllm_serve_env_file() {
+write_engine_env_file() {
   mkdir -p "$ROOT/runtime"
   local model
-  model="${CTOX_VLLM_SERVE_MODEL:-openai/gpt-oss-20b}"
+  model="${CTOX_ENGINE_MODEL:-openai/gpt-oss-20b}"
   local default_port="1234"
   local default_arch="gpt_oss"
   local default_max_seq_len="131072"
@@ -675,7 +793,7 @@ write_vllm_serve_env_file() {
   local default_stt_model="mistralai/Voxtral-Mini-4B-Realtime-2602"
   local default_stt_port="1238"
   local default_stt_isq="Q4K"
-  local default_tts_model="Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+  local default_tts_model="mistralai/Voxtral-4B-TTS-2603"
   local default_tts_port="1239"
   local default_tts_isq="Q4K"
 
@@ -695,6 +813,18 @@ write_vllm_serve_env_file() {
       default_port="1235"
       default_arch=""
       default_max_seq_len="2048"
+      default_tp_backend="disabled"
+      default_isq="Q4K"
+      default_paged_attn="off"
+      default_pa_cache_type=""
+      default_pa_memory_fraction=""
+      default_disable_nccl="1"
+      default_world_size=""
+      ;;
+    nvidia/Nemotron-Cascade-2-30B-A3B)
+      default_port="1236"
+      default_arch=""
+      default_max_seq_len="8192"
       default_tp_backend="disabled"
       default_isq="Q4K"
       default_paged_attn="off"
@@ -724,24 +854,24 @@ write_vllm_serve_env_file() {
       ;;
   esac
 
-  cat > "$ROOT/runtime/vllm_serve.env" <<EOF
-CTOX_VLLM_SERVE_MODEL=${model}
-CTOX_VLLM_SERVE_PORT=${CTOX_VLLM_SERVE_PORT:-$default_port}
-CTOX_VLLM_SERVE_ARCH=${CTOX_VLLM_SERVE_ARCH:-$default_arch}
-CTOX_VLLM_SERVE_MAX_SEQS=${CTOX_VLLM_SERVE_MAX_SEQS:-1}
-CTOX_VLLM_SERVE_MAX_BATCH_SIZE=${CTOX_VLLM_SERVE_MAX_BATCH_SIZE:-1}
-CTOX_VLLM_SERVE_MAX_SEQ_LEN=${CTOX_VLLM_SERVE_MAX_SEQ_LEN:-$default_max_seq_len}
-CTOX_VLLM_SERVE_PAGED_ATTN=${CTOX_VLLM_SERVE_PAGED_ATTN:-$default_paged_attn}
-CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND=${CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND:-$default_tp_backend}
-CTOX_VLLM_SERVE_ISQ=${CTOX_VLLM_SERVE_ISQ:-$default_isq}
-CTOX_VLLM_SERVE_PA_CACHE_TYPE=${CTOX_VLLM_SERVE_PA_CACHE_TYPE:-$default_pa_cache_type}
-CTOX_VLLM_SERVE_PA_MEMORY_FRACTION=${CTOX_VLLM_SERVE_PA_MEMORY_FRACTION:-$default_pa_memory_fraction}
-CTOX_VLLM_SERVE_PA_CONTEXT_LEN=${CTOX_VLLM_SERVE_PA_CONTEXT_LEN:-}
-CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES=${CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES:-}
-CTOX_VLLM_SERVE_DISABLE_NCCL=${CTOX_VLLM_SERVE_DISABLE_NCCL:-$default_disable_nccl}
-CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE=${CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE:-$default_world_size}
-CTOX_VLLM_SERVE_TOPOLOGY=${CTOX_VLLM_SERVE_TOPOLOGY:-}
-CTOX_VLLM_SERVE_NUM_DEVICE_LAYERS=${CTOX_VLLM_SERVE_NUM_DEVICE_LAYERS:-}
+  cat > "$ROOT/runtime/engine.env" <<EOF
+CTOX_ENGINE_MODEL=${model}
+CTOX_ENGINE_PORT=${CTOX_ENGINE_PORT:-$default_port}
+CTOX_ENGINE_ARCH=${CTOX_ENGINE_ARCH:-$default_arch}
+CTOX_ENGINE_MAX_SEQS=${CTOX_ENGINE_MAX_SEQS:-1}
+CTOX_ENGINE_MAX_BATCH_SIZE=${CTOX_ENGINE_MAX_BATCH_SIZE:-1}
+CTOX_ENGINE_MAX_SEQ_LEN=${CTOX_ENGINE_MAX_SEQ_LEN:-$default_max_seq_len}
+CTOX_ENGINE_PAGED_ATTN=${CTOX_ENGINE_PAGED_ATTN:-$default_paged_attn}
+CTOX_ENGINE_TENSOR_PARALLEL_BACKEND=${CTOX_ENGINE_TENSOR_PARALLEL_BACKEND:-$default_tp_backend}
+CTOX_ENGINE_ISQ=${CTOX_ENGINE_ISQ:-$default_isq}
+CTOX_ENGINE_PA_CACHE_TYPE=${CTOX_ENGINE_PA_CACHE_TYPE:-$default_pa_cache_type}
+CTOX_ENGINE_PA_MEMORY_FRACTION=${CTOX_ENGINE_PA_MEMORY_FRACTION:-$default_pa_memory_fraction}
+CTOX_ENGINE_PA_CONTEXT_LEN=${CTOX_ENGINE_PA_CONTEXT_LEN:-}
+CTOX_ENGINE_CUDA_VISIBLE_DEVICES=${CTOX_ENGINE_CUDA_VISIBLE_DEVICES:-}
+CTOX_ENGINE_DISABLE_NCCL=${CTOX_ENGINE_DISABLE_NCCL:-$default_disable_nccl}
+CTOX_ENGINE_MN_LOCAL_WORLD_SIZE=${CTOX_ENGINE_MN_LOCAL_WORLD_SIZE:-$default_world_size}
+CTOX_ENGINE_TOPOLOGY=${CTOX_ENGINE_TOPOLOGY:-}
+CTOX_ENGINE_NUM_DEVICE_LAYERS=${CTOX_ENGINE_NUM_DEVICE_LAYERS:-}
 CTOX_CHAT_MODEL=${CTOX_CHAT_MODEL:-$default_chat_model}
 CTOX_CHAT_MODEL_MAX_CONTEXT=${CTOX_CHAT_MODEL_MAX_CONTEXT:-131072}
 CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT=${CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT:-75}
@@ -782,6 +912,9 @@ fi
 ensure_linux_jami_installed
 
 cd "$ROOT"
+stop_ctox_user_services
+kill_residual_ctox_processes
+wipe_previous_ctox_runtime_state
 ensure_linux_discovery_prereqs
 ensure_project_references_present
 sync_repo_system_skills_into_vendored_codex
@@ -797,22 +930,22 @@ EOF
 chmod +x "$HOME/.local/bin/ctox"
 
 ensure_nvidia_cuda_stack
-MISTRALRS_FEATURES="$(detect_vllm_serve_features)"
+ENGINE_FEATURES="$(detect_engine_features)"
 ensure_cuda_build_prereqs
 configure_cuda_env
-if command -v sudo >/dev/null 2>&1 && nccl_packages_available && nccl_runtime_missing && vllm_serve_uses_cuda; then
-  echo "[prep] Install NCCL runtime packages for multi-GPU CTOX vllm-serve hosts"
+if command -v sudo >/dev/null 2>&1 && nccl_packages_available && nccl_runtime_missing && engine_uses_cuda; then
+  echo "[prep] Install NCCL runtime packages for multi-GPU CTOX engine hosts"
   sudo apt-get update
   sudo apt-get install -y libnccl2 libnccl-dev
 fi
 
-echo "[build] Build vendored vllm-serve engine with features: $MISTRALRS_FEATURES"
+echo "[build] Build CTOX Candle engine with features: $ENGINE_FEATURES"
 (
-  cd "$ROOT/ctox-vllm-serve"
-  if [[ -n "$MISTRALRS_FEATURES" ]]; then
-    "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs --features "$MISTRALRS_FEATURES"
+  cd "$ROOT/engine/candle"
+  if [[ -n "$ENGINE_FEATURES" ]]; then
+    "$CARGO_BIN" build --release -p ctox-engine-cli --bin ctox-engine --features "$ENGINE_FEATURES"
   else
-    "$CARGO_BIN" build --release -p mistralrs-cli --bin mistralrs
+    "$CARGO_BIN" build --release -p ctox-engine-cli --bin ctox-engine
   fi
 )
 
@@ -824,11 +957,12 @@ echo "[build] Build vendored codex binaries"
   "$CARGO_BIN" build --release -p codex-cli --bin codex
 )
 
-ln -sf "$ROOT/ctox-vllm-serve/target/release/mistralrs" "$HOME/.local/bin/vllm-serve"
+ln -sf "$ROOT/engine/candle/target/release/ctox-engine" "$HOME/.local/bin/ctox-engine"
 ln -sf "$ROOT/references/openai-codex/codex-rs/target/release/codex" "$HOME/.local/bin/codex-ctox"
-write_vllm_serve_env_file
+write_engine_env_file
 sync_repo_skills_into_codex_home
-chmod +x "$ROOT/scripts/run_vllm_serve_backend.sh"
+setup_interactive_browser_reference
+chmod +x "$ROOT/scripts/engine/run_engine.sh"
 chmod +x "$ROOT/scripts/run_speaches_cpu_backend.sh"
 chmod +x "$ROOT/scripts/communication_mail_cli.mjs" "$ROOT/scripts/communication_jami_cli.mjs" "$ROOT/scripts/run_jami_daemon.sh"
 install_ctox_user_service
@@ -842,12 +976,12 @@ Binary:
   $HOME/.local/bin/ctox
 
 Baseline binaries:
-  $HOME/.local/bin/vllm-serve -> $ROOT/ctox-vllm-serve/target/release/mistralrs
+  $HOME/.local/bin/ctox-engine -> $ROOT/engine/candle/target/release/ctox-engine
   $ROOT/references/openai-codex/codex-rs/target/release/codex-exec
   $HOME/.local/bin/codex-ctox -> $ROOT/references/openai-codex/codex-rs/target/release/codex
 
 Runtime launcher:
-  $ROOT/scripts/run_vllm_serve_backend.sh
+  $ROOT/scripts/engine/run_engine.sh
 
 CTOX background service:
   systemctl --user status ctox.service
@@ -856,6 +990,11 @@ CTOX background service:
 Bundled skills:
   $(resolve_codex_home)/skills
   $(resolve_codex_home)/skills/.system
+
+Interactive browser path:
+  $BROWSER_INSTALL_STATUS
+  ctox browser doctor
+  ctox browser bootstrap
 
 Jami runtime:
   $ROOT/scripts/run_jami_daemon.sh
@@ -866,5 +1005,5 @@ Try:
   ctox stop
   ctox start
   ctox clean-room-baseline-plan gpt_oss "Reply with CTOX_OK and nothing else."
-  $ROOT/scripts/run_vllm_serve_backend.sh
+  $ROOT/scripts/engine/run_engine.sh
 EOF

@@ -523,37 +523,41 @@ fn parse_base64_image_data_url(url: &str) -> Option<&str> {
 
 fn estimate_original_image_bytes(image_url: &str) -> Option<i64> {
     let key = sha1_digest(image_url.as_bytes());
-    ORIGINAL_IMAGE_ESTIMATE_CACHE.get_or_insert_with(key, || {
-        let payload = match parse_base64_image_data_url(image_url) {
-            Some(payload) => payload,
-            None => {
-                tracing::trace!("skipping original-detail estimate for non-base64 image data URL");
-                return None;
-            }
-        };
-        let bytes = match BASE64_STANDARD.decode(payload) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::trace!("failed to decode original-detail image payload: {error}");
-                return None;
-            }
-        };
-        let dynamic = match image::load_from_memory(&bytes) {
-            Ok(dynamic) => dynamic,
-            Err(error) => {
-                tracing::trace!("failed to decode original-detail image bytes: {error}");
-                return None;
-            }
-        };
-        let width = i64::from(dynamic.width());
-        let height = i64::from(dynamic.height());
-        let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
-        let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
-        let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;
-        let patch_count = patches_wide.saturating_mul(patches_high);
-        let patch_count = usize::try_from(patch_count).unwrap_or(usize::MAX);
-        Some(i64::try_from(approx_bytes_for_tokens(patch_count)).unwrap_or(i64::MAX))
-    })
+    ORIGINAL_IMAGE_ESTIMATE_CACHE
+        .get_or_try_insert_with(key, || -> Result<Option<i64>, std::convert::Infallible> {
+            let payload = match parse_base64_image_data_url(image_url) {
+                Some(payload) => payload,
+                None => {
+                    tracing::trace!("skipping original-detail estimate for non-base64 image data URL");
+                    return Ok(None);
+                }
+            };
+            let bytes = match BASE64_STANDARD.decode(payload) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::trace!("failed to decode original-detail image payload: {error}");
+                    return Ok(None);
+                }
+            };
+            let dynamic = match image::load_from_memory(&bytes) {
+                Ok(dynamic) => dynamic,
+                Err(error) => {
+                    tracing::trace!("failed to decode original-detail image bytes: {error}");
+                    return Ok(None);
+                }
+            };
+            let width = i64::from(dynamic.width());
+            let height = i64::from(dynamic.height());
+            let patch_size = i64::from(ORIGINAL_IMAGE_PATCH_SIZE);
+            let patches_wide = width.saturating_add(patch_size.saturating_sub(1)) / patch_size;
+            let patches_high = height.saturating_add(patch_size.saturating_sub(1)) / patch_size;
+            let patch_count = patches_wide.saturating_mul(patches_high);
+            let patch_count = usize::try_from(patch_count).unwrap_or(usize::MAX);
+            Ok(Some(
+                i64::try_from(approx_bytes_for_tokens(patch_count)).unwrap_or(i64::MAX),
+            ))
+        })
+        .expect("image estimate cache insert is infallible")
 }
 
 /// Scans one response item for discount-eligible inline image data URLs and

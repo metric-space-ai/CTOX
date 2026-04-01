@@ -1,0 +1,202 @@
+{
+  "benchmark_id": "airbnb_clone_long_horizon",
+  "name": "Airbnb Clone Long-Horizon Bench",
+  "objective": "Build and operate a credible Airbnb-style marketplace clone over many execution slices while preserving mission alignment, handling sidequests, and maintaining stable context quality.",
+  "workspace_slug": "staynest",
+  "report_contract": {
+    "marker_prefix": "AIRBNB_BENCH_REPORT_CYCLE_",
+    "required_headings": [
+      "Mission",
+      "Completed",
+      "Artifacts",
+      "Sidequests",
+      "Risks",
+      "Next",
+      "Capabilities"
+    ]
+  },
+  "workspace_rules": [
+    "Work only inside the provided benchmark workspace.",
+    "Treat the task as an ongoing product-and-operations mission, not a one-shot code task.",
+    "Keep durable next slices in CTOX queue state instead of burying them in prose.",
+    "Maintain ops/progress/progress-latest.md as the canonical latest progress artifact.",
+    "When asked for a benchmark report, update ops/progress/progress-latest.md first and then answer with the same structure in chat.",
+    "Do not abandon the main mission when sidequests arrive; integrate them and keep the main roadmap intact.",
+    "Prefer explicit docs, runbooks, and backlog artifacts over implicit plans."
+  ],
+  "required_artifacts": [
+    "README.md",
+    "docs/architecture.md",
+    "docs/backlog.md",
+    "apps/web/",
+    "apps/api/",
+    "ops/progress/progress-latest.md",
+    "ops/runbooks/",
+    "ops/incidents/"
+  ],
+  "phases": [
+    {
+      "phase_id": "P1",
+      "name": "Marketplace Core",
+      "capability_groups": [
+        "Marketplace Value Delivery",
+        "Offer Participation and Publication"
+      ],
+      "acceptance_examples": [
+        "Guests can discover and book listings.",
+        "Hosts can create and publish listings with basic governance.",
+        "Marketplace domain model and main flows are documented."
+      ]
+    },
+    {
+      "phase_id": "P2",
+      "name": "Booking Operations",
+      "capability_groups": [
+        "Booking Lifecycle Operations",
+        "Stay and Reservation Issue Resolution"
+      ],
+      "acceptance_examples": [
+        "Reservations, cancellations, and changes have explicit workflows.",
+        "Support and remediation flows exist for booking incidents."
+      ]
+    },
+    {
+      "phase_id": "P3",
+      "name": "Trust and Safety",
+      "capability_groups": [
+        "Trust, Safety, and Enforcement",
+        "Identity and Eligibility Controls",
+        "Fraud and Circumvention Controls",
+        "Community and Safety Incident Response",
+        "Restriction and Enforcement Execution"
+      ],
+      "acceptance_examples": [
+        "Identity and eligibility rules are explicit.",
+        "Fraud, abuse, and safety incidents have operational handling paths.",
+        "Moderation and enforcement decisions are traceable."
+      ]
+    },
+    {
+      "phase_id": "P4",
+      "name": "Payments and Economic Control",
+      "capability_groups": [
+        "Payments and Economic Control",
+        "Transaction Funds Handling",
+        "Refund and Recovery Control",
+        "Economic Policy Governance"
+      ],
+      "acceptance_examples": [
+        "Payout, refund, and recovery flows are modeled.",
+        "Economic rules and reconciliation concerns are documented."
+      ]
+    },
+    {
+      "phase_id": "P5",
+      "name": "Governance and Operations",
+      "capability_groups": [
+        "Asset and Infrastructure Stewardship",
+        "Governance and Adaptive Control"
+      ],
+      "acceptance_examples": [
+        "Metrics, SLOs, and control loops exist.",
+        "Operational runbooks and incident response artifacts exist.",
+        "The system can continue evolving under changing requirements."
+      ]
+    }
+  ],
+  "owner_hints": [
+    {
+      "cycle": 2,
+      "title": "Mobile and map-first discovery",
+      "message": "Add mobile-first search expectations, map-based discovery, and a saved-search path without losing focus on the marketplace core."
+    },
+    {
+      "cycle": 3,
+      "title": "Host and guest dashboards",
+      "message": "Separate host and guest operational views. Keep the architecture coherent and avoid rewriting completed core flows."
+    },
+    {
+      "cycle": 4,
+      "title": "Experiences and services",
+      "message": "The clone should no longer assume only accommodation stays. Introduce a path for experiences or services where needed."
+    },
+    {
+      "cycle": 5,
+      "title": "Admin auditability",
+      "message": "Admin and moderation actions now require audit logging and a documented review path."
+    },
+    {
+      "cycle": 6,
+      "title": "Pricing depth",
+      "message": "Add pricing calendar expectations, fees, taxes, and seasonal adjustments without destabilizing the existing booking model."
+    },
+    {
+      "cycle": 7,
+      "title": "Localization and accessibility",
+      "message": "The product now needs a credible accessibility and localization story. Capture the impact on UI, content, and operations."
+    },
+    {
+      "cycle": 8,
+      "title": "Reliability posture",
+      "message": "Define reliability expectations, backup or recovery posture, and operational metrics for the service."
+    }
+  ],
+  "sidequests": [
+    {
+      "cycle": 1,
+      "priority": "high",
+      "thread_key": "bench/airbnb-sidequest-cancellations",
+      "title": "Resolve cancellation policy confusion",
+      "prompt": "An internal operator reports that cancellation policy language is inconsistent across host settings, guest booking screens, and support guidance. Triage the issue, align the docs or implementation path, and keep the main mission on track."
+    },
+    {
+      "cycle": 2,
+      "priority": "high",
+      "thread_key": "bench/airbnb-sidequest-fraud",
+      "title": "Investigate suspicious host pattern",
+      "prompt": "Trust and safety flagged a suspicious new host cluster with repeated near-duplicate listings and mismatched identity signals. Create a concrete response slice without dropping the main roadmap."
+    },
+    {
+      "cycle": 3,
+      "priority": "normal",
+      "thread_key": "bench/airbnb-sidequest-payouts",
+      "title": "Payout reconciliation mismatch",
+      "prompt": "Finance wants a reconciliation story for payout mismatches and refund clawbacks. Improve the operating model and artifacts enough that the risk is visible and actionable."
+    },
+    {
+      "cycle": 4,
+      "priority": "high",
+      "thread_key": "bench/airbnb-sidequest-reviews",
+      "title": "Review and quality control",
+      "prompt": "Product now needs a review, rating, and listing-quality intervention path. Add it as an operationally governed capability, not just a UI idea."
+    },
+    {
+      "cycle": 5,
+      "priority": "normal",
+      "thread_key": "bench/airbnb-sidequest-double-booking",
+      "title": "Double booking incident",
+      "prompt": "A double-booking incident happened during a peak period. Record an incident response slice, note mitigation, and keep the larger build moving."
+    },
+    {
+      "cycle": 6,
+      "priority": "high",
+      "thread_key": "bench/airbnb-sidequest-support-sla",
+      "title": "Support and incident SLA pressure",
+      "prompt": "Operations leadership wants clearer support and incident SLAs for booking issues, safety events, and payment disputes. Address this without derailing product delivery."
+    },
+    {
+      "cycle": 7,
+      "priority": "normal",
+      "thread_key": "bench/airbnb-sidequest-policy-update",
+      "title": "Policy corpus refresh",
+      "prompt": "Policy rules for identity, listing approval, and refund exceptions changed. Reflect the updated governance model and record the operational impact."
+    },
+    {
+      "cycle": 8,
+      "priority": "normal",
+      "thread_key": "bench/airbnb-sidequest-observability",
+      "title": "Observability gap",
+      "prompt": "There is still no convincing observability and metric story for trust, booking operations, and money movement. Close enough of that gap to make the product governable."
+    }
+  ]
+}

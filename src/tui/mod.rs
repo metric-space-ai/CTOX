@@ -25,94 +25,162 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc;
+use std::sync::mpsc::Receiver;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-use crate::backend_manager;
 use crate::channels;
-use crate::chat_runtime;
-use crate::execution_baseline;
+use crate::context_health;
+use crate::inference::chat;
+use crate::inference::engine;
+use crate::inference::gateway::LoadObservation;
+use crate::inference::gateway::ProxyTelemetry;
+use crate::inference::runtime_env;
+use crate::inference::runtime_plan;
+use crate::inference::supervisor;
 use crate::lcm;
-use crate::responses_proxy::ProxyTelemetry;
-use crate::runtime_config;
-use crate::runtime_planner;
 use crate::service;
 
 mod render;
 
 const DEFAULT_ACTIVE_MODEL: &str = "openai/gpt-oss-20b";
 const DEFAULT_CHAT_SOURCE: &str = "local";
-const DEFAULT_API_PROVIDER: &str = "openai";
+const DEFAULT_API_PROVIDER: &str = "local";
 const DEFAULT_CHAT_PRESET: &str = "Quality";
 const DEFAULT_COMMUNICATION_PATH: &str = "tui";
 const CHAT_PRESET_CHOICES: &[&str] = &["Quality", "Max Context", "Performance"];
-const API_PROVIDER_CHOICES: &[&str] = &["openai"];
+const API_PROVIDER_CHOICES: &[&str] = &["local", "openai"];
 const COMMUNICATION_PATH_CHOICES: &[&str] = &["tui", "email", "jami"];
 const EMAIL_PROVIDER_CHOICES: &[&str] = &["imap", "graph", "ews"];
 const EMAIL_EWS_AUTH_CHOICES: &[&str] = &["basic", "oauth2"];
+const UI_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(350);
+const UI_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_millis(700);
+const SERVICE_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(500);
+const SERVICE_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_millis(1200);
+const CHAT_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(500);
+const CHAT_REFRESH_INTERVAL_BACKGROUND: Duration = Duration::from_secs(3);
+const COMMUNICATION_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(1);
+const COMMUNICATION_REFRESH_INTERVAL_BACKGROUND: Duration = Duration::from_secs(5);
+const SKILL_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
+const GPU_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
+const GPU_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_secs(4);
+const PROXY_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(700);
+const PROXY_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_millis(1200);
+
+fn refresh_due(last_refresh_at: &mut Option<Instant>, interval: Duration) -> bool {
+    let now = Instant::now();
+    match last_refresh_at {
+        Some(last) if now.duration_since(*last) < interval => false,
+        _ => {
+            *last_refresh_at = Some(now);
+            true
+        }
+    }
+}
 
 fn supported_local_chat_model_choices() -> Vec<&'static str> {
-    execution_baseline::SUPPORTED_CHAT_MODELS
+    engine::SUPPORTED_CHAT_MODELS
         .iter()
         .copied()
-        .filter(|model| !execution_baseline::is_openai_api_chat_model(model))
+        .filter(|model| !engine::is_openai_api_chat_model(model))
         .collect()
 }
 
-fn has_openai_api_key(env_map: &BTreeMap<String, String>) -> bool {
+fn openai_api_key_configured(env_map: &BTreeMap<String, String>) -> bool {
     env_map
         .get("OPENAI_API_KEY")
-        .map(|value| value.trim().starts_with("sk-"))
+        .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
 }
 
+fn openai_api_models_available(env_map: &BTreeMap<String, String>) -> bool {
+    infer_api_provider(env_map).eq_ignore_ascii_case("openai") && openai_api_key_configured(env_map)
+}
+
 fn infer_chat_source(env_map: &BTreeMap<String, String>) -> String {
-    env_map
-        .get("CTOX_CHAT_SOURCE")
-        .cloned()
-        .or_else(|| {
-            runtime_config::configured_chat_model_from_map(env_map)
-                .filter(|value| execution_baseline::is_openai_api_chat_model(value))
-                .map(|_| "api".to_string())
-        })
-        .unwrap_or_else(|| DEFAULT_CHAT_SOURCE.to_string())
+    let configured_model = runtime_env::configured_chat_model_from_map(env_map);
+    if openai_api_models_available(env_map)
+        && configured_model
+            .as_deref()
+            .map(engine::is_openai_api_chat_model)
+            .unwrap_or(false)
+    {
+        "api".to_string()
+    } else {
+        DEFAULT_CHAT_SOURCE.to_string()
+    }
 }
 
 fn infer_api_provider(env_map: &BTreeMap<String, String>) -> String {
     env_map
         .get("CTOX_API_PROVIDER")
+        .filter(|value| value.eq_ignore_ascii_case("local") || value.eq_ignore_ascii_case("openai"))
         .cloned()
         .or_else(|| {
-            runtime_config::configured_chat_model_from_map(env_map)
-                .filter(|value| execution_baseline::is_openai_api_chat_model(value))
+            runtime_env::configured_chat_model_from_map(env_map)
+                .filter(|value| engine::is_openai_api_chat_model(value))
                 .map(|_| "openai".to_string())
         })
         .unwrap_or_else(|| DEFAULT_API_PROVIDER.to_string())
 }
 
 fn supported_chat_model_choices(env_map: &BTreeMap<String, String>) -> Vec<&'static str> {
-    if infer_chat_source(env_map).eq_ignore_ascii_case("api") {
-        if infer_api_provider(env_map).eq_ignore_ascii_case("openai") && has_openai_api_key(env_map)
-        {
-            return execution_baseline::SUPPORTED_OPENAI_API_CHAT_MODELS.to_vec();
+    let mut choices = supported_local_chat_model_choices();
+    if openai_api_models_available(env_map) {
+        for model in engine::SUPPORTED_OPENAI_API_CHAT_MODELS {
+            if !choices
+                .iter()
+                .any(|existing| existing.eq_ignore_ascii_case(model))
+            {
+                choices.push(model);
+            }
         }
-        return Vec::new();
     }
-    supported_local_chat_model_choices()
+    choices
+}
+
+fn supported_api_chat_model_choices(env_map: &BTreeMap<String, String>) -> Vec<&'static str> {
+    if openai_api_models_available(env_map) {
+        return engine::SUPPORTED_OPENAI_API_CHAT_MODELS.to_vec();
+    }
+    Vec::new()
+}
+
+fn supported_boost_model_choices(env_map: &BTreeMap<String, String>) -> Vec<&'static str> {
+    let mut choices = supported_local_chat_model_choices();
+    for model in supported_api_chat_model_choices(env_map) {
+        if !choices
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(model))
+        {
+            choices.push(model);
+        }
+    }
+    choices
+}
+
+fn choice_contains(choices: &[&'static str], value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty()
+        && choices
+            .iter()
+            .any(|choice| choice.eq_ignore_ascii_case(trimmed))
 }
 
 fn supported_embedding_model_choices() -> Vec<&'static str> {
-    execution_baseline::SUPPORTED_EMBEDDING_MODELS.to_vec()
+    engine::SUPPORTED_EMBEDDING_MODELS.to_vec()
 }
 
 fn supported_stt_model_choices() -> Vec<&'static str> {
-    execution_baseline::SUPPORTED_STT_MODELS.to_vec()
+    engine::SUPPORTED_STT_MODELS.to_vec()
 }
 
 fn supported_tts_model_choices() -> Vec<&'static str> {
-    execution_baseline::SUPPORTED_TTS_MODELS.to_vec()
+    engine::SUPPORTED_TTS_MODELS.to_vec()
 }
-const DEFAULT_MAX_CONTEXT: usize = 131_072;
+const DEFAULT_MAX_CONTEXT: usize = 262_144;
 const DEFAULT_COMPACTION_THRESHOLD_PERCENT: usize = 75;
 const DEFAULT_COMPACTION_MIN_TOKENS: usize = 12_288;
 
@@ -125,8 +193,8 @@ enum Page {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsView {
-    General,
     Model,
+    Communication,
 }
 
 #[derive(Debug, Clone)]
@@ -143,8 +211,10 @@ struct SettingItem {
 
 #[derive(Debug, Clone)]
 struct HeaderState {
+    chat_source: String,
     model: String,
     base_model: String,
+    service_running: bool,
     boost_model: Option<String>,
     boost_active: bool,
     boost_remaining_seconds: Option<u64>,
@@ -162,15 +232,22 @@ struct HeaderState {
     last_output_tokens: Option<u64>,
     last_total_tokens: Option<u64>,
     gpu_cards: Vec<GpuCardState>,
+    gpu_loading_cards: Vec<GpuCardState>,
+    gpu_error_cards: Vec<GpuCardState>,
+    gpu_target_cards: Vec<GpuCardState>,
+    backend_warmup: bool,
+    expected_aux_models: Vec<String>,
     estimate_mode: bool,
-    chat_plan: Option<runtime_planner::ChatRuntimePlan>,
+    chat_plan: Option<runtime_plan::ChatRuntimePlan>,
 }
 
 impl Default for HeaderState {
     fn default() -> Self {
         Self {
+            chat_source: DEFAULT_CHAT_SOURCE.to_string(),
             model: DEFAULT_ACTIVE_MODEL.to_string(),
             base_model: DEFAULT_ACTIVE_MODEL.to_string(),
+            service_running: false,
             boost_model: None,
             boost_active: false,
             boost_remaining_seconds: None,
@@ -188,6 +265,11 @@ impl Default for HeaderState {
             last_output_tokens: None,
             last_total_tokens: None,
             gpu_cards: Vec::new(),
+            gpu_loading_cards: Vec::new(),
+            gpu_error_cards: Vec::new(),
+            gpu_target_cards: Vec::new(),
+            backend_warmup: false,
+            expected_aux_models: Vec::new(),
             estimate_mode: false,
             chat_plan: None,
         }
@@ -211,6 +293,37 @@ struct GpuCardState {
     allocations: Vec<GpuModelUsage>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct RuntimeHealthState {
+    proxy_ready: bool,
+    embedding_ready: Option<bool>,
+    stt_ready: Option<bool>,
+    tts_ready: Option<bool>,
+}
+
+impl RuntimeHealthState {
+    fn degraded_components(&self) -> Vec<&'static str> {
+        let mut parts = Vec::new();
+        if !self.proxy_ready {
+            parts.push("proxy");
+        }
+        if self.embedding_ready == Some(false) {
+            parts.push("embed");
+        }
+        if self.stt_ready == Some(false) {
+            parts.push("stt");
+        }
+        if self.tts_ready == Some(false) {
+            parts.push("tts");
+        }
+        parts
+    }
+
+    fn is_degraded(&self) -> bool {
+        !self.degraded_components().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ModelPerfStats {
     samples: u64,
@@ -228,6 +341,8 @@ struct JamiResolvedEnvelope {
     error: Option<String>,
     #[serde(rename = "dbusEnvFile", default)]
     dbus_env_file: Option<String>,
+    #[serde(default)]
+    checks: Vec<JamiDoctorCheck>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -250,6 +365,15 @@ struct JamiResolveOutcome {
     account: Option<JamiResolvedAccount>,
     error: Option<String>,
     dbus_env_file: Option<String>,
+    checks: Vec<JamiDoctorCheck>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct JamiDoctorCheck {
+    name: String,
+    ok: bool,
+    #[serde(default)]
+    detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +394,8 @@ struct App {
     status_line: String,
     spinner_phase: usize,
     header: HeaderState,
+    context_health: Option<context_health::ContextHealthSnapshot>,
+    mission_state: Option<lcm::MissionStateRecord>,
     settings_items: Vec<SettingItem>,
     settings_selected: usize,
     settings_view: SettingsView,
@@ -277,27 +403,94 @@ struct App {
     settings_menu_index: usize,
     jami_qr_lines: Vec<String>,
     last_jami_qr_key: String,
+    last_jami_refresh_at: Option<Instant>,
     jami_runtime_account: Option<JamiResolvedAccount>,
     settings_dirty: bool,
     service_status: service::ServiceStatus,
+    last_service_refresh_at: Option<Instant>,
     request_in_flight: bool,
+    runtime_switch_in_flight: bool,
+    runtime_switch_rx: Option<Receiver<Result<String, String>>>,
+    pending_runtime_transition_cards: Option<Vec<GpuCardState>>,
     model_perf_stats: BTreeMap<String, ModelPerfStats>,
     last_recorded_response_at: Option<String>,
     gpu_cards: Vec<GpuCardState>,
     last_gpu_refresh_at: Option<Instant>,
-    chat_preset_bundle: Option<runtime_planner::ChatPresetBundle>,
+    proxy_telemetry: Option<ProxyTelemetry>,
+    last_proxy_refresh_at: Option<Instant>,
+    runtime_health: RuntimeHealthState,
+    chat_preset_bundle: Option<runtime_plan::ChatPresetBundle>,
     skill_catalog: Vec<SkillCatalogEntry>,
     skills_selected: usize,
+    last_chat_refresh_at: Option<Instant>,
+    last_communication_refresh_at: Option<Instant>,
+    last_skill_catalog_refresh_at: Option<Instant>,
 }
 
 #[derive(Debug, Clone, Default)]
 struct SkillCatalogEntry {
     name: String,
-    source: String,
+    class: SkillClass,
+    state: SkillState,
     skill_path: PathBuf,
     description: String,
     helper_tools: Vec<String>,
     resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SkillClass {
+    CodexCore,
+    #[default]
+    CtoxCore,
+    InstalledPacks,
+    Personal,
+}
+
+impl SkillClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CodexCore => "Codex Core",
+            Self::CtoxCore => "CTOX Core",
+            Self::InstalledPacks => "Installed Packs",
+            Self::Personal => "Personal",
+        }
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Self::CtoxCore => 0,
+            Self::CodexCore => 1,
+            Self::InstalledPacks => 2,
+            Self::Personal => 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SkillState {
+    #[default]
+    Stable,
+    Authored,
+    Generated,
+    Draft,
+}
+
+impl SkillState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Authored => "authored",
+            Self::Generated => "generated",
+            Self::Draft => "draft",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SkillCatalogMetadata {
+    class: Option<SkillClass>,
+    state: Option<SkillState>,
 }
 
 pub fn run_tui(root: &Path) -> Result<()> {
@@ -329,7 +522,12 @@ pub fn run_tui(root: &Path) -> Result<()> {
             }
         }
 
-        if last_refresh.elapsed() >= Duration::from_millis(350) {
+        let refresh_interval = if app.page == Page::Settings {
+            UI_REFRESH_INTERVAL_SETTINGS
+        } else {
+            UI_REFRESH_INTERVAL_ACTIVE
+        };
+        if last_refresh.elapsed() >= refresh_interval {
             app.refresh()?;
             last_refresh = Instant::now();
         }
@@ -356,13 +554,17 @@ impl App {
                 manager: "process".to_string(),
                 pending_count: 0,
                 pending_previews: Vec::new(),
+                current_goal_preview: None,
                 active_source_label: None,
                 recent_events: Vec::new(),
                 last_error: None,
                 last_completed_at: None,
                 last_reply_chars: None,
+                monitor_last_check_at: None,
+                monitor_alerts: Vec::new(),
+                monitor_last_error: None,
             });
-        Self {
+        let mut app = Self {
             root: root.clone(),
             db_path,
             page: Page::Chat,
@@ -374,6 +576,8 @@ impl App {
             status_line: "Tab chat/skills/settings · Ctrl-C quit · Enter open/save".to_string(),
             spinner_phase: 0,
             header: HeaderState::default(),
+            context_health: None,
+            mission_state: None,
             settings_items: load_settings_items(&root),
             settings_selected: 0,
             settings_view: SettingsView::Model,
@@ -381,18 +585,33 @@ impl App {
             settings_menu_index: 0,
             jami_qr_lines: Vec::new(),
             last_jami_qr_key: String::new(),
+            last_jami_refresh_at: None,
             jami_runtime_account: None,
             settings_dirty: false,
             service_status,
+            last_service_refresh_at: None,
             request_in_flight: false,
+            runtime_switch_in_flight: false,
+            runtime_switch_rx: None,
+            pending_runtime_transition_cards: None,
             model_perf_stats: load_model_perf_stats(&root),
             last_recorded_response_at: None,
             gpu_cards: Vec::new(),
             last_gpu_refresh_at: None,
+            proxy_telemetry: None,
+            last_proxy_refresh_at: None,
+            runtime_health: RuntimeHealthState::default(),
             chat_preset_bundle: None,
             skill_catalog: load_skill_catalog(&root),
             skills_selected: 0,
+            last_chat_refresh_at: None,
+            last_communication_refresh_at: None,
+            last_skill_catalog_refresh_at: None,
+        };
+        if let Some(first) = app.visible_setting_indices().first().copied() {
+            app.settings_selected = first;
         }
+        app
     }
 
     fn handle_paste(&mut self, text: &str) {
@@ -403,6 +622,7 @@ impl App {
                 if let Some(item) = self.settings_items.get_mut(self.settings_selected) {
                     item.value.push_str(text);
                     self.settings_dirty = true;
+                    self.refresh_dynamic_setting_choices();
                 }
             }
         }
@@ -422,13 +642,41 @@ impl App {
         }
 
         match key_event.code {
-            KeyCode::Tab | KeyCode::BackTab => {
+            KeyCode::Tab => {
                 self.settings_menu_open = false;
-                self.page = match self.page {
-                    Page::Chat => Page::Skills,
-                    Page::Skills => Page::Settings,
-                    Page::Settings => Page::Chat,
-                };
+                match self.page {
+                    Page::Chat => self.page = Page::Skills,
+                    Page::Skills => {
+                        self.page = Page::Settings;
+                        self.switch_settings_view(SettingsView::Model);
+                    }
+                    Page::Settings => match self.settings_view {
+                        SettingsView::Model => {
+                            self.switch_settings_view(SettingsView::Communication);
+                        }
+                        SettingsView::Communication => {
+                            self.page = Page::Chat;
+                            self.switch_settings_view(SettingsView::Model);
+                        }
+                    },
+                }
+                return Ok(false);
+            }
+            KeyCode::BackTab => {
+                self.settings_menu_open = false;
+                match self.page {
+                    Page::Chat => {
+                        self.page = Page::Settings;
+                        self.switch_settings_view(SettingsView::Communication);
+                    }
+                    Page::Skills => self.page = Page::Chat,
+                    Page::Settings => match self.settings_view {
+                        SettingsView::Communication => {
+                            self.switch_settings_view(SettingsView::Model);
+                        }
+                        SettingsView::Model => self.page = Page::Skills,
+                    },
+                }
                 return Ok(false);
             }
             _ => {}
@@ -475,8 +723,18 @@ impl App {
             KeyCode::Down => {
                 self.move_settings_selection(1);
             }
-            KeyCode::Char('[') => self.switch_settings_view(SettingsView::General),
-            KeyCode::Char(']') => self.switch_settings_view(SettingsView::Model),
+            KeyCode::Char('[') | KeyCode::PageUp => {
+                self.switch_settings_view(previous_settings_view(self.settings_view))
+            }
+            KeyCode::Char(']') | KeyCode::PageDown => {
+                self.switch_settings_view(next_settings_view(self.settings_view))
+            }
+            KeyCode::Left if key_event.modifiers.contains(KeyModifiers::ALT) => {
+                self.switch_settings_view(previous_settings_view(self.settings_view));
+            }
+            KeyCode::Right if key_event.modifiers.contains(KeyModifiers::ALT) => {
+                self.switch_settings_view(next_settings_view(self.settings_view));
+            }
             KeyCode::Left => self.cycle_setting(false)?,
             KeyCode::Right => self.cycle_setting(true)?,
             KeyCode::Backspace => {
@@ -484,6 +742,7 @@ impl App {
                     if item.kind == SettingKind::Env {
                         item.value.pop();
                         self.settings_dirty = true;
+                        self.refresh_dynamic_setting_choices();
                     }
                 }
             }
@@ -493,6 +752,7 @@ impl App {
                     if item.kind == SettingKind::Env && item.choices.is_empty() {
                         item.value.push(ch);
                         self.settings_dirty = true;
+                        self.refresh_dynamic_setting_choices();
                     }
                 }
             }
@@ -537,6 +797,7 @@ impl App {
         };
         item.value = item.choices[next_index].to_string();
         self.settings_dirty = true;
+        self.refresh_dynamic_setting_choices();
         Ok(())
     }
 
@@ -571,6 +832,7 @@ impl App {
             service::start_background(&self.root)?
         };
         self.push_local_activity(self.status_line.clone());
+        self.last_service_refresh_at = None;
         self.refresh()?;
         Ok(())
     }
@@ -611,7 +873,42 @@ impl App {
     }
 
     fn poll_worker(&mut self) -> Result<()> {
-        self.refresh()
+        if let Some(receiver) = &self.runtime_switch_rx {
+            match receiver.try_recv() {
+                Ok(Ok(message)) => {
+                    self.runtime_switch_in_flight = false;
+                    self.runtime_switch_rx = None;
+                    self.pending_runtime_transition_cards = None;
+                    self.status_line = message;
+                    self.invalidate_runtime_observations();
+                    self.refresh()?;
+                }
+                Ok(Err(err)) => {
+                    self.runtime_switch_in_flight = false;
+                    self.runtime_switch_rx = None;
+                    self.pending_runtime_transition_cards = None;
+                    self.status_line = format!("Settings saved, but proxy switch failed: {err}");
+                    self.invalidate_runtime_observations();
+                    self.refresh()?;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.runtime_switch_in_flight = false;
+                    self.runtime_switch_rx = None;
+                    self.pending_runtime_transition_cards = None;
+                    self.status_line =
+                        "Settings saved, but runtime switch worker disappeared.".to_string();
+                    self.invalidate_runtime_observations();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn invalidate_runtime_observations(&mut self) {
+        self.last_gpu_refresh_at = None;
+        self.last_proxy_refresh_at = None;
+        self.proxy_telemetry = None;
     }
 
     fn refresh_service_status(&mut self) {
@@ -626,11 +923,15 @@ impl App {
                 manager: "process".to_string(),
                 pending_count: 0,
                 pending_previews: Vec::new(),
+                current_goal_preview: None,
                 active_source_label: None,
                 recent_events: Vec::new(),
                 last_error: None,
                 last_completed_at: None,
                 last_reply_chars: None,
+                monitor_last_check_at: None,
+                monitor_alerts: Vec::new(),
+                monitor_last_error: None,
             }
         });
         self.request_in_flight = self.service_status.running && self.service_status.busy;
@@ -670,7 +971,16 @@ impl App {
             "autostart off"
         };
         if self.service_status.running {
-            if self.service_status.busy {
+            let degraded = self.runtime_health.degraded_components();
+            if !degraded.is_empty() {
+                format!(
+                    "degraded on {} ({} down, {}, {})",
+                    self.service_status.listen_addr,
+                    degraded.join("+"),
+                    self.service_status.manager,
+                    persist
+                )
+            } else if self.service_status.busy {
                 format!(
                     "running on {} (busy, {}, {})",
                     self.service_status.listen_addr, self.service_status.manager, persist
@@ -775,8 +1085,43 @@ impl App {
     }
 
     fn setting_in_view(&self, item: &SettingItem) -> bool {
-        let _ = item;
-        true
+        match self.settings_view {
+            SettingsView::Model => matches!(
+                item.key,
+                "CTOX_SERVICE_TOGGLE"
+                    | "CTOX_API_PROVIDER"
+                    | "OPENAI_API_KEY"
+                    | "CTOX_CHAT_LOCAL_PRESET"
+                    | "CTOX_CHAT_MODEL"
+                    | "CTOX_CHAT_MODEL_BOOST"
+                    | "CTOX_BOOST_DEFAULT_MINUTES"
+                    | "CTOX_EMBEDDING_MODEL"
+                    | "CTOX_STT_MODEL"
+                    | "CTOX_TTS_MODEL"
+            ),
+            SettingsView::Communication => matches!(
+                item.key,
+                "CTOX_SERVICE_TOGGLE"
+                    | "CTOX_OWNER_NAME"
+                    | "CTOX_OWNER_EMAIL_ADDRESS"
+                    | "CTOX_ALLOWED_EMAIL_DOMAIN"
+                    | "CTOX_EMAIL_ADMIN_POLICIES"
+                    | "CTOX_OWNER_PREFERRED_CHANNEL"
+                    | "CTO_EMAIL_ADDRESS"
+                    | "CTO_EMAIL_PASSWORD"
+                    | "CTO_EMAIL_PROVIDER"
+                    | "CTO_EMAIL_IMAP_HOST"
+                    | "CTO_EMAIL_IMAP_PORT"
+                    | "CTO_EMAIL_SMTP_HOST"
+                    | "CTO_EMAIL_SMTP_PORT"
+                    | "CTO_EMAIL_GRAPH_USER"
+                    | "CTO_EMAIL_EWS_URL"
+                    | "CTO_EMAIL_EWS_AUTH_TYPE"
+                    | "CTO_EMAIL_EWS_USERNAME"
+                    | "CTO_JAMI_ACCOUNT_ID"
+                    | "CTO_JAMI_PROFILE_NAME"
+            ),
+        }
     }
 
     fn setting_visible(&self, item: &SettingItem) -> bool {
@@ -786,29 +1131,23 @@ impl App {
         let api_provider = self
             .value_for_setting("CTOX_API_PROVIDER")
             .unwrap_or(DEFAULT_API_PROVIDER);
-        let chat_source = self
-            .value_for_setting("CTOX_CHAT_SOURCE")
-            .unwrap_or(DEFAULT_CHAT_SOURCE);
+        let base_model = self.value_for_setting("CTOX_CHAT_MODEL").unwrap_or("");
+        let base_model_is_api = engine::is_openai_api_chat_model(base_model);
         match item.key {
-            "CTOX_CHAT_SOURCE"
-            | "CTOX_CHAT_MODEL"
+            "CTOX_CHAT_MODEL"
             | "CTOX_CHAT_MODEL_BOOST"
             | "CTOX_BOOST_DEFAULT_MINUTES"
             | "CTOX_EMBEDDING_MODEL"
             | "CTOX_STT_MODEL"
             | "CTOX_TTS_MODEL"
-            | "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT"
             | "CTOX_OWNER_NAME"
             | "CTOX_OWNER_EMAIL_ADDRESS"
             | "CTOX_ALLOWED_EMAIL_DOMAIN"
             | "CTOX_EMAIL_ADMIN_POLICIES"
             | "CTOX_OWNER_PREFERRED_CHANNEL" => true,
-            "CTOX_API_PROVIDER" => chat_source.eq_ignore_ascii_case("api"),
-            "OPENAI_API_KEY" => {
-                chat_source.eq_ignore_ascii_case("api")
-                    && api_provider.eq_ignore_ascii_case("openai")
-            }
-            "CTOX_CHAT_LOCAL_PRESET" => chat_source.eq_ignore_ascii_case("local"),
+            "CTOX_API_PROVIDER" => true,
+            "OPENAI_API_KEY" => api_provider.eq_ignore_ascii_case("openai"),
+            "CTOX_CHAT_LOCAL_PRESET" => !base_model_is_api,
             "CTO_EMAIL_ADDRESS" | "CTO_EMAIL_PASSWORD" | "CTO_EMAIL_PROVIDER" => self
                 .value_for_setting("CTOX_OWNER_PREFERRED_CHANNEL")
                 .unwrap_or(DEFAULT_COMMUNICATION_PATH)
@@ -899,27 +1238,133 @@ impl App {
     }
 
     fn refresh_dynamic_setting_choices(&mut self) {
+        self.sync_provider_selection();
         let env_map = self.settings_env_map();
         for item in &mut self.settings_items {
             match item.key {
-                "CTOX_CHAT_MODEL" => item.choices = supported_chat_model_choices(&env_map),
-                "CTOX_API_PROVIDER" => item.choices = API_PROVIDER_CHOICES.to_vec(),
-                "CTOX_CHAT_LOCAL_PRESET" => item.choices = runtime_planner::chat_preset_choices(),
+                "CTOX_CHAT_MODEL" => {
+                    item.choices = supported_chat_model_choices(&env_map);
+                    if !item.choices.is_empty() && !choice_contains(&item.choices, &item.value) {
+                        item.value = item.choices[0].to_string();
+                    }
+                }
+                "CTOX_CHAT_MODEL_BOOST" => {
+                    item.choices = supported_boost_model_choices(&env_map);
+                    if !item.value.trim().is_empty()
+                        && !item.choices.is_empty()
+                        && !choice_contains(&item.choices, &item.value)
+                    {
+                        item.value = item.choices[0].to_string();
+                    }
+                }
+                "CTOX_API_PROVIDER" => {
+                    item.choices = API_PROVIDER_CHOICES.to_vec();
+                    if !item.choices.is_empty() && !choice_contains(&item.choices, &item.value) {
+                        item.value = item.choices[0].to_string();
+                    }
+                }
+                "CTOX_CHAT_LOCAL_PRESET" => {
+                    item.choices = runtime_plan::chat_preset_choices();
+                    if !item.choices.is_empty() && !choice_contains(&item.choices, &item.value) {
+                        item.value = item.choices[0].to_string();
+                    }
+                }
                 _ => {}
             }
         }
     }
 
+    fn sync_provider_selection(&mut self) {
+        let provider = self
+            .settings_items
+            .iter()
+            .find(|item| item.key == "CTOX_API_PROVIDER")
+            .map(|item| {
+                if item.value.eq_ignore_ascii_case("openai") {
+                    "openai"
+                } else {
+                    "local"
+                }
+            })
+            .unwrap_or(DEFAULT_API_PROVIDER);
+        if let Some(item) = self
+            .settings_items
+            .iter_mut()
+            .find(|item| item.key == "CTOX_API_PROVIDER")
+        {
+            item.value = provider.to_string();
+        }
+        if let Some(item) = self
+            .settings_items
+            .iter_mut()
+            .find(|item| item.key == "CTOX_CHAT_SOURCE")
+        {
+            item.value = if provider.eq_ignore_ascii_case("openai") {
+                "api".to_string()
+            } else {
+                "local".to_string()
+            };
+        }
+    }
+
     fn refresh(&mut self) -> Result<()> {
         self.refresh_dynamic_setting_choices();
-        self.refresh_service_status();
-        self.refresh_chat_messages()?;
-        self.refresh_communication_feed();
-        self.refresh_skill_catalog();
+        let visible = self.visible_setting_indices();
+        if let Some(first) = visible.first().copied() {
+            if !visible.contains(&self.settings_selected) {
+                self.settings_selected = first;
+            }
+        }
+        self.refresh_service_status_if_due();
+        let chat_refresh_interval = self.chat_refresh_interval();
+        if self.should_refresh_chat_messages()
+            && refresh_due(&mut self.last_chat_refresh_at, chat_refresh_interval)
+        {
+            if let Err(err) = self.refresh_chat_messages() {
+                self.status_line = format!(
+                    "LCM refresh error: {}",
+                    summarize_inline(&err.to_string(), 96)
+                );
+            }
+        }
+        let communication_refresh_interval = self.communication_refresh_interval();
+        if self.should_refresh_communication_feed()
+            && refresh_due(
+                &mut self.last_communication_refresh_at,
+                communication_refresh_interval,
+            )
+        {
+            self.refresh_communication_feed();
+        }
+        if self.page == Page::Skills
+            && refresh_due(
+                &mut self.last_skill_catalog_refresh_at,
+                SKILL_REFRESH_INTERVAL_ACTIVE,
+            )
+        {
+            self.refresh_skill_catalog();
+        }
         self.refresh_gpu_cards();
+        self.refresh_proxy_telemetry_if_due();
         self.refresh_header();
         self.refresh_jami_qr();
         Ok(())
+    }
+
+    fn refresh_service_status_if_due(&mut self) {
+        let service_refresh_interval = self.service_refresh_interval();
+        if !refresh_due(&mut self.last_service_refresh_at, service_refresh_interval) {
+            return;
+        }
+        self.refresh_service_status();
+    }
+
+    fn refresh_proxy_telemetry_if_due(&mut self) {
+        let proxy_refresh_interval = self.proxy_refresh_interval();
+        if !refresh_due(&mut self.last_proxy_refresh_at, proxy_refresh_interval) {
+            return;
+        }
+        self.proxy_telemetry = load_proxy_telemetry(&self.root).ok().flatten();
     }
 
     fn refresh_skill_catalog(&mut self) {
@@ -956,28 +1401,90 @@ impl App {
     }
 
     fn refresh_gpu_cards(&mut self) {
-        let should_refresh = self
-            .last_gpu_refresh_at
-            .map(|at| at.elapsed() >= Duration::from_secs(2))
-            .unwrap_or(true);
-        if !should_refresh {
+        let gpu_refresh_interval = self.gpu_refresh_interval();
+        if !refresh_due(&mut self.last_gpu_refresh_at, gpu_refresh_interval) {
             return;
         }
         if let Ok(cards) = sample_gpu_cards() {
             self.gpu_cards = cards;
-            self.last_gpu_refresh_at = Some(Instant::now());
         }
     }
 
     fn refresh_chat_messages(&mut self) -> Result<()> {
-        let snapshot = lcm::run_dump(&self.db_path, chat_runtime::CHAT_CONVERSATION_ID)?;
+        let settings = self.saved_settings_env_map();
+        let max_context = read_usize_setting(
+            &settings,
+            "CTOX_CHAT_MODEL_MAX_CONTEXT",
+            DEFAULT_MAX_CONTEXT,
+        );
+        let engine = lcm::LcmEngine::open(&self.db_path, lcm::LcmConfig::default())?;
+        let snapshot = engine.snapshot(chat::CHAT_CONVERSATION_ID)?;
+        let continuity = engine.continuity_show_all(chat::CHAT_CONVERSATION_ID)?;
+        let forgotten = engine.continuity_forgotten(chat::CHAT_CONVERSATION_ID, None, None)?;
+        self.context_health = Some(context_health::assess_with_forgotten(
+            &snapshot,
+            &continuity,
+            &forgotten,
+            "",
+            max_context as i64,
+        ));
         self.chat_messages = snapshot.messages;
+        self.mission_state = Some(engine.mission_state(chat::CHAT_CONVERSATION_ID)?);
         Ok(())
     }
 
     fn refresh_communication_feed(&mut self) {
         self.communication_feed =
             channels::load_recent_communication_feed(&self.root, 10).unwrap_or_default();
+    }
+
+    fn service_refresh_interval(&self) -> Duration {
+        if self.page == Page::Settings {
+            SERVICE_REFRESH_INTERVAL_SETTINGS
+        } else {
+            SERVICE_REFRESH_INTERVAL_ACTIVE
+        }
+    }
+
+    fn chat_refresh_interval(&self) -> Duration {
+        if self.page == Page::Chat {
+            CHAT_REFRESH_INTERVAL_ACTIVE
+        } else {
+            CHAT_REFRESH_INTERVAL_BACKGROUND
+        }
+    }
+
+    fn communication_refresh_interval(&self) -> Duration {
+        if self.page == Page::Settings && self.settings_view == SettingsView::Communication {
+            COMMUNICATION_REFRESH_INTERVAL_ACTIVE
+        } else {
+            COMMUNICATION_REFRESH_INTERVAL_BACKGROUND
+        }
+    }
+
+    fn gpu_refresh_interval(&self) -> Duration {
+        if self.page == Page::Settings {
+            GPU_REFRESH_INTERVAL_SETTINGS
+        } else {
+            GPU_REFRESH_INTERVAL_ACTIVE
+        }
+    }
+
+    fn proxy_refresh_interval(&self) -> Duration {
+        if self.page == Page::Settings {
+            PROXY_REFRESH_INTERVAL_SETTINGS
+        } else {
+            PROXY_REFRESH_INTERVAL_ACTIVE
+        }
+    }
+
+    fn should_refresh_chat_messages(&self) -> bool {
+        self.page == Page::Chat || self.request_in_flight || self.service_status.busy
+    }
+
+    fn should_refresh_communication_feed(&self) -> bool {
+        self.page == Page::Chat
+            || (self.page == Page::Settings && self.settings_view == SettingsView::Communication)
     }
 
     fn refresh_header(&mut self) {
@@ -991,32 +1498,55 @@ impl App {
         } else {
             &saved_settings
         };
-        let proxy_telemetry = load_proxy_telemetry(&self.root).ok().flatten();
-        let model = proxy_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.active_model.clone())
-            .or_else(|| runtime_config::effective_chat_model_from_map(settings))
+        let selected_source = infer_chat_source(settings);
+        let saved_source = infer_chat_source(&saved_settings);
+        let display_source = if estimate_mode {
+            selected_source.as_str()
+        } else {
+            saved_source.as_str()
+        };
+        let proxy_telemetry = self.proxy_telemetry.clone();
+        let configured_model = runtime_env::configured_chat_model_from_map(settings)
+            .or_else(|| runtime_env::configured_chat_model_from_map(&saved_settings))
             .unwrap_or_else(|| DEFAULT_ACTIVE_MODEL.to_string());
-        let loaded_model = proxy_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.active_model.clone())
-            .or_else(|| runtime_config::effective_chat_model_from_map(&saved_settings))
-            .unwrap_or_else(|| DEFAULT_ACTIVE_MODEL.to_string());
-        let base_model = proxy_telemetry
-            .as_ref()
-            .and_then(|telemetry| telemetry.base_model.clone())
-            .or_else(|| runtime_config::configured_chat_model_from_map(&saved_settings))
-            .unwrap_or_else(|| loaded_model.clone());
+        let saved_configured_model = runtime_env::configured_chat_model_from_map(&saved_settings)
+            .unwrap_or_else(|| configured_model.clone());
+        let live_local_model = if saved_source.eq_ignore_ascii_case("local") {
+            proxy_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.active_model.clone())
+                .or_else(|| runtime_env::effective_chat_model_from_map(&saved_settings))
+                .or_else(|| runtime_env::configured_chat_model_from_map(&saved_settings))
+        } else {
+            None
+        };
+        let model = if display_source.eq_ignore_ascii_case("api") {
+            configured_model.clone()
+        } else if estimate_mode {
+            configured_model.clone()
+        } else {
+            live_local_model
+                .clone()
+                .unwrap_or_else(|| saved_configured_model.clone())
+        };
+        let base_model = if display_source.eq_ignore_ascii_case("api") {
+            configured_model.clone()
+        } else {
+            proxy_telemetry
+                .as_ref()
+                .and_then(|telemetry| telemetry.base_model.clone())
+                .unwrap_or_else(|| saved_configured_model.clone())
+        };
 
-        let selected_bundle = if infer_chat_source(settings).eq_ignore_ascii_case("local") {
-            runtime_planner::preview_chat_preset_bundle(&self.root, settings)
+        let selected_bundle = if selected_source.eq_ignore_ascii_case("local") {
+            runtime_plan::preview_chat_preset_bundle(&self.root, settings)
                 .ok()
                 .flatten()
         } else {
             None
         };
-        let saved_bundle = if infer_chat_source(&saved_settings).eq_ignore_ascii_case("local") {
-            runtime_planner::preview_chat_preset_bundle(&self.root, &saved_settings)
+        let saved_bundle = if saved_source.eq_ignore_ascii_case("local") {
+            runtime_plan::preview_chat_preset_bundle(&self.root, &saved_settings)
                 .ok()
                 .flatten()
         } else {
@@ -1025,7 +1555,7 @@ impl App {
         self.chat_preset_bundle = selected_bundle.clone();
 
         let realized_context_from_runtime = saved_settings
-            .get("CTOX_VLLM_SERVE_REALIZED_MAX_SEQ_LEN")
+            .get("CTOX_ENGINE_REALIZED_MAX_SEQ_LEN")
             .or_else(|| saved_settings.get("CTOX_CHAT_MODEL_REALIZED_CONTEXT"))
             .and_then(|value| value.trim().parse::<usize>().ok());
 
@@ -1038,7 +1568,7 @@ impl App {
         let configured_context = planned_context
             .or(saved_context)
             .or_else(|| {
-                execution_baseline::runtime_config_for_model(&model)
+                engine::runtime_config_for_model(&model)
                     .ok()
                     .and_then(|runtime| runtime.max_seq_len.map(|value| value as usize))
             })
@@ -1052,23 +1582,75 @@ impl App {
                 .unwrap_or(configured_context)
         }
         .min(DEFAULT_MAX_CONTEXT);
-        let gpu_cards =
+        let load_observations = collect_runtime_load_observations(
+            &self.root,
+            proxy_telemetry.as_ref(),
+            &saved_settings,
+        );
+        let runtime_health =
+            runtime_health_state(&self.root, &saved_settings, proxy_telemetry.as_ref());
+        self.runtime_health = runtime_health.clone();
+        let saved_runtime_models = configured_runtime_models(&saved_settings);
+        let saved_target_gpu_cards =
+            if let Some(plan) = saved_bundle.as_ref().map(|bundle| &bundle.selected_plan) {
+                gpu_cards_from_plan(plan, &saved_settings)
+            } else {
+                aux_gpu_target_cards(&self.gpu_cards, &saved_settings)
+            };
+        let gpu_target_cards = if estimate_mode {
             if let Some(plan) = selected_bundle.as_ref().map(|bundle| &bundle.selected_plan) {
                 gpu_cards_from_plan(plan, settings)
             } else {
-                let expected_live_models = configured_runtime_models(&saved_settings);
-                if estimate_mode {
+                if selected_source.eq_ignore_ascii_case("local") {
                     estimate_gpu_cards(
                         &self.gpu_cards,
-                        &loaded_model,
+                        live_local_model.as_deref().unwrap_or(""),
                         &model,
                         settings,
                         realized_context,
                     )
                 } else {
-                    filter_gpu_cards_to_models(&self.gpu_cards, &expected_live_models)
+                    aux_gpu_target_cards(&self.gpu_cards, settings)
                 }
-            };
+            }
+        } else {
+            Vec::new()
+        };
+        let gpu_loading_cards = loading_gpu_cards_from_observations(
+            &saved_target_gpu_cards,
+            &self.gpu_cards,
+            &load_observations,
+        );
+        let unhealthy_gpu_cards =
+            unhealthy_backend_loading_cards(&self.gpu_cards, &saved_settings, &runtime_health);
+        let mut gpu_loading_cards = merge_gpu_card_layers(
+            gpu_loading_cards,
+            if self.runtime_switch_in_flight {
+                unhealthy_gpu_cards.clone()
+            } else {
+                Vec::new()
+            },
+        );
+        if self.runtime_switch_in_flight {
+            if let Some(cards) = self.pending_runtime_transition_cards.clone() {
+                gpu_loading_cards = merge_gpu_card_layers(gpu_loading_cards, cards);
+            }
+        }
+        let gpu_error_cards = if self.runtime_switch_in_flight {
+            Vec::new()
+        } else {
+            unhealthy_gpu_cards
+        };
+        let healthy_aux_gpu_cards =
+            healthy_backend_deployed_cards(&self.gpu_cards, &saved_settings, &runtime_health);
+        let gpu_cards = merge_gpu_card_layers(
+            deployed_gpu_cards_from_live(
+                &self.gpu_cards,
+                &saved_runtime_models,
+                &load_observations,
+            ),
+            healthy_aux_gpu_cards,
+        );
         let effective_context = configured_context
             .min(realized_context)
             .min(DEFAULT_MAX_CONTEXT);
@@ -1146,9 +1728,21 @@ impl App {
                         .map(|bundle| bundle.selected_plan.expected_tok_s)
                 })
         };
+        let expected_aux_models = expected_gpu_aux_labels(settings);
+        let backend_warmup = self.service_status.running
+            && !expected_aux_models.is_empty()
+            && gpu_cards.iter().all(|card| card.allocations.is_empty())
+            && gpu_loading_cards
+                .iter()
+                .all(|card| card.allocations.is_empty())
+            && gpu_error_cards
+                .iter()
+                .all(|card| card.allocations.is_empty());
         self.header = HeaderState {
+            chat_source: display_source.to_string(),
             model,
             base_model,
+            service_running: self.service_status.running,
             boost_model: proxy_telemetry
                 .as_ref()
                 .and_then(|value| value.boost_model.clone()),
@@ -1183,6 +1777,11 @@ impl App {
                 .as_ref()
                 .and_then(|value| value.last_total_tokens),
             gpu_cards,
+            gpu_loading_cards,
+            gpu_error_cards,
+            gpu_target_cards,
+            backend_warmup,
+            expected_aux_models,
             estimate_mode,
             chat_plan: selected_bundle.map(|bundle| bundle.selected_plan),
         };
@@ -1229,7 +1828,7 @@ impl App {
     }
 
     fn save_settings(&mut self) -> Result<()> {
-        let previous_env = runtime_config::load_runtime_env_map(&self.root).unwrap_or_default();
+        let previous_env = runtime_env::load_runtime_env_map(&self.root).unwrap_or_default();
         let mut env_map = previous_env.clone();
         for item in &self.settings_items {
             if item.kind != SettingKind::Env {
@@ -1252,8 +1851,8 @@ impl App {
             env_map.remove("CTOX_CHAT_MODEL_BASE");
         }
         normalize_runtime_model_settings(&mut env_map);
-        let _ = runtime_planner::apply_chat_runtime_plan(&self.root, &mut env_map);
-        runtime_config::save_runtime_env_map(&self.root, &env_map)?;
+        let _ = runtime_plan::apply_chat_runtime_plan(&self.root, &mut env_map);
+        runtime_env::save_runtime_env_map(&self.root, &env_map)?;
         channels::sync_prompt_identity(&self.root, &env_map)?;
         let previous_model = previous_env
             .get("CTOX_CHAT_MODEL")
@@ -1265,10 +1864,10 @@ impl App {
             .filter(|value| !value.trim().is_empty());
         let next_source = infer_chat_source(&env_map);
         let next_preset = env_map.get("CTOX_CHAT_LOCAL_PRESET").map(String::as_str);
-        let switch_status = if next_source.eq_ignore_ascii_case("local") {
+        let pending_switch = if next_source.eq_ignore_ascii_case("local") {
             if let Some(next) = next_model.as_deref() {
                 if local_runtime_apply_changed(&previous_env, &env_map) {
-                    Some(switch_proxy_model(&self.root, next, next_preset))
+                    Some((next.to_string(), next_preset.map(str::to_string)))
                 } else {
                     None
                 }
@@ -1277,10 +1876,8 @@ impl App {
             }
         } else {
             match (&previous_model, &next_model) {
-                (Some(previous), Some(next)) if previous != next => {
-                    Some(switch_proxy_model(&self.root, next, None))
-                }
-                (None, Some(next)) => Some(switch_proxy_model(&self.root, next, None)),
+                (Some(previous), Some(next)) if previous != next => Some((next.to_string(), None)),
+                (None, Some(next)) => Some((next.to_string(), None)),
                 _ => None,
             }
         };
@@ -1289,14 +1886,33 @@ impl App {
             item.saved_value = item.value.clone();
         }
         self.refresh_dynamic_setting_choices();
-        if self.service_status.running {
-            let _ = backend_manager::ensure_persistent_backends(&self.root);
+        if self.service_status.running || self.runtime_health.proxy_ready {
+            let _ = supervisor::ensure_persistent_backends(&self.root);
         }
-        self.status_line = match switch_status {
-            Some(Ok(message)) => message,
-            Some(Err(err)) => format!("Settings saved, but proxy switch failed: {err}"),
-            None => "Settings saved to runtime/vllm_serve.env.".to_string(),
-        };
+        self.invalidate_runtime_observations();
+        if let Some((model, preset)) = pending_switch {
+            let (tx, rx) = mpsc::channel();
+            let root = self.root.clone();
+            let status_model = model.clone();
+            self.pending_runtime_transition_cards = (!self.header.gpu_target_cards.is_empty())
+                .then(|| self.header.gpu_target_cards.clone());
+            self.runtime_switch_in_flight = true;
+            self.runtime_switch_rx = Some(rx);
+            thread::spawn(move || {
+                let result = switch_proxy_model(&root, &model, preset.as_deref())
+                    .map_err(|err| err.to_string());
+                let _ = tx.send(result);
+            });
+            self.status_line = format!(
+                "Settings saved. Applying runtime change to {}...",
+                summarize_inline(&status_model, 48)
+            );
+        } else {
+            self.runtime_switch_in_flight = false;
+            self.runtime_switch_rx = None;
+            self.pending_runtime_transition_cards = None;
+            self.status_line = "Settings saved to runtime/engine.env.".to_string();
+        }
         self.refresh_header();
         self.refresh_jami_qr();
         Ok(())
@@ -1430,9 +2046,10 @@ impl App {
             {
                 let plan = &bundle.selected_plan;
                 return format!(
-                    "draft {}  {}  ctx {}  compact {}% min {}k  {} tok/s",
+                    "draft {}  {}  cache {}  ctx {}  compact {}% min {}k  {} tok/s",
                     compact_model_name(&plan.model, 20),
                     plan.quantization,
+                    plan.effective_cache_label(),
                     plan.max_seq_len,
                     plan.compaction_threshold_percent,
                     plan.compaction_min_tokens / 1024,
@@ -1480,20 +2097,40 @@ impl App {
         item.value = next.to_string();
         self.settings_dirty = true;
         self.settings_menu_open = false;
+        self.refresh_dynamic_setting_choices();
         self.refresh_jami_qr();
         Ok(())
     }
 
-    fn refresh_jami_qr(&mut self) {
+    fn jami_details_active(&self) -> bool {
+        if self.page != Page::Settings {
+            return false;
+        }
         let channel = self
             .value_for_setting("CTOX_OWNER_PREFERRED_CHANNEL")
-            .unwrap_or("tui");
-        if channel != "jami" {
+            .unwrap_or(DEFAULT_COMMUNICATION_PATH);
+        if !channel.eq_ignore_ascii_case("jami") {
+            return false;
+        }
+        matches!(
+            self.current_setting().map(|item| item.key),
+            Some("CTOX_OWNER_PREFERRED_CHANNEL")
+                | Some("CTO_JAMI_PROFILE_NAME")
+                | Some("CTO_JAMI_ACCOUNT_ID")
+        )
+    }
+
+    fn refresh_jami_qr(&mut self) {
+        if !self.jami_details_active() {
             self.jami_qr_lines.clear();
             self.last_jami_qr_key.clear();
+            self.last_jami_refresh_at = None;
             self.jami_runtime_account = None;
             return;
         }
+        let channel = self
+            .value_for_setting("CTOX_OWNER_PREFERRED_CHANNEL")
+            .unwrap_or("tui");
         let configured_jami_id = self
             .value_for_setting("CTO_JAMI_ACCOUNT_ID")
             .unwrap_or("")
@@ -1504,6 +2141,15 @@ impl App {
             .unwrap_or("")
             .trim()
             .to_string();
+        let refresh_key = format!("{channel}:{configured_jami_id}:{configured_profile_name}");
+        let should_probe = self.last_jami_qr_key != refresh_key
+            || self
+                .last_jami_refresh_at
+                .map(|at| at.elapsed() >= Duration::from_secs(5))
+                .unwrap_or(true);
+        if !should_probe && !self.jami_qr_lines.is_empty() {
+            return;
+        }
         let resolved =
             resolve_jami_runtime_account(&self.root, &configured_jami_id, &configured_profile_name);
         let qr_payload = resolved
@@ -1520,7 +2166,7 @@ impl App {
             })
             .or_else(|| (!configured_jami_id.is_empty()).then(|| configured_jami_id.clone()))
             .unwrap_or_default();
-        let qr_key = format!("{channel}:{qr_payload}");
+        let qr_key = refresh_key;
         if !qr_payload.is_empty()
             && self.last_jami_qr_key == qr_key
             && !self.jami_qr_lines.is_empty()
@@ -1528,30 +2174,50 @@ impl App {
             self.jami_runtime_account = resolved.account;
             return;
         }
+        self.last_jami_refresh_at = Some(Instant::now());
         self.jami_runtime_account = resolved.account.clone();
-        if let Some(error) = resolved.error.as_deref() {
-            self.jami_qr_lines = jami_error_lines(
-                error,
-                resolved.dbus_env_file.as_deref(),
-                !configured_jami_id.is_empty() || !configured_profile_name.is_empty(),
-            );
-            self.last_jami_qr_key = qr_key;
-            return;
-        }
         if qr_payload.is_empty() {
+            if let Some(error) = resolved.error.as_deref() {
+                self.jami_qr_lines = jami_error_lines(
+                    error,
+                    resolved.dbus_env_file.as_deref(),
+                    !configured_jami_id.is_empty() || !configured_profile_name.is_empty(),
+                    &resolved.checks,
+                );
+                self.last_jami_qr_key = qr_key;
+                return;
+            }
             self.jami_qr_lines = jami_missing_account_lines(
                 resolved.dbus_env_file.as_deref(),
                 !configured_jami_id.is_empty() || !configured_profile_name.is_empty(),
+                &resolved.checks,
             );
             self.last_jami_qr_key = qr_key;
             return;
         }
-        self.jami_qr_lines = render_qr_lines(&qr_payload).unwrap_or_else(|| {
+        let mut lines = render_qr_lines(&qr_payload).unwrap_or_else(|| {
             vec![
                 "Failed to render Jami QR.".to_string(),
                 format!("uri {}", truncate_for_ui(&qr_payload, 40)),
             ]
         });
+        if let Some(error) = resolved.error.as_deref() {
+            lines.push(String::new());
+            lines.extend(jami_error_lines(
+                error,
+                resolved.dbus_env_file.as_deref(),
+                !configured_jami_id.is_empty() || !configured_profile_name.is_empty(),
+                &resolved.checks,
+            ));
+        } else if resolved.account.is_none() {
+            lines.push(String::new());
+            lines.extend(jami_missing_account_lines(
+                resolved.dbus_env_file.as_deref(),
+                !configured_jami_id.is_empty() || !configured_profile_name.is_empty(),
+                &resolved.checks,
+            ));
+        }
+        self.jami_qr_lines = lines;
         self.last_jami_qr_key = qr_key;
     }
 
@@ -1577,12 +2243,13 @@ fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
     let mut catalog = Vec::new();
     let mut seen = HashSet::new();
     for base in skill_roots(root) {
-        collect_skill_entries(&base, &mut seen, &mut catalog);
+        collect_skill_entries(root, &base, &mut seen, &mut catalog);
     }
     catalog.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.source.cmp(&right.source))
+        left.class
+            .rank()
+            .cmp(&right.class.rank())
+            .then(left.name.cmp(&right.name))
             .then(left.skill_path.cmp(&right.skill_path))
     });
     catalog
@@ -1592,13 +2259,16 @@ fn skill_roots(root: &Path) -> Vec<PathBuf> {
     let mut roots = vec![root.join("skills")];
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
         roots.push(PathBuf::from(codex_home).join("skills"));
-    } else if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(home).join(".codex/skills"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(&home).join(".codex/skills"));
+        roots.push(PathBuf::from(home).join(".agents/skills"));
     }
     roots
 }
 
 fn collect_skill_entries(
+    root: &Path,
     base: &Path,
     seen: &mut HashSet<PathBuf>,
     catalog: &mut Vec<SkillCatalogEntry>,
@@ -1615,7 +2285,7 @@ fn collect_skill_entries(
         if skill_md.is_file() {
             if let Ok(canon_skill) = std::fs::canonicalize(&skill_md) {
                 if seen.insert(canon_skill) {
-                    if let Some(entry) = parse_skill_catalog_entry(base, &dir, &skill_md) {
+                    if let Some(entry) = parse_skill_catalog_entry(root, base, &dir, &skill_md) {
                         catalog.push(entry);
                     }
                 }
@@ -1627,7 +2297,11 @@ fn collect_skill_entries(
         };
         for child in read_dir.flatten() {
             let child_path = child.path();
-            if child.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false) {
+            if child
+                .file_type()
+                .map(|file_type| file_type.is_dir())
+                .unwrap_or(false)
+            {
                 queue.push(child_path);
             }
         }
@@ -1635,14 +2309,18 @@ fn collect_skill_entries(
 }
 
 fn parse_skill_catalog_entry(
+    root: &Path,
     base: &Path,
     dir: &Path,
     skill_md: &Path,
 ) -> Option<SkillCatalogEntry> {
     let body = std::fs::read_to_string(skill_md).ok()?;
+    let metadata = parse_skill_catalog_metadata(&body);
+    let (class, state) = classify_skill(root, base, skill_md, &metadata);
     Some(SkillCatalogEntry {
         name: dir.file_name()?.to_string_lossy().to_string(),
-        source: classify_skill_source(base, skill_md),
+        class,
+        state,
         skill_path: skill_md.to_path_buf(),
         description: parse_skill_description(&body),
         helper_tools: list_named_children(&dir.join("scripts")),
@@ -1686,7 +2364,12 @@ fn push_resource_summary(out: &mut Vec<String>, label: &str, dir: &Path) {
     if entries.is_empty() {
         return;
     }
-    let preview = entries.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let preview = entries
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
     let suffix = if entries.len() > 5 {
         format!(" (+{} more)", entries.len() - 5)
     } else {
@@ -1714,34 +2397,205 @@ fn list_named_children(dir: &Path) -> Vec<String> {
     entries
 }
 
-fn classify_skill_source(base: &Path, skill_md: &Path) -> String {
+fn parse_skill_catalog_metadata(body: &str) -> SkillCatalogMetadata {
+    let Some(frontmatter) = extract_frontmatter(body) else {
+        return SkillCatalogMetadata::default();
+    };
+
+    let mut metadata = SkillCatalogMetadata::default();
+    for raw_line in frontmatter.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((key, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
+        match key.trim() {
+            "class" => metadata.class = parse_skill_class(value),
+            "state" => metadata.state = parse_skill_state(value),
+            _ => {}
+        }
+    }
+    metadata
+}
+
+fn extract_frontmatter(body: &str) -> Option<&str> {
+    let body = body.strip_prefix("---\n")?;
+    let end = body.find("\n---")?;
+    body.get(..end)
+}
+
+fn parse_skill_class(value: &str) -> Option<SkillClass> {
+    if value.eq_ignore_ascii_case("codex-core")
+        || value.eq_ignore_ascii_case("codex_core")
+        || value.eq_ignore_ascii_case("codex")
+    {
+        return Some(SkillClass::CodexCore);
+    }
+    if value.eq_ignore_ascii_case("ctox-core")
+        || value.eq_ignore_ascii_case("ctox_core")
+        || value.eq_ignore_ascii_case("ctox")
+    {
+        return Some(SkillClass::CtoxCore);
+    }
+    if value.eq_ignore_ascii_case("installed-packs")
+        || value.eq_ignore_ascii_case("installed_pack")
+        || value.eq_ignore_ascii_case("pack")
+        || value.eq_ignore_ascii_case("packs")
+        || value.eq_ignore_ascii_case("curated")
+    {
+        return Some(SkillClass::InstalledPacks);
+    }
+    if value.eq_ignore_ascii_case("personal") {
+        return Some(SkillClass::Personal);
+    }
+    None
+}
+
+fn parse_skill_state(value: &str) -> Option<SkillState> {
+    if value.eq_ignore_ascii_case("stable") {
+        return Some(SkillState::Stable);
+    }
+    if value.eq_ignore_ascii_case("authored") {
+        return Some(SkillState::Authored);
+    }
+    if value.eq_ignore_ascii_case("generated") {
+        return Some(SkillState::Generated);
+    }
+    if value.eq_ignore_ascii_case("draft") {
+        return Some(SkillState::Draft);
+    }
+    None
+}
+
+fn classify_skill(
+    root: &Path,
+    base: &Path,
+    skill_md: &Path,
+    metadata: &SkillCatalogMetadata,
+) -> (SkillClass, SkillState) {
+    let mut class = metadata
+        .class
+        .unwrap_or_else(|| infer_skill_class(root, base, skill_md));
+    let mut state = metadata
+        .state
+        .unwrap_or_else(|| infer_skill_state(root, base, skill_md, class));
+
+    if class != SkillClass::Personal
+        && matches!(state, SkillState::Authored | SkillState::Generated)
+    {
+        state = SkillState::Stable;
+    }
+    if matches!(state, SkillState::Draft) && class == SkillClass::CodexCore {
+        class = SkillClass::Personal;
+    }
+    (class, state)
+}
+
+fn infer_skill_class(root: &Path, base: &Path, skill_md: &Path) -> SkillClass {
+    let repo_skills_root = root.join("skills");
+    if path_matches_prefix(skill_md, &repo_skills_root.join(".curated")) {
+        return SkillClass::InstalledPacks;
+    }
+    if path_matches_prefix(skill_md, &repo_skills_root.join(".system")) {
+        return SkillClass::CtoxCore;
+    }
+    if path_matches_prefix(skill_md, &repo_skills_root) {
+        return SkillClass::CtoxCore;
+    }
+
+    for global_root in global_skill_roots() {
+        if path_matches_prefix(skill_md, &global_root.join(".system")) {
+            return SkillClass::CodexCore;
+        }
+        if path_matches_prefix(skill_md, &global_root.join("packs")) {
+            return SkillClass::InstalledPacks;
+        }
+        if path_matches_prefix(skill_md, &global_root.join("personal")) {
+            return SkillClass::Personal;
+        }
+        if path_matches_prefix(skill_md, &global_root) {
+            return SkillClass::Personal;
+        }
+    }
+
     let base_text = base.to_string_lossy();
     let path_text = skill_md.to_string_lossy();
-    if base_text.contains(".codex/skills") {
-        if path_text.contains("/.system/") {
-            "codex system".to_string()
-        } else {
-            "codex custom".to_string()
-        }
-    } else if path_text.contains("/skills/.system/") {
-        "ctox system".to_string()
+    if (base_text.contains(".codex/skills") || base_text.contains(".agents/skills"))
+        && path_text.contains("/.system/")
+    {
+        SkillClass::CodexCore
+    } else if base_text.contains(".codex/skills") || base_text.contains(".agents/skills") {
+        SkillClass::Personal
     } else {
-        "repo custom".to_string()
+        SkillClass::CtoxCore
+    }
+}
+
+fn infer_skill_state(root: &Path, _base: &Path, skill_md: &Path, class: SkillClass) -> SkillState {
+    if class == SkillClass::Personal {
+        for global_root in global_skill_roots() {
+            if path_matches_prefix(skill_md, &global_root.join("personal/generated")) {
+                return SkillState::Generated;
+            }
+            if path_matches_prefix(skill_md, &global_root.join("personal/authored")) {
+                return SkillState::Authored;
+            }
+        }
+        let path_text = skill_md.to_string_lossy();
+        if path_text.contains("/personal/generated/") {
+            return SkillState::Generated;
+        }
+        if path_text.contains("/personal/authored/") {
+            return SkillState::Authored;
+        }
+        return SkillState::Authored;
+    }
+
+    if path_matches_prefix(skill_md, &root.join("skills/drafts")) {
+        return SkillState::Draft;
+    }
+
+    SkillState::Stable
+}
+
+fn global_skill_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        roots.push(PathBuf::from(codex_home).join("skills"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        roots.push(PathBuf::from(&home).join(".codex/skills"));
+        roots.push(PathBuf::from(home).join(".agents/skills"));
+    }
+    roots
+}
+
+fn path_matches_prefix(path: &Path, prefix: &Path) -> bool {
+    if path.starts_with(prefix) {
+        return true;
+    }
+
+    match (std::fs::canonicalize(path), std::fs::canonicalize(prefix)) {
+        (Ok(path), Ok(prefix)) => path.starts_with(prefix),
+        _ => false,
     }
 }
 
 fn switch_proxy_model(root: &Path, model: &str, preset: Option<&str>) -> Result<String> {
-    let mut env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let mut env_map = runtime_env::load_runtime_env_map(root).unwrap_or_default();
     env_map.remove("CTOX_BOOST_ACTIVE_UNTIL_EPOCH");
     env_map.remove("CTOX_BOOST_REASON");
-    runtime_config::save_runtime_env_map(root, &env_map)?;
-    if !execution_baseline::uses_ctox_proxy_model(model) {
-        return Ok("Settings saved to runtime/vllm_serve.env.".to_string());
+    runtime_env::save_runtime_env_map(root, &env_map)?;
+    if !engine::uses_ctox_proxy_model(model) {
+        return Ok("Settings saved to runtime/engine.env.".to_string());
     }
-    let host = runtime_config::env_or_config(root, "CTOX_PROXY_HOST")
+    let host = runtime_env::env_or_config(root, "CTOX_PROXY_HOST")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = runtime_config::env_or_config(root, "CTOX_PROXY_PORT")
-        .unwrap_or_else(|| "12434".to_string());
+    let port =
+        runtime_env::env_or_config(root, "CTOX_PROXY_PORT").unwrap_or_else(|| "12434".to_string());
     let url = format!("http://{host}:{port}/ctox/switch");
     let payload = match preset.map(str::trim).filter(|value| !value.is_empty()) {
         Some(preset) => format!(r#"{{"model":"{}","preset":"{}"}}"#, model, preset),
@@ -1761,7 +2615,7 @@ fn switch_proxy_model(root: &Path, model: &str, preset: Option<&str>) -> Result<
 }
 
 fn load_settings_items(root: &Path) -> Vec<SettingItem> {
-    let env_map = runtime_config::load_runtime_env_map(root).unwrap_or_default();
+    let env_map = runtime_env::load_runtime_env_map(root).unwrap_or_default();
     let inferred_chat_source = infer_chat_source(&env_map);
     let inferred_api_provider = infer_api_provider(&env_map);
     let mut choices_env_map = env_map.clone();
@@ -1770,17 +2624,12 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         "CTOX_API_PROVIDER".to_string(),
         inferred_api_provider.clone(),
     );
-    let is_api_source = inferred_chat_source.eq_ignore_ascii_case("api");
     let chat_model_choices = supported_chat_model_choices(&choices_env_map);
-    let active_model = if is_api_source {
-        runtime_config::configured_chat_model_from_map(&env_map)
-            .filter(|value| execution_baseline::is_openai_api_chat_model(value))
-            .or_else(|| chat_model_choices.first().map(|value| (*value).to_string()))
-            .unwrap_or_default()
-    } else {
-        runtime_config::configured_chat_model_from_map(&env_map)
-            .unwrap_or_else(|| DEFAULT_ACTIVE_MODEL.to_string())
-    };
+    let active_model = runtime_env::configured_chat_model_from_map(&env_map)
+        .filter(|value| choice_contains(&chat_model_choices, value))
+        .or_else(|| chat_model_choices.first().map(|value| (*value).to_string()))
+        .unwrap_or_else(|| DEFAULT_ACTIVE_MODEL.to_string());
+    let boost_choices = supported_boost_model_choices(&choices_env_map);
     let boost_model = env_map
         .get("CTOX_CHAT_MODEL_BOOST")
         .cloned()
@@ -1789,10 +2638,6 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         .get("CTOX_BOOST_DEFAULT_MINUTES")
         .cloned()
         .unwrap_or_else(|| "20".to_string());
-    let compaction_threshold = env_map
-        .get("CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT")
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_COMPACTION_THRESHOLD_PERCENT.to_string());
     vec![
         SettingItem {
             key: "CTOX_SERVICE_TOGGLE",
@@ -1805,47 +2650,60 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             kind: SettingKind::ServiceToggle,
         },
         SettingItem {
-            key: "CTOX_CHAT_SOURCE",
-            label: "Chat Source",
-            value: inferred_chat_source.clone(),
-            saved_value: inferred_chat_source,
-            secret: false,
-            choices: vec!["local", "api"],
-            help: "Choose whether the chat model runs locally or through an API provider.",
-            kind: SettingKind::Env,
-        },
-        SettingItem {
             key: "CTOX_API_PROVIDER",
-            label: "API Provider",
+            label: "Provider",
             value: inferred_api_provider.clone(),
             saved_value: inferred_api_provider,
             secret: false,
             choices: API_PROVIDER_CHOICES.to_vec(),
-            help: "API provider for remote chat models.",
+            help: "Choose whether the base model should come from the local runtime or OpenAI.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "OPENAI_API_KEY",
+            label: "API Token",
+            value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
+            saved_value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
+            secret: true,
+            choices: Vec::new(),
+            help: "OpenAI API token. When present, OpenAI models become available where supported.",
             kind: SettingKind::Env,
         },
         SettingItem {
             key: "CTOX_CHAT_MODEL",
-            label: if is_api_source { "API Model" } else { "Local Model" },
+            label: "Base Model",
             value: active_model,
-            saved_value: runtime_config::configured_chat_model_from_map(&env_map)
-                .filter(|value| {
-                    if is_api_source {
-                        execution_baseline::is_openai_api_chat_model(value)
-                    } else {
-                        true
-                    }
-                })
-                .unwrap_or_else(|| {
-                    if is_api_source {
-                        String::new()
-                    } else {
-                        DEFAULT_ACTIVE_MODEL.to_string()
-                    }
-                }),
+            saved_value: runtime_env::configured_chat_model_from_map(&env_map)
+                .filter(|value| choice_contains(&chat_model_choices, value))
+                .or_else(|| chat_model_choices.first().map(|value| (*value).to_string()))
+                .unwrap_or_else(|| DEFAULT_ACTIVE_MODEL.to_string()),
             secret: false,
             choices: chat_model_choices,
-            help: "Selected chat model for the chosen chat source.",
+            help: "Selected base chat model for the chosen provider.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_CHAT_LOCAL_PRESET",
+            label: "Chat Preset",
+            value: runtime_plan::ChatPreset::from_label(
+                env_map
+                    .get("CTOX_CHAT_LOCAL_PRESET")
+                    .map(String::as_str)
+                    .unwrap_or(DEFAULT_CHAT_PRESET),
+            )
+            .label()
+            .to_string(),
+            saved_value: runtime_plan::ChatPreset::from_label(
+                env_map
+                    .get("CTOX_CHAT_LOCAL_PRESET")
+                    .map(String::as_str)
+                    .unwrap_or(DEFAULT_CHAT_PRESET),
+            )
+            .label()
+            .to_string(),
+            secret: false,
+            choices: CHAT_PRESET_CHOICES.to_vec(),
+            help: "Preview the planned local runtime. The preset also owns the compaction trigger percentage and the absolute minimum floor. Enter once selects, Enter again saves and applies it through the proxy.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -1854,7 +2712,7 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             value: boost_model.clone(),
             saved_value: boost_model,
             secret: false,
-            choices: supported_chat_model_choices(&choices_env_map),
+            choices: boost_choices,
             help: "Optional stronger model for temporary boost leases. CTOX can request this model when it is genuinely stuck and then fall back automatically after the lease expires.",
             kind: SettingKind::Env,
         },
@@ -1869,50 +2727,26 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             kind: SettingKind::Env,
         },
         SettingItem {
-            key: "OPENAI_API_KEY",
-            label: "API Token",
-            value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
-            saved_value: env_map.get("OPENAI_API_KEY").cloned().unwrap_or_default(),
-            secret: true,
-            choices: Vec::new(),
-            help: "API token for the selected remote provider.",
-            kind: SettingKind::Env,
-        },
-        SettingItem {
-            key: "CTOX_CHAT_LOCAL_PRESET",
-            label: "Chat Preset",
-            value: runtime_planner::ChatPreset::from_label(
-                env_map
-                    .get("CTOX_CHAT_LOCAL_PRESET")
-                    .map(String::as_str)
-                    .unwrap_or(DEFAULT_CHAT_PRESET),
-            )
-            .label()
-            .to_string(),
-            saved_value: runtime_planner::ChatPreset::from_label(
-                env_map
-                    .get("CTOX_CHAT_LOCAL_PRESET")
-                    .map(String::as_str)
-                    .unwrap_or(DEFAULT_CHAT_PRESET),
-            )
-            .label()
-            .to_string(),
+            key: "CTOX_CHAT_SOURCE",
+            label: "Chat Source",
+            value: inferred_chat_source.clone(),
+            saved_value: inferred_chat_source,
             secret: false,
-            choices: CHAT_PRESET_CHOICES.to_vec(),
-            help: "Preview the planned local runtime. Enter once selects, Enter again saves and applies it through the proxy.",
+            choices: vec!["local", "api"],
+            help: "Internal source selector kept in sync with Provider.",
             kind: SettingKind::Env,
         },
         SettingItem {
             key: "CTOX_EMBEDDING_MODEL",
             label: "Embed Model",
-            value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Embedding,
+            value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Embedding,
                 env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
             )
             .choice
             .to_string(),
-            saved_value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Embedding,
+            saved_value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Embedding,
                 env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
             )
             .choice
@@ -1925,14 +2759,14 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         SettingItem {
             key: "CTOX_STT_MODEL",
             label: "STT Model",
-            value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Stt,
+            value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Stt,
                 env_map.get("CTOX_STT_MODEL").map(String::as_str),
             )
             .choice
             .to_string(),
-            saved_value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Stt,
+            saved_value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Stt,
                 env_map.get("CTOX_STT_MODEL").map(String::as_str),
             )
             .choice
@@ -1945,34 +2779,21 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         SettingItem {
             key: "CTOX_TTS_MODEL",
             label: "TTS Model",
-            value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Tts,
+            value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Tts,
                 env_map.get("CTOX_TTS_MODEL").map(String::as_str),
             )
             .choice
             .to_string(),
-            saved_value: execution_baseline::auxiliary_model_selection(
-                execution_baseline::AuxiliaryRole::Tts,
+            saved_value: engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Tts,
                 env_map.get("CTOX_TTS_MODEL").map(String::as_str),
             )
             .choice
             .to_string(),
             secret: false,
             choices: supported_tts_model_choices(),
-            help: "Text-to-speech sidecar. GPU keeps the native Qwen path; CPU standardizes on Piper over Speaches, with language-specific voices such as German, French, and English.",
-            kind: SettingKind::Env,
-        },
-        SettingItem {
-            key: "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT",
-            label: "Compact %",
-            value: compaction_threshold,
-            saved_value: env_map
-                .get("CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT")
-                .cloned()
-                .unwrap_or_else(|| DEFAULT_COMPACTION_THRESHOLD_PERCENT.to_string()),
-            secret: false,
-            choices: vec!["60", "70", "75", "80", "85"],
-            help: "Compaction trigger percentage for the active context window. Save to apply.",
+            help: "Text-to-speech sidecar. GPU now defaults to native Voxtral with Q4K; CPU standardizes on Piper over Speaches, with language-specific voices such as German, French, and English.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -2241,18 +3062,22 @@ fn settings_map_from_items(items: &[SettingItem]) -> BTreeMap<String, String> {
 
 fn current_context_tokens(db_path: &Path, max_context: usize) -> Result<usize> {
     let engine = lcm::LcmEngine::open(db_path, lcm::LcmConfig::default())?;
-    let decision =
-        engine.evaluate_compaction(chat_runtime::CHAT_CONVERSATION_ID, max_context as i64)?;
+    let decision = engine.evaluate_compaction(chat::CHAT_CONVERSATION_ID, max_context as i64)?;
     Ok(decision.current_tokens.max(0) as usize)
 }
 
 fn load_proxy_telemetry(root: &Path) -> Result<Option<ProxyTelemetry>> {
-    let host = runtime_config::env_or_config(root, "CTOX_PROXY_HOST")
+    let host = runtime_env::env_or_config(root, "CTOX_PROXY_HOST")
         .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = runtime_config::env_or_config(root, "CTOX_PROXY_PORT")
-        .unwrap_or_else(|| "12434".to_string());
+    let port =
+        runtime_env::env_or_config(root, "CTOX_PROXY_PORT").unwrap_or_else(|| "12434".to_string());
     let url = format!("http://{host}:{port}/ctox/telemetry");
-    let response = match ureq::get(&url).call() {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(100))
+        .timeout_read(Duration::from_millis(150))
+        .timeout_write(Duration::from_millis(150))
+        .build();
+    let response = match agent.get(&url).call() {
         Ok(response) => response,
         Err(_) => return Ok(None),
     };
@@ -2287,7 +3112,6 @@ fn relevant_header_estimate_setting(key: &str) -> bool {
             | "OPENAI_API_KEY"
             | "CTOX_CHAT_MODEL"
             | "CTOX_CHAT_LOCAL_PRESET"
-            | "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT"
     )
 }
 
@@ -2300,13 +3124,13 @@ fn local_runtime_apply_changed(
         "CTOX_CHAT_MODEL",
         "CTOX_CHAT_LOCAL_PRESET",
         "CTOX_CHAT_RUNTIME_PLAN_DIGEST",
-        "CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES",
-        "CTOX_VLLM_SERVE_DEVICE_LAYERS",
-        "CTOX_VLLM_SERVE_MAX_SEQ_LEN",
-        "CTOX_VLLM_SERVE_DISABLE_NCCL",
-        "CTOX_VLLM_SERVE_TENSOR_PARALLEL_BACKEND",
-        "CTOX_VLLM_SERVE_MN_LOCAL_WORLD_SIZE",
-        "CTOX_VLLM_SERVE_ISQ",
+        "CTOX_ENGINE_CUDA_VISIBLE_DEVICES",
+        "CTOX_ENGINE_DEVICE_LAYERS",
+        "CTOX_ENGINE_MAX_SEQ_LEN",
+        "CTOX_ENGINE_DISABLE_NCCL",
+        "CTOX_ENGINE_TENSOR_PARALLEL_BACKEND",
+        "CTOX_ENGINE_MN_LOCAL_WORLD_SIZE",
+        "CTOX_ENGINE_ISQ",
     ]
     .iter()
     .any(|key| previous_env.get(*key).map(String::as_str) != next_env.get(*key).map(String::as_str))
@@ -2323,26 +3147,34 @@ fn is_model_runtime_setting(key: &str) -> bool {
             | "CTOX_EMBEDDING_MODEL"
             | "CTOX_STT_MODEL"
             | "CTOX_TTS_MODEL"
-            | "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT"
     )
 }
 
 fn normalize_runtime_model_settings(env_map: &mut BTreeMap<String, String>) {
-    let chat_source = infer_chat_source(env_map);
-    if chat_source.eq_ignore_ascii_case("api") {
-        env_map.insert("CTOX_API_PROVIDER".to_string(), infer_api_provider(env_map));
+    let api_provider = infer_api_provider(env_map);
+    let configured_model = runtime_env::configured_chat_model_from_map(env_map);
+    let use_openai_base = api_provider.eq_ignore_ascii_case("openai")
+        && openai_api_key_configured(env_map)
+        && configured_model
+            .as_deref()
+            .map(engine::is_openai_api_chat_model)
+            .unwrap_or(false);
+    if use_openai_base {
+        env_map.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
+        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "api".to_string());
         env_map.remove("CTOX_CHAT_LOCAL_PRESET");
-        env_map.remove("CTOX_VLLM_SERVE_MAX_SEQ_LEN");
-        env_map.remove("CTOX_VLLM_SERVE_ISQ");
-        env_map.remove("CTOX_VLLM_SERVE_DISABLE_NCCL");
-        env_map.remove("CTOX_VLLM_SERVE_CUDA_VISIBLE_DEVICES");
-        env_map.remove("CTOX_VLLM_SERVE_DEVICE_LAYERS");
-        env_map.remove("CTOX_VLLM_SERVE_MAX_SEQS");
-        runtime_planner::clear_chat_plan_env(env_map);
+        env_map.remove("CTOX_ENGINE_MAX_SEQ_LEN");
+        env_map.remove("CTOX_ENGINE_ISQ");
+        env_map.remove("CTOX_ENGINE_DISABLE_NCCL");
+        env_map.remove("CTOX_ENGINE_CUDA_VISIBLE_DEVICES");
+        env_map.remove("CTOX_ENGINE_DEVICE_LAYERS");
+        env_map.remove("CTOX_ENGINE_MAX_SEQS");
+        runtime_plan::clear_chat_plan_env(env_map);
         return;
     }
 
-    env_map.insert("CTOX_API_PROVIDER".to_string(), "local".to_string());
+    env_map.insert("CTOX_API_PROVIDER".to_string(), api_provider);
+    env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
     env_map
         .entry("CTOX_CHAT_LOCAL_PRESET".to_string())
         .or_insert_with(|| DEFAULT_CHAT_PRESET.to_string());
@@ -2439,7 +3271,7 @@ fn sample_gpu_cards() -> Result<Vec<GpuCardState>> {
         let Some(model) = model_name_from_process_command(command) else {
             continue;
         };
-        let short_label = compact_model_name(&model, 18);
+        let short_label = short_gpu_label(&model);
         if let Some(card) = cards.iter_mut().find(|card| card.index == gpu_index) {
             if let Some(existing) = card
                 .allocations
@@ -2467,20 +3299,67 @@ fn sample_gpu_cards() -> Result<Vec<GpuCardState>> {
 
 fn model_name_from_process_command(command: &str) -> Option<String> {
     [
-        "openai/gpt-oss-20b",
-        "Qwen/Qwen3.5-4B",
-        "Qwen/Qwen3.5-9B",
-        "Qwen/Qwen3.5-27B",
-        "Qwen/Qwen3.5-35B-A3B",
-        "zai-org/GLM-4.7-Flash",
-        "Qwen/Qwen3-Embedding-0.6B",
-        "mistralai/Voxtral-Mini-4B-Realtime-2602",
-        "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
-        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+        (
+            "openai/gpt-oss-20b",
+            &["openai/gpt-oss-20b", "gpt-oss-20b"][..],
+        ),
+        ("Qwen/Qwen3.5-4B", &["Qwen/Qwen3.5-4B", "Qwen3.5-4B"][..]),
+        ("Qwen/Qwen3.5-9B", &["Qwen/Qwen3.5-9B", "Qwen3.5-9B"][..]),
+        ("Qwen/Qwen3.5-27B", &["Qwen/Qwen3.5-27B", "Qwen3.5-27B"][..]),
+        (
+            "Qwen/Qwen3.5-35B-A3B",
+            &["Qwen/Qwen3.5-35B-A3B", "Qwen3.5-35B-A3B"][..],
+        ),
+        (
+            "nvidia/Nemotron-Cascade-2-30B-A3B",
+            &["nvidia/Nemotron-Cascade-2-30B-A3B", "Nemotron-Cascade"][..],
+        ),
+        (
+            "zai-org/GLM-4.7-Flash",
+            &["zai-org/GLM-4.7-Flash", "GLM-4.7-Flash"][..],
+        ),
+        (
+            "Qwen/Qwen3-Embedding-0.6B",
+            &[
+                "Qwen/Qwen3-Embedding-0.6B",
+                "Qwen3-Embedding-0.6B",
+                "Embedding-0.6B",
+            ][..],
+        ),
+        (
+            "mistralai/Voxtral-Mini-4B-Realtime-2602",
+            &[
+                "mistralai/Voxtral-Mini-4B-Realtime-2602",
+                "Voxtral-Mini-4B-Realtime-2602",
+                "Voxtral-Mini-4B-Realtime",
+                "Voxtral-Mini",
+            ][..],
+        ),
+        (
+            "mistralai/Voxtral-4B-TTS-2603",
+            &[
+                "mistralai/Voxtral-4B-TTS-2603",
+                "Voxtral-4B-TTS-2603",
+                "Voxtral-4B-TTS",
+                "Voxtral-TTS",
+            ][..],
+        ),
+        (
+            "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+            &[
+                "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+                "Qwen3-TTS-12Hz-0.6B-Base",
+                "Qwen3-TTS",
+            ][..],
+        ),
+        (
+            "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            &["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", "CustomVoice"][..],
+        ),
     ]
     .iter()
-    .find(|candidate| command.contains(**candidate))
-    .map(|candidate| (*candidate).to_string())
+    .find(|(_, aliases)| aliases.iter().any(|alias| command.contains(alias)))
+    .map(|(model, _)| (*model).to_string())
 }
 
 fn estimated_tokens_per_second(
@@ -2497,6 +3376,7 @@ fn estimated_tokens_per_second(
                 "Qwen/Qwen3.5-9B" => 95.0,
                 "Qwen/Qwen3.5-27B" => 45.0,
                 "Qwen/Qwen3.5-35B-A3B" => 38.0,
+                "nvidia/Nemotron-Cascade-2-30B-A3B" => 42.0,
                 "zai-org/GLM-4.7-Flash" => 48.0,
                 _ => return None,
             })
@@ -2504,7 +3384,7 @@ fn estimated_tokens_per_second(
 }
 
 fn gpu_cards_from_plan(
-    plan: &runtime_planner::ChatRuntimePlan,
+    plan: &runtime_plan::ChatRuntimePlan,
     env_map: &BTreeMap<String, String>,
 ) -> Vec<GpuCardState> {
     plan.gpu_allocations
@@ -2520,7 +3400,7 @@ fn gpu_cards_from_plan(
             if allocation.chat_budget_mb > 0 {
                 allocations.push(GpuModelUsage {
                     model: plan.model.clone(),
-                    short_label: compact_model_name(&plan.model, 18),
+                    short_label: short_gpu_label(&plan.model),
                     used_mb: allocation.chat_budget_mb,
                 });
             }
@@ -2547,32 +3427,45 @@ fn estimated_aux_model_usages(
         return Vec::new();
     }
     let models = [
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Embedding,
-            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        (
+            engine::AuxiliaryRole::Embedding,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Embedding,
+                env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+            ),
         ),
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Stt,
-            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        (
+            engine::AuxiliaryRole::Stt,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Stt,
+                env_map.get("CTOX_STT_MODEL").map(String::as_str),
+            ),
         ),
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Tts,
-            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        (
+            engine::AuxiliaryRole::Tts,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Tts,
+                env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+            ),
         ),
     ]
     .into_iter()
-    .filter_map(|selection| {
+    .filter_map(|(role, selection)| {
         let reserve_mb = selection.gpu_reserve_mb();
-        (reserve_mb > 0).then_some((selection.request_model, reserve_mb))
+        (reserve_mb > 0).then_some((role, selection.request_model, reserve_mb))
     })
     .collect::<Vec<_>>();
     if models.is_empty() {
         return Vec::new();
     }
-    let total_weight = models.iter().map(|(_, weight)| *weight).sum::<u64>().max(1);
+    let total_weight = models
+        .iter()
+        .map(|(_, _, weight)| *weight)
+        .sum::<u64>()
+        .max(1);
     let mut remaining = total_aux_mb;
     let mut usages = Vec::with_capacity(models.len());
-    for (index, (model, weight)) in models.iter().enumerate() {
+    for (index, (role, model, weight)) in models.iter().enumerate() {
         let share = if index + 1 == models.len() {
             remaining
         } else {
@@ -2581,7 +3474,7 @@ fn estimated_aux_model_usages(
         remaining = remaining.saturating_sub(share);
         usages.push(GpuModelUsage {
             model: (*model).to_string(),
-            short_label: compact_model_name(model, 18),
+            short_label: auxiliary_role_label(*role).to_string(),
             used_mb: share,
         });
     }
@@ -2598,11 +3491,11 @@ fn estimate_gpu_cards(
 ) -> Vec<GpuCardState> {
     let mut cards = live_cards.to_vec();
     let target_isq = settings
-        .get("CTOX_VLLM_SERVE_ISQ")
+        .get("CTOX_ENGINE_ISQ")
         .map(String::as_str)
         .unwrap_or("Q4K");
     let target_context = settings
-        .get("CTOX_VLLM_SERVE_MAX_SEQ_LEN")
+        .get("CTOX_ENGINE_MAX_SEQ_LEN")
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(live_context.max(2048));
     let estimated_total_mb = estimate_chat_model_memory_mb(draft_model, target_isq, target_context);
@@ -2618,7 +3511,7 @@ fn estimate_gpu_cards(
         aux_by_gpu.insert(card.index, aux_used);
     }
 
-    let weights = parse_device_layer_weights(settings.get("CTOX_VLLM_SERVE_DEVICE_LAYERS"));
+    let weights = parse_device_layer_weights(settings.get("CTOX_ENGINE_DEVICE_LAYERS"));
     let total_weight = weights.values().copied().sum::<u64>();
     let selected_gpu_indices = if weights.is_empty() {
         cards.iter().map(|card| card.index).collect::<Vec<_>>()
@@ -2645,7 +3538,7 @@ fn estimate_gpu_cards(
         if chat_used > 0 {
             card.allocations.push(GpuModelUsage {
                 model: draft_model.to_string(),
-                short_label: compact_model_name(draft_model, 18),
+                short_label: short_gpu_label(draft_model),
                 used_mb: chat_used,
             });
         }
@@ -2658,24 +3551,26 @@ fn estimate_gpu_cards(
 
 fn configured_runtime_models(env_map: &BTreeMap<String, String>) -> Vec<String> {
     let mut models = Vec::new();
-    if let Some(value) = env_map
-        .get("CTOX_CHAT_MODEL")
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        models.push(value.to_string());
+    if infer_chat_source(env_map).eq_ignore_ascii_case("local") {
+        if let Some(value) = env_map
+            .get("CTOX_CHAT_MODEL")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            models.push(value.to_string());
+        }
     }
     for selection in [
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Embedding,
+        engine::auxiliary_model_selection(
+            engine::AuxiliaryRole::Embedding,
             env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
         ),
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Stt,
+        engine::auxiliary_model_selection(
+            engine::AuxiliaryRole::Stt,
             env_map.get("CTOX_STT_MODEL").map(String::as_str),
         ),
-        execution_baseline::auxiliary_model_selection(
-            execution_baseline::AuxiliaryRole::Tts,
+        engine::auxiliary_model_selection(
+            engine::AuxiliaryRole::Tts,
             env_map.get("CTOX_TTS_MODEL").map(String::as_str),
         ),
     ] {
@@ -2687,6 +3582,580 @@ fn configured_runtime_models(env_map: &BTreeMap<String, String>) -> Vec<String> 
         }
     }
     models
+}
+
+fn load_observation_for_port(root: &Path, port: u16) -> Option<LoadObservation> {
+    let path = root
+        .join("runtime")
+        .join(format!("load_observation_{port}.json"));
+    let raw = std::fs::read(path).ok()?;
+    serde_json::from_slice(&raw).ok()
+}
+
+fn collect_runtime_load_observations(
+    root: &Path,
+    telemetry: Option<&ProxyTelemetry>,
+    env_map: &BTreeMap<String, String>,
+) -> Vec<LoadObservation> {
+    let mut observations = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(observation) = telemetry.and_then(|value| value.load_observation.clone()) {
+        if seen.insert((
+            observation.port,
+            observation.model.clone(),
+            observation.role.clone(),
+        )) {
+            observations.push(observation);
+        }
+    }
+
+    for (role, port_key, model_value) in [
+        (
+            engine::AuxiliaryRole::Embedding,
+            "CTOX_EMBEDDING_PORT",
+            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Stt,
+            "CTOX_STT_PORT",
+            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Tts,
+            "CTOX_TTS_PORT",
+            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        ),
+    ] {
+        let selection = engine::auxiliary_model_selection(role, model_value);
+        if selection.compute_target == engine::ComputeTarget::Cpu {
+            continue;
+        }
+        let port = env_map
+            .get(port_key)
+            .and_then(|value| value.trim().parse::<u16>().ok())
+            .unwrap_or(selection.default_port);
+        let Some(observation) = load_observation_for_port(root, port) else {
+            continue;
+        };
+        let key = (
+            observation.port,
+            observation.model.clone(),
+            observation.role.clone(),
+        );
+        if seen.insert(key) {
+            observations.push(observation);
+        }
+    }
+
+    observations
+}
+
+fn local_health_check(url: &str) -> bool {
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(100))
+        .timeout_read(Duration::from_millis(150))
+        .timeout_write(Duration::from_millis(150))
+        .build();
+    match agent.get(url).call() {
+        Ok(response) => response.status() < 500,
+        Err(ureq::Error::Status(code, _)) => code < 500,
+        Err(_) => false,
+    }
+}
+
+fn auxiliary_backend_ready(
+    env_map: &BTreeMap<String, String>,
+    role: engine::AuxiliaryRole,
+) -> Option<bool> {
+    let (port_key, model_value) = match role {
+        engine::AuxiliaryRole::Embedding => (
+            "CTOX_EMBEDDING_PORT",
+            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        ),
+        engine::AuxiliaryRole::Stt => (
+            "CTOX_STT_PORT",
+            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        ),
+        engine::AuxiliaryRole::Tts => (
+            "CTOX_TTS_PORT",
+            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        ),
+    };
+    let selection = engine::auxiliary_model_selection(role, model_value);
+    let path = if selection.backend_kind == engine::AuxiliaryBackendKind::Speaches {
+        "/v1/models"
+    } else {
+        "/health"
+    };
+    let port = env_map
+        .get(port_key)
+        .and_then(|value| value.trim().parse::<u16>().ok())
+        .unwrap_or(selection.default_port);
+    Some(local_health_check(&format!(
+        "http://127.0.0.1:{port}{path}"
+    )))
+}
+
+fn runtime_health_state(
+    root: &Path,
+    env_map: &BTreeMap<String, String>,
+    telemetry: Option<&ProxyTelemetry>,
+) -> RuntimeHealthState {
+    let proxy_ready = telemetry
+        .map(|value| value.backend_healthy)
+        .unwrap_or_else(|| {
+            let host = runtime_env::env_or_config(root, "CTOX_PROXY_HOST")
+                .unwrap_or_else(|| "127.0.0.1".to_string());
+            let port = runtime_env::env_or_config(root, "CTOX_PROXY_PORT")
+                .unwrap_or_else(|| "12434".to_string());
+            local_health_check(&format!("http://{host}:{port}/ctox/telemetry"))
+        });
+    RuntimeHealthState {
+        proxy_ready,
+        embedding_ready: auxiliary_backend_ready(env_map, engine::AuxiliaryRole::Embedding),
+        stt_ready: auxiliary_backend_ready(env_map, engine::AuxiliaryRole::Stt),
+        tts_ready: auxiliary_backend_ready(env_map, engine::AuxiliaryRole::Tts),
+    }
+}
+
+fn ui_now_epoch_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn load_observation_is_loading(observation: &LoadObservation) -> bool {
+    if observation.startup_healthy {
+        return false;
+    }
+    let observed_until = observation.observed_until_epoch;
+    observed_until > 0 && ui_now_epoch_seconds().saturating_sub(observed_until) <= 30
+}
+
+fn push_gpu_allocation(
+    cards: &mut Vec<GpuCardState>,
+    gpu_index: usize,
+    gpu_name: &str,
+    total_mb: u64,
+    model: &str,
+    short_label: &str,
+    used_mb: u64,
+) {
+    if used_mb == 0 {
+        return;
+    }
+    let card_index = if let Some(position) = cards.iter().position(|card| card.index == gpu_index) {
+        position
+    } else {
+        cards.push(GpuCardState {
+            index: gpu_index,
+            name: gpu_name.to_string(),
+            used_mb: 0,
+            total_mb,
+            utilization: 0,
+            allocations: Vec::new(),
+        });
+        cards.len().saturating_sub(1)
+    };
+    let card = cards.get_mut(card_index).expect("gpu card inserted");
+    if card.total_mb == 0 {
+        card.total_mb = total_mb;
+    }
+    if card.name.is_empty() {
+        card.name = gpu_name.to_string();
+    }
+    if let Some(existing) = card
+        .allocations
+        .iter_mut()
+        .find(|allocation| allocation.model == model)
+    {
+        existing.used_mb = existing.used_mb.max(used_mb);
+    } else {
+        card.allocations.push(GpuModelUsage {
+            model: model.to_string(),
+            short_label: short_label.to_string(),
+            used_mb,
+        });
+    }
+    card.used_mb = card.used_mb.saturating_add(used_mb);
+}
+
+fn normalize_gpu_cards(cards: &mut Vec<GpuCardState>) {
+    cards.sort_by_key(|card| card.index);
+    for card in cards.iter_mut() {
+        card.allocations
+            .sort_by(|left, right| right.used_mb.cmp(&left.used_mb));
+        card.used_mb = card
+            .allocations
+            .iter()
+            .map(|allocation| allocation.used_mb)
+            .sum();
+    }
+    cards.retain(|card| !card.allocations.is_empty() || card.total_mb > 0);
+}
+
+fn merge_gpu_card_layers(
+    mut base_cards: Vec<GpuCardState>,
+    overlay_cards: Vec<GpuCardState>,
+) -> Vec<GpuCardState> {
+    for card in overlay_cards {
+        for allocation in card.allocations {
+            push_gpu_allocation(
+                &mut base_cards,
+                card.index,
+                &card.name,
+                card.total_mb,
+                &allocation.model,
+                &allocation.short_label,
+                allocation.used_mb,
+            );
+        }
+    }
+    normalize_gpu_cards(&mut base_cards);
+    base_cards
+}
+
+fn deployed_gpu_cards_from_live(
+    live_cards: &[GpuCardState],
+    allowed_models: &[String],
+    observations: &[LoadObservation],
+) -> Vec<GpuCardState> {
+    let loading_models = observations
+        .iter()
+        .filter(|observation| load_observation_is_loading(observation))
+        .map(|observation| observation.model.as_str())
+        .collect::<HashSet<_>>();
+    let mut cards = filter_gpu_cards_to_models(live_cards, allowed_models);
+    for card in cards.iter_mut() {
+        card.allocations
+            .retain(|allocation| !loading_models.contains(allocation.model.as_str()));
+        card.used_mb = card
+            .allocations
+            .iter()
+            .map(|allocation| allocation.used_mb)
+            .sum();
+    }
+    cards
+}
+
+fn loading_gpu_cards_from_observations(
+    target_cards: &[GpuCardState],
+    live_cards: &[GpuCardState],
+    observations: &[LoadObservation],
+) -> Vec<GpuCardState> {
+    let mut cards = Vec::new();
+    for observation in observations
+        .iter()
+        .filter(|observation| load_observation_is_loading(observation))
+    {
+        let short_label = short_gpu_label(&observation.model);
+        let mut matched_target = false;
+        for card in target_cards {
+            for allocation in card
+                .allocations
+                .iter()
+                .filter(|allocation| allocation.model == observation.model)
+            {
+                push_gpu_allocation(
+                    &mut cards,
+                    card.index,
+                    &card.name,
+                    card.total_mb,
+                    &allocation.model,
+                    &short_label,
+                    allocation.used_mb,
+                );
+                matched_target = true;
+            }
+        }
+        if matched_target {
+            continue;
+        }
+        let mut matched_live = false;
+        for card in live_cards {
+            for allocation in card
+                .allocations
+                .iter()
+                .filter(|allocation| allocation.model == observation.model)
+            {
+                push_gpu_allocation(
+                    &mut cards,
+                    card.index,
+                    &card.name,
+                    card.total_mb,
+                    &allocation.model,
+                    &short_label,
+                    allocation.used_mb,
+                );
+                matched_live = true;
+            }
+        }
+        if matched_live {
+            continue;
+        }
+        for gpu in &observation.gpus {
+            let observed_mb = gpu
+                .current_delta_mb
+                .max(gpu.peak_delta_mb)
+                .max(gpu.final_used_mb.saturating_sub(gpu.baseline_used_mb));
+            push_gpu_allocation(
+                &mut cards,
+                gpu.gpu_index,
+                &gpu.name,
+                gpu.total_mb,
+                &observation.model,
+                &short_label,
+                observed_mb,
+            );
+        }
+    }
+    normalize_gpu_cards(&mut cards);
+    cards
+}
+
+fn unhealthy_backend_models(
+    env_map: &BTreeMap<String, String>,
+    runtime_health: &RuntimeHealthState,
+) -> HashSet<String> {
+    let mut models = HashSet::new();
+    for (role, ready, model_value) in [
+        (
+            engine::AuxiliaryRole::Embedding,
+            runtime_health.embedding_ready,
+            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Stt,
+            runtime_health.stt_ready,
+            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Tts,
+            runtime_health.tts_ready,
+            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        ),
+    ] {
+        if ready == Some(false) {
+            let selection = engine::auxiliary_model_selection(role, model_value);
+            models.insert(selection.request_model.to_string());
+        }
+    }
+    models
+}
+
+fn unhealthy_backend_loading_cards(
+    live_cards: &[GpuCardState],
+    env_map: &BTreeMap<String, String>,
+    runtime_health: &RuntimeHealthState,
+) -> Vec<GpuCardState> {
+    let unhealthy_models = unhealthy_backend_models(env_map, runtime_health);
+    if unhealthy_models.is_empty() {
+        return Vec::new();
+    }
+    let target_cards = aux_gpu_target_cards(live_cards, env_map);
+    let mut cards = Vec::new();
+    for card in &target_cards {
+        for allocation in card
+            .allocations
+            .iter()
+            .filter(|allocation| unhealthy_models.contains(&allocation.model))
+        {
+            push_gpu_allocation(
+                &mut cards,
+                card.index,
+                &card.name,
+                card.total_mb,
+                &allocation.model,
+                &allocation.short_label,
+                allocation.used_mb,
+            );
+        }
+    }
+    normalize_gpu_cards(&mut cards);
+    cards
+}
+
+fn healthy_backend_models(
+    env_map: &BTreeMap<String, String>,
+    runtime_health: &RuntimeHealthState,
+) -> HashSet<String> {
+    let mut models = HashSet::new();
+    for (role, ready, model_value) in [
+        (
+            engine::AuxiliaryRole::Embedding,
+            runtime_health.embedding_ready,
+            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Stt,
+            runtime_health.stt_ready,
+            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Tts,
+            runtime_health.tts_ready,
+            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        ),
+    ] {
+        if ready == Some(true) {
+            let selection = engine::auxiliary_model_selection(role, model_value);
+            models.insert(selection.request_model.to_string());
+        }
+    }
+    models
+}
+
+fn healthy_backend_deployed_cards(
+    live_cards: &[GpuCardState],
+    env_map: &BTreeMap<String, String>,
+    runtime_health: &RuntimeHealthState,
+) -> Vec<GpuCardState> {
+    let healthy_models = healthy_backend_models(env_map, runtime_health);
+    if healthy_models.is_empty() {
+        return Vec::new();
+    }
+    let target_cards = aux_gpu_target_cards(live_cards, env_map);
+    let mut cards = Vec::new();
+    for card in &target_cards {
+        for allocation in card.allocations.iter().filter(|allocation| {
+            healthy_models.contains(&allocation.model)
+                && !live_cards.iter().any(|live_card| {
+                    live_card
+                        .allocations
+                        .iter()
+                        .any(|candidate| candidate.model == allocation.model)
+                })
+        }) {
+            push_gpu_allocation(
+                &mut cards,
+                card.index,
+                &card.name,
+                card.total_mb,
+                &allocation.model,
+                &allocation.short_label,
+                allocation.used_mb,
+            );
+        }
+    }
+    normalize_gpu_cards(&mut cards);
+    cards
+}
+
+fn parse_csv_gpu_indices(raw: Option<&String>) -> Vec<usize> {
+    raw.into_iter()
+        .flat_map(|value| value.split(','))
+        .filter_map(|chunk| chunk.trim().parse::<usize>().ok())
+        .collect()
+}
+
+fn even_shares(total: u64, count: usize) -> Vec<u64> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let base = total / count as u64;
+    let remainder = total % count as u64;
+    (0..count)
+        .map(|index| base + u64::from(index < remainder as usize))
+        .collect()
+}
+
+fn auxiliary_visible_devices_for_role(
+    env_map: &BTreeMap<String, String>,
+    role: engine::AuxiliaryRole,
+) -> Vec<usize> {
+    let role_specific_key = match role {
+        engine::AuxiliaryRole::Embedding => "CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES",
+        engine::AuxiliaryRole::Stt => "CTOX_STT_CUDA_VISIBLE_DEVICES",
+        engine::AuxiliaryRole::Tts => "CTOX_TTS_CUDA_VISIBLE_DEVICES",
+    };
+    let explicit = parse_csv_gpu_indices(env_map.get(role_specific_key));
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    let shared = parse_csv_gpu_indices(env_map.get("CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES"));
+    if !shared.is_empty() {
+        return shared;
+    }
+    vec![0]
+}
+
+fn aux_gpu_target_cards(
+    live_cards: &[GpuCardState],
+    env_map: &BTreeMap<String, String>,
+) -> Vec<GpuCardState> {
+    let mut cards = live_cards
+        .iter()
+        .map(|card| GpuCardState {
+            index: card.index,
+            name: card.name.clone(),
+            used_mb: 0,
+            total_mb: card.total_mb,
+            utilization: 0,
+            allocations: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+
+    for (role, model_value) in [
+        (
+            engine::AuxiliaryRole::Embedding,
+            env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Stt,
+            env_map.get("CTOX_STT_MODEL").map(String::as_str),
+        ),
+        (
+            engine::AuxiliaryRole::Tts,
+            env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+        ),
+    ] {
+        let selection = engine::auxiliary_model_selection(role, model_value);
+        let reserve_mb = selection.gpu_reserve_mb();
+        if reserve_mb == 0 {
+            continue;
+        }
+        let gpu_indices = auxiliary_visible_devices_for_role(env_map, role);
+        if gpu_indices.is_empty() {
+            continue;
+        }
+        let shares = even_shares(reserve_mb, gpu_indices.len());
+        for (position, gpu_index) in gpu_indices.iter().enumerate() {
+            let share = *shares.get(position).unwrap_or(&0);
+            if share == 0 {
+                continue;
+            }
+            if !cards.iter().any(|card| card.index == *gpu_index) {
+                cards.push(GpuCardState {
+                    index: *gpu_index,
+                    name: String::new(),
+                    used_mb: 0,
+                    total_mb: 0,
+                    utilization: 0,
+                    allocations: Vec::new(),
+                });
+            }
+            let card = cards
+                .iter_mut()
+                .find(|card| card.index == *gpu_index)
+                .expect("gpu card inserted");
+            card.allocations.push(GpuModelUsage {
+                model: selection.request_model.to_string(),
+                short_label: auxiliary_role_label(role).to_string(),
+                used_mb: share,
+            });
+            card.used_mb = card.used_mb.saturating_add(share);
+        }
+    }
+
+    cards.retain(|card| !card.allocations.is_empty());
+    cards.sort_by_key(|card| card.index);
+    for card in &mut cards {
+        card.allocations
+            .sort_by(|left, right| right.used_mb.cmp(&left.used_mb));
+    }
+    cards
 }
 
 fn filter_gpu_cards_to_models(
@@ -2712,6 +4181,152 @@ fn filter_gpu_cards_to_models(
             .sum();
     }
     cards
+}
+
+fn overlay_load_observation_gpu_cards(
+    live_cards: &[GpuCardState],
+    observations: &[LoadObservation],
+    env_map: &BTreeMap<String, String>,
+) -> Vec<GpuCardState> {
+    let mut cards = live_cards.to_vec();
+    if observations.is_empty() {
+        return cards;
+    }
+
+    for observation in observations {
+        if observation.model.trim().is_empty()
+            || engine::is_openai_api_chat_model(&observation.model)
+        {
+            continue;
+        }
+        if infer_chat_source(env_map).eq_ignore_ascii_case("api") && observation.role == "chat" {
+            continue;
+        }
+
+        let short_label = short_gpu_label(&observation.model);
+        for gpu in &observation.gpus {
+            let observed_mb = gpu
+                .current_delta_mb
+                .max(gpu.final_used_mb.saturating_sub(gpu.baseline_used_mb))
+                .max(gpu.peak_delta_mb.min(gpu.current_delta_mb));
+            if observed_mb == 0 {
+                continue;
+            }
+            let Some(card) = cards.iter_mut().find(|card| card.index == gpu.gpu_index) else {
+                cards.push(GpuCardState {
+                    index: gpu.gpu_index,
+                    name: gpu.name.clone(),
+                    used_mb: observed_mb,
+                    total_mb: gpu.total_mb,
+                    utilization: 0,
+                    allocations: vec![GpuModelUsage {
+                        model: observation.model.clone(),
+                        short_label: short_label.clone(),
+                        used_mb: observed_mb,
+                    }],
+                });
+                continue;
+            };
+            if let Some(existing) = card
+                .allocations
+                .iter_mut()
+                .find(|allocation| allocation.model == observation.model)
+            {
+                existing.used_mb = existing.used_mb.max(observed_mb);
+            } else {
+                card.allocations.push(GpuModelUsage {
+                    model: observation.model.clone(),
+                    short_label: short_label.clone(),
+                    used_mb: observed_mb,
+                });
+            }
+            card.used_mb = card.used_mb.max(observed_mb);
+            if card.total_mb == 0 {
+                card.total_mb = gpu.total_mb;
+            }
+            if card.name.is_empty() {
+                card.name = gpu.name.clone();
+            }
+        }
+    }
+
+    cards.sort_by_key(|card| card.index);
+    for card in &mut cards {
+        card.allocations
+            .sort_by(|left, right| right.used_mb.cmp(&left.used_mb));
+        let allocation_total = card
+            .allocations
+            .iter()
+            .map(|allocation| allocation.used_mb)
+            .sum::<u64>();
+        card.used_mb = card.used_mb.max(allocation_total);
+    }
+    cards
+}
+
+fn previous_settings_view(view: SettingsView) -> SettingsView {
+    match view {
+        SettingsView::Model => SettingsView::Communication,
+        SettingsView::Communication => SettingsView::Model,
+    }
+}
+
+fn next_settings_view(view: SettingsView) -> SettingsView {
+    match view {
+        SettingsView::Model => SettingsView::Communication,
+        SettingsView::Communication => SettingsView::Model,
+    }
+}
+
+fn expected_gpu_aux_labels(env_map: &BTreeMap<String, String>) -> Vec<String> {
+    [
+        (
+            engine::AuxiliaryRole::Embedding,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Embedding,
+                env_map.get("CTOX_EMBEDDING_MODEL").map(String::as_str),
+            ),
+        ),
+        (
+            engine::AuxiliaryRole::Stt,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Stt,
+                env_map.get("CTOX_STT_MODEL").map(String::as_str),
+            ),
+        ),
+        (
+            engine::AuxiliaryRole::Tts,
+            engine::auxiliary_model_selection(
+                engine::AuxiliaryRole::Tts,
+                env_map.get("CTOX_TTS_MODEL").map(String::as_str),
+            ),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(role, selection)| {
+        (selection.compute_target == engine::ComputeTarget::Gpu)
+            .then_some(auxiliary_role_label(role).to_string())
+    })
+    .collect()
+}
+
+fn auxiliary_role_label(role: engine::AuxiliaryRole) -> &'static str {
+    match role {
+        engine::AuxiliaryRole::Embedding => "embed",
+        engine::AuxiliaryRole::Stt => "stt",
+        engine::AuxiliaryRole::Tts => "tts",
+    }
+}
+
+fn short_gpu_label(model: &str) -> String {
+    match model.trim() {
+        "Qwen/Qwen3-Embedding-0.6B" => "embed".to_string(),
+        "mistralai/Voxtral-Mini-4B-Realtime-2602" => "stt".to_string(),
+        "mistralai/Voxtral-4B-TTS-2603"
+        | "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
+        | "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" => "tts".to_string(),
+        _ => compact_model_name(model, 32),
+    }
 }
 
 fn parse_device_layer_weights(raw: Option<&String>) -> BTreeMap<usize, u64> {
@@ -2741,6 +4356,7 @@ fn estimate_chat_model_memory_mb(model: &str, isq: &str, target_context: usize) 
         "Qwen/Qwen3.5-9B" => 7_000,
         "Qwen/Qwen3.5-27B" => 17_500,
         "Qwen/Qwen3.5-35B-A3B" => 20_500,
+        "nvidia/Nemotron-Cascade-2-30B-A3B" => 19_500,
         "zai-org/GLM-4.7-Flash" => 21_000,
         _ => 12_000,
     } as f64;
@@ -2769,13 +4385,13 @@ fn estimate_max_context_window(
         return DEFAULT_MAX_CONTEXT;
     }
     let target_isq = settings
-        .get("CTOX_VLLM_SERVE_ISQ")
+        .get("CTOX_ENGINE_ISQ")
         .map(String::as_str)
         .unwrap_or("Q4K");
     let base_context = live_context.max(2048);
     let base_memory_mb =
         estimate_chat_model_memory_mb(draft_model, target_isq, base_context).max(1);
-    let weights = parse_device_layer_weights(settings.get("CTOX_VLLM_SERVE_DEVICE_LAYERS"));
+    let weights = parse_device_layer_weights(settings.get("CTOX_ENGINE_DEVICE_LAYERS"));
     let selected_gpu_indices = if weights.is_empty() {
         cards.iter().map(|card| card.index).collect::<Vec<_>>()
     } else {
@@ -2829,7 +4445,7 @@ fn render_qr_lines(payload: &str) -> Option<Vec<String>> {
     let code = QrCode::new(payload.as_bytes()).ok()?;
     let width = code.width();
     let colors = code.to_colors();
-    let pad = 4usize;
+    let pad = 6usize;
     let mut matrix = vec![vec![false; width + pad * 2]; width + pad * 2];
     for y in 0..width {
         for x in 0..width {
@@ -2886,6 +4502,7 @@ fn resolve_jami_runtime_account(
                 account: None,
                 error: Some(format!("failed to start jami adapter: {err}")),
                 dbus_env_file: None,
+                checks: Vec::new(),
             };
         }
     };
@@ -2907,49 +4524,71 @@ fn resolve_jami_runtime_account(
                 account: parsed.resolved_account,
                 error: parsed.error.or(fallback_error),
                 dbus_env_file: parsed.dbus_env_file,
+                checks: parsed.checks,
             },
             Err(_) => JamiResolveOutcome {
                 account: None,
-                error: fallback_error.or_else(|| {
-                    Some(format!("jami adapter exited with status {}", output.status))
-                }),
+                error: fallback_error
+                    .or_else(|| Some(format!("jami adapter exited with status {}", output.status))),
                 dbus_env_file: None,
+                checks: Vec::new(),
             },
         };
     }
     match parsed {
         Ok(parsed) => JamiResolveOutcome {
             account: parsed.resolved_account,
-            error: if parsed.ok { parsed.error } else { parsed.error.or(fallback_error) },
+            error: if parsed.ok {
+                parsed.error
+            } else {
+                parsed.error.or(fallback_error)
+            },
             dbus_env_file: parsed.dbus_env_file,
+            checks: parsed.checks,
         },
         Err(err) => JamiResolveOutcome {
             account: None,
             error: Some(format!("failed to parse jami adapter output: {err}")),
             dbus_env_file: None,
+            checks: Vec::new(),
         },
     }
 }
 
-fn jami_missing_account_lines(dbus_env_file: Option<&str>, has_config: bool) -> Vec<String> {
+fn jami_missing_account_lines(
+    dbus_env_file: Option<&str>,
+    has_config: bool,
+    checks: &[JamiDoctorCheck],
+) -> Vec<String> {
     let mut lines = vec!["No live Jami RING account is available yet.".to_string()];
     if has_config {
-        lines.push("Configured account/profile could not be resolved to an active share URI.".to_string());
+        lines.push(
+            "Configured account/profile could not be resolved to an active share URI.".to_string(),
+        );
     } else {
         lines.push("No Jami account id or profile is configured yet, so the TUI cannot derive a QR target.".to_string());
     }
     if let Some(path) = dbus_env_file.filter(|value| !value.trim().is_empty()) {
         lines.push(format!("dbus {}", truncate_for_ui(path, 40)));
     }
+    lines.extend(jami_doctor_hint_lines(checks));
     lines.push("Verify the Jami daemon is running and that a RING account exists.".to_string());
     lines
 }
 
-fn jami_error_lines(error: &str, dbus_env_file: Option<&str>, has_config: bool) -> Vec<String> {
+fn jami_error_lines(
+    error: &str,
+    dbus_env_file: Option<&str>,
+    has_config: bool,
+    checks: &[JamiDoctorCheck],
+) -> Vec<String> {
     let mut lines = vec!["Jami runtime is not ready.".to_string()];
     lines.push(format!("blocker {}", truncate_for_ui(error, 68)));
     if error.contains("gdbus ENOENT") {
-        lines.push("Missing `gdbus`: install GLib DBus tooling so CTOX can resolve the Jami account.".to_string());
+        lines.push(
+            "Missing `gdbus`: install GLib DBus tooling so CTOX can resolve the Jami account."
+                .to_string(),
+        );
     }
     if let Some(path) = dbus_env_file.filter(|value| !value.trim().is_empty()) {
         lines.push(format!("dbus {}", truncate_for_ui(path, 40)));
@@ -2957,11 +4596,34 @@ fn jami_error_lines(error: &str, dbus_env_file: Option<&str>, has_config: bool) 
         lines.push("No Jami DBus env file is loaded yet.".to_string());
     }
     if has_config {
-        lines.push("Configured Jami account/profile is present, but runtime resolution still failed.".to_string());
+        lines.push(
+            "Configured Jami account/profile is present, but runtime resolution still failed."
+                .to_string(),
+        );
     } else {
         lines.push("No configured Jami account/profile is available to fall back to.".to_string());
     }
-    lines.push("Start or repair the Jami daemon first; then reopen the Jami settings view.".to_string());
+    lines.extend(jami_doctor_hint_lines(checks));
+    lines.push(
+        "Start or repair the Jami daemon first; then reopen the Jami settings view.".to_string(),
+    );
+    lines
+}
+
+fn jami_doctor_hint_lines(checks: &[JamiDoctorCheck]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for check in checks.iter().filter(|check| !check.ok) {
+        match check.name.as_str() {
+            "automation_backend" => lines.push(
+                "hint macOS Jami is not automatable through the current DBus adapter; use a manual share URI for QR or move Jami automation to a Linux runtime".to_string(),
+            ),
+            "gdbus" => lines.push("hint brew install glib".to_string()),
+            "dbus_launch" => lines.push("hint brew install dbus && brew services start dbus".to_string()),
+            "jami_runtime" => lines.push("hint brew install --cask jami".to_string()),
+            "configured_identity" => lines.push("hint set CTO_JAMI_ACCOUNT_ID or CTO_JAMI_PROFILE_NAME".to_string()),
+            _ => {}
+        }
+    }
     lines
 }
 
@@ -3068,7 +4730,7 @@ fn signed_delta(delta: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_config;
+    use crate::inference::runtime_env;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3083,22 +4745,34 @@ mod tests {
     }
 
     #[test]
-    fn supported_chat_models_only_include_openai_when_provider_and_key_are_present() {
+    fn supported_chat_models_follow_selected_provider_immediately() {
         let local_only = supported_chat_model_choices(&BTreeMap::new());
         assert!(local_only.contains(&"openai/gpt-oss-20b"));
         assert!(!local_only.contains(&"gpt-5.4"));
 
-        let mut openai_without_key = BTreeMap::new();
-        openai_without_key.insert("CTOX_CHAT_SOURCE".to_string(), "api".to_string());
-        openai_without_key.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
-        let still_local_only = supported_chat_model_choices(&openai_without_key);
-        assert!(!still_local_only.contains(&"gpt-5.4"));
-
-        openai_without_key.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
-        let with_openai = supported_chat_model_choices(&openai_without_key);
+        let mut openai_api = BTreeMap::new();
+        openai_api.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
+        openai_api.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
+        let with_openai = supported_chat_model_choices(&openai_api);
+        assert!(with_openai.contains(&"openai/gpt-oss-20b"));
         assert!(with_openai.contains(&"gpt-5.4-nano"));
         assert!(with_openai.contains(&"gpt-5.4-mini"));
         assert!(with_openai.contains(&"gpt-5.4"));
+    }
+
+    #[test]
+    fn supported_boost_models_include_api_models_when_key_is_present() {
+        let without_key = supported_boost_model_choices(&BTreeMap::new());
+        assert!(without_key.contains(&"openai/gpt-oss-20b"));
+        assert!(!without_key.contains(&"gpt-5.4"));
+
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
+        env_map.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
+        let with_key = supported_boost_model_choices(&env_map);
+        assert!(with_key.contains(&"openai/gpt-oss-20b"));
+        assert!(with_key.contains(&"gpt-5.4"));
+        assert!(with_key.contains(&"gpt-5.4-mini"));
     }
 
     #[test]
@@ -3109,13 +4783,12 @@ mod tests {
             "CTOX_CHAT_MODEL".to_string(),
             "openai/gpt-oss-20b".to_string(),
         );
-        runtime_config::save_runtime_env_map(&root, &env_map).unwrap();
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
         let items = load_settings_items(&root);
         let keys: Vec<_> = items.iter().map(|item| item.key).collect();
 
         assert!(keys.contains(&"CTOX_CHAT_MODEL"));
-        assert!(keys.contains(&"CTOX_CHAT_MODEL_BASE"));
         assert!(keys.contains(&"CTOX_CHAT_MODEL_BOOST"));
         assert!(keys.contains(&"CTOX_BOOST_DEFAULT_MINUTES"));
         assert!(keys.contains(&"CTOX_API_PROVIDER"));
@@ -3142,9 +4815,9 @@ mod tests {
             "openai/gpt-oss-20b".to_string(),
         );
         env_map.insert("CTOX_API_PROVIDER".to_string(), "local".to_string());
-        runtime_config::save_runtime_env_map(&root, &env_map).unwrap();
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
-        let mut app = App::new(root.clone(), db_path);
+        let app = App::new(root.clone(), db_path);
         assert_eq!(app.settings_view, SettingsView::Model);
 
         let openai_key_row = app
@@ -3154,20 +4827,56 @@ mod tests {
             .unwrap()
             .clone();
         assert!(!app.setting_visible(&openai_key_row));
+    }
 
-        let chat_source_idx = app
-            .settings_items
-            .iter()
-            .position(|item| item.key == "CTOX_CHAT_SOURCE")
+    #[test]
+    fn settings_view_shortcuts_switch_between_model_and_communication() {
+        let root = temp_root("settings-view-shortcuts");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut app = App::new(root, db_path);
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
             .unwrap();
-        let provider_idx = app
-            .settings_items
-            .iter()
-            .position(|item| item.key == "CTOX_API_PROVIDER")
+        assert_eq!(app.settings_view, SettingsView::Communication);
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE))
             .unwrap();
-        app.settings_items[chat_source_idx].value = "api".to_string();
-        app.settings_items[provider_idx].value = "openai".to_string();
-        assert!(app.setting_visible(&openai_key_row));
+        assert_eq!(app.settings_view, SettingsView::Model);
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
+            .unwrap();
+        assert_eq!(app.settings_view, SettingsView::Communication);
+    }
+
+    #[test]
+    fn tab_cycles_through_settings_communication_before_leaving_page() {
+        let root = temp_root("settings-tab-cycle");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut app = App::new(root, db_path);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Skills);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Model);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Communication);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Chat);
+        assert_eq!(app.settings_view, SettingsView::Model);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Communication);
     }
 
     #[test]
@@ -3176,7 +4885,7 @@ mod tests {
         let db_path = root.join("runtime/test.sqlite3");
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
-        runtime_config::save_runtime_env_map(&root, &env_map).unwrap();
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
         let mut app = App::new(root.clone(), db_path);
         let local_keys = app
@@ -3188,27 +4897,30 @@ mod tests {
             local_keys,
             vec![
                 "CTOX_SERVICE_TOGGLE",
-                "CTOX_CHAT_SOURCE",
+                "CTOX_API_PROVIDER",
                 "CTOX_CHAT_MODEL",
+                "CTOX_CHAT_LOCAL_PRESET",
                 "CTOX_CHAT_MODEL_BOOST",
                 "CTOX_BOOST_DEFAULT_MINUTES",
-                "CTOX_CHAT_LOCAL_PRESET",
                 "CTOX_EMBEDDING_MODEL",
                 "CTOX_STT_MODEL",
                 "CTOX_TTS_MODEL",
-                "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT",
-                "CTOX_OWNER_NAME",
-                "CTOX_OWNER_EMAIL_ADDRESS",
-                "CTOX_OWNER_PREFERRED_CHANNEL",
             ]
         );
 
-        let chat_source_idx = app
+        let provider_idx = app
             .settings_items
             .iter()
-            .position(|item| item.key == "CTOX_CHAT_SOURCE")
+            .position(|item| item.key == "CTOX_API_PROVIDER")
             .unwrap();
-        app.settings_items[chat_source_idx].value = "api".to_string();
+        let token_idx = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "OPENAI_API_KEY")
+            .unwrap();
+        app.settings_items[provider_idx].value = "openai".to_string();
+        app.settings_items[token_idx].value = "sk-test".to_string();
+        app.refresh_dynamic_setting_choices();
         let api_keys = app
             .visible_setting_indices()
             .into_iter()
@@ -3218,21 +4930,256 @@ mod tests {
             api_keys,
             vec![
                 "CTOX_SERVICE_TOGGLE",
-                "CTOX_CHAT_SOURCE",
                 "CTOX_API_PROVIDER",
+                "OPENAI_API_KEY",
                 "CTOX_CHAT_MODEL",
+                "CTOX_CHAT_LOCAL_PRESET",
                 "CTOX_CHAT_MODEL_BOOST",
                 "CTOX_BOOST_DEFAULT_MINUTES",
-                "OPENAI_API_KEY",
                 "CTOX_EMBEDDING_MODEL",
                 "CTOX_STT_MODEL",
                 "CTOX_TTS_MODEL",
-                "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT",
-                "CTOX_OWNER_NAME",
-                "CTOX_OWNER_EMAIL_ADDRESS",
-                "CTOX_OWNER_PREFERRED_CHANNEL",
             ]
         );
+
+        let base_idx = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "CTOX_CHAT_MODEL")
+            .unwrap();
+        app.settings_items[base_idx].value = "gpt-5.4-mini".to_string();
+        app.refresh_dynamic_setting_choices();
+        let api_base_keys = app
+            .visible_setting_indices()
+            .into_iter()
+            .map(|idx| app.settings_items[idx].key)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            api_base_keys,
+            vec![
+                "CTOX_SERVICE_TOGGLE",
+                "CTOX_API_PROVIDER",
+                "OPENAI_API_KEY",
+                "CTOX_CHAT_MODEL",
+                "CTOX_CHAT_MODEL_BOOST",
+                "CTOX_BOOST_DEFAULT_MINUTES",
+                "CTOX_EMBEDDING_MODEL",
+                "CTOX_STT_MODEL",
+                "CTOX_TTS_MODEL",
+            ]
+        );
+    }
+
+    #[test]
+    fn communication_settings_show_admin_and_channel_fields() {
+        let root = temp_root("communication-flow");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut app = App::new(root, db_path);
+        app.switch_settings_view(SettingsView::Communication);
+        let keys = app
+            .visible_setting_indices()
+            .into_iter()
+            .map(|idx| app.settings_items[idx].key)
+            .collect::<Vec<_>>();
+        assert!(keys.contains(&"CTOX_SERVICE_TOGGLE"));
+        assert!(keys.contains(&"CTOX_OWNER_NAME"));
+        assert!(keys.contains(&"CTOX_OWNER_EMAIL_ADDRESS"));
+        assert!(keys.contains(&"CTOX_ALLOWED_EMAIL_DOMAIN"));
+        assert!(keys.contains(&"CTOX_EMAIL_ADMIN_POLICIES"));
+        assert!(keys.contains(&"CTOX_OWNER_PREFERRED_CHANNEL"));
+    }
+
+    #[test]
+    fn model_settings_show_preset_immediately_after_base_model() {
+        let root = temp_root("preset-order");
+        let db_path = root.join("runtime/test.sqlite3");
+        let app = App::new(root, db_path);
+        let visible = app.visible_setting_indices();
+        let model_pos = visible
+            .iter()
+            .position(|idx| app.settings_items[*idx].key == "CTOX_CHAT_MODEL")
+            .unwrap();
+        let preset_pos = visible
+            .iter()
+            .position(|idx| app.settings_items[*idx].key == "CTOX_CHAT_LOCAL_PRESET")
+            .unwrap();
+        assert_eq!(preset_pos, model_pos + 1);
+    }
+
+    #[test]
+    fn configured_runtime_models_skip_remote_chat_model_for_api_source() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "api".to_string());
+        env_map.insert("CTOX_CHAT_MODEL".to_string(), "gpt-5.4-mini".to_string());
+
+        let models = configured_runtime_models(&env_map);
+
+        assert!(!models.iter().any(|model| model == "gpt-5.4-mini"));
+        assert!(models
+            .iter()
+            .any(|model| model == "Qwen/Qwen3-Embedding-0.6B"));
+    }
+
+    #[test]
+    fn api_estimate_keeps_aux_models_without_projecting_local_chat_gpu_load() {
+        let root = temp_root("api-estimate-aux");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
+        env_map.insert(
+            "CTOX_CHAT_MODEL".to_string(),
+            "openai/gpt-oss-20b".to_string(),
+        );
+        env_map.insert(
+            "CTOX_EMBEDDING_MODEL".to_string(),
+            "Qwen/Qwen3-Embedding-0.6B".to_string(),
+        );
+        env_map.insert(
+            "CTOX_STT_MODEL".to_string(),
+            "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+        );
+        env_map.insert(
+            "CTOX_TTS_MODEL".to_string(),
+            "mistralai/Voxtral-4B-TTS-2603".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
+
+        let mut app = App::new(root, db_path);
+        app.gpu_cards = vec![
+            GpuCardState {
+                index: 0,
+                name: "RTX A4500".to_string(),
+                used_mb: 12_000,
+                total_mb: 20_480,
+                utilization: 0,
+                allocations: vec![
+                    GpuModelUsage {
+                        model: "openai/gpt-oss-20b".to_string(),
+                        short_label: "gpt-oss-20b".to_string(),
+                        used_mb: 8_386,
+                    },
+                    GpuModelUsage {
+                        model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                        short_label: "embed".to_string(),
+                        used_mb: 1_100,
+                    },
+                    GpuModelUsage {
+                        model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                        short_label: "stt".to_string(),
+                        used_mb: 1_400,
+                    },
+                    GpuModelUsage {
+                        model: "mistralai/Voxtral-4B-TTS-2603".to_string(),
+                        short_label: "tts".to_string(),
+                        used_mb: 1_100,
+                    },
+                ],
+            },
+            GpuCardState {
+                index: 1,
+                name: "RTX A4500".to_string(),
+                used_mb: 8_386,
+                total_mb: 20_480,
+                utilization: 0,
+                allocations: vec![GpuModelUsage {
+                    model: "openai/gpt-oss-20b".to_string(),
+                    short_label: "gpt-oss-20b".to_string(),
+                    used_mb: 8_386,
+                }],
+            },
+        ];
+
+        let source_idx = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "CTOX_CHAT_SOURCE")
+            .unwrap();
+        let provider_idx = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "CTOX_API_PROVIDER")
+            .unwrap();
+        let model_idx = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "CTOX_CHAT_MODEL")
+            .unwrap();
+        app.settings_items[source_idx].value = "api".to_string();
+        app.settings_items[provider_idx].value = "openai".to_string();
+        app.settings_items[model_idx].value = "gpt-5.4-mini".to_string();
+
+        app.refresh_dynamic_setting_choices();
+        app.refresh_header();
+
+        assert!(app.header.estimate_mode);
+        assert_eq!(app.header.chat_source, "api");
+        assert_eq!(app.header.model, "gpt-5.4-mini");
+        assert!(app.header.gpu_target_cards.iter().all(|card| card
+            .allocations
+            .iter()
+            .all(|alloc| alloc.model != "openai/gpt-oss-20b")));
+        let allocations = app
+            .header
+            .gpu_target_cards
+            .iter()
+            .flat_map(|card| {
+                card.allocations
+                    .iter()
+                    .map(|alloc| alloc.short_label.as_str())
+            })
+            .collect::<Vec<_>>();
+        assert!(allocations.contains(&"embed"));
+        assert!(allocations.contains(&"stt"));
+        assert!(allocations.contains(&"tts"));
+    }
+
+    #[test]
+    fn healthy_aux_backend_falls_back_to_planned_gpu_allocation_when_live_probe_misses_it() {
+        let mut env_map = BTreeMap::new();
+        env_map.insert(
+            "CTOX_EMBEDDING_MODEL".to_string(),
+            "Qwen/Qwen3-Embedding-0.6B".to_string(),
+        );
+        env_map.insert(
+            "CTOX_STT_MODEL".to_string(),
+            "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+        );
+        env_map.insert(
+            "CTOX_TTS_MODEL".to_string(),
+            "Qwen/Qwen3-TTS-12Hz-0.6B-Base [GPU]".to_string(),
+        );
+
+        let live_cards = vec![GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 2_996,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![
+                GpuModelUsage {
+                    model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                    short_label: "embed".to_string(),
+                    used_mb: 1_100,
+                },
+                GpuModelUsage {
+                    model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                    short_label: "stt".to_string(),
+                    used_mb: 1_896,
+                },
+            ],
+        }];
+        let runtime_health = RuntimeHealthState {
+            proxy_ready: false,
+            embedding_ready: Some(true),
+            stt_ready: Some(true),
+            tts_ready: Some(true),
+        };
+
+        let cards = healthy_backend_deployed_cards(&live_cards, &env_map, &runtime_health);
+        assert!(cards.iter().any(|card| card
+            .allocations
+            .iter()
+            .any(|alloc| alloc.model == "Qwen/Qwen3-TTS-12Hz-0.6B-Base")));
     }
 
     #[test]
@@ -3303,6 +5250,31 @@ mod tests {
     }
 
     #[test]
+    fn refresh_header_ignores_stale_local_active_model_when_chat_source_is_api() {
+        let root = temp_root("api-header");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut env_map = BTreeMap::new();
+        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "api".to_string());
+        env_map.insert("CTOX_CHAT_MODEL".to_string(), "gpt-5.4-mini".to_string());
+        env_map.insert(
+            "CTOX_CHAT_MODEL_BASE".to_string(),
+            "gpt-5.4-mini".to_string(),
+        );
+        env_map.insert(
+            "CTOX_ACTIVE_MODEL".to_string(),
+            "Qwen/Qwen3.5-35B-A3B".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
+
+        let mut app = App::new(root, db_path);
+        app.refresh_header();
+
+        assert_eq!(app.header.chat_source, "api");
+        assert_eq!(app.header.model, "gpt-5.4-mini");
+        assert_eq!(app.header.base_model, "gpt-5.4-mini");
+    }
+
+    #[test]
     fn load_skill_catalog_discovers_skill_scripts_and_resources() {
         let root = temp_root("skills-catalog");
         let skill_dir = root.join("skills/.system/demo-skill");
@@ -3321,9 +5293,71 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "demo-skill")
             .unwrap();
-        assert_eq!(entry.description, "Use this skill when the operator wants a demo workflow.");
+        assert_eq!(
+            entry.description,
+            "Use this skill when the operator wants a demo workflow."
+        );
+        assert_eq!(entry.class, SkillClass::CtoxCore);
+        assert_eq!(entry.state, SkillState::Stable);
         assert!(entry.helper_tools.iter().any(|tool| tool == "demo_tool.py"));
-        assert!(entry.resources.iter().any(|resource| resource.contains("references:")));
+        assert!(entry
+            .resources
+            .iter()
+            .any(|resource| resource.contains("references:")));
+    }
+
+    #[test]
+    fn load_skill_catalog_classifies_curated_codex_and_personal_skills() {
+        let root = temp_root("skills-classes");
+        let curated_dir = root.join("skills/.curated/demo-pack");
+        fs::create_dir_all(&curated_dir).unwrap();
+        fs::write(
+            curated_dir.join("SKILL.md"),
+            "---\nname: demo-pack\ndescription: demo pack\n---\n",
+        )
+        .unwrap();
+
+        let codex_root = root.join("sandbox/.codex/skills");
+        let codex_dir = codex_root.join(".system/openai-docs");
+        fs::create_dir_all(&codex_dir).unwrap();
+        fs::write(
+            codex_dir.join("SKILL.md"),
+            "---\nname: openai-docs\ndescription: docs\n---\n",
+        )
+        .unwrap();
+
+        let personal_dir = codex_root.join("personal/generated/note-helper");
+        fs::create_dir_all(&personal_dir).unwrap();
+        fs::write(
+            personal_dir.join("SKILL.md"),
+            "---\nname: note-helper\ndescription: personal helper\n---\n",
+        )
+        .unwrap();
+
+        let mut catalog = Vec::new();
+        let mut seen = HashSet::new();
+        collect_skill_entries(&root, &root.join("skills"), &mut seen, &mut catalog);
+        collect_skill_entries(&root, &codex_root, &mut seen, &mut catalog);
+
+        let curated = catalog
+            .iter()
+            .find(|entry| entry.name == "demo-pack")
+            .unwrap();
+        assert_eq!(curated.class, SkillClass::InstalledPacks);
+        assert_eq!(curated.state, SkillState::Stable);
+
+        let codex = catalog
+            .iter()
+            .find(|entry| entry.name == "openai-docs" && entry.class == SkillClass::CodexCore)
+            .unwrap();
+        assert_eq!(codex.state, SkillState::Stable);
+
+        let personal = catalog
+            .iter()
+            .find(|entry| entry.name == "note-helper")
+            .unwrap();
+        assert_eq!(personal.class, SkillClass::Personal);
+        assert_eq!(personal.state, SkillState::Generated);
     }
 
     #[test]
@@ -3338,6 +5372,11 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Model);
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Communication);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
         assert_eq!(app.page, Page::Chat);
@@ -3345,20 +5384,80 @@ mod tests {
 
     #[test]
     fn jami_error_lines_surface_missing_gdbus_explicitly() {
-        let lines = jami_error_lines("spawnSync gdbus ENOENT", None, false);
+        let lines = jami_error_lines(
+            "spawnSync gdbus ENOENT",
+            None,
+            false,
+            &[JamiDoctorCheck {
+                name: "gdbus".to_string(),
+                ok: false,
+                detail: "Missing gdbus".to_string(),
+            }],
+        );
         let joined = lines.join("\n");
         assert!(joined.contains("Jami runtime is not ready."));
         assert!(joined.contains("Missing `gdbus`"));
         assert!(joined.contains("No configured Jami account/profile"));
+        assert!(joined.contains("brew install glib"));
     }
 
     #[test]
     fn jami_missing_account_lines_explain_missing_runtime_account() {
-        let lines = jami_missing_account_lines(Some("/tmp/cto-jami-dbus.env"), true);
+        let lines = jami_missing_account_lines(
+            Some("/tmp/cto-jami-dbus.env"),
+            true,
+            &[JamiDoctorCheck {
+                name: "configured_identity".to_string(),
+                ok: false,
+                detail: "missing".to_string(),
+            }],
+        );
         let joined = lines.join("\n");
         assert!(joined.contains("No live Jami RING account is available yet."));
         assert!(joined.contains("Configured account/profile could not be resolved"));
         assert!(joined.contains("/tmp/cto-jami-dbus.env"));
+        assert!(joined.contains("CTO_JAMI_ACCOUNT_ID"));
+    }
+
+    #[test]
+    fn jami_error_lines_include_runtime_bootstrap_hints() {
+        let lines = jami_error_lines(
+            "runtime unavailable",
+            Some("/tmp/cto-jami-dbus.env"),
+            true,
+            &[
+                JamiDoctorCheck {
+                    name: "dbus_launch".to_string(),
+                    ok: false,
+                    detail: "missing".to_string(),
+                },
+                JamiDoctorCheck {
+                    name: "jami_runtime".to_string(),
+                    ok: false,
+                    detail: "missing".to_string(),
+                },
+            ],
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("brew install dbus"));
+        assert!(joined.contains("brew install --cask jami"));
+    }
+
+    #[test]
+    fn jami_error_lines_surface_backend_mode_hint() {
+        let lines = jami_error_lines(
+            "backend unsupported",
+            None,
+            true,
+            &[JamiDoctorCheck {
+                name: "automation_backend".to_string(),
+                ok: false,
+                detail: "libwrap".to_string(),
+            }],
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("manual share URI"));
+        assert!(joined.contains("Linux runtime"));
     }
 
     #[test]
@@ -3374,7 +5473,7 @@ mod tests {
         app.settings_items[chat_idx].value = "gpt-5.4-mini".to_string();
         app.save_settings().unwrap();
 
-        let saved = runtime_config::load_runtime_env_map(&root).unwrap();
+        let saved = runtime_env::load_runtime_env_map(&root).unwrap();
         assert_eq!(
             saved.get("CTOX_CHAT_MODEL_BASE").map(String::as_str),
             Some("gpt-5.4-mini")

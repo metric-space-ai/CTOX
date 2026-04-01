@@ -39,6 +39,9 @@ switch_timeout_secs() {
     "Qwen/Qwen3.5-35B-A3B")
       echo 1500
       ;;
+    "nvidia/Nemotron-Cascade-2-30B-A3B")
+      echo 1800
+      ;;
     "zai-org/GLM-4.7-Flash")
       echo 900
       ;;
@@ -53,7 +56,7 @@ response_timeout_secs() {
     "openai/gpt-oss-20b"|"Qwen/Qwen3.5-4B"|"Qwen/Qwen3.5-9B")
       echo 120
       ;;
-    "Qwen/Qwen3.5-27B"|"Qwen/Qwen3.5-35B-A3B"|"zai-org/GLM-4.7-Flash")
+    "Qwen/Qwen3.5-27B"|"Qwen/Qwen3.5-35B-A3B"|"nvidia/Nemotron-Cascade-2-30B-A3B"|"zai-org/GLM-4.7-Flash")
       echo 180
       ;;
     *)
@@ -63,8 +66,8 @@ response_timeout_secs() {
 }
 
 pkill -f "ctox serve-responses-proxy" || true
-pkill -f "mistralrs serve" || true
-pkill -f "run_vllm_serve_backend.sh" || true
+pkill -f "ctox-engine serve" || true
+pkill -f "run_engine.sh" || true
 fuser -k 1235/tcp 2>/dev/null || true
 : > "$RUNTIME_DIR/manual_proxy.log"
 nohup "$ROOT/target/release/ctox" serve-responses-proxy >"$RUNTIME_DIR/manual_proxy.log" 2>&1 &
@@ -136,10 +139,21 @@ for line in out.strip().splitlines():
     )
 
 backend_log = ""
-for candidate in sorted(runtime.glob("vllm_serve_*.log"), key=lambda p: p.stat().st_mtime, reverse=True):
+for candidate in sorted(runtime.glob("engine_*.log"), key=lambda p: p.stat().st_mtime, reverse=True):
     backend_log = read_text(candidate)
     if backend_log:
         break
+
+telemetry = None
+try:
+    telemetry = json.loads(
+        subprocess.check_output(
+            ["curl", "-fsS", "--max-time", "3", f"{'http://127.0.0.1:12434'}/ctox/telemetry"],
+            text=True,
+        )
+    )
+except Exception:
+    telemetry = None
 
 result = {
     "model": model,
@@ -148,8 +162,10 @@ result = {
     "response_status": int(response_status),
     "switch_body": switch_body,
     "response_body": response_body,
-    "plan": read_json(runtime / "chat_runtime_plan.json"),
+    "plan": read_json(runtime / "chat_plan.json"),
     "gpus": gpu_rows,
+    "telemetry": telemetry,
+    "load_observation": None if telemetry is None else telemetry.get("load_observation"),
     "proxy_log_tail": read_text(runtime / "manual_proxy.log"),
     "backend_log_tail": backend_log,
 }

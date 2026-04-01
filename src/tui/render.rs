@@ -17,12 +17,15 @@ use ratatui::widgets::Tabs;
 use ratatui::widgets::Wrap;
 use ratatui::Frame;
 
-use crate::execution_baseline;
+use crate::context_health::ContextHealthStatus;
+use crate::inference::engine;
 
 use super::compact_model_name;
 use super::App;
 use super::Page;
 use super::SettingsView;
+
+const CONTEXT_BAR_REFERENCE_TOKENS: usize = 262_144;
 
 pub(super) fn draw(frame: &mut Frame, app: &App) {
     frame.render_widget(
@@ -33,7 +36,7 @@ pub(super) fn draw(frame: &mut Frame, app: &App) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
+            Constraint::Length(7),
             Constraint::Length(1),
             Constraint::Min(8),
             Constraint::Length(0),
@@ -108,7 +111,11 @@ fn render_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .split(area);
     let left = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(10), Constraint::Length(5)])
+        .constraints([
+            Constraint::Length(8),
+            Constraint::Min(10),
+            Constraint::Length(5),
+        ])
         .split(body[0]);
     let right = body[1];
 
@@ -134,16 +141,16 @@ fn render_chat(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         left[1].width.saturating_sub(4) as usize,
         left[1].height.saturating_sub(2) as usize,
     ))
-        .block(
-            pane_block().borders(Borders::TOP).title(Span::styled(
-                " chat ",
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        )
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: false });
+    .block(
+        pane_block().borders(Borders::TOP).title(Span::styled(
+            " chat ",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )),
+    )
+    .style(Style::default().fg(Color::White))
+    .wrap(Wrap { trim: false });
     frame.render_widget(transcript_widget, left[1]);
 
     let sidebar_widget = Paragraph::new(chat_sidebar_lines(
@@ -204,7 +211,11 @@ fn render_skills(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         .constraints([Constraint::Percentage(36), Constraint::Percentage(64)])
         .split(area);
 
-    let list_items = skill_list_items(app, body[0].width.saturating_sub(4) as usize);
+    let list_items = skill_list_items(
+        app,
+        body[0].width.saturating_sub(4) as usize,
+        body[0].height.saturating_sub(2) as usize,
+    );
     frame.render_widget(
         List::new(list_items).block(
             pane_block().borders(Borders::TOP).title(Span::styled(
@@ -240,10 +251,15 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         render_settings_narrow(frame, app, area);
         return;
     }
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(8)])
+        .split(area);
+    render_settings_view_tabs(frame, app, outer[0]);
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(area);
+        .split(outer[1]);
 
     let visible_indices = app.visible_setting_indices();
     let max_rows = body[0].height.saturating_sub(2) as usize;
@@ -282,6 +298,11 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     );
     frame.render_widget(list, body[0]);
 
+    let sidebar_style = if app.jami_details_active() {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
     let help_widget = Paragraph::new(settings_snapshot_text(
         app,
         body[1].width.saturating_sub(4) as usize,
@@ -289,17 +310,13 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     ))
     .block(
         sidebar_block().borders(Borders::TOP).title(Span::styled(
-            if app.header.estimate_mode {
-                " estimate "
-            } else {
-                " live "
-            },
+            " details ",
             Style::default()
                 .fg(Color::LightBlue)
                 .add_modifier(Modifier::BOLD),
         )),
     )
-    .style(Style::default().fg(Color::Gray))
+    .style(sidebar_style)
     .wrap(Wrap { trim: false });
     frame.render_widget(help_widget, body[1]);
 }
@@ -313,6 +330,7 @@ fn render_skills_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rec
         List::new(skill_list_items(
             app,
             layout[0].width.saturating_sub(4) as usize,
+            layout[0].height.saturating_sub(2) as usize,
         ))
         .block(
             pane_block().borders(Borders::TOP).title(Span::styled(
@@ -381,16 +399,16 @@ fn render_chat_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
         layout[1].width.saturating_sub(4) as usize,
         layout[1].height.saturating_sub(2) as usize,
     ))
-        .block(
-            pane_block().borders(Borders::TOP).title(Span::styled(
-                " chat ",
-                Style::default()
-                    .fg(Color::LightGreen)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        )
-        .style(Style::default().fg(Color::White))
-        .wrap(Wrap { trim: false });
+    .block(
+        pane_block().borders(Borders::TOP).title(Span::styled(
+            " chat ",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        )),
+    )
+    .style(Style::default().fg(Color::White))
+    .wrap(Wrap { trim: false });
     frame.render_widget(transcript_widget, layout[1]);
 
     let feed = Paragraph::new(
@@ -447,10 +465,15 @@ fn render_chat_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect)
 }
 
 fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let outer = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(8)])
+        .split(area);
+    render_settings_view_tabs(frame, app, outer[0]);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(8)])
-        .split(area);
+        .split(outer[1]);
     let visible_indices = app.visible_setting_indices();
     let max_rows = layout[0].height.saturating_sub(2) as usize;
     let window_indices = settings_window_indices(app, &visible_indices, max_rows);
@@ -484,6 +507,11 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
         ),
         layout[0],
     );
+    let sidebar_style = if app.jami_details_active() {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
     frame.render_widget(
         Paragraph::new(settings_snapshot_text(
             app,
@@ -492,17 +520,13 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
         ))
         .block(
             sidebar_block().borders(Borders::TOP).title(Span::styled(
-                if app.header.estimate_mode {
-                    " estimate "
-                } else {
-                    " live "
-                },
+                " details ",
                 Style::default()
                     .fg(Color::LightBlue)
                     .add_modifier(Modifier::BOLD),
             )),
         )
-        .style(Style::default().fg(Color::Gray))
+        .style(sidebar_style)
         .wrap(Wrap { trim: false }),
         layout[1],
     );
@@ -519,10 +543,19 @@ fn render_transcript_lines(app: &App, width: usize, height: usize) -> Vec<Line<'
         .into_iter()
         .rev()
     {
-        let (label, badge_color, body_color) = if message.role.eq_ignore_ascii_case("assistant") {
-            (" CTOX ", Color::LightGreen, Color::White)
+        let internal_queue = message.role.eq_ignore_ascii_case("user")
+            && is_internal_queue_prompt(message.content.as_str());
+        let (label, role_label, badge_color, body_color) = if internal_queue {
+            (" AUTO ", "system follow-up", Color::Yellow, Color::Gray)
+        } else if message.role.eq_ignore_ascii_case("assistant") {
+            (" CTOX ", "assistant", Color::LightGreen, Color::White)
         } else {
-            (" YOU ", Color::LightCyan, Color::Gray)
+            (
+                " YOU ",
+                message.role.as_str(),
+                Color::LightCyan,
+                Color::Gray,
+            )
         };
         lines.push(truncate_line_spans(
             vec![
@@ -535,13 +568,18 @@ fn render_transcript_lines(app: &App, width: usize, height: usize) -> Vec<Line<'
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    truncate_line(message.role.as_str(), width.saturating_sub(8)),
+                    truncate_line(role_label, width.saturating_sub(8)),
                     Style::default().fg(Color::DarkGray),
                 ),
             ],
             width,
         ));
-        for chunk in wrap_text_lines(&message.content, width.saturating_sub(2)) {
+        let rendered_body = if internal_queue {
+            summarize_internal_queue_prompt(&message.content, width.saturating_sub(2))
+        } else {
+            wrap_text_lines(&message.content, width.saturating_sub(2))
+        };
+        for chunk in rendered_body {
             lines.push(Line::from(vec![
                 Span::raw("  "),
                 Span::styled(chunk, Style::default().fg(body_color)),
@@ -591,13 +629,13 @@ fn settings_window_indices(app: &App, visible_indices: &[usize], max_rows: usize
     visible_indices[start..start + window].to_vec()
 }
 
-fn skill_list_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
+fn skill_list_items(app: &App, width: usize, max_rows: usize) -> Vec<ListItem<'static>> {
     if app.skill_catalog.is_empty() {
-        return vec![ListItem::new("No skills discovered yet.")
-            .style(Style::default().fg(Color::DarkGray))];
+        return vec![
+            ListItem::new("No skills discovered yet.").style(Style::default().fg(Color::DarkGray))
+        ];
     }
-    let max_rows = app.skill_catalog.len();
-    let window = skill_window_indices(app, max_rows.min(64));
+    let window = skill_window_indices(app, max_rows.max(1));
     window
         .into_iter()
         .filter_map(|index| app.skill_catalog.get(index).map(|entry| (index, entry)))
@@ -605,13 +643,9 @@ fn skill_list_items(app: &App, width: usize) -> Vec<ListItem<'static>> {
             let row = format!(
                 "{:18} {}",
                 truncate_line(&entry.name, 18),
-                truncate_line(&entry.source, width.saturating_sub(20))
+                truncate_line(entry.class.label(), width.saturating_sub(20))
             );
-            let base_style = if entry.source.contains("system") {
-                Style::default().fg(Color::LightCyan)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let base_style = Style::default().fg(skill_class_color(entry.class.label()));
             if index == app.skills_selected {
                 ListItem::new(row).style(
                     base_style
@@ -655,12 +689,16 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(entry.source.clone(), Style::default().fg(Color::LightCyan)),
+        Span::styled(
+            entry.class.label(),
+            Style::default().fg(skill_class_color(entry.class.label())),
+        ),
     ]));
     lines.push(Line::from(format!(
         "path {}",
         truncate_line(&entry.skill_path.to_string_lossy(), width.saturating_sub(5))
     )));
+    lines.push(Line::from(format!("state {}", entry.state.label())));
     lines.push(Line::from(String::new()));
     lines.push(section_title("summary", Color::LightGreen, width));
     for chunk in wrap_text_lines(&entry.description, width) {
@@ -672,7 +710,10 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
         lines.push(Line::from("No scripts/ helper tools detected."));
     } else {
         for tool in entry.helper_tools.iter().take(10) {
-            lines.push(Line::from(format!("• {}", truncate_line(tool, width.saturating_sub(2)))));
+            lines.push(Line::from(format!(
+                "• {}",
+                truncate_line(tool, width.saturating_sub(2))
+            )));
         }
     }
     lines.push(Line::from(String::new()));
@@ -692,6 +733,16 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
         lines.truncate(height);
     }
     lines
+}
+
+fn skill_class_color(label: &str) -> Color {
+    match label {
+        "CTOX Core" => Color::LightCyan,
+        "Codex Core" => Color::Cyan,
+        "Installed Packs" => Color::White,
+        "Personal" => Color::LightGreen,
+        _ => Color::White,
+    }
 }
 
 fn activity_lines(
@@ -791,10 +842,11 @@ fn sidebar_fill() -> Block<'static> {
 }
 
 fn sidebar_footer_lines(app: &App) -> Vec<Line<'static>> {
-    let frames = ["⠁", "⠂", "⠄", "⠂"];
-    let spinner = frames[app.spinner_phase % frames.len()];
+    let spinner = spinner_frame(app.spinner_phase);
     let status = if app.request_in_flight {
         "working"
+    } else if app.runtime_health.is_degraded() {
+        "degraded"
     } else if app.service_status.running {
         "ready"
     } else {
@@ -822,14 +874,42 @@ fn chat_sidebar_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
     let mut lines = Vec::new();
     let footer = sidebar_footer_lines(app);
     let footer_reserved = footer.len();
+    let active_reserved = if app.service_status.busy {
+        6usize
+    } else {
+        4usize
+    };
+    let mission_reserved = if app.mission_state.is_some() {
+        6usize
+    } else {
+        4usize
+    };
     let queue_reserved = 4usize;
     let live_budget = height
-        .saturating_sub(footer_reserved + queue_reserved)
+        .saturating_sub(footer_reserved + active_reserved + mission_reserved + queue_reserved)
         .max(4);
     lines.push(section_title("live", Color::LightBlue, width));
     for line in activity_lines(app, width, 2, false)
         .into_iter()
         .take(live_budget.saturating_sub(1))
+    {
+        lines.push(Line::from(truncate_line(&line, width)));
+    }
+    lines.push(Line::from(String::new()));
+
+    lines.push(section_title("active", Color::Yellow, width));
+    for line in active_lines(app, width)
+        .into_iter()
+        .take(active_reserved.saturating_sub(1))
+    {
+        lines.push(Line::from(truncate_line(&line, width)));
+    }
+    lines.push(Line::from(String::new()));
+
+    lines.push(section_title("missions", Color::LightMagenta, width));
+    for line in mission_lines(app, width)
+        .into_iter()
+        .take(mission_reserved.saturating_sub(1))
     {
         lines.push(Line::from(truncate_line(&line, width)));
     }
@@ -841,15 +921,73 @@ fn chat_sidebar_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
         format!("queue {}", app.draft_queue.len())
     };
     lines.push(section_title(&queue_title, Color::LightYellow, width));
-    for line in queue_lines(app, width) {
+    for line in queue_lines(app, width)
+        .into_iter()
+        .take(queue_reserved.saturating_sub(1))
+    {
         lines.push(Line::from(truncate_line(&line, width)));
     }
 
-    while lines.len() + footer_reserved < height {
+    let content_budget = height.saturating_sub(footer_reserved);
+    if lines.len() > content_budget {
+        lines.truncate(content_budget);
+    }
+    while lines.len() < content_budget {
         lines.push(Line::from(String::new()));
     }
     lines.extend(footer);
     lines.into_iter().take(height.max(1)).collect()
+}
+
+fn active_lines(app: &App, width: usize) -> Vec<String> {
+    if !app.service_status.running {
+        return vec!["Service offline.".to_string()];
+    }
+    if app.runtime_health.is_degraded() && !app.service_status.busy {
+        return vec![format!(
+            "Degraded: {} down.",
+            app.runtime_health.degraded_components().join("+")
+        )];
+    }
+    if !app.service_status.busy {
+        return vec!["Idle.".to_string()];
+    }
+    let source = app
+        .service_status
+        .active_source_label
+        .clone()
+        .unwrap_or_else(|| "turn".to_string());
+    let mut lines = vec![format!(
+        "{} {} active",
+        spinner_frame(app.spinner_phase),
+        source
+    )];
+    if let Some(event) = app
+        .service_status
+        .recent_events
+        .iter()
+        .rev()
+        .find(|event| event.starts_with("phase "))
+    {
+        let phase = event.trim_start_matches("phase ");
+        lines.push(format!(
+            "phase {}",
+            truncate_line(phase, width.saturating_sub(6))
+        ));
+    }
+    if let Some(goal) = app.service_status.current_goal_preview.as_deref() {
+        lines.push(format!(
+            "goal {}",
+            truncate_line(goal, width.saturating_sub(5))
+        ));
+    }
+    if app.service_status.pending_count > 0 {
+        lines.push(format!(
+            "after this {} queued",
+            app.service_status.pending_count
+        ));
+    }
+    lines
 }
 
 fn queue_lines(app: &App, width: usize) -> Vec<String> {
@@ -886,6 +1024,103 @@ fn queue_lines(app: &App, width: usize) -> Vec<String> {
         .collect()
 }
 
+fn mission_lines(app: &App, width: usize) -> Vec<String> {
+    let Some(mission) = app.mission_state.as_ref() else {
+        return vec!["No active mission yet.".to_string()];
+    };
+    let mission_name = if mission.mission.trim().is_empty() {
+        "Mission not classified yet.".to_string()
+    } else {
+        truncate_line(mission.mission.trim(), width)
+    };
+    let mut lines = vec![mission_name];
+    let state = fallback_label(&mission.mission_status, "unknown");
+    let mode = fallback_label(&mission.continuation_mode, "continuous");
+    lines.push(format!("{} • {}", state, mode));
+    if mission.is_open {
+        if let Some(next_slice) = non_empty_mission_value(&mission.next_slice) {
+            lines.push(format!(
+                "next {}",
+                truncate_line(next_slice, width.saturating_sub(5))
+            ));
+        }
+        if let Some(blocker) = non_empty_mission_value(&mission.blocker) {
+            lines.push(format!(
+                "blocker {}",
+                truncate_line(blocker, width.saturating_sub(8))
+            ));
+        } else {
+            lines.push("blocker none".to_string());
+        }
+    } else {
+        lines.push("closed".to_string());
+    }
+    lines
+}
+
+fn spinner_frame(phase: usize) -> &'static str {
+    let frames = ["⠁", "⠂", "⠄", "⠂"];
+    frames[phase % frames.len()]
+}
+
+fn is_internal_queue_prompt(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    [
+        "Continue the broader goal using the latest completed turn as the starting point.",
+        "Review the blocked owner-visible task without losing continuity.",
+        "Recover or finish the owner-visible task without losing continuity.",
+        "Use the queue-cleanup skill first.",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
+}
+
+fn summarize_internal_queue_prompt(content: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(first_line) = content.lines().find(|line| !line.trim().is_empty()) {
+        lines.push(truncate_line(first_line.trim(), width));
+    }
+    if let Some(goal) = extract_prompt_section(content, "Goal:") {
+        lines.push(format!(
+            "goal {}",
+            truncate_line(&goal, width.saturating_sub(5))
+        ));
+    }
+    if let Some(blocker) = extract_prompt_section(
+        content,
+        "The latest attempt failed or stalled with this blocker:",
+    ) {
+        lines.push(format!(
+            "blocker {}",
+            truncate_line(&blocker, width.saturating_sub(8))
+        ));
+    }
+    if lines.is_empty() {
+        lines.push(truncate_line(content.trim(), width));
+    }
+    lines
+}
+
+fn extract_prompt_section(content: &str, marker: &str) -> Option<String> {
+    let (_, tail) = content.split_once(marker)?;
+    let mut collected = Vec::new();
+    for line in tail.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !collected.is_empty() {
+                break;
+            }
+            continue;
+        }
+        collected.push(trimmed.to_string());
+    }
+    if collected.is_empty() {
+        None
+    } else {
+        Some(collected.join(" "))
+    }
+}
+
 fn section_title(title: &str, color: Color, width: usize) -> Line<'static> {
     let label = format!(" {title} ");
     let dash_count = width.saturating_sub(label.chars().count()).max(1);
@@ -904,6 +1139,8 @@ fn turn_summary_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
     let mut lines = Vec::new();
     let (status_text, status_color) = if !app.service_status.running {
         ("stopped", Color::Red)
+    } else if app.runtime_health.is_degraded() {
+        ("degraded", Color::Yellow)
     } else if app.service_status.busy {
         ("working", Color::Yellow)
     } else {
@@ -934,6 +1171,12 @@ fn turn_summary_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
         app.service_status.pending_count,
         app.draft_queue.len()
     )));
+    if let Some(goal) = app.service_status.current_goal_preview.as_deref() {
+        lines.push(Line::from(format!(
+            "goal {}",
+            truncate_line(goal, width.saturating_sub(5))
+        )));
+    }
     if let Some(error) = app.service_status.last_error.as_deref() {
         lines.push(Line::from(format!(
             "error {}",
@@ -950,7 +1193,29 @@ fn turn_summary_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
             truncate_line(completed, width.saturating_sub(10))
         )));
     }
+    let phase_events = app
+        .service_status
+        .recent_events
+        .iter()
+        .filter(|event| event.starts_with("phase "))
+        .rev()
+        .take(4)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !phase_events.is_empty() {
+        lines.push(Line::from("steps"));
+        for event in phase_events.into_iter().rev() {
+            let phase = event.trim_start_matches("phase ");
+            lines.push(Line::from(format!(
+                "• {}",
+                truncate_line(phase, width.saturating_sub(2))
+            )));
+        }
+    }
     for event in app.service_status.recent_events.iter().rev().take(3).rev() {
+        if event.starts_with("phase ") {
+            continue;
+        }
         lines.push(Line::from(format!(
             "• {}",
             truncate_line(event, width.saturating_sub(2))
@@ -1014,385 +1279,391 @@ fn value_for_key(app: &App, key: &str) -> String {
 }
 
 fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
-    let mode = if app.header.estimate_mode {
-        "estimate"
-    } else {
-        "live"
+    let Some(item) = app.current_setting() else {
+        return String::new();
     };
-    let avg_tps = app
-        .header
-        .avg_tokens_per_second
-        .map(|value| format!("{value:.0} tok/s"))
-        .unwrap_or_else(|| "- tok/s".to_string());
-    let base_model = value_for_key(app, "CTOX_CHAT_MODEL_BASE");
-    let active_model = truncate_line(&app.header.model, width.saturating_sub(9));
-    let boost_model = value_for_key(app, "CTOX_CHAT_MODEL_BOOST");
-    let boost_status = if app.header.boost_active {
-        if let Some(remaining_seconds) = app.header.boost_remaining_seconds {
-            format!("active {}m", (remaining_seconds + 59) / 60)
-        } else {
-            "active".to_string()
-        }
-    } else if boost_model != "-" {
-        "idle".to_string()
-    } else {
-        "-".to_string()
-    };
-    let boost_reason = app
-        .header
-        .boost_reason
-        .as_deref()
-        .map(|value| truncate_line(value, width.saturating_sub(9)))
-        .unwrap_or_else(|| "-".to_string());
-    let chat_source = value_for_key(app, "CTOX_CHAT_SOURCE");
-    let channel = value_for_key(app, "CTOX_OWNER_PREFERRED_CHANNEL");
-    if channel == "email" {
-        let protocol = value_for_key(app, "CTO_EMAIL_PROVIDER");
-        let mut lines = vec![
-            format!("mode     {mode}"),
-            "chat".to_string(),
-            format!("base     {}", truncate_line(&base_model, width.saturating_sub(9))),
-            format!("active   {active_model}"),
-            format!("boost    {}", truncate_line(&boost_status, width.saturating_sub(9))),
-            format!("why      {}", truncate_line(&boost_reason, width.saturating_sub(9))),
-            String::new(),
-            format!(
-                "owner    {}",
-                truncate_line(
-                    &value_for_key(app, "CTOX_OWNER_NAME"),
-                    width.saturating_sub(9)
-                )
-            ),
-            format!(
-                "owner@   {}",
-                truncate_line(
-                    &value_for_key(app, "CTOX_OWNER_EMAIL_ADDRESS"),
-                    width.saturating_sub(9)
-                )
-            ),
-            "channel  email".to_string(),
-            String::new(),
-            "email".to_string(),
-            format!(
-                "address  {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_EMAIL_ADDRESS"),
-                    width.saturating_sub(9)
-                )
-            ),
-            format!(
-                "proto    {}",
-                truncate_line(&protocol, width.saturating_sub(9))
-            ),
-            "choices  imap | graph | ews".to_string(),
-        ];
-        match protocol.as_str() {
-            "graph" => lines.push(format!(
-                "user     {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_EMAIL_GRAPH_USER"),
-                    width.saturating_sub(9)
-                )
-            )),
-            "ews" => {
-                lines.push(format!(
-                    "url      {}",
-                    truncate_line(
-                        &value_for_key(app, "CTO_EMAIL_EWS_URL"),
-                        width.saturating_sub(9)
-                    )
-                ));
-                lines.push(format!(
-                    "auth     {}",
-                    truncate_line(
-                        &value_for_key(app, "CTO_EMAIL_EWS_AUTH_TYPE"),
-                        width.saturating_sub(9)
-                    )
-                ));
-                lines.push(format!(
-                    "user     {}",
-                    truncate_line(
-                        &value_for_key(app, "CTO_EMAIL_EWS_USERNAME"),
-                        width.saturating_sub(9)
-                    )
-                ));
+    let mut lines = vec![
+        format!(
+            "item     {}",
+            truncate_line(item.label, width.saturating_sub(9))
+        ),
+        format!(
+            "mode     {}",
+            if app.header.estimate_mode {
+                "estimate"
+            } else {
+                "live"
             }
-            _ => {
-                lines.push(format!(
-                    "imap     {}:{}",
-                    value_for_key(app, "CTO_EMAIL_IMAP_HOST"),
-                    value_for_key(app, "CTO_EMAIL_IMAP_PORT")
-                ));
-                lines.push(format!(
-                    "smtp     {}:{}",
-                    value_for_key(app, "CTO_EMAIL_SMTP_HOST"),
-                    value_for_key(app, "CTO_EMAIL_SMTP_PORT")
-                ));
-            }
-        }
-        lines
-            .into_iter()
-            .take(height.max(1))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else if channel == "jami" {
-        let mut lines = vec![
-            format!("mode     {mode}"),
-            "chat".to_string(),
-            format!("base     {}", truncate_line(&base_model, width.saturating_sub(9))),
-            format!("active   {active_model}"),
-            format!("boost    {}", truncate_line(&boost_status, width.saturating_sub(9))),
-            format!("why      {}", truncate_line(&boost_reason, width.saturating_sub(9))),
-            String::new(),
-            format!(
-                "owner    {}",
-                truncate_line(
-                    &value_for_key(app, "CTOX_OWNER_NAME"),
-                    width.saturating_sub(9)
-                )
-            ),
-            "channel  jami".to_string(),
-            String::new(),
-            "jami".to_string(),
-            format!(
-                "name     {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_JAMI_PROFILE_NAME"),
-                    width.saturating_sub(9)
-                )
-            ),
-            format!(
-                "account  {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_JAMI_ACCOUNT_ID"),
-                    width.saturating_sub(9)
-                )
-            ),
-            String::new(),
-        ];
-        for qr in app.jami_qr_lines.iter() {
-            lines.push(truncate_line(qr, width));
-        }
-        lines
-            .into_iter()
-            .take(height.max(1))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut lines = vec![
-            format!("mode     {mode}"),
-            format!("source   {chat_source}"),
-            format!("base     {}", truncate_line(&base_model, width.saturating_sub(9))),
-            format!("active   {active_model}"),
-            format!("boost    {}", truncate_line(&boost_status, width.saturating_sub(9))),
-            format!("why      {}", truncate_line(&boost_reason, width.saturating_sub(9))),
-        ];
-        if chat_source == "api" {
-            lines.push(format!(
-                "provider {}",
-                truncate_line(
-                    &value_for_key(app, "CTOX_API_PROVIDER"),
-                    width.saturating_sub(9)
-                )
-            ));
-        } else {
-            lines.push(format!(
-                "preset   {}",
-                truncate_line(
-                    &value_for_key(app, "CTOX_CHAT_LOCAL_PRESET"),
-                    width.saturating_sub(9)
-                )
-            ));
-        }
+        ),
+    ];
+    lines.push(String::new());
+    push_wrapped_lines(&mut lines, &item.help, width);
+    if item.kind == super::SettingKind::Env {
+        lines.push(String::new());
         lines.push(format!(
-            "owner    {}",
-            truncate_line(
-                &value_for_key(app, "CTOX_OWNER_NAME"),
-                width.saturating_sub(9)
-            )
+            "saved    {}",
+            display_setting_value(item.saved_value.trim(), item.secret)
         ));
         lines.push(format!(
-            "owner@   {}",
-            truncate_line(
-                &value_for_key(app, "CTOX_OWNER_EMAIL_ADDRESS"),
-                width.saturating_sub(9)
-            )
+            "{} {}",
+            if app.setting_is_dirty(item) {
+                "draft   "
+            } else {
+                "active   "
+            },
+            display_setting_value(item.value.trim(), item.secret)
         ));
-        lines.push(format!(
-            "channel  {}",
-            truncate_line(&channel, width.saturating_sub(9))
-        ));
-        if channel == "email" {
-            lines.push(String::new());
-            lines.push("email".to_string());
-            lines.push(format!(
-                "address  {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_EMAIL_ADDRESS"),
-                    width.saturating_sub(9)
-                )
-            ));
-            let protocol = value_for_key(app, "CTO_EMAIL_PROVIDER");
-            lines.push(format!(
-                "proto    {}",
-                truncate_line(&protocol, width.saturating_sub(9))
-            ));
-            lines.push("choices  imap | graph | ews".to_string());
-            match protocol.as_str() {
-                "graph" => lines.push(format!(
-                    "user     {}",
-                    truncate_line(
-                        &value_for_key(app, "CTO_EMAIL_GRAPH_USER"),
-                        width.saturating_sub(9)
-                    )
-                )),
-                "ews" => {
-                    lines.push(format!(
-                        "url      {}",
-                        truncate_line(
-                            &value_for_key(app, "CTO_EMAIL_EWS_URL"),
-                            width.saturating_sub(9)
-                        )
-                    ));
-                    lines.push(format!(
-                        "auth     {}",
-                        truncate_line(
-                            &value_for_key(app, "CTO_EMAIL_EWS_AUTH_TYPE"),
-                            width.saturating_sub(9)
-                        )
-                    ));
-                    lines.push(format!(
-                        "user     {}",
-                        truncate_line(
-                            &value_for_key(app, "CTO_EMAIL_EWS_USERNAME"),
-                            width.saturating_sub(9)
-                        )
-                    ));
-                }
-                _ => {
-                    lines.push(format!(
-                        "imap     {}:{}",
-                        value_for_key(app, "CTO_EMAIL_IMAP_HOST"),
-                        value_for_key(app, "CTO_EMAIL_IMAP_PORT")
-                    ));
-                    lines.push(format!(
-                        "smtp     {}:{}",
-                        value_for_key(app, "CTO_EMAIL_SMTP_HOST"),
-                        value_for_key(app, "CTO_EMAIL_SMTP_PORT")
-                    ));
-                }
-            }
-        } else if channel == "jami" {
-            lines.push(String::new());
-            lines.push("jami".to_string());
-            lines.push(format!(
-                "name     {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_JAMI_PROFILE_NAME"),
-                    width.saturating_sub(9)
-                )
-            ));
-            lines.push(format!(
-                "account  {}",
-                truncate_line(
-                    &value_for_key(app, "CTO_JAMI_ACCOUNT_ID"),
-                    width.saturating_sub(9)
-                )
-            ));
-            lines.push(String::new());
-            for qr in app.jami_qr_lines.iter() {
-                lines.push(truncate_line(qr, width));
-            }
-        }
-        lines.push(format!(
-            "embed    {}",
-            truncate_line(
-                &value_for_key(app, "CTOX_EMBEDDING_MODEL"),
-                width.saturating_sub(9)
-            )
-        ));
-        lines.push(format!(
-            "stt      {}",
-            truncate_line(
-                &value_for_key(app, "CTOX_STT_MODEL"),
-                width.saturating_sub(9)
-            )
-        ));
-        lines.push(format!(
-            "tts      {}",
-            truncate_line(
-                &value_for_key(app, "CTOX_TTS_MODEL"),
-                width.saturating_sub(9)
-            )
-        ));
-        lines.push(format!(
-            "compact  {}%",
-            value_for_key(app, "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT")
-        ));
-        lines.push(format!("speed    {avg_tps}"));
-        if channel != "email" && channel != "jami" {
-            if let Some(bundle) = &app.chat_preset_bundle {
-                lines.push(String::new());
-                lines.push("plan".to_string());
-                lines.push(format!(
-                    "active   {}",
-                    truncate_line(bundle.selected_plan.preset.label(), width.saturating_sub(9))
-                ));
-                lines.push(format!(
-                    "quant    {}",
-                    truncate_line(&bundle.selected_plan.quantization, width.saturating_sub(9))
-                ));
-                lines.push(format!("ctx      {}", bundle.selected_plan.max_seq_len));
-                lines.push(format!(
-                    "backend  {}",
-                    if bundle.selected_plan.disable_nccl {
-                        "device-layers"
-                    } else {
-                        "nccl"
-                    }
-                ));
-                lines.push(format!(
-                    "gpus     {}",
-                    truncate_line(
-                        &bundle.selected_plan.cuda_visible_devices,
-                        width.saturating_sub(9)
-                    )
-                ));
-                if let Some(device_layers) = &bundle.selected_plan.device_layers {
-                    lines.push(format!(
-                        "layers   {}",
-                        truncate_line(device_layers, width.saturating_sub(9))
-                    ));
-                }
-                lines.push("presets".to_string());
-                for plan in &bundle.plans {
-                    lines.push(format!(
-                        "• {} {} {}k {:.0} tok/s",
-                        plan.preset.label(),
-                        plan.quantization,
-                        plan.max_seq_len / 1024,
-                        plan.expected_tok_s
-                    ));
-                }
-                lines.push("gpu budget".to_string());
-                for allocation in bundle.selected_plan.gpu_allocations.iter().take(4) {
-                    lines.push(format!(
-                        "• GPU{} {}G = {}G desk + {}G aux + {}G chat",
-                        allocation.gpu_index,
-                        allocation.total_mb / 1024,
-                        allocation.desktop_reserve_mb / 1024,
-                        allocation.aux_reserve_mb / 1024,
-                        allocation.chat_budget_mb / 1024,
-                    ));
-                }
-            }
-        }
-        lines
-            .into_iter()
-            .take(height.max(1))
-            .collect::<Vec<_>>()
-            .join("\n")
     }
+    match item.key {
+        "CTOX_API_PROVIDER" | "OPENAI_API_KEY" => {
+            append_provider_details(&mut lines, app, width);
+        }
+        "CTOX_CHAT_MODEL" | "CTOX_CHAT_LOCAL_PRESET" | "CTOX_CHAT_MODEL_BOOST" => {
+            append_chat_runtime_details(&mut lines, app, item.key, width);
+        }
+        "CTOX_EMBEDDING_MODEL" | "CTOX_STT_MODEL" | "CTOX_TTS_MODEL" => {
+            append_aux_model_details(&mut lines, app, item.key, width);
+        }
+        _ => {
+            append_general_setting_details(&mut lines, app, width);
+        }
+    }
+    lines
+        .into_iter()
+        .take(height.max(1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn push_wrapped_lines(lines: &mut Vec<String>, text: &str, width: usize) {
+    for chunk in wrap_text_lines(text, width) {
+        lines.push(chunk);
+    }
+}
+
+fn append_provider_details(lines: &mut Vec<String>, app: &App, width: usize) {
+    lines.push(String::new());
+    lines.push("model pool".to_string());
+    let local_pool = engine::SUPPORTED_CHAT_MODELS
+        .iter()
+        .filter(|model| !engine::is_openai_api_chat_model(model))
+        .count();
+    let api_pool = engine::SUPPORTED_OPENAI_API_CHAT_MODELS.len();
+    let token_present = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == "OPENAI_API_KEY")
+        .map(|item| !item.value.trim().is_empty())
+        .unwrap_or(false);
+    lines.push(format!("local    {local_pool} models"));
+    lines.push(format!(
+        "openai   {}",
+        if token_present {
+            format!("{api_pool} models unlocked")
+        } else {
+            format!("{api_pool} models locked until token is saved")
+        }
+    ));
+    lines.push(format!(
+        "merge    {}",
+        truncate_line(
+            "base + boost use the merged local/API pool once OpenAI is unlocked",
+            width.saturating_sub(9)
+        )
+    ));
+}
+
+fn append_chat_runtime_details(lines: &mut Vec<String>, app: &App, item_key: &str, width: usize) {
+    lines.push(String::new());
+    lines.push("context".to_string());
+    lines.push(format!("used     {}k", app.header.current_tokens / 1024));
+    lines.push(format!(
+        "compact  {}k @{}% >= {}k",
+        app.header.compact_at / 1024,
+        app.header.compact_percent,
+        app.header.compact_min_tokens / 1024
+    ));
+    lines.push(format!(
+        "plan     {}k   live {}k   ref 256k",
+        app.header.configured_context / 1024,
+        app.header.max_context / 1024
+    ));
+
+    let selected_model = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == item_key)
+        .map(|item| item.value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            app.settings_items
+                .iter()
+                .find(|item| item.key == "CTOX_CHAT_MODEL")
+                .map(|item| item.value.trim())
+                .unwrap_or("")
+        });
+
+    if !selected_model.is_empty() {
+        lines.push(String::new());
+        lines.push("model".to_string());
+        lines.push(format!(
+            "name     {}",
+            truncate_line(selected_model, width.saturating_sub(9))
+        ));
+        lines.push(format!(
+            "kind     {}",
+            if engine::is_openai_api_chat_model(selected_model) {
+                "api"
+            } else {
+                "local"
+            }
+        ));
+        if let Ok(profile) = engine::model_profile_for_model(selected_model) {
+            lines.push(format!("family   {:?}", profile.runtime.family));
+            lines.push(format!(
+                "max ctx  {}k",
+                (profile.family_profile.max_seq_len as usize) / 1024
+            ));
+            lines.push(format!(
+                "default  {} / {}",
+                profile.family_profile.isq.as_deref().unwrap_or("native"),
+                profile
+                    .family_profile
+                    .pa_cache_type
+                    .as_deref()
+                    .unwrap_or("kv off")
+            ));
+        }
+    }
+
+    if item_key != "CTOX_CHAT_MODEL_BOOST" {
+        if let Some(bundle) = &app.chat_preset_bundle {
+            lines.push(String::new());
+            lines.push("runtime".to_string());
+            lines.push(format!("preset   {}", bundle.selected_plan.preset.label()));
+            lines.push(format!(
+                "weights  {}",
+                truncate_line(&bundle.selected_plan.quantization, width.saturating_sub(9))
+            ));
+            lines.push(format!(
+                "runtime  {}",
+                truncate_line(
+                    bundle
+                        .selected_plan
+                        .runtime_isq
+                        .as_deref()
+                        .unwrap_or("native"),
+                    width.saturating_sub(9)
+                )
+            ));
+            lines.push(format!(
+                "kv cache {}",
+                truncate_line(
+                    bundle.selected_plan.effective_cache_label(),
+                    width.saturating_sub(9)
+                )
+            ));
+            lines.push(format!(
+                "paged    {}",
+                truncate_line(&bundle.selected_plan.paged_attn, width.saturating_sub(9))
+            ));
+            lines.push(format!(
+                "batch    {}   seqs {}",
+                bundle.selected_plan.max_batch_size, bundle.selected_plan.max_seqs
+            ));
+            lines.push(format!(
+                "backend  {}",
+                if bundle.selected_plan.disable_nccl {
+                    "device-layers"
+                } else {
+                    "nccl"
+                }
+            ));
+            lines.push(format!(
+                "gpus     {}",
+                truncate_line(
+                    &bundle.selected_plan.cuda_visible_devices,
+                    width.saturating_sub(9)
+                )
+            ));
+            if let Some(device_layers) = &bundle.selected_plan.device_layers {
+                lines.push(format!(
+                    "layers   {}",
+                    truncate_line(device_layers, width.saturating_sub(9))
+                ));
+            }
+            lines.push(format!(
+                "speed    {:.0} tok/s",
+                bundle.selected_plan.expected_tok_s
+            ));
+
+            lines.push(String::new());
+            lines.push("presets".to_string());
+            for plan in &bundle.plans {
+                lines.push(format!(
+                    "• {} {}k {} kv:{} {:.0} tok/s",
+                    plan.preset.label(),
+                    plan.max_seq_len / 1024,
+                    plan.quantization,
+                    plan.effective_cache_label(),
+                    plan.expected_tok_s
+                ));
+            }
+
+            lines.push(String::new());
+            lines.push("gpu budget".to_string());
+            for allocation in bundle.selected_plan.gpu_allocations.iter().take(4) {
+                lines.push(format!(
+                    "• GPU{} wt {}G kv {}G free {}G",
+                    allocation.gpu_index,
+                    allocation.weight_mb / 1024,
+                    allocation.kv_cache_mb / 1024,
+                    allocation.free_headroom_mb / 1024
+                ));
+            }
+        }
+    }
+}
+
+fn append_aux_model_details(lines: &mut Vec<String>, app: &App, item_key: &str, width: usize) {
+    let Some(item) = app.settings_items.iter().find(|item| item.key == item_key) else {
+        return;
+    };
+    let selected_model = item.value.trim();
+    if selected_model.is_empty() {
+        return;
+    }
+    lines.push(String::new());
+    lines.push("runtime".to_string());
+    lines.push(format!(
+        "name     {}",
+        truncate_line(selected_model, width.saturating_sub(9))
+    ));
+    if let Ok(profile) = engine::model_profile_for_model(selected_model) {
+        lines.push(format!("family   {:?}", profile.runtime.family));
+        lines.push(format!(
+            "weights  {}",
+            truncate_line(
+                profile.family_profile.isq.as_deref().unwrap_or("native"),
+                width.saturating_sub(9)
+            )
+        ));
+        lines.push(format!(
+            "kv cache {}",
+            truncate_line(
+                profile
+                    .family_profile
+                    .pa_cache_type
+                    .as_deref()
+                    .unwrap_or("off"),
+                width.saturating_sub(9)
+            )
+        ));
+        lines.push(format!(
+            "max ctx  {}k",
+            (profile.family_profile.max_seq_len as usize) / 1024
+        ));
+        lines.push(format!(
+            "batch    {}   seqs {}",
+            profile.runtime.max_batch_size, profile.runtime.max_seqs
+        ));
+        lines.push(format!(
+            "mode     {}",
+            truncate_line(
+                &profile.family_profile.launcher_mode,
+                width.saturating_sub(9)
+            )
+        ));
+    }
+    let health = match item_key {
+        "CTOX_EMBEDDING_MODEL" => app.runtime_health.embedding_ready,
+        "CTOX_STT_MODEL" => app.runtime_health.stt_ready,
+        "CTOX_TTS_MODEL" => app.runtime_health.tts_ready,
+        _ => None,
+    };
+    lines.push(format!(
+        "health   {}",
+        match health {
+            Some(true) => "ready",
+            Some(false) => "error",
+            None => "unknown",
+        }
+    ));
+}
+
+fn append_general_setting_details(lines: &mut Vec<String>, app: &App, width: usize) {
+    lines.push(String::new());
+    lines.push("runtime".to_string());
+    lines.push(format!("loop     {}", loop_status_label(app)));
+    lines.push(format!("source   {}", app.header.chat_source));
+    lines.push(format!(
+        "base     {}",
+        truncate_line(
+            &compact_model_name(&app.header.base_model, width),
+            width.saturating_sub(9)
+        )
+    ));
+    lines.push(format!(
+        "active   {}",
+        truncate_line(
+            &compact_model_name(&app.header.model, width),
+            width.saturating_sub(9)
+        )
+    ));
+    lines.push(format!(
+        "boost    {}",
+        truncate_line(
+            &app.header
+                .boost_model
+                .clone()
+                .unwrap_or_else(|| "idle".to_string()),
+            width.saturating_sub(9)
+        )
+    ));
+}
+
+fn chat_source_is_api(app: &App) -> bool {
+    app.header.chat_source.eq_ignore_ascii_case("api")
+}
+
+fn snapshot_line(label: &str, value: &str) -> String {
+    format!("{label:<9}{value}")
+}
+
+fn loop_status_label(app: &App) -> &'static str {
+    if !app.header.service_running {
+        "stopped"
+    } else if app.runtime_health.is_degraded() {
+        "degraded"
+    } else {
+        "running"
+    }
+}
+
+fn local_gpu_snapshot_lines(app: &App, width: usize) -> Vec<String> {
+    if app.header.gpu_cards.is_empty()
+        && app.header.gpu_loading_cards.is_empty()
+        && app.header.gpu_error_cards.is_empty()
+        && app.header.gpu_target_cards.is_empty()
+    {
+        return vec!["gpu      unavailable".to_string()];
+    }
+    let mut lines = Vec::new();
+    for (gpu_index, live_card, loading_card, error_card, target_card) in
+        gpu_display_rows(app).into_iter().take(4)
+    {
+        let summary = gpu_allocation_summary(live_card, loading_card, error_card, target_card, 4);
+        if summary.is_empty() {
+            lines.push(format!("gpu{}     idle", gpu_index));
+            continue;
+        }
+        lines.push(format!(
+            "gpu{}     {}",
+            gpu_index,
+            truncate_line(&summary, width.saturating_sub(9))
+        ));
+    }
+    lines
 }
 
 fn setting_details_text(app: &App) -> String {
@@ -1538,7 +1809,10 @@ fn model_mode_line(app: &App, width: usize) -> Line<'static> {
         .as_deref()
         .map(|value| compact_model_name(value, name_width))
         .filter(|value| !value.is_empty());
-    let mut text = format!("base {base_model}  active {active_model}");
+    let mut text = format!(
+        "source {}  base {base_model}  active {active_model}",
+        app.header.chat_source
+    );
     if app.header.boost_active {
         if let Some(boost_model) = boost_model {
             text.push_str(&format!("  boost {boost_model}"));
@@ -1563,10 +1837,10 @@ fn model_mode_line(app: &App, width: usize) -> Line<'static> {
 
 fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let selected = match app.settings_view {
-        SettingsView::General => 0,
-        SettingsView::Model => 1,
+        SettingsView::Model => 0,
+        SettingsView::Communication => 1,
     };
-    let titles = ["General", "Model"]
+    let titles = ["Model", "Communication"]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -1585,30 +1859,60 @@ fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout
 }
 
 fn combined_gpu_bar_line(app: &App, width: usize) -> Line<'static> {
-    if app.header.gpu_cards.is_empty() {
+    if app.header.gpu_cards.is_empty()
+        && app.header.gpu_loading_cards.is_empty()
+        && app.header.gpu_error_cards.is_empty()
+        && app.header.gpu_target_cards.is_empty()
+    {
         return Line::from(truncate_line("GPU telemetry unavailable", width));
     }
     let per_gpu_width = gpu_segment_width(app, width);
     let mut spans = Vec::new();
-    for (idx, card) in app.header.gpu_cards.iter().enumerate() {
+    for (idx, (_gpu_index, live_card, loading_card, error_card, target_card)) in
+        gpu_display_rows(app).into_iter().enumerate()
+    {
         if idx > 0 {
             spans.push(Span::raw("  "));
         }
-        spans.extend(gpu_usage_bar_spans(card, per_gpu_width));
+        spans.extend(gpu_usage_bar_spans(
+            app,
+            live_card,
+            loading_card,
+            error_card,
+            target_card,
+            per_gpu_width,
+        ));
     }
     truncate_line_spans(spans, width)
 }
 
 fn combined_gpu_label_line(app: &App, width: usize) -> Line<'static> {
-    if app.header.gpu_cards.is_empty() {
+    if app.gpu_cards.is_empty()
+        && app.header.gpu_loading_cards.is_empty()
+        && app.header.gpu_error_cards.is_empty()
+        && app.header.gpu_target_cards.is_empty()
+    {
         return Line::from(String::new());
     }
     let per_gpu_width = gpu_segment_width(app, width);
     let mut text = String::new();
-    for (idx, card) in app.header.gpu_cards.iter().enumerate() {
+    for (idx, (gpu_index, live_card, loading_card, error_card, target_card)) in
+        gpu_display_rows(app).into_iter().enumerate()
+    {
         if idx > 0 {
             text.push_str("  ");
         }
+        let card = app
+            .gpu_cards
+            .iter()
+            .find(|candidate| candidate.index == gpu_index)
+            .or(live_card)
+            .or(loading_card)
+            .or(error_card)
+            .or(target_card);
+        let Some(card) = card else {
+            continue;
+        };
         let segment = format!(
             "GPU{} {}/{}G {}%",
             card.index,
@@ -1627,9 +1931,125 @@ fn combined_gpu_label_line(app: &App, width: usize) -> Line<'static> {
     Line::from(truncate_line(&text, width))
 }
 
+fn combined_gpu_allocation_line(app: &App, width: usize) -> Line<'static> {
+    if app.header.gpu_cards.is_empty()
+        && app.header.gpu_loading_cards.is_empty()
+        && app.header.gpu_error_cards.is_empty()
+        && app.header.gpu_target_cards.is_empty()
+    {
+        return Line::from(String::new());
+    }
+    let text = gpu_display_rows(app)
+        .into_iter()
+        .map(
+            |(gpu_index, live_card, loading_card, error_card, target_card)| {
+                let summary =
+                    gpu_allocation_summary(live_card, loading_card, error_card, target_card, 3);
+                if summary.is_empty() {
+                    format!("GPU{} idle", gpu_index)
+                } else {
+                    format!("GPU{} {}", gpu_index, summary)
+                }
+            },
+        )
+        .collect::<Vec<_>>()
+        .join("  ");
+    Line::from(truncate_line(&text, width))
+}
+
 fn gpu_segment_width(app: &App, width: usize) -> usize {
-    let gpu_count = app.header.gpu_cards.len().max(1);
-    ((width.saturating_sub(gpu_count.saturating_sub(1) * 2)) / gpu_count).clamp(10, 24)
+    let gpu_count = gpu_display_rows(app).len().max(1);
+    ((width.saturating_sub(gpu_count.saturating_sub(1) * 2)) / gpu_count).clamp(10, 30)
+}
+
+fn gpu_display_rows(
+    app: &App,
+) -> Vec<(
+    usize,
+    Option<&super::GpuCardState>,
+    Option<&super::GpuCardState>,
+    Option<&super::GpuCardState>,
+    Option<&super::GpuCardState>,
+)> {
+    let mut rows = Vec::new();
+    let mut seen = Vec::new();
+
+    for target_card in &app.header.gpu_target_cards {
+        if seen.contains(&target_card.index) {
+            continue;
+        }
+        seen.push(target_card.index);
+        let live_card = app
+            .header
+            .gpu_cards
+            .iter()
+            .find(|candidate| candidate.index == target_card.index);
+        let loading_card = app
+            .header
+            .gpu_loading_cards
+            .iter()
+            .find(|candidate| candidate.index == target_card.index);
+        let error_card = app
+            .header
+            .gpu_error_cards
+            .iter()
+            .find(|candidate| candidate.index == target_card.index);
+        rows.push((
+            target_card.index,
+            live_card,
+            loading_card,
+            error_card,
+            Some(target_card),
+        ));
+    }
+
+    for loading_card in &app.header.gpu_loading_cards {
+        if seen.contains(&loading_card.index) {
+            continue;
+        }
+        seen.push(loading_card.index);
+        let live_card = app
+            .header
+            .gpu_cards
+            .iter()
+            .find(|candidate| candidate.index == loading_card.index);
+        let error_card = app
+            .header
+            .gpu_error_cards
+            .iter()
+            .find(|candidate| candidate.index == loading_card.index);
+        rows.push((
+            loading_card.index,
+            live_card,
+            Some(loading_card),
+            error_card,
+            None,
+        ));
+    }
+
+    for error_card in &app.header.gpu_error_cards {
+        if seen.contains(&error_card.index) {
+            continue;
+        }
+        seen.push(error_card.index);
+        let live_card = app
+            .header
+            .gpu_cards
+            .iter()
+            .find(|candidate| candidate.index == error_card.index);
+        rows.push((error_card.index, live_card, None, Some(error_card), None));
+    }
+
+    for live_card in &app.header.gpu_cards {
+        if seen.contains(&live_card.index) {
+            continue;
+        }
+        seen.push(live_card.index);
+        rows.push((live_card.index, Some(live_card), None, None, None));
+    }
+
+    rows.sort_unstable_by_key(|(index, _, _, _, _)| *index);
+    rows
 }
 
 fn pad_to_width(text: &str, width: usize) -> String {
@@ -1643,28 +2063,30 @@ fn pad_to_width(text: &str, width: usize) -> String {
 
 fn context_window_line(app: &App, width: usize) -> Line<'static> {
     let bar_width = width.saturating_sub(2).max(16);
-    let compact_percent = value_for_key(app, "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT")
-        .parse::<usize>()
-        .ok()
-        .unwrap_or(75);
-    let display_compact = app.header.max_context.saturating_mul(compact_percent) / 100;
-    let fill_index = ratio_index(app.header.current_tokens, app.header.max_context, bar_width);
-    let compact_index = ratio_index(display_compact, app.header.max_context, bar_width);
-    let configured_index = ratio_index(
-        app.header.configured_context,
-        app.header.max_context,
-        bar_width,
-    );
+    let reference_total = CONTEXT_BAR_REFERENCE_TOKENS.max(app.header.max_context.max(1));
+    let fill_index = ratio_index(app.header.current_tokens, reference_total, bar_width);
+    let compact_index = ratio_index(app.header.compact_at, reference_total, bar_width);
+    let configured_index = ratio_index(app.header.configured_context, reference_total, bar_width);
+    let runtime_index = ratio_index(app.header.max_context, reference_total, bar_width);
     let chat_color = role_color("chat");
     let mut spans = vec![Span::raw("▕")];
     for idx in 0..bar_width {
+        let in_runtime_window = idx < runtime_index.max(1);
         let bg = if idx < fill_index {
             chat_color
-        } else {
+        } else if in_runtime_window {
             Color::Rgb(32, 32, 32)
+        } else {
+            Color::Rgb(10, 10, 10)
         };
         if idx == compact_index.min(bar_width.saturating_sub(1)) {
             spans.push(Span::styled("◆", Style::default().fg(Color::White).bg(bg)));
+        } else if idx == runtime_index.min(bar_width.saturating_sub(1)) && runtime_index < bar_width
+        {
+            spans.push(Span::styled(
+                "│",
+                Style::default().fg(Color::LightCyan).bg(bg),
+            ));
         } else if idx == configured_index.min(bar_width.saturating_sub(1)) {
             spans.push(Span::styled("▲", Style::default().fg(chat_color).bg(bg)));
         } else {
@@ -1676,53 +2098,268 @@ fn context_window_line(app: &App, width: usize) -> Line<'static> {
 }
 
 fn context_label_line(app: &App, width: usize) -> Line<'static> {
-    let compact_percent = value_for_key(app, "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT")
-        .parse::<usize>()
-        .ok()
-        .unwrap_or(75);
-    let display_compact = app.header.max_context.saturating_mul(compact_percent) / 100;
-    let text = format!(
-        "{}k compact   {}k cfg   {}k max",
-        display_compact / 1024,
-        app.header.configured_context / 1024,
-        app.header.max_context / 1024
-    );
+    let text = if let Some(health) = app.context_health.as_ref() {
+        let status = health.status.as_str();
+        let hint = context_health_hint(app);
+        let warning_suffix = if health.warnings.is_empty() {
+            String::new()
+        } else {
+            format!("  {} warning(s)", health.warnings.len())
+        };
+        format!(
+            "context {status} {}  {hint}{warning_suffix}",
+            health.overall_score
+        )
+    } else {
+        format!(
+            "context pending  {}k used of {}k live",
+            app.header.current_tokens / 1024,
+            app.header.max_context / 1024
+        )
+    };
     Line::from(truncate_line(&text, width))
 }
 
-fn gpu_usage_bar_spans(card: &super::GpuCardState, width: usize) -> Vec<Span<'static>> {
+fn context_health_hint(app: &App) -> String {
+    let Some(health) = app.context_health.as_ref() else {
+        return "waiting for the next context sample".to_string();
+    };
+    match health.status {
+        ContextHealthStatus::Healthy => {
+            if let Some(mission) = app.mission_state.as_ref().filter(|mission| mission.is_open) {
+                if mission.allow_idle {
+                    "stable and safely idling between mission triggers".to_string()
+                } else {
+                    "stable and on track".to_string()
+                }
+            } else {
+                "stable and ready".to_string()
+            }
+        }
+        ContextHealthStatus::Watch => "watch drift and refresh focus soon".to_string(),
+        ContextHealthStatus::Degraded => "repair focus before more risky retries".to_string(),
+        ContextHealthStatus::Critical => "stop and rebuild mission context".to_string(),
+    }
+}
+
+fn non_empty_mission_value(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("n/a")
+        || trimmed.eq_ignore_ascii_case("na")
+    {
+        None
+    } else {
+        Some(trimmed)
+    }
+}
+
+fn fallback_label<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback
+    } else {
+        trimmed
+    }
+}
+
+fn gpu_usage_bar_spans(
+    app: &App,
+    live_card: Option<&super::GpuCardState>,
+    loading_card: Option<&super::GpuCardState>,
+    error_card: Option<&super::GpuCardState>,
+    target_card: Option<&super::GpuCardState>,
+    width: usize,
+) -> Vec<Span<'static>> {
     let bar_width = width.saturating_sub(2).clamp(8, 24);
-    if card.total_mb == 0 {
+    let total_mb = live_card
+        .map(|card| card.total_mb)
+        .unwrap_or(0)
+        .max(loading_card.map(|card| card.total_mb).unwrap_or(0))
+        .max(error_card.map(|card| card.total_mb).unwrap_or(0))
+        .max(target_card.map(|card| card.total_mb).unwrap_or(0));
+    if total_mb == 0 {
         return vec![Span::styled(
             "[no-gpu-data]",
             Style::default().fg(Color::DarkGray),
         )];
     }
 
+    let mut glyphs = (0..bar_width)
+        .map(|_| ('.', Style::default().fg(Color::DarkGray)))
+        .collect::<Vec<_>>();
+
+    paint_gpu_layer(&mut glyphs, target_card, total_mb, |allocation, _idx| {
+        (
+            allocation_bar_char(&allocation.short_label, false),
+            Style::default().fg(dim_color(model_color(&allocation.model))),
+        )
+    });
+    paint_gpu_layer(&mut glyphs, live_card, total_mb, |allocation, _idx| {
+        ('█', Style::default().fg(model_color(&allocation.model)))
+    });
+    paint_gpu_layer(&mut glyphs, loading_card, total_mb, |allocation, idx| {
+        let blink_on = (app.spinner_phase + idx) % 4 < 2;
+        let glyph = if blink_on { '▓' } else { '▒' };
+        (glyph, Style::default().fg(model_color(&allocation.model)))
+    });
+    paint_gpu_layer(&mut glyphs, error_card, total_mb, |_allocation, idx| {
+        let blink_on = (app.spinner_phase + idx) % 4 < 2;
+        let glyph = if blink_on { 'E' } else { 'e' };
+        (glyph, Style::default().fg(Color::Red))
+    });
+
     let mut spans = Vec::new();
     spans.push(Span::styled("[", Style::default().fg(Color::Gray)));
-    let mut painted = 0usize;
-    let total_mb = card.total_mb.max(1);
-
-    for allocation in &card.allocations {
-        let seg =
-            ((allocation.used_mb as f64 / total_mb as f64) * bar_width as f64).round() as usize;
-        let seg = seg.max(1);
-        painted = painted.saturating_add(seg);
-        spans.push(Span::styled(
-            " ".repeat(seg),
-            Style::default().bg(model_color(&allocation.model)),
-        ));
-    }
-
-    if painted < bar_width {
-        spans.push(Span::styled(
-            " ".repeat(bar_width - painted),
-            Style::default().bg(Color::Rgb(32, 32, 32)),
-        ));
+    for (glyph, style) in glyphs {
+        spans.push(Span::styled(glyph.to_string(), style));
     }
     spans.push(Span::styled("]", Style::default().fg(Color::Gray)));
     spans
+}
+
+fn gpu_allocation_summary(
+    live_card: Option<&super::GpuCardState>,
+    loading_card: Option<&super::GpuCardState>,
+    error_card: Option<&super::GpuCardState>,
+    target_card: Option<&super::GpuCardState>,
+    max_items: usize,
+) -> String {
+    if let Some(error_card) = error_card.filter(|card| !card.allocations.is_empty()) {
+        let mut parts = error_card
+            .allocations
+            .iter()
+            .take(max_items)
+            .map(|allocation| format!("{} error {}M", allocation.short_label, allocation.used_mb))
+            .collect::<Vec<_>>();
+        if error_card.allocations.len() > max_items {
+            parts.push(format!("+{}", error_card.allocations.len() - max_items));
+        }
+        return parts.join(" + ");
+    }
+
+    if let Some(loading_card) = loading_card.filter(|card| !card.allocations.is_empty()) {
+        let mut parts = loading_card
+            .allocations
+            .iter()
+            .take(max_items)
+            .map(|allocation| format!("{} ~{}M", allocation.short_label, allocation.used_mb))
+            .collect::<Vec<_>>();
+        if loading_card.allocations.len() > max_items {
+            parts.push(format!("+{}", loading_card.allocations.len() - max_items));
+        }
+        return parts.join(" + ");
+    }
+
+    if let Some(target_card) = target_card.filter(|card| !card.allocations.is_empty()) {
+        let mut parts = target_card
+            .allocations
+            .iter()
+            .take(max_items)
+            .map(|allocation| {
+                let live_used = live_card
+                    .and_then(|card| {
+                        card.allocations
+                            .iter()
+                            .find(|candidate| candidate.model == allocation.model)
+                    })
+                    .map(|usage| usage.used_mb)
+                    .unwrap_or(0);
+                if live_used == allocation.used_mb {
+                    format!("{} {}M", allocation.short_label, allocation.used_mb)
+                } else {
+                    format!(
+                        "{} {}/{}M",
+                        allocation.short_label, live_used, allocation.used_mb
+                    )
+                }
+            })
+            .collect::<Vec<_>>();
+        if target_card.allocations.len() > max_items {
+            parts.push(format!("+{}", target_card.allocations.len() - max_items));
+        }
+        return parts.join(" + ");
+    }
+
+    let Some(live_card) = live_card else {
+        return String::new();
+    };
+    let mut parts = live_card
+        .allocations
+        .iter()
+        .take(max_items)
+        .map(|allocation| format!("{} {}M", allocation.short_label, allocation.used_mb))
+        .collect::<Vec<_>>();
+    if live_card.allocations.len() > max_items {
+        parts.push(format!("+{}", live_card.allocations.len() - max_items));
+    }
+    parts.join(" + ")
+}
+
+fn paint_gpu_layer<F>(
+    glyphs: &mut [(char, Style)],
+    card: Option<&super::GpuCardState>,
+    total_mb: u64,
+    mut painter: F,
+) where
+    F: FnMut(&super::GpuModelUsage, usize) -> (char, Style),
+{
+    let Some(card) = card else {
+        return;
+    };
+    if card.allocations.is_empty() || total_mb == 0 || glyphs.is_empty() {
+        return;
+    }
+    let bar_width = glyphs.len();
+    let mut painted = 0usize;
+    for allocation in &card.allocations {
+        let seg =
+            ((allocation.used_mb as f64 / total_mb as f64) * bar_width as f64).round() as usize;
+        let seg = seg.max(1).min(bar_width.saturating_sub(painted));
+        if seg == 0 {
+            continue;
+        }
+        for offset in 0..seg {
+            let cell_index = painted + offset;
+            let (glyph, style) = painter(allocation, cell_index);
+            glyphs[cell_index] = (glyph, style);
+        }
+        painted = painted.saturating_add(seg);
+        if painted >= bar_width {
+            break;
+        }
+    }
+}
+
+fn dim_color(color: Color) -> Color {
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            r.saturating_div(2).saturating_add(24),
+            g.saturating_div(2).saturating_add(24),
+            b.saturating_div(2).saturating_add(24),
+        ),
+        Color::Yellow => Color::Rgb(140, 140, 24),
+        Color::LightMagenta => Color::Rgb(140, 24, 140),
+        Color::LightGreen => Color::Rgb(24, 140, 24),
+        Color::Cyan | Color::LightCyan => Color::Rgb(24, 120, 120),
+        _ => Color::Rgb(80, 80, 80),
+    }
+}
+
+fn allocation_bar_char(label: &str, loaded: bool) -> char {
+    let base = match label.trim().to_ascii_lowercase().as_str() {
+        "embed" => 'e',
+        "stt" => 's',
+        "tts" => 't',
+        "chat" => 'c',
+        other => other.chars().next().unwrap_or('m'),
+    };
+    if loaded {
+        base.to_ascii_uppercase()
+    } else {
+        base
+    }
 }
 
 fn model_color(model: &str) -> Color {
@@ -1791,28 +2428,20 @@ fn header_preview_line(app: &App, width: usize) -> Line<'static> {
         .settings_items
         .iter()
         .find(|item| item.key == "CTOX_CHAT_MODEL");
-    let compact_item = app
+    let preset_item = app
         .settings_items
         .iter()
-        .find(|item| item.key == "CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT");
+        .find(|item| item.key == "CTOX_CHAT_LOCAL_PRESET");
     let channel_item = app
         .settings_items
         .iter()
         .find(|item| item.key == "CTOX_OWNER_PREFERRED_CHANNEL");
-    if let (Some(model_item), Some(compact_item)) = (model_item, compact_item) {
+    if let Some(model_item) = model_item {
         if app.setting_is_dirty(model_item) {
-            let loaded = execution_baseline::model_profile_for_model(&model_item.saved_value).ok();
-            let draft = execution_baseline::model_profile_for_model(&model_item.value).ok();
+            let loaded = engine::model_profile_for_model(&model_item.saved_value).ok();
+            let draft = engine::model_profile_for_model(&model_item.value).ok();
             if let (Some(loaded), Some(draft)) = (loaded, draft) {
-                let compact_percent = compact_item
-                    .value
-                    .trim()
-                    .parse::<usize>()
-                    .ok()
-                    .unwrap_or(75);
-                let draft_compact = (draft.family_profile.max_seq_len as usize)
-                    .saturating_mul(compact_percent)
-                    / 100;
+                let draft_compact = app.header.compact_at;
                 let ctx_delta = draft.family_profile.max_seq_len as i64
                     - loaded.family_profile.max_seq_len as i64;
                 let compact_delta = draft_compact as i64 - app.header.compact_at as i64;
@@ -1859,14 +2488,14 @@ fn header_preview_line(app: &App, width: usize) -> Line<'static> {
                 );
             }
         }
-        if app.setting_is_dirty(compact_item) {
-            let draft_percent = compact_item
-                .value
-                .trim()
-                .parse::<usize>()
-                .ok()
-                .unwrap_or(75);
-            let draft_compact = app.header.realized_context.saturating_mul(draft_percent) / 100;
+    }
+    if let Some(preset_item) = preset_item {
+        if app.setting_is_dirty(preset_item) {
+            let cache_label = app
+                .chat_preset_bundle
+                .as_ref()
+                .map(|bundle| bundle.selected_plan.effective_cache_label().to_string())
+                .unwrap_or_else(|| "auto".to_string());
             return truncate_line_spans(
                 vec![
                     Span::styled(
@@ -1875,9 +2504,16 @@ fn header_preview_line(app: &App, width: usize) -> Line<'static> {
                             .fg(Color::LightYellow)
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw("compact "),
-                    Span::raw(format!("{draft_percent}% -> {draft_compact}")),
-                    delta_span(draft_compact as i64 - app.header.compact_at as i64),
+                    Span::raw("preset "),
+                    Span::raw(preset_item.value.clone()),
+                    Span::raw("  cache "),
+                    Span::raw(cache_label),
+                    Span::raw("  compact "),
+                    Span::raw(format!(
+                        "{}% >= {}k",
+                        app.header.compact_percent,
+                        app.header.compact_min_tokens / 1024
+                    )),
                 ],
                 width,
             );
@@ -1987,6 +2623,7 @@ fn truncate_line(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference::runtime_plan;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use std::path::PathBuf;
@@ -2003,6 +2640,69 @@ mod tests {
         let mut app = App::new(root, db_path);
         app.page = Page::Chat;
         app
+    }
+
+    fn test_plan(
+        model: &str,
+        preset: runtime_plan::ChatPreset,
+        cache: Option<&str>,
+    ) -> runtime_plan::ChatRuntimePlan {
+        runtime_plan::ChatRuntimePlan {
+            model: model.to_string(),
+            preset,
+            quantization: "Q4_K_M".to_string(),
+            runtime_isq: Some("Q4_K_M".to_string()),
+            max_seq_len: 16_384,
+            compaction_threshold_percent: 75,
+            compaction_min_tokens: 12_288,
+            min_context_floor_applied: false,
+            paged_attn: "auto".to_string(),
+            pa_cache_type: cache.map(str::to_string),
+            pa_memory_fraction: None,
+            disable_nccl: false,
+            tensor_parallel_backend: Some("nccl".to_string()),
+            mn_local_world_size: Some(3),
+            max_batch_size: 64,
+            max_seqs: 16,
+            cuda_visible_devices: "0,1,2".to_string(),
+            device_layers: None,
+            topology: None,
+            allow_device_layers_with_topology: false,
+            nm_device_ordinal: None,
+            base_device_ordinal: None,
+            moe_experts_backend: None,
+            disable_flash_attn: false,
+            force_no_mmap: false,
+            force_language_model_only: false,
+            isq_singlethread: false,
+            isq_cpu_threads: Some(16),
+            expected_tok_s: 92.0,
+            hardware_fingerprint: "test-gpu".to_string(),
+            rationale: vec!["test".to_string()],
+            gpu_allocations: vec![],
+        }
+    }
+
+    fn test_bundle(model: &str, cache: Option<&str>) -> runtime_plan::ChatPresetBundle {
+        let selected_plan = test_plan(model, runtime_plan::ChatPreset::Quality, cache);
+        runtime_plan::ChatPresetBundle {
+            model: model.to_string(),
+            hardware: runtime_plan::HardwareProfile {
+                gpus: vec![runtime_plan::HardwareGpu {
+                    index: 0,
+                    name: "RTX A4500".to_string(),
+                    total_mb: 20_480,
+                }],
+                gpu0_desktop_reserve_mb: 1_024,
+                fingerprint: "test-gpu".to_string(),
+            },
+            selected_preset: runtime_plan::ChatPreset::Quality,
+            selected_plan: selected_plan.clone(),
+            plans: vec![
+                selected_plan,
+                test_plan(model, runtime_plan::ChatPreset::Performance, cache),
+            ],
+        }
     }
 
     fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
@@ -2036,13 +2736,49 @@ mod tests {
         let mut app = test_app();
         app.service_status.running = true;
         app.service_status.busy = true;
+        app.runtime_health = crate::tui::RuntimeHealthState {
+            proxy_ready: true,
+            embedding_ready: Some(true),
+            stt_ready: Some(true),
+            tts_ready: Some(true),
+        };
         app.service_status.active_source_label = Some("queue".to_string());
+        app.service_status.current_goal_preview =
+            Some("Installiere Nextcloud sauber und pruefe danach den Login.".to_string());
         app.service_status.pending_count = 2;
         app.service_status.last_reply_chars = Some(534);
         app.service_status.recent_events = vec![
+            "phase queue compaction-check".to_string(),
+            "phase queue invoke-model".to_string(),
             "Started queued queue prompt".to_string(),
             "Completed queue reply with 318 chars".to_string(),
         ];
+        app.context_health = Some(crate::context_health::ContextHealthSnapshot {
+            conversation_id: 1,
+            overall_score: 96,
+            status: crate::context_health::ContextHealthStatus::Healthy,
+            summary: "healthy".to_string(),
+            repair_recommended: false,
+            dimensions: Vec::new(),
+            warnings: Vec::new(),
+        });
+        app.mission_state = Some(crate::lcm::MissionStateRecord {
+            conversation_id: 1,
+            mission: "Build and operate the Airbnb clone.".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker: "none".to_string(),
+            next_slice: "Implement host onboarding.".to_string(),
+            done_gate: "Keep capability audit open.".to_string(),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-1".to_string(),
+            last_synced_at: "2026-03-31T00:00:00Z".to_string(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+        });
         app.chat_messages.push(crate::lcm::MessageRecord {
             message_id: 1,
             conversation_id: 1,
@@ -2066,8 +2802,44 @@ mod tests {
         assert!(text.contains("turn"), "{text}");
         assert!(text.contains("working"), "{text}");
         assert!(text.contains("queue"), "{text}");
+        assert!(text.contains("active"), "{text}");
+        assert!(text.contains("missions"), "{text}");
+        assert!(
+            text.contains("Build and operate the Airbnb clone"),
+            "{text}"
+        );
+        assert!(text.contains("context healthy 96"), "{text}");
+        assert!(text.contains("goal"), "{text}");
+        assert!(text.contains("invoke-model"), "{text}");
         assert!(text.contains("CTOX"), "{text}");
         assert!(text.contains("YOU"), "{text}");
+    }
+
+    #[test]
+    fn internal_follow_up_turns_are_labeled_as_auto() {
+        let backend = TestBackend::new(140, 34);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.chat_messages.push(crate::lcm::MessageRecord {
+            message_id: 1,
+            conversation_id: 1,
+            seq: 1,
+            role: "user".to_string(),
+            content: "Review the blocked owner-visible task without losing continuity.\n\nGoal:\nInstall Redis cleanly\n\nThe latest attempt failed or stalled with this blocker:\ncodex-exec timed out after 180s\n".to_string(),
+            created_at: "2026-03-26T10:00:00Z".to_string(),
+            token_count: 40,
+        });
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("AUTO"), "{text}");
+        assert!(text.contains("system follow-up"), "{text}");
+        assert!(text.contains("goal Install Redis cleanly"), "{text}");
+        assert!(
+            text.contains("blocker codex-exec timed out after 180s"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -2075,6 +2847,7 @@ mod tests {
         let backend = TestBackend::new(140, 18);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = test_app();
+        app.header.chat_source = "local".to_string();
         app.header.model = "gpt-5.4".to_string();
         app.header.base_model = "gpt-5.4-mini".to_string();
         app.header.boost_model = Some("gpt-5.4".to_string());
@@ -2089,6 +2862,337 @@ mod tests {
     }
 
     #[test]
+    fn settings_view_renders_model_and_communication_tabs() {
+        let backend = TestBackend::new(140, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.page = Page::Settings;
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("Model"), "{text}");
+        assert!(text.contains("Communication"), "{text}");
+    }
+
+    #[test]
+    fn chat_header_shows_api_source_and_gpu_allocations() {
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 1536,
+            total_mb: 20_480,
+            utilization: 8,
+            allocations: vec![super::super::GpuModelUsage {
+                model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                short_label: "embed".to_string(),
+                used_mb: 512,
+            }],
+        }];
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("source api"), "{text}");
+        assert!(text.contains("GPU0 embed 512M"), "{text}");
+    }
+
+    #[test]
+    fn settings_snapshot_distinguishes_remote_chat_from_local_load() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 1024,
+            total_mb: 20_480,
+            utilization: 3,
+            allocations: vec![super::super::GpuModelUsage {
+                model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                short_label: "embed".to_string(),
+                used_mb: 512,
+            }],
+        }];
+
+        let text = settings_snapshot_text(&app, 80, 40);
+
+        assert!(text.contains("remote   gpt-5.4-mini"), "{text}");
+        assert!(text.contains("aux config"), "{text}");
+        assert!(text.contains("local load"), "{text}");
+        assert!(text.contains("gpu0     embed 512M"), "{text}");
+    }
+
+    #[test]
+    fn settings_snapshot_keeps_preview_wording_in_estimate_mode() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.header.estimate_mode = true;
+        app.header.chat_source = "local".to_string();
+        app.header.model = "Qwen/Qwen3.5-35B-A3B".to_string();
+        app.header.base_model = "Qwen/Qwen3.5-35B-A3B".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 12_288,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![super::super::GpuModelUsage {
+                model: "Qwen/Qwen3.5-35B-A3B".to_string(),
+                short_label: "qwen35".to_string(),
+                used_mb: 11_264,
+            }],
+        }];
+
+        let text = settings_snapshot_text(&app, 80, 40);
+
+        assert!(text.contains("preview  Qwen/Qwen3.5-35B-A3B"), "{text}");
+        assert!(text.contains("local est"), "{text}");
+        assert!(text.contains("gpu0     qwen35 11264M"), "{text}");
+    }
+
+    #[test]
+    fn settings_snapshot_lists_aux_gpu_roles_explicitly() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 6_700,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![
+                super::super::GpuModelUsage {
+                    model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                    short_label: "embed".to_string(),
+                    used_mb: 1_100,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                    short_label: "stt".to_string(),
+                    used_mb: 3_200,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-4B-TTS-2603".to_string(),
+                    short_label: "tts".to_string(),
+                    used_mb: 2_400,
+                },
+            ],
+        }];
+
+        let text = settings_snapshot_text(&app, 120, 40);
+
+        assert!(
+            text.contains("gpu0     embed 1100M + stt 3200M + tts 2400M"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_shows_loop_and_aux_targets_with_zero_progress() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.header.service_running = true;
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 0,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![],
+        }];
+        app.header.gpu_target_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 6_700,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![
+                super::super::GpuModelUsage {
+                    model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                    short_label: "embed".to_string(),
+                    used_mb: 1_100,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                    short_label: "stt".to_string(),
+                    used_mb: 4_200,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-4B-TTS-2603".to_string(),
+                    short_label: "tts".to_string(),
+                    used_mb: 1_400,
+                },
+            ],
+        }];
+
+        let text = settings_snapshot_text(&app, 120, 40);
+
+        assert!(text.contains("loop     running"), "{text}");
+        assert!(
+            text.contains("gpu0     embed 0/1100M + stt 0/4200M + tts 0/1400M"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn chat_header_shows_targeted_aux_progress_ranges() {
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 0,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![],
+        }];
+        app.header.gpu_target_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 6_700,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![
+                super::super::GpuModelUsage {
+                    model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                    short_label: "embed".to_string(),
+                    used_mb: 1_100,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                    short_label: "stt".to_string(),
+                    used_mb: 4_200,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-4B-TTS-2603".to_string(),
+                    short_label: "tts".to_string(),
+                    used_mb: 1_400,
+                },
+            ],
+        }];
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("GPU0 embed 0/1100M"), "{text}");
+        assert!(!text.contains("warmup expected"), "{text}");
+    }
+
+    #[test]
+    fn chat_header_overlays_target_ranges_on_live_idle_gpus() {
+        let backend = TestBackend::new(180, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+        app.header.gpu_cards = vec![
+            super::super::GpuCardState {
+                index: 0,
+                name: "RTX A4500".to_string(),
+                used_mb: 0,
+                total_mb: 20_480,
+                utilization: 0,
+                allocations: vec![],
+            },
+            super::super::GpuCardState {
+                index: 1,
+                name: "RTX A4500".to_string(),
+                used_mb: 0,
+                total_mb: 20_480,
+                utilization: 0,
+                allocations: vec![],
+            },
+            super::super::GpuCardState {
+                index: 2,
+                name: "RTX A4500".to_string(),
+                used_mb: 0,
+                total_mb: 20_480,
+                utilization: 0,
+                allocations: vec![],
+            },
+        ];
+        app.header.gpu_target_cards = vec![super::super::GpuCardState {
+            index: 0,
+            name: "RTX A4500".to_string(),
+            used_mb: 6_700,
+            total_mb: 20_480,
+            utilization: 0,
+            allocations: vec![
+                super::super::GpuModelUsage {
+                    model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
+                    short_label: "embed".to_string(),
+                    used_mb: 1_100,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-Mini-4B-Realtime-2602".to_string(),
+                    short_label: "stt".to_string(),
+                    used_mb: 4_200,
+                },
+                super::super::GpuModelUsage {
+                    model: "mistralai/Voxtral-4B-TTS-2603".to_string(),
+                    short_label: "tts".to_string(),
+                    used_mb: 1_400,
+                },
+            ],
+        }];
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("GPU0 embed 0/1100M"), "{text}");
+        assert!(text.contains("GPU1 idle"), "{text}");
+        assert!(text.contains("GPU2 idle"), "{text}");
+    }
+
+    #[test]
+    fn settings_snapshot_shows_effective_cache_type_in_plan() {
+        let mut app = test_app();
+        app.chat_preset_bundle = Some(test_bundle("openai/gpt-oss-20b", Some("f8e4m3")));
+
+        let text = settings_snapshot_text(&app, 80, 40);
+
+        assert!(text.contains("cache    f8e4m3"), "{text}");
+        assert!(
+            text.contains("• Quality Q4_K_M f8e4m3 16k 92 tok/s"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn settings_snapshot_uses_off_when_plan_disables_paged_attention() {
+        let mut app = test_app();
+        let mut bundle = test_bundle("Qwen/Qwen3.5-35B-A3B", None);
+        bundle.selected_plan.paged_attn = "off".to_string();
+        bundle.plans[0].paged_attn = "off".to_string();
+        bundle.plans[1].paged_attn = "off".to_string();
+        app.chat_preset_bundle = Some(bundle);
+
+        let text = settings_snapshot_text(&app, 80, 40);
+
+        assert!(text.contains("cache    off"), "{text}");
+    }
+
+    #[test]
     fn skills_view_shows_skill_details_and_resources() {
         let backend = TestBackend::new(140, 36);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2096,7 +3200,8 @@ mod tests {
         app.page = Page::Skills;
         app.skill_catalog = vec![super::super::SkillCatalogEntry {
             name: "service-deployment".to_string(),
-            source: "ctox system".to_string(),
+            class: super::super::SkillClass::CtoxCore,
+            state: super::super::SkillState::Stable,
             skill_path: PathBuf::from("/tmp/service-deployment/SKILL.md"),
             description: "Use when CTOX needs to install, configure, start and verify software."
                 .to_string(),
@@ -2112,5 +3217,32 @@ mod tests {
         assert!(text.contains("service-deployment"), "{text}");
         assert!(text.contains("deployment_bootstrap.py"), "{text}");
         assert!(text.contains("install-patterns.md"), "{text}");
+    }
+
+    #[test]
+    fn skills_view_keeps_selected_skill_inside_visible_window() {
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.page = Page::Skills;
+        app.skill_catalog = (0..30)
+            .map(|index| super::super::SkillCatalogEntry {
+                name: format!("skill-{index:02}"),
+                class: super::super::SkillClass::InstalledPacks,
+                state: super::super::SkillState::Stable,
+                skill_path: PathBuf::from(format!("/tmp/skill-{index:02}/SKILL.md")),
+                description: format!("Description for skill-{index:02}."),
+                helper_tools: vec![],
+                resources: vec![],
+            })
+            .collect();
+        app.skills_selected = 20;
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("skill-20"), "{text}");
+        assert!(!text.contains("skill-00"), "{text}");
+        assert!(!text.contains("skill-29"), "{text}");
     }
 }
