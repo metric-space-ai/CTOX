@@ -252,6 +252,18 @@ fn ensure_proxy_process(root: &Path) -> Result<()> {
     }
 
     let pid_path = proxy_pid_path(root);
+    if read_pid(&pid_path)
+        .filter(|pid| process_is_alive(*pid))
+        .is_some()
+    {
+        return Ok(());
+    }
+    if let Some(listener_pid) = listening_pids_for_port(root, port)?.into_iter().next() {
+        std::fs::write(&pid_path, format!("{listener_pid}\n")).with_context(|| {
+            format!("failed to write proxy pid file {}", pid_path.display())
+        })?;
+        return Ok(());
+    }
     stop_process(root, pid_path.clone())?;
 
     let runtime_dir = root.join("runtime");
@@ -262,14 +274,19 @@ fn ensure_proxy_process(root: &Path) -> Result<()> {
     let log_file_err = log_file
         .try_clone()
         .with_context(|| format!("failed to clone proxy log {}", log_path.display()))?;
-    let exe = {
-        let candidate = root.join("target/release/ctox");
-        if candidate.is_file() {
-            candidate
-        } else {
-            std::env::current_exe().context("failed to resolve current CTOX executable")?
-        }
-    };
+    let exe = std::env::current_exe()
+        .context("failed to resolve current CTOX executable")
+        .or_else(|_| {
+            let candidate = root.join("target/release/ctox");
+            if candidate.is_file() {
+                Ok(candidate)
+            } else {
+                Err(anyhow::anyhow!(
+                    "failed to resolve current CTOX executable and no runtime-local ctox binary exists at {}",
+                    candidate.display()
+                ))
+            }
+        })?;
     let mut command = Command::new("bash");
     command
         .arg("-lc")
@@ -318,6 +335,18 @@ fn ensure_backend_process(root: &Path, role: ManagedBackendRole) -> Result<()> {
             return Ok(());
         }
         stop_processes_on_port(root, spec.port)?;
+    }
+    if read_pid(&pid_path)
+        .filter(|pid| process_is_alive(*pid))
+        .is_some()
+    {
+        return Ok(());
+    }
+    if let Some(matched_pid) = matching_listener_pid_for_backend(root, spec.port, &spec)? {
+        std::fs::write(&pid_path, format!("{matched_pid}\n")).with_context(|| {
+            format!("failed to write backend pid file {}", pid_path.display())
+        })?;
+        return Ok(());
     }
 
     stop_process(root, pid_path.clone())?;

@@ -328,14 +328,7 @@ pub fn start_background(root: &Path) -> Result<String> {
         .append(true)
         .open(&log_path)
         .with_context(|| format!("failed to open service log {}", log_path.display()))?;
-    let exe = {
-        let candidate = root.join("target/release/ctox");
-        if candidate.is_file() {
-            candidate
-        } else {
-            std::env::current_exe().context("failed to resolve current CTOX executable")?
-        }
-    };
+    let exe = preferred_ctox_executable(root)?;
     let mut command = Command::new("bash");
     command
         .arg("-lc")
@@ -773,9 +766,32 @@ fn service_log_path(root: &Path) -> std::path::PathBuf {
     root.join(SERVICE_LOG_RELATIVE_PATH)
 }
 
+fn preferred_ctox_executable(root: &Path) -> Result<std::path::PathBuf> {
+    let current_exe = std::env::current_exe().context("failed to resolve current CTOX executable")?;
+    if current_exe.is_file() {
+        return Ok(current_exe);
+    }
+    let candidate = root.join("target/release/ctox");
+    if candidate.is_file() {
+        return Ok(candidate);
+    }
+    Ok(current_exe)
+}
+
+fn known_ctox_executable_displays(root: &Path) -> Vec<String> {
+    let mut displays = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe() {
+        displays.push(current_exe.display().to_string());
+    }
+    let candidate_display = root.join("target/release/ctox").display().to_string();
+    if !displays.iter().any(|entry| entry == &candidate_display) {
+        displays.push(candidate_display);
+    }
+    displays
+}
+
 fn cleanup_orphan_service_processes(root: &Path, keep_pid: Option<u32>) -> Result<usize> {
-    let exe = root.join("target/release/ctox");
-    let exe_display = exe.display().to_string();
+    let exe_displays = known_ctox_executable_displays(root);
     let output = Command::new("ps")
         .args(["-axo", "pid=,command="])
         .output()
@@ -803,7 +819,11 @@ fn cleanup_orphan_service_processes(root: &Path, keep_pid: Option<u32>) -> Resul
         if Some(pid) == keep_pid || pid == std::process::id() {
             continue;
         }
-        if !command.contains(&exe_display) || !command.contains("service --foreground") {
+        if !exe_displays
+            .iter()
+            .any(|exe_display| command.contains(exe_display))
+            || !command.contains("service --foreground")
+        {
             continue;
         }
         let status = Command::new("kill")
@@ -1969,7 +1989,8 @@ fn default_follow_up_thread_key(goal: &str) -> String {
 }
 
 fn build_queue_guard_prompt(root: &Path, pending: usize) -> String {
-    let ctox_bin = root.join("target/release/ctox");
+    let ctox_bin =
+        preferred_ctox_executable(root).unwrap_or_else(|_| root.join("target/release/ctox"));
     format!(
         "Use the queue-cleanup skill first. The CTOX service queue is under pressure with {pending} queued prompt(s). Before doing any normal work, inspect the service state for this root: {}. Prefer the local CLI binary `{}` with `status`, `schedule list`, and `queue list`. If that binary is unavailable, inspect `runtime/ctox_service.log` plus the runtime databases directly instead of assuming `ctox` is on PATH. Find the source of repeated or flooding work, pause or contain any schedule that is filling the queue, avoid duplicate follow-up tasks, and keep only the minimum safe next work moving. Treat queue recovery as top priority and report what was paused, deduplicated, blocked, or left active.",
         root.display(),

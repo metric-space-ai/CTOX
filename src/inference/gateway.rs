@@ -5,13 +5,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::ErrorKind;
 use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -353,6 +351,17 @@ fn sync_boost_telemetry_fields(
 }
 
 pub fn serve_proxy(config: ProxyConfig) -> anyhow::Result<()> {
+    if !config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+    {
+        ensure_backend_ready(&config.root, &config, false).with_context(|| {
+            format!(
+                "failed to prepare primary backend {} before starting proxy",
+                config.active_model.as_deref().unwrap_or("unknown")
+            )
+        })?;
+    }
     let server = Server::http(config.listen_addr())
         .map_err(|err| anyhow::anyhow!("failed to bind CTOX responses proxy: {err}"))?;
     let shared = Arc::new(Mutex::new(ProxyState {
@@ -391,8 +400,21 @@ pub fn serve_proxy(config: ProxyConfig) -> anyhow::Result<()> {
         let config = Arc::clone(&shared);
         let telemetry = Arc::clone(&telemetry);
         let response_state = Arc::clone(&response_state);
-        if let Err(err) = handle_request(&config, &telemetry, &response_state, request) {
-            eprintln!("ctox proxy error: {err}");
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_request(&config, &telemetry, &response_state, request)
+        })) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => eprintln!("ctox proxy error: {err}"),
+            Err(panic_payload) => {
+                let panic_message = if let Some(message) = panic_payload.downcast_ref::<&str>() {
+                    (*message).to_string()
+                } else if let Some(message) = panic_payload.downcast_ref::<String>() {
+                    message.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                eprintln!("ctox proxy request panic: {panic_message}");
+            }
         }
     }
 
@@ -742,6 +764,29 @@ fn handle_request(
     } else {
         config.join_routed_url(&upstream_path)
     };
+    let targets_primary_local_chat_backend =
+        matches!(request.method(), Method::Post)
+            && !use_openai_passthrough
+            && !matches!(
+                url.as_str(),
+                "/v1/embeddings" | "/v1/audio/transcriptions" | "/v1/audio/speech" | "/v1/audio/voices"
+            );
+    if targets_primary_local_chat_backend {
+        if let Err(err) = ensure_backend_ready(&config.root, &config, false) {
+            let response = Response::from_string(
+                serde_json::json!({
+                    "error": { "message": err.to_string() }
+                })
+                .to_string(),
+            )
+            .with_status_code(StatusCode(502))
+            .with_header(json_header());
+            request
+                .respond(response)
+                .context("failed to write primary backend error response")?;
+            return Ok(());
+        }
+    }
     if matches!(request.method(), Method::Post) && url == "/v1/audio/transcriptions" {
         let content_type = request
             .headers()
@@ -995,69 +1040,10 @@ fn relay_gpt_oss_harmony_response(
     request_path: &str,
     started: Instant,
 ) -> anyhow::Result<()> {
-    if matches!(harmony_relay_mode, HarmonyRelayMode::Sse) {
-        eprintln!("ctox proxy opening streaming harmony relay");
-        let (tx, rx) = mpsc::channel();
-        let state = Arc::clone(state);
-        let telemetry = Arc::clone(telemetry);
-        let response_state = Arc::clone(response_state);
-        let config = config.clone();
-        let method = method.to_string();
-        let upstream_url = upstream_url.to_string();
-        let materialized_request = materialized_request.clone();
-        let forwarded_body = forwarded_body.clone();
-        let request_path = request_path.to_string();
-        let augmentation = web_search_augmentation.cloned();
-        thread::spawn(move || {
-            eprintln!("ctox proxy harmony SSE worker start");
-            let result = complete_gpt_oss_harmony_roundtrip(
-                &state,
-                &config,
-                &telemetry,
-                &response_state,
-                &method,
-                &upstream_url,
-                materialized_request,
-                forwarded_body,
-                augmentation.as_ref(),
-            )
-            .and_then(|outcome| {
-                let terminal_body = build_harmony_terminal_sse(
-                    &outcome.body,
-                    augmentation.as_ref(),
-                    outcome.status_code,
-                )?;
-                update_proxy_telemetry(
-                    &telemetry,
-                    &config,
-                    &request_path,
-                    outcome.status_code,
-                    &terminal_body,
-                    started.elapsed().as_millis() as u64,
-                );
-                Ok(terminal_body)
-            })
-            .map_err(|err| {
-                eprintln!("ctox proxy harmony SSE worker error: {err}");
-                let _ = attempt_auto_recovery(
-                    &state,
-                    &telemetry,
-                    &format!("harmony SSE relay failed: {err}"),
-                );
-                err.to_string()
-            });
-            if result.is_ok() {
-                eprintln!("ctox proxy harmony SSE worker finished successfully");
-            }
-            let _ = tx.send(result);
-        });
-        eprintln!("ctox proxy about to write streaming harmony relay");
-        write_streaming_harmony_sse_response(request, rx)
-            .context("failed to write streaming harmony relay response")?;
-        eprintln!("ctox proxy finished streaming harmony relay response");
-        return Ok(());
-    }
-
+    eprintln!(
+        "ctox proxy harmony relay start mode={:?} request_path={request_path}",
+        harmony_relay_mode
+    );
     let outcome = complete_gpt_oss_harmony_roundtrip(
         state,
         config,
@@ -1069,7 +1055,13 @@ fn relay_gpt_oss_harmony_response(
         forwarded_body,
         web_search_augmentation,
     )?;
+    eprintln!(
+        "ctox proxy harmony relay roundtrip complete status={} body_bytes={}",
+        outcome.status_code,
+        outcome.body.len()
+    );
 
+    eprintln!("ctox proxy harmony relay about to emit downstream response");
     relay_response_from_parts(
         config,
         telemetry,
@@ -1082,7 +1074,9 @@ fn relay_gpt_oss_harmony_response(
         web_search_augmentation,
         request_path,
         started,
-    )
+    )?;
+    eprintln!("ctox proxy harmony relay downstream response emitted");
+    Ok(())
 }
 
 fn complete_gpt_oss_harmony_roundtrip(
@@ -1096,57 +1090,55 @@ fn complete_gpt_oss_harmony_roundtrip(
     forwarded_body: Vec<u8>,
     web_search_augmentation: Option<&web_search::WebSearchAugmentation>,
 ) -> anyhow::Result<HarmonyRelayResponse> {
+    eprintln!("ctox proxy harmony roundtrip sending first upstream request");
     let agent = ureq::AgentBuilder::new().build();
-    let first_response = send_harmony_upstream_request_with_retry(
+    let mut outcome = send_harmony_upstream_request_with_retry(
         &agent,
         config,
         method,
         upstream_url,
         config.active_model.as_deref(),
         &forwarded_body,
+    )
+    .map_err(|err| {
+        let _ = attempt_auto_recovery(state, telemetry, &format!("harmony upstream failed: {err}"));
+        anyhow::anyhow!("harmony upstream failed: {err}")
+    })?;
+    eprintln!(
+        "ctox proxy harmony first upstream response status={} body_bytes={}",
+        outcome.status_code,
+        outcome.body.len()
     );
-    let mut outcome = match first_response {
-        Ok(response) => harmony_relay_response_from_ureq(response)
-            .context("failed to read upstream harmony response")?,
-        Err(ureq::Error::Status(_, response)) => harmony_relay_response_from_ureq(response)
-            .context("failed to read upstream harmony error response")?,
-        Err(err) => {
-            let _ =
-                attempt_auto_recovery(state, telemetry, &format!("harmony upstream failed: {err}"));
-            anyhow::bail!("harmony upstream failed: {err}");
-        }
-    };
 
     if outcome.status_code < 400 {
         if let Some(followup_body) =
             engine::build_gpt_oss_followup_completion_request(&forwarded_body, &outcome.body)?
         {
             eprintln!("ctox proxy issuing GPT-OSS continuation completion");
-            let followup_response = send_harmony_upstream_request_with_retry(
+            outcome = send_harmony_upstream_request_with_retry(
                 &agent,
                 config,
                 method,
                 upstream_url,
                 config.active_model.as_deref(),
                 &followup_body,
-            );
-            outcome = match followup_response {
-                Ok(response) => harmony_relay_response_from_ureq(response)
-                    .context("failed to read GPT-OSS continuation body")?,
-                Err(ureq::Error::Status(_, response)) => harmony_relay_response_from_ureq(response)
-                    .context("failed to read GPT-OSS continuation error body")?,
-                Err(err) => {
-                    let _ = attempt_auto_recovery(
-                        state,
-                        telemetry,
-                        &format!("harmony continuation failed: {err}"),
-                    );
-                    anyhow::bail!("harmony continuation failed: {err}");
-                }
-            };
+            )
+            .map_err(|err| {
+                let _ = attempt_auto_recovery(
+                    state,
+                    telemetry,
+                    &format!("harmony continuation failed: {err}"),
+                );
+                anyhow::anyhow!("harmony continuation failed: {err}")
+            })?;
             eprintln!(
                 "ctox proxy continuation harmony body={}",
                 String::from_utf8_lossy(&outcome.body)
+            );
+            eprintln!(
+                "ctox proxy harmony continuation response status={} body_bytes={}",
+                outcome.status_code,
+                outcome.body.len()
             );
         }
     }
@@ -1170,7 +1162,19 @@ fn send_harmony_upstream_request_with_retry(
     upstream_url: &str,
     active_model: Option<&str>,
     body: &[u8],
-) -> Result<ureq::Response, ureq::Error> {
+) -> anyhow::Result<HarmonyRelayResponse> {
+    if !config
+        .upstream_base_url
+        .starts_with(OPENAI_RESPONSES_BASE_URL)
+    {
+        return send_local_harmony_upstream_request_with_retry(
+            config,
+            method,
+            upstream_url,
+            active_model,
+            body,
+        );
+    }
     let retry_deadline =
         Instant::now() + Duration::from_secs(harmony_upstream_startup_retry_secs(config));
     loop {
@@ -1181,9 +1185,131 @@ fn send_harmony_upstream_request_with_retry(
             {
                 thread::sleep(Duration::from_millis(500));
             }
+            Ok(response) => {
+                return harmony_relay_response_from_ureq(response)
+                    .context("failed to read upstream harmony response");
+            }
+            Err(ureq::Error::Status(_, response)) => {
+                return harmony_relay_response_from_ureq(response)
+                    .context("failed to read upstream harmony error response");
+            }
+            Err(err) => return Err(anyhow::anyhow!(err.to_string())),
+        }
+    }
+}
+
+fn send_local_harmony_upstream_request_with_retry(
+    config: &ProxyConfig,
+    method: &str,
+    upstream_url: &str,
+    active_model: Option<&str>,
+    body: &[u8],
+) -> anyhow::Result<HarmonyRelayResponse> {
+    let retry_deadline =
+        Instant::now() + Duration::from_secs(harmony_upstream_startup_retry_secs(config));
+    loop {
+        match send_local_harmony_upstream_request(method, upstream_url, active_model, body) {
+            Err(err)
+                if should_retry_harmony_local_connect(&err)
+                    && Instant::now() < retry_deadline =>
+            {
+                thread::sleep(Duration::from_millis(500));
+            }
             other => return other,
         }
     }
+}
+
+fn send_local_harmony_upstream_request(
+    method: &str,
+    upstream_url: &str,
+    active_model: Option<&str>,
+    body: &[u8],
+) -> anyhow::Result<HarmonyRelayResponse> {
+    let started = Instant::now();
+    let sentinel = "\n__CTOX_HTTP_STATUS__:";
+    eprintln!(
+        "ctox proxy local harmony upstream spawn method={} url={} body_bytes={}",
+        method,
+        upstream_url,
+        body.len()
+    );
+    let mut command = Command::new("curl");
+    command
+        .arg("-sS")
+        .arg("--max-time")
+        .arg("240")
+        .arg("-X")
+        .arg(method)
+        .arg("-H")
+        .arg("content-type: application/json")
+        .arg("--data-binary")
+        .arg("@-")
+        .arg("-w")
+        .arg(format!("{sentinel}%{{http_code}}"))
+        .arg(upstream_url)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(active_model) = active_model {
+        command.arg("-H").arg(format!("x-ctox-active-model: {active_model}"));
+    }
+    let mut child = command
+        .spawn()
+        .context("failed to launch curl for local harmony upstream")?;
+    eprintln!("ctox proxy local harmony upstream curl pid={}", child.id());
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(body)
+            .context("failed to write local harmony upstream request body")?;
+        stdin
+            .flush()
+            .context("failed to flush local harmony upstream request body")?;
+        drop(stdin);
+        eprintln!("ctox proxy local harmony upstream request body sent");
+    }
+    eprintln!("ctox proxy local harmony upstream waiting for curl output");
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for local harmony upstream curl")?;
+    eprintln!(
+        "ctox proxy local harmony upstream curl finished rc={:?} elapsed_ms={}",
+        output.status.code(),
+        started.elapsed().as_millis()
+    );
+    if !output.status.success() {
+        eprintln!(
+            "ctox proxy local harmony upstream curl stderr={}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        anyhow::bail!(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let stdout_text = String::from_utf8_lossy(&output.stdout);
+    let Some(marker_index) = stdout_text.rfind(sentinel) else {
+        anyhow::bail!("local harmony upstream did not return an HTTP status marker");
+    };
+    let status_code = stdout_text[marker_index + sentinel.len()..]
+        .trim()
+        .parse::<u16>()
+        .unwrap_or(502);
+    eprintln!(
+        "ctox proxy local harmony upstream parsed status={} response_body_bytes={}",
+        status_code,
+        marker_index
+    );
+    Ok(HarmonyRelayResponse {
+        status_code,
+        response_headers: Vec::new(),
+        body: output.stdout[..marker_index].to_vec(),
+    })
+}
+
+fn should_retry_harmony_local_connect(err: &anyhow::Error) -> bool {
+    let text = err.to_string();
+    text.contains("Connection refused")
+        || text.contains("Failed to connect")
+        || text.contains("Could not connect")
+        || text.contains("Connection reset by peer")
 }
 
 fn harmony_upstream_startup_retry_secs(config: &ProxyConfig) -> u64 {
@@ -1321,17 +1447,6 @@ fn extract_harmony_error_message(body: &[u8]) -> String {
         .unwrap_or_else(|| String::from_utf8_lossy(body).trim().to_string())
 }
 
-fn sse_keepalive_frame(message: &str) -> Vec<u8> {
-    format!(
-        "event: response.in_progress\ndata: {}\n\n",
-        serde_json::json!({
-            "type": "response.in_progress",
-            "message": message,
-        })
-    )
-    .into_bytes()
-}
-
 fn sse_error_frame(message: &str) -> Vec<u8> {
     format!(
         "event: error\ndata: {}\n\ndata: [DONE]\n\n",
@@ -1342,71 +1457,6 @@ fn sse_error_frame(message: &str) -> Vec<u8> {
         })
     )
     .into_bytes()
-}
-
-fn write_streaming_harmony_sse_response(
-    request: tiny_http::Request,
-    receiver: mpsc::Receiver<Result<Vec<u8>, String>>,
-) -> anyhow::Result<()> {
-    let mut writer = request.into_writer();
-    write!(
-        writer,
-        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nx-accel-buffering: no\r\nconnection: close\r\n\r\n"
-    )
-    .context("failed to write harmony SSE response headers")?;
-    writer
-        .flush()
-        .context("failed to flush harmony SSE response headers")?;
-    write_stream_payload(&mut writer, &sse_keepalive_frame("harmony relay started"))?;
-    eprintln!("ctox proxy harmony SSE writer emitted initial chunk");
-
-    loop {
-        match receiver.recv_timeout(Duration::from_secs(3)) {
-            Ok(Ok(body)) => {
-                eprintln!(
-                    "ctox proxy harmony SSE writer received terminal body ({} bytes)",
-                    body.len()
-                );
-                write_stream_payload(&mut writer, &body)?;
-                writer.flush().or_else(ignore_client_close_error)?;
-                return Ok(());
-            }
-            Ok(Err(message)) => {
-                eprintln!("ctox proxy harmony SSE writer received terminal error: {message}");
-                let body = sse_error_frame(&message);
-                write_stream_payload(&mut writer, &body)?;
-                writer.flush().or_else(ignore_client_close_error)?;
-                return Ok(());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                write_stream_payload(&mut writer, &sse_keepalive_frame("harmony relay keepalive"))?;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                let body = sse_error_frame("proxy background relay disconnected before completion");
-                write_stream_payload(&mut writer, &body)?;
-                writer.flush().or_else(ignore_client_close_error)?;
-                return Ok(());
-            }
-        }
-    }
-}
-
-fn write_stream_payload(writer: &mut dyn Write, body: &[u8]) -> anyhow::Result<()> {
-    writer
-        .write_all(body)
-        .context("failed to write harmony SSE payload")?;
-    writer.flush().or_else(ignore_client_close_error)?;
-    Ok(())
-}
-
-fn ignore_client_close_error(err: std::io::Error) -> std::io::Result<()> {
-    match err.kind() {
-        ErrorKind::BrokenPipe
-        | ErrorKind::ConnectionAborted
-        | ErrorKind::ConnectionReset
-        | ErrorKind::UnexpectedEof => Ok(()),
-        _ => Err(err),
-    }
 }
 
 fn maybe_expire_boost_lease(
@@ -1616,6 +1666,13 @@ fn relay_response_from_parts(
     started: Instant,
 ) -> anyhow::Result<()> {
     let status = StatusCode(status_code);
+    eprintln!(
+        "ctox proxy relay_response_from_parts status={} harmony_mode={:?} local_mode={:?} body_bytes={}",
+        status.0,
+        harmony_relay_mode,
+        local_responses_relay_mode,
+        body.len()
+    );
     if !matches!(
         local_responses_relay_mode,
         LocalResponsesRelayMode::Disabled
@@ -1784,9 +1841,15 @@ fn relay_response_from_parts(
             tiny_response = tiny_response.with_header(header);
         }
     }
+    eprintln!(
+        "ctox proxy writing downstream response status={} content_type_override={:?}",
+        status.0,
+        content_type_override
+    );
     request
         .respond(tiny_response)
         .context("failed to write proxy response")?;
+    eprintln!("ctox proxy downstream response write finished");
     Ok(())
 }
 
