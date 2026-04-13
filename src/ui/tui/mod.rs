@@ -1477,10 +1477,9 @@ impl App {
                         .unwrap_or("imap")
                         .eq_ignore_ascii_case("ews")
             }
-            "CTO_JAMI_ACCOUNT_ID" | "CTO_JAMI_PROFILE_NAME" => self
-                .value_for_setting("CTOX_OWNER_PREFERRED_CHANNEL")
-                .unwrap_or(DEFAULT_COMMUNICATION_PATH)
-                .eq_ignore_ascii_case("jami"),
+            // Jami fields are always visible so the QR code can be used to add
+            // the agent as a contact regardless of the preferred reply channel.
+            "CTO_JAMI_ACCOUNT_ID" | "CTO_JAMI_PROFILE_NAME" => true,
             "CTO_TEAMS_USERNAME"
             | "CTO_TEAMS_PASSWORD"
             | "CTO_TEAMS_TENANT_ID"
@@ -2524,17 +2523,11 @@ impl App {
         if self.page != Page::Settings {
             return false;
         }
-        let channel = self
-            .value_for_setting("CTOX_OWNER_PREFERRED_CHANNEL")
-            .unwrap_or(DEFAULT_COMMUNICATION_PATH);
-        if !channel.eq_ignore_ascii_case("jami") {
-            return false;
-        }
+        // Show the Jami QR code whenever a Jami-related field is focused,
+        // regardless of the preferred reply channel.
         matches!(
             self.current_setting().map(|item| item.key),
-            Some("CTOX_OWNER_PREFERRED_CHANNEL")
-                | Some("CTO_JAMI_PROFILE_NAME")
-                | Some("CTO_JAMI_ACCOUNT_ID")
+            Some("CTO_JAMI_PROFILE_NAME") | Some("CTO_JAMI_ACCOUNT_ID")
         )
     }
 
@@ -4285,12 +4278,22 @@ fn auxiliary_backend_ready(
 
 fn runtime_health_state(root: &Path, telemetry: Option<&RuntimeTelemetry>) -> RuntimeHealthState {
     let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
-    let proxy_ready = telemetry
-        .map(|value| value.backend_healthy)
-        .or_else(|| (!supervisor::boundary_proxy_is_managed(root)).then_some(true))
-        .unwrap_or_else(|| {
-            crate::inference::gateway::current_runtime_telemetry(root).backend_healthy
-        });
+    // When inference is purely API-backed the local proxy is not required;
+    // treat it as healthy so the TUI does not show a misleading "degraded".
+    let chat_source_is_api = runtime_kernel::InferenceRuntimeKernel::resolve(root)
+        .ok()
+        .map(|k| k.source.eq_ignore_ascii_case("api"))
+        .unwrap_or(false);
+    let proxy_ready = if chat_source_is_api && !supervisor::boundary_proxy_is_managed(root) {
+        true
+    } else {
+        telemetry
+            .map(|value| value.backend_healthy)
+            .or_else(|| (!supervisor::boundary_proxy_is_managed(root)).then_some(true))
+            .unwrap_or_else(|| {
+                crate::inference::gateway::current_runtime_telemetry(root).backend_healthy
+            })
+    };
     RuntimeHealthState {
         proxy_ready,
         embedding_ready: auxiliary_backend_ready(
