@@ -1172,6 +1172,51 @@ MANIFEST
   [[ -n "$ENGINE_FEATURES" ]] && printf '%s\n' "$ENGINE_FEATURES" > "$STATE_ROOT/engine_features"
 }
 
+# ── Jami DBus env file ────────────────────────────────────────────────────────
+write_jami_dbus_env() {
+  [[ "$PLATFORM" == "linux" ]] || return 0
+  local state_root="$1"
+  local dbus_env_path="$state_root/jami_dbus_env"
+  local uid; uid="$(id -u)"
+  local bus_path="/run/user/${uid}/bus"
+
+  # Only write the file when a user bus socket actually exists
+  if [[ -S "$bus_path" ]]; then
+    printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s\n' "$bus_path" > "$dbus_env_path"
+    # Ensure engine.env references the file
+    if ! grep -q 'CTO_JAMI_DBUS_ENV_FILE' "$state_root/engine.env" 2>/dev/null; then
+      printf 'CTO_JAMI_DBUS_ENV_FILE=%s\n' "$dbus_env_path" >> "$state_root/engine.env"
+    fi
+  fi
+}
+
+# ── Linux desktop entry ──────────────────────────────────────────────────────
+install_linux_desktop_entry() {
+  [[ "$PLATFORM" == "linux" ]] || return 0
+  # Only install when a graphical session is likely present
+  [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_SESSION_TYPE:-}" ]] || return 0
+  local source_root="$1"
+  local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+  local icons_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
+  local desktop_file="$source_root/desktop/packaging/linux/ctox-desktop.desktop"
+  local icon_file="$source_root/desktop/CTOX_app_icon.png"
+
+  [[ -f "$desktop_file" ]] || return 0
+
+  mkdir -p "$apps_dir"
+  # Patch Exec= so it resolves via the symlinked binary
+  sed "s|^Exec=.*|Exec=$BIN_DIR/ctox-desktop|" "$desktop_file" > "$apps_dir/ctox-desktop.desktop"
+  chmod 644 "$apps_dir/ctox-desktop.desktop"
+
+  if [[ -f "$icon_file" ]]; then
+    mkdir -p "$icons_dir"
+    cp "$icon_file" "$icons_dir/ctox-desktop.png"
+  fi
+
+  command -v update-desktop-database >/dev/null 2>&1 && \
+    update-desktop-database "$apps_dir" 2>/dev/null || true
+}
+
 # ── Full engine.env ──────────────────────────────────────────────────────────
 write_full_engine_env() {
   local state_root="$1"
@@ -1577,6 +1622,12 @@ main() {
     printf '\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$shell_rc"
     shell_rc_hint="$shell_rc"
   fi
+
+  # Write Jami DBus env file so the Jami adapter can reach the daemon
+  write_jami_dbus_env "$STATE_ROOT"
+
+  # Install Linux desktop entry if a graphical session is present
+  install_linux_desktop_entry "$source_root"
 
   # Set update channel
   "$BIN_DIR/ctox" update channel set-github --repo metric-space-ai/ctox 2>/dev/null || true

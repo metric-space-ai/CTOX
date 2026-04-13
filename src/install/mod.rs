@@ -1145,6 +1145,10 @@ where
             copy_filtered(&source_path, &destination_path, skip)?;
             continue;
         }
+        // Skip Unix sockets, FIFOs, and other special files that cannot be copied.
+        if !file_type.is_file() && !file_type.is_symlink() {
+            continue;
+        }
         if file_type.is_symlink() {
             let target = fs::read_link(&source_path)
                 .with_context(|| format!("failed to read symlink {}", source_path.display()))?;
