@@ -1241,9 +1241,18 @@ write_full_engine_env() {
   esac
 
   local proxy_port="12434"
-  local emb_model="Qwen/Qwen3-Embedding-0.6B" emb_port="1237" emb_isq="Q4K"
-  local stt_model="engineai/Voxtral-Mini-4B-Realtime-2602" stt_port="1238" stt_isq="Q4K"
-  local tts_model="engineai/Voxtral-4B-TTS-2603" tts_port="1239" tts_isq="Q4K"
+
+  # Auxiliary models require a local inference runtime.  On hosts without a
+  # GPU (detected_gpu=none) leave them empty so CTOX does not attempt to
+  # spawn backends that can never start.
+  local emb_model="" emb_port="1237" emb_isq="Q4K"
+  local stt_model="" stt_port="1238" stt_isq="Q4K"
+  local tts_model="" tts_port="1239" tts_isq="Q4K"
+  if [[ "${CTOX_DETECTED_GPU:-none}" != "none" ]]; then
+    emb_model="Qwen/Qwen3-Embedding-0.6B"
+    stt_model="Systran/faster-whisper-small [CPU]"
+    tts_model="speaches-ai/piper-en_US-lessac-medium [CPU EN]"
+  fi
 
   cat > "$state_root/engine.env" <<ENVEOF
 CTOX_ENGINE_MODEL=${model}
@@ -1604,7 +1613,7 @@ main() {
   write_wrapper_script "$active_root"
   sync_skills_to_codex_home "$source_root"
   write_platform_capabilities "$STATE_ROOT"
-  write_full_engine_env "$STATE_ROOT"
+  CTOX_DETECTED_GPU="$detected_gpu" write_full_engine_env "$STATE_ROOT"
   tui_complete_step 9 "$INSTALL_ROOT"
 
   # ── Step 10: Services ──

@@ -4294,14 +4294,27 @@ fn runtime_health_state(root: &Path, telemetry: Option<&RuntimeTelemetry>) -> Ru
                 crate::inference::gateway::current_runtime_telemetry(root).backend_healthy
             })
     };
+    // When running in pure API mode without a managed proxy, local
+    // auxiliary backends (embedding, STT, TTS) are optional — mark them
+    // as unknown (None) instead of failed so the TUI stays "healthy".
+    let skip_aux = chat_source_is_api && !supervisor::boundary_proxy_is_managed(root);
     RuntimeHealthState {
         proxy_ready,
-        embedding_ready: auxiliary_backend_ready(
-            resolved_runtime.as_ref(),
-            engine::AuxiliaryRole::Embedding,
-        ),
-        stt_ready: auxiliary_backend_ready(resolved_runtime.as_ref(), engine::AuxiliaryRole::Stt),
-        tts_ready: auxiliary_backend_ready(resolved_runtime.as_ref(), engine::AuxiliaryRole::Tts),
+        embedding_ready: if skip_aux {
+            None
+        } else {
+            auxiliary_backend_ready(resolved_runtime.as_ref(), engine::AuxiliaryRole::Embedding)
+        },
+        stt_ready: if skip_aux {
+            None
+        } else {
+            auxiliary_backend_ready(resolved_runtime.as_ref(), engine::AuxiliaryRole::Stt)
+        },
+        tts_ready: if skip_aux {
+            None
+        } else {
+            auxiliary_backend_ready(resolved_runtime.as_ref(), engine::AuxiliaryRole::Tts)
+        },
     }
 }
 
