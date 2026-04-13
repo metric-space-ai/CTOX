@@ -31,6 +31,8 @@ struct JamiOptions {
     outbox_dir: PathBuf,
     archive_dir: PathBuf,
     account_id: String,
+    /// The Jami username hash of the own account, used to filter self-echo.
+    username: String,
     profile_name: String,
     provider: String,
     limit: usize,
@@ -370,6 +372,12 @@ fn execute_sync(options: &JamiOptions) -> Result<Value> {
     let mut options = options.clone();
     ensure_dirs(&options)?;
     let resolved = resolve_jami_account(&mut options, true)?;
+    // Populate own username so the self-echo filter in normalize_jami_git_commit works.
+    if options.username.is_empty() {
+        if let Some(account) = resolved.as_ref() {
+            options.username = account.username.clone();
+        }
+    }
     let account_key = account_key_from_jami(&options.account_id);
     let mut conn = open_channel_db(&options.db_path)?;
     ensure_account(
@@ -1612,6 +1620,10 @@ fn normalize_jami_git_commit(
                 .unwrap_or_else(|| entry.author_device.clone())
         });
     if author.trim().is_empty() {
+        return Ok(None);
+    }
+    // Skip messages authored by our own account to avoid self-echo.
+    if !options.username.is_empty() && author == options.username {
         return Ok(None);
     }
     let has_voice_payload =
