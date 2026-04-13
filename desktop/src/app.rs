@@ -30,6 +30,7 @@ use crate::{
     provision::{ProvisionEvent, ProvisionRequest},
     terminal_backend::TerminalSession,
     terminal_emulator::{TERMINAL_DEFAULT_BG, TerminalSnapshot},
+    views::{self, DataView, DataViewState},
 };
 
 const LEFT_PANEL_WIDTH: f32 = 300.0;
@@ -67,6 +68,7 @@ pub struct CtoxDesktopApp {
     terminal_zoom: f32,
     installation_statuses: BTreeMap<String, InstallationRuntimeStatus>,
     last_installation_status_poll: Instant,
+    data_view_state: DataViewState,
     provision_rx: Option<Receiver<ProvisionEvent>>,
     provisioning_installation_id: Option<String>,
     provision_status: Option<String>,
@@ -175,6 +177,7 @@ impl CtoxDesktopApp {
             terminal_zoom: 1.0,
             installation_statuses: BTreeMap::new(),
             last_installation_status_poll: Instant::now() - Duration::from_secs(10),
+            data_view_state: DataViewState::default(),
             provision_rx: None,
             provisioning_installation_id: None,
             provision_status: None,
@@ -482,6 +485,11 @@ impl CtoxDesktopApp {
 
     fn select_installation_and_focus(&mut self, installation_id: String) {
         self.selected_installation_id = Some(installation_id.clone());
+
+        // When switching installation, reset data view to Terminal
+        // so we don't show stale data from the previous installation
+        self.data_view_state.active_view = DataView::Terminal;
+
         let runtime_status = self.installation_runtime_status(&installation_id);
         let can_show_tui = !matches!(runtime_status.label.as_str(), "Offline" | "Error");
         if can_show_tui {
@@ -1374,41 +1382,7 @@ impl CtoxDesktopApp {
         });
     }
 
-    fn render_tui_view_tabs(&mut self, ui: &mut Ui) {
-        let Some(tab) = self.active_tab() else {
-            return;
-        };
-        if tab.kind != SessionKind::Tui {
-            return;
-        }
-        let current = tab.active_tui_view.unwrap_or(TuiView::Chat);
-        ui.horizontal(|ui| {
-            for view in TuiView::ALL {
-                let selected = current == view;
-                if ui.selectable_label(selected, view.label()).clicked() {
-                    self.switch_active_tui_view(view);
-                }
-            }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.small_button("Reset").clicked() {
-                    self.terminal_zoom = 1.0;
-                }
-                ui.label(
-                    RichText::new(format!("{:.0}%", self.terminal_zoom * 100.0))
-                        .size(12.0)
-                        .color(Color32::from_gray(180)),
-                );
-                if ui.small_button("+").clicked() {
-                    self.terminal_zoom =
-                        (self.terminal_zoom + 0.05).clamp(TERMINAL_ZOOM_MIN, TERMINAL_ZOOM_MAX);
-                }
-                if ui.small_button("-").clicked() {
-                    self.terminal_zoom =
-                        (self.terminal_zoom - 0.05).clamp(TERMINAL_ZOOM_MIN, TERMINAL_ZOOM_MAX);
-                }
-            });
-        });
-    }
+    // render_tui_view_tabs is now integrated into render_mode_tabs
 
     fn render_terminal_area(&mut self, ui: &mut Ui) {
         let Some(active_tab_id) = self.active_tab_id.clone() else {
@@ -1661,25 +1635,6 @@ impl CtoxDesktopApp {
                     {
                         self.pick_composer_attachments();
                     }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("⚡").size(17.0).color(Color32::from_gray(180)));
-                    egui::ComboBox::from_id_salt("composer-model")
-                        .selected_text(self.selected_model)
-                        .width(132.0)
-                        .show_ui(ui, |ui| {
-                            for model in COMPOSER_MODELS {
-                                ui.selectable_value(&mut self.selected_model, *model, *model);
-                            }
-                        });
-                    ui.add_space(18.0);
-                    egui::ComboBox::from_id_salt("composer-preset")
-                        .selected_text(self.selected_preset)
-                        .width(110.0)
-                        .show_ui(ui, |ui| {
-                            for preset in COMPOSER_PRESETS {
-                                ui.selectable_value(&mut self.selected_preset, *preset, *preset);
-                            }
-                        });
                     ui.add_space(14.0);
                     ui.label(
                         RichText::new(format!("{} · {}", selected_name, if remote { "Remote" } else { "Local" }))
@@ -1752,6 +1707,19 @@ impl eframe::App for CtoxDesktopApp {
         self.refresh_installation_statuses();
         self.handle_terminal_input(ctx);
 
+        // Sync data view root with selected installation
+        let selected_root = self
+            .selected_installation()
+            .and_then(|inst| inst.root_path.clone());
+        self.data_view_state.set_root(selected_root);
+
+        // Periodic data refresh when a data view is active
+        if self.data_view_state.active_view != DataView::Terminal
+            && self.data_view_state.needs_refresh()
+        {
+            self.data_view_state.refresh();
+        }
+
         self.render_left_panel(ctx);
         self.render_right_panel(ctx);
 
@@ -1765,24 +1733,11 @@ impl eframe::App for CtoxDesktopApp {
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            if !self.show_right_panel {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add(
-                            Button::new(RichText::new("⟨").size(16.0))
-                                .frame(false)
-                                .min_size(egui::vec2(24.0, 24.0)),
-                        )
-                        .clicked()
-                    {
-                        self.show_right_panel = true;
-                    }
-                });
-            }
             self.render_tabs(ui);
+            ui.add_space(6.0);
+            self.render_mode_tabs(ui);
             ui.add_space(8.0);
-            self.render_tui_view_tabs(ui);
-            ui.add_space(8.0);
+
             let available_width = ui.available_width();
             let remaining_height = ui.available_height();
             let status_height = if self.command_run.is_some() || self.last_command_result.is_some() {
@@ -1791,7 +1746,7 @@ impl eframe::App for CtoxDesktopApp {
                 0.0
             };
             let footer_spacing = 8.0;
-            let terminal_height = (remaining_height
+            let content_height = (remaining_height
                 - status_height
                 - footer_spacing
                 - if status_height > 0.0 { 6.0 } else { 0.0 })
@@ -1799,14 +1754,21 @@ impl eframe::App for CtoxDesktopApp {
             let origin = ui.next_widget_position();
             let mut cursor_y = origin.y;
 
-            let terminal_rect = egui::Rect::from_min_size(
+            let content_rect = egui::Rect::from_min_size(
                 egui::pos2(origin.x, cursor_y),
-                egui::vec2(available_width, terminal_height),
+                egui::vec2(available_width, content_height),
             );
-            ui.allocate_ui_at_rect(terminal_rect, |ui| {
-                self.render_terminal_area(ui);
-            });
-            cursor_y += terminal_height + footer_spacing;
+
+            if self.data_view_state.active_view == DataView::Terminal {
+                ui.allocate_ui_at_rect(content_rect, |ui| {
+                    self.render_terminal_area(ui);
+                });
+            } else {
+                ui.allocate_ui_at_rect(content_rect, |ui| {
+                    self.render_data_view_content(ui);
+                });
+            }
+            cursor_y += content_height + footer_spacing;
 
             if status_height > 0.0 {
                 let status_rect = egui::Rect::from_min_size(
@@ -1825,6 +1787,158 @@ impl eframe::App for CtoxDesktopApp {
 }
 
 impl CtoxDesktopApp {
+    fn render_mode_tabs(&mut self, ui: &mut Ui) {
+        let in_data_mode = self.data_view_state.active_view != DataView::Terminal;
+
+        ui.horizontal(|ui| {
+            // TUI mode tabs
+            if !in_data_mode {
+                // Show TUI sub-tabs (Chat/Skills/Settings) inline
+                if let Some(tab) = self.active_tab() {
+                    if tab.kind == SessionKind::Tui {
+                        let current = tab.active_tui_view.unwrap_or(TuiView::Chat);
+                        for view in TuiView::ALL {
+                            let selected = current == view;
+                            if ui.selectable_label(selected, view.label()).clicked() {
+                                self.switch_active_tui_view(view);
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Show Data sub-tabs inline
+                for view in DataView::DATA_VIEWS {
+                    if ui.selectable_label(self.data_view_state.active_view == view, view.label()).clicked() {
+                        self.data_view_state.active_view = view;
+                        self.data_view_state.last_refresh = None;
+                    }
+                }
+            }
+
+            // Right-aligned mode switch
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !self.show_right_panel {
+                    if ui
+                        .add(
+                            Button::new(RichText::new("CLI").size(12.0).color(Color32::from_gray(140)))
+                                .frame(false),
+                        )
+                        .clicked()
+                    {
+                        self.show_right_panel = true;
+                    }
+                    ui.add_space(8.0);
+                }
+
+                if in_data_mode {
+                    // Zoom controls don't apply in data mode
+                    if ui
+                        .add(
+                            Button::new(
+                                RichText::new("TUI")
+                                    .size(12.5)
+                                    .color(Color32::from_gray(170)),
+                            )
+                            .min_size(egui::vec2(42.0, 22.0))
+                            .corner_radius(6.0),
+                        )
+                        .clicked()
+                    {
+                        self.data_view_state.active_view = DataView::Terminal;
+                        self.terminal_focus = true;
+                    }
+                } else {
+                    // Zoom controls + Data button
+                    if ui
+                        .add(
+                            Button::new(
+                                RichText::new("Data")
+                                    .size(12.5)
+                                    .color(Color32::from_gray(170)),
+                            )
+                            .min_size(egui::vec2(42.0, 22.0))
+                            .corner_radius(6.0),
+                        )
+                        .clicked()
+                    {
+                        self.data_view_state.active_view = DataView::Tickets;
+                        self.terminal_focus = false;
+                        self.data_view_state.last_refresh = None;
+                    }
+                    ui.add_space(8.0);
+                    if ui.small_button("Reset").clicked() {
+                        self.terminal_zoom = 1.0;
+                    }
+                    ui.label(
+                        RichText::new(format!("{:.0}%", self.terminal_zoom * 100.0))
+                            .size(12.0)
+                            .color(Color32::from_gray(180)),
+                    );
+                    if ui.small_button("+").clicked() {
+                        self.terminal_zoom =
+                            (self.terminal_zoom + 0.05).clamp(TERMINAL_ZOOM_MIN, TERMINAL_ZOOM_MAX);
+                    }
+                    if ui.small_button("-").clicked() {
+                        self.terminal_zoom =
+                            (self.terminal_zoom - 0.05).clamp(TERMINAL_ZOOM_MIN, TERMINAL_ZOOM_MAX);
+                    }
+                }
+            });
+        });
+    }
+
+    fn render_data_view_content(&mut self, ui: &mut Ui) {
+        Frame::default()
+            .fill(Color32::from_rgb(14, 16, 20))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(34, 38, 44)))
+            .corner_radius(16.0)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ScrollArea::both()
+                    .id_salt("data-view-scroll")
+                    .show(ui, |ui| {
+                        let dvs = &mut self.data_view_state;
+                        match dvs.active_view {
+                            DataView::Terminal => {}
+                            DataView::Tickets => {
+                                let tickets = dvs.ticket_items.clone();
+                                let cases = dvs.ticket_cases.clone();
+                                let actions = dvs.execution_actions.clone();
+                                let root = dvs.root.clone();
+                                views::kanban::render(
+                                    ui, &tickets, &cases, &actions,
+                                    &mut dvs.kanban_state,
+                                    root.as_deref(),
+                                );
+                            }
+                            DataView::Queue => {
+                                let msgs = dvs.comm_messages.clone();
+                                views::queue::render(ui, &msgs, &mut dvs.queue_state);
+                            }
+                            DataView::Conversations => {
+                                let msgs = dvs.lcm_messages.clone();
+                                let missions = dvs.mission_states.clone();
+                                let docs = dvs.continuity_docs.clone();
+                                let root = dvs.root.clone();
+                                views::conversations::render(
+                                    ui, &msgs, &missions, &docs,
+                                    &mut dvs.conversations_state,
+                                    root.as_deref(),
+                                );
+                            }
+                            DataView::Threads => {
+                                let threads = dvs.threads.clone();
+                                views::threads::render(ui, &threads, &mut dvs.threads_state);
+                            }
+                            DataView::Logs => {
+                                let logs = dvs.logs.clone();
+                                views::logs::render(ui, &logs, &mut dvs.logs_state);
+                            }
+                        }
+                    });
+            });
+    }
+
     fn switch_active_tui_view(&mut self, target: TuiView) {
         let Some(tab) = self.active_tab_mut() else {
             return;
