@@ -5,6 +5,9 @@ use serde_json::Value;
 pub(crate) mod gemma4;
 pub(crate) mod glm47;
 pub(crate) mod gpt_oss;
+pub(crate) mod kimi;
+pub(crate) mod minimax;
+pub(crate) mod mistral;
 pub(crate) mod nemotron;
 pub(crate) mod qwen35;
 
@@ -21,6 +24,9 @@ pub enum ResponsesModelAdapter {
     Gemma4,
     Nemotron,
     Glm47,
+    MiniMax,
+    Mistral,
+    Kimi,
 }
 
 pub fn adapter_reasoning_cap_env_key() -> &'static str {
@@ -43,6 +49,7 @@ pub struct ResponsesAdapterResponsePlan {
     transport_kind: ResponsesTransportKind,
     stream: bool,
     exact_text_override: Option<String>,
+    remote: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +66,9 @@ impl ResponsesModelAdapter {
             engine::ChatModelFamily::Gemma4 => Some(Self::Gemma4),
             engine::ChatModelFamily::NemotronCascade => Some(Self::Nemotron),
             engine::ChatModelFamily::Glm47Flash => Some(Self::Glm47),
+            engine::ChatModelFamily::MiniMax => Some(Self::MiniMax),
+            engine::ChatModelFamily::Mistral => Some(Self::Mistral),
+            engine::ChatModelFamily::Kimi => Some(Self::Kimi),
         }
     }
 
@@ -69,6 +79,9 @@ impl ResponsesModelAdapter {
             Self::Gemma4 => gemma4::adapter_id(),
             Self::Nemotron => nemotron::adapter_id(),
             Self::Glm47 => glm47::adapter_id(),
+            Self::MiniMax => minimax::adapter_id(),
+            Self::Mistral => mistral::adapter_id(),
+            Self::Kimi => kimi::adapter_id(),
         }
     }
 
@@ -79,6 +92,9 @@ impl ResponsesModelAdapter {
             Self::Gemma4 => gemma4::transport_kind(),
             Self::Nemotron => nemotron::transport_kind(),
             Self::Glm47 => glm47::transport_kind(),
+            Self::MiniMax => minimax::transport_kind(),
+            Self::Mistral => mistral::transport_kind(),
+            Self::Kimi => kimi::transport_kind(),
         }
     }
 
@@ -89,6 +105,9 @@ impl ResponsesModelAdapter {
             Self::Gemma4 => gemma4::upstream_path(),
             Self::Nemotron => nemotron::upstream_path(),
             Self::Glm47 => glm47::upstream_path(),
+            Self::MiniMax => minimax::upstream_path(),
+            Self::Mistral => mistral::upstream_path(),
+            Self::Kimi => kimi::upstream_path(),
         }
     }
 
@@ -99,30 +118,47 @@ impl ResponsesModelAdapter {
         }
     }
 
-    pub fn build_route(self, raw: &[u8]) -> anyhow::Result<ResolvedResponsesAdapterRoute> {
+    pub fn build_route(
+        self,
+        raw: &[u8],
+        remote: bool,
+    ) -> anyhow::Result<ResolvedResponsesAdapterRoute> {
         let request_payload: Value = serde_json::from_slice(raw)
             .context("failed to parse canonical responses request for adapter routing")?;
+        let transport_kind = if remote {
+            // Remote API providers (OpenRouter etc.) always use standard
+            // /v1/chat/completions — even GPT-OSS, which locally uses the
+            // Harmony completion-template transport.
+            ResponsesTransportKind::ChatCompletions
+        } else {
+            self.transport_kind()
+        };
         let response_plan = ResponsesAdapterResponsePlan {
             adapter: self,
-            transport_kind: self.transport_kind(),
+            transport_kind,
             stream: engine::responses_request_streams(raw)?,
             exact_text_override: engine::extract_exact_text_override_from_materialized_request(
                 &request_payload,
             ),
+            remote,
         };
         Ok(ResolvedResponsesAdapterRoute {
-            forwarded_body: self.rewrite_request(raw)?,
+            forwarded_body: self.rewrite_request(raw, remote)?,
             response_plan,
         })
     }
 
-    fn rewrite_request(self, raw: &[u8]) -> anyhow::Result<Vec<u8>> {
+    fn rewrite_request(self, raw: &[u8], remote: bool) -> anyhow::Result<Vec<u8>> {
         match self {
+            Self::GptOss if remote => gpt_oss::rewrite_chat_request(raw),
             Self::GptOss => gpt_oss::rewrite_request(raw),
             Self::Qwen35 => qwen35::rewrite_request(raw),
             Self::Gemma4 => gemma4::rewrite_request(raw),
             Self::Nemotron => nemotron::rewrite_request(raw),
             Self::Glm47 => glm47::rewrite_request(raw),
+            Self::MiniMax => minimax::rewrite_request(raw),
+            Self::Mistral => mistral::rewrite_request(raw),
+            Self::Kimi => kimi::rewrite_request(raw),
         }
     }
 
@@ -131,8 +167,12 @@ impl ResponsesModelAdapter {
         raw: &[u8],
         fallback_model: Option<&str>,
         exact_text_override: Option<&str>,
+        remote: bool,
     ) -> anyhow::Result<Vec<u8>> {
         match self {
+            Self::GptOss if remote => {
+                gpt_oss::rewrite_chat_success_response(raw, fallback_model, exact_text_override)
+            }
             Self::GptOss => {
                 gpt_oss::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
@@ -148,6 +188,15 @@ impl ResponsesModelAdapter {
             Self::Glm47 => {
                 glm47::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
+            Self::MiniMax => {
+                minimax::rewrite_success_response(raw, fallback_model, exact_text_override)
+            }
+            Self::Mistral => {
+                mistral::rewrite_success_response(raw, fallback_model, exact_text_override)
+            }
+            Self::Kimi => {
+                kimi::rewrite_success_response(raw, fallback_model, exact_text_override)
+            }
         }
     }
 
@@ -160,7 +209,13 @@ impl ResponsesModelAdapter {
             Self::GptOss => {
                 gpt_oss::build_followup_request(initial_request_raw, first_response_raw)
             }
-            Self::Qwen35 | Self::Gemma4 | Self::Nemotron | Self::Glm47 => Ok(None),
+            Self::Qwen35
+            | Self::Gemma4
+            | Self::Nemotron
+            | Self::Glm47
+            | Self::MiniMax
+            | Self::Mistral
+            | Self::Kimi => Ok(None),
         }
     }
 }
@@ -178,6 +233,9 @@ pub fn runtime_adapter_tuning_for_local_plan(
             nemotron::runtime_tuning(preset, max_output_tokens)
         }
         Some(ResponsesModelAdapter::Glm47) => glm47::runtime_tuning(preset, max_output_tokens),
+        Some(ResponsesModelAdapter::MiniMax) => minimax::runtime_tuning(preset, max_output_tokens),
+        Some(ResponsesModelAdapter::Mistral) => mistral::runtime_tuning(preset, max_output_tokens),
+        Some(ResponsesModelAdapter::Kimi) => kimi::runtime_tuning(preset, max_output_tokens),
         None => crate::inference::runtime_state::AdapterRuntimeTuning::default(),
     }
 }
@@ -205,7 +263,7 @@ impl ResponsesAdapterResponsePlan {
         fallback_model: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
         self.adapter
-            .rewrite_success_response(raw, fallback_model, self.exact_text_override())
+            .rewrite_success_response(raw, fallback_model, self.exact_text_override(), self.remote)
     }
 
     pub fn build_followup_request(
@@ -219,14 +277,18 @@ impl ResponsesAdapterResponsePlan {
 }
 
 impl ResolvedResponsesAdapterRoute {
-    pub fn resolve(model: Option<&str>, raw: &[u8]) -> anyhow::Result<Option<Self>> {
+    pub fn resolve(
+        model: Option<&str>,
+        raw: &[u8],
+        remote: bool,
+    ) -> anyhow::Result<Option<Self>> {
         let Some(model) = model else {
             return Ok(None);
         };
         let Some(adapter) = ResponsesModelAdapter::from_model(model) else {
             return Ok(None);
         };
-        Ok(Some(adapter.build_route(raw)?))
+        Ok(Some(adapter.build_route(raw, remote)?))
     }
 
     pub fn id(&self) -> &'static str {
@@ -259,6 +321,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Gemma4 => gemma4::compact_instructions(),
             ResponsesModelAdapter::Nemotron => nemotron::compact_instructions(),
             ResponsesModelAdapter::Glm47 => glm47::compact_instructions(),
+            ResponsesModelAdapter::MiniMax => minimax::compact_instructions(),
+            ResponsesModelAdapter::Mistral => mistral::compact_instructions(),
+            ResponsesModelAdapter::Kimi => kimi::compact_instructions(),
         }
     }
 
@@ -269,6 +334,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Gemma4 => gemma4::reasoning_effort_override(),
             ResponsesModelAdapter::Nemotron => nemotron::reasoning_effort_override(),
             ResponsesModelAdapter::Glm47 => glm47::reasoning_effort_override(),
+            ResponsesModelAdapter::MiniMax => minimax::reasoning_effort_override(),
+            ResponsesModelAdapter::Mistral => mistral::reasoning_effort_override(),
+            ResponsesModelAdapter::Kimi => kimi::reasoning_effort_override(),
         }
     }
 
@@ -279,6 +347,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Gemma4 => gemma4::unified_exec_enabled(),
             ResponsesModelAdapter::Nemotron => nemotron::unified_exec_enabled(),
             ResponsesModelAdapter::Glm47 => glm47::unified_exec_enabled(),
+            ResponsesModelAdapter::MiniMax => minimax::unified_exec_enabled(),
+            ResponsesModelAdapter::Mistral => mistral::unified_exec_enabled(),
+            ResponsesModelAdapter::Kimi => kimi::unified_exec_enabled(),
         }
     }
 
@@ -289,6 +360,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Gemma4 => gemma4::uses_ctox_web_stack(),
             ResponsesModelAdapter::Nemotron => nemotron::uses_ctox_web_stack(),
             ResponsesModelAdapter::Glm47 => glm47::uses_ctox_web_stack(),
+            ResponsesModelAdapter::MiniMax => minimax::uses_ctox_web_stack(),
+            ResponsesModelAdapter::Mistral => mistral::uses_ctox_web_stack(),
+            ResponsesModelAdapter::Kimi => kimi::uses_ctox_web_stack(),
         }
     }
 
@@ -308,6 +382,15 @@ impl LocalCodexExecPolicy {
             }
             ResponsesModelAdapter::Glm47 => {
                 glm47::compact_limit(self.model.as_str(), realized_context)
+            }
+            ResponsesModelAdapter::MiniMax => {
+                minimax::compact_limit(self.model.as_str(), realized_context)
+            }
+            ResponsesModelAdapter::Mistral => {
+                mistral::compact_limit(self.model.as_str(), realized_context)
+            }
+            ResponsesModelAdapter::Kimi => {
+                kimi::compact_limit(self.model.as_str(), realized_context)
             }
         }
     }
@@ -342,6 +425,7 @@ mod tests {
         let route = ResolvedResponsesAdapterRoute::resolve(
             Some("google/gemma-4-26B-A4B-it"),
             &serde_json::to_vec(&request).expect("request should encode"),
+            false,
         )
         .expect("route resolution should succeed")
         .expect("gemma route should resolve");

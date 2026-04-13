@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "goal": "CTOX source tree layout for build and update orchestration",
+  "sourceTrees": [
+    {
+      "name": "agent-runtime",
+      "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
+      "integrationMode": "hard_fork",
+      "requiredPaths": ["tools/agent-runtime/Cargo.toml"],
+      "targetDir": "tools/agent-runtime",
+      "purpose": "Codex execution engine for bounded agent turns"
+    },
+    {
+      "name": "model-runtime",
+      "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
+      "integrationMode": "hard_fork",
+      "requiredPaths": ["tools/model-runtime/core/Cargo.toml"],
+      "targetDir": "tools/model-runtime",
+      "purpose": "Candle-based local inference runtime"
+    }
+  ]
+}

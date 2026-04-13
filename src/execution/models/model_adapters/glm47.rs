@@ -80,12 +80,14 @@ pub fn rewrite_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let messages =
-        apply_runtime_prompts(messages, &tools, &payload, exact_text_override.as_deref());
+    let messages = apply_exact_text_prompt(messages, exact_text_override.as_deref());
 
     let mut request = serde_json::Map::new();
     request.insert("model".to_string(), Value::String(model));
     request.insert("messages".to_string(), Value::Array(messages));
+    if !tools.is_empty() {
+        request.insert("tools".to_string(), Value::Array(tools));
+    }
     let (mut enable_thinking, reasoning_effort) = reasoning_config(&payload);
     if exact_text_override.is_some() {
         enable_thinking = false;
@@ -96,6 +98,9 @@ pub fn rewrite_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
             "reasoning_effort".to_string(),
             Value::String(reasoning_effort),
         );
+    }
+    if let Some(value) = payload.get("tool_choice") {
+        request.insert("tool_choice".to_string(), value.clone());
     }
     for key in [
         "temperature",
@@ -155,7 +160,10 @@ pub fn rewrite_success_response(
                 }
             }
             if let Some(reasoning) = message
-                .and_then(|msg| msg.get("reasoning_content"))
+                .and_then(|msg| {
+                    msg.get("reasoning_content")
+                        .or_else(|| msg.get("reasoning"))
+                })
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .filter(|text| !text.is_empty())
@@ -204,16 +212,8 @@ pub fn rewrite_success_response(
     serde_json::to_vec(&response_payload).context("failed to encode GLM responses payload")
 }
 
-fn apply_runtime_prompts(
-    mut messages: Vec<Value>,
-    tools: &[Value],
-    payload: &Value,
-    exact_text_override: Option<&str>,
-) -> Vec<Value> {
+fn apply_exact_text_prompt(mut messages: Vec<Value>, exact_text_override: Option<&str>) -> Vec<Value> {
     if let Some(prompt) = build_exact_text_prompt(exact_text_override) {
-        prepend_system_message(&mut messages, prompt);
-    }
-    if let Some(prompt) = build_tool_prompt(tools, payload) {
         prepend_system_message(&mut messages, prompt);
     }
     messages
@@ -252,53 +252,6 @@ fn build_exact_text_prompt(exact_text_override: Option<&str>) -> Option<String> 
     Some(format!(
         "Return exactly this final answer and nothing else: {exact_text}\nDo not emit reasoning or any additional text."
     ))
-}
-
-fn build_tool_prompt(tools: &[Value], payload: &Value) -> Option<String> {
-    if tools.is_empty() {
-        return None;
-    }
-    let mut lines = vec![
-        "Available tools are described below.".to_string(),
-        "When you need a tool, emit exactly one tool call and no surrounding prose using this format:".to_string(),
-        "<tool_call>TOOL_NAME".to_string(),
-        "<arg_key>ARG_NAME</arg_key><arg_value>ARG_VALUE</arg_value>".to_string(),
-        "</tool_call>".to_string(),
-    ];
-    if let Some(required_tool) = required_tool_name(payload) {
-        lines.push(format!(
-            "Your next response must be a tool call for `{required_tool}`."
-        ));
-    }
-    lines.push("Tools:".to_string());
-    for tool in tools {
-        if let Some(function) = tool.get("function").and_then(Value::as_object) {
-            let name = function
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let description = function
-                .get("description")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("No description provided.");
-            lines.push(format!("- {name}: {description}"));
-        }
-    }
-    Some(lines.join("\n"))
-}
-
-fn required_tool_name(payload: &Value) -> Option<&str> {
-    let tool_choice = payload.get("tool_choice")?;
-    tool_choice
-        .get("function")
-        .and_then(|value| value.get("name"))
-        .and_then(Value::as_str)
-        .or_else(|| tool_choice.get("name").and_then(Value::as_str))
 }
 
 fn reasoning_config(payload: &Value) -> (bool, Option<String>) {
@@ -526,7 +479,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn glm_request_injects_xml_tool_prompt_for_required_tool_choice() {
+    fn glm_request_forwards_tools_array_and_tool_choice() {
         let payload = json!({
             "model": "zai-org/GLM-4.7-Flash",
             "input": [{"type":"message","role":"user","content":[{"type":"input_text","text":"Call get_cwd now."}]}],
@@ -549,11 +502,9 @@ mod tests {
         });
         let raw = serde_json::to_vec(&payload).unwrap();
         let rewritten: Value = serde_json::from_slice(&rewrite_request(&raw).unwrap()).unwrap();
-        assert!(rewritten.get("tools").is_none());
-        let messages = rewritten["messages"].as_array().unwrap();
-        let system = messages[0]["content"].as_str().unwrap();
-        assert!(system.contains("<tool_call>TOOL_NAME"));
-        assert!(system.contains("get_cwd"));
+        let tools = rewritten.get("tools").and_then(Value::as_array).expect("tools array should be present");
+        assert!(!tools.is_empty(), "tools array should not be empty");
+        assert!(rewritten.get("tool_choice").is_some(), "tool_choice should be forwarded");
     }
 
     #[test]

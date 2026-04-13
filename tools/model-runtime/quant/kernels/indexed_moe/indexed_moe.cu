@@ -547,7 +547,15 @@ extern "C" __global__ void quantize_q8_1(const float *__restrict__ x,
   reinterpret_cast<half &>(y[ib].ds.y) = sum;
 }
 
-// indexed_moe_forward template
+// Number of output rows each CUDA block computes.
+// Higher values reduce grid size and improve input-vector reuse across rows.
+// Must be a power of 2 for alignment.  4 gives ~3.5x fewer blocks while
+// keeping register pressure manageable.
+#define NROWS_PER_BLOCK 4
+
+// indexed_moe_forward template — multi-row variant
+// Each block processes NROWS_PER_BLOCK consecutive output rows, reusing
+// the same quantised input vector across all of them.
 template <int qk, int qi, typename block_q_t, int vdr,
           vec_dot_q_cuda_t vec_dot_q_cuda>
 __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
@@ -583,46 +591,70 @@ __device__ void indexed_moe_forward(const void *__restrict__ all_weights,
       (const char *)all_weights + expert_id * weight_expert_stride_bytes;
   float *current_output_ptr = all_outputs + task_id * output_task_stride_elems;
 
-  constexpr int ncols_y = 1;
   constexpr int nwarps = 4;
-  constexpr int rows_per_cuda_block = 1;
 
   const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
-  const int row0 = rows_per_cuda_block * blockIdx.x;
+  const int row_base = NROWS_PER_BLOCK * blockIdx.x;
 
-  if (row0 >= n) {
+  if (row_base >= n) {
     return;
   }
 
-  const int blocks_per_row_x = k / qk;
-  const int blocks_per_col_y = k_padded / QK8_1;
-  constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
+  // How many rows this block actually covers (handles the tail)
+  const int rows_this_block = min(NROWS_PER_BLOCK, n - row_base);
 
-  float tmp = 0.0f;
+  const int blocks_per_row_x = k / qk;
+  constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
 
   const block_q_t *w = (const block_q_t *)current_weight_ptr;
   const block_q8_1 *x = (const block_q8_1 *)current_input_ptr;
+
+  // Accumulate vec_dot for each row this block handles.
+  // The input vector (x) is the same for all rows — only the weight row
+  // pointer changes, so the x-blocks stay in L1/L2 cache.
+  float tmp[NROWS_PER_BLOCK];
+#pragma unroll
+  for (int r = 0; r < NROWS_PER_BLOCK; ++r) {
+    tmp[r] = 0.0f;
+  }
 
   for (int kbx = tid / (qi / vdr); kbx < blocks_per_row_x;
        kbx += blocks_per_iter) {
     const int kby = kbx * (qk / QK8_1);
     const int kqs = vdr * (tid % (qi / vdr));
-    tmp += vec_dot_q_cuda(&w[kbx + row0 * blocks_per_row_x], &x[kby], kqs);
+
+    // Load the input block once and apply it to every output row
+#pragma unroll
+    for (int r = 0; r < NROWS_PER_BLOCK; ++r) {
+      if (row_base + r < n) {
+        tmp[r] += vec_dot_q_cuda(
+            &w[kbx + (row_base + r) * blocks_per_row_x], &x[kby], kqs);
+      }
+    }
   }
 
-  __shared__ float tmp_shared[nwarps - 1][WARP_SIZE];
-  if (threadIdx.y > 0) {
-    tmp_shared[threadIdx.y - 1][threadIdx.x] = tmp;
+  // Warp-level reduction per row
+  __shared__ float tmp_shared[NROWS_PER_BLOCK][nwarps - 1][WARP_SIZE];
+
+#pragma unroll
+  for (int r = 0; r < NROWS_PER_BLOCK; ++r) {
+    if (threadIdx.y > 0) {
+      tmp_shared[r][threadIdx.y - 1][threadIdx.x] = tmp[r];
+    }
   }
   __syncthreads();
 
-  if (threadIdx.y == 0) {
-    for (int l = 0; l < nwarps - 1; ++l) {
-      tmp += tmp_shared[l][threadIdx.x];
-    }
-    tmp = warp_reduce_sum(tmp);
-    if (threadIdx.x == 0) {
-      current_output_ptr[row0] = tmp;
+#pragma unroll
+  for (int r = 0; r < NROWS_PER_BLOCK; ++r) {
+    if (row_base + r < n && threadIdx.y == 0) {
+      float sum = tmp[r];
+      for (int l = 0; l < nwarps - 1; ++l) {
+        sum += tmp_shared[r][l][threadIdx.x];
+      }
+      sum = warp_reduce_sum(sum);
+      if (threadIdx.x == 0) {
+        current_output_ptr[row_base + r] = sum;
+      }
     }
   }
 }
@@ -720,7 +752,7 @@ extern "C" void launch_indexed_moe_forward_q2k_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q2k_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -732,7 +764,7 @@ extern "C" void launch_indexed_moe_forward_q3k_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q3k_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -744,7 +776,7 @@ extern "C" void launch_indexed_moe_forward_q4k_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q4k_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -756,7 +788,7 @@ extern "C" void launch_indexed_moe_forward_q5k_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q5k_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -768,7 +800,7 @@ extern "C" void launch_indexed_moe_forward_q6k_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q6k_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -780,7 +812,7 @@ extern "C" void launch_indexed_moe_forward_q8_0_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q8_0_q8_1<<<grid, block, 0, cuda_stream>>>(
@@ -792,7 +824,7 @@ extern "C" void launch_indexed_moe_forward_q5_1_q8_1(
     const void *all_weights, const void *all_inputs,
     const unsigned int *indices, float *all_outputs, int n, int k, int batch,
     int topk, int k_padded, int input_dim1, void *stream) {
-  dim3 grid(n, batch, topk);
+  dim3 grid((n + NROWS_PER_BLOCK - 1) / NROWS_PER_BLOCK, batch, topk);
   dim3 block(WARP_SIZE, 4, 1);
   cudaStream_t cuda_stream = static_cast<cudaStream_t>(stream);
   indexed_moe_forward_q5_1_q8_1<<<grid, block, 0, cuda_stream>>>(

@@ -14,7 +14,8 @@ use crate::{
     layers::Sdpa,
     paged_attention::PagedCacheType,
     pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-    turbo3_rotate_forward_in_place, turbo3_rotate_inverse_in_place, TurboQuantArtifacts,
+    turbo3_rotate_forward_in_place, turbo3_rotate_inverse_in_place,
+    turbo3_score_from_packed, turbo3_value_from_packed_rotated, TurboQuantArtifacts,
     TurboQuantBits,
 };
 
@@ -330,6 +331,35 @@ impl PagedAttention {
                 && turboquant_native_paged_enabled();
 
             if !turbo_decode_via_native_paged {
+                // Fused decode: compute attention scores directly from packed turbo3
+                // bytes using online softmax, avoiding full KV decompression.
+                let use_fused_decode = seq_len == 1
+                    && turbo_rotated
+                    && turbo_bits == Some(TurboQuantBits::Three)
+                    && attention_mask.is_none()
+                    && std::env::var_os("ENGINE_TURBOQUANT_DISABLE_FUSED_DECODE").is_none();
+
+                if use_fused_decode {
+                    return turboquant_fused_decode(
+                        query,
+                        key_cache.as_ref().unwrap(),
+                        value_cache.as_ref().unwrap(),
+                        TurboQuantBits::Three,
+                        block_tables,
+                        context_lens,
+                        kv_head_size,
+                        key_value_heads,
+                        attention_heads,
+                        sdpa_params.softmax_scale,
+                    )
+                    .map_err(|e| {
+                        candle_core::Error::Msg(format!(
+                            "turboquant fused decode failed (kv_heads={}, q_heads={}, kv_head_size={}): {e}",
+                            key_value_heads, attention_heads, kv_head_size
+                        ))
+                    });
+                }
+
                 let paged_kv_metadata = turboquant_should_use_windowed_paged_kv_metadata(use_full);
                 let (k_gathered, v_gathered, cu_kv, max_k) = turboquant_gather_kv_cache(
                     key_cache.as_ref().unwrap(),
@@ -1125,6 +1155,190 @@ fn turboquant_decode_flat_token(
     for head in reconstructed_value.chunks_exact(head_dim) {
         v_out.extend_from_slice(head);
     }
+}
+
+/// Fused decode attention: computes attention scores directly from packed
+/// turbo3 key bytes without materializing full f32 KV tensors.
+///
+/// This replaces the gather+dequant+SDPA pipeline for single-token decode,
+/// eliminating two large O(N × num_heads × head_dim) intermediate allocations.
+///
+/// Algorithm: online softmax (flash-attention style) over compressed KV cache.
+fn turboquant_fused_decode(
+    query: &Tensor,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    bits: TurboQuantBits,
+    block_tables: &Tensor,
+    context_lens: &Tensor,
+    head_dim: usize,
+    key_value_heads: usize,
+    attention_heads: usize,
+    softmax_scale: f32,
+) -> Result<Tensor> {
+    assert_eq!(bits, TurboQuantBits::Three, "fused decode only supports turbo3");
+    let out_dtype = query.dtype();
+    let out_device = query.device().clone();
+
+    let (num_blocks, num_heads, key_bytes, block_size, x) = key_cache.dims5()?;
+    let (_, _, value_bytes, _, _) = value_cache.dims5()?;
+    let _ = num_blocks;
+    assert_eq!(x, 1);
+    assert_eq!(num_heads, key_value_heads);
+
+    let key_block_bytes = num_heads * key_bytes * block_size;
+    let value_block_bytes = num_heads * value_bytes * block_size;
+    let packed_key_head_bytes = bits.packed_key_bytes_for_dim(head_dim);
+    let packed_value_head_bytes = bits.packed_value_bytes_for_dim(head_dim);
+
+    // Extract query to f32 on CPU: shape (1, attention_heads, 1, head_dim)
+    let query_f32 = query.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+    let query_flat = query_f32.flatten_all()?.to_vec1::<f32>()?;
+    // query_flat has attention_heads * head_dim elements
+
+    let queries_per_kv = attention_heads / key_value_heads;
+
+    // Rotate each query head forward (WHT).
+    // For GQA: group queries that share the same KV head and rotate together.
+    let mut query_rot = query_flat.clone();
+    for chunk in query_rot.chunks_exact_mut(head_dim) {
+        if head_dim % 128 == 0 {
+            turbo3_rotate_forward_in_place(chunk);
+        }
+    }
+
+    // Parse block tables and context lengths
+    let block_tables_2d = tensor_to_u32_2d(block_tables)?;
+    let raw_context_lens = tensor_to_u32_vec(context_lens)?;
+    let context_lens_vec: Vec<u32> = if !block_tables_2d.is_empty()
+        && raw_context_lens.len() > block_tables_2d.len()
+        && raw_context_lens.len() % block_tables_2d.len() == 0
+    {
+        let row_width = raw_context_lens.len() / block_tables_2d.len();
+        raw_context_lens
+            .chunks(row_width)
+            .map(|row| row.iter().copied().max().map(|x| x + 1).unwrap_or(0))
+            .collect()
+    } else {
+        raw_context_lens
+    };
+
+    // Online softmax state per (sequence, attention_head)
+    // For single-token decode, batch_size is typically 1
+    let batch_size = block_tables_2d.len();
+    let mut output = vec![0.0f32; batch_size * attention_heads * head_dim];
+
+    let mut key_blocks: HashMap<usize, Vec<u8>> = HashMap::new();
+    let mut value_blocks: HashMap<usize, Vec<u8>> = HashMap::new();
+
+    for seq_idx in 0..batch_size {
+        let context_len = context_lens_vec[seq_idx] as usize;
+        if context_len == 0 {
+            continue;
+        }
+
+        // Per-head online softmax accumulators
+        let mut max_scores = vec![f32::NEG_INFINITY; attention_heads];
+        let mut sum_exps = vec![0.0f32; attention_heads];
+        let mut accumulators = vec![vec![0.0f32; head_dim]; attention_heads];
+
+        for token_idx in 0..context_len {
+            let block_number = block_tables_2d[seq_idx][token_idx / block_size] as usize;
+            let block_offset = token_idx % block_size;
+
+            // Read key block (cached)
+            let key_block = key_blocks.entry(block_number).or_insert_with(|| {
+                read_cuda_block_u8(key_cache, block_number, key_block_bytes)
+                    .expect("failed to read turboquant key block")
+            });
+
+            // Read value block (cached alongside key block)
+            let value_block = value_blocks.entry(block_number).or_insert_with(|| {
+                read_cuda_block_u8(value_cache, block_number, value_block_bytes)
+                    .expect("failed to read turboquant value block")
+            });
+
+            // Process each KV head: score all query heads, decompress value once
+            for kv_head in 0..key_value_heads {
+                // Gather packed key payload for this head
+                let mut key_payload = vec![0u8; packed_key_head_bytes];
+                for byte_idx in 0..key_bytes {
+                    let linear = ((kv_head * key_bytes + byte_idx) * block_size) + block_offset;
+                    key_payload[byte_idx] = key_block[linear];
+                }
+
+                // Decompress value ONCE per KV head (shared across all query heads)
+                let mut value_payload = vec![0u8; packed_value_head_bytes];
+                for byte_idx in 0..value_bytes {
+                    let linear =
+                        ((kv_head * value_bytes + byte_idx) * block_size) + block_offset;
+                    value_payload[byte_idx] = value_block[linear];
+                }
+                let value_vec = turbo3_value_from_packed_rotated(&value_payload);
+
+                // Score and accumulate for each query head sharing this KV head
+                for q_local in 0..queries_per_kv {
+                    let attn_head = kv_head * queries_per_kv + q_local;
+                    let q_start = attn_head * head_dim;
+                    let q_slice = &query_rot[q_start..q_start + head_dim];
+
+                    // Direct score from packed bytes — no key decompression!
+                    let score =
+                        turbo3_score_from_packed(q_slice, &key_payload) * softmax_scale;
+
+                    // Online softmax update
+                    let old_max = max_scores[attn_head];
+                    let new_max = old_max.max(score);
+                    let correction = (old_max - new_max).exp();
+                    let new_exp = (score - new_max).exp();
+
+                    // Rescale existing accumulator
+                    sum_exps[attn_head] = sum_exps[attn_head] * correction + new_exp;
+                    for v in accumulators[attn_head].iter_mut() {
+                        *v *= correction;
+                    }
+                    max_scores[attn_head] = new_max;
+
+                    // Accumulate weighted value
+                    for (acc_v, &val) in
+                        accumulators[attn_head].iter_mut().zip(value_vec.iter())
+                    {
+                        *acc_v += new_exp * val;
+                    }
+                }
+            }
+        }
+
+        // Normalize accumulators
+        let out_base = seq_idx * attention_heads * head_dim;
+        for attn_head in 0..attention_heads {
+            let inv_sum = if sum_exps[attn_head] > 0.0 {
+                1.0 / sum_exps[attn_head]
+            } else {
+                0.0
+            };
+            let head_out = &mut output
+                [out_base + attn_head * head_dim..out_base + (attn_head + 1) * head_dim];
+            for (o, &a) in head_out.iter_mut().zip(accumulators[attn_head].iter()) {
+                *o = a * inv_sum;
+            }
+        }
+    }
+
+    // Build output tensor: (batch_size, attention_heads, 1, head_dim) to match query shape
+    let out_tensor =
+        Tensor::from_vec(output, (batch_size, attention_heads, head_dim), &Device::Cpu)?;
+
+    // Rotate output back from rotated space
+    let out_rotated = rotate_turbo3_attention_tensor(&out_tensor, key_value_heads, false)?;
+
+    // Reshape to match expected (batch, heads, 1, head_dim) output
+    let out_final = out_rotated
+        .reshape((batch_size, attention_heads, 1, head_dim))?
+        .to_dtype(out_dtype)?
+        .to_device(&out_device)?;
+
+    Ok(out_final)
 }
 
 fn turboquant_gather_kv_cache(

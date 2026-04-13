@@ -158,7 +158,10 @@ pub fn rewrite_success_response(
                 }
             }
             if let Some(reasoning) = message
-                .and_then(|msg| msg.get("reasoning_content"))
+                .and_then(|msg| {
+                    msg.get("reasoning_content")
+                        .or_else(|| msg.get("reasoning"))
+                })
                 .and_then(Value::as_str)
                 .map(str::to_string)
                 .filter(|text| !text.is_empty())

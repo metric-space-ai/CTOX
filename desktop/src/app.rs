@@ -1307,11 +1307,8 @@ impl CtoxDesktopApp {
                             }
 
                             ui.add_space(10.0);
-                            let can_connect = match installation.remote.instance_source {
-                                RemoteInstanceSource::AttachExisting => true,
-                                RemoteInstanceSource::InstallNew => installation.remote.host_prepared,
-                                RemoteInstanceSource::Unspecified => false,
-                            };
+                            // Always allow Connect — the host may have been set up manually via SSH
+                            let can_connect = !installation.remote.room_id.trim().is_empty();
                             if ui
                                 .add_enabled(can_connect, Button::new("Connect"))
                                 .clicked()
@@ -2297,10 +2294,18 @@ fn composer_runtime_label(model: &str, preset: &str) -> String {
 
 fn default_installation_runtime_status(installation: &Installation) -> InstallationRuntimeStatus {
     if installation.is_remote() {
-        InstallationRuntimeStatus {
-            label: "Offline".to_owned(),
-            color: Color32::from_rgb(136, 144, 155),
+        // Show "Ready" if room is configured (host may be online, we just haven't connected yet)
+        let has_room = !installation.remote.room_id.trim().is_empty();
+        if has_room {
+            return InstallationRuntimeStatus {
+                label: "Ready".to_owned(),
+                color: Color32::from_rgb(141, 154, 166),
+            };
         }
+        return InstallationRuntimeStatus {
+            label: "Not configured".to_owned(),
+            color: Color32::from_rgb(136, 144, 155),
+        };
     } else if installation.resolved_binary().is_none() {
         InstallationRuntimeStatus {
             label: "Build required".to_owned(),

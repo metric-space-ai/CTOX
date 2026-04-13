@@ -196,6 +196,7 @@ fn execute_request(config: &LiteRtBridgeConfig, raw_request: &str) -> anyhow::Re
     let route = model_adapters::ResolvedResponsesAdapterRoute::resolve(
         Some(&config.model_reference),
         &request_bytes,
+        false,
     )?
     .context("LiteRT bridge only supports models with a local responses adapter")?;
     let chat_request: Value = serde_json::from_slice(route.forwarded_body())

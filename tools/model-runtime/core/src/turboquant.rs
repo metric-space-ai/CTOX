@@ -998,6 +998,84 @@ fn unpack_signs(payload: &[u8], values: usize) -> Vec<i8> {
         .collect()
 }
 
+/// Compute attention score directly from a packed turbo3 key payload
+/// without decompressing to a full f32 vector.
+///
+/// `query_rot` must already be WHT-forward-rotated and have length == head_dim.
+/// `packed_payload` is the packed key bytes for one head (14 bytes per 32-element block).
+///
+/// Returns `sum_j(query_rot[j] * TURBO3_CENTROIDS[idx[j]] * block_norm[j/32])`.
+pub fn turbo3_score_from_packed(query_rot: &[f32], packed_payload: &[u8]) -> f32 {
+    assert_eq!(packed_payload.len() % TURBO3_BLOCK_BYTES, 0);
+    let num_blocks = packed_payload.len() / TURBO3_BLOCK_BYTES;
+    assert_eq!(query_rot.len(), num_blocks * TURBO3_BLOCK_SIZE);
+
+    let mut score = 0.0f32;
+    for (block_idx, block) in packed_payload.chunks_exact(TURBO3_BLOCK_BYTES).enumerate() {
+        let norm = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+        let low = &block[2..10];
+        let high = &block[10..14];
+        let base = block_idx * TURBO3_BLOCK_SIZE;
+        let mut block_score = 0.0f32;
+        for j in 0..TURBO3_BLOCK_SIZE {
+            let low2 = (low[j / 4] >> ((j % 4) * 2)) & 0x3;
+            let hi1 = (high[j / 8] >> (j % 8)) & 0x1;
+            let idx = (low2 | (hi1 << 2)) as usize;
+            block_score += query_rot[base + j] * TURBO3_CENTROIDS[idx];
+        }
+        score += block_score * norm;
+    }
+    score
+}
+
+/// Compute attention scores for multiple heads from a flat (all-heads) packed payload.
+///
+/// `query_rot` has length `num_heads * head_dim`, already WHT-forward-rotated.
+/// `packed_payload` has length `num_heads * packed_key_bytes_per_head`.
+/// Returns one score per head.
+pub fn turbo3_score_from_packed_flat(
+    query_rot: &[f32],
+    packed_payload: &[u8],
+    head_dim: usize,
+) -> Vec<f32> {
+    let packed_head_bytes = TurboQuantBits::Three.packed_key_bytes_for_dim(head_dim);
+    let num_heads = packed_payload.len() / packed_head_bytes;
+    assert_eq!(packed_payload.len(), num_heads * packed_head_bytes);
+    assert_eq!(query_rot.len(), num_heads * head_dim);
+
+    (0..num_heads)
+        .map(|h| {
+            let q_slice = &query_rot[h * head_dim..(h + 1) * head_dim];
+            let p_slice = &packed_payload[h * packed_head_bytes..(h + 1) * packed_head_bytes];
+            turbo3_score_from_packed(q_slice, p_slice)
+        })
+        .collect()
+}
+
+/// Decompress a turbo3 value from packed bytes directly to f32 values
+/// in rotated space (no inverse rotation applied).
+///
+/// This is equivalent to `turbo3_rotated_reference(unpack(payload))` but
+/// avoids intermediate allocations.
+pub fn turbo3_value_from_packed_rotated(packed_payload: &[u8]) -> Vec<f32> {
+    assert_eq!(packed_payload.len() % TURBO3_BLOCK_BYTES, 0);
+    let num_blocks = packed_payload.len() / TURBO3_BLOCK_BYTES;
+    let mut out = Vec::with_capacity(num_blocks * TURBO3_BLOCK_SIZE);
+
+    for block in packed_payload.chunks_exact(TURBO3_BLOCK_BYTES) {
+        let norm = f16::from_bits(u16::from_le_bytes([block[0], block[1]])).to_f32();
+        let low = &block[2..10];
+        let high = &block[10..14];
+        for j in 0..TURBO3_BLOCK_SIZE {
+            let low2 = (low[j / 4] >> ((j % 4) * 2)) & 0x3;
+            let hi1 = (high[j / 8] >> (j % 8)) & 0x1;
+            let idx = (low2 | (hi1 << 2)) as usize;
+            out.push(TURBO3_CENTROIDS[idx] * norm);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,6 +1275,101 @@ mod tests {
             for (lhs, rhs) in observed.iter().zip(expected.iter()) {
                 assert!((lhs - rhs).abs() < 5e-4, "{lhs} != {rhs}");
             }
+        }
+    }
+
+    #[test]
+    fn turbo3_score_from_packed_matches_reconstruct_dot() {
+        let dim = 128;
+        let tq = TurboQuantArtifacts::new(dim, TurboQuantBits::Three, 79);
+        let mut rng = rand_isaac::Isaac64Rng::seed_from_u64(83);
+
+        let key_input = (0..dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect::<Vec<_>>();
+        let query = (0..dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect::<Vec<_>>();
+
+        // Compress and pack key
+        let key = tq.compress_key(&key_input);
+        let packed = tq.pack_key(&key);
+
+        // Method A: existing path — reconstruct rotated key, dot with rotated query
+        let key_rotated = tq.reconstruct_key_mse_rotated(&key);
+        let mut query_rot = query.clone();
+        turbo3_rotate_forward_in_place(&mut query_rot);
+        let expected_score = dot(&query_rot, &key_rotated);
+
+        // Method B: direct score from packed bytes
+        let direct_score = turbo3_score_from_packed(&query_rot, &packed);
+
+        assert!(
+            (expected_score - direct_score).abs() < 1e-4,
+            "expected {expected_score}, got {direct_score}"
+        );
+    }
+
+    #[test]
+    fn turbo3_score_from_packed_flat_matches_per_head() {
+        let num_heads = 4;
+        let head_dim = 128;
+        let flat_dim = num_heads * head_dim;
+        let tq = TurboQuantArtifacts::new(flat_dim, TurboQuantBits::Three, 89);
+        let mut rng = rand_isaac::Isaac64Rng::seed_from_u64(97);
+
+        let key_input = (0..flat_dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect::<Vec<_>>();
+        let mut query_rot = (0..flat_dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect::<Vec<_>>();
+        turbo3_rotate_forward_in_place(&mut query_rot);
+
+        let key = tq.compress_key(&key_input);
+        let packed = tq.pack_key(&key);
+
+        // Flat scoring
+        let flat_scores = turbo3_score_from_packed_flat(&query_rot, &packed, head_dim);
+        assert_eq!(flat_scores.len(), num_heads);
+
+        // Per-head scoring
+        let head_bytes = TurboQuantBits::Three.packed_key_bytes_for_dim(head_dim);
+        for h in 0..num_heads {
+            let q_slice = &query_rot[h * head_dim..(h + 1) * head_dim];
+            let p_slice = &packed[h * head_bytes..(h + 1) * head_bytes];
+            let per_head_score = turbo3_score_from_packed(q_slice, p_slice);
+            assert!(
+                (flat_scores[h] - per_head_score).abs() < 1e-6,
+                "head {h}: flat={}, per_head={}",
+                flat_scores[h],
+                per_head_score
+            );
+        }
+    }
+
+    #[test]
+    fn turbo3_value_from_packed_rotated_matches_existing() {
+        let dim = 128;
+        let tq = TurboQuantArtifacts::new(dim, TurboQuantBits::Three, 101);
+        let mut rng = rand_isaac::Isaac64Rng::seed_from_u64(103);
+
+        let val_input = (0..dim)
+            .map(|_| rng.random::<f32>() - 0.5)
+            .collect::<Vec<_>>();
+
+        let value = tq.compress_value(&val_input);
+        let packed = tq.pack_value(&value);
+
+        // Existing path
+        let expected = tq.decompress_value_rotated(&value);
+
+        // New direct path
+        let direct = turbo3_value_from_packed_rotated(&packed);
+
+        assert_eq!(expected.len(), direct.len());
+        for (lhs, rhs) in expected.iter().zip(direct.iter()) {
+            assert!((lhs - rhs).abs() < 1e-6, "{lhs} != {rhs}");
         }
     }
 }

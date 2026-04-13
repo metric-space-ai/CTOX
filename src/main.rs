@@ -199,6 +199,18 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("tui") => tui::run_tui(&root),
+        Some("tui-smoke") => {
+            let page = args.get(1).map(String::as_str).unwrap_or("chat");
+            let width: u16 = args
+                .get(2)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120);
+            let height: u16 = args
+                .get(3)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(40);
+            tui::run_tui_smoke(&root, page, width, height)
+        }
         Some("browser") => browser::handle_browser_command(&root, &args[1..]),
         Some("channel") => channels::handle_channel_command(&root, &args[1..]),
         Some("doc") => doc::handle_doc_command(&root, &args[1..]),

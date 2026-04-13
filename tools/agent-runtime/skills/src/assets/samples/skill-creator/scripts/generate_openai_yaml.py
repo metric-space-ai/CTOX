@@ -101,24 +101,74 @@ def generate_short_description(display_name):
     return description
 
 
+def extract_frontmatter(content):
+    if not content.startswith("---\n"):
+        return None
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        return None
+    return content[4:end]
+
+
+def parse_scalar(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def parse_frontmatter(frontmatter_text):
+    data = {}
+    current_parent = None
+
+    for raw_line in frontmatter_text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if ":" not in line:
+            raise ValueError(f"Invalid frontmatter line: {raw_line}")
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if indent == 0:
+            current_parent = None
+            if value == "":
+                data[key] = {}
+                current_parent = key
+            else:
+                data[key] = parse_scalar(value)
+            continue
+
+        if indent == 2 and current_parent:
+            parent = data.setdefault(current_parent, {})
+            if not isinstance(parent, dict):
+                raise ValueError(f"Parent field {current_parent} is not a mapping")
+            parent[key] = parse_scalar(value)
+            continue
+
+        raise ValueError(f"Unsupported frontmatter indentation: {raw_line}")
+
+    return data
+
+
 def read_frontmatter_name(skill_dir):
     skill_md = Path(skill_dir) / "SKILL.md"
     if not skill_md.exists():
         print(f"[ERROR] SKILL.md not found in {skill_dir}")
         return None
     content = skill_md.read_text()
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if not match:
+    frontmatter_text = extract_frontmatter(content)
+    if frontmatter_text is None:
         print("[ERROR] Invalid SKILL.md frontmatter format.")
         return None
-    frontmatter_text = match.group(1)
-
-    import yaml
-
     try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-    except yaml.YAMLError as exc:
-        print(f"[ERROR] Invalid YAML frontmatter: {exc}")
+        frontmatter = parse_frontmatter(frontmatter_text)
+    except ValueError as exc:
+        print(f"[ERROR] Invalid frontmatter: {exc}")
         return None
     if not isinstance(frontmatter, dict):
         print("[ERROR] Frontmatter must be a YAML dictionary.")

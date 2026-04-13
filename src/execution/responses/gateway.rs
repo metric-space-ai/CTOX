@@ -650,7 +650,12 @@ fn handle_request(
 
     let adapter_route: Option<ResolvedResponsesAdapterRoute> =
         if matches!(request.method(), Method::Post) && url == "/v1/responses" && !body.is_empty() {
-            ResolvedResponsesAdapterRoute::resolve(config.active_model.as_deref(), &effective_body)?
+            let is_remote = uses_remote_api_upstream(&config.upstream_base_url);
+            ResolvedResponsesAdapterRoute::resolve(
+                config.active_model.as_deref(),
+                &effective_body,
+                is_remote,
+            )?
         } else {
             None
         };
@@ -2317,6 +2322,7 @@ mod tests {
                 "input": "bootstrap"
             }))
             .unwrap(),
+            false,
         )
         .expect("gemma4 adapter route should resolve")
         .expect("gemma4 adapter should exist");
@@ -2364,6 +2370,7 @@ mod tests {
         let rewritten_request = ResolvedResponsesAdapterRoute::resolve(
             Some("google/gemma-4-26B-A4B-it"),
             &serde_json::to_vec(&request).unwrap(),
+            false,
         )
         .expect("gemma4 request route should resolve")
         .expect("gemma4 adapter route should exist");

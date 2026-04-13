@@ -139,8 +139,9 @@ use toml_selector::{TomlLoaderArgs, TomlSelector};
 pub use tools::{ToolCallResponse, ToolCallType, ToolCallbacks, ToolChoice};
 pub use topology::{LayerTopology, Topology};
 pub use turboquant::{
-    turbo3_rotate_forward_in_place, turbo3_rotate_inverse_in_place, CompressedTurboQuantKey,
-    CompressedTurboQuantValue, TurboQuantArtifacts, TurboQuantBits,
+    turbo3_rotate_forward_in_place, turbo3_rotate_inverse_in_place, turbo3_score_from_packed,
+    turbo3_value_from_packed_rotated, CompressedTurboQuantKey, CompressedTurboQuantValue,
+    TurboQuantArtifacts, TurboQuantBits,
 };
 pub use utils::debug::initialize_logging;
 pub use utils::memory_usage::MemoryUsage;

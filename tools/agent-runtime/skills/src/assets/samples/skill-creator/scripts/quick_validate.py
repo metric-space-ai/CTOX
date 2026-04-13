@@ -7,9 +7,61 @@ import re
 import sys
 from pathlib import Path
 
-import yaml
-
 MAX_SKILL_NAME_LENGTH = 64
+
+
+def extract_frontmatter(content):
+    if not content.startswith("---\n"):
+        return None
+    end = content.find("\n---\n", 4)
+    if end == -1:
+        return None
+    return content[4:end]
+
+
+def parse_scalar(value):
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        return value[1:-1]
+    return value
+
+
+def parse_frontmatter(frontmatter_text):
+    data = {}
+    current_parent = None
+
+    for raw_line in frontmatter_text.splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+        if ":" not in line:
+            return None, f"Invalid frontmatter line: {raw_line}"
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if indent == 0:
+            current_parent = None
+            if value == "":
+                data[key] = {}
+                current_parent = key
+            else:
+                data[key] = parse_scalar(value)
+            continue
+
+        if indent == 2 and current_parent:
+            parent = data.setdefault(current_parent, {})
+            if not isinstance(parent, dict):
+                return None, f"Parent field {current_parent} is not a mapping"
+            parent[key] = parse_scalar(value)
+            continue
+
+        return None, f"Unsupported frontmatter indentation: {raw_line}"
+
+    return data, None
 
 
 def validate_skill(skill_path):
@@ -21,21 +73,13 @@ def validate_skill(skill_path):
         return False, "SKILL.md not found"
 
     content = skill_md.read_text()
-    if not content.startswith("---"):
-        return False, "No YAML frontmatter found"
-
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if not match:
+    frontmatter_text = extract_frontmatter(content)
+    if frontmatter_text is None:
         return False, "Invalid frontmatter format"
 
-    frontmatter_text = match.group(1)
-
-    try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-        if not isinstance(frontmatter, dict):
-            return False, "Frontmatter must be a YAML dictionary"
-    except yaml.YAMLError as e:
-        return False, f"Invalid YAML in frontmatter: {e}"
+    frontmatter, error = parse_frontmatter(frontmatter_text)
+    if error is not None:
+        return False, error
 
     allowed_properties = {"name", "description", "license", "allowed-tools", "metadata"}
 

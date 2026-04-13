@@ -122,7 +122,6 @@ pub fn rewrite_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     serde_json::to_vec(&completion_payload).context("failed to encode GPT-OSS completion payload")
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rewrite_chat_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     let payload: Value =
         serde_json::from_slice(raw).context("failed to parse responses request")?;
@@ -323,7 +322,6 @@ pub(crate) fn rewrite_success_response_to_sse(
     engine::rewrite_responses_payload_to_sse(&json_payload)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn rewrite_chat_success_response(
     raw: &[u8],
     fallback_model: Option<&str>,
@@ -337,8 +335,13 @@ pub(crate) fn rewrite_chat_success_response(
         for choice in choices {
             let message = choice.get("message").and_then(Value::as_object);
             let mut choice_reasoning = Vec::new();
+            // OpenRouter returns reasoning in `reasoning_content` or `reasoning`
+            // depending on the provider.
             if let Some(reasoning) = message
-                .and_then(|msg| msg.get("reasoning_content"))
+                .and_then(|msg| {
+                    msg.get("reasoning_content")
+                        .or_else(|| msg.get("reasoning"))
+                })
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|text| !text.is_empty())

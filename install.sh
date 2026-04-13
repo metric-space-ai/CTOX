@@ -1294,6 +1294,7 @@ ENVEOF
 # ── Rebuild mode (called by `ctox update apply`) ────────────────────────────
 run_rebuild() {
   local root="$1"
+  root="$(cd "$root" && pwd)"  # absolute path
   detect_platform
 
   if [[ -z "${CTOX_ENGINE_FEATURES:-}" && -f "${CTOX_STATE_ROOT:-$root/runtime}/engine_features" ]]; then
@@ -1305,6 +1306,21 @@ run_rebuild() {
   CUDA_HOME_RESOLVED="$(detect_cuda_home || true)"
   configure_cuda_env
   build_ctox "$root"
+
+  # Ensure ctox is available as a command everywhere
+  STATE_ROOT="${CTOX_STATE_ROOT:-$root/runtime}"
+  write_wrapper_script "$root"
+
+  # Ensure BIN_DIR is in PATH for future shells
+  local shell_rc=""
+  case "${SHELL:-}" in
+    */zsh)  shell_rc="$HOME/.zshrc" ;;
+    */bash) shell_rc="$HOME/.bashrc" ;;
+    */fish) shell_rc="$HOME/.config/fish/config.fish" ;;
+  esac
+  if [[ -n "$shell_rc" ]] && ! grep -q "$BIN_DIR" "$shell_rc" 2>/dev/null; then
+    printf '\nexport PATH="%s:$PATH"\n' "$BIN_DIR" >> "$shell_rc"
+  fi
 }
 
 # Auto-detect without interactivity (for rebuild / non-interactive)
