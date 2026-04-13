@@ -2392,7 +2392,7 @@ fn route_assigned_ticket_self_work(root: &Path, state: &Arc<Mutex<SharedState>>)
         if item.assigned_to.as_deref() != Some("self") {
             continue;
         }
-        if item.kind == "ticket-system-onboarding" {
+        if item.kind == "system-onboarding" {
             continue;
         }
         let thread_key = format!("ticket-self-work:{}", item.work_id);
@@ -4309,7 +4309,7 @@ mod tests {
                 thread_key: "queue/onboarding".to_string(),
                 workspace_root: None,
                 priority: "high".to_string(),
-                suggested_skill: Some("ticket-system-onboarding".to_string()),
+                suggested_skill: Some("system-onboarding".to_string()),
                 parent_message_key: None,
             },
         )
@@ -4330,13 +4330,13 @@ mod tests {
             .expect("queued prompt missing");
         assert_eq!(
             prompt.suggested_skill.as_deref(),
-            Some("ticket-system-onboarding")
+            Some("system-onboarding")
         );
         assert_eq!(prompt.source_label, "queue");
         assert!(shared
             .recent_events
             .iter()
-            .any(|event| event.contains("skill ticket-system-onboarding")));
+            .any(|event| event.contains("skill system-onboarding")));
     }
 
     #[test]
@@ -4392,7 +4392,7 @@ mod tests {
             source_label: "ticket:zammad".to_string(),
             goal: "continue onboarding".to_string(),
             prompt: "prompt".to_string(),
-            suggested_skill: Some("ticket-system-onboarding".to_string()),
+            suggested_skill: Some("system-onboarding".to_string()),
             leased_message_keys: Vec::new(),
             leased_ticket_event_keys: Vec::new(),
             thread_key: None,
@@ -4404,12 +4404,12 @@ mod tests {
 
         assert_eq!(
             next.suggested_skill.as_deref(),
-            Some("ticket-system-onboarding")
+            Some("system-onboarding")
         );
         assert!(shared.busy);
         assert_eq!(shared.active_source_label.as_deref(), Some("ticket:zammad"));
         assert!(shared.recent_events.iter().any(|event| event
-            .contains("Started queued ticket:zammad prompt [skill ticket-system-onboarding]")));
+            .contains("Started queued ticket:zammad prompt [skill system-onboarding]")));
     }
 
     #[test]
@@ -4419,13 +4419,13 @@ mod tests {
             &root,
             tickets::TicketSelfWorkUpsertInput {
                 source_system: "local".to_string(),
-                kind: "ticket-system-onboarding".to_string(),
+                kind: "system-onboarding".to_string(),
                 title: "Review current helpdesk working model".to_string(),
                 body_text: "Review the attached ticket desk and record onboarding gaps."
                     .to_string(),
                 state: "open".to_string(),
                 metadata: serde_json::json!({
-                    "skill": "ticket-system-onboarding",
+                    "skill": "system-onboarding",
                     "phase": "observe",
                 }),
             },
@@ -4488,12 +4488,12 @@ mod tests {
         assert_eq!(prompt.source_label, "ticket:local");
         assert_eq!(
             prompt.suggested_skill.as_deref(),
-            Some("ticket-system-onboarding")
+            Some("system-onboarding")
         );
         assert!(shared
             .recent_events
             .iter()
-            .any(|event| event.contains("skill ticket-system-onboarding")));
+            .any(|event| event.contains("skill system-onboarding")));
     }
 
     #[test]
@@ -4510,7 +4510,7 @@ mod tests {
                         .to_string(),
                 state: "open".to_string(),
                 metadata: serde_json::json!({
-                    "skill": "ticket-system-onboarding",
+                    "skill": "system-onboarding",
                     "phase": "desk-guided",
                 }),
             },
@@ -4549,12 +4549,12 @@ mod tests {
         assert_eq!(prompt.source_label, "ticket:local");
         assert_eq!(
             prompt.suggested_skill.as_deref(),
-            Some("ticket-system-onboarding")
+            Some("system-onboarding")
         );
         assert!(shared
             .recent_events
             .iter()
-            .any(|event| event.contains("skill ticket-system-onboarding")));
+            .any(|event| event.contains("skill system-onboarding")));
     }
 
     #[test]
@@ -4570,7 +4570,7 @@ mod tests {
                     .to_string(),
                 state: "open".to_string(),
                 metadata: serde_json::json!({
-                    "skill": "ticket-system-onboarding",
+                    "skill": "system-onboarding",
                 }),
             },
             true,
@@ -4595,7 +4595,7 @@ mod tests {
             .expect("queued prompt missing");
         assert_eq!(
             prompt.suggested_skill.as_deref(),
-            Some("ticket-system-onboarding")
+            Some("system-onboarding")
         );
         let expected_thread_key = format!("ticket-self-work:{}", item.work_id);
         assert_eq!(
@@ -4812,7 +4812,7 @@ mod tests {
             pending_previews: vec!["ticket  support/onboarding zammad:42".to_string()],
             current_goal_preview: Some("Inspect onboarding ticket".to_string()),
             active_source_label: Some("ticket:zammad".to_string()),
-            recent_events: vec!["Started prompt [skill ticket-system-onboarding]".to_string()],
+            recent_events: vec!["Started prompt [skill system-onboarding]".to_string()],
             last_error: None,
             last_completed_at: None,
             last_reply_chars: None,
@@ -4842,7 +4842,7 @@ mod tests {
         assert!(status
             .recent_events
             .iter()
-            .any(|event| event.contains("ticket-system-onboarding")));
+            .any(|event| event.contains("system-onboarding")));
     }
 
     #[test]

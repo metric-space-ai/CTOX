@@ -1861,10 +1861,10 @@ mod tests {
                 entries: vec!["user: inspect the ticket system".to_string()],
                 omitted_items: 0,
             },
-            Some("ticket-system-onboarding"),
+            Some("system-onboarding"),
         );
 
         assert!(prompt.contains("Suggested skill dispatch:"));
-        assert!(prompt.contains("preferred_skill: ticket-system-onboarding"));
+        assert!(prompt.contains("preferred_skill: system-onboarding"));
     }
 }

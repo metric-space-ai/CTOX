@@ -51,7 +51,7 @@ def current_state(ctox_bin: str, system: str, env: dict[str, str]) -> dict[str, 
         (
             item
             for item in items
-            if item.get("kind") == "ticket-system-onboarding"
+            if item.get("kind") == "system-onboarding"
             and isinstance(item.get("metadata"), dict)
             and item["metadata"].get("dedupe_key") == canonical_onboarding_dedupe_key(system)
             and item.get("state") not in {"closed", "rejected"}
@@ -103,7 +103,7 @@ def current_state(ctox_bin: str, system: str, env: dict[str, str]) -> dict[str, 
 
 
 def ensure_guide(ctox_bin: str, system: str, env: dict[str, str], publish: bool) -> None:
-    guide_script = REPO_ROOT / "skills/system/ticket-system-onboarding/scripts/upsert_onboarding_guide.py"
+    guide_script = REPO_ROOT / "skills/system/system-onboarding/scripts/upsert_onboarding_guide.py"
     command = [
         sys.executable,
         str(guide_script),
@@ -125,7 +125,7 @@ def ensure_validation_expansion_work(
     publish: bool,
 ) -> str | None:
     metadata = {
-        "skill": "ticket-system-onboarding",
+        "skill": "system-onboarding",
         "kind": "validation-expansion-review",
         "goal": "collect more validated runbook applications and correction evidence",
         "dedupe_key": f"validation-expansion:{system}",
@@ -147,7 +147,7 @@ def ensure_validation_expansion_work(
                 "Naechster Schritt ist, weitere bestaetigte Anwendungen und mindestens einen sichtbaren Gegenfall zu sammeln, bevor der Leitfaden in bounded autonomy uebergeht."
             ),
             "--skill",
-            "ticket-system-onboarding",
+            "system-onboarding",
             "--metadata-json",
             json.dumps(metadata, ensure_ascii=False),
             *(["--publish"] if publish else []),
@@ -184,7 +184,7 @@ def ensure_validation_expansion_work(
 
 def ensure_execution_gap_work(ctox_bin: str, system: str, env: dict[str, str], publish: bool) -> None:
     metadata = {
-        "skill": "ticket-system-onboarding",
+        "skill": "system-onboarding",
         "kind": "execution-enrichment-review",
         "goal": "build first source-specific execution supplement",
         "dedupe_key": f"execution-gap:{system}",
@@ -205,7 +205,7 @@ def ensure_execution_gap_work(ctox_bin: str, system: str, env: dict[str, str], p
             "Naechster Schritt ist genau eine erste family-spezifische Execution-Ergaenzung mit klaren Tool-Aktionen, Verifikation und Writeback-Grenze."
         ),
         "--skill",
-        "ticket-system-onboarding",
+        "system-onboarding",
         "--metadata-json",
         json.dumps(metadata, ensure_ascii=False),
     ]
@@ -244,7 +244,7 @@ def ensure_desk_skill_refinement_work(
     blocker_summary: str,
 ) -> str | None:
     metadata = {
-        "skill": "ticket-system-onboarding",
+        "skill": "system-onboarding",
         "kind": "desk-skill-refinement-review",
         "goal": "raise first desk skill to activation quality",
         "dedupe_key": f"desk-skill-refinement:{system}",
@@ -266,7 +266,7 @@ def ensure_desk_skill_refinement_work(
                 f"Blocker: {blocker_summary}"
             ),
             "--skill",
-            "ticket-system-onboarding",
+            "system-onboarding",
             "--metadata-json",
             json.dumps(metadata, ensure_ascii=False),
             *(["--publish"] if publish else []),
@@ -368,7 +368,7 @@ def main() -> None:
     if state["active_binding"] is None:
         bootstrap_command = [
             sys.executable,
-            str(REPO_ROOT / "skills/system/ticket-system-onboarding/scripts/bootstrap_ticket_source_skill.py"),
+            str(REPO_ROOT / "skills/system/system-onboarding/scripts/bootstrap_ticket_source_skill.py"),
             "--system",
             args.system,
             "--skill-name",

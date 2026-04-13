@@ -1,13 +1,13 @@
 ---
-name: ticket-system-onboarding
-description: Use when CTOX is first attached to a ticket system and must build onboarding work, source understanding, and operator-visible review tickets through generic ticket primitives rather than kernel-owned onboarding logic.
+name: system-onboarding
+description: Use when CTOX is assigned to any new system (codebase, platform, API, ticket system, database, infrastructure) and must build a knowledge base, skillbooks, runbooks, and operator-visible review tickets through generic primitives.
 metadata:
-  short-description: Onboard a ticket system through skill-driven self-work
+  short-description: Onboard any system through skill-driven discovery and knowledge building
 ---
 
-# Ticket System Onboarding
+# System Onboarding
 
-Use this skill when CTOX is attached to an existing ticket system and needs to understand how that system is actually used.
+Use this skill when CTOX is assigned to a new system of any kind — a codebase, a community platform, an API integration, a ticket system, a database, or infrastructure — and needs to build operational understanding from scratch.
 
 The kernel provides storage, references, self-work CRUD, publishing, and audit. This skill owns the onboarding behavior.
 
@@ -133,7 +133,7 @@ ctox ticket monitoring-ingest --system "<system>" --snapshot-json '<json>'
 Build and activate a desk-specific operating skill when the source has enough history:
 
 ```sh
-python3 skills/system/ticket-system-onboarding/scripts/bootstrap_ticket_source_skill.py \
+python3 skills/system/system-onboarding/scripts/bootstrap_ticket_source_skill.py \
   --system "<system>" \
   --skill-name "<system>-desk-operator" \
   --dataset-label "<human dataset label>" \
@@ -152,7 +152,7 @@ This tool will:
 
 These are templates, not mandatory fixed outputs:
 
-- `ticket-system-onboarding`
+- `system-onboarding`
 - `label-landscape-review`
 - `glossary-candidate-review`
 - `service-catalog-seeding`
@@ -169,7 +169,7 @@ Create only the items that are supported by observed evidence.
 The default execution path is the deterministic runner:
 
 ```sh
-python3 skills/system/ticket-system-onboarding/scripts/run_onboarding_plan.py \
+python3 skills/system/system-onboarding/scripts/run_onboarding_plan.py \
   --ctox-bin "<path-to-ctox>" \
   --system "<system>" \
   --env-file "<runtime.env>" \
@@ -208,7 +208,7 @@ You are done with activation only when:
 
 The handoff rule is:
 
-- before an active source skill exists, live work should prefer `ticket-system-onboarding`
+- before an active source skill exists, live work should prefer `system-onboarding`
 - once an active source skill exists, normal work should prefer that source skill
 - the onboarding skill should then remain only for the guide itself, explicit onboarding work, and exception correction
 

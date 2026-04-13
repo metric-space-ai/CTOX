@@ -136,7 +136,7 @@ def main() -> None:
     onboarding_item = next(
         (
             item for item in items
-            if item.get("kind") == "ticket-system-onboarding"
+            if item.get("kind") == "system-onboarding"
             and isinstance(item.get("metadata"), dict)
             and item["metadata"].get("dedupe_key") == canonical_dedupe_key(args.system)
         ),
@@ -145,7 +145,7 @@ def main() -> None:
     legacy_onboarding_item = next(
         (
             item for item in items
-            if item.get("kind") == "ticket-system-onboarding"
+            if item.get("kind") == "system-onboarding"
         ),
         None,
     )
@@ -159,7 +159,7 @@ def main() -> None:
     assigned_work_count = sum(
         1
         for item in items
-        if item.get("kind") != "ticket-system-onboarding"
+        if item.get("kind") != "system-onboarding"
         and item.get("assigned_to")
         and item.get("state") not in {"closed", "rejected"}
     )
@@ -180,7 +180,7 @@ def main() -> None:
         ]
     )
     metadata = {
-        "skill": "ticket-system-onboarding",
+        "skill": "system-onboarding",
         "phase": phase,
         "guide_mode": guide_mode,
         "active_source_skill": active_skill,
@@ -198,13 +198,13 @@ def main() -> None:
                 "--system",
                 args.system,
                 "--kind",
-                "ticket-system-onboarding",
+                "system-onboarding",
                 "--title",
                 title,
                 "--body",
                 body,
                 "--skill",
-                "ticket-system-onboarding",
+                "system-onboarding",
                 "--metadata-json",
                 json.dumps(metadata, ensure_ascii=False),
                 *(["--publish"] if args.publish else []),
@@ -285,13 +285,13 @@ def main() -> None:
             "--system",
             args.system,
             "--kind",
-            "ticket-system-onboarding",
+            "system-onboarding",
             "--title",
             title,
             "--body",
             body,
             "--skill",
-            "ticket-system-onboarding",
+            "system-onboarding",
             "--metadata-json",
             json.dumps(metadata, ensure_ascii=False),
         ],

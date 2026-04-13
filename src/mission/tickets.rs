@@ -3291,7 +3291,7 @@ pub(crate) fn preferred_skill_for_ticket_source(
         return Ok(Some(binding.skill_name));
     }
     if load_ticket_source_control_from_conn(&conn, source_system)?.is_some() {
-        return Ok(Some("ticket-system-onboarding".to_string()));
+        return Ok(Some("system-onboarding".to_string()));
     }
     Ok(None)
 }
@@ -4533,7 +4533,7 @@ fn default_skill_for_self_work_kind(kind: &str) -> Option<String> {
     }
     match kind {
         "access-request" => Some("ticket-access-and-secrets".to_string()),
-        "ticket-system-onboarding" => Some("ticket-system-onboarding".to_string()),
+        "system-onboarding" => Some("system-onboarding".to_string()),
         "secret-hygiene" => Some("secret-hygiene".to_string()),
         _ => None,
     }
@@ -7741,20 +7741,20 @@ mod tests {
             &root,
             TicketSelfWorkUpsertInput {
                 source_system: "local".to_string(),
-                kind: "ticket-system-onboarding".to_string(),
+                kind: "system-onboarding".to_string(),
                 title: "Review current helpdesk working model".to_string(),
                 body_text:
                     "Review the observed operating model and propose the next adoption steps."
                         .to_string(),
                 state: "open".to_string(),
                 metadata: json!({
-                    "skill": "ticket-system-onboarding",
+                    "skill": "system-onboarding",
                     "phase": "observe",
                 }),
             },
             true,
         )?;
-        assert_eq!(item.kind, "ticket-system-onboarding");
+        assert_eq!(item.kind, "system-onboarding");
         assert_eq!(item.state, "published");
         assert!(item.remote_ticket_id.is_some());
 
@@ -7819,7 +7819,7 @@ mod tests {
 
         assert_eq!(
             preferred_skill_for_ticket_source(&root, "local")?,
-            Some("ticket-system-onboarding".to_string())
+            Some("system-onboarding".to_string())
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -8098,11 +8098,11 @@ mod tests {
             &root,
             TicketSelfWorkUpsertInput {
                 source_system: "local".to_string(),
-                kind: "ticket-system-onboarding".to_string(),
+                kind: "system-onboarding".to_string(),
                 title: "CTOX: Ticket system onboarding".to_string(),
                 body_text: "Visible onboarding work item for routing validation.".to_string(),
                 state: "open".to_string(),
-                metadata: json!({"skill": "ticket-system-onboarding"}),
+                metadata: json!({"skill": "system-onboarding"}),
             },
             true,
         )?;
@@ -9001,7 +9001,7 @@ mod tests {
                 title: "Review access gaps for monitoring".to_string(),
                 body_text: "Investigate which monitoring systems still need access.".to_string(),
                 state: "open".to_string(),
-                metadata: json!({"skill": "ticket-system-onboarding"}),
+                metadata: json!({"skill": "system-onboarding"}),
             },
             true,
         )?;

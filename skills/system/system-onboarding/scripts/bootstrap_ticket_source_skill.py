@@ -175,7 +175,7 @@ def main() -> None:
         env=ctox_env,
     )
 
-    guide_script = REPO_ROOT / "skills/system/ticket-system-onboarding/scripts/upsert_onboarding_guide.py"
+    guide_script = REPO_ROOT / "skills/system/system-onboarding/scripts/upsert_onboarding_guide.py"
     if guide_script.exists():
         run(
             [
