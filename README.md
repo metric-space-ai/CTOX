@@ -92,71 +92,85 @@ layout and provenance markers. CTOX's context system, orchestration, governance,
 verification, and runtime mediation live in the main repository code.
 
 
+## Installation
+
+### One-liner (remote server)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh | bash
+```
+
+### From a checked-out repository
+
+```sh
+./install.sh
+```
+
+### Installer options
+
+The installer accepts the following flags:
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--backend=<cuda\|metal\|cpu>` | auto-detected | Compute backend (skip interactive selection) |
+| `--model=<model>` | `google/gemma-4-E4B-it` | Default model for local inference |
+| `--features=<features>` | auto | Override engine features (comma or space separated) |
+| `--branch=<branch>` | `main` | Git branch to install from |
+| `--repo=<url>` | `metric-space-ai/ctox` | Git repository URL |
+| `--install-root=<path>` | `~/.local/lib/ctox` | Installation directory |
+| `--state-root=<path>` | `~/.local/state/ctox` | State directory |
+| `--cache-root=<path>` | `~/.cache/ctox` | Cache directory |
+| `--bin-dir=<path>` | `~/.local/bin` | Binary symlink directory |
+| `--rebuild` | | Rebuild in-place (used by `ctox update`) |
+
+All flags can also be set as environment variables:
+
+| Variable | Equivalent flag |
+| --- | --- |
+| `CTOX_BACKEND` | `--backend` |
+| `CTOX_MODEL` | `--model` |
+| `CTOX_INSTALL_ROOT` | `--install-root` |
+| `CTOX_STATE_ROOT` | `--state-root` |
+| `CTOX_CACHE_ROOT` | `--cache-root` |
+| `CTOX_BIN_DIR` | `--bin-dir` |
+| `CTOX_REPO` | `--repo` |
+| `CTOX_BRANCH` | `--branch` |
+
+### Example: install with CUDA backend and a specific model
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
+  | bash -s -- --backend=cuda --model=openai/gpt-oss-20b
+```
+
+
 ## Quick Start
 
-Install directly on a server with the one-liner:
-
 ```sh
-bash -lc "$(curl -fsSL https://raw.githubusercontent.com/metric-space-ai/CTOX/main/scripts/install/install_ctox_remote.sh)"
+ctox version          # verify installation
+ctox start            # start the persistent loop
+ctox status           # check service status
+ctox                  # open the TUI
+ctox stop             # stop the persistent loop
 ```
 
-Local install from a checked-out repository:
+## Updates
+
+Upgrade existing installations through the managed release layout:
 
 ```sh
-./scripts/install/install_ctox.sh
-```
-
-Start the persistent loop:
-
-```sh
-ctox version
-ctox start
-ctox status
-```
-
-Open the visual command-line interface:
-
-```sh
-ctox
-```
-
-Stop the persistent loop:
-
-```sh
-ctox stop
-```
-
-Upgrade existing installations through the managed release layout instead of resetting `runtime/`:
-
-```sh
-ctox update adopt --install-root ~/.local/lib/ctox --state-root ~/.local/state/ctox
-ctox update channel set-github --repo metric-space-ai/CTOX
-ctox update apply --source /path/to/new/CTOX-checkout
+ctox update channel set-github --repo metric-space-ai/ctox
 ctox update apply --latest
 ctox update status
 ```
 
-The full CLI reference lives in the docs, not in this README.
+Or adopt an existing checkout into the managed layout:
 
-## Documentation
+```sh
+ctox update adopt --install-root ~/.local/lib/ctox --state-root ~/.local/state/ctox
+ctox update apply --source /path/to/new/ctox-checkout
+```
 
-- [Docs Index](docs/index.md)
-- [Architecture](docs/architecture.md)
-- [CLI Reference](docs/cli.md)
-- [Web Paths](docs/web-paths.md)
-- [Clean-Room Baseline](docs/clean-room-baseline.md)
-
-## Project Site
-
-This repository can publish `docs/` as a GitHub Pages project site.
-
-The basic shape is already compatible with that setup:
-
-- `README.md` as the repo landing page
-- `docs/index.md` as the docs landing page
-- topic pages under `docs/`
-
-The remaining step is repository-side Pages activation in GitHub settings.
 
 ## Supported Local 128k Models
 
@@ -170,3 +184,10 @@ These are the current minimum `128k` entry points for local CTOX models. Multi G
 | openai/gpt-oss-20b | 1x37.1 GB | 2x20.5 GB |
 
 <!-- END GENERATED 128K README SUMMARY -->
+
+
+## License
+
+[Apache License 2.0](LICENSE)
+
+See [NOTICE](NOTICE) for attribution of integrated source trees.
