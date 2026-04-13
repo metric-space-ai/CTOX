@@ -1,0 +1,33 @@
+{
+  "id": "data_lake_tender_p1",
+  "pdf": "01_AAA+BWB Data Lake.pdf",
+  "page": 1,
+  "description": "Single-column procurement letter with bullets, wrapped prose and footer metadata.",
+  "expected_lines": [
+    "Aufforderung zur Abgabe von Angeboten",
+    "Guten Tag,",
+    "Data Lake Software",
+    "Freundliche Grüße"
+  ],
+  "required_patterns": [
+    "Diese Beschaffung wird als Offenes Verfahren",
+    "Registrierung Ihres Unternehmens auf http://www.dtvp.de erforderlich.",
+    "Support-Team der Firma COSINEX."
+  ],
+  "ordered_phrases": [
+    "Guten Tag,",
+    "Data Lake Software",
+    "Fragen zu den Vergabeunterlagen",
+    "Freundliche Grüße",
+    "Support-Team der Firma COSINEX."
+  ],
+  "same_line_groups": [],
+  "separate_line_groups": [
+    [
+      "Aufforderung zur Abgabe von Angeboten",
+      "Guten Tag,"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

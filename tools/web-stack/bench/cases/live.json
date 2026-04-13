@@ -1,0 +1,266 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "live.web_search.rfc9110",
+      "tier": "live",
+      "tool": "ctox_web_search",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "search",
+        "--query",
+        "RFC 9110 HTTP Semantics",
+        "--domain",
+        "rfc-editor.org",
+        "--include-sources"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_search"
+        },
+        {
+          "path": "results",
+          "len_gte": 1
+        },
+        {
+          "path": "context",
+          "contains": "HTTP"
+        }
+      ]
+    },
+    {
+      "id": "live.web_read.rfc9110",
+      "tier": "live",
+      "tool": "ctox_web_read",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "read",
+        "--url",
+        "https://www.rfc-editor.org/rfc/rfc9110.html",
+        "--find",
+        "HTTP Semantics"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_read"
+        },
+        {
+          "path": "find_results",
+          "len_gte": 1
+        }
+      ]
+    },
+    {
+      "id": "live.web_read.pdf.attention_is_all_you_need",
+      "tier": "live",
+      "tool": "ctox_web_read",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=6000000\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "read",
+        "--url",
+        "https://arxiv.org/pdf/1706.03762.pdf",
+        "--find",
+        "Attention Is All You Need"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_read"
+        },
+        {
+          "path": "is_pdf",
+          "equals": true
+        },
+        {
+          "path": "page_text_excerpt",
+          "contains": "Attention Is All You Need"
+        }
+      ]
+    },
+    {
+      "id": "live.web_search.docusaurus.create_site",
+      "tier": "live",
+      "tool": "ctox_web_search",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "search",
+        "--query",
+        "What is the command to create a new Docusaurus site?",
+        "--domain",
+        "docusaurus.io",
+        "--include-sources"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_search"
+        },
+        {
+          "path": "results",
+          "len_gte": 1
+        },
+        {
+          "path": "context",
+          "contains": "create-docusaurus@latest"
+        }
+      ]
+    },
+    {
+      "id": "live.web_search.github.rustlings_intro1",
+      "tier": "live",
+      "tool": "ctox_web_search",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "search",
+        "--query",
+        "Where is intro1.rs in rust-lang/rustlings?",
+        "--domain",
+        "github.com",
+        "--include-sources"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_search"
+        },
+        {
+          "path": "results",
+          "len_gte": 1
+        },
+        {
+          "path": "context",
+          "contains": "intro1.rs"
+        }
+      ]
+    },
+    {
+      "id": "live.browser_automation.local_click",
+      "tier": "live",
+      "tool": "ctox_browser_automation",
+      "families": ["MiniWoB++", "Mind2Web"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser.html', { waitUntil: 'domcontentloaded' });\nconst title = await page.title();\nawait page.click('#confirm');\nconst status = await page.textContent('#status');\nreturn { title, status };\n"
+          }
+        },
+        {
+          "command": [
+            "web",
+            "browser-prepare",
+            "--dir",
+            "${TMP_ROOT}/browser-reference",
+            "--install-reference",
+            "--install-browser"
+          ],
+          "assertions": [
+            {
+              "path": "ok",
+              "equals": true
+            },
+            {
+              "path": "doctor.automation_ready",
+              "equals": true
+            }
+          ]
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${TMP_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_browser_automation"
+        },
+        {
+          "path": "result.status",
+          "equals": "clicked-ok"
+        },
+        {
+          "path": "page.title",
+          "equals": "CTOX Browser Bench"
+        }
+      ]
+    }
+  ]
+}

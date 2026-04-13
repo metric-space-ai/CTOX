@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Login</title>
+  </head>
+  <body>
+    <main>
+      <h1>Browser Login</h1>
+      <form id="login-form">
+        <label>
+          Username
+          <input id="username" name="username" type="text" autocomplete="username">
+        </label>
+        <label>
+          Password
+          <input id="password" name="password" type="password" autocomplete="current-password">
+        </label>
+        <button type="submit">Sign In</button>
+      </form>
+      <p id="status">awaiting credentials</p>
+    </main>
+    <script>
+      document.getElementById("login-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const username = document.getElementById("username").value;
+        const password = document.getElementById("password").value;
+        if (username === "metricspace" && password === "ctox-web") {
+          window.location.href = `/browser-dashboard.html?user=${encodeURIComponent(username)}`;
+          return;
+        }
+        document.getElementById("status").textContent = "invalid credentials";
+      });
+    </script>
+  </body>
+</html>

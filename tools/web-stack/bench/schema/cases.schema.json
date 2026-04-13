@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ctox.local/tools/web-stack/bench/cases.schema.json",
+  "title": "CTOX Web Stack Bench Cases",
+  "type": "object",
+  "required": ["version", "cases"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "const": 1
+    },
+    "shared_setup": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      }
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/case"
+      }
+    }
+  },
+  "$defs": {
+    "case": {
+      "type": "object",
+      "required": ["id", "tier", "tool", "command"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tier": {
+          "type": "string",
+          "enum": ["fixture", "live"]
+        },
+        "tool": {
+          "type": "string",
+          "minLength": 1
+        },
+        "families": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "setup": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/step"
+          }
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "assertions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        },
+        "expect_failure": {
+          "$ref": "#/$defs/expected_failure"
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": ["assertions"]
+        },
+        {
+          "required": ["expect_failure"]
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "properties": {
+        "write_json": {
+          "type": "object",
+          "required": ["path", "value"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "value": {}
+          },
+          "additionalProperties": false
+        },
+        "write_text": {
+          "type": "object",
+          "required": ["path", "content"],
+          "properties": {
+            "path": {
+              "type": "string",
+              "minLength": 1
+            },
+            "content": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/assertion"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": ["write_json"]
+        },
+        {
+          "required": ["write_text"]
+        },
+        {
+          "required": ["command"]
+        }
+      ]
+    },
+    "assertion": {
+      "type": "object",
+      "required": ["path"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "equals": {},
+        "contains": {
+          "type": "string"
+        },
+        "len_eq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "len_gte": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truthy": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": ["equals"]
+        },
+        {
+          "required": ["contains"]
+        },
+        {
+          "required": ["len_eq"]
+        },
+        {
+          "required": ["len_gte"]
+        },
+        {
+          "required": ["truthy"]
+        }
+      ]
+    },
+    "expected_failure": {
+      "type": "object",
+      "required": ["contains"],
+      "properties": {
+        "contains": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,64 @@
+[package]
+name = "ctox-engine-cli"
+readme = "../README.md"
+authors = ["CTOX contributors"]
+version.workspace = true
+edition.workspace = true
+description = "Command-line interface for the CTOX Candle engine"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "ctox-engine"
+
+[[bin]]
+name = "ctox-engine"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+engine-core = { workspace = true }
+engine-server-core = { workspace = true }
+engine = { workspace = true }
+candle-core = { workspace = true }
+
+clap = { workspace = true }
+clap_complete = "4.5"
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+ctrlc = { workspace = true }
+rustyline = { workspace = true }
+directories = { workspace = true }
+axum = { workspace = true, features = ["multipart", "ws"] }
+either = { workspace = true }
+indexmap = { workspace = true }
+regex = { workspace = true }
+include_dir = { workspace = true }
+mime_guess = { workspace = true }
+tower-http = { workspace = true, features = ["fs"] }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures-util = { workspace = true }
+image = { workspace = true }
+comfy-table = "7"
+dirs = { workspace = true }
+walkdir = { workspace = true }
+
+[features]
+default = []
+cuda = ["engine-core/cuda", "engine-server-core/cuda"]
+nccl = ["engine-core/nccl", "engine-server-core/nccl"]
+cudnn = ["engine-core/cudnn", "engine-server-core/cudnn"]
+flash-attn = ["cuda", "engine-core/flash-attn", "engine-server-core/flash-attn"]
+flash-attn-v3 = ["cuda", "engine-core/flash-attn-v3", "engine-server-core/flash-attn-v3"]
+accelerate = ["engine-core/accelerate", "engine-server-core/accelerate"]
+metal = ["engine-core/metal", "engine-server-core/metal"]
+mkl = ["engine-core/mkl", "engine-server-core/mkl"]
+ring = ["engine-core/ring", "engine-server-core/ring"]

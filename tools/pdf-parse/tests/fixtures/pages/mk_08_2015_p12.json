@@ -1,0 +1,39 @@
+{
+  "id": "mk_08_2015_p12",
+  "pdf": "MK_Archiv/2015/MK-08_2015.pdf",
+  "page": 12,
+  "description": "Legal newsletter page with sidebar text and long-form body text. This page is a relatively stable regression target for layout-faithful prose extraction.",
+  "expected_lines": [
+    "Wohnraummiete",
+    "MK",
+    "Zigarettenlänge andauern. Darauf, dass die Beklagten zugestanden haben,",
+    "Entscheidungsgründe/Praxishinweis zu Leitsatz 3a und 3b"
+  ],
+  "required_patterns": [
+    "Intensiv wahrgenommene",
+    "Wichtig |",
+    "Wird im Freien geraucht"
+  ],
+  "ordered_phrases": [
+    "Wohnraummiete",
+    "Zigarettenlänge andauern.",
+    "Entscheidungsgründe/Praxishinweis zu Leitsatz 3a und 3b",
+    "Wird im Freien geraucht"
+  ],
+  "same_line_groups": [
+    [
+      "Wichtig",
+      "Der BGH geht"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Wohnraummiete",
+      "Beachten Sie"
+    ]
+  ],
+  "forbidden_patterns": [
+    "­Zigarettenlänge"
+  ],
+  "allowed_missing_lines": 0
+}

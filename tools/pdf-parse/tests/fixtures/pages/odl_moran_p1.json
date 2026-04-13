@@ -1,0 +1,50 @@
+{
+  "id": "odl_moran_p1",
+  "pdf": "1901.03003.pdf",
+  "page": 1,
+  "description": "Public two-column paper sample from the OpenDataLoader repository. This page should expose reading-order, figure-caption mixing and intra-word fragmentation failures.",
+  "expected_lines": [
+    "MORAN: A Multi-Object Rectified Attention Network",
+    "for Scene Text Recognition",
+    "Abstract"
+  ],
+  "required_patterns": [
+    "Irregular text is widely used. However, it is",
+    "considerably difficult to recognize because of its",
+    "various shapes and distorted patterns.",
+    "Figure 1. Examples of regular and irregular scene text."
+  ],
+  "ordered_phrases": [
+    "MORAN: A Multi-Object Rectified Attention Network",
+    "for Scene Text Recognition",
+    "Abstract",
+    "Irregular text is widely used. However, it is",
+    "Figure 1. Examples of regular and irregular scene text."
+  ],
+  "same_line_groups": [
+    [
+      "Scene Text",
+      "Recognition"
+    ],
+    [
+      "Figure 1.",
+      "regular and irregular scene text."
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "network is",
+      "Figure 1."
+    ],
+    [
+      "contain irregular text.",
+      "Figure 1."
+    ]
+  ],
+  "forbidden_patterns": [
+    "MORAN: A M ulti-ObjectR ectifiedA tentionN etwork",
+    "Irregular t ext i s w idely u sed.",
+    "designed for rectifying images that contain irregu Figure 1."
+  ],
+  "allowed_missing_lines": 0
+}

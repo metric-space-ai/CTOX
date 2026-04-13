@@ -1,0 +1,18 @@
+CTOX repository notice
+
+This repository contains first-party CTOX code plus integrated hard forks.
+
+Primary integrated source trees:
+
+- tools/agent-runtime
+  Derived from https://github.com/openai/codex
+  Upstream license: Apache-2.0
+  Integrated into CTOX as a source-owned hard fork
+
+- tools/model-runtime
+  CTOX serving fork with historical import lineage carried through mistral.rs / engine.rs naming
+  before being normalized here as a Candle-focused serving subtree.
+  This subtree keeps its own license file and provenance markers.
+
+The root LICENSE applies to first-party CTOX repository code unless an integrated source subtree or file
+states otherwise.

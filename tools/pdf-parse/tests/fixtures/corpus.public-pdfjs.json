@@ -1,0 +1,14 @@
+{
+  "name": "public-pdfjs",
+  "description": "Public smoke corpus derived from pinned pdf.js test PDFs.",
+  "pdf_root": "samples/public/pdfjs",
+  "fixtures": [
+    "pages/pdfjs_annotation_text_widget_p1.json",
+    "pages/pdfjs_annotation_button_widget_p1.json",
+    "pages/pdfjs_annotation_choice_widget_p1.json",
+    "pages/pdfjs_file_pdfjs_form_p1.json",
+    "pages/pdfjs_annotation_link_text_popup_p1.json",
+    "pages/pdfjs_annotation_highlight_p1.json",
+    "pages/pdfjs_hello_world_rotated_p5.json"
+  ]
+}

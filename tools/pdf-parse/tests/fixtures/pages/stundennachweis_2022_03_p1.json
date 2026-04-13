@@ -1,0 +1,41 @@
+{
+  "id": "stundennachweis_2022_03_p1",
+  "pdf": "02_Welsch_Stundennachweis_2022-03_signed.pdf",
+  "page": 1,
+  "description": "Dense form-like monthly timesheet with repeated labels, row totals and signature fields.",
+  "expected_lines": [
+    "Firma: PANDA GmbH Stundennachweis",
+    "Jahr 2022",
+    "Gesamtstunden: 184,00",
+    "Unterschrift des Mitarbeiters Unterschrift des Projektleiters/Vorgesetzten"
+  ],
+  "required_patterns": [
+    "Welsch, Michael Name: Monat: März",
+    "Arbeitspaket 4 8,00 8,00 8,00 8,00 32,00",
+    "1.186,24 € Gemeinkosten 177,94 €"
+  ],
+  "ordered_phrases": [
+    "Firma: PANDA GmbH",
+    "Arbeitspaket 4",
+    "Gesamtstunden:",
+    "Unterschrift des Mitarbeiters"
+  ],
+  "same_line_groups": [
+    [
+      "Firma: PANDA GmbH",
+      "Stundennachweis"
+    ],
+    [
+      "Gesamtstunden:",
+      "184,00"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Firma: PANDA GmbH",
+      "Gesamtstunden:"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

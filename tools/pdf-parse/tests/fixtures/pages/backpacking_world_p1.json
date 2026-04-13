@@ -1,0 +1,42 @@
+{
+  "id": "backpacking_world_p1",
+  "pdf": "Backpacking_The_World.pdf",
+  "page": 1,
+  "description": "Highly fragmented title page that exposes intra-word split and merge failures in large headline text.",
+  "expected_lines": [
+    "Backpacking the World: A",
+    "Practical Guide to Budget",
+    "Travel, Regional Adventures,",
+    "and Empowering Experiences"
+  ],
+  "required_patterns": [
+    "Backpacking the World",
+    "Practical Guide to Budget",
+    "Regional Adventures",
+    "Empowering Experiences"
+  ],
+  "ordered_phrases": [
+    "Backpacking the World",
+    "Practical Guide to Budget",
+    "Regional Adventures",
+    "Empowering Experiences"
+  ],
+  "same_line_groups": [
+    [
+      "Backpacking",
+      "the World"
+    ],
+    [
+      "Practical Guide",
+      "to Budget"
+    ]
+  ],
+  "separate_line_groups": [],
+  "forbidden_patterns": [
+    "Backpackingt heW orld",
+    "PracticalG uidet oB udget",
+    "RegionalA dventures",
+    "andE mpoweringE xperiences"
+  ],
+  "allowed_missing_lines": 0
+}

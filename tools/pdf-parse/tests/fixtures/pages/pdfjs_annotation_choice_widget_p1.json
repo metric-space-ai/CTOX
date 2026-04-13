@@ -1,0 +1,38 @@
+{
+  "id": "pdfjs_annotation_choice_widget_p1",
+  "pdf": "annotation-choice-widget.pdf",
+  "page": 1,
+  "description": "Public pdf.js choice-widget sample covering combo-box and list-box extraction.",
+  "expected_lines": [
+    "Combo box",
+    "Combo box, read-only",
+    "List box, single selection",
+    "List box, multiple selection",
+    "List box, read-only"
+  ],
+  "required_patterns": [
+    "Combo box, read-only",
+    "List box, multiple selection"
+  ],
+  "ordered_phrases": [
+    "Combo box",
+    "Combo box, read-only",
+    "List box, single selection",
+    "List box, multiple selection",
+    "List box, read-only"
+  ],
+  "same_line_groups": [
+    [
+      "List box,",
+      "single selection"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Combo box",
+      "List box, single selection"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

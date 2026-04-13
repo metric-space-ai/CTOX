@@ -1,0 +1,82 @@
+{
+  "name": "public-opendataloader-samples",
+  "description": "Small public PDF smoke corpus derived from the OpenDataLoader PDF repository samples.",
+  "samples": [
+    {
+      "id": "odl_moran_pdf",
+      "path": "1901.03003.pdf",
+      "download_url": "https://raw.githubusercontent.com/opendataloader-project/opendataloader-pdf/main/samples/pdf/1901.03003.pdf",
+      "source_name": "OpenDataLoader PDF samples",
+      "source_url": "https://github.com/opendataloader-project/opendataloader-pdf/tree/main/samples/pdf",
+      "description": "Two-column scene-text paper used to benchmark reading order and figure-caption separation.",
+      "sha256": "691ad42cb91667e54639ddbb04f16a88b059d445c094d79d021ae6e450685558",
+      "tags": [
+        "public",
+        "benchmark",
+        "paper",
+        "two-column"
+      ]
+    },
+    {
+      "id": "odl_bialetti_pdf",
+      "path": "issue-336-conto-economico-bialetti.pdf",
+      "download_url": "https://raw.githubusercontent.com/opendataloader-project/opendataloader-pdf/main/samples/pdf/issue-336-conto-economico-bialetti.pdf",
+      "source_name": "OpenDataLoader PDF samples",
+      "source_url": "https://github.com/opendataloader-project/opendataloader-pdf/tree/main/samples/pdf",
+      "description": "Financial statement table used to guard numeric layout fidelity.",
+      "sha256": "5581b954db0f44e9aca54fab7e5a2b9d0b0331fc55245e53d861d848dcdce9de",
+      "tags": [
+        "public",
+        "benchmark",
+        "table",
+        "financial"
+      ]
+    },
+    {
+      "id": "odl_lorem_pdf",
+      "path": "lorem.pdf",
+      "download_url": "https://raw.githubusercontent.com/opendataloader-project/opendataloader-pdf/main/samples/pdf/lorem.pdf",
+      "source_name": "OpenDataLoader PDF samples",
+      "source_url": "https://github.com/opendataloader-project/opendataloader-pdf/tree/main/samples/pdf",
+      "description": "Single-column prose sanity-check sample.",
+      "sha256": "082f9f8c800fda43b13d097ccf3a603e1f8048987fb497fd2be4cba6817001ee",
+      "tags": [
+        "public",
+        "benchmark",
+        "single-column",
+        "prose"
+      ]
+    },
+    {
+      "id": "odl_insec_pdf",
+      "path": "2408.02509v1.pdf",
+      "download_url": "https://raw.githubusercontent.com/opendataloader-project/opendataloader-pdf/main/samples/pdf/2408.02509v1.pdf",
+      "source_name": "OpenDataLoader PDF samples",
+      "source_url": "https://github.com/opendataloader-project/opendataloader-pdf/tree/main/samples/pdf",
+      "description": "Two-column security paper used to benchmark prose-line reconstruction and CamelCase preservation in born-digital PDFs.",
+      "sha256": "1f45f83e3eb33b441a63c483c3fa08ab4ec7296597dbb1a6a78859fb0ec01abe",
+      "tags": [
+        "public",
+        "benchmark",
+        "paper",
+        "two-column",
+        "prose"
+      ]
+    },
+    {
+      "id": "odl_chinese_scan_pdf",
+      "path": "chinese_scan.pdf",
+      "download_url": "https://raw.githubusercontent.com/opendataloader-project/opendataloader-pdf/main/samples/pdf/chinese_scan.pdf",
+      "source_name": "OpenDataLoader PDF samples",
+      "source_url": "https://github.com/opendataloader-project/opendataloader-pdf/tree/main/samples/pdf",
+      "description": "Scanned Chinese PDF kept as a queued OCR-gap probe rather than an active green smoke fixture.",
+      "sha256": "972b342ff5a87f3bf6e1a4df8a81168e56fb42f61128709f5eb9a5c04945ae3c",
+      "tags": [
+        "public",
+        "benchmark",
+        "scan",
+        "ocr-gap"
+      ]
+    }
+  ]
+}

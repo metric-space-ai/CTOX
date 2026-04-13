@@ -1,0 +1,7 @@
+{
+  "name": "local-regression",
+  "description": "Example corpus manifest for CTOX pdf_parse page fixtures.",
+  "fixtures": [
+    "pages/example_page.json"
+  ]
+}

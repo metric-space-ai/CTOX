@@ -1,0 +1,38 @@
+{
+  "id": "pdfjs_file_pdfjs_form_p1",
+  "pdf": "file_pdfjs_form.pdf",
+  "page": 1,
+  "description": "Public pdf.js AcroForm sample guarding footer domains and basic form label extraction.",
+  "expected_lines": [
+    "Acro Form",
+    "Text Field:",
+    "page 1 / 1",
+    "Powered by TCPDF (www.tcpdf.org)"
+  ],
+  "required_patterns": [
+    "Powered by TCPDF",
+    "www.tcpdf.org"
+  ],
+  "ordered_phrases": [
+    "Acro Form",
+    "Text Field:",
+    "page 1 / 1",
+    "Powered by TCPDF (www.tcpdf.org)"
+  ],
+  "same_line_groups": [
+    [
+      "Powered by TCPDF",
+      "www.tcpdf.org"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Text Field:",
+      "Powered by TCPDF"
+    ]
+  ],
+  "forbidden_patterns": [
+    "Powered by TCPDF (www. tcpdf. org)"
+  ],
+  "allowed_missing_lines": 0
+}

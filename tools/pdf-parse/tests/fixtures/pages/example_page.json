@@ -1,0 +1,33 @@
+{
+  "id": "example_page",
+  "pdf": "../samples/example.pdf",
+  "page": 1,
+  "description": "Example page fixture schema for layout-faithful plain-text evaluation.",
+  "expected_lines": [
+    "Wohnraummiete MK",
+    "VORGETÄUSCHTER EIGENBEDARF"
+  ],
+  "required_patterns": [
+    "Revision hat Erfolg"
+  ],
+  "ordered_phrases": [
+    "Der Vermieter kündigte",
+    "Revision hat Erfolg"
+  ],
+  "same_line_groups": [
+    [
+      "Wohnraummiete",
+      "MK"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "VORGETÄUSCHTER EIGENBEDARF",
+      "1. Der Fall des BGH"
+    ]
+  ],
+  "forbidden_patterns": [
+    "Wohnung ihr PLuS im netZ",
+    "WohnraummieteMK"
+  ]
+}

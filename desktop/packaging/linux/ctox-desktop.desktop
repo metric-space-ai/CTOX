@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=CTOX Desktop
+Comment=Manage multiple CTOX instances
+Exec=ctox-desktop
+Icon=ctox-desktop
+Terminal=false
+Type=Application
+Categories=Development;Utility;
+StartupWMClass=ctox-desktop

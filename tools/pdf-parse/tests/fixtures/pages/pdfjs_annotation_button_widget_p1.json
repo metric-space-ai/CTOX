@@ -1,0 +1,42 @@
+{
+  "id": "pdfjs_annotation_button_widget_p1",
+  "pdf": "annotation-button-widget.pdf",
+  "page": 1,
+  "description": "Public pdf.js widget sample covering checkbox and radio-button extraction.",
+  "expected_lines": [
+    "Check box, unchecked",
+    "Check box, checked",
+    "Check box, read-only"
+  ],
+  "required_patterns": [
+    "Radio button, unselected",
+    "Radio buton, selected",
+    "Radio button, read-only"
+  ],
+  "ordered_phrases": [
+    "Check box, unchecked",
+    "Check box, checked",
+    "Check box, read-only",
+    "Radio button, unselected",
+    "Radio buton, selected",
+    "Radio button, read-only"
+  ],
+  "same_line_groups": [
+    [
+      "Check box,",
+      "unchecked"
+    ],
+    [
+      "Radio button,",
+      "unselected"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Check box, unchecked",
+      "Check box, checked"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

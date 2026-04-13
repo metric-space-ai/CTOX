@@ -1,0 +1,19 @@
+{
+  "cases": [
+    {
+      "name": "strip_numeric_cell",
+      "input": "| 123 |",
+      "expected": "123"
+    },
+    {
+      "name": "preserve_word_cell",
+      "input": "| Revenue |",
+      "expected": "| Revenue |"
+    },
+    {
+      "name": "preserve_na",
+      "input": "N/A",
+      "expected": "N/A"
+    }
+  ]
+}

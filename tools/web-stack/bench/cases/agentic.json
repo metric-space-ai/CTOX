@@ -1,0 +1,285 @@
+{
+  "version": 1,
+  "shared_setup": [
+    {
+      "command": [
+        "web",
+        "browser-prepare",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--install-reference",
+        "--install-browser"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "doctor.automation_ready",
+          "equals": true
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "fixture.web_read.http.deploy_guide",
+      "tier": "fixture",
+      "tool": "ctox_web_read",
+      "families": ["BrowseComp"],
+      "command": [
+        "web",
+        "read",
+        "--url",
+        "${FIXTURE_BASE_URL}/browser-docs-deploy.html",
+        "--query",
+        "Which command promotes the staging release?",
+        "--find",
+        "ctox deploy --env staging --approve"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_read"
+        },
+        {
+          "path": "page_text_excerpt",
+          "contains": "ctox deploy --env staging --approve"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.form_submission",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["Mind2Web", "WorkArena"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-form-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-form.html', { waitUntil: 'domcontentloaded' });\nawait page.fill('#name', 'testuser');\nawait page.selectOption('#topic', 'rollout');\nawait page.selectOption('#priority', 'high');\nawait page.click('button[type=\"submit\"]');\nreturn {\n  title: await page.title(),\n  summary: await page.textContent('#summary')\n};\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-form-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.summary",
+          "contains": "FORM_OK_20260408"
+        },
+        {
+          "path": "result.summary",
+          "contains": "testuser"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.login_flow",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["Mind2Web", "WorkArena"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-login-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-login.html', { waitUntil: 'domcontentloaded' });\nawait page.fill('#username', 'testuser');\nawait page.fill('#password', 'testpass');\nawait page.click('button[type=\"submit\"]');\nawait page.waitForURL('**/browser-dashboard.html**');\nreturn {\n  title: await page.title(),\n  headline: await page.textContent('#headline'),\n  token: await page.textContent('#token')\n};\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-login-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.headline",
+          "contains": "testuser"
+        },
+        {
+          "path": "result.token",
+          "equals": "LOGIN_OK_20260408"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.table_filter",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["Mind2Web", "WebArena-Verified"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-table-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-table.html', { waitUntil: 'domcontentloaded' });\nawait page.fill('#filter', 'critical');\nconst rows = await page.$$eval('tbody tr', (elements) =>\n  elements\n    .filter((row) => row.style.display !== 'none')\n    .map((row) => row.textContent.replace(/\\s+/g, ' ').trim())\n);\nreturn { rows, count: rows.length };\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-table-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.count",
+          "equals": 2
+        },
+        {
+          "path": "result.rows",
+          "contains": "Rotate staging cert"
+        },
+        {
+          "path": "result.rows",
+          "contains": "Restore browser fixtures"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.multi_step_wizard",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["MiniWoB++", "Mind2Web"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-wizard-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-wizard.html', { waitUntil: 'domcontentloaded' });\nawait page.click('#start');\nawait page.fill('#note', 'reviewed');\nawait page.click('#next');\nawait page.check('#approve');\nawait page.click('#finish');\nreturn {\n  status: await page.textContent('#status')\n};\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-wizard-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.status",
+          "contains": "approved:reviewed:WIZARD_OK_20260408"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.docs_navigation",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["WebArena-Verified", "Mind2Web"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-docs-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-docs-index.html', { waitUntil: 'domcontentloaded' });\nawait page.click('text=Deploy Guide');\nawait page.waitForURL('**/browser-docs-deploy.html');\nreturn {\n  title: await page.title(),\n  article: await page.textContent('article')\n};\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-docs-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.article",
+          "contains": "ctox deploy --env staging --approve"
+        },
+        {
+          "path": "result.article",
+          "contains": "DOCS_NAV_OK_20260408"
+        }
+      ]
+    },
+    {
+      "id": "fixture.browser_automation.checklist_progress",
+      "tier": "fixture",
+      "tool": "ctox_browser_automation",
+      "families": ["MiniWoB++", "WorkArena"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/browser-checklist-script.js",
+            "content": "await page.goto('${FIXTURE_BASE_URL}/browser-checklist.html', { waitUntil: 'domcontentloaded' });\nawait page.check('input[value=\"sync\"]');\nawait page.check('input[value=\"bench\"]');\nreturn {\n  progress: await page.textContent('#progress')\n};\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "browser-automation",
+        "--dir",
+        "${SHARED_ROOT}/browser-reference",
+        "--timeout-ms",
+        "120000",
+        "--script-file",
+        "${TMP_ROOT}/browser-checklist-script.js"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "result.progress",
+          "contains": "2/3 complete"
+        },
+        {
+          "path": "result.progress",
+          "contains": "CHECKLIST_OK_20260408"
+        }
+      ]
+    }
+  ]
+}

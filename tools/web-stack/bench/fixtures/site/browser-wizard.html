@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Wizard</title>
+    <style>
+      [hidden] {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <section id="step-1">
+        <h1>Step 1</h1>
+        <button id="start" type="button">Start</button>
+      </section>
+      <section id="step-2" hidden>
+        <h1>Step 2</h1>
+        <label>
+          Note
+          <input id="note" type="text">
+        </label>
+        <button id="next" type="button">Next</button>
+      </section>
+      <section id="step-3" hidden>
+        <h1>Step 3</h1>
+        <label>
+          <input id="approve" type="checkbox">
+          Approve
+        </label>
+        <button id="finish" type="button">Finish</button>
+      </section>
+      <p id="status">wizard-pending</p>
+    </main>
+    <script>
+      const show = (id) => {
+        for (const section of document.querySelectorAll("section")) {
+          section.hidden = section.id !== id;
+        }
+      };
+      document.getElementById("start").addEventListener("click", () => show("step-2"));
+      document.getElementById("next").addEventListener("click", () => show("step-3"));
+      document.getElementById("finish").addEventListener("click", () => {
+        const note = document.getElementById("note").value || "empty";
+        const approved = document.getElementById("approve").checked ? "approved" : "rejected";
+        document.getElementById("status").textContent =
+          `${approved}:${note}:WIZARD_OK_20260408`;
+      });
+    </script>
+  </body>
+</html>

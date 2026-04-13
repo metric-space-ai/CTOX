@@ -1,0 +1,40 @@
+{
+  "id": "odl_bialetti_p1",
+  "pdf": "issue-336-conto-economico-bialetti.pdf",
+  "page": 1,
+  "description": "Public financial-table sample from the OpenDataLoader repository. This guards that prose fixes do not degrade dense numeric layouts.",
+  "expected_lines": [
+    "CONTO ECONOMICO 2015 2016 2017 2018",
+    "Vari 2.500.000 3.085.000 3.055.000 1.773.000",
+    "Contributo in conto esercizio 0 0 0 0"
+  ],
+  "required_patterns": [
+    "A) VALORE DELLA PRODUZIONE 124.504.000 127.608.000",
+    "B) COSTI DELLA PRODUZIONE 115.995.000 116.800.000",
+    "Spese per prestazioni di servizi 32.935.000 29.497.000"
+  ],
+  "ordered_phrases": [
+    "A) VALORE DELLA PRODUZIONE",
+    "Vari 2.500.000 3.085.000 3.055.000 1.773.000",
+    "B) COSTI DELLA PRODUZIONE",
+    "Spese per prestazioni di servizi"
+  ],
+  "same_line_groups": [
+    [
+      "A) VALORE DELLA PRODUZIONE",
+      "80.579.000"
+    ],
+    [
+      "Vari",
+      "1.773.000"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "A) VALORE DELLA PRODUZIONE",
+      "Vari 2.500.000 3.085.000 3.055.000 1.773.000"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

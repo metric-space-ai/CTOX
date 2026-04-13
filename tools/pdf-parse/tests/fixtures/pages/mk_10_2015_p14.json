@@ -1,0 +1,42 @@
+{
+  "id": "mk_10_2015_p14",
+  "pdf": "MK_Archiv/2015/MK-10_2015.pdf",
+  "page": 14,
+  "description": "Legal newsletter page with teaser lines, sidebar promo fragments and long-form body text. This page is a known fragmentation and block-mixing stress case.",
+  "expected_lines": [
+    "Wohnraummiete",
+    "MK",
+    "VORGETÄUSCHTER EIGENBEDARF",
+    "2. Schadenersatzanspruch"
+  ],
+  "required_patterns": [
+    "von RiOLG Günther Geldmacher, Düsseldorf",
+    "Revision hat Erfolg",
+    "Zurechnungszusammenhang"
+  ],
+  "ordered_phrases": [
+    "Der Vermieter kündigte das Mietverhältnis",
+    "Revision hat Erfolg",
+    "2. Schadenersatzanspruch",
+    "Zurechnungszusammenhang"
+  ],
+  "same_line_groups": [
+    [
+      "von RiOLG",
+      "Günther Geldmacher",
+      "Düsseldorf"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "die Wohnung",
+      "ihr PLuS im netZ"
+    ]
+  ],
+  "forbidden_patterns": [
+    "Wohnung ihr PLuS im netZ",
+    "BGh",
+    "ausschluss desSchadenersatzanspruchs"
+  ],
+  "allowed_missing_lines": 0
+}

@@ -1,0 +1,37 @@
+{
+  "id": "pdfjs_annotation_link_text_popup_p1",
+  "pdf": "annotation-link-text-popup.pdf",
+  "page": 1,
+  "description": "Public pdf.js annotation sample covering link labels, popup text and URL extraction.",
+  "expected_lines": [
+    "Link",
+    "mozilla.org",
+    "Text"
+  ],
+  "required_patterns": [
+    "mozilla.org"
+  ],
+  "ordered_phrases": [
+    "Link",
+    "mozilla.org",
+    "Text"
+  ],
+  "same_line_groups": [
+    [
+      "mozilla",
+      ".org"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Link",
+      "mozilla.org"
+    ],
+    [
+      "mozilla.org",
+      "Text"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

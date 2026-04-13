@@ -1,0 +1,297 @@
+{
+  "cases": [
+    {
+      "name": "merge_same_line",
+      "input": [
+        {
+          "str": "Hello",
+          "x": 0,
+          "y": 10,
+          "w": 50,
+          "h": 12,
+          "strLength": 5
+        },
+        {
+          "str": " World",
+          "x": 50,
+          "y": 10,
+          "w": 55,
+          "h": 12,
+          "strLength": 6
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "Hello World",
+            "x": 0,
+            "y": 10,
+            "w": 105,
+            "h": 12,
+            "strLength": 11,
+            "pageBbox": {
+              "x": 0,
+              "y": 10,
+              "w": 105,
+              "h": 12
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "gap_too_large",
+      "input": [
+        {
+          "str": "Hello",
+          "x": 0,
+          "y": 10,
+          "w": 50,
+          "h": 12,
+          "strLength": 5
+        },
+        {
+          "str": "World",
+          "x": 100,
+          "y": 10,
+          "w": 50,
+          "h": 12,
+          "strLength": 5
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "Hello",
+            "x": 0,
+            "y": 10,
+            "w": 50,
+            "h": 12,
+            "strLength": 5
+          },
+          {
+            "str": "World",
+            "x": 100,
+            "y": 10,
+            "w": 50,
+            "h": 12,
+            "strLength": 5
+          }
+        ]
+      ]
+    },
+    {
+      "name": "different_lines",
+      "input": [
+        {
+          "str": "Line1",
+          "x": 0,
+          "y": 10,
+          "w": 50,
+          "h": 12,
+          "strLength": 5
+        },
+        {
+          "str": "Line2",
+          "x": 0,
+          "y": 30,
+          "w": 50,
+          "h": 12,
+          "strLength": 5
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "Line1",
+            "x": 0,
+            "y": 10,
+            "w": 50,
+            "h": 12,
+            "strLength": 5
+          }
+        ],
+        [
+          {
+            "str": "Line2",
+            "x": 0,
+            "y": 30,
+            "w": 50,
+            "h": 12,
+            "strLength": 5
+          }
+        ]
+      ]
+    },
+    {
+      "name": "small_negative_xdelta",
+      "input": [
+        {
+          "str": "AB",
+          "x": 0,
+          "y": 0,
+          "w": 20.3,
+          "h": 10,
+          "strLength": 2
+        },
+        {
+          "str": "CD",
+          "x": 20.1,
+          "y": 0,
+          "w": 20.0,
+          "h": 10,
+          "strLength": 2
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "ABCD",
+            "x": 0,
+            "y": 0,
+            "w": 40.1,
+            "h": 10,
+            "strLength": 4,
+            "pageBbox": {
+              "x": 0,
+              "y": 0,
+              "w": 40.1,
+              "h": 10
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "mismatched_markup_no_merge",
+      "input": [
+        {
+          "str": "A",
+          "x": 0,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "strLength": 1,
+          "markup": {
+            "highlight": "yes",
+            "underline": false,
+            "squiggly": false,
+            "strikeout": false
+          }
+        },
+        {
+          "str": "B",
+          "x": 10,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "strLength": 1,
+          "markup": {
+            "highlight": "no",
+            "underline": false,
+            "squiggly": false,
+            "strikeout": false
+          }
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "A",
+            "x": 0,
+            "y": 0,
+            "w": 10,
+            "h": 10,
+            "strLength": 1,
+            "markup": {
+              "highlight": "yes",
+              "underline": false,
+              "squiggly": false,
+              "strikeout": false
+            }
+          },
+          {
+            "str": "B",
+            "x": 10,
+            "y": 0,
+            "w": 10,
+            "h": 10,
+            "strLength": 1,
+            "markup": {
+              "highlight": "no",
+              "underline": false,
+              "squiggly": false,
+              "strikeout": false
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "unsorted_sorted",
+      "input": [
+        {
+          "str": "C",
+          "x": 20,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "strLength": 1
+        },
+        {
+          "str": "A",
+          "x": 0,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "strLength": 1
+        },
+        {
+          "str": "B",
+          "x": 10,
+          "y": 0,
+          "w": 10,
+          "h": 10,
+          "strLength": 1
+        }
+      ],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": [
+        [
+          {
+            "str": "ABC",
+            "x": 0,
+            "y": 0,
+            "w": 30,
+            "h": 10,
+            "strLength": 3,
+            "pageBbox": {
+              "x": 0,
+              "y": 0,
+              "w": 30,
+              "h": 10
+            }
+          }
+        ]
+      ]
+    },
+    {
+      "name": "empty_input",
+      "input": [],
+      "medianWidth": 10,
+      "medianHeight": 12,
+      "expected": []
+    }
+  ]
+}

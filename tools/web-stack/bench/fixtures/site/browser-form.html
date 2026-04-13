@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Form</title>
+  </head>
+  <body>
+    <main>
+      <h1>Incident Intake</h1>
+      <form id="incident-form">
+        <label>
+          Name
+          <input id="name" name="name" type="text">
+        </label>
+        <label>
+          Topic
+          <select id="topic" name="topic">
+            <option value="rollout">rollout</option>
+            <option value="incident">incident</option>
+            <option value="review">review</option>
+          </select>
+        </label>
+        <label>
+          Priority
+          <select id="priority" name="priority">
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <button type="submit">Save</button>
+      </form>
+      <p id="summary">pending</p>
+    </main>
+    <script>
+      document.getElementById("incident-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        const name = document.getElementById("name").value || "unknown";
+        const topic = document.getElementById("topic").value;
+        const priority = document.getElementById("priority").value;
+        document.getElementById("summary").textContent =
+          `Saved ${topic} for ${name} at ${priority} priority. Token FORM_OK_20260408`;
+      });
+    </script>
+  </body>
+</html>

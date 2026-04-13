@@ -1,0 +1,24 @@
+{
+  "id": "pdfjs_hello_world_rotated_p5",
+  "pdf": "hello_world_rotated.pdf",
+  "page": 5,
+  "description": "Public pdf.js rotated sample page used to guard rotation-aware text extraction.",
+  "expected_lines": [
+    "Hello world"
+  ],
+  "required_patterns": [
+    "Hello world"
+  ],
+  "ordered_phrases": [
+    "Hello world"
+  ],
+  "same_line_groups": [
+    [
+      "Hello",
+      "world"
+    ]
+  ],
+  "separate_line_groups": [],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

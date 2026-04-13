@@ -1,0 +1,161 @@
+{
+  "name": "public-pdfjs-samples",
+  "description": "Small public PDF smoke corpus derived from pinned pdf.js test PDFs.",
+  "samples": [
+    {
+      "id": "pdfjs_annotation_text_widget_pdf",
+      "path": "annotation-text-widget.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/annotation-text-widget.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Widget-heavy AcroForm text sample with alignment variants and multiline fields.",
+      "sha256": "9f091ceb368ad0406094efaa6c50d5033735ee52f383e0973dc53a7467089d7c",
+      "tags": [
+        "public",
+        "benchmark",
+        "form",
+        "widget"
+      ]
+    },
+    {
+      "id": "pdfjs_annotation_button_widget_pdf",
+      "path": "annotation-button-widget.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/annotation-button-widget.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Widget sample covering checkboxes and radio buttons.",
+      "sha256": "f7b1c9c7b2ecb909f6b168cc1b137230076533f977a205472b212b7f0d3a78d7",
+      "tags": [
+        "public",
+        "benchmark",
+        "form",
+        "widget",
+        "button"
+      ]
+    },
+    {
+      "id": "pdfjs_annotation_choice_widget_pdf",
+      "path": "annotation-choice-widget.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/annotation-choice-widget.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Choice-widget sample covering combo boxes and single/multi-select list boxes.",
+      "sha256": "2fcab2aed82afe9775359c1d166fb7aae77e99d25fe03be177e233d02d572538",
+      "tags": [
+        "public",
+        "benchmark",
+        "form",
+        "widget",
+        "choice"
+      ]
+    },
+    {
+      "id": "pdfjs_file_pdfjs_form_pdf",
+      "path": "file_pdfjs_form.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/file_pdfjs_form.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Simple AcroForm page with footer URL and page counter.",
+      "sha256": "808af1e794952475e8af824ad1ee6ac41d6646de122e5ac91975e75b0951c80b",
+      "tags": [
+        "public",
+        "benchmark",
+        "form",
+        "footer"
+      ]
+    },
+    {
+      "id": "pdfjs_annotation_link_text_popup_pdf",
+      "path": "annotation-link-text-popup.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/annotation-link-text-popup.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Annotation sample covering link text, popup text and inline URL extraction.",
+      "sha256": "06917202feda6b6bb8b57b048655f946f749bdff5a8bfcb35eb0116f38910312",
+      "tags": [
+        "public",
+        "benchmark",
+        "annotation",
+        "link",
+        "popup"
+      ]
+    },
+    {
+      "id": "pdfjs_annotation_highlight_pdf",
+      "path": "annotation-highlight.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/annotation-highlight.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Highlight annotation sample guarding highlighted text recovery.",
+      "sha256": "72b6387356ccfdfb95a0a5eff5e1ceb9b7667019807d7b04abaf64dad7ea143a",
+      "tags": [
+        "public",
+        "benchmark",
+        "annotation",
+        "highlight"
+      ]
+    },
+    {
+      "id": "pdfjs_arabic_cid_truetype_pdf",
+      "path": "ArabicCIDTrueType.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/ArabicCIDTrueType.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "RTL/CID text sample kept as a queued hard case for future text-layer improvements.",
+      "sha256": "1cad1de912ba29f89a6d8b08bc5b0f84382874ffedab2c8f9e05ef608c265bb1",
+      "tags": [
+        "public",
+        "benchmark",
+        "rtl",
+        "cid",
+        "queued-hard"
+      ]
+    },
+    {
+      "id": "pdfjs_simfang_variant_pdf",
+      "path": "SimFang-variant.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/SimFang-variant.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "CJK font-spacing sample kept as a queued hard case for future parser work.",
+      "sha256": "e6c6e3fb472f06a3d812bef23afc026e90b33497408122b61d577e0f7df49418",
+      "tags": [
+        "public",
+        "benchmark",
+        "cjk",
+        "font",
+        "queued-hard"
+      ]
+    },
+    {
+      "id": "pdfjs_truetype_without_cmap_pdf",
+      "path": "TrueType_without_cmap.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/TrueType_without_cmap.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Broken-encoding edge case kept as a queued hard sample rather than an active smoke fixture.",
+      "sha256": "3e111eef52ce9c0d0b1da043290df4b49a5670c89891fcb3db6962edb12e35aa",
+      "tags": [
+        "public",
+        "benchmark",
+        "encoding",
+        "font",
+        "queued-hard"
+      ]
+    },
+    {
+      "id": "pdfjs_hello_world_rotated_pdf",
+      "path": "hello_world_rotated.pdf",
+      "download_url": "https://raw.githubusercontent.com/mozilla/pdf.js/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs/hello_world_rotated.pdf",
+      "source_name": "pdf.js test PDFs",
+      "source_url": "https://github.com/mozilla/pdf.js/tree/a67b952118f5d799c8fcf899e6ac46e2c2fa20b4/test/pdfs",
+      "description": "Rotated hello-world pages used to guard rotation-aware reading order.",
+      "sha256": "ab0cb700cd5e5338fd676dfca25becae800acd2be03a4e57856485b8cfd2d28b",
+      "tags": [
+        "public",
+        "benchmark",
+        "rotation"
+      ]
+    }
+  ]
+}

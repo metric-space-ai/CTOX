@@ -1,0 +1,352 @@
+use anyhow::Context;
+use anyhow::Result;
+use serde_json::Value;
+use std::path::Path;
+use std::path::PathBuf;
+
+use crate::browser::capture_browser_transport;
+use crate::browser::prepare_browser_environment;
+use crate::browser::read_browser_automation_source;
+use crate::browser::run_browser_automation;
+use crate::browser::BrowserAutomationRequest;
+use crate::browser::BrowserCaptureRequest;
+use crate::browser::BrowserPrepareOptions;
+use crate::web_search::run_ctox_google_bootstrap_import_tool;
+use crate::web_search::run_ctox_google_bootstrap_refresh_tool;
+use crate::web_search::run_ctox_google_bootstrap_status_tool;
+use crate::web_search::run_ctox_web_read_tool;
+use crate::web_search::run_ctox_web_search_tool;
+use crate::web_search::CanonicalWebSearchRequest;
+use crate::web_search::ContextSize;
+use crate::web_search::DirectWebReadRequest;
+use crate::web_search::SearchUserLocation;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebScrapeRequest {
+    pub target_key: String,
+    pub mode: WebScrapeMode,
+    pub query: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebScrapeMode {
+    Latest,
+    Semantic,
+}
+
+impl WebScrapeRequest {
+    pub fn forwarded_args(&self) -> Result<Vec<String>> {
+        let mut forwarded = match self.mode {
+            WebScrapeMode::Latest => {
+                if self.query.is_some() {
+                    anyhow::bail!(
+                        "ctox web scrape --mode latest does not accept --query; use --mode semantic instead"
+                    );
+                }
+                vec![
+                    "show-latest".to_string(),
+                    "--target-key".to_string(),
+                    self.target_key.clone(),
+                ]
+            }
+            WebScrapeMode::Semantic => {
+                let query = self
+                    .query
+                    .as_ref()
+                    .context("ctox web scrape --mode semantic requires --query <text>")?;
+                vec![
+                    "semantic-search".to_string(),
+                    "--target-key".to_string(),
+                    self.target_key.clone(),
+                    "--query".to_string(),
+                    query.clone(),
+                ]
+            }
+        };
+        if let Some(limit) = self.limit {
+            forwarded.push("--limit".to_string());
+            forwarded.push(limit.to_string());
+        }
+        Ok(forwarded)
+    }
+}
+
+impl WebScrapeMode {
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "latest" => Ok(Self::Latest),
+            "semantic" => Ok(Self::Semantic),
+            other => anyhow::bail!("unsupported --mode `{other}`; expected `latest` or `semantic`"),
+        }
+    }
+}
+
+pub fn handle_web_command(
+    root: &Path,
+    args: &[String],
+    scrape_executor: &dyn Fn(&Path, &[String]) -> Result<()>,
+) -> Result<()> {
+    let command = args.first().map(String::as_str).unwrap_or("");
+    match command {
+        "search" => {
+            let query = required_flag_value(args, "--query")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context(
+                    "usage: ctox web search --query <text> [--domain <host>]... [--context-size <low|medium|high>] [--cached] [--include-sources]",
+                )?;
+            let search_context_size = find_flag_value(args, "--context-size")
+                .map(parse_context_size)
+                .transpose()?;
+            let payload = run_ctox_web_search_tool(
+                root,
+                &CanonicalWebSearchRequest {
+                    query: query.to_string(),
+                    external_web_access: args.iter().any(|arg| arg == "--cached").then_some(false),
+                    allowed_domains: find_flag_values(args, "--domain")
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                    user_location: SearchUserLocation::default(),
+                    search_context_size,
+                    search_content_types: Vec::new(),
+                    include_sources: args.iter().any(|arg| arg == "--include-sources"),
+                },
+            )?;
+            print_json(&payload)
+        }
+        "read" => {
+            let url = required_flag_value(args, "--url")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context("usage: ctox web read --url <url> [--query <text>] [--find <text>]...")?;
+            let payload = run_ctox_web_read_tool(
+                root,
+                &DirectWebReadRequest {
+                    url: url.to_string(),
+                    query: find_flag_value(args, "--query").map(ToOwned::to_owned),
+                    find: find_flag_values(args, "--find")
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                },
+            )?;
+            print_json(&payload)
+        }
+        "google-bootstrap-refresh" => {
+            let query = required_flag_value(args, "--query")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context(
+                    "usage: ctox web google-bootstrap-refresh --query <text> [--domain <host>]... [--timeout-ms <n>]",
+                )?;
+            if looks_headless_without_browser_session() {
+                anyhow::bail!(
+                    "interactive Google bootstrap refresh needs a local browser session, but this host looks headless. Refresh the profile on a GUI host and install it here with `ctox web google-bootstrap-import --file <path>`."
+                );
+            }
+            let timeout_ms = find_flag_value(args, "--timeout-ms")
+                .map(|value| value.parse::<u64>())
+                .transpose()
+                .context("failed to parse --timeout-ms")?;
+            eprintln!(
+                "CTOX is opening Chrome for a manual Google bootstrap refresh. If Google shows a challenge, clear it in the browser window and wait for the search results page."
+            );
+            let payload = run_ctox_google_bootstrap_refresh_tool(
+                root,
+                query,
+                &find_flag_values(args, "--domain")
+                    .into_iter()
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>(),
+                timeout_ms,
+            )?;
+            print_json(&payload)
+        }
+        "google-bootstrap-status" => {
+            let payload = run_ctox_google_bootstrap_status_tool(root)?;
+            print_json(&payload)
+        }
+        "google-bootstrap-import" => {
+            let source = required_flag_value(args, "--file")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context("usage: ctox web google-bootstrap-import --file <path>")?;
+            let payload =
+                run_ctox_google_bootstrap_import_tool(root, &PathBuf::from(source))?;
+            print_json(&payload)
+        }
+        "scrape" => {
+            let target_key = required_flag_value(args, "--target-key")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context(
+                    "usage: ctox web scrape --target-key <key> --mode <latest|semantic> [--query <text>] [--limit <n>]",
+                )?;
+            let mode = required_flag_value(args, "--mode")
+                .context(
+                    "usage: ctox web scrape --target-key <key> --mode <latest|semantic> [--query <text>] [--limit <n>]",
+                )
+                .and_then(WebScrapeMode::parse)?;
+            let limit = find_flag_value(args, "--limit")
+                .map(|value| value.parse::<usize>())
+                .transpose()
+                .context("failed to parse --limit")?;
+            let request = WebScrapeRequest {
+                target_key: target_key.to_string(),
+                mode,
+                query: find_flag_value(args, "--query")
+                    .or_else(|| find_flag_value(args, "-q"))
+                    .map(ToOwned::to_owned),
+                limit,
+            };
+            let forwarded = request.forwarded_args()?;
+            scrape_executor(root, &forwarded)
+        }
+        "browser-prepare" => {
+            let payload = prepare_browser_environment(
+                root,
+                &BrowserPrepareOptions {
+                    dir: find_flag_value(args, "--dir").map(PathBuf::from),
+                    install_reference: args.iter().any(|arg| arg == "--install-reference"),
+                    install_browser: args.iter().any(|arg| arg == "--install-browser"),
+                    skip_npm_install: args.iter().any(|arg| arg == "--skip-npm-install"),
+                },
+            )?;
+            print_json(&payload)
+        }
+        "browser-automation" => {
+            let script_file = find_flag_value(args, "--script-file").map(PathBuf::from);
+            let payload = run_browser_automation(
+                root,
+                &BrowserAutomationRequest {
+                    dir: find_flag_value(args, "--dir").map(PathBuf::from),
+                    timeout_ms: find_flag_value(args, "--timeout-ms")
+                        .map(|value| value.parse::<u64>())
+                        .transpose()
+                        .context("failed to parse --timeout-ms")?,
+                    source: read_browser_automation_source(script_file.as_deref())?,
+                },
+            )?;
+            print_json(&payload)
+        }
+        "browser-capture" => {
+            let url = required_flag_value(args, "--url")
+                .or_else(|| args.get(1).map(String::as_str))
+                .context(
+                    "usage: ctox web browser-capture --url <url> [--out-dir <path>] [--timeout-ms <n>]",
+                )?;
+            let payload = capture_browser_transport(
+                root,
+                &BrowserCaptureRequest {
+                    dir: find_flag_value(args, "--dir").map(PathBuf::from),
+                    out_dir: find_flag_value(args, "--out-dir").map(PathBuf::from),
+                    timeout_ms: find_flag_value(args, "--timeout-ms")
+                        .map(|value| value.parse::<u64>())
+                        .transpose()
+                        .context("failed to parse --timeout-ms")?,
+                    url: url.to_string(),
+                },
+            )?;
+            print_json(&payload)
+        }
+        _ => anyhow::bail!(
+            "usage:\n  ctox web search --query <text> [--domain <host>]... [--context-size <low|medium|high>] [--cached] [--include-sources]\n  ctox web read --url <url> [--query <text>] [--find <text>]...\n  ctox web google-bootstrap-refresh --query <text> [--domain <host>]... [--timeout-ms <n>]\n  ctox web google-bootstrap-status\n  ctox web google-bootstrap-import --file <path>\n  ctox web scrape --target-key <key> --mode <latest|semantic> [--query <text>] [--limit <n>]\n  ctox web browser-prepare [--dir <path>] [--install-reference] [--install-browser] [--skip-npm-install]\n  ctox web browser-automation [--dir <path>] [--timeout-ms <n>] [--script-file <path>] < script.js\n  ctox web browser-capture --url <url> [--dir <path>] [--out-dir <path>] [--timeout-ms <n>]"
+        ),
+    }
+}
+
+fn looks_headless_without_browser_session() -> bool {
+    if cfg!(target_os = "macos") {
+        return false;
+    }
+    std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none()
+}
+
+fn parse_context_size(raw: &str) -> Result<ContextSize> {
+    ContextSize::from_label(raw).with_context(|| {
+        format!("unsupported --context-size `{raw}`; expected low, medium, or high")
+    })
+}
+
+fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    find_flag_value(args, flag)
+}
+
+fn find_flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == flag {
+            if let Some(value) = args.get(index + 1) {
+                out.push(value.as_str());
+            }
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    out
+}
+
+fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    let index = args.iter().position(|arg| arg == flag)?;
+    args.get(index + 1).map(String::as_str)
+}
+
+fn print_json(value: &Value) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WebScrapeMode;
+    use super::WebScrapeRequest;
+
+    #[test]
+    fn scrape_request_requires_explicit_latest_mode() {
+        let request = WebScrapeRequest {
+            target_key: "jobs".to_string(),
+            mode: WebScrapeMode::Latest,
+            query: None,
+            limit: Some(5),
+        };
+        assert_eq!(
+            request.forwarded_args().expect("latest scrape args"),
+            vec!["show-latest", "--target-key", "jobs", "--limit", "5",]
+        );
+    }
+
+    #[test]
+    fn scrape_request_requires_explicit_semantic_mode() {
+        let request = WebScrapeRequest {
+            target_key: "jobs".to_string(),
+            mode: WebScrapeMode::Semantic,
+            query: Some("rust".to_string()),
+            limit: Some(3),
+        };
+        assert_eq!(
+            request.forwarded_args().expect("semantic scrape args"),
+            vec![
+                "semantic-search",
+                "--target-key",
+                "jobs",
+                "--query",
+                "rust",
+                "--limit",
+                "3",
+            ]
+        );
+    }
+
+    #[test]
+    fn latest_scrape_mode_rejects_query() {
+        let request = WebScrapeRequest {
+            target_key: "jobs".to_string(),
+            mode: WebScrapeMode::Latest,
+            query: Some("rust".to_string()),
+            limit: None,
+        };
+        let err = request
+            .forwarded_args()
+            .expect_err("latest scrape should reject query");
+        assert!(err.to_string().contains("--mode latest"));
+    }
+}

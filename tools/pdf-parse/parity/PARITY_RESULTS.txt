@@ -1,0 +1,17 @@
+PASS bbox_to_line::merge_same_line
+PASS bbox_to_line::gap_too_large
+PASS bbox_to_line::different_lines
+PASS bbox_to_line::small_negative_xdelta
+PASS bbox_to_line::mismatched_markup_no_merge
+PASS bbox_to_line::unsorted_sorted
+PASS bbox_to_line::empty_input
+PASS project_to_grid::single_column
+PASS project_to_grid::two_column
+PASS project_to_grid::dot_garbage
+PASS build_bounding_boxes::skips_whitespace
+PASS clean_text::strip_margin_and_nulls
+PASS text_utils::strip_numeric_cell
+PASS text_utils::preserve_word_cell
+PASS text_utils::preserve_na
+
+Summary: 15 passed, 0 failed

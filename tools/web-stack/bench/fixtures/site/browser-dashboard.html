@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Dashboard</title>
+  </head>
+  <body>
+    <main>
+      <h1 id="headline">Dashboard</h1>
+      <p id="token">pending</p>
+    </main>
+    <script>
+      const user = new URLSearchParams(window.location.search).get("user") || "anonymous";
+      document.getElementById("headline").textContent = `Dashboard ready for ${user}`;
+      document.getElementById("token").textContent = "LOGIN_OK_20260408";
+    </script>
+  </body>
+</html>

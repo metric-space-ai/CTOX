@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Table</title>
+  </head>
+  <body>
+    <main>
+      <h1>Operations Queue</h1>
+      <label>
+        Filter
+        <input id="filter" type="text" placeholder="critical">
+      </label>
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Severity</th>
+          </tr>
+        </thead>
+        <tbody id="rows">
+          <tr><td>Rotate staging cert</td><td>critical</td></tr>
+          <tr><td>Refresh docs search index</td><td>normal</td></tr>
+          <tr><td>Restore browser fixtures</td><td>critical</td></tr>
+          <tr><td>Archive old bench reports</td><td>low</td></tr>
+        </tbody>
+      </table>
+    </main>
+    <script>
+      const input = document.getElementById("filter");
+      const rows = Array.from(document.querySelectorAll("#rows tr"));
+      const applyFilter = () => {
+        const needle = input.value.trim().toLowerCase();
+        for (const row of rows) {
+          const text = row.textContent.toLowerCase();
+          row.style.display = needle && !text.includes(needle) ? "none" : "";
+        }
+      };
+      input.addEventListener("input", applyFilter);
+    </script>
+  </body>
+</html>

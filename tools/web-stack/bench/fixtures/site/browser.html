@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Bench</title>
+  </head>
+  <body>
+    <main>
+      <h1>CTOX Browser Bench</h1>
+      <p>This page validates real browser automation against a local fixture.</p>
+      <button id="confirm" type="button">Confirm</button>
+      <div id="status">ready</div>
+    </main>
+    <script>
+      document.getElementById("confirm").addEventListener("click", () => {
+        document.getElementById("status").textContent = "clicked-ok";
+      });
+    </script>
+  </body>
+</html>

@@ -1,0 +1,380 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "fixture.web_search.mock.synthetic",
+      "tier": "fixture",
+      "tool": "ctox_web_search",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_PROVIDER=mock\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "search",
+        "--query",
+        "ctox bench synthetic evidence",
+        "--include-sources"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_search"
+        },
+        {
+          "path": "provider",
+          "equals": "mock"
+        },
+        {
+          "path": "results",
+          "len_gte": 1
+        },
+        {
+          "path": "citations",
+          "len_gte": 1
+        },
+        {
+          "path": "context",
+          "contains": "CTOX_REMOTE_WEB_OK"
+        }
+      ]
+    },
+    {
+      "id": "fixture.web_read.http.find_in_page",
+      "tier": "fixture",
+      "tool": "ctox_web_read",
+      "families": ["BrowseComp"],
+      "command": [
+        "web",
+        "read",
+        "--url",
+        "${FIXTURE_BASE_URL}/guide.html",
+        "--query",
+        "Which confirmation token does the guide publish?",
+        "--find",
+        "STACK_CANARY_20260408"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_read"
+        },
+        {
+          "path": "url",
+          "equals": "${FIXTURE_BASE_URL}/guide.html"
+        },
+        {
+          "path": "find_results",
+          "len_gte": 1
+        },
+        {
+          "path": "page_text_excerpt",
+          "contains": "STACK_CANARY_20260408"
+        }
+      ]
+    },
+    {
+      "id": "fixture.web_read.mock_pdf",
+      "tier": "fixture",
+      "tool": "ctox_web_read",
+      "families": ["BrowseComp"],
+      "setup": [
+        {
+          "write_text": {
+            "path": "${TMP_ROOT}/runtime/engine.env",
+            "content": "CTOX_WEB_SEARCH_PROVIDER=mock\n"
+          }
+        }
+      ],
+      "command": [
+        "web",
+        "read",
+        "--url",
+        "https://example.com/mock-bench.pdf",
+        "--query",
+        "Find the confirmation token in the mock PDF",
+        "--find",
+        "CTOX_REMOTE_WEB_OK"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_web_read"
+        },
+        {
+          "path": "is_pdf",
+          "equals": true
+        },
+        {
+          "path": "find_results",
+          "len_gte": 1
+        },
+        {
+          "path": "page_text_excerpt",
+          "contains": "CTOX_REMOTE_WEB_OK"
+        }
+      ]
+    },
+    {
+      "id": "fixture.web_scrape.show_latest.empty_target",
+      "tier": "fixture",
+      "tool": "ctox_web_scrape",
+      "families": ["WebArena-Verified"],
+      "setup": [
+        {
+          "write_json": {
+            "path": "${TMP_ROOT}/seed/scrape-target.json",
+            "value": {
+              "target_key": "bench-jobs",
+              "display_name": "Bench Jobs",
+              "start_url": "https://example.com/jobs",
+              "target_kind": "jobs",
+              "config": {
+                "skip_probe": true
+              },
+              "output_schema": {
+                "schema_key": "jobs.v1",
+                "record_key_fields": ["id"]
+              }
+            }
+          }
+        },
+        {
+          "command": [
+            "scrape",
+            "upsert-target",
+            "--input",
+            "${TMP_ROOT}/seed/scrape-target.json",
+            "--runtime-root",
+            "${TMP_ROOT}/scrape-runtime"
+          ],
+          "assertions": [
+            {
+              "path": "ok",
+              "equals": true
+            }
+          ]
+        }
+      ],
+      "command": [
+        "web",
+        "scrape",
+        "--target-key",
+        "bench-jobs",
+        "--mode",
+        "latest",
+        "--limit",
+        "5"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "latest.target_key",
+          "equals": "bench-jobs"
+        },
+        {
+          "path": "latest.active_record_count",
+          "equals": 0
+        },
+        {
+          "path": "latest.records",
+          "len_eq": 0
+        }
+      ]
+    },
+    {
+      "id": "fixture.web_scrape.semantic.disabled_target",
+      "tier": "fixture",
+      "tool": "ctox_web_scrape",
+      "families": ["WebArena-Verified"],
+      "setup": [
+        {
+          "write_json": {
+            "path": "${TMP_ROOT}/seed/scrape-semantic-disabled.json",
+            "value": {
+              "target_key": "bench-semantic-disabled",
+              "display_name": "Bench Semantic Disabled",
+              "start_url": "https://example.com/jobs",
+              "target_kind": "jobs",
+              "config": {
+                "skip_probe": true,
+                "api": {
+                  "semantic": {
+                    "enabled": false
+                  }
+                }
+              },
+              "output_schema": {
+                "schema_key": "jobs.v1",
+                "record_key_fields": ["id"]
+              }
+            }
+          }
+        },
+        {
+          "command": [
+            "scrape",
+            "upsert-target",
+            "--input",
+            "${TMP_ROOT}/seed/scrape-semantic-disabled.json",
+            "--runtime-root",
+            "${TMP_ROOT}/scrape-runtime"
+          ],
+          "assertions": [
+            {
+              "path": "ok",
+              "equals": true
+            }
+          ]
+        }
+      ],
+      "command": [
+        "web",
+        "scrape",
+        "--target-key",
+        "bench-semantic-disabled",
+        "--mode",
+        "semantic",
+        "--query",
+        "rust",
+        "--limit",
+        "2"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "semantic.target_key",
+          "equals": "bench-semantic-disabled"
+        },
+        {
+          "path": "semantic.semantic_enabled",
+          "equals": false
+        },
+        {
+          "path": "semantic.message",
+          "contains": "disabled"
+        }
+      ]
+    },
+    {
+      "id": "fixture.web_scrape.semantic.fail_fast_without_engine",
+      "tier": "fixture",
+      "tool": "ctox_web_scrape",
+      "families": ["WebArena-Verified"],
+      "setup": [
+        {
+          "write_json": {
+            "path": "${TMP_ROOT}/seed/scrape-semantic-enabled.json",
+            "value": {
+              "target_key": "bench-semantic-enabled",
+              "display_name": "Bench Semantic Enabled",
+              "start_url": "https://example.com/jobs",
+              "target_kind": "jobs",
+              "config": {
+                "skip_probe": true
+              },
+              "output_schema": {
+                "schema_key": "jobs.v1",
+                "record_key_fields": ["id"]
+              }
+            }
+          }
+        },
+        {
+          "command": [
+            "scrape",
+            "upsert-target",
+            "--input",
+            "${TMP_ROOT}/seed/scrape-semantic-enabled.json",
+            "--runtime-root",
+            "${TMP_ROOT}/scrape-runtime"
+          ],
+          "assertions": [
+            {
+              "path": "ok",
+              "equals": true
+            }
+          ]
+        }
+      ],
+      "command": [
+        "web",
+        "scrape",
+        "--target-key",
+        "bench-semantic-enabled",
+        "--mode",
+        "semantic",
+        "--query",
+        "rust",
+        "--limit",
+        "2"
+      ],
+      "expect_failure": {
+        "contains": "ctox-engine"
+      }
+    },
+    {
+      "id": "fixture.browser_prepare.reference_bootstrap",
+      "tier": "fixture",
+      "tool": "ctox_browser_prepare",
+      "families": ["MiniWoB++"],
+      "command": [
+        "web",
+        "browser-prepare",
+        "--dir",
+        "${TMP_ROOT}/browser-reference",
+        "--install-reference",
+        "--skip-npm-install"
+      ],
+      "assertions": [
+        {
+          "path": "ok",
+          "equals": true
+        },
+        {
+          "path": "tool",
+          "equals": "ctox_browser_prepare"
+        },
+        {
+          "path": "install.ok",
+          "equals": true
+        },
+        {
+          "path": "install.package_json_created",
+          "equals": true
+        },
+        {
+          "path": "doctor.package_json_exists",
+          "equals": true
+        },
+        {
+          "path": "bootstrap.ok",
+          "equals": true
+        }
+      ]
+    }
+  ]
+}

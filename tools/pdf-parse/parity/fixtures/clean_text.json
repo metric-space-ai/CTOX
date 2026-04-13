@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "name": "strip_margin_and_nulls",
+      "input": [
+        {
+          "pageNum": 1,
+          "width": 100,
+          "height": 100,
+          "text": "\n   Hello   \n   World\u0000\n",
+          "textItems": [],
+          "images": []
+        }
+      ],
+      "expected": [
+        {
+          "pageNum": 1,
+          "width": 100,
+          "height": 100,
+          "text": "Hello\nWorld ",
+          "textItems": [],
+          "images": []
+        }
+      ]
+    }
+  ]
+}

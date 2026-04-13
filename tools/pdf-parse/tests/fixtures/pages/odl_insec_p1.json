@@ -1,0 +1,49 @@
+{
+  "id": "odl_insec_p1",
+  "pdf": "2408.02509v1.pdf",
+  "page": 1,
+  "description": "Public two-column security paper sample from the OpenDataLoader repository. This guards prose-line reconstruction, CamelCase preservation and dense born-digital paragraph recovery.",
+  "expected_lines": [
+    "Practical Attacks against Black-box Code Completion Engines",
+    "ETH Zurich, Switzerland"
+  ],
+  "required_patterns": [
+    "commercial completion engines, such as GitHub Copilot, INSEC",
+    "we design a series of specialized initialization schemes and an",
+    "does not have any knowledge or control over the internals of",
+    "to target black-box services in practice, such as model API",
+    "behavior closely mirrors the original to maintain functional"
+  ],
+  "ordered_phrases": [
+    "Practical Attacks against Black-box Code Completion Engines",
+    "Abstract",
+    "we design a series of specialized initialization schemes and an",
+    "Our Practical Threat Model",
+    "does not have any knowledge or control over the internals of",
+    "behavior closely mirrors the original to maintain functional"
+  ],
+  "same_line_groups": [
+    [
+      "GitHub Copilot",
+      "INSEC"
+    ],
+    [
+      "Our Practical Threat Model",
+      "In this work, we consider"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Abstract",
+      "Our Practical Threat Model"
+    ]
+  ],
+  "forbidden_patterns": [
+    "Git Hub Copilot",
+    "wed esign as eries ofs pecializedi nitializations chemesa nda n",
+    "doesn oth ave anyk nowledge orc ontrolo ver thei nternalso f",
+    "tot argetb lack-boxs ervices in practice,s uch asm odel APIS",
+    "tom aintain functional"
+  ],
+  "allowed_missing_lines": 0
+}

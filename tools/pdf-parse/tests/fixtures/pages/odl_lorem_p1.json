@@ -1,0 +1,35 @@
+{
+  "id": "odl_lorem_p1",
+  "pdf": "lorem.pdf",
+  "page": 1,
+  "description": "Simple public OpenDataLoader sample used as a sanity-check baseline for single-column prose.",
+  "expected_lines": [
+    "Lorem Ipsum",
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor",
+    "anim id est laborum."
+  ],
+  "required_patterns": [
+    "Ut enim ad minim veniam, quis nostrud",
+    "Duis aute irure dolor in reprehenderit"
+  ],
+  "ordered_phrases": [
+    "Lorem Ipsum",
+    "Lorem ipsum dolor sit amet",
+    "Excepteur sint occaecat cupidatat non proident",
+    "anim id est laborum."
+  ],
+  "same_line_groups": [
+    [
+      "Lorem",
+      "Ipsum"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Lorem Ipsum",
+      "Lorem ipsum dolor sit amet"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

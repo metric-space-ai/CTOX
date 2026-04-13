@@ -1,0 +1,44 @@
+{
+  "id": "pdfjs_annotation_text_widget_p1",
+  "pdf": "annotation-text-widget.pdf",
+  "page": 1,
+  "description": "Public pdf.js widget sample covering aligned text widgets and multiline field output.",
+  "expected_lines": [
+    "Single line, unlimited length",
+    "Single line, length 10",
+    "Single line, center aligned",
+    "Single line, right aligned"
+  ],
+  "required_patterns": [
+    "Single line, read-only",
+    "Single line, combs",
+    "Multiline"
+  ],
+  "ordered_phrases": [
+    "Single line, unlimited length",
+    "Single line, length 10",
+    "Single line, center aligned",
+    "Single line, right aligned",
+    "Single line, read-only",
+    "Single line, combs",
+    "Multiline"
+  ],
+  "same_line_groups": [
+    [
+      "Single line,",
+      "unlimited length"
+    ],
+    [
+      "center",
+      "aligned"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Single line, unlimited length",
+      "Multiline"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

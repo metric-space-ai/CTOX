@@ -1,0 +1,273 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build-desktop-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: ctox-desktop-macos-arm64
+          - os: macos-13
+            target: x86_64-apple-darwin
+            artifact: ctox-desktop-macos-x64
+
+    runs-on: ${{ matrix.os }}
+    name: Desktop .dmg — ${{ matrix.artifact }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: ${{ matrix.target }}-cargo-desktop-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-desktop-
+
+      - name: Build desktop app
+        working-directory: desktop
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Create .app bundle and .dmg
+        run: |
+          APP="CTOX Desktop.app"
+          mkdir -p "$APP/Contents/MacOS"
+          mkdir -p "$APP/Contents/Resources"
+
+          # Copy binary
+          cp desktop/target/${{ matrix.target }}/release/ctox-desktop "$APP/Contents/MacOS/"
+
+          # Copy Info.plist
+          cp desktop/packaging/macos/Info.plist "$APP/Contents/"
+
+          # Create .icns from PNG
+          ICONSET="AppIcon.iconset"
+          mkdir -p "$ICONSET"
+          sips -z 16 16     desktop/CTOX_app_icon.png --out "$ICONSET/icon_16x16.png"
+          sips -z 32 32     desktop/CTOX_app_icon.png --out "$ICONSET/icon_16x16@2x.png"
+          sips -z 32 32     desktop/CTOX_app_icon.png --out "$ICONSET/icon_32x32.png"
+          sips -z 64 64     desktop/CTOX_app_icon.png --out "$ICONSET/icon_32x32@2x.png"
+          sips -z 128 128   desktop/CTOX_app_icon.png --out "$ICONSET/icon_128x128.png"
+          sips -z 256 256   desktop/CTOX_app_icon.png --out "$ICONSET/icon_128x128@2x.png"
+          sips -z 256 256   desktop/CTOX_app_icon.png --out "$ICONSET/icon_256x256.png"
+          sips -z 512 512   desktop/CTOX_app_icon.png --out "$ICONSET/icon_256x256@2x.png"
+          sips -z 512 512   desktop/CTOX_app_icon.png --out "$ICONSET/icon_512x512.png"
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+
+          # Create .dmg
+          hdiutil create -volname "CTOX Desktop" \
+            -srcfolder "$APP" \
+            -ov -format UDZO \
+            "${{ matrix.artifact }}.dmg"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.dmg
+
+  build-desktop-linux:
+    runs-on: ubuntu-22.04
+    name: Desktop .AppImage — linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: x86_64-unknown-linux-gnu-cargo-desktop-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: x86_64-unknown-linux-gnu-cargo-desktop-
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libssl-dev libfontconfig1-dev pkg-config \
+            fuse libfuse2
+
+      - name: Build desktop app
+        working-directory: desktop
+        run: cargo build --release
+
+      - name: Create AppImage
+        run: |
+          # Download linuxdeploy
+          wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
+          chmod +x linuxdeploy-x86_64.AppImage
+
+          # Build AppDir structure
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
+          cp desktop/target/release/ctox-desktop AppDir/usr/bin/
+          cp desktop/packaging/linux/ctox-desktop.desktop AppDir/usr/share/applications/
+          cp desktop/CTOX_app_icon.png AppDir/usr/share/icons/hicolor/256x256/apps/ctox-desktop.png
+
+          # Create AppImage
+          export OUTPUT="ctox-desktop-linux-x64.AppImage"
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --desktop-file desktop/packaging/linux/ctox-desktop.desktop \
+            --icon-file desktop/CTOX_app_icon.png \
+            --output appimage
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctox-desktop-linux-x64
+          path: ctox-desktop-linux-x64.AppImage
+
+  build-desktop-windows:
+    runs-on: windows-latest
+    name: Desktop .msi — windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            desktop/target
+          key: x86_64-pc-windows-msvc-cargo-desktop-${{ hashFiles('desktop/Cargo.lock') }}
+          restore-keys: x86_64-pc-windows-msvc-cargo-desktop-
+
+      - name: Build desktop app
+        working-directory: desktop
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Create .ico from PNG
+        shell: pwsh
+        run: |
+          magick desktop/CTOX_app_icon.png -define icon:auto-resize=256,128,64,48,32,16 desktop/packaging/windows/ctox-desktop.ico
+
+      - name: Build .msi with WiX
+        shell: pwsh
+        run: |
+          # Copy binary and icon to WiX source directory
+          Copy-Item "desktop\target\x86_64-pc-windows-msvc\release\ctox-desktop.exe" "desktop\packaging\windows\"
+
+          # WiX v3 is pre-installed on windows-latest runners
+          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\candle.exe" `
+            -arch x64 `
+            -ext WixUIExtension `
+            -out desktop\packaging\windows\main.wixobj `
+            desktop\packaging\windows\main.wxs
+
+          & "C:\Program Files (x86)\WiX Toolset v3.14\bin\light.exe" `
+            -ext WixUIExtension `
+            -out ctox-desktop-windows-x64.msi `
+            desktop\packaging\windows\main.wixobj
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctox-desktop-windows-x64
+          path: ctox-desktop-windows-x64.msi
+
+  build-ctox:
+    runs-on: ubuntu-22.04
+    name: CTOX CLI — linux-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.0"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: x86_64-unknown-linux-gnu-cargo-ctox-${{ hashFiles('Cargo.lock') }}
+          restore-keys: x86_64-unknown-linux-gnu-cargo-ctox-
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev
+
+      - name: Build CTOX
+        run: cargo build --release
+
+      - name: Package binary
+        run: |
+          mkdir -p dist
+          cp target/release/ctox dist/
+          cd dist && tar czf ../ctox-linux-x64.tar.gz ctox
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctox-linux-x64
+          path: ctox-linux-x64.tar.gz
+
+  release:
+    needs: [build-desktop-macos, build-desktop-linux, build-desktop-windows, build-ctox]
+    runs-on: ubuntu-latest
+    name: Create GitHub Release
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*

@@ -1,0 +1,22 @@
+[package]
+name = "ctox-engine-audio"
+readme = "../README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "engine_audio"
+
+[dependencies]
+anyhow.workspace = true
+hound.workspace = true
+symphonia.workspace = true
+apodize.workspace = true

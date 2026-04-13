@@ -1,0 +1,31 @@
+{
+  "id": "pdfjs_annotation_highlight_p1",
+  "pdf": "annotation-highlight.pdf",
+  "page": 1,
+  "description": "Public pdf.js annotation sample guarding highlighted text recovery.",
+  "expected_lines": [
+    "Highlight",
+    "Lorem ipsum dolor sit amet"
+  ],
+  "required_patterns": [
+    "Lorem ipsum dolor sit amet"
+  ],
+  "ordered_phrases": [
+    "Highlight",
+    "Lorem ipsum dolor sit amet"
+  ],
+  "same_line_groups": [
+    [
+      "Lorem ipsum",
+      "dolor sit amet"
+    ]
+  ],
+  "separate_line_groups": [
+    [
+      "Highlight",
+      "Lorem ipsum dolor sit amet"
+    ]
+  ],
+  "forbidden_patterns": [],
+  "allowed_missing_lines": 0
+}

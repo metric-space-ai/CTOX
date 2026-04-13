@@ -1,0 +1,11 @@
+{
+  "name": "public-opendataloader",
+  "description": "Public benchmark smoke corpus backed by a small sample pack from the OpenDataLoader PDF repository.",
+  "pdf_root": "samples/public/opendataloader",
+  "fixtures": [
+    "pages/odl_lorem_p1.json",
+    "pages/odl_bialetti_p1.json",
+    "pages/odl_moran_p1.json",
+    "pages/odl_insec_p1.json"
+  ]
+}

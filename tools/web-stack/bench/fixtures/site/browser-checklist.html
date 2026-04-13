@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>CTOX Browser Checklist</title>
+  </head>
+  <body>
+    <main>
+      <h1>Release Checklist</h1>
+      <label><input class="task" type="checkbox" value="sync"> Sync runtime</label>
+      <label><input class="task" type="checkbox" value="bench"> Run bench</label>
+      <label><input class="task" type="checkbox" value="report"> Publish report</label>
+      <p id="progress">0/3 complete</p>
+    </main>
+    <script>
+      const tasks = Array.from(document.querySelectorAll(".task"));
+      const update = () => {
+        const complete = tasks.filter((task) => task.checked).length;
+        const suffix = complete === 2 ? " CHECKLIST_OK_20260408" : "";
+        document.getElementById("progress").textContent = `${complete}/3 complete${suffix}`;
+      };
+      for (const task of tasks) {
+        task.addEventListener("change", update);
+      }
+    </script>
+  </body>
+</html>

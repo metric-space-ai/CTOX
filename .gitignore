@@ -1,0 +1,36 @@
+target/
+/runtime/
+.venv/
+.codex-paramiko-venv/
+.DS_Store
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+old-legacy-for-transplation-only/
+
+# Secrets and credentials
+*.env
+*.env.*
+*.key
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Dev-only directories
+/scripts/
+/benchmarks/
+/qualification/
+/docs/
+/output/
+/contracts/
+/.claude/
+/.playwright-cli/
+/.remote_import/
+
+# Dev-only files
+*.expect
+bench_compaction_host_run.sh
