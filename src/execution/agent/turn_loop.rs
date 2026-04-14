@@ -11,9 +11,51 @@ use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
 use std::thread;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
+
+/// Per-conversation count of turns since the last continuity refresh.
+/// Lives in process memory so that restarts do not preserve it — that is
+/// fine: a restart always forces a refresh on the first turn anyway.
+fn turn_counters() -> &'static Mutex<HashMap<i64, u64>> {
+    static COUNTERS: OnceLock<Mutex<HashMap<i64, u64>>> = OnceLock::new();
+    COUNTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Decide whether the current turn should run a continuity refresh.
+/// Refreshes always run on a task boundary (e.g. a plan step closed) and
+/// when the configured interval `every_n` (default 1 = every turn) has
+/// elapsed. With `every_n` > 1, intermediate turns skip the refresh and
+/// just bump the counter, which avoids the 3 LLM calls per turn cost.
+fn should_refresh_continuity(
+    conversation_id: i64,
+    every_n: u64,
+    force_task_boundary: bool,
+) -> bool {
+    if force_task_boundary {
+        // reset counter so the next free interval starts cleanly
+        let mut counters = turn_counters().lock().expect("turn_counters poisoned");
+        counters.insert(conversation_id, 0);
+        return true;
+    }
+    let interval = every_n.max(1);
+    if interval == 1 {
+        return true;
+    }
+    let mut counters = turn_counters().lock().expect("turn_counters poisoned");
+    let counter = counters.entry(conversation_id).or_insert(0);
+    *counter += 1;
+    if *counter >= interval {
+        *counter = 0;
+        true
+    } else {
+        false
+    }
+}
 use std::time::UNIX_EPOCH;
 
 use crate::channels;
@@ -102,7 +144,9 @@ impl CodexExecBinary {
         let binary = engine::discover_source_layout_paths(root).codex_exec_binary;
         if !binary.is_file() {
             anyhow::bail!(
-                "required codex-exec binary is missing at {}. CTOX no longer falls back to source execution; build or install tools/agent-runtime first",
+                "required codex-exec binary is missing at {}. \
+                 Build it with: `cd tools/agent-runtime && cargo build --release --bin codex-exec`. \
+                 CTOX no longer falls back to source execution.",
                 binary.display()
             );
         }
@@ -300,6 +344,36 @@ pub fn run_chat_turn_with_events<F>(
 where
     F: FnMut(&str),
 {
+    run_chat_turn_with_events_extended(
+        root,
+        db_path,
+        prompt,
+        workspace_root,
+        conversation_id,
+        suggested_skill,
+        false,
+        emit,
+    )
+}
+
+/// Like `run_chat_turn_with_events` but accepts a `force_continuity_refresh`
+/// hint. The service sets this to `true` when the turn closed a task
+/// boundary (e.g. a plan step or a self-work item completion) so the
+/// continuity refresh is never skipped at those moments, regardless of
+/// the `CTOX_CONTINUITY_REFRESH_EVERY_N_TURNS` setting.
+pub fn run_chat_turn_with_events_extended<F>(
+    root: &Path,
+    db_path: &Path,
+    prompt: &str,
+    workspace_root: Option<&Path>,
+    conversation_id: i64,
+    suggested_skill: Option<&str>,
+    force_continuity_refresh: bool,
+    mut emit: F,
+) -> Result<String>
+where
+    F: FnMut(&str),
+{
     let runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root)?;
     let operator_settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
     let default_turn_timeout_secs = if runtime.state.source.is_local() {
@@ -403,15 +477,29 @@ where
     emit("persist-assistant-turn");
     lcm::run_add_message(db_path, conversation_id, "assistant", &reply)?;
     let engine = lcm::LcmEngine::open(db_path, lcm::LcmConfig::default())?;
-    emit("continuity-refresh");
-    let continuity_stats = refresh_continuity_documents(
-        root,
+    let refresh_every_n = read_usize_setting(
         &operator_settings,
-        &engine,
-        workspace_root,
+        "CTOX_CONTINUITY_REFRESH_EVERY_N_TURNS",
+        1,
+    ) as u64;
+    let continuity_stats = if should_refresh_continuity(
         conversation_id,
-        &mut emit,
-    )?;
+        refresh_every_n,
+        force_continuity_refresh,
+    ) {
+        emit("continuity-refresh");
+        refresh_continuity_documents(
+            root,
+            &operator_settings,
+            &engine,
+            workspace_root,
+            conversation_id,
+            &mut emit,
+        )?
+    } else {
+        emit("continuity-refresh-skipped-by-interval");
+        Default::default()
+    };
     let outcome = turn_engine::ChatTurnOutcome {
         stage: turn_engine::TurnStage::Complete,
         health_status: health.status,

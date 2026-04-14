@@ -1957,13 +1957,21 @@ fn start_prompt_worker(
             let workspace_root = job.workspace_root.as_deref().map(std::path::Path::new);
             let conversation_id =
                 turn_loop::conversation_id_for_thread_key(job.thread_key.as_deref());
-            let result = turn_loop::run_chat_turn_with_events(
+            // Task boundaries — plan-step messages or self-work item
+            // closures — must always trigger a continuity refresh, regardless
+            // of CTOX_CONTINUITY_REFRESH_EVERY_N_TURNS.
+            let force_continuity_refresh = job
+                .leased_message_keys
+                .iter()
+                .any(|key| key.starts_with("plan:system::"));
+            let result = turn_loop::run_chat_turn_with_events_extended(
                 &root,
                 &db_path,
                 &job.prompt,
                 workspace_root,
                 conversation_id,
                 job.suggested_skill.as_deref(),
+                force_continuity_refresh,
                 |event| {
                     push_event(&event_state, format!("phase {} {}", event_source, event));
                 },
