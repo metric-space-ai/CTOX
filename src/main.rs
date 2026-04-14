@@ -733,22 +733,26 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// `ctox run-once` — execute a single mission headlessly against a fresh
-/// conversation, block until the turn completes, emit a trajectory, and exit
-/// with a status code that Harbor-style harnesses can consume directly:
+/// `ctox run-once` — drive a single CTOX mission from the initial brief all
+/// the way to its done-gate, then emit a trajectory.
 ///
-///   exit 0  — mission handled (success)
-///   exit !0 — mission failed (turn error propagates)
+/// A mission in CTOX is *not* a single LLM call: the agent can enqueue
+/// follow-ups, plans can emit new steps between turns, and those extend the
+/// mission until the continuity state reaches `is_open == false`. This CLI
+/// replicates the inner loop that `start_prompt_worker` runs inside the
+/// service daemon, without the service daemon itself — bench harnesses get
+/// the full CTOX operating model (Plan → Turn → Follow-up → Turn → … →
+/// Done-gate) in a single invocation.
 ///
-/// This path deliberately bypasses the service daemon, the queue dispatcher,
-/// and the watcher thread: a benchmark task is a one-shot mission, so we call
-/// the turn loop directly on the current conversation. All CTOX plumbing that
-/// the turn loop itself depends on (LCM, continuity, compaction, governance,
-/// skills) is exercised in the process.
+/// Exit semantics for harness consumption:
+///   0   — mission closed (is_open == false). Done-gate reached.
+///   1   — a turn failed (error propagated via `anyhow`).
+///   2   — mission blocked (no more pending work but mission still open).
+///   4   — turn-cap reached (`--max-turns`, default 30).
 fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let brief = find_flag_value(args, "--brief").context(
         "usage: ctox run-once --brief <text> [--model <id>] [--quality|--performance] \
-         [--workspace <path>] [--atif-out <path>] [--thread-key <key>]",
+         [--workspace <path>] [--atif-out <path>] [--thread-key <key>] [--max-turns <n>]",
     )?;
     let model = find_flag_value(args, "--model");
     let preset = if args.iter().any(|arg| arg == "--quality") {
@@ -763,6 +767,11 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let thread_key = find_flag_value(args, "--thread-key")
         .map(str::to_owned)
         .unwrap_or_else(|| format!("run-once-{}", chrono::Utc::now().timestamp_millis()));
+    let max_turns: usize = find_flag_value(args, "--max-turns")
+        .map(|v| v.parse::<usize>())
+        .transpose()
+        .context("failed to parse --max-turns")?
+        .unwrap_or(30);
 
     if let Some(model_id) = model {
         let outcome = runtime_control::execute_runtime_switch(root, model_id, preset)?;
@@ -784,38 +793,165 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
         inference::turn_loop::conversation_id_for_thread_key(Some(thread_key.as_str()));
 
     eprintln!(
-        "ctox run-once: thread_key={} conversation_id={} brief_chars={}",
+        "ctox run-once: thread_key={} conversation_id={} brief_chars={} max_turns={}",
         thread_key,
         conversation_id,
-        brief.chars().count()
+        brief.chars().count(),
+        max_turns
     );
 
-    let workspace_ref = workspace_opt.as_deref();
-    let turn_result = inference::turn_loop::run_chat_turn_with_events_extended(
-        root,
-        &db_path,
-        brief,
-        workspace_ref,
-        conversation_id,
-        None,
-        false,
-        |event| eprintln!("[ctox run-once] {event}"),
-    );
-
-    let err_text = turn_result.as_ref().err().map(|err| err.to_string());
-    let mission_status = if turn_result.is_ok() {
-        "handled"
-    } else {
-        "failed"
+    // Seed the mission with the brief as a queue task so it flows through
+    // exactly the same lease/ack machinery that channel-sourced prompts
+    // use in the service daemon.
+    let initial_title = {
+        let mut s: String = brief.chars().take(80).collect();
+        if brief.chars().count() > 80 {
+            s.push('…');
+        }
+        format!("run-once: {s}")
     };
+    let _seed = channels::create_queue_task(
+        root,
+        channels::QueueTaskCreateRequest {
+            title: initial_title,
+            prompt: brief.to_string(),
+            thread_key: thread_key.clone(),
+            workspace_root: workspace_opt
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+            priority: "normal".to_string(),
+            suggested_skill: None,
+            parent_message_key: None,
+        },
+    )
+    .context("failed to seed initial queue task for run-once mission")?;
+
+    let lease_owner = "run-once";
+    let mut mission_status: &str = "open";
+    let mut last_error: Option<String> = None;
+    let mut last_reply = String::new();
+    let mut turns_run: usize = 0;
+
+    let mut current = lease_next_for_thread(root, &thread_key, lease_owner)?;
+    if current.is_none() {
+        anyhow::bail!(
+            "failed to lease newly-created queue task for thread {thread_key}"
+        );
+    }
+
+    while let Some((prompt_text, leased_keys, ws_override)) = current.take() {
+        turns_run += 1;
+        let workspace_ref = ws_override.as_deref().or(workspace_opt.as_deref());
+        let force_continuity_refresh = leased_keys
+            .iter()
+            .any(|key| key.starts_with("plan:system::"));
+
+        eprintln!(
+            "ctox run-once: turn {}/{} leased={:?} prompt_chars={}",
+            turns_run,
+            max_turns,
+            leased_keys,
+            prompt_text.chars().count()
+        );
+
+        let turn_result = inference::turn_loop::run_chat_turn_with_events_extended(
+            root,
+            &db_path,
+            &prompt_text,
+            workspace_ref,
+            conversation_id,
+            None,
+            force_continuity_refresh,
+            |event| eprintln!("[ctox run-once t{turns_run}] {event}"),
+        );
+
+        match &turn_result {
+            Ok(reply) => {
+                last_reply.clone_from(reply);
+                if let Err(err) = channels::ack_leased_messages(root, &leased_keys, "handled") {
+                    eprintln!("ctox run-once: ack handled failed: {err}");
+                }
+                for key in &leased_keys {
+                    if key.starts_with("plan:system::") {
+                        if let Err(err) = plan::complete_step_by_message_key(root, key, reply) {
+                            eprintln!(
+                                "ctox run-once: complete_step_by_message_key({key}) failed: {err}"
+                            );
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                last_error = Some(err.to_string());
+                eprintln!("ctox run-once: turn {turns_run} failed: {err}");
+                let _ = channels::ack_leased_messages(root, &leased_keys, "failed");
+                mission_status = "failed";
+                break;
+            }
+        }
+
+        // Done-gate: mission_state_from_continuity tells us whether the
+        // mission has declared itself closed.
+        let mission_open = match lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
+            .and_then(|engine| engine.sync_mission_state_from_continuity(conversation_id))
+        {
+            Ok(state) => {
+                eprintln!(
+                    "ctox run-once: after t{} is_open={} mode={}",
+                    turns_run, state.is_open, state.continuation_mode
+                );
+                state.is_open
+            }
+            Err(err) => {
+                eprintln!(
+                    "ctox run-once: sync_mission_state_from_continuity failed: {err}; assuming still open"
+                );
+                true
+            }
+        };
+
+        if !mission_open {
+            mission_status = "handled";
+            break;
+        }
+
+        if turns_run >= max_turns {
+            mission_status = "cap";
+            break;
+        }
+
+        // Let plan steps that are now due emit new plan:system:: messages
+        // into the queue. This is the hook the watcher thread normally runs
+        // on its timer; run-once triggers it synchronously between turns.
+        if let Err(err) = plan::emit_due_steps(root) {
+            eprintln!("ctox run-once: plan::emit_due_steps failed: {err}");
+        }
+
+        current = lease_next_for_thread(root, &thread_key, lease_owner)?;
+        if current.is_none() {
+            mission_status = "blocked";
+            break;
+        }
+    }
 
     if let Some(out_path) = atif_out.as_deref() {
         let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
         let model_name = runtime_env::effective_chat_model_from_map(&settings)
             .unwrap_or_else(|| "unknown".to_string());
-        let notes = err_text
-            .as_ref()
-            .map(|msg| format!("run-once terminated with error: {msg}"));
+        let notes = match mission_status {
+            "handled" => Some(format!("mission handled in {turns_run} turn(s)")),
+            "failed" => Some(format!(
+                "mission failed on turn {turns_run}: {}",
+                last_error.as_deref().unwrap_or("<no error text>")
+            )),
+            "blocked" => Some(format!(
+                "mission blocked after {turns_run} turn(s): no more pending work but mission still open"
+            )),
+            "cap" => Some(format!(
+                "mission hit --max-turns cap ({max_turns}); mission still open"
+            )),
+            _ => None,
+        };
         let trajectory = export::atif::build_trajectory(
             &db_path,
             conversation_id,
@@ -833,21 +969,52 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
         );
     }
 
-    match turn_result {
-        Ok(reply) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "status": mission_status,
-                    "conversation_id": conversation_id,
-                    "thread_key": thread_key,
-                    "reply_chars": reply.chars().count(),
-                }))?
-            );
-            Ok(())
-        }
-        Err(err) => Err(err),
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": mission_status,
+            "conversation_id": conversation_id,
+            "thread_key": thread_key,
+            "turns_run": turns_run,
+            "reply_chars": last_reply.chars().count(),
+            "last_error": last_error,
+        }))?
+    );
+
+    match mission_status {
+        "handled" => Ok(()),
+        "failed" => Err(anyhow::anyhow!(
+            last_error.unwrap_or_else(|| "mission failed".to_string())
+        )),
+        "blocked" => std::process::exit(2),
+        "cap" => std::process::exit(4),
+        _ => std::process::exit(5),
     }
+}
+
+/// Lease at most one pending queue message whose thread matches our mission.
+/// `channels::lease_pending_inbound_messages` leases across the whole queue;
+/// we filter to our thread here. Foreign messages (which shouldn't exist in
+/// a bench container but may exist in an exploratory host run) are released
+/// back with status `blocked` rather than consumed.
+fn lease_next_for_thread(
+    root: &Path,
+    thread_key: &str,
+    lease_owner: &str,
+) -> anyhow::Result<Option<(String, Vec<String>, Option<PathBuf>)>> {
+    let leased = channels::lease_pending_inbound_messages(root, 32, lease_owner)?;
+    let mut matched: Option<(String, Vec<String>, Option<PathBuf>)> = None;
+    for msg in leased {
+        if matched.is_none() && msg.thread_key == thread_key {
+            let prompt = msg.body_text;
+            let keys = vec![msg.message_key];
+            let workspace = msg.workspace_root.map(PathBuf::from);
+            matched = Some((prompt, keys, workspace));
+        } else {
+            let _ = channels::ack_leased_messages(root, &[msg.message_key], "blocked");
+        }
+    }
+    Ok(matched)
 }
 
 fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
