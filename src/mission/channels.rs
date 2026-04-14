@@ -1695,6 +1695,12 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
+    // Historical auto-handle rule: inbound messages whose external timestamp
+    // predates the communication account's creation are marked as already
+    // handled so we don't re-process mailbox history at first boot. The
+    // synthetic `queue` channel is programmatic — queue tasks are created
+    // after the account exists and must stay `pending` until leased — so
+    // it is excluded from the pre-account auto-handle.
     conn.execute(
         r#"
         INSERT INTO communication_routing_state (
@@ -1705,6 +1711,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
             CASE
                 WHEN m.direction = 'outbound' THEN 'handled'
                 WHEN m.trust_level = 'system_probe' THEN 'handled'
+                WHEN m.channel = 'queue' THEN 'pending'
                 WHEN m.direction = 'inbound'
                      AND a.created_at IS NOT NULL
                      AND m.external_created_at <= a.created_at THEN 'handled'
@@ -1714,6 +1721,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
             NULL,
             CASE
                 WHEN m.direction = 'outbound' OR m.trust_level = 'system_probe' THEN m.observed_at
+                WHEN m.channel = 'queue' THEN NULL
                 WHEN m.direction = 'inbound'
                      AND a.created_at IS NOT NULL
                      AND m.external_created_at <= a.created_at THEN m.observed_at
