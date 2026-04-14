@@ -2191,6 +2191,11 @@ fn start_channel_syncer(root: std::path::PathBuf) {
 
 fn start_mission_watcher(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
     thread::spawn(move || loop {
+        // Emit any due plan steps first so auto-advancing plans keep moving
+        // without requiring an explicit `ctox plan tick` call.
+        if let Err(err) = plan::emit_due_steps(&root) {
+            push_event(&state, format!("Plan emitter failed: {err}"));
+        }
         if let Err(err) = monitor_mission_continuity(&root, &state) {
             push_event(&state, format!("Mission watcher failed: {err}"));
         }
