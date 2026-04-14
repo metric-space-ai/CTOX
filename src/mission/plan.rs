@@ -817,6 +817,34 @@ fn collapse_ws(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Whether any active plan still has pending steps, ignoring auto_advance.
+/// Used by the mission idle watchdog so that it keeps triggering as long as
+/// real plan work is open, even when the mission state record has drifted to
+/// allow_idle or is_open=false.
+pub fn has_active_goal_with_pending_step(root: &Path) -> Result<bool> {
+    let conn = open_plan_db(root)?;
+    let now = now_iso_string();
+    let exists: i64 = conn.query_row(
+        r#"
+        SELECT EXISTS (
+            SELECT 1
+            FROM planned_goals g
+            JOIN planned_steps s ON s.goal_id = g.goal_id
+            WHERE g.status = 'active'
+              AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+              AND (
+                    s.defer_until IS NULL
+                    OR s.defer_until = ''
+                    OR s.defer_until <= ?1
+              )
+        )
+        "#,
+        params![now],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
 fn list_goal_ids_with_due_work(conn: &Connection) -> Result<Vec<String>> {
     let mut statement = conn.prepare(
         r#"
@@ -1312,5 +1340,63 @@ mod tests {
         let steps = decompose_prompt_into_steps("Follow up", "Need a durable follow-up.");
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].title, "Inspect scope and constraints");
+    }
+
+    #[test]
+    fn new_plans_default_to_auto_advance() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path();
+        let view = ingest(
+            root,
+            IngestPlanRequest {
+                title: "Test plan".to_string(),
+                prompt: "- step one\n- step two\n- step three".to_string(),
+                thread_key: None,
+                skill: None,
+                auto_advance: true,
+                emit_now: false,
+            },
+        )?;
+        assert!(view.auto_advance, "plan should default to auto_advance");
+        assert!(
+            has_active_goal_with_pending_step(root)?,
+            "plan with pending steps must be reported as active with pending work"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn has_active_goal_reports_false_when_no_plans_exist() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        assert!(!has_active_goal_with_pending_step(tmp.path())?);
+        Ok(())
+    }
+
+    #[test]
+    fn has_active_goal_reports_false_when_all_steps_completed() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path();
+        let view = ingest(
+            root,
+            IngestPlanRequest {
+                title: "Done plan".to_string(),
+                prompt: "- a\n- b".to_string(),
+                thread_key: None,
+                skill: None,
+                auto_advance: true,
+                emit_now: false,
+            },
+        )?;
+        let conn = open_plan_db(root)?;
+        conn.execute(
+            "UPDATE planned_steps SET status='completed' WHERE goal_id=?1",
+            params![view.goal_id],
+        )?;
+        conn.execute(
+            "UPDATE planned_goals SET status='completed' WHERE goal_id=?1",
+            params![view.goal_id],
+        )?;
+        assert!(!has_active_goal_with_pending_step(root)?);
+        Ok(())
     }
 }

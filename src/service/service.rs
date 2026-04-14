@@ -70,6 +70,7 @@ use crate::inference::supervisor;
 use crate::inference::turn_loop;
 use crate::lcm;
 use crate::mission::communication_adapters;
+use crate::mission::plan;
 use crate::mission::tickets;
 use crate::schedule;
 use crate::scrape;
@@ -2205,7 +2206,11 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
     let db_path = root.join("runtime/ctox_lcm.db");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let mission = engine.sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)?;
-    if !mission.is_open || mission.allow_idle {
+    // Normally we skip when the mission state says closed or allow_idle,
+    // but if there is still an active plan with pending steps we keep
+    // triggering — the mission state has drifted away from reality.
+    let active_plan_has_work = plan::has_active_goal_with_pending_step(root).unwrap_or(false);
+    if (!mission.is_open || mission.allow_idle) && !active_plan_has_work {
         return Ok(());
     }
 
@@ -2295,10 +2300,15 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
         );
     }
     sync_configured_tickets(root, &settings);
+    let bot_name = settings
+        .get("CTO_MEETING_BOT_NAME")
+        .cloned()
+        .unwrap_or_else(|| "CTOX Notetaker".to_string());
     let leased = channels::lease_pending_inbound_messages(root, 16, CHANNEL_ROUTER_LEASE_OWNER)?;
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
     let mut blocked = Vec::new();
+    let mut meeting_handled = Vec::new();
     for message in leased {
         if let Some(reason) = blocked_inbound_reason(&message, &settings) {
             let mechanism_id = governance::mechanism_id_for_block_reason(&reason);
@@ -2336,6 +2346,42 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             duplicates.push(message.message_key.clone());
             continue;
         }
+        // --- Meeting invitation intercept ---
+        // If this is an email containing a meeting URL, schedule the join
+        // and ack the message instead of routing it to the agent.
+        if message.channel == "email" {
+            let body = if !message.body_text.trim().is_empty() {
+                message.body_text.trim()
+            } else {
+                ""
+            };
+            let meeting_urls =
+                crate::mission::communication_meeting_native::extract_meeting_urls(body);
+            if !meeting_urls.is_empty() {
+                let result =
+                    crate::mission::communication_meeting_native::process_email_for_meetings(
+                        root,
+                        message.subject.trim(),
+                        body,
+                        &bot_name,
+                    );
+                if let Ok(ref val) = result {
+                    if val.get("action").and_then(serde_json::Value::as_str) != Some("none") {
+                        push_event(
+                            state,
+                            format!(
+                                "Meeting detected in email from {}: {}",
+                                display_inbound_sender(&message),
+                                meeting_urls.first().unwrap_or(&String::new()),
+                            ),
+                        );
+                        meeting_handled.push(message.message_key.clone());
+                        continue;
+                    }
+                }
+            }
+        }
+
         let prompt_body = if !message.body_text.trim().is_empty() {
             message.body_text.trim().to_string()
         } else if !message.preview.trim().is_empty() {
@@ -2381,6 +2427,9 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     }
     if !blocked.is_empty() {
         let _ = channels::ack_leased_messages(root, &blocked, "blocked_sender");
+    }
+    if !meeting_handled.is_empty() {
+        let _ = channels::ack_leased_messages(root, &meeting_handled, "meeting_scheduled");
     }
     route_ticket_events(root, state)?;
     Ok(())
@@ -2728,6 +2777,34 @@ fn enrich_inbound_prompt(
             prepend_workspace_contract(prompt_body, message.workspace_root.as_deref())
         );
     }
+    if message.channel == "meeting" {
+        let sender = display_inbound_sender(message);
+        let session_id = &message.thread_key; // thread_key == session_id
+        let provider = message
+            .metadata
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let is_mention = crate::mission::communication_meeting_native::MeetingSession::is_mention(prompt_body);
+        let mention_hint = if is_mention {
+            format!(
+                " Du wurdest per @CTOX erwaehnt — antworte im Meeting-Chat.\n\
+                 Nutze `meeting_get_transcript` fuer das vollstaendige Transkript.\n\
+                 Nutze `meeting_send_chat` mit session_id `{session_id}` um zu antworten.\n\
+                 Halte deine Antwort kurz (1-3 Saetze)."
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            "[Meeting-Chat-Nachricht eingegangen]\n\
+             Provider: {provider}\n\
+             Sender: {sender}\n\
+             Session: {session_id}\n\
+             Wenn du im Meeting-Chat antworten willst, nutze `ctox channel send --channel meeting --thread-key '{session_id}' --body \"<deine Antwort>\"`.{mention_hint}\n\n{}",
+            prepend_workspace_contract(prompt_body, message.workspace_root.as_deref())
+        );
+    }
     prepend_workspace_contract(prompt_body, message.workspace_root.as_deref())
 }
 
@@ -2797,6 +2874,7 @@ fn render_email_context_contract(root: &Path, message: &channels::RoutedInboundM
 fn sync_configured_channels(root: &Path, settings: &BTreeMap<String, String>) {
     let _ = communication_adapters::email().service_sync(root, settings);
     let _ = communication_adapters::jami().service_sync(root, settings);
+    let _ = communication_adapters::meeting().service_sync(root, settings);
     let _ = communication_adapters::teams().service_sync(root, settings);
 }
 
