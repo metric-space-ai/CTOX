@@ -2233,6 +2233,34 @@ fn start_mission_watcher(root: std::path::PathBuf, state: Arc<Mutex<SharedState>
                 ),
                 _ => {}
             }
+        } else {
+            // Normal interactive mode: proactively nag the owner about
+            // open approval-gate items over the configured channels, and
+            // close gates when a structured email reply arrives.
+            match crate::mission::approval_nag::sweep(&root) {
+                Ok(summary) => {
+                    if summary.sent > 0
+                        || summary.scheduled > 0
+                        || summary.replies_processed > 0
+                        || summary.completed > 0
+                    {
+                        push_event(
+                            &state,
+                            format!(
+                                "Approval nag: scheduled={} sent={} replies={} completed={}",
+                                summary.scheduled,
+                                summary.sent,
+                                summary.replies_processed,
+                                summary.completed
+                            ),
+                        );
+                    }
+                }
+                Err(err) => push_event(
+                    &state,
+                    format!("Approval nag sweep failed: {err}"),
+                ),
+            }
         }
         if let Err(err) = monitor_mission_continuity(&root, &state) {
             push_event(&state, format!("Mission watcher failed: {err}"));
