@@ -3261,7 +3261,14 @@ fn runnable_thread_task_exists(root: &Path, thread_key: &str) -> Result<bool> {
 fn runnable_queue_work_exists(root: &Path) -> Result<bool> {
     let tasks =
         channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 64)?;
-    Ok(!tasks.is_empty())
+    if !tasks.is_empty() {
+        return Ok(true);
+    }
+    // Pending inbound messages (including plan-emitted steps that are
+    // waiting to be leased by the queue picker) also count as runnable work.
+    // Without this check the mission watchdog creates redundant
+    // continuation tasks and starves the actual queued step.
+    channels::has_runnable_inbound_message(root)
 }
 
 fn mission_thread_key(conversation_id: i64) -> String {

@@ -656,6 +656,25 @@ pub fn lease_pending_inbound_messages(
         .collect())
 }
 
+/// Whether any inbound communication message is still pending or leased
+/// (i.e. not acked as handled/blocked). Used by the mission watchdog to
+/// avoid queuing redundant continuation tasks when real work is already
+/// waiting in the channel queue.
+pub fn has_runnable_inbound_message(root: &Path) -> Result<bool> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let count: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM communication_routing_state
+        WHERE route_status IN ('pending', 'leased')
+        "#,
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -> Result<usize> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
@@ -1170,6 +1189,23 @@ fn sync_channel(root: &Path, db_path: &Path, channel: &str, args: &[String]) -> 
                 "adapter_result": adapter_json,
             }))
         }
+        Some(communication_adapters::ExternalCommunicationAdapter::Meeting(adapter)) => {
+            let adapter_json = adapter.sync_cli(
+                root,
+                &communication_adapters::AdapterSyncCommandRequest {
+                    db_path,
+                    passthrough_args: args,
+                    skip_flags: &["--db", "--channel"],
+                },
+            )?;
+            ensure_routing_rows_for_inbound(&conn)?;
+            Ok(json!({
+                "ok": true,
+                "channel": adapter.channel_name(),
+                "db_path": db_path,
+                "adapter_result": adapter_json,
+            }))
+        }
         Some(communication_adapters::ExternalCommunicationAdapter::Teams(adapter)) => {
             let adapter_json = adapter.sync_cli(
                 root,
@@ -1310,6 +1346,28 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
                     .and_then(|value| value.get("confirmed"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
+                "adapter_result": adapter_json,
+            }))
+        }
+        "meeting" => {
+            let adapter = communication_adapters::meeting();
+            let session_id = &request.thread_key;
+            let adapter_json = adapter.send_cli(
+                root,
+                &communication_adapters::MeetingSendCommandRequest {
+                    db_path,
+                    session_id,
+                    body: &request.body,
+                },
+            )?;
+            Ok(json!({
+                "ok": true,
+                "channel": "meeting",
+                "db_path": db_path,
+                "status": adapter_json
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("sent"),
                 "adapter_result": adapter_json,
             }))
         }
