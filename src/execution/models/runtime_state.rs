@@ -17,10 +17,14 @@ const DEFAULT_LOCAL_ENGINE_PORT: u16 = 1234;
 const DEFAULT_OPENAI_RESPONSES_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_ANTHROPIC_RESPONSES_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";
-// MiniMax exposes an OpenAI-compatible chat-completions surface at this
-// base URL. Keys issued on platform.minimax.io authenticate here as
-// Bearer tokens just like OpenAI's.
-const DEFAULT_MINIMAX_RESPONSES_BASE_URL: &str = "https://api.minimax.io/v1";
+// MiniMax exposes an OpenAI-compatible chat-completions surface at
+// https://api.minimax.io/v1/chat/completions. Keys issued on
+// platform.minimax.io authenticate here as Bearer tokens just like
+// OpenAI's. The base URL deliberately omits the trailing `/v1` because
+// CTOX' gateway concatenates the adapter-emitted upstream_path
+// (`/v1/chat/completions`) onto this base — same convention as
+// DEFAULT_OPENAI_RESPONSES_BASE_URL.
+const DEFAULT_MINIMAX_RESPONSES_BASE_URL: &str = "https://api.minimax.io";
 const API_PROVIDER_LOCAL: &str = "local";
 const LOCAL_RUNTIME_CANDLE: &str = "candle";
 const LOCAL_RUNTIME_LITERT: &str = "litert";
