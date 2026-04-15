@@ -1433,9 +1433,9 @@ fn apply_auxiliary_runtime_plan(
     target.configured_model = Some(plan.display_model.clone());
     target.port = Some(plan.port);
     target.base_url = Some(match role {
-        engine::AuxiliaryRole::Embedding | engine::AuxiliaryRole::Stt => {
-            format!("http://{host}:{}", plan.port)
-        }
+        engine::AuxiliaryRole::Embedding
+        | engine::AuxiliaryRole::Stt
+        | engine::AuxiliaryRole::Vision => format!("http://{host}:{}", plan.port),
         engine::AuxiliaryRole::Tts => format!("ws://{host}:{}", plan.port),
     });
 }

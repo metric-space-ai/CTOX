@@ -4704,6 +4704,7 @@ fn auxiliary_visible_devices_for_role(
         engine::AuxiliaryRole::Embedding => "CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES",
         engine::AuxiliaryRole::Stt => "CTOX_STT_CUDA_VISIBLE_DEVICES",
         engine::AuxiliaryRole::Tts => "CTOX_TTS_CUDA_VISIBLE_DEVICES",
+        engine::AuxiliaryRole::Vision => "CTOX_VISION_CUDA_VISIBLE_DEVICES",
     };
     let explicit = parse_csv_gpu_indices(env_map.get(role_specific_key));
     if !explicit.is_empty() {
@@ -4949,6 +4950,7 @@ fn auxiliary_role_label(role: engine::AuxiliaryRole) -> &'static str {
         engine::AuxiliaryRole::Embedding => "embed",
         engine::AuxiliaryRole::Stt => "stt",
         engine::AuxiliaryRole::Tts => "tts",
+        engine::AuxiliaryRole::Vision => "vision",
     }
 }
 

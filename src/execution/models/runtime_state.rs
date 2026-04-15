@@ -174,6 +174,13 @@ pub struct InferenceRuntimeState {
     pub transcription: AuxiliaryRuntimeState,
     #[serde(default)]
     pub speech: AuxiliaryRuntimeState,
+    /// Qwen3-VL-2B-Instruct (or equivalent) auxiliary vision model used by
+    /// the vision preprocessor to turn image content blocks into textual
+    /// descriptions for primary LLMs that cannot natively accept images.
+    /// Ensures tools can always evaluate images regardless of the primary
+    /// model's capabilities.
+    #[serde(default)]
+    pub vision: AuxiliaryRuntimeState,
 }
 
 impl InferenceRuntimeState {
@@ -429,6 +436,10 @@ pub fn is_runtime_state_key(key: &str) -> bool {
             | "CTOX_TTS_PORT"
             | "CTOX_TTS_BASE_URL"
             | "CTOX_DISABLE_TTS_BACKEND"
+            | "CTOX_VISION_MODEL"
+            | "CTOX_VISION_PORT"
+            | "CTOX_VISION_BASE_URL"
+            | "CTOX_DISABLE_VISION_BACKEND"
     )
 }
 
@@ -440,6 +451,7 @@ pub fn auxiliary_runtime_state_for_role(
         engine::AuxiliaryRole::Embedding => &state.embedding,
         engine::AuxiliaryRole::Stt => &state.transcription,
         engine::AuxiliaryRole::Tts => &state.speech,
+        engine::AuxiliaryRole::Vision => &state.vision,
     }
 }
 
@@ -518,6 +530,16 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
                 Some("1".to_string())
             }
         }
+        "CTOX_VISION_MODEL" => state.vision.configured_model.clone(),
+        "CTOX_VISION_PORT" => state.vision.port.map(|value| value.to_string()),
+        "CTOX_VISION_BASE_URL" => state.vision.base_url.clone(),
+        "CTOX_DISABLE_VISION_BACKEND" => {
+            if state.vision.enabled {
+                None
+            } else {
+                Some("1".to_string())
+            }
+        }
         _ => None,
     }
 }
@@ -558,6 +580,10 @@ pub fn apply_runtime_state_to_env_map(
         "CTOX_TTS_PORT",
         "CTOX_TTS_BASE_URL",
         "CTOX_DISABLE_TTS_BACKEND",
+        "CTOX_VISION_MODEL",
+        "CTOX_VISION_PORT",
+        "CTOX_VISION_BASE_URL",
+        "CTOX_DISABLE_VISION_BACKEND",
     ] {
         if let Some(value) = owned_runtime_env_value(state, key) {
             env_map.insert(key.to_string(), value);
@@ -653,7 +679,7 @@ fn derive_runtime_state(
         };
 
     Ok(InferenceRuntimeState {
-        version: 8,
+        version: 9,
         source,
         local_runtime,
         base_model,
@@ -671,6 +697,7 @@ fn derive_runtime_state(
         embedding: derive_auxiliary_runtime_state(env_map, "EMBEDDING"),
         transcription: derive_auxiliary_runtime_state(env_map, "STT"),
         speech: derive_auxiliary_runtime_state(env_map, "TTS"),
+        vision: derive_auxiliary_runtime_state(env_map, "VISION"),
     })
 }
 
@@ -726,6 +753,11 @@ fn migrate_runtime_state(root: &Path, state: &mut InferenceRuntimeState) -> Resu
                 default_api_upstream_base_url_for_provider(&provider).to_string();
         }
         state.version = 8;
+        migrated = true;
+    }
+    if state.version < 9 {
+        state.vision = derive_auxiliary_runtime_state(&env_map, "VISION");
+        state.version = 9;
         migrated = true;
     }
     if state.base_model.is_none() {

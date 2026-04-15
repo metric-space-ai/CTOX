@@ -92,6 +92,13 @@ pub const SUPPORTED_TTS_MODELS: &[&str] = &[
     "speaches-ai/piper-en_US-lessac-medium [CPU EN]",
 ];
 
+/// Auxiliary vision models. Used by the vision preprocessor to describe
+/// images for primary LLMs that cannot natively accept image input.
+/// Qwen3-VL-2B-Instruct is the current default — small enough for a single
+/// GPU (~1.5 GB weights Q4K), supported by the ctox-engine Candle vision
+/// loader (Qwen3VLForConditionalGeneration).
+pub const SUPPORTED_VISION_MODELS: &[&str] = &["Qwen/Qwen3-VL-2B-Instruct [GPU]"];
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChatFamilyCatalogEntry {
     pub family: engine::ChatModelFamily,
@@ -1120,6 +1127,48 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         family: engine::LocalModelFamily::VoxtralTranscription,
     },
     LocalModelCatalogEntry {
+        canonical_model: "Qwen/Qwen3-VL-2B-Instruct",
+        aliases: &[
+            "qwen/qwen3-vl-2b-instruct [gpu]",
+            "qwen/qwen3-vl-2b-instruct (gpu)",
+            "qwen/qwen3-vl-2b-instruct",
+            "qwen3-vl-2b-instruct",
+            "qwen3-vl-2b",
+            "qwen3vl-2b",
+        ],
+        chat_family: None,
+        runtime_manifest_slug: None,
+        auxiliary_manifest_slug: Some("qwen3_vl_2b_instruct"),
+        runtime: StaticRuntimeConfig {
+            port: 1240,
+            proxy_port: None,
+            max_seq_len: Some(32_768),
+            max_seqs: 1,
+            max_batch_size: 1,
+        },
+        profile: StaticFamilyProfile {
+            // launcher_mode "vision" maps to the ctox-engine vision loader
+            // kind — the same input-modality bucket the engine uses for
+            // any non-text input pipeline (Qwen3VLForConditionalGeneration
+            // here; the engine auto-detects the arch from config.json).
+            launcher_mode: "vision",
+            arch: None,
+            paged_attn: "auto",
+            pa_cache_type: Some("f8e4m3"),
+            pa_memory_fraction: Some("0.55"),
+            pa_context_len: None,
+            max_seq_len: 32_768,
+            max_batch_size: 1,
+            max_seqs: 1,
+            isq: Some("Q4K"),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(1),
+        },
+        family: engine::LocalModelFamily::Qwen3VisionAuxiliary,
+    },
+    LocalModelCatalogEntry {
         canonical_model: "speaches-ai/piper-de_DE-thorsten-high",
         aliases: &[
             "speaches-ai/piper-de_de-thorsten-high [cpu de]",
@@ -1562,6 +1611,25 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
         compute_target: engine::ComputeTarget::Cpu,
         default_port: 1239,
         default_for_role: false,
+    },
+    // Vision auxiliary — default describer model for tools and messages
+    // that carry image content when the primary LLM cannot natively accept
+    // images. Served via the ctox-engine vision loader.
+    AuxiliarySelectionEntry {
+        role: engine::AuxiliaryRole::Vision,
+        choice: "Qwen/Qwen3-VL-2B-Instruct [GPU]",
+        request_model: "Qwen/Qwen3-VL-2B-Instruct",
+        aliases: &[
+            "qwen/qwen3-vl-2b-instruct [gpu]",
+            "qwen/qwen3-vl-2b-instruct (gpu)",
+            "qwen/qwen3-vl-2b-instruct",
+            "qwen3-vl-2b-instruct",
+            "qwen3-vl-2b",
+        ],
+        backend_kind: engine::AuxiliaryBackendKind::MistralRs,
+        compute_target: engine::ComputeTarget::Gpu,
+        default_port: 1240,
+        default_for_role: true,
     },
 ];
 

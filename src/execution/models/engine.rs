@@ -35,6 +35,11 @@ pub enum LocalModelFamily {
     PiperSpeech,
     Qwen3Speech,
     VoxtralSpeech,
+    /// Qwen3-VL auxiliary vision model used by the vision preprocessor to
+    /// describe images for primary LLMs that cannot natively accept image
+    /// input. Loaded via the ctox-engine (Candle) vision loader
+    /// (`Qwen3VLForConditionalGeneration`).
+    Qwen3VisionAuxiliary,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -56,6 +61,11 @@ pub enum AuxiliaryRole {
     Embedding,
     Stt,
     Tts,
+    /// Vision-describing auxiliary model. Used by the vision preprocessor to
+    /// turn image content blocks into textual descriptions when the primary
+    /// LLM is not natively vision-capable. Tools must be able to evaluate
+    /// images regardless of which primary model is loaded.
+    Vision,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,6 +110,9 @@ impl AuxiliaryModelSelection {
             AuxiliaryRole::Embedding => 1100,
             AuxiliaryRole::Stt => 4200,
             AuxiliaryRole::Tts => 1400,
+            // Qwen3-VL-2B with Q4K quant: ~1.2 GB weights + ~2 GB KV cache
+            // + vision encoder headroom. Conservative reserve of 3.5 GB.
+            AuxiliaryRole::Vision => 3500,
         }
     }
 }
@@ -488,7 +501,9 @@ pub fn build_engine_command(
                 command.extend(["--max-seq-len".to_string(), max_seq_len.to_string()]);
             }
         }
-        LocalModelFamily::Qwen35Vision | LocalModelFamily::Gemma4Vision => {
+        LocalModelFamily::Qwen35Vision
+        | LocalModelFamily::Gemma4Vision
+        | LocalModelFamily::Qwen3VisionAuxiliary => {
             command.extend([
                 "serve".to_string(),
                 "-p".to_string(),

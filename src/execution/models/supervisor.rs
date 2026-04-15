@@ -505,6 +505,16 @@ pub fn ensure_auxiliary_backend_ready(
         engine::AuxiliaryRole::Embedding => ManagedBackendRole::Embedding,
         engine::AuxiliaryRole::Stt => ManagedBackendRole::Stt,
         engine::AuxiliaryRole::Tts => ManagedBackendRole::Tts,
+        engine::AuxiliaryRole::Vision => {
+            // Vision aux model lifecycle is not yet integrated into the
+            // ManagedBackendRole supervisor path. Phase D of the vision
+            // branch uses a direct HTTP-based preprocessor call against a
+            // configurable aux endpoint (CTOX_VISION_BASE_URL). Fall back
+            // to no-op here so callers that blindly iterate over all aux
+            // roles don't fail. Full supervisor integration is follow-up.
+            let _ = (root, force_restart);
+            return Ok(());
+        }
     };
     ensure_backend_process(root, role, force_restart)
 }
@@ -533,6 +543,7 @@ pub fn ensure_auxiliary_backend_launchable(root: &Path, role: engine::AuxiliaryR
         engine::AuxiliaryRole::Embedding => "embedding",
         engine::AuxiliaryRole::Stt => "stt",
         engine::AuxiliaryRole::Tts => "tts",
+        engine::AuxiliaryRole::Vision => "vision",
     };
     anyhow::bail!(
         "{role_label} backend requires ctox-engine at {}. Run the explicit engine rebuild workflow first or configure an external {role_label} runtime.",
