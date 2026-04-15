@@ -1378,7 +1378,22 @@ const REMOTE_CHAT_FAMILY_REGISTRY: &[RemoteChatFamilyEntry] = &[
     },
     // MiniMax family
     RemoteChatFamilyEntry {
+        // OpenRouter-routed alias (minimax/* prefix is OpenRouter's
+        // namespace). Goes via openrouter.ai/api/v1.
         model: "minimax/minimax-m2.7",
+        chat_family: engine::ChatModelFamily::MiniMax,
+    },
+    RemoteChatFamilyEntry {
+        // Direct API alias (capitalised name as published on
+        // platform.minimax.io). Goes via api.minimax.io/v1 with
+        // MINIMAX_API_KEY. Both aliases share the same MiniMax adapter
+        // which translates codex-exec's /v1/responses requests into
+        // MiniMax's /v1/chat/completions surface.
+        model: "MiniMax-M2.7",
+        chat_family: engine::ChatModelFamily::MiniMax,
+    },
+    RemoteChatFamilyEntry {
+        model: "MiniMax-M2.7-highspeed",
         chat_family: engine::ChatModelFamily::MiniMax,
     },
     // Mistral family
