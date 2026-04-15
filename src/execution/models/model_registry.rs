@@ -99,6 +99,39 @@ pub const SUPPORTED_TTS_MODELS: &[&str] = &[
 /// loader (Qwen3VLForConditionalGeneration).
 pub const SUPPORTED_VISION_MODELS: &[&str] = &["Qwen/Qwen3-VL-2B-Instruct [GPU]"];
 
+/// API-hosted models that natively accept image input. Used by
+/// `model_supports_vision()` so the vision preprocessor can recognise
+/// vision-capable remote providers and skip the aux-describe round trip.
+/// Conservative list — only models where vision support is documented by
+/// the provider. `gpt-5.4-nano` is deliberately excluded (cheapest variant,
+/// vision not guaranteed).
+pub const VISION_API_MODELS: &[&str] = &[
+    // OpenAI (gpt-4o lineage)
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    // Anthropic (all Claude 3+ have vision)
+    "anthropic/claude-sonnet-4.6",
+    // MiniMax VL
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
+    "minimax/minimax-m2.7",
+    // Gemma 4 via OpenRouter (vision-enabled tiers)
+    "google/gemma-4-26b-a4b-it",
+    "google/gemma-4-26b-a4b-it:free",
+    "google/gemma-4-31b-it",
+    "google/gemma-4-31b-it:free",
+    // Qwen 3.5-VL family via OpenRouter
+    "qwen/qwen3.5-9b",
+    "qwen/qwen3.5-27b",
+    "qwen/qwen3.5-35b-a3b",
+    "qwen/qwen3.5-122b-a10b",
+    "qwen/qwen3.5-397b-a17b",
+    // Mistral Pixtral
+    "mistralai/mistral-small-2603",
+    // xAI Grok (vision-enabled)
+    "x-ai/grok-4.20",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub struct ChatFamilyCatalogEntry {
     pub family: engine::ChatModelFamily,
@@ -107,6 +140,11 @@ pub struct ChatFamilyCatalogEntry {
     pub parse_aliases: &'static [&'static str],
     pub variants: &'static [&'static str],
     pub planning_variants: &'static [&'static str],
+    /// True when the family's primary-generation models can natively accept
+    /// image content blocks in the request. When false, the vision
+    /// preprocessor describes images via the Vision aux before the primary
+    /// model ever sees the request.
+    pub supports_vision: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -188,6 +226,7 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         parse_aliases: &["gpt_oss", "gpt-oss", "gpt oss"],
         variants: &["openai/gpt-oss-20b"],
         planning_variants: &["openai/gpt-oss-20b"],
+        supports_vision: false,
     },
     ChatFamilyCatalogEntry {
         family: engine::ChatModelFamily::Qwen35,
@@ -208,6 +247,9 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
             "Qwen/Qwen3.5-27B",
             "Qwen/Qwen3.5-9B",
         ],
+        // Qwen3.5 family is vision-capable via the Qwen35Vision local
+        // family registered in LOCAL_FAMILY_REGISTRY.
+        supports_vision: true,
     },
     ChatFamilyCatalogEntry {
         family: engine::ChatModelFamily::Gemma4,
@@ -226,6 +268,9 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
             "google/gemma-4-E4B-it",
             "google/gemma-4-E2B-it",
         ],
+        // Gemma 4 family is vision-capable via the Gemma4Vision local
+        // family registered in LOCAL_FAMILY_REGISTRY.
+        supports_vision: true,
     },
     ChatFamilyCatalogEntry {
         family: engine::ChatModelFamily::NemotronCascade,
@@ -239,6 +284,7 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         ],
         variants: &["nvidia/Nemotron-Cascade-2-30B-A3B"],
         planning_variants: &["nvidia/Nemotron-Cascade-2-30B-A3B"],
+        supports_vision: false,
     },
     ChatFamilyCatalogEntry {
         family: engine::ChatModelFamily::Glm47Flash,
@@ -253,6 +299,7 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         ],
         variants: &["zai-org/GLM-4.7-Flash"],
         planning_variants: &["zai-org/GLM-4.7-Flash"],
+        supports_vision: false,
     },
 ];
 
@@ -1972,6 +2019,51 @@ pub fn chat_model_family_for_model(model: &str) -> Option<engine::ChatModelFamil
         .iter()
         .find(|entry| matches_candidate(trimmed, entry.model))
         .map(|entry| entry.chat_family)
+}
+
+/// True when the model can natively accept image content blocks
+/// (`input_image` / `image_url`). The vision preprocessor consults this
+/// before deciding whether to describe images via the Vision aux.
+///
+/// Resolution order:
+/// 1. Local model catalog → `ChatFamilyCatalogEntry::supports_vision` for
+///    the model's chat family (covers Qwen3.5, Gemma 4, Mistral local).
+/// 2. Local model family-based marker — `Qwen35Vision`, `Gemma4Vision`,
+///    `Qwen3VisionAuxiliary` are vision-capable regardless of the chat
+///    family mapping (covers the Qwen3-VL-2B aux itself).
+/// 3. Explicit `VISION_API_MODELS` allowlist for remote/API providers.
+pub fn model_supports_vision(model: &str) -> bool {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // (1) chat family-based lookup
+    if let Some(family) = chat_model_family_for_model(trimmed) {
+        if let Some(entry) = CHAT_FAMILY_REGISTRY
+            .iter()
+            .find(|candidate| candidate.family == family)
+        {
+            if entry.supports_vision {
+                return true;
+            }
+        }
+    }
+    // (2) local model family — catches Qwen35Vision/Gemma4Vision/Qwen3VisionAuxiliary
+    //     even if the chat family hasn't been enriched yet.
+    if let Some(entry) = local_model_entry(trimmed) {
+        if matches!(
+            entry.family,
+            engine::LocalModelFamily::Qwen35Vision
+                | engine::LocalModelFamily::Gemma4Vision
+                | engine::LocalModelFamily::Qwen3VisionAuxiliary
+        ) {
+            return true;
+        }
+    }
+    // (3) API / remote allowlist
+    VISION_API_MODELS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(trimmed))
 }
 
 pub fn canonical_model_id(model: &str) -> Option<&'static str> {

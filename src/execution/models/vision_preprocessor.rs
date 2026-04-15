@@ -77,13 +77,13 @@ pub fn preprocess_responses_payload(
         return Ok(false);
     };
 
-    // Capability check — if the primary model can already see images, no-op.
-    // For now this is conservative: only local vision families (Qwen35Vision,
-    // Gemma4Vision) and a small API allowlist skip the preprocessor. Other
-    // models (incl. API models not yet flagged) go through the aux.
-    // Phase B (capability flag) will extend this check.
+    // Capability check — if the primary model can already see images,
+    // no-op. Resolution is delegated to the central registry lookup
+    // (`engine::model_supports_vision`) so this path stays in sync with
+    // the SUPPORTED_VISION_MODELS / VISION_API_MODELS / ChatFamilyCatalog
+    // data sources without duplicating them.
     let primary_supports_vision = primary_model
-        .map(model_supports_vision_primary)
+        .map(engine::model_supports_vision)
         .unwrap_or(false);
 
     if primary_supports_vision {
@@ -149,48 +149,20 @@ fn is_vision_preprocessor_disabled(root: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Conservative capability check for MVP. Returns true only for models
-/// CTOX explicitly knows are vision-capable. Phase B replaces this with a
-/// proper `model_supports_vision()` registry lookup covering API models.
-fn model_supports_vision_primary(model: &str) -> bool {
-    let trimmed = model.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // Local vision families
-    if let Ok(profile) = engine::model_profile_for_model(trimmed) {
-        if matches!(
-            profile.runtime.family,
-            engine::LocalModelFamily::Qwen35Vision
-                | engine::LocalModelFamily::Gemma4Vision
-                | engine::LocalModelFamily::Qwen3VisionAuxiliary
-        ) {
-            return true;
-        }
-    }
-    // Known-vision API models (subset; Phase B expands this)
-    const KNOWN_API_VISION: &[&str] = &[
-        "anthropic/claude-sonnet-4.6",
-        "gpt-5.4",
-        "gpt-5.4-mini",
-        "MiniMax-M2.7",
-        "MiniMax-M2.7-highspeed",
-        "minimax/minimax-m2.7",
-        "mistralai/mistral-small-2603",
-    ];
-    KNOWN_API_VISION
-        .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(trimmed))
-}
-
 /// Resolve the vision aux endpoint from either an explicit env override or
 /// the managed InferenceRuntimeKernel binding for the Vision role.
 fn resolve_vision_aux_endpoint(root: &Path) -> Option<VisionAuxEndpoint> {
     if let Some(base_url) = runtime_env::env_or_config(root, "CTOX_VISION_BASE_URL") {
         let base = base_url.trim().trim_end_matches('/');
         if !base.is_empty() {
-            let model = runtime_env::env_or_config(root, "CTOX_VISION_MODEL")
-                .unwrap_or_else(|| "Qwen/Qwen3-VL-2B-Instruct".to_string());
+            let model = runtime_env::env_or_config(root, "CTOX_VISION_MODEL").unwrap_or_else(|| {
+                // Fall back to the registry's default-for-role Vision aux
+                // selection so the model name never leaks into this module
+                // as a hardcoded literal.
+                engine::auxiliary_model_selection(engine::AuxiliaryRole::Vision, None)
+                    .request_model
+                    .to_string()
+            });
             return Some(VisionAuxEndpoint {
                 chat_completions_url: format!("{base}/v1/chat/completions"),
                 model,
@@ -469,9 +441,9 @@ mod tests {
 
     #[test]
     fn known_api_vision_models_are_flagged() {
-        assert!(model_supports_vision_primary("anthropic/claude-sonnet-4.6"));
-        assert!(model_supports_vision_primary("gpt-5.4"));
-        assert!(!model_supports_vision_primary("openai/gpt-oss-20b"));
-        assert!(!model_supports_vision_primary("moonshotai/kimi-k2.5"));
+        assert!(engine::model_supports_vision("anthropic/claude-sonnet-4.6"));
+        assert!(engine::model_supports_vision("gpt-5.4"));
+        assert!(!engine::model_supports_vision("openai/gpt-oss-20b"));
+        assert!(!engine::model_supports_vision("moonshotai/kimi-k2.5"));
     }
 }

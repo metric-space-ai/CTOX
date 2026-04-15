@@ -271,6 +271,14 @@ pub fn chat_model_family_for_model(model: &str) -> Option<ChatModelFamily> {
     model_registry::chat_model_family_for_model(model)
 }
 
+/// True when the model can natively accept image content blocks. Consulted
+/// by the vision preprocessor to decide whether images must be described
+/// via the Vision aux before reaching the primary model. See
+/// [`model_registry::model_supports_vision`] for resolution details.
+pub fn model_supports_vision(model: &str) -> bool {
+    model_registry::model_supports_vision(model)
+}
+
 pub fn auxiliary_model_selection(
     role: AuxiliaryRole,
     configured_model: Option<&str>,
