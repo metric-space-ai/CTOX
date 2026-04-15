@@ -225,6 +225,8 @@ fn write_runtime_env_map(root: &Path, env_map: &BTreeMap<String, String>) -> Res
 fn process_env_override_allowed(key: &str) -> bool {
     if key.starts_with("OPENAI_")
         || key.starts_with("OPENROUTER_")
+        || key.starts_with("ANTHROPIC_")
+        || key.starts_with("MINIMAX_")
         || key.starts_with("CODEX_")
         || key.starts_with("CTO_")
     {
