@@ -60,7 +60,7 @@ const DEFAULT_CHAT_SKILL_PRESET: &str = "Standard";
 const DEFAULT_COMMUNICATION_PATH: &str = "tui";
 const CHAT_PRESET_CHOICES: &[&str] = &["Quality", "Performance"];
 const CHAT_SKILL_PRESET_CHOICES: &[&str] = &["Standard", "Simple"];
-const API_PROVIDER_CHOICES: &[&str] = &["local", "openai", "anthropic", "openrouter"];
+const API_PROVIDER_CHOICES: &[&str] = &["local", "openai", "anthropic", "openrouter", "minimax"];
 const LOCAL_RUNTIME_CHOICES: &[&str] = &["candle", "litert"];
 const LITERT_LOCAL_CHAT_MODEL_CHOICES: &[&str] = &[
     "google/gemma-4-E4B-it",

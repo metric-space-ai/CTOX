@@ -17,12 +17,17 @@ const DEFAULT_LOCAL_ENGINE_PORT: u16 = 1234;
 const DEFAULT_OPENAI_RESPONSES_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_ANTHROPIC_RESPONSES_BASE_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v1";
+// MiniMax exposes an OpenAI-compatible chat-completions surface at this
+// base URL. Keys issued on platform.minimax.io authenticate here as
+// Bearer tokens just like OpenAI's.
+const DEFAULT_MINIMAX_RESPONSES_BASE_URL: &str = "https://api.minimax.io/v1";
 const API_PROVIDER_LOCAL: &str = "local";
 const LOCAL_RUNTIME_CANDLE: &str = "candle";
 const LOCAL_RUNTIME_LITERT: &str = "litert";
 const API_PROVIDER_OPENAI: &str = "openai";
 const API_PROVIDER_ANTHROPIC: &str = "anthropic";
 const API_PROVIDER_OPENROUTER: &str = "openrouter";
+const API_PROVIDER_MINIMAX: &str = "minimax";
 
 fn default_auxiliary_enabled() -> bool {
     true
@@ -207,6 +212,7 @@ pub fn default_api_upstream_base_url_for_provider(provider: &str) -> &'static st
     match normalize_api_provider(provider) {
         API_PROVIDER_ANTHROPIC => DEFAULT_ANTHROPIC_RESPONSES_BASE_URL,
         API_PROVIDER_OPENROUTER => DEFAULT_OPENROUTER_RESPONSES_BASE_URL,
+        API_PROVIDER_MINIMAX => DEFAULT_MINIMAX_RESPONSES_BASE_URL,
         _ => DEFAULT_OPENAI_RESPONSES_BASE_URL,
     }
 }
@@ -215,6 +221,7 @@ pub fn normalize_api_provider(provider: &str) -> &'static str {
     match provider.trim().to_ascii_lowercase().as_str() {
         API_PROVIDER_ANTHROPIC => API_PROVIDER_ANTHROPIC,
         API_PROVIDER_OPENROUTER => API_PROVIDER_OPENROUTER,
+        API_PROVIDER_MINIMAX => API_PROVIDER_MINIMAX,
         API_PROVIDER_OPENAI => API_PROVIDER_OPENAI,
         API_PROVIDER_LOCAL => API_PROVIDER_LOCAL,
         _ => API_PROVIDER_OPENAI,
@@ -269,6 +276,8 @@ pub fn api_provider_for_upstream_base_url(upstream_base_url: &str) -> &'static s
         API_PROVIDER_OPENROUTER
     } else if trimmed.starts_with(DEFAULT_ANTHROPIC_RESPONSES_BASE_URL) {
         API_PROVIDER_ANTHROPIC
+    } else if trimmed.starts_with(DEFAULT_MINIMAX_RESPONSES_BASE_URL) {
+        API_PROVIDER_MINIMAX
     } else {
         API_PROVIDER_OPENAI
     }
@@ -313,6 +322,7 @@ pub fn api_key_env_var_for_provider(provider: &str) -> &'static str {
     match normalize_api_provider(provider) {
         API_PROVIDER_OPENROUTER => "OPENROUTER_API_KEY",
         API_PROVIDER_ANTHROPIC => "ANTHROPIC_API_KEY",
+        API_PROVIDER_MINIMAX => "MINIMAX_API_KEY",
         _ => "OPENAI_API_KEY",
     }
 }

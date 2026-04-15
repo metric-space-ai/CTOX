@@ -225,6 +225,7 @@ pub use crate::execution::models::model_registry::SUPPORTED_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_EMBEDDING_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_LOCAL_CHAT_FAMILIES;
 pub use crate::execution::models::model_registry::SUPPORTED_OPENAI_API_CHAT_MODELS;
+pub use crate::execution::models::model_registry::SUPPORTED_MINIMAX_API_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_OPENROUTER_API_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_STT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_TTS_MODELS;
@@ -329,6 +330,13 @@ pub fn is_anthropic_api_chat_model(model: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn is_minimax_api_chat_model(model: &str) -> bool {
+    let normalized = model.trim().to_ascii_lowercase();
+    SUPPORTED_MINIMAX_API_CHAT_MODELS
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
+}
+
 pub fn supports_local_chat_runtime(model: &str) -> bool {
     runtime_config_for_model(model).is_ok()
 }
@@ -336,6 +344,7 @@ pub fn supports_local_chat_runtime(model: &str) -> bool {
 pub fn is_api_chat_model(model: &str) -> bool {
     is_openai_api_chat_model(model)
         || is_anthropic_api_chat_model(model)
+        || is_minimax_api_chat_model(model)
         || (is_openrouter_api_chat_model(model) && !supports_local_chat_runtime(model))
 }
 
@@ -343,6 +352,7 @@ pub fn api_provider_supports_model(provider: &str, model: &str) -> bool {
     match provider.trim().to_ascii_lowercase().as_str() {
         "openrouter" => is_openrouter_api_chat_model(model),
         "anthropic" => is_anthropic_api_chat_model(model),
+        "minimax" => is_minimax_api_chat_model(model),
         "openai" => is_openai_api_chat_model(model),
         _ => false,
     }
@@ -351,6 +361,8 @@ pub fn api_provider_supports_model(provider: &str, model: &str) -> bool {
 pub fn default_api_provider_for_model(model: &str) -> &'static str {
     if is_anthropic_api_chat_model(model) {
         "anthropic"
+    } else if is_minimax_api_chat_model(model) {
+        "minimax"
     } else if is_openrouter_api_chat_model(model) {
         "openrouter"
     } else {

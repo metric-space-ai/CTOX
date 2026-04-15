@@ -4,6 +4,11 @@ pub const DEFAULT_LOCAL_CHAT_FAMILY: engine::LocalModelFamily = engine::LocalMod
 
 pub const SUPPORTED_OPENAI_API_CHAT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"];
 pub const SUPPORTED_ANTHROPIC_API_CHAT_MODELS: &[&str] = &["anthropic/claude-sonnet-4.6"];
+// MiniMax Direct-API (platform.minimax.io). These are the cloud-hosted
+// variants; the `minimax/minimax-m2.7` entry lower down is the OpenRouter-
+// routed variant with the same weights.
+pub const SUPPORTED_MINIMAX_API_CHAT_MODELS: &[&str] =
+    &["MiniMax-M2.7", "MiniMax-M2.7-highspeed"];
 pub const SUPPORTED_OPENROUTER_API_CHAT_MODELS: &[&str] = &[
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
@@ -31,6 +36,8 @@ pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.4-nano",
+    "MiniMax-M2.7",
+    "MiniMax-M2.7-highspeed",
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
     "Qwen/Qwen3.5-2B",
