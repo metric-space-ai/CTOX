@@ -1462,9 +1462,17 @@ fn resolve_api_model_provider_spec(
     if !engine::api_provider_supports_model(&provider, model) {
         return None;
     }
-    if !provider.eq_ignore_ascii_case("openrouter") {
-        return None;
-    }
+    // OpenAI is the codex-exec built-in default provider — emitting an
+    // override would be redundant. Anthropic is also handled natively by
+    // codex-exec via its own model-name matching. The remaining providers
+    // need an explicit `-c model_providers.X.base_url=...` so codex-exec
+    // points its HTTP client at the correct upstream.
+    let normalized = provider.to_ascii_lowercase();
+    let (provider_id, name, env_key, default_provider) = match normalized.as_str() {
+        "openrouter" => ("cto_openrouter", "cto-openrouter", "OPENROUTER_API_KEY", "openrouter"),
+        "minimax" => ("cto_minimax", "cto-minimax", "MINIMAX_API_KEY", "minimax"),
+        _ => return None,
+    };
     let base_url = resolved_runtime
         .map(|runtime| runtime.internal_responses_base_url())
         .or_else(|| {
@@ -1474,14 +1482,14 @@ fn resolve_api_model_provider_spec(
         })
         .unwrap_or_else(|| {
             responses_api_base_url(runtime_state::default_api_upstream_base_url_for_provider(
-                "openrouter",
+                default_provider,
             ))
         });
     Some(ApiModelProviderSpec {
-        provider_id: "cto_openrouter",
-        name: "cto-openrouter",
+        provider_id,
+        name,
         base_url,
-        env_key: "OPENROUTER_API_KEY",
+        env_key,
     })
 }
 
