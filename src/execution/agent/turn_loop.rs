@@ -353,6 +353,9 @@ struct ApiModelProviderSpec {
     name: &'static str,
     base_url: String,
     env_key: &'static str,
+    /// codex-exec wire protocol. "responses" for OpenAI-style responses API,
+    /// "chat" for /v1/chat/completions providers (e.g. MiniMax direct).
+    wire_api: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -446,8 +449,8 @@ impl CodexExecConfigSpec {
                     provider.provider_id, provider.env_key
                 ),
                 format!(
-                    "model_providers.{}.wire_api=\"responses\"",
-                    provider.provider_id
+                    "model_providers.{}.wire_api=\"{}\"",
+                    provider.provider_id, provider.wire_api
                 ),
                 format!(
                     "model_providers.{}.requires_openai_auth=false",
@@ -1468,9 +1471,26 @@ fn resolve_api_model_provider_spec(
     // need an explicit `-c model_providers.X.base_url=...` so codex-exec
     // points its HTTP client at the correct upstream.
     let normalized = provider.to_ascii_lowercase();
-    let (provider_id, name, env_key, default_provider) = match normalized.as_str() {
-        "openrouter" => ("cto_openrouter", "cto-openrouter", "OPENROUTER_API_KEY", "openrouter"),
-        "minimax" => ("cto_minimax", "cto-minimax", "MINIMAX_API_KEY", "minimax"),
+    // (provider_id, name, env_key, default_provider_for_url, wire_api)
+    let (provider_id, name, env_key, default_provider, wire_api) = match normalized.as_str() {
+        "openrouter" => (
+            "cto_openrouter",
+            "cto-openrouter",
+            "OPENROUTER_API_KEY",
+            "openrouter",
+            "responses",
+        ),
+        // MiniMax's OpenAI-compatible surface is at /v1/chat/completions —
+        // it does NOT implement the OpenAI Responses API, so codex-exec
+        // must speak the chat-completions wire protocol or every call
+        // 404s on /v1/responses.
+        "minimax" => (
+            "cto_minimax",
+            "cto-minimax",
+            "MINIMAX_API_KEY",
+            "minimax",
+            "chat",
+        ),
         _ => return None,
     };
     let base_url = resolved_runtime
@@ -1490,6 +1510,7 @@ fn resolve_api_model_provider_spec(
         name,
         base_url,
         env_key,
+        wire_api,
     })
 }
 
