@@ -17,3 +17,4 @@ pub mod runtime_plan;
 pub mod runtime_state;
 pub mod supervisor;
 pub mod turn_contract;
+pub mod vision_preprocessor;
