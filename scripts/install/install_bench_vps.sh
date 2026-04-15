@@ -75,8 +75,12 @@ step_apt_packages() {
   log "Installing apt prereqs"
   run_sudo apt-get update -qq
   run_sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-    build-essential pkg-config libssl-dev ca-certificates curl git \
+    build-essential pkg-config libssl-dev libcap-dev ca-certificates curl git \
     python3-venv python3-pip
+  # libcap-dev is needed by tools/agent-runtime/linux-sandbox (a transitive
+  # build dep of codex-exec). Without it the codex-exec build fails part-way
+  # through with `pkg-config: libcap.pc not found`, only after burning ~10
+  # minutes compiling other crates.
 }
 
 step_docker_engine() {
