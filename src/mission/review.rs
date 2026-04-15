@@ -109,6 +109,7 @@ pub fn review_completion_if_needed(
         Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
         Some(REVIEW_SYSTEM_PROMPT),
         Some(false),
+        0,
     ) {
         Ok(report) => parse_review_report(score, reasons, &report),
         Err(err) => ReviewOutcome {

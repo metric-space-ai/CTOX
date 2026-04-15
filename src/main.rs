@@ -987,17 +987,14 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
         }
 
-        // Detect whether the turn ended with the model mid-work rather
-        // than actually completing. Typical mid-work patterns from
-        // reasoning-first models (M2.7, Claude Extended Thinking, etc.):
-        //   - reply is only `<think>...</think>` with nothing substantive
-        //     after the close tag
-        //   - reply ends with an intent statement ("I'll do X", "Let me
-        //     Y", "Now I'll Z:") and no tool-call or terminal answer
-        // If the reply looks mid-work we auto-enqueue a continuation
-        // slice so the mission-loop keeps going — a bench/service run
-        // must not declare a mission done just because one turn
-        // returned.
+        // Narrow mid-work detection: only the unambiguous case. An
+        // unclosed `<think>` means the reasoning was cut off mid-
+        // stream and the model never got to act. Text-pattern matches
+        // on intent prefixes ("I'll ...", "Now ...") were too brittle
+        // across languages and model phrasings and created downstream
+        // false-positives in the tool-activity gate. The system-
+        // prompt Mission Control Contract now handles the cooperative
+        // case; the heuristic only catches the hard truncation case.
         let last_reply_is_mid_work = turn_result
             .as_ref()
             .ok()
@@ -1016,7 +1013,7 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
             ) {
                 Ok(title) => {
                     eprintln!(
-                        "ctox run-once: turn {} ended mid-work — enqueued continuation: {title}",
+                        "ctox run-once: turn {} ended mid-think — enqueued continuation: {title}",
                         turns_run
                     );
                 }
@@ -1028,28 +1025,41 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
             }
         }
 
-        // Done-gate: mission_state_from_continuity tells us whether the
-        // mission has declared itself closed. We only trust a `false`
-        // reading if the turn ALSO looks completed — otherwise we loop
-        // and pick up any queued work (continuations, plan steps, model-
-        // emitted follow-ups).
-        let mission_open = match lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
-            .and_then(|engine| engine.sync_mission_state_from_continuity(conversation_id))
-        {
-            Ok(state) => {
-                eprintln!(
-                    "ctox run-once: after t{} is_open={} mode={} mid_work={}",
-                    turns_run, state.is_open, state.continuation_mode, last_reply_is_mid_work
-                );
-                state.is_open
-            }
-            Err(err) => {
-                eprintln!(
-                    "ctox run-once: sync_mission_state_from_continuity failed: {err}; assuming still open"
-                );
-                true
-            }
-        };
+        // Explicit closure check — only trust `mission_status == "done"`
+        // or `continuation_mode in {closed, dormant}`. Do NOT use
+        // `is_open=false` on its own: for a fresh mission the Focus
+        // document is still empty, which the derivation function
+        // reports as `is_open=false` even though the mission just
+        // started. The service daemon (service.rs:2320) already treats
+        // `is_open` as an idle-detection signal, not a termination
+        // signal; run-once now matches.
+        let explicitly_closed =
+            match lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
+                .and_then(|engine| engine.sync_mission_state_from_continuity(conversation_id))
+            {
+                Ok(state) => {
+                    let status = state.mission_status.to_ascii_lowercase();
+                    let mode = state.continuation_mode.to_ascii_lowercase();
+                    let closed =
+                        status == "done" || mode == "closed" || mode == "dormant";
+                    eprintln!(
+                        "ctox run-once: after t{} status={} mode={} explicit_closed={} mid_work={}",
+                        turns_run, status, mode, closed, last_reply_is_mid_work
+                    );
+                    closed
+                }
+                Err(err) => {
+                    eprintln!(
+                        "ctox run-once: sync_mission_state_from_continuity failed: {err}; treating mission as still open"
+                    );
+                    false
+                }
+            };
+
+        if explicitly_closed {
+            mission_status = "handled";
+            break;
+        }
 
         if turns_run >= max_turns {
             mission_status = "cap";
@@ -1065,21 +1075,12 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
 
         current = lease_next_for_thread(root, &thread_key, lease_owner)?;
         if current.is_none() {
-            // Only declare the mission done/blocked if we also have no
-            // reason to believe the model was mid-work. If it was mid-
-            // work, our midwork continuation should have been enqueued
-            // above; if we still can't lease it (e.g. upstream queue
-            // hiccup), surface it as blocked so the caller can see.
-            if last_reply_is_mid_work {
-                mission_status = "blocked";
-                eprintln!(
-                    "ctox run-once: mid-work reply but no pending lease after continuation enqueue — surfacing as blocked"
-                );
-            } else if !mission_open {
-                mission_status = "handled";
-            } else {
-                mission_status = "blocked";
-            }
+            // No pending queue work AND mission wasn't explicitly
+            // closed. This is the "natural end" case — model
+            // completed the task, didn't queue follow-ups. We treat
+            // it as handled; if the verifier disagrees, that's a
+            // model-side fail per the bench rules.
+            mission_status = "handled";
             break;
         }
     }
@@ -1151,122 +1152,22 @@ fn is_turn_timeout_blocker(value: &str) -> bool {
     lowered.contains("timed out after") || lowered.contains("time budget")
 }
 
-/// Strip `<think>...</think>` blocks from a reply. Returns the substantive
-/// text only. An unclosed `<think>` at the end is treated as the reply
-/// having been cut off inside a reasoning block (the function drops
-/// everything from the opening `<think>` onward).
-fn strip_think_blocks(reply: &str) -> String {
-    let mut out = String::with_capacity(reply.len());
-    let mut rest = reply;
-    loop {
-        match rest.find("<think>") {
-            Some(open) => {
-                out.push_str(&rest[..open]);
-                let after_open = &rest[open + 7..];
-                match after_open.find("</think>") {
-                    Some(close) => {
-                        rest = &after_open[close + 8..];
-                    }
-                    None => {
-                        // unclosed think — drop remainder
-                        break;
-                    }
-                }
-            }
-            None => {
-                out.push_str(rest);
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Heuristically detect whether a turn's final reply looks like the model
-/// was still mid-work (announcing an intent without carrying it out, or
-/// falling silent right after a reasoning block). A bench/service run that
-/// treats such a reply as "mission done" would be unfair to the model —
-/// the orchestrator ended the work, not the model.
+/// Detect the one unambiguous mid-work signal: a reply that contains an
+/// opening `<think>` tag but no matching close tag. This means the
+/// reasoning block was cut off mid-stream (upstream truncation, token
+/// cap, connection drop inside the stream, …) and the model never got
+/// to act on its thinking.
 ///
-/// Positives:
-///   - reply is empty after stripping `<think>...</think>`
-///   - trailing text ends with a colon (typical "Let me do X:" setup)
-///   - the last sentence starts with an intent marker
-///     ("I'll ", "Let me ", "Now I'll ", "I'm going to ", …)
-///   - reply contains an unclosed `<think>` (mid-reasoning cutoff)
-///
-/// False positives are acceptable: the cost is one extra continuation
-/// turn, capped by `--max-turns`.
+/// Earlier versions of this heuristic also pattern-matched intent
+/// prefixes ("I'll ...", "Now ...", etc.) and very short replies
+/// without completion keywords. Those were too brittle across model
+/// phrasings / languages and produced downstream false-positives
+/// (e.g. queuing a continuation after the work was already done, which
+/// then tripped the tool-activity gate). The cooperative path is now
+/// handled by the Mission Control Contract in the system prompt; this
+/// heuristic only catches the hard truncation case.
 fn reply_looks_mid_work(reply: &str) -> bool {
-    // Unclosed <think> → truncated inside the reasoning block.
-    if reply.contains("<think>") && !reply.contains("</think>") {
-        return true;
-    }
-    let stripped = strip_think_blocks(reply);
-    let trimmed = stripped.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-    let last_char = trimmed.chars().last();
-    if matches!(last_char, Some(':') | Some(',')) {
-        return true;
-    }
-    // Split into sentences on `.`, `!`, `?`. Take the LAST non-empty
-    // sentence — a reply ending in "Now I'll X." has an empty trailing
-    // fragment but the actual final sentence is the "Now I'll X" part.
-    let last_sentence = trimmed
-        .split(['.', '!', '?'])
-        .rev()
-        .map(str::trim)
-        .find(|seg| !seg.is_empty())
-        .unwrap_or(trimmed)
-        .to_ascii_lowercase();
-    const INTENT_PREFIXES: &[&str] = &[
-        "i'll ",
-        "i will ",
-        "let me ",
-        "now i'll ",
-        "now i will ",
-        "next, i'll ",
-        "next i'll ",
-        "i'm going to ",
-        "going to ",
-        "i am going to ",
-        "i need to ",
-        "we need to ",
-    ];
-    if INTENT_PREFIXES
-        .iter()
-        .any(|marker| last_sentence.starts_with(marker))
-    {
-        return true;
-    }
-    // Catch implicit imperatives — "Now install X", "Now setup Y" — that
-    // don't start with an explicit "I'll" / "Let me" but are still pure
-    // intent (the model is announcing the next action, not reporting
-    // completion). Constrained to short replies with no completion
-    // signal, to avoid false positives on legitimate short answers like
-    // "The answer is 42." or "Done — vm.js is in place."
-    let lowered_full = trimmed.to_ascii_lowercase();
-    const COMPLETION_KEYWORDS: &[&str] = &[
-        "done", "complete", "completed", "verified", "wrote", "saved",
-        "answer", "result", "passed", "ready", "finished", "in place",
-        "successfully",
-    ];
-    let has_completion_signal = COMPLETION_KEYWORDS
-        .iter()
-        .any(|kw| lowered_full.contains(kw));
-    if !has_completion_signal {
-        if last_sentence.starts_with("now ") || last_sentence.starts_with("then ") {
-            return true;
-        }
-        // A very short reply with no completion signal is almost always
-        // a partial intent the model didn't follow through on.
-        if trimmed.chars().count() < 100 {
-            return true;
-        }
-    }
-    false
+    reply.contains("<think>") && !reply.contains("</think>")
 }
 
 /// Mid-work parallel to `enqueue_timeout_continuation`. Queues a follow-up
@@ -1317,26 +1218,21 @@ mod run_once_tests {
 
     #[test]
     fn mid_work_detects_unclosed_think() {
-        assert!(reply_looks_mid_work("<think>I'm analyzing"));
+        assert!(reply_looks_mid_work("<think>I'm still analyzing the problem"));
     }
 
     #[test]
-    fn mid_work_detects_intent_only() {
-        assert!(reply_looks_mid_work(
-            "<think>yes</think>\n\nNow I'll set up the web server as a systemd service."
-        ));
-    }
-
-    #[test]
-    fn mid_work_detects_trailing_colon() {
-        assert!(reply_looks_mid_work(
+    fn mid_work_accepts_closed_think_with_any_tail() {
+        // Narrowed heuristic: a properly closed <think> block is NOT
+        // mid-work regardless of what follows. The system-prompt
+        // Mission Control Contract handles the intent-without-action
+        // case cooperatively now.
+        assert!(!reply_looks_mid_work(
             "<think>done</think>\n\nLet me create a modular implementation:"
         ));
-    }
-
-    #[test]
-    fn mid_work_detects_empty_after_think() {
-        assert!(reply_looks_mid_work("<think>thinking</think>\n   \n"));
+        assert!(!reply_looks_mid_work(
+            "<think>yes</think>\n\nNow I'll set up the web server."
+        ));
     }
 
     #[test]
@@ -1354,27 +1250,11 @@ mod run_once_tests {
     }
 
     #[test]
-    fn mid_work_detects_now_imperative_no_completion() {
-        // Real-world M2.7 reply that previously slipped through the
-        // intent-prefix list — "Now install git and Python." is an
-        // imperative continuation, not a completion.
-        assert!(reply_looks_mid_work(
-            "<think>\nGood, apt-get update succeeded. Now let me install git and python3.\n\n</think>\n\nGood. Now install git and Python."
-        ));
-    }
-
-    #[test]
-    fn mid_work_accepts_short_completion_with_keyword() {
-        // Short reply with completion keyword should NOT trigger mid-work.
-        assert!(!reply_looks_mid_work(
-            "<think>did it</think>\n\nDone. Saved to /app/result.txt."
-        ));
-    }
-
-    #[test]
-    fn mid_work_detects_short_no_completion() {
-        // Very short reply without any completion signal is mid-work.
-        assert!(reply_looks_mid_work("<think>thinking</think>\n\nLooks good."));
+    fn mid_work_accepts_reply_without_think() {
+        // A reply without any <think> block cannot be in an unclosed
+        // reasoning state.
+        assert!(!reply_looks_mid_work("Short reply."));
+        assert!(!reply_looks_mid_work(""));
     }
 }
 

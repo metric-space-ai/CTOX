@@ -636,6 +636,7 @@ where
         &rendered_prompt.prompt,
         workspace_root,
         Some(Duration::from_secs(config.turn_timeout_secs)),
+        conversation_id,
     )?;
     emit("persist-assistant-turn");
     lcm::run_add_message(db_path, conversation_id, "assistant", &reply)?;
@@ -787,6 +788,7 @@ fn refresh_continuity_documents(
                 &payload.prompt,
                 workspace_root,
                 Some(Duration::from_secs(refresh_timeout_secs)),
+                conversation_id,
             ) {
                 Ok(diff) => diff,
                 Err(err) => {
@@ -1047,6 +1049,7 @@ pub(crate) fn invoke_codex_exec_with_timeout(
     prompt: &str,
     workspace_root: Option<&Path>,
     timeout: Option<Duration>,
+    conversation_id: i64,
 ) -> Result<String> {
     invoke_codex_exec_with_timeout_and_instructions(
         root,
@@ -1056,6 +1059,7 @@ pub(crate) fn invoke_codex_exec_with_timeout(
         timeout,
         None,
         None,
+        conversation_id,
     )
 }
 
@@ -1067,6 +1071,7 @@ pub(crate) fn invoke_codex_exec_with_timeout_and_instructions(
     timeout: Option<Duration>,
     base_instructions_override: Option<&str>,
     include_apply_patch_tool_override: Option<bool>,
+    conversation_id: i64,
 ) -> Result<String> {
     invoke_codex_exec_with_timeout_and_instructions_inner(
         root,
@@ -1077,6 +1082,7 @@ pub(crate) fn invoke_codex_exec_with_timeout_and_instructions(
         base_instructions_override.map(str::to_string),
         include_apply_patch_tool_override,
         false,
+        conversation_id,
     )
 }
 
@@ -1089,6 +1095,7 @@ fn invoke_codex_exec_with_timeout_and_instructions_inner(
     base_instructions_override: Option<String>,
     include_apply_patch_tool_override: Option<bool>,
     retried_for_tool_verification: bool,
+    conversation_id: i64,
 ) -> Result<String> {
     let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
     let model = resolved_runtime
@@ -1331,8 +1338,12 @@ fn invoke_codex_exec_with_timeout_and_instructions_inner(
     } else {
         None
     };
-    let missing_required_tool_activity =
-        response_missing_required_tool_activity(prompt, event_stream_summary.as_ref());
+    let missing_required_tool_activity = response_missing_required_tool_activity(
+        prompt,
+        event_stream_summary.as_ref(),
+        root,
+        conversation_id,
+    );
     if let Some(response) = stdout_response.clone() {
         if missing_required_tool_activity {
             if !retried_for_tool_verification {
@@ -1361,6 +1372,7 @@ fn invoke_codex_exec_with_timeout_and_instructions_inner(
                     Some(retry_instructions),
                     include_apply_patch_tool_override,
                     true,
+                    conversation_id,
                 );
             }
             anyhow::bail!(
@@ -1406,11 +1418,49 @@ fn invoke_codex_exec_with_timeout_and_instructions_inner(
 fn response_missing_required_tool_activity(
     prompt: &str,
     event_stream_summary: Option<&turn_contract::CodexExecEventStreamSummary>,
+    root: &Path,
+    conversation_id: i64,
 ) -> bool {
-    prompt_requires_tool_verification(prompt)
-        && !event_stream_summary
-            .map(|summary| summary.saw_tool_activity)
-            .unwrap_or(false)
+    if !prompt_requires_tool_verification(prompt) {
+        return false;
+    }
+    if event_stream_summary
+        .map(|summary| summary.saw_tool_activity)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    // Mission-history awareness: the current codex-exec invocation
+    // produced no tool activity, but this may be a closing continuation
+    // slice *within the same mission* — earlier slices already did the
+    // real work and there is nothing left to act on. Bailing on such a
+    // turn would flag a correct mission as a cheat.
+    //
+    // Proxy for "prior work happened in this mission": any earlier
+    // assistant message persisted on this conversation_id. The current
+    // user prompt is written to LCM *before* codex-exec is invoked
+    // (see run_chat_turn_with_events_extended), so at this point the
+    // messages table contains N+1 user turns and N assistant turns
+    // for the mission. N ≥ 1 means ≥ 1 previous completed turn.
+    let db_path = root.join("runtime/ctox_lcm.db");
+    if db_path.is_file() {
+        if let Ok(engine) = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()) {
+            if let Ok(messages) = engine.messages_for_conversation(conversation_id) {
+                let prior_assistant_turns = messages
+                    .iter()
+                    .filter(|message| message.role == "assistant")
+                    .count();
+                if prior_assistant_turns >= 1 {
+                    eprintln!(
+                        "ctox tool-activity gate: skipping bail — {} prior assistant turn(s) in conversation {}",
+                        prior_assistant_turns, conversation_id
+                    );
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 fn resolved_local_socket_path(
@@ -3211,6 +3261,7 @@ mod tests {
             Some(Duration::from_secs(180)),
             None,
             Some(false),
+            0,
         );
 
         let raw_request =
@@ -3272,6 +3323,7 @@ mod tests {
             Some(Duration::from_secs(180)),
             None,
             Some(false),
+            0,
         );
 
         let raw_request =
@@ -3322,6 +3374,7 @@ mod tests {
             Some(Duration::from_secs(180)),
             None,
             Some(false),
+            0,
         );
 
         let raw_request =
@@ -3554,9 +3607,12 @@ mod tests {
             "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Mission\\n\\nDone.\"}}\n"
         );
         let summary = turn_contract::summarize_event_stream(raw).expect("event stream summary");
+        let tmp = temp_root("ctox-tool-guard-flag");
         assert!(response_missing_required_tool_activity(
             prompt,
-            Some(&summary)
+            Some(&summary),
+            &tmp,
+            0,
         ));
     }
 
@@ -3572,9 +3628,12 @@ mod tests {
             "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Mission\\n\\nDone.\"}}\n"
         );
         let summary = turn_contract::summarize_event_stream(raw).expect("event stream summary");
+        let tmp = temp_root("ctox-tool-guard-ok");
         assert!(!response_missing_required_tool_activity(
             prompt,
-            Some(&summary)
+            Some(&summary),
+            &tmp,
+            0,
         ));
     }
 
