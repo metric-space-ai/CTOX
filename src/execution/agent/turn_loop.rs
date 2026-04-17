@@ -2352,6 +2352,8 @@ mod tests {
                 transcription_model: None,
                 speech_base_url: String::new(),
                 speech_model: None,
+                vision_base_url: String::new(),
+                vision_model: None,
             },
             primary_generation: Some(runtime_kernel::ResolvedRuntimeBinding {
                 workload: runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
@@ -2360,6 +2362,9 @@ mod tests {
                 port: 2234,
                 base_url: "http://127.0.0.1:2234".to_string(),
                 socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+                transport: crate::inference::local_transport::LocalTransport::UnixSocket {
+                    path: std::path::PathBuf::from("/tmp/ctox-primary.sock"),
+                },
                 health_path: "/health",
                 launcher_kind: runtime_kernel::RuntimeLauncherKind::Engine,
                 compute_target: None,
@@ -2368,6 +2373,7 @@ mod tests {
             embedding: None,
             transcription: None,
             speech: None,
+            vision: None,
         };
 
         let overrides = CodexExecConfigSpec {
