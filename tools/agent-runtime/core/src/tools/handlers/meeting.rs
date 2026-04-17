@@ -97,12 +97,17 @@ impl ToolHandler for MeetingHandler {
             }
             "meeting_send_chat" => {
                 let args: MeetingSendChatArgs = parse_arguments(&arguments)?;
+                // Meeting uses thread_key=session_id and a fixed system
+                // account_key. The channels.rs send_message() arm for "meeting"
+                // forwards thread_key as session_id to the Playwright process.
                 command
                     .arg("channel")
                     .arg("send")
                     .arg("--channel")
                     .arg("meeting")
-                    .arg("--session-id")
+                    .arg("--account-key")
+                    .arg("meeting:system")
+                    .arg("--thread-key")
                     .arg(&args.session_id)
                     .arg("--body")
                     .arg(&args.text);
