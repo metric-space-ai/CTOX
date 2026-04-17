@@ -72,12 +72,81 @@ use crate::inference::runtime_state;
 #[path = "model_catalog_boundary_tests.rs"]
 mod model_catalog_boundary_tests;
 
+fn print_help() {
+    let version = env!("CARGO_PKG_VERSION");
+    println!(
+        "ctox {version} — autonomous agent runtime
+
+USAGE
+  ctox [COMMAND] [OPTIONS]
+  ctox                           open the TUI
+
+EVERYDAY
+  ctox start                     start the persistent mission loop (systemd service)
+  ctox stop                      stop the mission loop
+  ctox status                    show service status (JSON)
+  ctox tui                       open the TUI
+  ctox version                   print the version string
+
+INSTALL / UPGRADE
+  ctox upgrade [--stable|--dev]  one-shot update (default: latest release binary)
+  ctox update check              poll the release channel for a new version
+  ctox update apply --latest     same as `ctox upgrade --stable`
+  ctox update apply --version <tag> [--from-source]
+  ctox update apply --source <path> [--release <name>]
+  ctox update rollback           revert to the previous release slot
+  ctox update status             dump install layout + manifest + update state
+
+ENGINE / GPU
+  ctox engine rebuild [--features=\"cuda flash-attn nccl\"]
+                                 re-run GPU/CUDA/Metal detection + rebuild ctox-engine
+  ctox engine status             show engine binary path and persisted feature stamp
+  ctox doctor                    health check — update available? engine present? hints
+
+RUN / EXEC
+  ctox run-once --brief <text> [--model <id>] [--quality|--performance]
+  ctox runtime switch <model> <quality|performance>
+  ctox serve-responses-proxy
+  ctox serve-litert-bridge --config <json>
+
+GOVERNANCE / MISSION
+  ctox governance <subcmd>       governance decisions and audits
+  ctox channel <subcmd>          communication channels (email, jami, webrtc)
+  ctox plan <subcmd>             mission plans
+  ctox schedule <subcmd>         recurring / deferred work
+  ctox follow-up <subcmd>        blocked-task follow-ups
+  ctox ticket <subcmd>           ticket integrations
+  ctox secret <subcmd>           credential storage
+  ctox state-invariants [--conversation-id <id>]
+
+CONTEXT / LCM (power-user)
+  ctox lcm-init | lcm-add-message | lcm-compact | lcm-grep | lcm-dump
+  ctox continuity-init | continuity-show | continuity-apply | continuity-log
+  ctox context-health | context-retrieve | context-stress
+  ctox chat-prompt-export
+
+CONFIGURE THE UPDATE CHANNEL (for forks)
+  ctox update channel show | clear
+  ctox update channel set-github --repo <owner/repo> [--api-base <url>] [--token-env <env>]
+
+ENVIRONMENT
+  CTOX_ROOT, CTOX_STATE_ROOT, CTOX_INSTALL_ROOT, CTOX_CACHE_ROOT, CTOX_BIN_DIR
+  CTOX_UPDATE_GITHUB_REPO / _API_BASE / _TOKEN_ENV   (override release channel)
+
+Full reference: https://github.com/metric-space-ai/ctox"
+    );
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = resolve_workspace_root()?;
 
     match args.first().map(String::as_str) {
         None => tui::run_tui(&root),
+        Some("help") | Some("--help") | Some("-h") => {
+            print_help();
+            Ok(())
+        }
         Some("source-status") => {
             let outcome = engine::source_layout_status(&root)?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
@@ -734,12 +803,10 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("run-once") => handle_run_once(&root, &args[1..]),
-        _ => {
-            let clean_room_families = model_registry::supported_clean_room_family_selectors().join("|");
+        Some(unknown) => {
             anyhow::bail!(
-                "usage:\n  ctox\n  ctox version\n  ctox start\n  ctox stop\n  ctox status\n  ctox service --foreground\n  ctox run-once --brief <text> [--model <id>] [--quality|--performance] [--workspace <path>] [--atif-out <path>] [--thread-key <key>]\n  ctox governance <subcommand> ...\n  ctox state-invariants [--conversation-id <id>]\n  ctox update status\n  ctox update check\n  ctox update channel show\n  ctox update channel set-github --repo <owner/repo> [--api-base <url>] [--token-env <env-var>]\n  ctox update channel clear\n  ctox update adopt [--install-root <path>] [--state-root <path>] [--release <name>] [--skip-build] [--force]\n  ctox update apply --source <path> [--release <name>] [--force] [--keep-failed-release]\n  ctox update apply --latest [--force] [--keep-failed-release] [--from-source]\n  ctox update apply --version <tag> [--force] [--keep-failed-release] [--from-source]\n  ctox upgrade                                (shortcut for `update apply --latest`)\n  ctox update rollback\n  ctox engine rebuild [--features=\"...\"]\n  ctox engine status\n  ctox doctor\n  ctox source-status\n  ctox clean-room-baseline-plan <{}> [prompt]\n  ctox clean-room-rewrite-responses <json-path>\n  ctox runtime switch <model> <quality|performance>\n  ctox serve-responses-proxy\n  ctox serve-litert-bridge --config <json-path>\n  ctox boost status\n  ctox boost start [--minutes <n>] [--model <id>] [--reason <text>]\n  ctox boost stop\n  ctox tui\n  ctox channel <subcommand> ...\n  ctox follow-up <subcommand> ...\n  ctox plan <subcommand> ...\n  ctox schedule <subcommand> ...\n  ctox secret <subcommand> ...\n  ctox ticket <subcommand> ...\n  ctox lcm-init <db-path>\n  ctox lcm-add-message <db-path> <conversation-id> <role> <content>\n  ctox lcm-compact <db-path> <conversation-id> [token-budget] [--force]\n  ctox lcm-grep <db-path> <conversation-id|all> <scope> <mode> <query> [limit]\n  ctox lcm-describe <db-path> <summary-id>\n  ctox lcm-expand <db-path> <summary-id> [depth] [--messages] [token-cap]\n  ctox lcm-dump <db-path> <conversation-id>\n  ctox lcm-refresh-continuity <db-path> <conversation-id>\n  ctox lcm-show-continuity <db-path> <conversation-id>\n  ctox lcm-run-fixture <db-path> <fixture-path>\n  ctox continuity-init <db-path> <conversation-id>\n  ctox continuity-show <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-apply <db-path> <conversation-id> <narrative|anchors|focus> <diff-path>\n  ctox continuity-log <db-path> <conversation-id> [narrative|anchors|focus]\n  ctox continuity-rebuild <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox continuity-forgotten <db-path> <conversation-id> [narrative|anchors|focus] [query]\n  ctox continuity-build-prompt <db-path> <conversation-id> <narrative|anchors|focus>\n  ctox context-health <db-path> <conversation-id> [latest-user-prompt] [token-budget]\n  ctox chat-prompt-export [--db <path>] [--conversation-id <id>] [--output <path>]\n  ctox context-stress <db-path> [conversation-id] [iterations] [token-budget]\n  ctox context-retrieve [--db <path>] [--conversation-id <id>] --mode <current|continuity|forgotten|search|describe|expand> [--kind <narrative|anchors|focus>] [--query <text>] [--summary-id <id>] [--limit <n>] [--depth <n>] [--messages] [--token-cap <n>]",
-                clean_room_families
-            )
+                "unknown command `{unknown}` — run `ctox help` for usage"
+            );
         }
     }
 }

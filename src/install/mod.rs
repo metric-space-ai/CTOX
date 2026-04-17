@@ -353,11 +353,20 @@ pub fn handle_doctor_command(root: &Path) -> Result<()> {
 }
 
 pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
-    // `ctox update` / `ctox upgrade` with no further args is the one-shot
-    // path: fetch the latest release, apply it (binary by default).
-    if args.is_empty() {
-        let result =
-            apply_remote_update(root, RemoteReleaseRequest::Latest, false, false, false)?;
+    // `ctox update` / `ctox upgrade` one-shot path. Accepts --stable (default)
+    // or --dev (track the main branch, source build) as the only args.
+    let top_flags_only = !args.is_empty()
+        && args
+            .iter()
+            .all(|arg| matches!(arg.as_str(), "--stable" | "--dev"));
+    if args.is_empty() || top_flags_only {
+        let use_dev = args.iter().any(|arg| arg == "--dev");
+        let request = if use_dev {
+            RemoteReleaseRequest::Branch("main".to_string())
+        } else {
+            RemoteReleaseRequest::Latest
+        };
+        let result = apply_remote_update(root, request, false, false, false)?;
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
@@ -461,6 +470,9 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
 enum RemoteReleaseRequest {
     Latest,
     Tag(String),
+    /// Follow the tip of a branch (always source-mode — no release asset exists
+    /// for arbitrary branches). Used by `ctox upgrade --dev`.
+    Branch(String),
 }
 
 fn handle_update_channel_command(root: &Path, args: &[String]) -> Result<()> {
@@ -578,6 +590,12 @@ fn apply_remote_update(
     let manifest = load_install_manifest(&layout.install_manifest_path())?;
     let channel = resolve_release_channel(&layout, manifest.as_ref())
         .context("release channel is not configured; use `ctox update channel set-github --repo <owner/repo>` first")?;
+    // Branch requests only have a source tarball — no binary assets for arbitrary branches.
+    let is_branch = matches!(request, RemoteReleaseRequest::Branch(_));
+    let from_source = is_branch || from_source;
+    // Branch HEADs move; always bypass the on-disk cache so `ctox upgrade --dev`
+    // genuinely picks up the latest commit.
+    let force = force || is_branch;
     let (downloaded, kind) = if from_source {
         (
             download_release_source(&layout, &channel.config, request, force)?,
@@ -1024,7 +1042,24 @@ fn fetch_remote_release(
 ) -> Result<GitHubReleaseResponse> {
     match channel {
         ReleaseChannelConfig::GitHub { repo, api_base, .. } => {
-            let endpoint = match request {
+            if let RemoteReleaseRequest::Branch(branch) = &request {
+                // Synthesize a GitHubReleaseResponse that points at the branch
+                // tarball. GitHub doesn't publish a "release" for a branch, so
+                // we can't list release assets here — callers must use the
+                // source-mode path for Branch requests.
+                let tarball_url = format!(
+                    "https://codeload.github.com/{repo}/tar.gz/refs/heads/{branch}"
+                );
+                return Ok(GitHubReleaseResponse {
+                    tag_name: format!("branch-{branch}"),
+                    name: Some(format!("{branch} (development snapshot)")),
+                    tarball_url,
+                    html_url: None,
+                    published_at: None,
+                    assets: Vec::new(),
+                });
+            }
+            let endpoint = match &request {
                 RemoteReleaseRequest::Latest => {
                     format!(
                         "{}/repos/{repo}/releases/latest",
@@ -1036,6 +1071,7 @@ fn fetch_remote_release(
                     api_base.trim_end_matches('/'),
                     tag
                 ),
+                RemoteReleaseRequest::Branch(_) => unreachable!("handled above"),
             };
             let body = github_api_get_json(channel, &endpoint)?;
             let release: GitHubReleaseResponse =
