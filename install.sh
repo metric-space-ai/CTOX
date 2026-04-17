@@ -504,6 +504,13 @@ try_install_cuda_stack() {
 
   printf '\n  %b%bCUDA-Toolkit wird installiert...%b\n\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
 
+  # Kernel headers are required by DKMS to build the nvidia module against the
+  # running kernel. Without them the driver package installs but the .ko is
+  # never produced, and modprobe/nvidia-smi fail silently afterwards.
+  local kern; kern="$(uname -r)"
+  run_sudo apt-get update -qq
+  run_sudo apt-get install -y "linux-headers-${kern}" 2>/dev/null || true
+
   # First try: install from existing apt sources
   local packages=() driver cuda
   driver="$(latest_apt_package_matching '^nvidia-driver-[0-9]+-server-open$' || true)"
@@ -514,10 +521,28 @@ try_install_cuda_stack() {
   [[ -z "$cuda" ]] && cuda="nvidia-cuda-toolkit"
   packages+=("$cuda")
 
-  [[ "${#packages[@]}" -gt 0 ]] && { run_sudo apt-get update -qq; run_sudo apt-get install -y "${packages[@]}"; }
+  [[ "${#packages[@]}" -gt 0 ]] && run_sudo apt-get install -y "${packages[@]}"
+
+  # After apt install, the kernel module exists on disk (via DKMS) but may not
+  # be loaded yet — try to modprobe it so nvidia-smi / cudarc can succeed
+  # without requiring a reboot. nvidia-modprobe also creates /dev/nvidia*.
+  run_sudo modprobe nvidia 2>/dev/null || true
+  run_sudo modprobe nvidia-uvm 2>/dev/null || true
+  command -v nvidia-modprobe >/dev/null 2>&1 && run_sudo nvidia-modprobe -c 0 -u 2>/dev/null || true
+
   nvidia_driver_ready && cuda_toolchain_ready && return 0
 
-  # If that didn't work, add NVIDIA's official CUDA repo and try again
+  # nvcc is the only hard dependency for the build. If it is present, surface
+  # a clear reboot-required hint and return success so the source build can
+  # proceed — the user will just need to reboot before running CTOX.
+  if cuda_toolchain_ready; then
+    printf '\n  %b%b⚠ NVIDIA-Treiber installiert, aber Kernel-Modul nicht geladen.%b\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
+    printf '  %b  → Bitte das System neu starten, bevor CTOX gestartet wird.%b\n\n' "$C_YELLOW" "$C_RESET"
+    return 0
+  fi
+
+  # If the toolchain itself is still missing, add NVIDIA's official CUDA repo
+  # and try again (fixes systems with broken Ubuntu-packaged CUDA).
   setup_nvidia_cuda_repo
   return $?
 }
