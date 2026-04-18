@@ -6,12 +6,7 @@ use harness::TestRoot;
 /// Build a helper that invokes the ctox binary in `--tui-smoke` mode.
 /// The binary renders one frame to stdout as plain-text then exits.
 fn tui_smoke(root: &TestRoot, page: &str, width: u16, height: u16) -> String {
-    let output = root.run(&[
-        "tui-smoke",
-        page,
-        &width.to_string(),
-        &height.to_string(),
-    ]);
+    let output = root.run(&["tui-smoke", page, &width.to_string(), &height.to_string()]);
     output.success();
     output.stdout()
 }
@@ -42,7 +37,10 @@ fn tui_smoke_settings_renders() {
 fn tui_smoke_narrow_chat_renders() {
     let root = TestRoot::new("tui-smoke-narrow");
     let buf = tui_smoke(&root, "chat", 60, 24);
-    assert!(buf.contains("CTOX"), "narrow layout must still render header");
+    assert!(
+        buf.contains("CTOX"),
+        "narrow layout must still render header"
+    );
 }
 
 #[test]

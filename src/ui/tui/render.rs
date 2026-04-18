@@ -372,10 +372,14 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
     };
     frame.render_widget(
         Paragraph::new(info)
-            .block(pane_block().borders(Borders::TOP).title(Span::styled(
-                " install / version ",
-                Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
-            )))
+            .block(
+                pane_block().borders(Borders::TOP).title(Span::styled(
+                    " install / version ",
+                    Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            )
             .wrap(Wrap { trim: false }),
         split[1],
     );
@@ -388,10 +392,14 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
     };
     frame.render_widget(
         Paragraph::new(check_body)
-            .block(pane_block().borders(Borders::TOP).title(Span::styled(
-                " remote check ",
-                Style::default().fg(Color::LightBlue).add_modifier(Modifier::BOLD),
-            )))
+            .block(
+                pane_block().borders(Borders::TOP).title(Span::styled(
+                    " remote check ",
+                    Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            )
             .wrap(Wrap { trim: false }),
         split[2],
     );
@@ -402,10 +410,7 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
         app.update_view.last_action_line.clone()
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(
-            footer,
-            Style::default().fg(Color::DarkGray),
-        )),
+        Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
         split[3],
     );
 }
