@@ -798,7 +798,7 @@ struct SkillCatalogMetadata {
 }
 
 pub fn run_tui(root: &Path) -> Result<()> {
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut stdout = io::stdout();
@@ -851,7 +851,7 @@ pub fn run_tui(root: &Path) -> Result<()> {
 pub fn run_tui_smoke(root: &Path, page_name: &str, width: u16, height: u16) -> Result<()> {
     use ratatui::backend::TestBackend;
 
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut app = App::new(root.to_path_buf(), db_path);
@@ -893,7 +893,7 @@ pub fn run_tui_inject(
 ) -> Result<String> {
     use ratatui::backend::TestBackend;
 
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut app = App::new(root.to_path_buf(), db_path);
@@ -5979,7 +5979,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let root = temp_root("composer-badge");
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).unwrap();
 
         let mut app = App::new(root.clone(), db_path);
@@ -6033,7 +6033,7 @@ mod tests {
     #[test]
     fn image_slash_command_resolves_existing_file_and_rejects_non_image() {
         let root = temp_root("image-slash");
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).unwrap();
         let mut app = App::new(root.clone(), db_path);
 

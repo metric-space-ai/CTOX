@@ -341,7 +341,7 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     eprintln!("ctox service autonomy level: {active_level}");
     channels::ensure_store(root)?;
     governance::ensure_governance(root)?;
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let _ = crate::lcm::LcmEngine::open(&db_path, crate::lcm::LcmConfig::default())?;
     let listen_addr = service_listen_addr(root);
     write_pid_file(root, std::process::id())?;
@@ -638,7 +638,7 @@ fn attempt_state_invariant_repair(
     lcm::MissionStateRepairOutcome,
     state_invariants::RuntimeStateInvariantReport,
 )> {
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let mut repair = engine.sync_mission_state_from_continuity_with_repair(conversation_id)?;
     let mut report = state_invariants::evaluate_runtime_state_invariants(root, conversation_id)?;
@@ -1971,7 +1971,7 @@ fn start_prompt_worker(
             clip_text(&job.preview, 120)
         );
         let panic_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let db_path = root.join("runtime/ctox_lcm.db");
+            let db_path = crate::paths::lcm_db(root);
             let event_state = state.clone();
             let event_source = job.source_label.clone();
             let workspace_root = job.workspace_root.as_deref().map(std::path::Path::new);
@@ -2306,7 +2306,7 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
         return Ok(());
     }
 
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let mission = engine.sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)?;
     // Normally we skip when the mission state says closed or allow_idle,
@@ -2943,8 +2943,8 @@ fn render_email_context_contract(root: &Path, message: &channels::RoutedInboundM
     } else {
         format!("{sender} {}", query_parts.join(" "))
     };
-    let db_path = root.join("runtime/cto_agent.db");
-    let lcm_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::mission_db(root);
+    let lcm_path = crate::paths::lcm_db(root);
     let lines = vec![
         "[Kommunikationskontext aktiv pruefen]".to_string(),
         "Vor einer Antwort nicht nur auf diese Mail-Huelle verlassen.".to_string(),
@@ -3850,7 +3850,7 @@ mod tests {
     fn boot_state_invariant_check_records_visible_violation_event() {
         let root = temp_root("boot-state-invariants");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -3896,7 +3896,7 @@ mod tests {
     fn boot_state_invariant_check_repairs_partial_commit_focus_conflict() {
         let root = temp_root("boot-state-invariants-repair");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -3949,7 +3949,7 @@ mod tests {
     fn boot_state_invariant_check_reopens_mission_when_runtime_work_is_still_open() {
         let root = temp_root("boot-state-runtime-open");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4026,7 +4026,7 @@ mod tests {
     fn turn_end_state_invariant_check_reopens_mission_when_runtime_work_is_still_open() {
         let root = temp_root("turn-state-runtime-open");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4110,7 +4110,7 @@ mod tests {
     fn turn_end_state_invariant_check_rebuilds_focus_after_refresh_skip() {
         let root = temp_root("turn-state-focus-refresh-skip");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4186,7 +4186,7 @@ mod tests {
     fn turn_end_state_invariant_check_hydrates_sparse_open_focus_from_runtime_title() {
         let root = temp_root("turn-state-sparse-open-focus");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4284,7 +4284,7 @@ mod tests {
     fn turn_end_state_invariant_check_repairs_partial_commit_focus_conflict() {
         let root = temp_root("turn-state-partial-commit");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = root.join("runtime/ctox_lcm.db");
+        let db_path = crate::paths::lcm_db(root);
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -5451,7 +5451,7 @@ mod tests {
         let root = temp_root("ctox-mission-watcher-open");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
         let engine =
-            lcm::LcmEngine::open(&root.join("runtime/ctox_lcm.db"), lcm::LcmConfig::default())
+            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
                 .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -5492,7 +5492,7 @@ mod tests {
         let root = temp_root("ctox-mission-watcher-closed");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
         let engine =
-            lcm::LcmEngine::open(&root.join("runtime/ctox_lcm.db"), lcm::LcmConfig::default())
+            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
                 .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -5522,7 +5522,7 @@ mod tests {
         let root = temp_root("ctox-mission-watcher-backoff");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
         let engine =
-            lcm::LcmEngine::open(&root.join("runtime/ctox_lcm.db"), lcm::LcmConfig::default())
+            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
                 .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)

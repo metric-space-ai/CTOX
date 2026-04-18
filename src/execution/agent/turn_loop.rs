@@ -163,7 +163,7 @@ fn detect_durable_state_transition(
     use rusqlite::Connection;
 
     // Mission-side tables live in cto_agent.db.
-    let mission_db = root.join("runtime/cto_agent.db");
+    let mission_db = crate::paths::mission_db(root);
     if mission_db.exists() {
         let conn = Connection::open_with_flags(
             &mission_db,

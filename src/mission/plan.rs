@@ -16,7 +16,6 @@ use std::time::SystemTime;
 
 use crate::channels;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const DEFAULT_GOAL_THREAD_PREFIX: &str = "plan";
 const DEFAULT_RESULT_EXCERPT_CHARS: usize = 420;
 
@@ -1271,7 +1270,7 @@ fn schema_state(conn: &Connection) -> Result<serde_json::Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn parse_ingest_request(args: &[String]) -> Result<PlanCreateRequest> {

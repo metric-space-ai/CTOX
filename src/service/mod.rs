@@ -1,6 +1,7 @@
 // Origin: CTOX
 // License: Apache-2.0
 
+pub mod db_migration;
 pub mod governance;
 pub mod mission_governor;
 pub mod state_invariants;

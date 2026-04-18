@@ -9,6 +9,7 @@ mod execution;
 mod export;
 mod install;
 mod mission;
+mod paths;
 mod secrets;
 mod service;
 mod ui;
@@ -140,6 +141,8 @@ Full reference: https://github.com/metric-space-ai/ctox"
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = resolve_workspace_root()?;
+    service::db_migration::run_if_needed(&root)
+        .context("failed to consolidate legacy databases into runtime/ctox.db")?;
     let clean_room_families = model_registry::supported_clean_room_family_selectors().join("|");
 
     match args.first().map(String::as_str) {
@@ -697,7 +700,7 @@ fn main() -> anyhow::Result<()> {
                 .context("failed to parse conversation id")?;
             let db_path = find_flag_value(&args[1..], "--db")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| root.join("runtime/ctox_lcm.db"));
+                .unwrap_or_else(|| crate::paths::lcm_db(root));
             let output_path = find_flag_value(&args[1..], "--output").map(PathBuf::from);
             let settings = runtime_env::effective_runtime_env_map(&root).unwrap_or_default();
             let model = runtime_env::effective_chat_model_from_map(&settings)
@@ -768,7 +771,7 @@ fn main() -> anyhow::Result<()> {
             let mode = find_flag_value(&args[1..], "--mode").unwrap_or("current");
             let db_path = find_flag_value(&args[1..], "--db")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| root.join("runtime/ctox_lcm.db"));
+                .unwrap_or_else(|| crate::paths::lcm_db(root));
             let query = find_flag_value(&args[1..], "--query").map(ToOwned::to_owned);
             let continuity_kind = find_flag_value(&args[1..], "--kind").map(ToOwned::to_owned);
             let summary_id = find_flag_value(&args[1..], "--summary-id").map(ToOwned::to_owned);
@@ -848,9 +851,11 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
     // Default to the conventional runtime DB if --db is not supplied. Codex-
     // exec children inherit CTOX_ROOT so this usually just works.
     let ctox_root_env = std::env::var("CTOX_ROOT").ok();
-    let default_db = ctox_root_env
-        .as_deref()
-        .map(|r| format!("{}/runtime/ctox_lcm.db", r.trim_end_matches('/')));
+    let default_db = ctox_root_env.as_deref().map(|r| {
+        crate::paths::lcm_db(Path::new(r))
+            .to_string_lossy()
+            .into_owned()
+    });
     let db_path = find_flag_value(args, "--db")
         .map(str::to_string)
         .or(default_db)
@@ -980,7 +985,7 @@ fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;

@@ -19,7 +19,6 @@ use zeroize::Zeroizing;
 
 use crate::lcm;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const MASTER_KEY_ENV: &str = "CTOX_SECRET_MASTER_KEY";
 const MASTER_KEY_RELATIVE_PATH: &str = "runtime/ctox_secret_master.key";
 
@@ -340,7 +339,7 @@ fn delete_secret(root: &Path, scope: &str, name: &str) -> Result<()> {
 }
 
 fn resolve_db_path(root: &Path) -> PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn open_secret_db(root: &Path) -> Result<Connection> {
@@ -687,7 +686,7 @@ mod tests {
     fn secret_intake_stores_secret_and_rewrites_memory_reference() -> Result<()> {
         let root = temp_root("intake");
         fs::create_dir_all(&root)?;
-        let lcm_db = root.join("runtime").join("ctox_lcm.db");
+        let lcm_db = crate::paths::lcm_db(&root);
         if let Some(parent) = lcm_db.parent() {
             fs::create_dir_all(parent)?;
         }

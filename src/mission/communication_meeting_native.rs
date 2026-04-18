@@ -710,7 +710,7 @@ fn finalize_meeting(
     // Ingest the summary as a normal inbound message in the "meeting" channel.
     // The service loop's route_external_messages() will pick it up and route
     // it to the agent with the meeting-participant skill via metadata.
-    let db_path = root.join("runtime/cto_agent.db");
+    let db_path = crate::paths::mission_db(root);
     let mut conn = open_channel_db(&db_path)?;
     let observed_at = now_iso_string();
     let message_key = format!(

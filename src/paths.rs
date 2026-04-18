@@ -1,0 +1,63 @@
+//! Centralized runtime database paths.
+//!
+//! All core state lives in a single consolidated sqlite file, [`core_db`] =
+//! `runtime/ctox.db`. Mission-side tables (queue, tickets, governance,
+//! secrets, channels, schedule, plans, approval nag, knowledge) and LCM-side
+//! tables (messages, summaries, continuity, mission state, verification,
+//! claims) share that file. [`mission_db`] and [`lcm_db`] are thin aliases
+//! that exist for call-site clarity — both resolve to the same path.
+//!
+//! A first-start migration merges the historical `cto_agent.db` and
+//! `ctox_lcm.db` files into `ctox.db` and moves the originals into a dated
+//! backup folder; see [`crate::service::db_migration`].
+//!
+//! Tool-owned sqlite stores keep their own files and are exposed here so
+//! `ctox source-status` and other callers can locate them without duplicating
+//! string literals.
+
+use std::path::{Path, PathBuf};
+
+pub fn runtime_dir(root: &Path) -> PathBuf {
+    root.join("runtime")
+}
+
+pub fn backup_dir(root: &Path) -> PathBuf {
+    runtime_dir(root).join("backup")
+}
+
+/// The consolidated core state database.
+pub fn core_db(root: &Path) -> PathBuf {
+    runtime_dir(root).join("ctox.db")
+}
+
+/// Alias of [`core_db`] used by mission-side call sites for readability.
+pub fn mission_db(root: &Path) -> PathBuf {
+    core_db(root)
+}
+
+/// Alias of [`core_db`] used by LCM-side call sites for readability.
+pub fn lcm_db(root: &Path) -> PathBuf {
+    core_db(root)
+}
+
+/// Legacy `runtime/cto_agent.db` — used only by the one-shot merge migration.
+pub fn legacy_mission_db(root: &Path) -> PathBuf {
+    runtime_dir(root).join("cto_agent.db")
+}
+
+/// Legacy `runtime/ctox_lcm.db` — used only by the one-shot merge migration.
+pub fn legacy_lcm_db(root: &Path) -> PathBuf {
+    runtime_dir(root).join("ctox_lcm.db")
+}
+
+/// Tool-owned store for the scrape capability. Stays separate from the core
+/// consolidation by design (tools may keep their own sqlite files).
+pub fn scrape_db(root: &Path) -> PathBuf {
+    runtime_dir(root).join("ctox_scraping.db")
+}
+
+/// Tool-owned store for the local ticket adapter. Stays separate for the same
+/// reason as [`scrape_db`].
+pub fn ticket_local_db(root: &Path) -> PathBuf {
+    runtime_dir(root).join("ticket_local.db")
+}

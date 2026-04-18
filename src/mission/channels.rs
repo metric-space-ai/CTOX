@@ -21,7 +21,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::mission::communication_adapters;
 use crate::mission::communication_adapters::CommunicationTransportAdapter;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const DEFAULT_TAKE_LIMIT: usize = 10;
 const QUEUE_CHANNEL_NAME: &str = "queue";
 const QUEUE_ACCOUNT_KEY: &str = "queue:system";
@@ -3323,7 +3322,7 @@ fn resolve_account_key(conn: &Connection, channel: &str, explicit: Option<&str>)
 fn resolve_db_path(root: &Path, explicit: Option<&str>) -> PathBuf {
     explicit
         .map(PathBuf::from)
-        .unwrap_or_else(|| root.join(DEFAULT_DB_RELATIVE_PATH))
+        .unwrap_or_else(|| crate::paths::mission_db(root))
 }
 
 fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str> {

@@ -99,7 +99,7 @@ impl RecordedSliceAssurance {
 
 pub fn handle_verification_command(root: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     match command {
         "init" => {
@@ -139,7 +139,7 @@ pub fn record_slice_assurance(
     blocker: Option<&str>,
     review_outcome: Option<&review::ReviewOutcome>,
 ) -> Result<RecordedSliceAssurance> {
-    let db_path = root.join("runtime/ctox_lcm.db");
+    let db_path = crate::paths::lcm_db(root);
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let created_at = now_millis_string();
     let result_excerpt = clip_text(result_text, 280);
@@ -578,7 +578,7 @@ mod tests {
         assert!(!recorded.closure_blocking_open_items().is_empty());
 
         let engine =
-            lcm::LcmEngine::open(&root.join("runtime/ctox_lcm.db"), lcm::LcmConfig::default())?;
+            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())?;
         let assurance = engine.mission_assurance_snapshot(7)?;
         assert_eq!(
             assurance.latest_run.as_ref().map(|run| run.run_id.clone()),

@@ -12,7 +12,6 @@ use std::path::Path;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const DEFAULT_EVENT_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Serialize)]
@@ -428,7 +427,7 @@ fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn open_governance_db(root: &Path) -> Result<Connection> {

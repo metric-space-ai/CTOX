@@ -36,8 +36,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::inference::runtime_env;
 use crate::mission::tickets;
 
-const DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
-
 #[derive(Debug, Default, Clone)]
 pub struct NagSweepSummary {
     pub scheduled: usize,
@@ -83,7 +81,7 @@ pub fn sweep(root: &Path) -> Result<NagSweepSummary> {
 }
 
 fn db_path(root: &Path) -> PathBuf {
-    root.join(DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn open_db(root: &Path) -> Result<Connection> {
