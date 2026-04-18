@@ -19,7 +19,7 @@ Do **not** rely on grep/memory/assumptions about what a given subsystem is suppo
 
 ## What CTOX Is (one-paragraph orientation)
 
-CTOX is an AI agent system for autonomous server and DevOps work. It combines (1) an orchestration layer with mission queue, continuity tracking, governance and communication routing, (2) an in-process inference engine based on a hard-fork of the OpenAI Codex agent runtime (`tools/agent-runtime/` = `ctox-core`), (3) a local proxy gateway that normalizes model APIs to an OpenAI Responses surface, and (4) an optional on-host model-serving engine (`tools/model-runtime/`). TUI uses ratatui + crossterm. Persistence: SQLite (`cto_agent.db` for mission state, `ctox_lcm.db` for long-context memory) plus `engine.env` and `runtime/inference_runtime.json`. Rust toolchain: 1.93. Full architecture is in `AGENTS.md` — read it before making architectural claims.
+CTOX is an AI agent system for autonomous server and DevOps work. It combines (1) an orchestration layer with mission queue, continuity tracking, governance and communication routing, (2) an in-process inference engine based on a hard-fork of the OpenAI Codex agent runtime (`tools/agent-runtime/` = `ctox-core`), (3) a local proxy gateway that normalizes model APIs to an OpenAI Responses surface, and (4) an optional on-host model-serving engine (`tools/model-runtime/`). TUI uses ratatui + crossterm. Persistence: a single consolidated SQLite file `runtime/ctox.db` for all core state (mission queue, tickets, governance, secrets, LCM, continuity, verification, knowledge/skillbooks/runbooks) — all paths resolved through `src/paths.rs`; tool-owned stores (`ticket_local.db`, `ctox_scraping.db`, `documents/ctox_doc.db`) stay as separate files; plus `engine.env` and `runtime/inference_runtime.json`. Rust toolchain: 1.93. Full architecture is in `AGENTS.md` — read it before making architectural claims.
 
 ## TUI Surface (orientation only)
 
@@ -47,5 +47,8 @@ When the user asks for a TUI layout or rendering change, they are the ones who r
 | `src/service/` | systemd service daemon |
 | `tools/agent-runtime/` | Hard-fork of codex agent runtime (ctox-core) — integrated source tree, not a dependency |
 | `tools/model-runtime/` | Local model serving engine — integrated source tree |
+| `src/paths.rs` | Single source of truth for all runtime DB paths |
+| `src/service/db_migration.rs` | One-shot merge of legacy `cto_agent.db` + `ctox_lcm.db` into `ctox.db` |
+| `runtime/ctox.db` | Consolidated core state (mission, tickets, governance, secrets, LCM, knowledge, verification) |
 | `runtime/engine.env` | Persisted operator settings |
 | `runtime/inference_runtime.json` | Persisted runtime-state projection |

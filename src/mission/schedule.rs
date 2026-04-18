@@ -17,7 +17,6 @@ use std::time::SystemTime;
 
 use crate::channels;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const CRON_SCAN_MINUTES: i64 = 366 * 24 * 60;
 
 #[derive(Debug, Clone, Serialize)]
@@ -507,7 +506,7 @@ fn schema_state(conn: &Connection) -> Result<serde_json::Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn parse_add_request(args: &[String]) -> Result<ScheduleCreateRequest> {
@@ -621,7 +620,7 @@ mod tests {
         .expect("ensure task");
 
         let run = emit_task_now(&root, &task.task_id).expect("emit run");
-        let db = Connection::open(root.join("runtime/cto_agent.db")).expect("open channel db");
+        let db = Connection::open(crate::paths::mission_db(&root)).expect("open channel db");
         let row = db
             .query_row(
                 "SELECT thread_key, subject, body_text, metadata_json FROM communication_messages WHERE message_key = ?1",

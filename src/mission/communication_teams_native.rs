@@ -398,7 +398,7 @@ pub(crate) fn service_sync(
         return Ok(None);
     }
     let runtime = runtime_from_settings(root, settings);
-    let db_path = root.join("runtime/cto_agent.db");
+    let db_path = crate::paths::mission_db(root);
     let request = AdapterSyncCommandRequest {
         db_path: db_path.as_path(),
         passthrough_args: &["sync".to_string()],

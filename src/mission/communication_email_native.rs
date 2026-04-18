@@ -154,7 +154,7 @@ pub(crate) fn service_sync(
     if email.is_empty() {
         return Ok(None);
     }
-    let db_path = root.join("runtime/cto_agent.db");
+    let db_path = crate::paths::mission_db(root);
     let mut args = vec!["sync".to_string(), "--email".to_string(), email];
     if let Some(provider) = settings
         .get("CTO_EMAIL_PROVIDER")

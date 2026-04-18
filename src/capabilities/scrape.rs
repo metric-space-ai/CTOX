@@ -36,7 +36,6 @@ use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox_scraping.db";
 const DEFAULT_RUNTIME_ROOT: &str = "runtime/scraping";
 const DEFAULT_QUEUE_PRIORITY: &str = "high";
 const DEFAULT_REPAIR_SKILL: &str = "universal-scraping";
@@ -2171,7 +2170,7 @@ fn open_db(root: &Path) -> Result<Connection> {
 }
 
 fn resolve_db_path(root: &Path) -> PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::scrape_db(root)
 }
 
 fn resolve_runtime_root(root: &Path, runtime_root_arg: &str) -> PathBuf {

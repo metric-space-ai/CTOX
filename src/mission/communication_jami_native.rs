@@ -119,7 +119,7 @@ pub(crate) fn resolve_account(
     request: &JamiResolveAccountCommandRequest<'_>,
 ) -> Result<Value> {
     let mut options =
-        base_options_from_runtime(root, runtime, root.join("runtime/cto_agent.db").as_path());
+        base_options_from_runtime(root, runtime, crate::paths::mission_db(root).as_path());
     if let Some(account_id) = request.account_id.filter(|value| !value.trim().is_empty()) {
         options.account_id = account_id.trim().to_string();
     }
@@ -161,7 +161,7 @@ pub(crate) fn service_sync(
         args.push(profile_name.to_string());
     }
     let runtime = runtime_from_settings(root, settings);
-    let db_path = root.join("runtime/cto_agent.db");
+    let db_path = crate::paths::mission_db(root);
     let request = AdapterSyncCommandRequest {
         db_path: db_path.as_path(),
         passthrough_args: &args,

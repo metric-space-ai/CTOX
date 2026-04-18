@@ -17,7 +17,6 @@ use crate::mission::ticket_protocol::TicketSelfWorkAssignResult;
 use crate::mission::ticket_protocol::TicketSyncBatch;
 use crate::mission::ticket_protocol::TicketWritebackResult;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ticket_local.db";
 const DEFAULT_LIST_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, Serialize)]
@@ -509,7 +508,7 @@ fn schema_state(conn: &Connection) -> Result<Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::ticket_local_db(root)
 }
 
 fn now_iso_string() -> String {

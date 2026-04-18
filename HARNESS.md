@@ -6,7 +6,7 @@
 ║  ctox start → systemd Service → Persistent Loop                            ║
 ║                                                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐   ║
-║  │  Mission Queue (SQLite: runtime/cto_agent.db)                       │   ║
+║  │  Mission Queue (SQLite: runtime/ctox.db, mission-side tables)       │   ║
 ║  │                                                                     │   ║
 ║  │  Produzenten (schreiben via mission/channels):                      │   ║
 ║  │   • TUI Chat-Eingabe       "Deploy the new API version"             │   ║
@@ -124,8 +124,15 @@
 ║                                                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐   ║
 ║  │  Persistenz (runtime/)                                              │   ║
-║  │   ctox_lcm.db     Focus / Anchors / Narrative (Commit-Historie)     │   ║
-║  │   cto_agent.db    Queue, Tickets, Plan, Mission-State               │   ║
+║  │   ctox.db         Core-State (Queue, Tickets, Plan, Governance,     │   ║
+║  │                   Secrets, Communication, Knowledge/Skillbooks/     │   ║
+║  │                   Runbooks, LCM: Focus/Anchors/Narrative, Mission-  │   ║
+║  │                   State, Verification, Claims)                      │   ║
+║  │   ticket_local.db Tool-Store: lokaler Ticket-Adapter                │   ║
+║  │   ctox_scraping.db Tool-Store: Scrape-Capability                    │   ║
+║  │   documents/ctox_doc.db  Tool-Store: Doc-Stack (FTS5 + Embeddings)  │   ║
+║  │   backup/<ISO>/   Archivierte Vor-Merge-Kopien (cto_agent.db,       │   ║
+║  │                   ctox_lcm.db) vom einmaligen ctox.db-Merge         │   ║
 ║  │   engine.env      Settings (CTOX_CHAT_MODEL_MAX_CONTEXT=131072)     │   ║
 ║  └─────────────────────────────────────────────────────────────────────┘   ║
 ║                                                                            ║
@@ -140,7 +147,8 @@
 |---|---|
 | `ctox start` | [src/main.rs:202](src/main.rs#L202) |
 | Mission-Loop / systemd-Service | [src/service/service.rs](src/service/service.rs) |
-| Queue-Pfad `runtime/cto_agent.db` | [src/mission/channels.rs:24](src/mission/channels.rs#L24) |
+| Zentrale DB-Pfade | [src/paths.rs](src/paths.rs) |
+| Einmalige `cto_agent.db` + `ctox_lcm.db` → `ctox.db` Merge-Migration | [src/service/db_migration.rs](src/service/db_migration.rs) |
 | `lease_next_for_thread()` | [src/main.rs:1389](src/main.rs#L1389) |
 | System Prompt "Mission Control Contract" | [assets/prompts/ctox_chat_system_prompt.md:97](assets/prompts/ctox_chat_system_prompt.md#L97) |
 | Continuity-Kinds Loop (Focus/Anchors/Narrative) | [src/execution/agent/turn_loop.rs:764](src/execution/agent/turn_loop.rs#L764) |
@@ -148,16 +156,23 @@
 | ADAPTIVE-Schwelle 15% (`output_budget_pct`) | [src/execution/agent/turn_loop.rs:668](src/execution/agent/turn_loop.rs#L668) |
 | Context-Window Default 131072 | [src/execution/agent/turn_loop.rs:1232](src/execution/agent/turn_loop.rs#L1232) |
 | `ctox continuity-update` CLI | [src/main.rs:509](src/main.rs#L509) · Driver [src/execution/agent/turn_loop.rs:824](src/execution/agent/turn_loop.rs#L824) |
-| `runtime/ctox_lcm.db` | [src/service/service.rs:344](src/service/service.rs#L344) |
 | `runtime/engine.env` | [src/execution/models/runtime_env.rs:9](src/execution/models/runtime_env.rs#L9) |
 | `CTOX_CHAT_MODEL_MAX_CONTEXT=131072` seed | [install.sh:1276](install.sh#L1276) |
 | Producer Email / Cron / Tickets | [src/mission/communication_email_native.rs](src/mission/communication_email_native.rs) · [src/mission/schedule.rs](src/mission/schedule.rs) · [src/mission/tickets.rs](src/mission/tickets.rs) · [src/mission/ticket_zammad_native.rs](src/mission/ticket_zammad_native.rs) |
 
+## Persistenz-Policy
+
+- **Core-State** lebt in einer einzigen Datei `runtime/ctox.db` (Mission-Queue, Tickets, Plan, Schedule, Governance, Secrets, Communication, Knowledge/Skillbooks/Runbooks, LCM, Verification). Alle Pfade werden über [src/paths.rs](src/paths.rs) zentral aufgelöst — `paths::core_db(root)` ist die Single-Source-of-Truth.
+- **Tool-Stores** behalten ihre eigenen Dateien, weil sie in ihrem Tool gekapselt sind: `runtime/ticket_local.db` (lokaler Ticket-Adapter), `runtime/ctox_scraping.db` (Scrape-Capability), `runtime/documents/ctox_doc.db` (Doc-Stack).
+- **System-Skills** liegen unter [skills/system/](skills/system) im Repo und werden via `include_dir!` in `tools/agent-runtime/skills/src/assets/samples` in die Binary eingebettet; bei Service-Start extrahiert der Codex-Skill-Manager sie nach `$CODEX_HOME/skills/.system/`. User-Skills — darunter die initial aus [skills/packs/](skills/packs) ausgerollten Packs — bleiben lose im Ordner `$CODEX_HOME/skills/<name>/`, sichtbar und dynamisch veränderbar.
+- **Runtime-erzeugte Desk-Skills** (Output von `dataset-skill-creator` / `system-onboarding`) landen als User-Skills im gleichen Ordner, nicht im Repo. Metadaten, Bindings und Embeddings dieser Skills werden über die `knowledge_*`-Tabellen in `ctox.db` persistiert.
+- **Erste Start nach dem ctox.db-Merge:** die historischen Dateien `cto_agent.db` und `ctox_lcm.db` werden einmalig in `runtime/ctox.db` konsolidiert und nach `runtime/backup/<ISO8601>/` verschoben — ausgelöst von [src/service/db_migration.rs](src/service/db_migration.rs), aufgerufen früh in `main()` ([src/main.rs](src/main.rs)).
+
 ## Änderungen gegenüber der Ursprungsversion
 
-1. **`context-log.jsonl` entfernt** — keine solche Datei im Repo; Token-Metriken leben als `token_count`-Spalten in `ctox_lcm.db`.
+1. **`context-log.jsonl` entfernt** — keine solche Datei im Repo; Token-Metriken leben als `token_count`-Spalten in `ctox.db`.
 2. **"Auto-Continuation" aus der Producer-Liste entfernt** — es ist kein Producer, sondern der Status-Pfad "status=active + Queue leer → Re-Enqueue" in Sektion D.
-3. **Queue-Pfad präzisiert** auf `runtime/cto_agent.db` (analog für `ctox_lcm.db`, `engine.env`).
+3. **Core-DB-Merge** von `cto_agent.db` + `ctox_lcm.db` auf `runtime/ctox.db` mit Auto-Migration beim ersten Start.
 4. **`lease_next()` → `lease_next_for_thread()`** (tatsächlicher Symbolname).
 5. **Producer-Zeile Ticket-Sync** konkretisiert auf Zammad (nativer Adapter im Code).
 6. **Compact-Policy-Schwellen** mit den echten Konstantennamen annotiert (`DEFAULT_CONTEXT_THRESHOLD`, `output_budget_pct`).

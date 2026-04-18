@@ -574,7 +574,7 @@ fn render_queue_spill_body(task: &channels::QueueTaskView, reason: Option<&str>)
 }
 
 fn queue_bridge_db_path(root: &Path) -> std::path::PathBuf {
-    root.join("runtime/cto_agent.db")
+    crate::paths::mission_db(root)
 }
 
 fn open_queue_bridge_db(root: &Path) -> Result<Connection> {

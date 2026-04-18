@@ -31,7 +31,6 @@ use crate::mission::ticket_adapters;
 use crate::mission::ticket_protocol;
 use crate::mission::ticket_translation;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/cto_agent.db";
 const DEFAULT_LIST_LIMIT: usize = 20;
 const DEFAULT_AUDIT_LIMIT: usize = 30;
 const DEFAULT_APPROVAL_MODE: &str = "human_approval_required";
@@ -6725,7 +6724,7 @@ fn schema_state(conn: &Connection) -> Result<Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::mission_db(root)
 }
 
 fn canonical_ticket_key(system: &str, remote_ticket_id: &str) -> String {
