@@ -130,7 +130,6 @@ impl FromStr for LocalModelFamily {
 pub struct SourceLayoutPaths {
     pub tools_root: PathBuf,
     pub agent_runtime_root: PathBuf,
-    pub codex_exec_binary: PathBuf,
     pub model_runtime_root: PathBuf,
     pub model_runtime_binary: PathBuf,
 }
@@ -308,7 +307,6 @@ pub fn discover_source_layout_paths(root: &Path) -> SourceLayoutPaths {
     let model_runtime_root = tools_root.join("model-runtime");
     SourceLayoutPaths {
         tools_root,
-        codex_exec_binary: agent_runtime_root.join("target/release/codex-exec"),
         agent_runtime_root,
         model_runtime_binary: model_runtime_root.join("target/release/ctox-engine"),
         model_runtime_root,
@@ -1910,8 +1908,8 @@ mod tests {
         let deps = discover_source_layout_paths(Path::new("/tmp/ctox"));
         assert_eq!(deps.tools_root, PathBuf::from("/tmp/ctox/tools"));
         assert_eq!(
-            deps.codex_exec_binary,
-            PathBuf::from("/tmp/ctox/tools/agent-runtime/target/release/codex-exec")
+            deps.agent_runtime_root,
+            PathBuf::from("/tmp/ctox/tools/agent-runtime")
         );
         assert_eq!(
             deps.model_runtime_binary,
