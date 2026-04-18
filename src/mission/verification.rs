@@ -99,15 +99,13 @@ impl RecordedSliceAssurance {
 
 pub fn handle_verification_command(root: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     match command {
-        "init" => {
-            print_json(&json!({
-                "ok": true,
-                "db_path": db_path,
-            }))
-        }
+        "init" => print_json(&json!({
+            "ok": true,
+            "db_path": db_path,
+        })),
         "assurance" => {
             let conversation_id = parse_conversation_id(args)?;
             let assurance = engine.mission_assurance_snapshot(conversation_id)?;
@@ -139,7 +137,7 @@ pub fn record_slice_assurance(
     blocker: Option<&str>,
     review_outcome: Option<&review::ReviewOutcome>,
 ) -> Result<RecordedSliceAssurance> {
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let created_at = now_millis_string();
     let result_excerpt = clip_text(result_text, 280);
@@ -378,9 +376,9 @@ fn claim_summary(claim_kind: &str, claim_status: &str, subject: &str) -> String 
         ("artifact_state", "verified") => {
             format!("Artifact behavior for \"{subject}\" was verified strongly enough for closure.")
         }
-        ("artifact_state", "blocked") => format!(
-            "Artifact behavior for \"{subject}\" is still blocked and must stay open."
-        ),
+        ("artifact_state", "blocked") => {
+            format!("Artifact behavior for \"{subject}\" is still blocked and must stay open.")
+        }
         ("artifact_state", _) => format!(
             "Artifact behavior for \"{subject}\" still needs evidence before final mission closure."
         ),
@@ -577,8 +575,10 @@ mod tests {
         assert!(recorded.run.closure_blocking_claim_count >= 1);
         assert!(!recorded.closure_blocking_open_items().is_empty());
 
-        let engine =
-            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())?;
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )?;
         let assurance = engine.mission_assurance_snapshot(7)?;
         assert_eq!(
             assurance.latest_run.as_ref().map(|run| run.run_id.clone()),

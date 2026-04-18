@@ -44,8 +44,8 @@ Use these tools directly:
 
 If needed for diagnosis, inspect SQLite state directly:
 
-- `sqlite3 runtime/cto_agent.db`
-- `sqlite3 runtime/ctox_lcm.db`
+- `sqlite3 runtime/ctox.sqlite3`
+- `sqlite3 runtime/ctox.sqlite3`
 
 ## Workflow
 

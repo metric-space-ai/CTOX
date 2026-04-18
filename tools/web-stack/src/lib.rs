@@ -19,6 +19,7 @@ pub use surface::handle_web_command;
 pub use surface::WebScrapeRequest;
 pub use web_search::augment_responses_request;
 pub use web_search::execute_canonical_web_search;
+pub use web_search::run_ctox_google_bootstrap_doctor_tool;
 pub use web_search::run_ctox_web_read_tool;
 pub use web_search::run_ctox_web_search_tool;
 pub use web_search::CanonicalWebSearchExecution;

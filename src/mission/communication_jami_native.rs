@@ -25,6 +25,7 @@ const JAMI_DBUS_INTERFACE: &str = "cx.ring.Ring.ConfigurationManager";
 
 #[derive(Clone, Debug)]
 struct JamiOptions {
+    root: PathBuf,
     db_path: PathBuf,
     raw_dir: PathBuf,
     inbox_dir: PathBuf,
@@ -34,12 +35,12 @@ struct JamiOptions {
     /// The Jami username hash of the own account, used to filter self-echo.
     username: String,
     profile_name: String,
+    account_uri: String,
+    device_name: String,
     provider: String,
     limit: usize,
     trust_level: String,
     dbus_env_file: String,
-    proxy_host: String,
-    proxy_port: String,
     transcription_model: String,
     speech_model: String,
     speech_voice: String,
@@ -119,7 +120,7 @@ pub(crate) fn resolve_account(
     request: &JamiResolveAccountCommandRequest<'_>,
 ) -> Result<Value> {
     let mut options =
-        base_options_from_runtime(root, runtime, crate::paths::mission_db(root).as_path());
+        base_options_from_runtime(root, runtime, root.join("runtime/ctox.sqlite3").as_path());
     if let Some(account_id) = request.account_id.filter(|value| !value.trim().is_empty()) {
         options.account_id = account_id.trim().to_string();
     }
@@ -161,7 +162,7 @@ pub(crate) fn service_sync(
         args.push(profile_name.to_string());
     }
     let runtime = runtime_from_settings(root, settings);
-    let db_path = crate::paths::mission_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let request = AdapterSyncCommandRequest {
         db_path: db_path.as_path(),
         passthrough_args: &args,
@@ -612,6 +613,7 @@ fn base_options_from_runtime(
     db_path: &Path,
 ) -> JamiOptions {
     JamiOptions {
+        root: root.to_path_buf(),
         db_path: db_path.to_path_buf(),
         raw_dir: root.join("runtime/communication/jami/raw"),
         inbox_dir: root.join(
@@ -644,6 +646,8 @@ fn base_options_from_runtime(
             .get("CTO_JAMI_PROFILE_NAME")
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
+        account_uri: String::new(),
+        device_name: String::new(),
         provider: "jami".to_string(),
         limit: runtime
             .get("CTO_JAMI_LIMIT")
@@ -658,14 +662,6 @@ fn base_options_from_runtime(
             .get("CTO_JAMI_DBUS_ENV_FILE")
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
-        proxy_host: runtime
-            .get("CTOX_PROXY_HOST")
-            .map(|value| value.trim().to_string())
-            .unwrap_or_else(|| "127.0.0.1".to_string()),
-        proxy_port: runtime
-            .get("CTOX_PROXY_PORT")
-            .map(|value| value.trim().to_string())
-            .unwrap_or_else(|| "12434".to_string()),
         transcription_model: runtime
             .get("CTOX_STT_MODEL")
             .map(|value| value.trim().to_string())
@@ -1397,6 +1393,15 @@ fn resolve_jami_account(
     }
     let selected = selected.ok_or_else(|| anyhow!("Jami account could not be resolved"))?;
     options.account_id = selected.account_id.clone();
+    options.username = selected.username.clone();
+    options.account_uri = selected.share_uri.clone();
+    options.device_name = selected
+        .details
+        .get("Account.deviceName")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if options.profile_name.trim().is_empty() {
         options.profile_name = selected.display_name.clone();
     }
@@ -1624,9 +1629,16 @@ fn normalize_jami_git_commit(
     // Skip messages authored by our own account to avoid self-echo.
     // The author field may be the account username hash, the device hash,
     // or the display name depending on how the commit was created.
+    let author_device = entry.author_device.trim();
     let is_own_message = (!options.username.is_empty() && author == options.username)
-        || (!options.profile_name.is_empty()
-            && author.eq_ignore_ascii_case(&options.profile_name));
+        || (!options.profile_name.is_empty() && author.eq_ignore_ascii_case(&options.profile_name))
+        || (!options.account_uri.is_empty() && author == options.account_uri)
+        || (!options.device_name.is_empty() && author.eq_ignore_ascii_case(&options.device_name))
+        || (!author_device.is_empty()
+            && ((!options.username.is_empty() && author_device == options.username)
+                || (!options.account_uri.is_empty() && author_device == options.account_uri)
+                || (!options.device_name.is_empty()
+                    && author_device.eq_ignore_ascii_case(&options.device_name))));
     if is_own_message {
         return Ok(None);
     }
@@ -2021,26 +2033,18 @@ fn synthesize_voice_attachment(
     if !options.speech_voice.trim().is_empty() {
         payload["voice"] = Value::String(options.speech_voice.clone());
     }
-    let body = serde_json::to_vec(&payload)?;
-    let mut headers = BTreeMap::new();
-    headers.insert("content-type".to_string(), "application/json".to_string());
-    let response = super::communication_email_native::http_request(
-        "POST",
-        &format!(
-            "http://{}:{}/v1/audio/speech",
-            options.proxy_host, options.proxy_port
-        ),
-        &headers,
-        Some(&body),
+    let input = payload
+        .get("input")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let audio = super::communication_gateway::synthesize_speech(
+        &options.root,
+        input,
+        &options.speech_model,
+        &options.speech_voice,
+        "wav",
     )?;
-    if !(200..300).contains(&response.status) {
-        bail!(
-            "voice synthesis returned HTTP {}: {}",
-            response.status,
-            String::from_utf8_lossy(&response.body)
-        );
-    }
-    fs::write(&output_path, &response.body)?;
+    fs::write(&output_path, audio)?;
     Ok(output_path)
 }
 
@@ -2107,60 +2111,11 @@ fn first_audio_attachment(value: &Value) -> Option<PathBuf> {
 }
 
 fn transcribe_audio_attachment(options: &JamiOptions, audio_path: &Path) -> Result<String> {
-    let boundary = format!("----ctox-jami-{}", stable_digest(&now_iso_string()));
-    let file_bytes = fs::read(audio_path)
-        .with_context(|| format!("failed to read audio attachment {}", audio_path.display()))?;
-    let mut body = Vec::new();
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            audio_path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .unwrap_or("audio.wav")
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    body.extend_from_slice(&file_bytes);
-    body.extend_from_slice(b"\r\n");
-    if !options.transcription_model.trim().is_empty() {
-        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
-        body.extend_from_slice(options.transcription_model.as_bytes());
-        body.extend_from_slice(b"\r\n");
-    }
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-    let mut headers = BTreeMap::new();
-    headers.insert(
-        "content-type".to_string(),
-        format!("multipart/form-data; boundary={boundary}"),
-    );
-    let response = super::communication_email_native::http_request(
-        "POST",
-        &format!(
-            "http://{}:{}/v1/audio/transcriptions",
-            options.proxy_host, options.proxy_port
-        ),
-        &headers,
-        Some(&body),
-    )?;
-    if !(200..300).contains(&response.status) {
-        bail!(
-            "audio transcription returned HTTP {}: {}",
-            response.status,
-            String::from_utf8_lossy(&response.body)
-        );
-    }
-    let parsed = serde_json::from_slice::<Value>(&response.body).unwrap_or(Value::Null);
-    Ok(parsed
-        .get("text")
-        .and_then(Value::as_str)
-        .or_else(|| parsed.get("transcript").and_then(Value::as_str))
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    super::communication_gateway::transcribe_audio_file(
+        &options.root,
+        audio_path,
+        &options.transcription_model,
+    )
 }
 
 fn sanitize_persistent_value(value: &Value) -> Value {

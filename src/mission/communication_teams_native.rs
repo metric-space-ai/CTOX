@@ -68,7 +68,11 @@ impl GraphTeamsClient {
                 &options.tenant_id,
                 &options.username,
                 &options.password,
-                if options.client_id.is_empty() { ROPC_PUBLIC_CLIENT_ID } else { &options.client_id },
+                if options.client_id.is_empty() {
+                    ROPC_PUBLIC_CLIENT_ID
+                } else {
+                    &options.client_id
+                },
             )?
         } else if has_client_creds {
             acquire_app_token(
@@ -81,10 +85,7 @@ impl GraphTeamsClient {
         };
         Ok(Self {
             access_token,
-            base_url: options
-                .graph_base_url
-                .trim_end_matches('/')
-                .to_string(),
+            base_url: options.graph_base_url.trim_end_matches('/').to_string(),
         })
     }
 
@@ -220,9 +221,7 @@ impl GraphTeamsClient {
         });
         self.request(
             "POST",
-            &format!(
-                "/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies"
-            ),
+            &format!("/teams/{team_id}/channels/{channel_id}/messages/{message_id}/replies"),
             &[],
             Some(&payload),
         )
@@ -249,9 +248,7 @@ impl GraphTeamsClient {
 }
 
 fn acquire_app_token(tenant_id: &str, client_id: &str, client_secret: &str) -> Result<String> {
-    let token_url = format!(
-        "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
-    );
+    let token_url = format!("https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token");
     let form_body = format!(
         "client_id={}&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_secret={}&grant_type=client_credentials",
         urlencoding_encode(client_id),
@@ -275,8 +272,8 @@ fn acquire_app_token(tenant_id: &str, client_id: &str, client_secret: &str) -> R
             response.status
         );
     }
-    let token_json: Value = serde_json::from_slice(&response.body)
-        .context("failed to parse OAuth2 token response")?;
+    let token_json: Value =
+        serde_json::from_slice(&response.body).context("failed to parse OAuth2 token response")?;
     token_json
         .get("access_token")
         .and_then(Value::as_str)
@@ -290,10 +287,13 @@ fn acquire_ropc_token(
     password: &str,
     client_id: &str,
 ) -> Result<String> {
-    let effective_tenant = if tenant_id.is_empty() { "organizations" } else { tenant_id };
-    let token_url = format!(
-        "https://login.microsoftonline.com/{effective_tenant}/oauth2/v2.0/token"
-    );
+    let effective_tenant = if tenant_id.is_empty() {
+        "organizations"
+    } else {
+        tenant_id
+    };
+    let token_url =
+        format!("https://login.microsoftonline.com/{effective_tenant}/oauth2/v2.0/token");
     let form_body = format!(
         "client_id={}&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default+offline_access&username={}&password={}&grant_type=password",
         urlencoding_encode(client_id),
@@ -318,8 +318,8 @@ fn acquire_ropc_token(
             response.status
         );
     }
-    let token_json: Value = serde_json::from_slice(&response.body)
-        .context("failed to parse ROPC token response")?;
+    let token_json: Value =
+        serde_json::from_slice(&response.body).context("failed to parse ROPC token response")?;
     token_json
         .get("access_token")
         .and_then(Value::as_str)
@@ -398,7 +398,7 @@ pub(crate) fn service_sync(
         return Ok(None);
     }
     let runtime = runtime_from_settings(root, settings);
-    let db_path = crate::paths::mission_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let request = AdapterSyncCommandRequest {
         db_path: db_path.as_path(),
         passthrough_args: &["sync".to_string()],
@@ -415,7 +415,9 @@ fn has_any_auth(options: &TeamsOptions) -> bool {
 
 fn execute_sync(options: &TeamsOptions) -> Result<Value> {
     if !has_any_auth(options) {
-        bail!("Teams sync requires either CTO_TEAMS_USERNAME + CTO_TEAMS_PASSWORD, or CTO_TEAMS_CLIENT_ID + CTO_TEAMS_CLIENT_SECRET");
+        bail!(
+            "Teams sync requires either CTO_TEAMS_USERNAME + CTO_TEAMS_PASSWORD, or CTO_TEAMS_CLIENT_ID + CTO_TEAMS_CLIENT_SECRET"
+        );
     }
     let client = GraphTeamsClient::from_options(options)?;
     let mut conn = open_channel_db(&options.db_path)?;
@@ -483,11 +485,8 @@ fn sync_channel_messages(
     options: &TeamsOptions,
     account_key: &str,
 ) -> Result<usize> {
-    let messages = client.list_channel_messages(
-        &options.team_id,
-        &options.channel_id,
-        options.limit,
-    )?;
+    let messages =
+        client.list_channel_messages(&options.team_id, &options.channel_id, options.limit)?;
     let mut count = 0;
     for msg in &messages {
         if let Some(inbound) =
@@ -683,10 +682,7 @@ fn normalize_teams_chat_message(
     })
 }
 
-fn store_teams_message(
-    conn: &mut rusqlite::Connection,
-    msg: &TeamsInboundMessage,
-) -> Result<()> {
+fn store_teams_message(conn: &mut rusqlite::Connection, msg: &TeamsInboundMessage) -> Result<()> {
     let recipients_json = serde_json::to_string(&msg.recipients)?;
     let metadata_json = serde_json::to_string(&msg.metadata)?;
     upsert_communication_message(
@@ -724,7 +720,9 @@ fn store_teams_message(
 
 fn execute_send(options: &TeamsOptions, request: &TeamsSendCommandRequest<'_>) -> Result<Value> {
     if !has_any_auth(options) {
-        bail!("Teams send requires either CTO_TEAMS_USERNAME + CTO_TEAMS_PASSWORD, or CTO_TEAMS_CLIENT_ID + CTO_TEAMS_CLIENT_SECRET");
+        bail!(
+            "Teams send requires either CTO_TEAMS_USERNAME + CTO_TEAMS_PASSWORD, or CTO_TEAMS_CLIENT_ID + CTO_TEAMS_CLIENT_SECRET"
+        );
     }
     let client = GraphTeamsClient::from_options(options)?;
     let mut conn = open_channel_db(&options.db_path)?;
@@ -767,14 +765,12 @@ fn execute_send(options: &TeamsOptions, request: &TeamsSendCommandRequest<'_>) -
                 request.body,
             )
         } else {
-            client.send_channel_message(
-                &options.team_id,
-                &options.channel_id,
-                request.body,
-            )
+            client.send_channel_message(&options.team_id, &options.channel_id, request.body)
         }
     } else {
-        bail!("Teams send requires either CTO_TEAMS_CHAT_ID or CTO_TEAMS_TEAM_ID + CTO_TEAMS_CHANNEL_ID");
+        bail!(
+            "Teams send requires either CTO_TEAMS_CHAT_ID or CTO_TEAMS_TEAM_ID + CTO_TEAMS_CHANNEL_ID"
+        );
     };
 
     let sent_remote_id = send_result
@@ -1061,10 +1057,7 @@ mod tests {
     #[test]
     fn strip_html_basic_removes_tags() {
         assert_eq!(strip_html_basic("<p>hello</p>"), "hello");
-        assert_eq!(
-            strip_html_basic("<div><b>bold</b> text</div>"),
-            "bold text"
-        );
+        assert_eq!(strip_html_basic("<div><b>bold</b> text</div>"), "bold text");
         assert_eq!(strip_html_basic("plain text"), "plain text");
     }
 
@@ -1072,7 +1065,11 @@ mod tests {
         TeamsOptions {
             db_path: std::path::PathBuf::from("/tmp/test.db"),
             username: username.to_string(),
-            password: if username.is_empty() { String::new() } else { "pw".to_string() },
+            password: if username.is_empty() {
+                String::new()
+            } else {
+                "pw".to_string()
+            },
             tenant_id: tenant_id.to_string(),
             client_id: String::new(),
             client_secret: String::new(),
@@ -1171,7 +1168,10 @@ mod tests {
         let mut options = test_options("user@co.com", "b1", "t1");
         options.team_id = "team1".to_string();
         let profile = build_profile_json(&options);
-        assert_eq!(profile.get("username").unwrap().as_str().unwrap(), "user@co.com");
+        assert_eq!(
+            profile.get("username").unwrap().as_str().unwrap(),
+            "user@co.com"
+        );
         assert_eq!(profile.get("tenantId").unwrap().as_str().unwrap(), "t1");
         assert_eq!(profile.get("teamId").unwrap().as_str().unwrap(), "team1");
     }

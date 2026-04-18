@@ -36,6 +36,7 @@ use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_RUNTIME_ROOT: &str = "runtime/scraping";
 const DEFAULT_QUEUE_PRIORITY: &str = "high";
 const DEFAULT_REPAIR_SKILL: &str = "universal-scraping";
@@ -471,7 +472,8 @@ pub fn handle_scrape_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("failed to parse --limit")?
                 .unwrap_or(50);
             let filters = parse_where_filters(args)?;
-            let response = query_records(root, target_key, &filters, limit)?.context("target_key not found")?;
+            let response = query_records(root, target_key, &filters, limit)?
+                .context("target_key not found")?;
             print_json(&json!({ "ok": true, "query": response }))
         }
         "semantic-search" => {
@@ -486,20 +488,24 @@ pub fn handle_scrape_command(root: &Path, args: &[String]) -> Result<()> {
                 .transpose()
                 .context("failed to parse --limit")?
                 .unwrap_or(12);
-            let response = semantic_search(root, target_key, query, limit)?.context("target_key not found")?;
+            let response =
+                semantic_search(root, target_key, query, limit)?.context("target_key not found")?;
             print_json(&json!({ "ok": true, "semantic": response }))
         }
         "rebuild-semantic" => {
             let target_key = required_flag_value(args, "--target-key")
                 .or_else(|| args.get(1).map(String::as_str))
                 .context("usage: ctox scrape rebuild-semantic --target-key <key> [--limit <n>]")?;
-            let response = rebuild_semantic_index(root, target_key)?.context("target_key not found")?;
+            let response =
+                rebuild_semantic_index(root, target_key)?.context("target_key not found")?;
             print_json(&json!({ "ok": true, "semantic_rebuild": response }))
         }
         "upsert-target" => {
-            let input = required_flag_value(args, "--input")
-                .context("usage: ctox scrape upsert-target --input <json-path> [--runtime-root <path>]")?;
-            let runtime_root = find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
+            let input = required_flag_value(args, "--input").context(
+                "usage: ctox scrape upsert-target --input <json-path> [--runtime-root <path>]",
+            )?;
+            let runtime_root =
+                find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
             let payload = load_json_file(root, input)?;
             let target = upsert_target(root, runtime_root, payload)?;
             print_json(&json!({ "ok": true, "target": target }))
@@ -509,7 +515,8 @@ pub fn handle_scrape_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("usage: ctox scrape register-script --target-key <key> --script-file <path> [--language <lang>] [--change-reason <text>] [--notes <text>] [--runtime-root <path>]")?;
             let script_file = required_flag_value(args, "--script-file")
                 .context("usage: ctox scrape register-script --target-key <key> --script-file <path> [--language <lang>] [--change-reason <text>] [--notes <text>] [--runtime-root <path>]")?;
-            let runtime_root = find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
+            let runtime_root =
+                find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
             let language = find_flag_value(args, "--language").unwrap_or("javascript");
             let registered = register_script(
                 root,
@@ -529,7 +536,8 @@ pub fn handle_scrape_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("usage: ctox scrape register-source-module --target-key <key> --source-key <key> --module-file <path> [--language <lang>] [--change-reason <text>] [--notes <text>] [--runtime-root <path>]")?;
             let module_file = required_flag_value(args, "--module-file")
                 .context("usage: ctox scrape register-source-module --target-key <key> --source-key <key> --module-file <path> [--language <lang>] [--change-reason <text>] [--notes <text>] [--runtime-root <path>]")?;
-            let runtime_root = find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
+            let runtime_root =
+                find_flag_value(args, "--runtime-root").unwrap_or(DEFAULT_RUNTIME_ROOT);
             let language = find_flag_value(args, "--language").unwrap_or("javascript");
             let registered = register_source_module(
                 root,
@@ -2170,7 +2178,7 @@ fn open_db(root: &Path) -> Result<Connection> {
 }
 
 fn resolve_db_path(root: &Path) -> PathBuf {
-    crate::paths::scrape_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn resolve_runtime_root(root: &Path, runtime_root_arg: &str) -> PathBuf {
@@ -3108,21 +3116,19 @@ fn invoke_responses_text(
         .context("failed to resolve runtime kernel for scrape enrichment")?;
     if resolved_runtime.state.source.is_local() {
         if let Some(binding) = resolved_runtime.primary_generation.as_ref() {
-            match &binding.transport {
-                LocalTransport::UnixSocket { .. } | LocalTransport::NamedPipe { .. } => {
-                    let label = binding.transport.display_label();
-                    return invoke_responses_text_via_local_socket(
-                        &binding.transport,
-                        model,
-                        prompt,
-                        timeout_seconds,
-                    )
-                    .with_context(|| format!("failed to reach responses transport {label}"));
-                }
-                LocalTransport::TcpLoopback { .. } => {
-                    // fall through to HTTP path using internal_responses_base_url
-                }
+            if !binding.transport.is_private_ipc() {
+                anyhow::bail!(
+                    "ctox_core_local requires private IPC for local responses inference; loopback HTTP transport is not allowed"
+                );
             }
+            let label = binding.transport.display_label();
+            return invoke_responses_text_via_local_socket(
+                &binding.transport,
+                model,
+                prompt,
+                timeout_seconds,
+            )
+            .with_context(|| format!("failed to reach responses transport {label}"));
         }
     }
     let base_url = resolved_runtime.internal_responses_base_url();
@@ -3143,10 +3149,13 @@ fn invoke_responses_text(
 }
 
 #[derive(Serialize)]
-struct LocalResponsesSocketRequest<'a> {
-    model: &'a str,
-    input: &'a str,
-    stream: bool,
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LocalResponsesSocketRequest<'a> {
+    ResponsesCreate {
+        model: &'a str,
+        input: &'a str,
+        stream: bool,
+    },
 }
 
 fn invoke_responses_text_via_local_socket(
@@ -3161,7 +3170,7 @@ fn invoke_responses_text_via_local_socket(
         .connect_blocking(timeout)
         .with_context(|| format!("failed to connect via {label}"))?;
 
-    let request = LocalResponsesSocketRequest {
+    let request = LocalResponsesSocketRequest::ResponsesCreate {
         model,
         input: prompt,
         stream: true,
@@ -3944,16 +3953,14 @@ fn embed_texts(root: &Path, inputs: &[String], model: &str) -> Result<Vec<Vec<f6
     if let Some(binding) = resolved_runtime
         .binding_for_auxiliary_role(crate::inference::engine::AuxiliaryRole::Embedding)
     {
-        match &binding.transport {
-            LocalTransport::UnixSocket { .. } | LocalTransport::NamedPipe { .. } => {
-                let label = binding.transport.display_label();
-                return embed_texts_via_local_socket(&binding.transport, inputs, model)
-                    .with_context(|| format!("failed to reach embedding transport {label}"));
-            }
-            LocalTransport::TcpLoopback { .. } => {
-                // fall through to HTTP path using binding.base_url
-            }
+        if !binding.transport.is_private_ipc() {
+            anyhow::bail!(
+                "ctox_core_local requires private IPC for local embedding inference; loopback HTTP transport is not allowed"
+            );
         }
+        let label = binding.transport.display_label();
+        return embed_texts_via_local_socket(&binding.transport, inputs, model)
+            .with_context(|| format!("failed to reach embedding transport {label}"));
     }
     let base_url = resolved_runtime
         .auxiliary_base_url(crate::inference::engine::AuxiliaryRole::Embedding)
@@ -4672,8 +4679,7 @@ mod tests {
             path: socket_path.clone(),
         };
         let vectors =
-            embed_texts_via_local_socket(&transport, &inputs, "Qwen/Qwen3-Embedding-0.6B")
-                .unwrap();
+            embed_texts_via_local_socket(&transport, &inputs, "Qwen/Qwen3-Embedding-0.6B").unwrap();
         assert_eq!(vectors, vec![vec![1.0_f64, 2.5_f64], vec![3.0_f64]]);
         server.join().unwrap().unwrap();
         cleanup_test_root(&root);
@@ -4693,6 +4699,7 @@ mod tests {
             let mut reader = BufReader::new(stream);
             let mut request_line = String::new();
             std::io::BufRead::read_line(&mut reader, &mut request_line)?;
+            assert!(request_line.contains("\"kind\":\"responses_create\""));
             assert!(request_line.contains("\"stream\":true"));
             assert!(request_line.contains("\"model\":\"gpt-oss-20b\""));
             assert!(request_line.contains("\"input\":\"Say hello\""));

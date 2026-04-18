@@ -187,7 +187,7 @@ pub fn rewrite_success_response(
                         .and_then(Value::as_str)
                         .map(str::to_string)
                         .unwrap_or_else(|| {
-                            let call_id = format!("call_ctox_proxy_{synthetic_tool_call_index}");
+                            let call_id = format!("call_ctox_gateway_{synthetic_tool_call_index}");
                             synthetic_tool_call_index += 1;
                             call_id
                         });
@@ -297,7 +297,9 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .map(str::to_string)
-                    .unwrap_or_else(|| format!("call_ctox_proxy_{}", tool_names_by_call_id.len()));
+                    .unwrap_or_else(|| {
+                        format!("call_ctox_gateway_{}", tool_names_by_call_id.len())
+                    });
                 let name = object
                     .get("name")
                     .and_then(Value::as_str)
@@ -438,7 +440,7 @@ fn parse_response_content(text: &str) -> (Option<String>, Option<String>, Vec<Xm
             .map(|capture| capture.as_str().trim().to_string())
             .unwrap_or_else(|| "{}".to_string());
         tool_calls.push(XmlToolCall {
-            call_id: format!("call_ctox_proxy_{index}"),
+            call_id: format!("call_ctox_gateway_{index}"),
             name,
             arguments,
         });

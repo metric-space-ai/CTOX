@@ -3,23 +3,15 @@ use anyhow::Result;
 use sha2::Digest;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::io::Read;
-#[cfg(unix)]
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Output;
-use std::process::Stdio;
 use std::sync::Mutex;
-use std::thread;
 
 // Re-export PersistentSession so callers (main.rs, service.rs) can hold one.
 pub(crate) use super::direct_session::PersistentSession;
 use std::sync::OnceLock;
 use std::time::Duration;
-use std::time::Instant;
-use std::time::SystemTime;
+use toml::Value as TomlValue;
 
 /// Per-conversation refresh accounting since the last continuity refresh.
 /// Lives in process memory so that restarts do not preserve it — that is
@@ -162,8 +154,8 @@ fn detect_durable_state_transition(
 ) -> Result<bool> {
     use rusqlite::Connection;
 
-    // Mission-side tables live in cto_agent.db.
-    let mission_db = crate::paths::mission_db(root);
+    // Mission-side tables live in the unified CTOX runtime database.
+    let mission_db = crate::persistence::sqlite_path(root);
     if mission_db.exists() {
         let conn = Connection::open_with_flags(
             &mission_db,
@@ -217,18 +209,12 @@ fn detect_durable_state_transition(
     Ok(false)
 }
 
-use std::time::UNIX_EPOCH;
-
-use crate::channels;
 use crate::context_health;
 use crate::governance;
 use crate::inference::engine;
-use crate::inference::model_adapters::LocalCodexExecPolicy;
 use crate::inference::runtime_env;
 use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
-use crate::inference::supervisor;
-use crate::inference::turn_contract;
 use crate::inference::turn_engine;
 use crate::lcm;
 use crate::live_context;
@@ -237,81 +223,44 @@ pub const CHAT_CONVERSATION_ID: i64 = 1;
 const DEFAULT_CONTINUITY_REFRESH_TIMEOUT_SECS: u64 = 45;
 const DEFAULT_REMOTE_CHAT_TURN_TIMEOUT_SECS: u64 = 180;
 const DEFAULT_LOCAL_CHAT_TURN_TIMEOUT_SECS: u64 = 900;
-const CHAT_MODEL_REASONING_EFFORT_ENV_KEY: &str = "CTOX_CHAT_MODEL_REASONING_EFFORT";
-const CHAT_SKILL_PRESET_ENV_KEY: &str = "CTOX_CHAT_SKILL_PRESET";
 const CONTINUITY_REFRESH_FAULT_FILE_ENV_KEY: &str = "CTOX_CONTINUITY_REFRESH_FAULT_FILE";
 const CONTINUITY_REFRESH_TIMEOUT_ENV_KEY: &str = "CTOX_CONTINUITY_REFRESH_TIMEOUT_SECS";
-const CTOX_CODEX_EXEC_STANDARD_OVERLAY: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_standard_overlay.md");
-const CTOX_CODEX_EXEC_SIMPLE_OVERLAY: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_overlay.md");
-const CTOX_CODEX_EXEC_SIMPLE_TASK_ROUTER: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_task_router.md");
-const CTOX_CODEX_EXEC_SIMPLE_SMALL_STEP_CORE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_small_step_core.md");
-const CTOX_CODEX_EXEC_SIMPLE_TERMINAL_OPS_CORE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_terminal_ops_core.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_ANALYSIS_READ_ONLY: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_analysis_read_only.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_DOCS_TEXT_CHANGE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_docs_text_change.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_GENERAL_SAFE_TASK: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_general_safe_task.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_READ_TRACE_FIRST: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_read_trace_first.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_BUG_FIX: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_bug_fix.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_FEATURE_ADD: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_feature_add.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_REFACTOR_SAFE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_refactor_safe.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_TEST_WORK: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_test_work.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_CODE_REVIEW: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_code_review.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_BUG_FIX_WITH_TESTS: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_bug_fix_with_tests.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_DEPENDENCY_UPDATE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_dependency_update.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_MIGRATION_WITH_DATA_CHANGE: &str = include_str!(
-    "../../../assets/prompts/ctox_codex_exec_simple_phase_migration_with_data_change.md"
-);
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_MIGRATION_CHANGE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_migration_change.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_DATA_CHANGE_SAFE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_data_change_safe.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_INFRA_CONFIG_CHANGE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_infra_config_change.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_DEPLOY_RELEASE: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_deploy_release.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_OPS_DEBUG_TERMINAL: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_ops_debug_terminal.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_INCIDENT_HOTFIX: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_incident_hotfix.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_INCIDENT_HOTFIX_DEPLOY: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_incident_hotfix_deploy.md");
-const CTOX_CODEX_EXEC_SIMPLE_PHASE_ROLLBACK_RECOVERY: &str =
-    include_str!("../../../assets/prompts/ctox_codex_exec_simple_phase_rollback_recovery.md");
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct LocalModelProviderSpec {
-    socket_path: String,
+pub(crate) struct LocalModelProviderSpec {
+    pub(crate) provider_id: &'static str,
+    pub(crate) name: &'static str,
+    pub(crate) transport_endpoint: String,
+    pub(crate) wire_api: &'static str,
 }
 
 impl LocalModelProviderSpec {
-    fn resolve(
-        model: &str,
-        resolved_runtime: Option<&runtime_kernel::InferenceRuntimeKernel>,
-    ) -> Option<Self> {
-        if !engine::uses_ctox_proxy_model(model) {
-            return None;
-        }
-        let socket_path = resolved_local_socket_path(resolved_runtime)?;
-        Some(Self { socket_path })
-    }
-
-    fn provider_id(&self) -> &'static str {
-        "cto_local"
+    pub(crate) fn ctox_core_cli_overrides(&self) -> Vec<(String, TomlValue)> {
+        vec![
+            (
+                format!("model_providers.{}.name", self.provider_id),
+                TomlValue::String(self.name.to_string()),
+            ),
+            (
+                format!("model_providers.{}.transport_endpoint", self.provider_id),
+                TomlValue::String(self.transport_endpoint.clone()),
+            ),
+            (
+                format!(
+                    "model_providers.{}.socket_transport_required",
+                    self.provider_id
+                ),
+                TomlValue::Boolean(true),
+            ),
+            (
+                format!("model_providers.{}.wire_api", self.provider_id),
+                TomlValue::String(self.wire_api.to_string()),
+            ),
+            (
+                format!("model_providers.{}.requires_openai_auth", self.provider_id),
+                TomlValue::Boolean(false),
+            ),
+        ]
     }
 }
 
@@ -321,9 +270,33 @@ pub(crate) struct ApiModelProviderSpec {
     pub(crate) name: &'static str,
     pub(crate) base_url: String,
     pub(crate) env_key: &'static str,
-    /// agent-runtime wire protocol. "responses" for OpenAI-style responses API,
-    /// "chat" for /v1/chat/completions providers (e.g. MiniMax direct).
+    /// Upstream edge transport handed to ctox-core for the selected provider.
+    /// CTOX itself remains canonical Responses internally; adapters normalize
+    /// into provider-native forms only at this outer boundary.
     pub(crate) wire_api: &'static str,
+}
+
+impl ApiModelProviderSpec {
+    pub(crate) fn ctox_core_cli_overrides(&self) -> Vec<(String, TomlValue)> {
+        vec![
+            (
+                format!("model_providers.{}.base_url", self.provider_id),
+                TomlValue::String(self.base_url.clone()),
+            ),
+            (
+                format!("model_providers.{}.api_key_env_var", self.provider_id),
+                TomlValue::String(self.env_key.to_string()),
+            ),
+            (
+                format!("model_providers.{}.wire_api", self.provider_id),
+                TomlValue::String(self.wire_api.to_string()),
+            ),
+            (
+                format!("model_providers.{}.requires_openai_auth", self.provider_id),
+                TomlValue::Boolean(false),
+            ),
+        ]
+    }
 }
 
 pub fn run_chat_turn_with_events<F>(
@@ -333,7 +306,7 @@ pub fn run_chat_turn_with_events<F>(
     workspace_root: Option<&Path>,
     conversation_id: i64,
     suggested_skill: Option<&str>,
-    mut emit: F,
+    emit: F,
 ) -> Result<String>
 where
     F: FnMut(&str),
@@ -354,19 +327,19 @@ where
 /// Like `run_chat_turn_with_events` but accepts a `force_continuity_refresh`
 /// hint and an optional `PersistentSession`.
 ///
-/// When `session` is `Some`, the turn reuses the existing codex-core client
+/// When `session` is `Some`, the turn reuses the existing ctox-core client
 /// so that context accumulates across turns (tool results, prior replies,
-/// conversation history all stay in codex-core's thread state). This is
+/// conversation history all stay in ctox-core's thread state). This is
 /// critical for the CompactPolicy to observe real context growth and fire
 /// Emergency/Adaptive compaction when needed.
-///
-/// When `session` is `None`, falls back to `run_direct_session()` which
-/// creates a throwaway client per turn (legacy behaviour for TUI).
-pub fn run_chat_turn_with_events_extended<F>(
+/// When `session` is `None`, the turn now provisions its own local
+/// `PersistentSession` so the main turn and continuity refresh still share
+/// one in-process runtime.
+pub(crate) fn run_chat_turn_with_events_extended<F>(
     root: &Path,
     db_path: &Path,
     prompt: &str,
-    workspace_root: Option<&Path>,
+    _workspace_root: Option<&Path>,
     conversation_id: i64,
     suggested_skill: Option<&str>,
     force_continuity_refresh: bool,
@@ -378,6 +351,11 @@ where
 {
     let runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root)?;
     let operator_settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
+    let mut owned_session = if session.is_none() {
+        Some(PersistentSession::start(root, &operator_settings)?)
+    } else {
+        None
+    };
     let default_turn_timeout_secs = if runtime.state.source.is_local() {
         DEFAULT_LOCAL_CHAT_TURN_TIMEOUT_SECS
     } else {
@@ -470,27 +448,24 @@ where
     ));
     let turn_start_ts = current_rfc3339_timestamp();
     emit("invoke-model");
-    let reply = if let Some(ref mut sess) = session {
-        // Reuse the persistent session — context accumulates across turns.
-        sess.run_turn(
+    let reply = match session.as_deref_mut() {
+        Some(sess) => sess.run_turn(
             &rendered_prompt.prompt,
             Some(Duration::from_secs(config.turn_timeout_secs)),
             None, // base_instructions
             None, // include_apply_patch_tool
             conversation_id,
-        )?
-    } else {
-        // Legacy: one-shot client per turn (no cross-turn context).
-        super::direct_session::run_direct_session(super::direct_session::DirectSessionRequest {
-            root,
-            settings: &operator_settings,
-            prompt: &rendered_prompt.prompt,
-            workspace_root,
-            timeout: Some(Duration::from_secs(config.turn_timeout_secs)),
-            base_instructions: None,
-            include_apply_patch_tool: None,
-            conversation_id,
-        })?
+        )?,
+        None => owned_session
+            .as_mut()
+            .expect("owned persistent session should exist when no session was supplied")
+            .run_turn(
+                &rendered_prompt.prompt,
+                Some(Duration::from_secs(config.turn_timeout_secs)),
+                None, // base_instructions
+                None, // include_apply_patch_tool
+                conversation_id,
+            )?,
     };
     emit("persist-assistant-turn");
     lcm::run_add_message(db_path, conversation_id, "assistant", &reply)?;
@@ -534,21 +509,25 @@ where
             "output-budget"
         };
         emit(&format!("continuity-refresh reason={}", reason));
-        {
-            // Reborrow the session for the refresh sub-calls.
-            let refresh_session: Option<&mut PersistentSession> = match session {
-                Some(ref mut s) => Some(s),
-                None => None,
-            };
-            refresh_continuity_documents(
+        match session.as_deref_mut() {
+            Some(refresh_session) => refresh_continuity_documents(
                 root,
                 &operator_settings,
                 &engine,
-                workspace_root,
                 conversation_id,
                 refresh_session,
                 &mut emit,
-            )?
+            )?,
+            None => refresh_continuity_documents(
+                root,
+                &operator_settings,
+                &engine,
+                conversation_id,
+                owned_session
+                    .as_mut()
+                    .expect("owned persistent session should exist for continuity refresh"),
+                &mut emit,
+            )?,
         }
     } else {
         emit("continuity-refresh-skipped");
@@ -610,9 +589,8 @@ fn refresh_continuity_documents(
     root: &Path,
     settings: &BTreeMap<String, String>,
     engine: &lcm::LcmEngine,
-    workspace_root: Option<&Path>,
     conversation_id: i64,
-    mut session: Option<&mut PersistentSession>,
+    session: &mut PersistentSession,
     emit: &mut impl FnMut(&str),
 ) -> Result<turn_engine::ContinuityRefreshStats> {
     let mut stats = turn_engine::ContinuityRefreshStats::default();
@@ -656,7 +634,9 @@ fn refresh_continuity_documents(
                         engine.continuity_apply_diff(conversation_id, kind, injected_diff.trim())
                     {
                         stats.skipped_apply += 1;
-                        eprintln!("ctox continuity refresh skipped invalid injected {kind_label} diff: {err}");
+                        eprintln!(
+                            "ctox continuity refresh skipped invalid injected {kind_label} diff: {err}"
+                        );
                     } else {
                         stats.updated += 1;
                     }
@@ -675,26 +655,13 @@ fn refresh_continuity_documents(
         }
 
         emit(&format!("continuity-{kind_label}-invoke"));
-        let reply = match if let Some(ref mut sess) = session {
-            sess.run_turn(
-                &payload.prompt,
-                Some(Duration::from_secs(refresh_timeout_secs)),
-                None,
-                None,
-                conversation_id,
-            )
-        } else {
-            super::direct_session::run_direct_session(super::direct_session::DirectSessionRequest {
-                root,
-                settings,
-                prompt: &payload.prompt,
-                workspace_root,
-                timeout: Some(Duration::from_secs(refresh_timeout_secs)),
-                base_instructions: None,
-                include_apply_patch_tool: None,
-                conversation_id,
-            })
-        } {
+        let reply = match session.run_turn(
+            &payload.prompt,
+            Some(Duration::from_secs(refresh_timeout_secs)),
+            None,
+            None,
+            conversation_id,
+        ) {
             Ok(reply) => reply,
             Err(err) => {
                 stats.skipped_invoke += 1;
@@ -738,69 +705,6 @@ fn refresh_continuity_documents(
         }
     }
     Ok(stats)
-}
-
-enum ContinuityRefreshRepair {
-    Apply {
-        diff: String,
-        repair_reason: Option<&'static str>,
-    },
-    Noop {
-        reason: &'static str,
-    },
-}
-
-fn repair_continuity_refresh_output(raw: &str) -> ContinuityRefreshRepair {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return ContinuityRefreshRepair::Noop {
-            reason: "empty response",
-        };
-    }
-    if let Some(summary) = turn_contract::summarize_event_stream(trimmed) {
-        if let Some(text) = summary
-            .final_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
-            return ContinuityRefreshRepair::Apply {
-                diff: strip_markdown_code_fences(text),
-                repair_reason: Some("extracted final agent message from event stream"),
-            };
-        }
-        return ContinuityRefreshRepair::Noop {
-            reason: "event stream contained no non-empty agent message",
-        };
-    }
-    let unfenced = strip_markdown_code_fences(trimmed);
-    if unfenced != trimmed {
-        return ContinuityRefreshRepair::Apply {
-            diff: unfenced,
-            repair_reason: Some("removed markdown code fences"),
-        };
-    }
-    ContinuityRefreshRepair::Apply {
-        diff: trimmed.to_string(),
-        repair_reason: None,
-    }
-}
-
-fn strip_markdown_code_fences(text: &str) -> String {
-    let trimmed = text.trim();
-    let Some(stripped) = trimmed.strip_prefix("```") else {
-        return trimmed.to_string();
-    };
-    let body = match stripped.find('\n') {
-        Some(index) => &stripped[index + 1..],
-        None => return trimmed.to_string(),
-    };
-    let body = body.strip_suffix("```").unwrap_or(body).trim();
-    if body.is_empty() {
-        trimmed.to_string()
-    } else {
-        body.to_string()
-    }
 }
 
 fn summarize_continuity_diff_for_log(diff: &str) -> String {
@@ -919,37 +823,12 @@ pub fn conversation_id_for_thread_key(thread_key: Option<&str>) -> i64 {
     }
 }
 
-fn resolved_local_socket_path(
-    resolved_runtime: Option<&runtime_kernel::InferenceRuntimeKernel>,
-) -> Option<String> {
-    let runtime = resolved_runtime?;
-    if !runtime.state.source.is_local() {
-        return None;
-    }
-    runtime
-        .primary_generation
-        .as_ref()
-        .and_then(|binding| binding.socket_path.clone())
-}
-
 fn responses_api_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     if trimmed.ends_with("/v1") {
         trimmed.to_string()
     } else {
         format!("{trimmed}/v1")
-    }
-}
-
-fn local_provider_socket_ready(socket_path: &str) -> bool {
-    #[cfg(unix)]
-    {
-        let path = Path::new(socket_path);
-        path.exists() && UnixStream::connect(path).is_ok()
-    }
-    #[cfg(not(unix))]
-    {
-        Path::new(socket_path).exists()
     }
 }
 
@@ -977,583 +856,49 @@ pub(crate) fn resolve_api_model_provider_spec(
     if !engine::api_provider_supports_model(&provider, model) {
         return None;
     }
-    // OpenAI is the agent-runtime built-in default provider — emitting an
-    // override would be redundant. Anthropic is also handled natively by
-    // the agent runtime via its own model-name matching. The remaining providers
-    // need an explicit `-c model_providers.X.base_url=...` so the agent runtime
-    // points its HTTP client at the correct upstream.
+    // OpenAI is the agent-runtime built-in default provider. The remaining
+    // supported API-backed providers are normalized into one explicit CTOX
+    // mode, `ctox_core_api`, which still speaks Responses internally and only
+    // differs at the outer provider edge.
     let normalized = provider.to_ascii_lowercase();
-    // (provider_id, name, env_key, default_provider_for_url, wire_api)
-    let (provider_id, name, env_key, default_provider, wire_api) = match normalized.as_str() {
-        "openrouter" => (
-            "cto_openrouter",
-            "cto-openrouter",
-            "OPENROUTER_API_KEY",
-            "openrouter",
-            "responses",
-        ),
-        // MiniMax's OpenAI-compatible surface is /v1/chat/completions only —
-        // it does NOT implement OpenAI's /v1/responses. The agent runtime only
-        // speaks `wire_api = "responses"`. Bridge: route the agent runtime at the
-        // CTOX gateway running on localhost; the gateway sees the model has
-        // a chat-family adapter (model_adapters/minimax.rs), translates the
-        // /v1/responses body to /v1/chat/completions, and forwards to
-        // api.minimax.io with MINIMAX_API_KEY. This is the same machinery
-        // CTOX uses for local-engine models, just with a remote upstream.
-        // Caller (run-once / service) must ensure the gateway is running.
-        "minimax" => (
-            "cto_minimax",
-            "cto-minimax",
-            "MINIMAX_API_KEY",
-            "minimax",
-            "responses",
-        ),
+    // (env_key, default_provider_for_url, wire_api)
+    let (env_key, default_provider, wire_api) = match normalized.as_str() {
+        "openrouter" => ("OPENROUTER_API_KEY", "openrouter", "responses"),
+        "minimax" => ("MINIMAX_API_KEY", "minimax", "responses"),
         _ => return None,
     };
-    // For minimax we deliberately point at the local CTOX gateway, not the
-    // remote upstream — the gateway does the wire-protocol translation via
-    // its registered chat-family adapter before forwarding upstream.
-    let base_url = if normalized == "minimax" {
-        resolved_runtime
-            .map(|runtime| {
-                let host = if runtime.proxy.listen_host == "0.0.0.0" {
-                    "127.0.0.1"
-                } else {
-                    runtime.proxy.listen_host.as_str()
-                };
-                format!("http://{host}:{}/v1", runtime.proxy.listen_port)
-            })
-            .unwrap_or_else(|| "http://127.0.0.1:12434/v1".to_string())
-    } else {
-        resolved_runtime
-            .map(|runtime| runtime.internal_responses_base_url())
-            .or_else(|| {
-                settings
-                    .get("CTOX_UPSTREAM_BASE_URL")
-                    .map(|value| responses_api_base_url(value))
-            })
-            .unwrap_or_else(|| {
-                responses_api_base_url(runtime_state::default_api_upstream_base_url_for_provider(
-                    default_provider,
-                ))
-            })
-    };
+    let base_url = resolved_runtime
+        .map(|runtime| runtime.internal_responses_base_url())
+        .or_else(|| {
+            settings
+                .get("CTOX_UPSTREAM_BASE_URL")
+                .map(|value| responses_api_base_url(value))
+        })
+        .unwrap_or_else(|| {
+            responses_api_base_url(runtime_state::default_api_upstream_base_url_for_provider(
+                default_provider,
+            ))
+        });
     Some(ApiModelProviderSpec {
-        provider_id,
-        name,
+        provider_id: "ctox_core_api",
+        name: "ctox-core-api",
         base_url,
         env_key,
         wire_api,
     })
 }
 
-fn use_openai_native_web_search(
-    model: &str,
-    api_provider_spec: Option<&ApiModelProviderSpec>,
-) -> bool {
-    engine::is_openai_api_chat_model(model) && api_provider_spec.is_none()
-}
-
-fn escape_inline_toml_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SimpleExecPhase {
-    AnalysisReadOnly,
-    DocsTextChange,
-    ReadTraceFirst,
-    BugFix,
-    FeatureAdd,
-    RefactorSafe,
-    TestWork,
-    CodeReview,
-    BugFixWithTests,
-    DependencyUpdate,
-    MigrationWithDataChange,
-    MigrationChange,
-    DataChangeSafe,
-    InfraConfigChange,
-    DeployRelease,
-    OpsDebugTerminal,
-    IncidentHotfix,
-    IncidentHotfixDeploy,
-    RollbackRecovery,
-    GeneralSafeTask,
-}
-
-impl SimpleExecPhase {
-    fn label(self) -> &'static str {
-        match self {
-            Self::AnalysisReadOnly => "analysis-read-only",
-            Self::DocsTextChange => "docs-text-change",
-            Self::ReadTraceFirst => "read-trace-first",
-            Self::BugFix => "bug-fix",
-            Self::FeatureAdd => "feature-add",
-            Self::RefactorSafe => "refactor-safe",
-            Self::TestWork => "test-work",
-            Self::CodeReview => "code-review",
-            Self::BugFixWithTests => "bug-fix-with-tests",
-            Self::DependencyUpdate => "dependency-update",
-            Self::MigrationWithDataChange => "migration-with-data-change",
-            Self::MigrationChange => "migration-change",
-            Self::DataChangeSafe => "data-change-safe",
-            Self::InfraConfigChange => "infra-config-change",
-            Self::DeployRelease => "deploy-release",
-            Self::OpsDebugTerminal => "ops-debug-terminal",
-            Self::IncidentHotfix => "incident-hotfix",
-            Self::IncidentHotfixDeploy => "incident-hotfix-deploy",
-            Self::RollbackRecovery => "rollback-recovery",
-            Self::GeneralSafeTask => "general-safe-task",
-        }
-    }
-
-    fn prompt_fragment(self) -> &'static str {
-        match self {
-            Self::AnalysisReadOnly => CTOX_CODEX_EXEC_SIMPLE_PHASE_ANALYSIS_READ_ONLY,
-            Self::DocsTextChange => CTOX_CODEX_EXEC_SIMPLE_PHASE_DOCS_TEXT_CHANGE,
-            Self::ReadTraceFirst => CTOX_CODEX_EXEC_SIMPLE_PHASE_READ_TRACE_FIRST,
-            Self::BugFix => CTOX_CODEX_EXEC_SIMPLE_PHASE_BUG_FIX,
-            Self::FeatureAdd => CTOX_CODEX_EXEC_SIMPLE_PHASE_FEATURE_ADD,
-            Self::RefactorSafe => CTOX_CODEX_EXEC_SIMPLE_PHASE_REFACTOR_SAFE,
-            Self::TestWork => CTOX_CODEX_EXEC_SIMPLE_PHASE_TEST_WORK,
-            Self::CodeReview => CTOX_CODEX_EXEC_SIMPLE_PHASE_CODE_REVIEW,
-            Self::BugFixWithTests => CTOX_CODEX_EXEC_SIMPLE_PHASE_BUG_FIX_WITH_TESTS,
-            Self::DependencyUpdate => CTOX_CODEX_EXEC_SIMPLE_PHASE_DEPENDENCY_UPDATE,
-            Self::MigrationWithDataChange => {
-                CTOX_CODEX_EXEC_SIMPLE_PHASE_MIGRATION_WITH_DATA_CHANGE
-            }
-            Self::MigrationChange => CTOX_CODEX_EXEC_SIMPLE_PHASE_MIGRATION_CHANGE,
-            Self::DataChangeSafe => CTOX_CODEX_EXEC_SIMPLE_PHASE_DATA_CHANGE_SAFE,
-            Self::InfraConfigChange => CTOX_CODEX_EXEC_SIMPLE_PHASE_INFRA_CONFIG_CHANGE,
-            Self::DeployRelease => CTOX_CODEX_EXEC_SIMPLE_PHASE_DEPLOY_RELEASE,
-            Self::OpsDebugTerminal => CTOX_CODEX_EXEC_SIMPLE_PHASE_OPS_DEBUG_TERMINAL,
-            Self::IncidentHotfix => CTOX_CODEX_EXEC_SIMPLE_PHASE_INCIDENT_HOTFIX,
-            Self::IncidentHotfixDeploy => CTOX_CODEX_EXEC_SIMPLE_PHASE_INCIDENT_HOTFIX_DEPLOY,
-            Self::RollbackRecovery => CTOX_CODEX_EXEC_SIMPLE_PHASE_ROLLBACK_RECOVERY,
-            Self::GeneralSafeTask => CTOX_CODEX_EXEC_SIMPLE_PHASE_GENERAL_SAFE_TASK,
-        }
-    }
-
-    fn needs_terminal_ops_core(self) -> bool {
-        matches!(
-            self,
-            Self::MigrationWithDataChange
-                | Self::DataChangeSafe
-                | Self::InfraConfigChange
-                | Self::DeployRelease
-                | Self::OpsDebugTerminal
-                | Self::IncidentHotfix
-                | Self::IncidentHotfixDeploy
-                | Self::RollbackRecovery
-        )
-    }
-}
-
-fn classify_simple_exec_phase(prompt: &str) -> SimpleExecPhase {
-    let lower = prompt.to_ascii_lowercase();
-    if contains_any(
-        &lower,
-        &[
-            "summarize",
-            "explain",
-            "compare",
-            "analysis only",
-            "investigate why",
-            "why is this happening",
-        ],
-    ) && !contains_any(
-        &lower,
-        &[
-            "edit",
-            "change",
-            "fix",
-            "implement",
-            "add ",
-            "deploy",
-            "rollback",
-        ],
-    ) {
-        return SimpleExecPhase::AnalysisReadOnly;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "documentation",
-            "docs",
-            "readme",
-            "markdown",
-            "prompt",
-            "comment",
-            "wording",
-            "copy change",
-            "text change",
-        ],
-    ) && !contains_any(
-        &lower,
-        &["migration", "schema", "deploy", "rollback", "incident"],
-    ) {
-        return SimpleExecPhase::DocsTextChange;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "incident",
-            "hotfix",
-            "restore service now",
-            "urgent restore",
-        ],
-    ) && contains_any(&lower, &["deploy", "release", "rollout", "promote", "ship"])
-    {
-        return SimpleExecPhase::IncidentHotfixDeploy;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "migration",
-            "schema change",
-            "database schema",
-            "add column",
-            "drop column",
-            "alter table",
-        ],
-    ) && contains_any(
-        &lower,
-        &[
-            "backfill",
-            "data repair",
-            "update records",
-            "target rows",
-            "dry run",
-            "sample rows",
-            "before count",
-            "after count",
-        ],
-    ) {
-        return SimpleExecPhase::MigrationWithDataChange;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "bug",
-            "fix",
-            "broken",
-            "regression",
-            "failing",
-            "failure",
-            "wrong behavior",
-        ],
-    ) && contains_any(
-        &lower,
-        &[
-            "test only",
-            "tests only",
-            "add test",
-            "fix test",
-            "update test",
-            "failing test",
-            "flaky test",
-            "test file",
-        ],
-    ) {
-        return SimpleExecPhase::BugFixWithTests;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "code review",
-            "review only",
-            "review this diff",
-            "review this patch",
-            "no material issues found",
-            "finding:",
-        ],
-    ) {
-        return SimpleExecPhase::CodeReview;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "rollback",
-            "roll back",
-            "revert to last known good",
-            "last known good",
-            "restore previous version",
-        ],
-    ) {
-        return SimpleExecPhase::RollbackRecovery;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "incident",
-            "hotfix",
-            "restore service now",
-            "service is broken now",
-            "urgent restore",
-        ],
-    ) {
-        return SimpleExecPhase::IncidentHotfix;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "deploy",
-            "release",
-            "ship",
-            "promote",
-            "rollout",
-            "publish build",
-        ],
-    ) {
-        return SimpleExecPhase::DeployRelease;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "terraform",
-            "helm",
-            "kubernetes",
-            "dockerfile",
-            "docker compose",
-            "docker-compose",
-            "nginx",
-            "systemd",
-            "ci config",
-            "github actions",
-            "workflow yml",
-            "infra config",
-            "deployment config",
-        ],
-    ) {
-        return SimpleExecPhase::InfraConfigChange;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "backfill",
-            "data repair",
-            "update records",
-            "target rows",
-            "dry run",
-            "idempotent script",
-            "sample rows",
-            "before count",
-            "after count",
-        ],
-    ) {
-        return SimpleExecPhase::DataChangeSafe;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "migration",
-            "schema change",
-            "database schema",
-            "add column",
-            "drop column",
-            "alter table",
-            "rollback path",
-        ],
-    ) {
-        return SimpleExecPhase::MigrationChange;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "dependency update",
-            "upgrade dependency",
-            "bump version",
-            "lockfile",
-            "package update",
-            "library version",
-            "runtime version",
-            "base image",
-        ],
-    ) {
-        return SimpleExecPhase::DependencyUpdate;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "journalctl",
-            "systemctl",
-            "kubectl",
-            "docker ",
-            "docker-compose",
-            "service ",
-            "logs",
-            "log output",
-            "deploy",
-            "release",
-            "restart",
-            "terminal",
-            "shell command",
-            "process",
-            "health check",
-        ],
-    ) {
-        return SimpleExecPhase::OpsDebugTerminal;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "refactor",
-            "cleanup",
-            "clean up",
-            "extract ",
-            "rename ",
-            "move ",
-            "reorganize",
-            "restructure",
-        ],
-    ) && !contains_any(
-        &lower,
-        &["bug", "fix", "broken", "failing", "feature", "new behavior"],
-    ) {
-        return SimpleExecPhase::RefactorSafe;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "test only",
-            "tests only",
-            "add test",
-            "fix test",
-            "update test",
-            "failing test",
-            "flaky test",
-            "test file",
-        ],
-    ) {
-        return SimpleExecPhase::TestWork;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "bug",
-            "fix",
-            "broken",
-            "regression",
-            "error",
-            "failing",
-            "failure",
-            "does not work",
-            "wrong behavior",
-        ],
-    ) {
-        return SimpleExecPhase::BugFix;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "add ",
-            "implement",
-            "support ",
-            "new behavior",
-            "new feature",
-            "allow ",
-            "create ",
-        ],
-    ) {
-        return SimpleExecPhase::FeatureAdd;
-    }
-    if contains_any(
-        &lower,
-        &[
-            "investigate this area",
-            "figure out where",
-            "where should this change go",
-            "trace this path",
-            "find the entry point",
-        ],
-    ) {
-        return SimpleExecPhase::ReadTraceFirst;
-    }
-    SimpleExecPhase::GeneralSafeTask
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
-struct CodexModelInstructionsFile {
-    path: PathBuf,
-}
-
-impl CodexModelInstructionsFile {
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for CodexModelInstructionsFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-fn extract_codex_error_response(stdout: &str) -> Option<String> {
-    turn_contract::extract_final_error_from_event_stream(stdout)
-}
-
-fn prompt_requires_tool_verification(prompt: &str) -> bool {
-    let lower = prompt.to_ascii_lowercase();
-    if lower.contains("you are updating the ctox continuity document")
-        && lower.contains("<current_document>")
-    {
-        return false;
-    }
-    let workspace_bound = lower.contains("work only inside this workspace")
-        || lower.contains("work only in this workspace")
-        || lower.contains("workspace:")
-        || lower.contains("workspace root")
-        || lower.contains("workspace_root")
-        || prompt.contains("/home/")
-        || prompt.contains("/tmp/")
-        || prompt.contains("/Users/");
-    let has_action_verb = [
-        "create ",
-        "edit ",
-        "modify ",
-        "implement ",
-        "build ",
-        "compile ",
-        "run ",
-        "test ",
-        "verify ",
-        "fix ",
-        "debug ",
-        "refactor ",
-        "rename ",
-        "patch ",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    let has_strong_verification_marker = [
-        "cmake",
-        "cargo ",
-        "pytest",
-        "npm ",
-        "pnpm ",
-        "make ",
-        "./build/",
-        "do not answer before",
-        "on successful run",
-        "must print exactly",
-        "must output exactly",
-        "verify the binary",
-        "create at least these files",
-        ".cpp",
-        ".cc",
-        ".cxx",
-        ".h",
-        ".hpp",
-        "cmakelists.txt",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    (workspace_bound && has_action_verb) || has_strong_verification_marker
+pub(crate) fn resolve_local_model_provider_spec(
+    resolved_runtime: Option<&runtime_kernel::InferenceRuntimeKernel>,
+) -> Option<LocalModelProviderSpec> {
+    let runtime = resolved_runtime?;
+    let binding = runtime.primary_generation.as_ref()?;
+    Some(LocalModelProviderSpec {
+        provider_id: "ctox_core_local",
+        name: "ctox-core-local",
+        transport_endpoint: binding.transport.endpoint_string(),
+        wire_api: "responses",
+    })
 }
 
 pub fn summarize_runtime_error(content: &str) -> String {
@@ -1637,57 +982,3 @@ fn continuity_refresh_timeout_secs(settings: &BTreeMap<String, String>) -> u64 {
         DEFAULT_CONTINUITY_REFRESH_TIMEOUT_SECS as usize,
     ) as u64
 }
-
-fn read_reasoning_effort_setting(settings: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    let normalized = settings
-        .get(key)
-        .map(|value| value.trim().to_ascii_lowercase())?;
-    match normalized.as_str() {
-        "minimal" | "low" => Some("low".to_string()),
-        "medium" => Some("medium".to_string()),
-        "high" => Some("high".to_string()),
-        "none" => Some("none".to_string()),
-        _ => None,
-    }
-}
-
-fn selected_skill_preset(settings: &BTreeMap<String, String>) -> runtime_state::ChatSkillPreset {
-    settings
-        .get(CHAT_SKILL_PRESET_ENV_KEY)
-        .map(String::as_str)
-        .map(runtime_state::ChatSkillPreset::from_label)
-        .unwrap_or_default()
-}
-
-fn preset_reasoning_effort_for_model(
-    settings: &BTreeMap<String, String>,
-    model: &str,
-) -> Option<String> {
-    let preset = settings
-        .get("CTOX_CHAT_LOCAL_PRESET")
-        .map(String::as_str)
-        .map(crate::inference::runtime_plan::ChatPreset::from_label)?;
-    let normalized = model.trim();
-    let supports_preset_reasoning = normalized == "openai/gpt-oss-20b"
-        || normalized.eq_ignore_ascii_case("gpt-5.4")
-        || normalized.eq_ignore_ascii_case("gpt-5.4-mini")
-        || normalized.eq_ignore_ascii_case("gpt-5.4-nano");
-    if !supports_preset_reasoning {
-        return None;
-    }
-    Some(
-        match preset {
-            crate::inference::runtime_plan::ChatPreset::Quality => "high",
-            crate::inference::runtime_plan::ChatPreset::Performance => "low",
-        }
-        .to_string(),
-    )
-}
-
-fn chat_source_is_local(settings: &BTreeMap<String, String>) -> bool {
-    settings
-        .get("CTOX_CHAT_SOURCE")
-        .map(|value| value.trim().eq_ignore_ascii_case("local"))
-        .unwrap_or(false)
-}
-

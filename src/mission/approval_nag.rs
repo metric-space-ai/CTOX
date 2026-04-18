@@ -4,7 +4,7 @@
 // Proactive reminder / approval-chase for open approval-gate self-work
 // items.
 //
-// Normal (non-benchmark) runs leave `CTOX_AUTO_APPROVE_GATES` unset,
+// Normal runs leave `CTOX_AUTO_APPROVE_GATES` unset,
 // which means CTOX creates approval-gate self-work items and then
 // stops. Without this module the owner would never be pinged and the
 // gate would sit forever. This module:
@@ -36,6 +36,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::inference::runtime_env;
 use crate::mission::tickets;
 
+const DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
+
 #[derive(Debug, Default, Clone)]
 pub struct NagSweepSummary {
     pub scheduled: usize,
@@ -58,9 +60,7 @@ impl ApprovalModality {
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or("");
-        if marker.eq_ignore_ascii_case("tui-only")
-            || marker.eq_ignore_ascii_case("tui_only")
-        {
+        if marker.eq_ignore_ascii_case("tui-only") || marker.eq_ignore_ascii_case("tui_only") {
             Self::TuiOnly
         } else {
             Self::EmailReply
@@ -81,7 +81,7 @@ pub fn sweep(root: &Path) -> Result<NagSweepSummary> {
 }
 
 fn db_path(root: &Path) -> PathBuf {
-    crate::paths::mission_db(root)
+    root.join(DB_RELATIVE_PATH)
 }
 
 fn open_db(root: &Path) -> Result<Connection> {
@@ -135,8 +135,8 @@ fn add_offset_rfc3339(base_iso: &str, offset_seconds: i64) -> String {
 /// few times per workday, not for minute-by-minute response. Empty
 /// schedule means no nagging (progressive level auto-closes gates
 /// instead).
-fn nag_schedule() -> &'static [(i64, &'static str)] {
-    crate::autonomy::AutonomyLevel::from_env().nag_cadence_seconds()
+fn nag_schedule(root: &Path) -> &'static [(i64, &'static str)] {
+    crate::autonomy::AutonomyLevel::from_root(root).nag_cadence_seconds()
 }
 
 fn schedule_new_gates(root: &Path) -> Result<usize> {
@@ -159,7 +159,7 @@ fn schedule_new_gates(root: &Path) -> Result<usize> {
             continue;
         }
         let now = now_rfc3339();
-        let Some(first) = nag_schedule().first() else {
+        let Some(first) = nag_schedule(root).first() else {
             // Progressive autonomy has no nag schedule — nothing to do.
             continue;
         };
@@ -317,12 +317,12 @@ fn send_due_nags(root: &Path) -> Result<usize> {
             continue;
         }
         let attempt = attempt_count as usize;
-        let (channel, subject, body) = compose_nag(&item, attempt);
+        let (channel, subject, body) = compose_nag(root, &item, attempt);
         match send_via_channel(root, &channel, &subject, &body, &item) {
             Ok(()) => {
                 sent += 1;
                 let next_attempt = attempt + 1;
-                let next_iso = if next_attempt >= nag_schedule().len() {
+                let next_iso = if next_attempt >= nag_schedule(root).len() {
                     // Stop nagging. Mark as completed so we stop re-sending.
                     let _ = conn.execute(
                         "UPDATE ticket_approval_nag_state SET completed_at = ?1, attempt_count = ?2, last_nag_at = ?1, last_channel = ?3 WHERE work_id = ?4",
@@ -330,7 +330,7 @@ fn send_due_nags(root: &Path) -> Result<usize> {
                     );
                     continue;
                 } else {
-                    add_offset_rfc3339(&first_seen, nag_schedule()[next_attempt].0)
+                    add_offset_rfc3339(&first_seen, nag_schedule(root)[next_attempt].0)
                 };
                 conn.execute(
                     r#"
@@ -363,10 +363,11 @@ fn send_due_nags(root: &Path) -> Result<usize> {
 }
 
 fn compose_nag(
+    root: &Path,
     item: &tickets::TicketSelfWorkItemView,
     attempt: usize,
 ) -> (String, String, String) {
-    let channel = nag_schedule()
+    let channel = nag_schedule(root)
         .get(attempt)
         .map(|(_, c)| c.to_string())
         .unwrap_or_else(|| "email".to_string());
@@ -421,7 +422,9 @@ fn compose_body(
                  To approve or reject, please open the local CTOX TUI on the host and act on this gate there, or run on the host:\n\
                    ctox ticket self-work-set-state --work-id ");
             out.push_str(&item.work_id);
-            out.push_str(" --state closed     # to approve\n   ctox ticket self-work-set-state --work-id ");
+            out.push_str(
+                " --state closed     # to approve\n   ctox ticket self-work-set-state --work-id ",
+            );
             out.push_str(&item.work_id);
             out.push_str(" --state failed     # to reject\n\n\
                  This email contains the full request so you can decide without opening the TUI first; the TUI step is only for the final confirmation.\n");
@@ -444,9 +447,7 @@ fn send_via_channel(
         .filter(|s| !s.is_empty());
 
     let ctox_bin = std::env::current_exe()
-        .or_else(|_| -> std::io::Result<PathBuf> {
-            Ok(PathBuf::from("ctox"))
-        })
+        .or_else(|_| -> std::io::Result<PathBuf> { Ok(PathBuf::from("ctox")) })
         .unwrap_or_else(|_| PathBuf::from("ctox"));
 
     let thread_key = format!("approval-nag:{}", item.work_id);

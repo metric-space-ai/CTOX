@@ -2,7 +2,7 @@ mod gemma4;
 mod glm47;
 mod gpt_oss;
 mod native_chat;
-mod nemotron;
+mod nemotron_cascade2;
 mod qwen35;
 
 use crate::openai::{CompletionRequest, Message, StopTokenIds};
@@ -21,7 +21,7 @@ pub enum ResponsesModelAdapter {
     NativeChatCompletions,
     GptOssHarmony,
     Qwen35,
-    Nemotron,
+    NemotronCascade2,
     Gemma4,
     Glm47,
 }
@@ -57,7 +57,7 @@ impl ResponsesModelAdapter {
             Self::GptOssHarmony => gpt_oss::effective_model_id(requested_model, state),
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => {
                 if requested_model == "default" {
@@ -80,8 +80,8 @@ impl ResponsesModelAdapter {
             Self::GptOssHarmony
         } else if qwen35::matches(model_id) {
             Self::Qwen35
-        } else if nemotron::matches(model_id) {
-            Self::Nemotron
+        } else if nemotron_cascade2::matches(model_id) {
+            Self::NemotronCascade2
         } else if gemma4::matches(model_id) {
             Self::Gemma4
         } else if glm47::matches(model_id) {
@@ -96,7 +96,7 @@ impl ResponsesModelAdapter {
             Self::NativeChatCompletions => native_chat::transport_kind(),
             Self::GptOssHarmony => gpt_oss::transport_kind(),
             Self::Qwen35 => qwen35::transport_kind(),
-            Self::Nemotron => nemotron::transport_kind(),
+            Self::NemotronCascade2 => nemotron_cascade2::transport_kind(),
             Self::Gemma4 => gemma4::transport_kind(),
             Self::Glm47 => glm47::transport_kind(),
         }
@@ -107,7 +107,7 @@ impl ResponsesModelAdapter {
             Self::GptOssHarmony => gpt_oss::prefers_chat_completions(request),
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => false,
         }
@@ -118,7 +118,7 @@ impl ResponsesModelAdapter {
             Self::NativeChatCompletions => native_chat::requires_buffered_chat_response(),
             Self::GptOssHarmony => gpt_oss::requires_buffered_chat_response(),
             Self::Qwen35 => qwen35::requires_buffered_chat_response(),
-            Self::Nemotron => nemotron::requires_buffered_chat_response(),
+            Self::NemotronCascade2 => nemotron_cascade2::requires_buffered_chat_response(),
             Self::Gemma4 => gemma4::requires_buffered_chat_response(),
             Self::Glm47 => glm47::requires_buffered_chat_response(),
         }
@@ -129,7 +129,7 @@ impl ResponsesModelAdapter {
             Self::Qwen35 => Some(false),
             Self::NativeChatCompletions
             | Self::GptOssHarmony
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => None,
         }
@@ -140,7 +140,7 @@ impl ResponsesModelAdapter {
             Self::GptOssHarmony => gpt_oss::chat_stop_token_ids(),
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => None,
         }
@@ -163,7 +163,9 @@ impl ResponsesModelAdapter {
                 }
             }
             Self::Qwen35 => qwen35::prepare_chat_request(messages, tools, tool_choice),
-            Self::Nemotron => nemotron::prepare_chat_request(messages, tools, tool_choice),
+            Self::NemotronCascade2 => {
+                nemotron_cascade2::prepare_chat_request(messages, tools, tool_choice)
+            }
             Self::Glm47 => glm47::prepare_chat_request(messages, tools, tool_choice),
             Self::NativeChatCompletions | Self::Gemma4 => AdaptedChatRequest {
                 messages: messages.to_vec(),
@@ -182,7 +184,7 @@ impl ResponsesModelAdapter {
             Self::GptOssHarmony => gpt_oss::completion_exact_text_override(messages, tools),
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => None,
         }
@@ -202,7 +204,7 @@ impl ResponsesModelAdapter {
             )),
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => None,
         }
@@ -219,7 +221,7 @@ impl ResponsesModelAdapter {
             }
             Self::NativeChatCompletions
             | Self::Qwen35
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Gemma4
             | Self::Glm47 => None,
         }
@@ -240,7 +242,7 @@ impl ResponsesModelAdapter {
             Self::NativeChatCompletions => native_chat::parse_response_items(raw_text),
             Self::GptOssHarmony => gpt_oss::parse_response_items(raw_text),
             Self::Qwen35 => qwen35::parse_response_items(raw_text),
-            Self::Nemotron => nemotron::parse_response_items(raw_text),
+            Self::NemotronCascade2 => nemotron_cascade2::parse_response_items(raw_text),
             Self::Gemma4 => gemma4::parse_response_items(raw_text),
             Self::Glm47 => glm47::parse_response_items(raw_text),
         }
@@ -251,7 +253,9 @@ impl ResponsesModelAdapter {
             Self::NativeChatCompletions => native_chat::response_text_to_history_messages(raw_text),
             Self::GptOssHarmony => gpt_oss::response_text_to_history_messages(raw_text),
             Self::Qwen35 => qwen35::response_text_to_history_messages(raw_text),
-            Self::Nemotron => nemotron::response_text_to_history_messages(raw_text),
+            Self::NemotronCascade2 => {
+                nemotron_cascade2::response_text_to_history_messages(raw_text)
+            }
             Self::Gemma4 => gemma4::response_text_to_history_messages(raw_text),
             Self::Glm47 => glm47::response_text_to_history_messages(raw_text),
         }
@@ -393,7 +397,7 @@ mod tests {
     }
 
     #[test]
-    fn nemotron_adapter_disables_native_tools_and_injects_xml_prompt() {
+    fn nemotron_cascade2_adapter_disables_native_tools_and_injects_xml_prompt() {
         let messages = vec![Message {
             content: Some(MessageContent::from_text(
                 "Call the get_cwd tool now.".to_string(),
@@ -417,7 +421,7 @@ mod tests {
         }))
         .expect("tool parses")];
 
-        let adapted = ResponsesModelAdapter::Nemotron.prepare_chat_request(
+        let adapted = ResponsesModelAdapter::NemotronCascade2.prepare_chat_request(
             &messages,
             Some(&tools),
             Some(&ToolChoice::Tool(tools[0].clone())),
@@ -588,7 +592,9 @@ mod tests {
                 tool_call_id: None,
             },
             Message {
-                content: Some(MessageContent::from_text("Inspect the workspace.".to_string())),
+                content: Some(MessageContent::from_text(
+                    "Inspect the workspace.".to_string(),
+                )),
                 role: "user".to_string(),
                 name: None,
                 tool_calls: None,

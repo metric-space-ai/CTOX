@@ -6,7 +6,7 @@ use harness::TestRoot;
 #[test]
 fn verification_surfaces_are_available_on_fresh_lcm_state() {
     let root = TestRoot::new("verification-empty");
-    let db = root.path("runtime/ctox_lcm.db");
+    let db = root.path("runtime/ctox.sqlite3");
     let db_str = db.to_string_lossy().to_string();
 
     root.run(&["lcm-init", &db_str]).success();

@@ -49,15 +49,12 @@ pub fn runtime_tuning(
 pub fn rewrite_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     let payload: Value =
         serde_json::from_slice(raw).context("failed to parse responses request")?;
-    // Always use the canonical MiniMax model name, regardless of what codex-core
-    // puts in the request body. codex-core's Models-Manager may remap unknown
+    // Always use the canonical MiniMax model name, regardless of what ctox-core
+    // puts in the request body. ctox-core's Models-Manager may remap unknown
     // model names to its internal defaults (e.g. "gpt-5.3-codex"), which the
     // MiniMax API rejects. The gateway already routed to this adapter based on
     // CTOX's active_model, so the correct model is always MiniMax-M2.7.
-    let incoming_model = payload
-        .get("model")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let incoming_model = payload.get("model").and_then(Value::as_str).unwrap_or("");
     let model = if incoming_model.to_ascii_lowercase().contains("minimax") {
         incoming_model.to_string()
     } else {
@@ -110,10 +107,7 @@ pub fn rewrite_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
             if mapped_key == "temperature" {
                 if let Some(temp) = value.as_f64() {
                     let clamped = temp.clamp(0.001, 1.0);
-                    request.insert(
-                        mapped_key.to_string(),
-                        serde_json::json!(clamped),
-                    );
+                    request.insert(mapped_key.to_string(), serde_json::json!(clamped));
                     continue;
                 }
             }
@@ -192,7 +186,7 @@ pub fn rewrite_success_response(
                     let call_id = tool_call
                         .get("id")
                         .and_then(Value::as_str)
-                        .unwrap_or("call_ctox_proxy");
+                        .unwrap_or("call_ctox_gateway");
                     builder.push_function_call(
                         call_id,
                         name,
@@ -296,7 +290,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 messages.push(json!({
                     "role": "assistant",
                     "content": "",
@@ -314,7 +308,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 let output = engine::extract_function_call_output_text(object.get("output"));
                 messages.push(json!({
                     "role": "tool",

@@ -135,7 +135,7 @@ pub struct ManifestLaunchContract {
 impl Default for ManifestLaunchContract {
     fn default() -> Self {
         Self {
-            required_context_tokens: 131_072,
+            required_context_tokens: 32_768,
             require_primary_gpu_anchor: true,
             nccl_qualification: ManifestNcclQualification::Unsupported,
             nccl_preserves_primary_gpu_anchor: false,
@@ -233,8 +233,13 @@ pub struct PlatformGpuCapability {
 pub struct PlatformCapabilities {
     pub generated_at: String,
     pub source: String,
+    #[serde(default)]
     pub cuda_available: bool,
+    #[serde(default)]
+    pub metal_available: bool,
+    #[serde(default)]
     pub nccl_available: bool,
+    #[serde(default)]
     pub flash_attn_available: bool,
     pub gpus: Vec<PlatformGpuCapability>,
 }

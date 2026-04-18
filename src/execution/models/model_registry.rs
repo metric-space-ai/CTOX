@@ -7,8 +7,7 @@ pub const SUPPORTED_ANTHROPIC_API_CHAT_MODELS: &[&str] = &["anthropic/claude-son
 // MiniMax Direct-API (platform.minimax.io). These are the cloud-hosted
 // variants; the `minimax/minimax-m2.7` entry lower down is the OpenRouter-
 // routed variant with the same weights.
-pub const SUPPORTED_MINIMAX_API_CHAT_MODELS: &[&str] =
-    &["MiniMax-M2.7", "MiniMax-M2.7-highspeed"];
+pub const SUPPORTED_MINIMAX_API_CHAT_MODELS: &[&str] = &["MiniMax-M2.7", "MiniMax-M2.7-highspeed"];
 pub const SUPPORTED_OPENROUTER_API_CHAT_MODELS: &[&str] = &[
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
@@ -27,7 +26,6 @@ pub const SUPPORTED_OPENROUTER_API_CHAT_MODELS: &[&str] = &[
     "moonshotai/kimi-k2.5",
     "minimax/minimax-m2.7",
     "mistralai/mistral-small-2603",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "x-ai/grok-4.20",
     "z-ai/glm-4.7-flash",
 ];
@@ -43,8 +41,7 @@ pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
     "Qwen/Qwen3.5-2B",
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.5-9B",
-    "Qwen/Qwen3.5-27B",
-    "Qwen/Qwen3.5-35B-A3B",
+    "Qwen/Qwen3.6-35B-A3B",
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
     "google/gemma-4-26B-A4B-it",
@@ -58,7 +55,6 @@ pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
     "x-ai/grok-4.20",
     "minimax/minimax-m2.7",
     "mistralai/mistral-small-2603",
-    "nvidia/nemotron-3-super-120b-a12b:free",
     "qwen/qwen3.5-122b-a10b",
     "anthropic/claude-sonnet-4.6",
     "qwen/qwen3.5-397b-a17b",
@@ -69,7 +65,7 @@ pub const SUPPORTED_LOCAL_CHAT_FAMILIES: &[engine::ChatModelFamily] = &[
     engine::ChatModelFamily::GptOss,
     engine::ChatModelFamily::Qwen35,
     engine::ChatModelFamily::Gemma4,
-    engine::ChatModelFamily::NemotronCascade,
+    engine::ChatModelFamily::NemotronCascade2,
     engine::ChatModelFamily::Glm47Flash,
 ];
 
@@ -150,7 +146,6 @@ pub struct ChatFamilyCatalogEntry {
 #[derive(Debug, Clone, Copy)]
 struct StaticRuntimeConfig {
     port: u16,
-    proxy_port: Option<u16>,
     max_seq_len: Option<u32>,
     max_seqs: u32,
     max_batch_size: u32,
@@ -232,19 +227,19 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         family: engine::ChatModelFamily::Qwen35,
         label: "Qwen 3.5",
         selector: "qwen3_5",
-        parse_aliases: &["qwen3_5", "qwen3.5", "qwen 3.5", "qwen"],
+        parse_aliases: &[
+            "qwen3_5", "qwen3.5", "qwen 3.5", "qwen3_6", "qwen3.6", "qwen 3.6", "qwen",
+        ],
         variants: &[
+            "Qwen/Qwen3.6-35B-A3B",
             "Qwen/Qwen3.5-2B",
             "Qwen/Qwen3.5-4B",
             "Qwen/Qwen3.5-9B",
-            "Qwen/Qwen3.5-27B",
-            "Qwen/Qwen3.5-35B-A3B",
         ],
         planning_variants: &[
-            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.6-35B-A3B",
             "Qwen/Qwen3.5-4B",
             "Qwen/Qwen3.5-2B",
-            "Qwen/Qwen3.5-27B",
             "Qwen/Qwen3.5-9B",
         ],
         // Qwen3.5 family is vision-capable via the Qwen35Vision local
@@ -273,14 +268,17 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         supports_vision: true,
     },
     ChatFamilyCatalogEntry {
-        family: engine::ChatModelFamily::NemotronCascade,
-        label: "Nemotron Cascade",
-        selector: "nemotron_cascade",
+        family: engine::ChatModelFamily::NemotronCascade2,
+        label: "Nemotron Cascade 2",
+        selector: "nemotron_cascade_2",
         parse_aliases: &[
             "nemotron",
             "nemotron_cascade",
+            "nemotron_cascade_2",
             "nemotron-cascade",
+            "nemotron-cascade-2",
             "nemotron cascade",
+            "nemotron cascade 2",
         ],
         variants: &["nvidia/Nemotron-Cascade-2-30B-A3B"],
         planning_variants: &["nvidia/Nemotron-Cascade-2-30B-A3B"],
@@ -311,7 +309,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "codex_responses_runtime",
         default_runtime: StaticRuntimeConfig {
             port: 1234,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -335,12 +332,22 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
     },
     LocalFamilyCatalogEntry {
         family: engine::LocalModelFamily::Qwen35Vision,
-        parse_aliases: &["qwen3_5", "qwen3.5", "qwen3-5", "qwen35", "qwen3_5_vision"],
-        default_model: "Qwen/Qwen3.5-27B",
+        parse_aliases: &[
+            "qwen3_5",
+            "qwen3.5",
+            "qwen3-5",
+            "qwen35",
+            "qwen3_5_vision",
+            "qwen3_6",
+            "qwen3.6",
+            "qwen3-6",
+            "qwen36",
+            "qwen3_6_vision",
+        ],
+        default_model: "Qwen/Qwen3.6-35B-A3B",
         bridge_mode: "qwen_custom_execution",
         default_runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: None,
             max_seq_len: Some(262_144),
             max_seqs: 1,
             max_batch_size: 1,
@@ -375,7 +382,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "gemma_custom_execution",
         default_runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: None,
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -398,7 +404,7 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         },
     },
     LocalFamilyCatalogEntry {
-        family: engine::LocalModelFamily::NemotronCascade,
+        family: engine::LocalModelFamily::NemotronCascade2,
         parse_aliases: &[
             "nemotron",
             "nemotron_cascade",
@@ -412,7 +418,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "chatml_custom_execution",
         default_runtime: StaticRuntimeConfig {
             port: 1236,
-            proxy_port: None,
             max_seq_len: Some(8_192),
             max_seqs: 1,
             max_batch_size: 1,
@@ -448,7 +453,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "codex_responses_runtime",
         default_runtime: StaticRuntimeConfig {
             port: 1236,
-            proxy_port: None,
             max_seq_len: Some(65_536),
             max_seqs: 1,
             max_batch_size: 1,
@@ -477,7 +481,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "embedding_server",
         default_runtime: StaticRuntimeConfig {
             port: 1237,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 8,
             max_batch_size: 8,
@@ -511,7 +514,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "transcription_server",
         default_runtime: StaticRuntimeConfig {
             port: 1238,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 2,
             max_batch_size: 2,
@@ -545,7 +547,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "transcription_server",
         default_runtime: StaticRuntimeConfig {
             port: 1238,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 2,
             max_batch_size: 2,
@@ -574,7 +575,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "speech_server",
         default_runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -603,7 +603,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "speech_server",
         default_runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -637,7 +636,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         bridge_mode: "speech_server",
         default_runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: Some(8_192),
             max_seqs: 1,
             max_batch_size: 1,
@@ -670,7 +668,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1234,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -701,7 +698,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(262_144),
             max_seqs: 1,
             max_batch_size: 1,
@@ -732,7 +728,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(262_144),
             max_seqs: 1,
             max_batch_size: 1,
@@ -763,7 +758,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(262_144),
             max_seqs: 1,
             max_batch_size: 1,
@@ -787,45 +781,13 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         family: engine::LocalModelFamily::Qwen35Vision,
     },
     LocalModelCatalogEntry {
-        canonical_model: "Qwen/Qwen3.5-27B",
-        aliases: &[],
+        canonical_model: "Qwen/Qwen3.6-35B-A3B",
+        aliases: &["Qwen3.6-35B-A3B"],
         chat_family: Some(engine::ChatModelFamily::Qwen35),
-        runtime_manifest_slug: Some("qwen3_5_27b"),
+        runtime_manifest_slug: Some("qwen3_6_35b_a3b"),
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
-            max_seq_len: Some(262_144),
-            max_seqs: 1,
-            max_batch_size: 1,
-        },
-        profile: StaticFamilyProfile {
-            launcher_mode: "vision",
-            arch: None,
-            paged_attn: "auto",
-            pa_cache_type: Some("turboquant3"),
-            pa_memory_fraction: Some("0.80"),
-            pa_context_len: None,
-            max_seq_len: 262_144,
-            max_batch_size: 1,
-            max_seqs: 1,
-            isq: Some("Q4K"),
-            tensor_parallel_backend: None,
-            disable_nccl: false,
-            target_world_size: None,
-            preferred_gpu_count: Some(3),
-        },
-        family: engine::LocalModelFamily::Qwen35Vision,
-    },
-    LocalModelCatalogEntry {
-        canonical_model: "Qwen/Qwen3.5-35B-A3B",
-        aliases: &[],
-        chat_family: Some(engine::ChatModelFamily::Qwen35),
-        runtime_manifest_slug: Some("qwen3_5_35b_a3b"),
-        auxiliary_manifest_slug: None,
-        runtime: StaticRuntimeConfig {
-            port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(262_144),
             max_seqs: 1,
             max_batch_size: 1,
@@ -861,7 +823,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -897,7 +858,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -933,7 +893,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -969,7 +928,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
-            proxy_port: Some(12434),
             max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
@@ -1000,12 +958,11 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
             "nemotron cascade 2 30b a3b",
             "nemotron cascade 2",
         ],
-        chat_family: Some(engine::ChatModelFamily::NemotronCascade),
+        chat_family: Some(engine::ChatModelFamily::NemotronCascade2),
         runtime_manifest_slug: Some("nemotron_cascade_2_30b_a3b"),
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1236,
-            proxy_port: Some(12434),
             max_seq_len: Some(8_192),
             max_seqs: 1,
             max_batch_size: 1,
@@ -1026,7 +983,7 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
             target_world_size: None,
             preferred_gpu_count: Some(2),
         },
-        family: engine::LocalModelFamily::NemotronCascade,
+        family: engine::LocalModelFamily::NemotronCascade2,
     },
     LocalModelCatalogEntry {
         canonical_model: "zai-org/GLM-4.7-Flash",
@@ -1045,7 +1002,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1236,
-            proxy_port: Some(12434),
             max_seq_len: Some(2_048),
             max_seqs: 1,
             max_batch_size: 1,
@@ -1080,7 +1036,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("qwen3_embedding_0_6b"),
         runtime: StaticRuntimeConfig {
             port: 1237,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 8,
             max_batch_size: 8,
@@ -1116,7 +1071,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1238,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 2,
             max_batch_size: 2,
@@ -1150,7 +1104,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("voxtral_mini_4b_realtime_2602"),
         runtime: StaticRuntimeConfig {
             port: 1238,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 2,
             max_batch_size: 2,
@@ -1188,7 +1141,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("qwen3_vl_2b_instruct"),
         runtime: StaticRuntimeConfig {
             port: 1240,
-            proxy_port: None,
             max_seq_len: Some(32_768),
             max_seqs: 1,
             max_batch_size: 1,
@@ -1227,7 +1179,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -1262,7 +1213,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -1297,7 +1247,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -1333,7 +1282,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("qwen3_tts_12hz_0_6b_base"),
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -1369,7 +1317,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("qwen3_tts_12hz_0_6b_customvoice"),
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: None,
             max_seqs: 1,
             max_batch_size: 1,
@@ -1404,7 +1351,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         auxiliary_manifest_slug: Some("voxtral_4b_tts_2603"),
         runtime: StaticRuntimeConfig {
             port: 1239,
-            proxy_port: None,
             max_seq_len: Some(8_192),
             max_seqs: 1,
             max_batch_size: 1,
@@ -1462,15 +1408,6 @@ const REMOTE_CHAT_FAMILY_REGISTRY: &[RemoteChatFamilyEntry] = &[
     RemoteChatFamilyEntry {
         model: "z-ai/glm-5.1",
         chat_family: engine::ChatModelFamily::Glm47Flash,
-    },
-    // Nemotron family
-    RemoteChatFamilyEntry {
-        model: "nvidia/nemotron-3-super-120b-a12b",
-        chat_family: engine::ChatModelFamily::NemotronCascade,
-    },
-    RemoteChatFamilyEntry {
-        model: "nvidia/nemotron-3-super-120b-a12b:free",
-        chat_family: engine::ChatModelFamily::NemotronCascade,
     },
     // MiniMax family
     RemoteChatFamilyEntry {
@@ -1714,16 +1651,8 @@ const MODEL_OPS_METADATA_REGISTRY: &[ModelOpsMetadataEntry] = &[
         gpu_short_label: None,
     },
     ModelOpsMetadataEntry {
-        canonical_model: "Qwen/Qwen3.5-27B",
-        process_aliases: &["Qwen/Qwen3.5-27B", "Qwen3.5-27B"],
-        startup_wait_secs: 1_200,
-        default_tokens_per_second: Some(45.0),
-        estimated_chat_base_memory_mb: Some(17_500),
-        gpu_short_label: None,
-    },
-    ModelOpsMetadataEntry {
-        canonical_model: "Qwen/Qwen3.5-35B-A3B",
-        process_aliases: &["Qwen/Qwen3.5-35B-A3B", "Qwen3.5-35B-A3B"],
+        canonical_model: "Qwen/Qwen3.6-35B-A3B",
+        process_aliases: &["Qwen/Qwen3.6-35B-A3B", "Qwen3.6-35B-A3B"],
         startup_wait_secs: 1_500,
         default_tokens_per_second: Some(38.0),
         estimated_chat_base_memory_mb: Some(20_500),
@@ -1920,7 +1849,6 @@ fn materialize_runtime_config(
         family,
         model: model.to_string(),
         port: runtime.port,
-        proxy_port: runtime.proxy_port,
         max_seq_len: runtime.max_seq_len,
         max_seqs: runtime.max_seqs,
         max_batch_size: runtime.max_batch_size,

@@ -8,7 +8,7 @@ pub(crate) mod gpt_oss;
 pub(crate) mod kimi;
 pub(crate) mod minimax;
 pub(crate) mod mistral;
-pub(crate) mod nemotron;
+pub(crate) mod nemotron_cascade2;
 pub(crate) mod qwen35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +22,7 @@ pub enum ResponsesModelAdapter {
     GptOss,
     Qwen35,
     Gemma4,
-    Nemotron,
+    NemotronCascade2,
     Glm47,
     MiniMax,
     Mistral,
@@ -64,7 +64,7 @@ impl ResponsesModelAdapter {
             engine::ChatModelFamily::GptOss => Some(Self::GptOss),
             engine::ChatModelFamily::Qwen35 => Some(Self::Qwen35),
             engine::ChatModelFamily::Gemma4 => Some(Self::Gemma4),
-            engine::ChatModelFamily::NemotronCascade => Some(Self::Nemotron),
+            engine::ChatModelFamily::NemotronCascade2 => Some(Self::NemotronCascade2),
             engine::ChatModelFamily::Glm47Flash => Some(Self::Glm47),
             engine::ChatModelFamily::MiniMax => Some(Self::MiniMax),
             engine::ChatModelFamily::Mistral => Some(Self::Mistral),
@@ -77,7 +77,7 @@ impl ResponsesModelAdapter {
             Self::GptOss => gpt_oss::adapter_id(),
             Self::Qwen35 => qwen35::adapter_id(),
             Self::Gemma4 => gemma4::adapter_id(),
-            Self::Nemotron => nemotron::adapter_id(),
+            Self::NemotronCascade2 => nemotron_cascade2::adapter_id(),
             Self::Glm47 => glm47::adapter_id(),
             Self::MiniMax => minimax::adapter_id(),
             Self::Mistral => mistral::adapter_id(),
@@ -90,7 +90,7 @@ impl ResponsesModelAdapter {
             Self::GptOss => gpt_oss::transport_kind(),
             Self::Qwen35 => qwen35::transport_kind(),
             Self::Gemma4 => gemma4::transport_kind(),
-            Self::Nemotron => nemotron::transport_kind(),
+            Self::NemotronCascade2 => nemotron_cascade2::transport_kind(),
             Self::Glm47 => glm47::transport_kind(),
             Self::MiniMax => minimax::transport_kind(),
             Self::Mistral => mistral::transport_kind(),
@@ -103,7 +103,7 @@ impl ResponsesModelAdapter {
             Self::GptOss => gpt_oss::upstream_path(),
             Self::Qwen35 => qwen35::upstream_path(),
             Self::Gemma4 => gemma4::upstream_path(),
-            Self::Nemotron => nemotron::upstream_path(),
+            Self::NemotronCascade2 => nemotron_cascade2::upstream_path(),
             Self::Glm47 => glm47::upstream_path(),
             Self::MiniMax => minimax::upstream_path(),
             Self::Mistral => mistral::upstream_path(),
@@ -111,7 +111,7 @@ impl ResponsesModelAdapter {
         }
     }
 
-    pub fn local_codex_exec_policy(self, model: &str) -> LocalCodexExecPolicy {
+    pub fn local_ctox_exec_policy(self, model: &str) -> LocalCodexExecPolicy {
         LocalCodexExecPolicy {
             adapter: self,
             model: model.trim().to_string(),
@@ -154,7 +154,7 @@ impl ResponsesModelAdapter {
             Self::GptOss => gpt_oss::rewrite_request(raw),
             Self::Qwen35 => qwen35::rewrite_request(raw),
             Self::Gemma4 => gemma4::rewrite_request(raw),
-            Self::Nemotron => nemotron::rewrite_request(raw),
+            Self::NemotronCascade2 => nemotron_cascade2::rewrite_request(raw),
             Self::Glm47 => glm47::rewrite_request(raw),
             Self::MiniMax => minimax::rewrite_request(raw),
             Self::Mistral => mistral::rewrite_request(raw),
@@ -182,9 +182,11 @@ impl ResponsesModelAdapter {
             Self::Gemma4 => {
                 gemma4::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
-            Self::Nemotron => {
-                nemotron::rewrite_success_response(raw, fallback_model, exact_text_override)
-            }
+            Self::NemotronCascade2 => nemotron_cascade2::rewrite_success_response(
+                raw,
+                fallback_model,
+                exact_text_override,
+            ),
             Self::Glm47 => {
                 glm47::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
@@ -194,9 +196,7 @@ impl ResponsesModelAdapter {
             Self::Mistral => {
                 mistral::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
-            Self::Kimi => {
-                kimi::rewrite_success_response(raw, fallback_model, exact_text_override)
-            }
+            Self::Kimi => kimi::rewrite_success_response(raw, fallback_model, exact_text_override),
         }
     }
 
@@ -211,7 +211,7 @@ impl ResponsesModelAdapter {
             }
             Self::Qwen35
             | Self::Gemma4
-            | Self::Nemotron
+            | Self::NemotronCascade2
             | Self::Glm47
             | Self::MiniMax
             | Self::Mistral
@@ -229,8 +229,8 @@ pub fn runtime_adapter_tuning_for_local_plan(
         Some(ResponsesModelAdapter::GptOss) => gpt_oss::runtime_tuning(preset, max_output_tokens),
         Some(ResponsesModelAdapter::Qwen35) => qwen35::runtime_tuning(preset, max_output_tokens),
         Some(ResponsesModelAdapter::Gemma4) => gemma4::runtime_tuning(preset, max_output_tokens),
-        Some(ResponsesModelAdapter::Nemotron) => {
-            nemotron::runtime_tuning(preset, max_output_tokens)
+        Some(ResponsesModelAdapter::NemotronCascade2) => {
+            nemotron_cascade2::runtime_tuning(preset, max_output_tokens)
         }
         Some(ResponsesModelAdapter::Glm47) => glm47::runtime_tuning(preset, max_output_tokens),
         Some(ResponsesModelAdapter::MiniMax) => minimax::runtime_tuning(preset, max_output_tokens),
@@ -262,8 +262,12 @@ impl ResponsesAdapterResponsePlan {
         raw: &[u8],
         fallback_model: Option<&str>,
     ) -> anyhow::Result<Vec<u8>> {
-        self.adapter
-            .rewrite_success_response(raw, fallback_model, self.exact_text_override(), self.remote)
+        self.adapter.rewrite_success_response(
+            raw,
+            fallback_model,
+            self.exact_text_override(),
+            self.remote,
+        )
     }
 
     pub fn build_followup_request(
@@ -277,11 +281,7 @@ impl ResponsesAdapterResponsePlan {
 }
 
 impl ResolvedResponsesAdapterRoute {
-    pub fn resolve(
-        model: Option<&str>,
-        raw: &[u8],
-        remote: bool,
-    ) -> anyhow::Result<Option<Self>> {
+    pub fn resolve(model: Option<&str>, raw: &[u8], remote: bool) -> anyhow::Result<Option<Self>> {
         let Some(model) = model else {
             return Ok(None);
         };
@@ -311,7 +311,7 @@ impl ResolvedResponsesAdapterRoute {
 impl LocalCodexExecPolicy {
     pub fn resolve(model: &str) -> Option<Self> {
         let adapter = ResponsesModelAdapter::from_model(model)?;
-        Some(adapter.local_codex_exec_policy(model))
+        Some(adapter.local_ctox_exec_policy(model))
     }
 
     pub fn compact_instructions(&self) -> &'static str {
@@ -319,7 +319,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::GptOss => gpt_oss::compact_instructions(),
             ResponsesModelAdapter::Qwen35 => qwen35::compact_instructions(),
             ResponsesModelAdapter::Gemma4 => gemma4::compact_instructions(),
-            ResponsesModelAdapter::Nemotron => nemotron::compact_instructions(),
+            ResponsesModelAdapter::NemotronCascade2 => nemotron_cascade2::compact_instructions(),
             ResponsesModelAdapter::Glm47 => glm47::compact_instructions(),
             ResponsesModelAdapter::MiniMax => minimax::compact_instructions(),
             ResponsesModelAdapter::Mistral => mistral::compact_instructions(),
@@ -332,7 +332,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::GptOss => gpt_oss::reasoning_effort_override(),
             ResponsesModelAdapter::Qwen35 => qwen35::reasoning_effort_override(),
             ResponsesModelAdapter::Gemma4 => gemma4::reasoning_effort_override(),
-            ResponsesModelAdapter::Nemotron => nemotron::reasoning_effort_override(),
+            ResponsesModelAdapter::NemotronCascade2 => {
+                nemotron_cascade2::reasoning_effort_override()
+            }
             ResponsesModelAdapter::Glm47 => glm47::reasoning_effort_override(),
             ResponsesModelAdapter::MiniMax => minimax::reasoning_effort_override(),
             ResponsesModelAdapter::Mistral => mistral::reasoning_effort_override(),
@@ -345,7 +347,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::GptOss => gpt_oss::unified_exec_enabled(),
             ResponsesModelAdapter::Qwen35 => qwen35::unified_exec_enabled(),
             ResponsesModelAdapter::Gemma4 => gemma4::unified_exec_enabled(),
-            ResponsesModelAdapter::Nemotron => nemotron::unified_exec_enabled(),
+            ResponsesModelAdapter::NemotronCascade2 => nemotron_cascade2::unified_exec_enabled(),
             ResponsesModelAdapter::Glm47 => glm47::unified_exec_enabled(),
             ResponsesModelAdapter::MiniMax => minimax::unified_exec_enabled(),
             ResponsesModelAdapter::Mistral => mistral::unified_exec_enabled(),
@@ -358,7 +360,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::GptOss => gpt_oss::uses_ctox_web_stack(),
             ResponsesModelAdapter::Qwen35 => qwen35::uses_ctox_web_stack(),
             ResponsesModelAdapter::Gemma4 => gemma4::uses_ctox_web_stack(),
-            ResponsesModelAdapter::Nemotron => nemotron::uses_ctox_web_stack(),
+            ResponsesModelAdapter::NemotronCascade2 => nemotron_cascade2::uses_ctox_web_stack(),
             ResponsesModelAdapter::Glm47 => glm47::uses_ctox_web_stack(),
             ResponsesModelAdapter::MiniMax => minimax::uses_ctox_web_stack(),
             ResponsesModelAdapter::Mistral => mistral::uses_ctox_web_stack(),
@@ -377,8 +379,8 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Gemma4 => {
                 gemma4::compact_limit(self.model.as_str(), realized_context)
             }
-            ResponsesModelAdapter::Nemotron => {
-                nemotron::compact_limit(self.model.as_str(), realized_context)
+            ResponsesModelAdapter::NemotronCascade2 => {
+                nemotron_cascade2::compact_limit(self.model.as_str(), realized_context)
             }
             ResponsesModelAdapter::Glm47 => {
                 glm47::compact_limit(self.model.as_str(), realized_context)
@@ -452,11 +454,11 @@ mod tests {
 
     #[test]
     fn local_exec_policy_keeps_model_specific_compact_limits_in_adapter_layer() {
-        let qwen = LocalCodexExecPolicy::resolve("Qwen/Qwen3.5-27B")
+        let qwen = LocalCodexExecPolicy::resolve("Qwen/Qwen3.6-35B-A3B")
             .expect("qwen local exec policy should resolve");
         let glm = LocalCodexExecPolicy::resolve("zai-org/GLM-4.7-Flash")
             .expect("glm local exec policy should resolve");
-        assert_eq!(qwen.compact_limit(131_072), 2_560);
+        assert_eq!(qwen.compact_limit(131_072), 1_536);
         assert_eq!(glm.compact_limit(131_072), 1_280);
     }
 }

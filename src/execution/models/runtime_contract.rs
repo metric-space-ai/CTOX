@@ -2,7 +2,6 @@
 // Modified for CTOX from local inference runtime contract work.
 // License: Apache-2.0
 
-use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
@@ -12,10 +11,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const CHAT_CAPACITY_CONTRACT_RELATIVE_PATH: &str = "runtime/chat_capacity_contract.json";
-const RUNTIME_OWNERSHIP_STATE_RELATIVE_PATH: &str = "runtime/runtime_ownership.json";
+use crate::persistence;
+
 const LEGACY_GPU_LEASE_LEDGER_RELATIVE_PATH: &str = "runtime/backend_gpu_leases.json";
-const PROXY_PID_FILE_NAME: &str = "ctox_proxy.pid";
+const CHAT_CAPACITY_CONTRACT_STORAGE_KEY: &str = "chat_capacity_contract";
+const RUNTIME_OWNERSHIP_STATE_STORAGE_KEY: &str = "runtime_ownership_state";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -131,19 +131,8 @@ impl BackendRuntimeResidency {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ProxyRuntimeResidency {
-    pub phase: RuntimeResidencyPhase,
-    pub pid: Option<u32>,
-    pub host: String,
-    pub port: u16,
-    pub health_path: String,
-    pub updated_at_epoch_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeOwnershipState {
     pub version: u32,
-    pub proxy: Option<ProxyRuntimeResidency>,
     pub workloads: Vec<BackendRuntimeResidency>,
 }
 
@@ -151,92 +140,42 @@ impl Default for RuntimeOwnershipState {
     fn default() -> Self {
         Self {
             version: 1,
-            proxy: None,
             workloads: Vec::new(),
         }
     }
 }
 
-pub fn chat_capacity_contract_path(root: &Path) -> PathBuf {
-    root.join(CHAT_CAPACITY_CONTRACT_RELATIVE_PATH)
-}
-
-pub fn runtime_ownership_state_path(root: &Path) -> PathBuf {
-    root.join(RUNTIME_OWNERSHIP_STATE_RELATIVE_PATH)
-}
-
 pub fn persist_chat_capacity_contract(root: &Path, contract: &ChatCapacityContract) -> Result<()> {
-    let path = chat_capacity_contract_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create chat contract dir {}", parent.display()))?;
-    }
-    let bytes =
-        serde_json::to_vec_pretty(contract).context("failed to encode chat capacity contract")?;
-    std::fs::write(&path, bytes)
-        .with_context(|| format!("failed to write chat capacity contract {}", path.display()))
+    persistence::store_json_payload(root, CHAT_CAPACITY_CONTRACT_STORAGE_KEY, Some(contract))
 }
 
 pub fn load_chat_capacity_contract(root: &Path) -> Result<Option<ChatCapacityContract>> {
-    let path = chat_capacity_contract_path(root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read chat capacity contract {}", path.display()))?;
-    let contract = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse chat capacity contract {}", path.display()))?;
-    Ok(Some(contract))
+    persistence::load_json_payload(root, CHAT_CAPACITY_CONTRACT_STORAGE_KEY)
 }
 
 pub fn clear_chat_capacity_contract(root: &Path) -> Result<()> {
-    let path = chat_capacity_contract_path(root);
-    let _ = std::fs::remove_file(&path);
-    Ok(())
+    persistence::store_json_payload::<ChatCapacityContract>(
+        root,
+        CHAT_CAPACITY_CONTRACT_STORAGE_KEY,
+        None,
+    )
 }
 
 pub fn load_runtime_ownership_state(root: &Path) -> Result<RuntimeOwnershipState> {
-    let path = runtime_ownership_state_path(root);
     let legacy_path = legacy_backend_gpu_lease_ledger_path(root);
-    let path_exists = path.exists();
     let legacy_exists = legacy_path.exists();
-    let mut state = if path.exists() {
-        let bytes = std::fs::read(&path).with_context(|| {
-            format!("failed to read runtime ownership state {}", path.display())
-        })?;
-        let mut decoded: RuntimeOwnershipState =
-            serde_json::from_slice(&bytes).with_context(|| {
-                format!("failed to parse runtime ownership state {}", path.display())
-            })?;
-        if decoded.version == 0 {
-            decoded.version = 1;
-        }
-        decoded
-    } else {
-        migrate_legacy_backend_gpu_lease_ledger(root)?
-    };
+    let mut state = persistence::load_json_payload(root, RUNTIME_OWNERSHIP_STATE_STORAGE_KEY)?
+        .unwrap_or_else(RuntimeOwnershipState::default);
     let original = state.clone();
     prune_dead_runtime_residency(root, &mut state);
-    if legacy_exists || (path_exists && state != original) {
+    if legacy_exists || state != original {
         persist_runtime_ownership_state(root, &state)?;
     }
     Ok(state)
 }
 
 pub fn persist_runtime_ownership_state(root: &Path, state: &RuntimeOwnershipState) -> Result<()> {
-    let path = runtime_ownership_state_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create runtime ownership dir {}",
-                parent.display()
-            )
-        })?;
-    }
-    let bytes =
-        serde_json::to_vec_pretty(state).context("failed to encode runtime ownership state")?;
-    std::fs::write(&path, bytes)
-        .with_context(|| format!("failed to write runtime ownership state {}", path.display()))?;
+    persistence::store_json_payload(root, RUNTIME_OWNERSHIP_STATE_STORAGE_KEY, Some(state))?;
     let _ = std::fs::remove_file(legacy_backend_gpu_lease_ledger_path(root));
     Ok(())
 }
@@ -255,18 +194,6 @@ pub fn sync_backend_runtime_residency(
 pub fn release_backend_runtime_residency(root: &Path, role: BackendRole) -> Result<()> {
     let mut state = load_runtime_ownership_state(root)?;
     state.workloads.retain(|entry| entry.role != role);
-    persist_runtime_ownership_state(root, &state)
-}
-
-pub fn sync_proxy_runtime_residency(root: &Path, residency: ProxyRuntimeResidency) -> Result<()> {
-    let mut state = load_runtime_ownership_state(root)?;
-    state.proxy = Some(residency);
-    persist_runtime_ownership_state(root, &state)
-}
-
-pub fn release_proxy_runtime_residency(root: &Path) -> Result<()> {
-    let mut state = load_runtime_ownership_state(root)?;
-    state.proxy = None;
     persist_runtime_ownership_state(root, &state)
 }
 
@@ -306,40 +233,10 @@ pub fn current_epoch_secs() -> u64 {
         .as_secs()
 }
 
-fn migrate_legacy_backend_gpu_lease_ledger(root: &Path) -> Result<RuntimeOwnershipState> {
-    let path = legacy_backend_gpu_lease_ledger_path(root);
-    if !path.exists() {
-        return Ok(RuntimeOwnershipState::default());
-    }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read backend GPU lease ledger {}", path.display()))?;
-    let ledger: BackendGpuLeaseLedger = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to parse backend GPU lease ledger {}",
-            path.display()
-        )
-    })?;
-    let mut state = RuntimeOwnershipState::default();
-    state.workloads = ledger
-        .leases
-        .into_iter()
-        .map(|lease| BackendRuntimeResidency::from_lease(lease, RuntimeResidencyPhase::Active))
-        .collect();
-    Ok(state)
-}
-
 fn prune_dead_runtime_residency(root: &Path, state: &mut RuntimeOwnershipState) {
     state
         .workloads
         .retain(|entry| backend_residency_is_alive(root, entry));
-    if state
-        .proxy
-        .as_ref()
-        .map(|entry| !proxy_residency_is_alive(root, entry))
-        .unwrap_or(false)
-    {
-        state.proxy = None;
-    }
 }
 
 fn backend_residency_is_alive(root: &Path, residency: &BackendRuntimeResidency) -> bool {
@@ -347,14 +244,6 @@ fn backend_residency_is_alive(root: &Path, residency: &BackendRuntimeResidency) 
         return false;
     };
     let pid_path = root.join("runtime").join(residency.role.pid_file_name());
-    pid_path.exists() && process_id_is_alive(pid)
-}
-
-fn proxy_residency_is_alive(root: &Path, residency: &ProxyRuntimeResidency) -> bool {
-    let Some(pid) = residency.pid else {
-        return false;
-    };
-    let pid_path = root.join("runtime").join(PROXY_PID_FILE_NAME);
     pid_path.exists() && process_id_is_alive(pid)
 }
 
@@ -405,23 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_ownership_tracks_proxy_and_backend_residency() {
+    fn runtime_ownership_tracks_backend_residency() {
         let root = make_temp_root();
         write_pid_file(&root, BackendRole::Chat.pid_file_name());
-        write_pid_file(&root, PROXY_PID_FILE_NAME);
-
-        sync_proxy_runtime_residency(
-            &root,
-            ProxyRuntimeResidency {
-                phase: RuntimeResidencyPhase::Active,
-                pid: Some(std::process::id()),
-                host: "127.0.0.1".to_string(),
-                port: 12434,
-                health_path: "/ctox/telemetry".to_string(),
-                updated_at_epoch_secs: current_epoch_secs(),
-            },
-        )
-        .unwrap();
         sync_backend_runtime_residency(
             &root,
             BackendRuntimeResidency {
@@ -441,7 +316,6 @@ mod tests {
         .unwrap();
 
         let state = load_runtime_ownership_state(&root).unwrap();
-        assert_eq!(state.proxy.as_ref().map(|entry| entry.port), Some(12434));
         assert_eq!(state.workloads.len(), 1);
         assert_eq!(state.workloads[0].port, Some(1234));
         assert_eq!(
@@ -476,7 +350,12 @@ mod tests {
         let state = load_runtime_ownership_state(&root).unwrap();
         assert_eq!(state.workloads.len(), 1);
         assert_eq!(state.workloads[0].role, BackendRole::Embedding);
-        assert!(runtime_ownership_state_path(&root).exists());
+        assert!(persistence::load_json_payload::<RuntimeOwnershipState>(
+            &root,
+            RUNTIME_OWNERSHIP_STATE_STORAGE_KEY
+        )
+        .unwrap()
+        .is_some());
         assert!(!legacy_path.exists());
         assert_eq!(
             reserved_gpu_mb_by_role(&root, None)
@@ -491,20 +370,6 @@ mod tests {
     fn releasing_runtime_residency_clears_entries() {
         let root = make_temp_root();
         write_pid_file(&root, BackendRole::Tts.pid_file_name());
-        write_pid_file(&root, PROXY_PID_FILE_NAME);
-
-        sync_proxy_runtime_residency(
-            &root,
-            ProxyRuntimeResidency {
-                phase: RuntimeResidencyPhase::Starting,
-                pid: Some(std::process::id()),
-                host: "127.0.0.1".to_string(),
-                port: 12434,
-                health_path: "/ctox/telemetry".to_string(),
-                updated_at_epoch_secs: current_epoch_secs(),
-            },
-        )
-        .unwrap();
         persist_backend_gpu_lease(
             &root,
             BackendGpuLease {
@@ -517,11 +382,9 @@ mod tests {
         )
         .unwrap();
 
-        release_proxy_runtime_residency(&root).unwrap();
         release_backend_runtime_residency(&root, BackendRole::Tts).unwrap();
 
         let state = load_runtime_ownership_state(&root).unwrap();
-        assert!(state.proxy.is_none());
         assert!(state.workloads.is_empty());
     }
 }

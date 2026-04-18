@@ -32,14 +32,14 @@ zeroize = "1.8"
 zbus = "5.14"
 
 # Phase 1b: direct-session path — in-process codex core library
-codex-core                = { path = "tools/agent-runtime/core" }
-codex-app-server-client   = { path = "tools/agent-runtime/app-server-client" }
-codex-app-server-protocol = { path = "tools/agent-runtime/app-server-protocol" }
-codex-protocol            = { path = "tools/agent-runtime/protocol" }
-codex-arg0                = { path = "tools/agent-runtime/arg0" }
-codex-feedback            = { path = "tools/agent-runtime/feedback" }
-codex-cloud-requirements  = { path = "tools/agent-runtime/cloud-requirements" }
-codex-utils-absolute-path = { path = "tools/agent-runtime/utils/absolute-path" }
+ctox-core                = { path = "src/inference/core" }
+ctox-app-server-client   = { path = "src/inference/app-server-client" }
+ctox-app-server-protocol = { path = "src/inference/app-server-protocol" }
+ctox-protocol            = { path = "src/inference/protocol" }
+ctox-arg0                = { path = "src/inference/arg0" }
+ctox-feedback            = { path = "src/inference/feedback" }
+ctox-cloud-requirements  = { path = "src/inference/cloud-requirements" }
+ctox-utils-absolute-path = { path = "src/inference/utils/absolute-path" }
 toml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
@@ -56,7 +56,7 @@ windows-sys = { version = "0.59", features = [
 tempfile = "3"
 
 [patch.crates-io]
-# Mirror of tools/agent-runtime/Cargo.toml patch.crates-io so that codex-* path
+# Mirror of src/inference/Cargo.toml patch.crates-io so that codex-* path
 # dependencies resolve against the same forks agent-runtime uses.
 crossterm = { git = "https://github.com/nornagon/crossterm", branch = "nornagon/color-query" }
 ratatui = { git = "https://github.com/nornagon/ratatui", branch = "nornagon-v0.29.0-patch" }

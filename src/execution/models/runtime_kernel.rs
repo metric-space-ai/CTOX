@@ -1,7 +1,5 @@
 use anyhow::Result;
-#[cfg(unix)]
 use sha2::Digest;
-#[cfg(unix)]
 use sha2::Sha256;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
@@ -51,7 +49,7 @@ pub struct ResolvedRuntimeBinding {
     pub request_model: String,
     pub port: u16,
     pub base_url: String,
-    pub socket_path: Option<String>,
+    pub transport_endpoint: Option<String>,
     pub transport: LocalTransport,
     pub health_path: &'static str,
     pub launcher_kind: RuntimeLauncherKind,
@@ -60,9 +58,7 @@ pub struct ResolvedRuntimeBinding {
 }
 
 #[derive(Debug, Clone)]
-pub struct ResolvedProxyRuntime {
-    pub listen_host: String,
-    pub listen_port: u16,
+pub struct ResolvedGatewayRuntime {
     pub upstream_base_url: String,
     pub active_model: Option<String>,
     pub embedding_base_url: String,
@@ -79,7 +75,7 @@ pub struct ResolvedProxyRuntime {
 pub struct InferenceRuntimeKernel {
     pub state: runtime_state::InferenceRuntimeState,
     pub ownership: runtime_contract::RuntimeOwnershipState,
-    pub proxy: ResolvedProxyRuntime,
+    pub gateway: ResolvedGatewayRuntime,
     pub primary_generation: Option<ResolvedRuntimeBinding>,
     pub embedding: Option<ResolvedRuntimeBinding>,
     pub transcription: Option<ResolvedRuntimeBinding>,
@@ -87,15 +83,15 @@ pub struct InferenceRuntimeKernel {
     pub vision: Option<ResolvedRuntimeBinding>,
 }
 
-pub fn managed_runtime_socket_path(root: &Path, workload: InferenceWorkloadRole) -> PathBuf {
-    let socket_name = match workload {
+pub fn managed_runtime_ipc_path(root: &Path, workload: InferenceWorkloadRole) -> PathBuf {
+    let endpoint_name = match workload {
         InferenceWorkloadRole::PrimaryGeneration => "primary_generation.sock",
         InferenceWorkloadRole::Embedding => "embedding.sock",
         InferenceWorkloadRole::Transcription => "transcription.sock",
         InferenceWorkloadRole::Speech => "speech.sock",
         InferenceWorkloadRole::Vision => "vision.sock",
     };
-    let preferred = root.join("runtime/sockets").join(socket_name);
+    let preferred = root.join("runtime/sockets").join(endpoint_name);
     #[cfg(unix)]
     {
         const MAX_UNIX_SOCKET_PATH_LEN: usize = 100;
@@ -105,10 +101,32 @@ pub fn managed_runtime_socket_path(root: &Path, workload: InferenceWorkloadRole)
             let digest = format!("{:x}", hasher.finalize());
             return Path::new("/tmp")
                 .join(format!("ctox-sock-{}", &digest[..12]))
-                .join(socket_name);
+                .join(endpoint_name);
         }
     }
     preferred
+}
+
+pub fn managed_runtime_pipe_name(root: &Path, workload: InferenceWorkloadRole) -> String {
+    let role_slug = match workload {
+        InferenceWorkloadRole::PrimaryGeneration => "primary_generation",
+        InferenceWorkloadRole::Embedding => "embedding",
+        InferenceWorkloadRole::Transcription => "transcription",
+        InferenceWorkloadRole::Speech => "speech",
+        InferenceWorkloadRole::Vision => "vision",
+    };
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(root.display().to_string().as_bytes())
+    );
+    format!("ctox-{}-{}", &digest[..12], role_slug)
+}
+
+pub fn managed_runtime_transport(root: &Path, workload: InferenceWorkloadRole) -> LocalTransport {
+    LocalTransport::ipc_for_host(
+        managed_runtime_ipc_path(root, workload),
+        managed_runtime_pipe_name(root, workload),
+    )
 }
 
 pub fn preferred_auxiliary_selection_for_host(
@@ -156,10 +174,9 @@ impl InferenceRuntimeKernel {
         let upstream_base_url = primary_generation
             .as_ref()
             .map(|binding| binding.base_url.clone())
+            .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| state.upstream_base_url.clone());
-        let proxy = ResolvedProxyRuntime {
-            listen_host: state.proxy_host.clone(),
-            listen_port: state.proxy_port,
+        let gateway = ResolvedGatewayRuntime {
             upstream_base_url,
             active_model: state.active_model.clone(),
             embedding_base_url: embedding
@@ -191,7 +208,7 @@ impl InferenceRuntimeKernel {
         Ok(Self {
             state,
             ownership,
-            proxy,
+            gateway,
             primary_generation,
             embedding,
             transcription,
@@ -203,26 +220,23 @@ impl InferenceRuntimeKernel {
     pub fn turn_context_tokens(&self) -> i64 {
         self.state
             .realized_context_tokens
+            .or(self.state.configured_context_tokens)
             .map(|value| value as i64)
-            .unwrap_or(131_072)
+            .unwrap_or(crate::inference::runtime_plan::default_chat_context_tokens() as i64)
     }
 
     pub fn active_model(&self) -> Option<&str> {
         self.state.active_model.as_deref()
     }
 
-    pub fn responses_gateway_base_url(&self) -> String {
-        format!(
-            "http://{}:{}",
-            self.proxy.listen_host, self.proxy.listen_port
-        )
-    }
-
+    /// Canonical Responses-facing base URL that CTOX hands to ctox-core and
+    /// other internal callers. Provider-native wire formats stay behind
+    /// adapters; internal call sites should not bypass this contract.
     pub fn internal_responses_base_url(&self) -> String {
         if let Some(binding) = self.primary_generation.as_ref() {
             return responses_api_base_url(&binding.base_url);
         }
-        responses_api_base_url(&self.proxy.upstream_base_url)
+        responses_api_base_url(&self.gateway.upstream_base_url)
     }
 
     pub fn auxiliary_base_url(&self, role: engine::AuxiliaryRole) -> Option<&str> {
@@ -281,12 +295,8 @@ fn resolve_primary_generation(
                 .or_else(|| runtime_env::env_or_config(root, "CTOX_ENGINE_CUDA_VISIBLE_DEVICES"))
         }
     };
-    let socket_path_buf =
-        managed_runtime_socket_path(root, InferenceWorkloadRole::PrimaryGeneration);
-    let transport = LocalTransport::default_for_host(Some(socket_path_buf), "127.0.0.1", port);
-    let socket_path = transport
-        .unix_socket_path()
-        .map(|path| path.display().to_string());
+    let transport = managed_runtime_transport(root, InferenceWorkloadRole::PrimaryGeneration);
+    let transport_endpoint = Some(transport.endpoint_string());
     let base_url = transport.http_base_url().unwrap_or_default();
     Some(ResolvedRuntimeBinding {
         workload: InferenceWorkloadRole::PrimaryGeneration,
@@ -294,7 +304,7 @@ fn resolve_primary_generation(
         request_model,
         port,
         base_url,
-        socket_path,
+        transport_endpoint,
         transport,
         health_path: "/health",
         launcher_kind,
@@ -331,23 +341,20 @@ fn resolve_auxiliary(
         engine::AuxiliaryRole::Tts => InferenceWorkloadRole::Speech,
         engine::AuxiliaryRole::Vision => InferenceWorkloadRole::Vision,
     };
-    let socket_path_buf = managed_runtime_socket_path(root, workload);
-    let transport = LocalTransport::default_for_host(Some(socket_path_buf), "127.0.0.1", port);
-    let socket_path = transport
-        .unix_socket_path()
-        .map(|path| path.display().to_string());
-    let base_url = auxiliary_state.base_url.clone().unwrap_or_else(|| {
-        transport
-            .http_base_url()
-            .unwrap_or_else(|| format!("http://127.0.0.1:{port}"))
-    });
+    let transport = managed_runtime_transport(root, workload);
+    let transport_endpoint = Some(transport.endpoint_string());
+    let base_url = auxiliary_state
+        .base_url
+        .clone()
+        .or_else(|| transport.http_base_url())
+        .unwrap_or_default();
     Some(ResolvedRuntimeBinding {
         workload,
         display_model: selection.choice.to_string(),
         request_model: selection.request_model.to_string(),
         port,
         base_url,
-        socket_path,
+        transport_endpoint,
         transport,
         health_path: "/health",
         launcher_kind: RuntimeLauncherKind::Engine,
@@ -390,10 +397,9 @@ mod tests {
                 active_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_port: Some(2234),
+                configured_context_tokens: Some(65_536),
                 realized_context_tokens: Some(65_536),
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 22434,
-                upstream_base_url: "http://127.0.0.1:2234".to_string(),
+                upstream_base_url: runtime_state::local_upstream_base_url(2234),
                 local_preset: Some("Quality".to_string()),
                 boost: runtime_state::BoostRuntimeState::default(),
                 adapter_tuning: runtime_state::AdapterRuntimeTuning::default(),
@@ -416,7 +422,6 @@ mod tests {
         );
         assert!(!operator_settings.contains_key("CTOX_CHAT_MODEL"));
         assert!(!operator_settings.contains_key("CTOX_ACTIVE_MODEL"));
-        assert_eq!(resolved.proxy.listen_port, 22434);
         assert_eq!(
             resolved
                 .primary_generation
@@ -431,14 +436,7 @@ mod tests {
                 .map(|binding| binding.base_url.as_str()),
             Some("")
         );
-        assert_eq!(
-            resolved.internal_responses_base_url(),
-            "/v1"
-        );
-        assert_eq!(
-            resolved.responses_gateway_base_url(),
-            "http://127.0.0.1:22434"
-        );
+        assert_eq!(resolved.internal_responses_base_url(), "/v1");
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -457,9 +455,8 @@ mod tests {
                 active_model: Some("gpt-5.4".to_string()),
                 engine_model: None,
                 engine_port: None,
+                configured_context_tokens: None,
                 realized_context_tokens: None,
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 12434,
                 upstream_base_url: "https://api.openai.com".to_string(),
                 local_preset: None,
                 boost: runtime_state::BoostRuntimeState::default(),
@@ -479,7 +476,7 @@ mod tests {
             "https://api.openai.com/v1"
         );
         assert_eq!(
-            resolved.proxy.upstream_base_url,
+            resolved.gateway.upstream_base_url,
             "https://api.openai.com".to_string()
         );
         assert_eq!(resolved.active_model(), Some("gpt-5.4"));
@@ -501,10 +498,9 @@ mod tests {
                 active_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_port: Some(1234),
+                configured_context_tokens: Some(131_072),
                 realized_context_tokens: Some(131_072),
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 12434,
-                upstream_base_url: "http://127.0.0.1:1234".to_string(),
+                upstream_base_url: runtime_state::local_upstream_base_url(1234),
                 local_preset: Some("Quality".to_string()),
                 boost: runtime_state::BoostRuntimeState::default(),
                 adapter_tuning: runtime_state::AdapterRuntimeTuning::default(),
@@ -526,7 +522,7 @@ mod tests {
                         "speaches-ai/piper-en_US-lessac-medium [CPU EN]".to_string(),
                     ),
                     port: Some(2239),
-                    base_url: Some("http://127.0.0.1:2239".to_string()),
+                    base_url: None,
                 },
                 vision: runtime_state::AuxiliaryRuntimeState::default(),
             },
@@ -558,7 +554,7 @@ mod tests {
                 .speech
                 .as_ref()
                 .map(|binding| binding.base_url.as_str()),
-            Some("http://127.0.0.1:2239")
+            Some("")
         );
 
         std::fs::remove_dir_all(root).unwrap();
@@ -566,33 +562,32 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn managed_runtime_socket_path_uses_short_tmp_path_for_long_roots() {
+    fn managed_runtime_ipc_path_uses_short_tmp_path_for_long_roots() {
         let long_root = PathBuf::from("/tmp").join("a".repeat(180));
-        let socket_path = managed_runtime_socket_path(&long_root, InferenceWorkloadRole::Embedding);
+        let ipc_path = managed_runtime_ipc_path(&long_root, InferenceWorkloadRole::Embedding);
         assert_eq!(
-            socket_path.file_name().and_then(|value| value.to_str()),
+            ipc_path.file_name().and_then(|value| value.to_str()),
             Some("embedding.sock")
         );
-        assert!(socket_path.starts_with(Path::new("/tmp")));
+        assert!(ipc_path.starts_with(Path::new("/tmp")));
         assert_eq!(
-            socket_path
+            ipc_path
                 .parent()
                 .and_then(|path| path.file_name())
                 .and_then(|value| value.to_str())
                 .map(|value| value.starts_with("ctox-sock-")),
             Some(true)
         );
-        assert!(socket_path.as_os_str().as_bytes().len() < 100);
+        assert!(ipc_path.as_os_str().as_bytes().len() < 100);
     }
 
     #[cfg(unix)]
     #[test]
-    fn managed_runtime_socket_path_keeps_workspace_runtime_dir_when_short_enough() {
+    fn managed_runtime_ipc_path_keeps_workspace_runtime_dir_when_short_enough() {
         let root = make_temp_root();
-        let socket_path =
-            managed_runtime_socket_path(&root, InferenceWorkloadRole::PrimaryGeneration);
+        let ipc_path = managed_runtime_ipc_path(&root, InferenceWorkloadRole::PrimaryGeneration);
         assert_eq!(
-            socket_path,
+            ipc_path,
             root.join("runtime/sockets/primary_generation.sock")
         );
         std::fs::remove_dir_all(root).unwrap();

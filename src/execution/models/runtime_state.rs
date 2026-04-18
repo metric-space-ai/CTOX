@@ -1,5 +1,8 @@
 use anyhow::Context;
 use anyhow::Result;
+use rusqlite::params;
+use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -10,9 +13,8 @@ use crate::inference::engine;
 use crate::inference::model_adapters;
 use crate::inference::runtime_plan;
 
-const DEFAULT_RUNTIME_STATE_RELATIVE_PATH: &str = "runtime/inference_runtime.json";
-const DEFAULT_PROXY_HOST: &str = "127.0.0.1";
-const DEFAULT_PROXY_PORT: u16 = 12434;
+const RUNTIME_STATE_TABLE: &str = "runtime_state_store";
+const DEFAULT_LOOPBACK_HOST: &str = "127.0.0.1";
 const DEFAULT_LOCAL_ENGINE_PORT: u16 = 1234;
 const DEFAULT_OPENAI_RESPONSES_BASE_URL: &str = "https://api.openai.com";
 const DEFAULT_ANTHROPIC_RESPONSES_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -159,9 +161,9 @@ pub struct InferenceRuntimeState {
     pub active_model: Option<String>,
     pub engine_model: Option<String>,
     pub engine_port: Option<u16>,
+    #[serde(default)]
+    pub configured_context_tokens: Option<u32>,
     pub realized_context_tokens: Option<u32>,
-    pub proxy_host: String,
-    pub proxy_port: u16,
     pub upstream_base_url: String,
     pub local_preset: Option<String>,
     #[serde(default)]
@@ -200,15 +202,11 @@ impl InferenceRuntimeState {
 }
 
 pub fn runtime_state_path(root: &Path) -> PathBuf {
-    root.join(DEFAULT_RUNTIME_STATE_RELATIVE_PATH)
+    crate::persistence::sqlite_path(root)
 }
 
-pub fn default_proxy_host() -> &'static str {
-    DEFAULT_PROXY_HOST
-}
-
-pub fn default_proxy_port() -> u16 {
-    DEFAULT_PROXY_PORT
+pub fn default_loopback_host() -> &'static str {
+    DEFAULT_LOOPBACK_HOST
 }
 
 pub fn default_local_engine_port() -> u16 {
@@ -345,31 +343,51 @@ pub fn local_upstream_base_url(port: u16) -> String {
     String::new()
 }
 
+pub fn is_local_loopback_base_url(base_url: &str) -> bool {
+    let trimmed = base_url.trim().to_ascii_lowercase();
+    trimmed.starts_with("http://127.0.0.1:")
+        || trimmed.starts_with("http://localhost:")
+        || trimmed.starts_with("http://[::1]:")
+        || trimmed.starts_with("ws://127.0.0.1:")
+        || trimmed.starts_with("ws://localhost:")
+        || trimmed.starts_with("ws://[::1]:")
+}
+
 pub fn load_runtime_state(root: &Path) -> Result<Option<InferenceRuntimeState>> {
-    let path = runtime_state_path(root);
-    if !path.exists() {
-        return Ok(None);
+    let conn = open_runtime_state_db(root)?;
+    if let Some(raw) = load_runtime_state_json_from_db(&conn)? {
+        let mut state: InferenceRuntimeState = serde_json::from_str(&raw).with_context(|| {
+            format!(
+                "failed to decode runtime state {}",
+                runtime_state_path(root).display()
+            )
+        })?;
+        if migrate_runtime_state(root, &mut state)? {
+            persist_runtime_state(root, &state)?;
+        }
+        return Ok(Some(state));
     }
-    let raw = std::fs::read(&path)
-        .with_context(|| format!("failed to read runtime state {}", path.display()))?;
-    let mut state: InferenceRuntimeState = serde_json::from_slice(&raw)
-        .with_context(|| format!("failed to decode runtime state {}", path.display()))?;
-    if migrate_runtime_state(root, &mut state)? {
-        persist_runtime_state(root, &state)?;
-    }
-    Ok(Some(state))
+    Ok(None)
 }
 
 pub fn persist_runtime_state(root: &Path, state: &InferenceRuntimeState) -> Result<()> {
-    let path = runtime_state_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create runtime state dir {}", parent.display()))?;
-    }
-    let bytes =
-        serde_json::to_vec_pretty(state).context("failed to encode inference runtime state")?;
-    std::fs::write(&path, bytes)
-        .with_context(|| format!("failed to write runtime state {}", path.display()))
+    let conn = open_runtime_state_db(root)?;
+    let raw =
+        serde_json::to_string_pretty(state).context("failed to encode inference runtime state")?;
+    conn.execute(
+        &format!(
+            "INSERT INTO {RUNTIME_STATE_TABLE} (state_id, state_json) VALUES (1, ?1)
+             ON CONFLICT(state_id) DO UPDATE SET state_json = excluded.state_json"
+        ),
+        params![raw],
+    )
+    .with_context(|| {
+        format!(
+            "failed to write runtime state {}",
+            runtime_state_path(root).display()
+        )
+    })?;
+    Ok(())
 }
 
 pub fn load_or_resolve_runtime_state(root: &Path) -> Result<InferenceRuntimeState> {
@@ -415,9 +433,6 @@ pub fn is_runtime_state_key(key: &str) -> bool {
             | "CTOX_ENGINE_REALIZED_MODEL"
             | "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN"
             | "CTOX_CHAT_MODEL_REALIZED_CONTEXT"
-            | "CTOX_CHAT_MODEL_MAX_CONTEXT"
-            | "CTOX_PROXY_HOST"
-            | "CTOX_PROXY_PORT"
             | "CTOX_UPSTREAM_BASE_URL"
             | "CTOX_CHAT_LOCAL_PRESET"
             | "CTOX_LOCAL_ADAPTER_REASONING_CAP"
@@ -476,13 +491,12 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
         "CTOX_BOOST_REASON" => state.boost.reason.clone(),
         "CTOX_ENGINE_MODEL" | "CTOX_ENGINE_REALIZED_MODEL" => state.engine_model.clone(),
         "CTOX_ENGINE_PORT" => state.engine_port.map(|value| value.to_string()),
-        "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN"
-        | "CTOX_CHAT_MODEL_REALIZED_CONTEXT"
-        | "CTOX_CHAT_MODEL_MAX_CONTEXT" => {
+        "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN" | "CTOX_CHAT_MODEL_REALIZED_CONTEXT" => {
             state.realized_context_tokens.map(|value| value.to_string())
         }
-        "CTOX_PROXY_HOST" => Some(state.proxy_host.clone()),
-        "CTOX_PROXY_PORT" => Some(state.proxy_port.to_string()),
+        "CTOX_CHAT_MODEL_MAX_CONTEXT" => state
+            .configured_context_tokens
+            .map(|value| value.to_string()),
         "CTOX_UPSTREAM_BASE_URL" => {
             if state.source.is_local() {
                 None
@@ -500,7 +514,11 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
             .map(|value| value.to_string()),
         "CTOX_EMBEDDING_MODEL" => state.embedding.configured_model.clone(),
         "CTOX_EMBEDDING_PORT" => state.embedding.port.map(|value| value.to_string()),
-        "CTOX_EMBEDDING_BASE_URL" => state.embedding.base_url.clone(),
+        "CTOX_EMBEDDING_BASE_URL" => state
+            .embedding
+            .base_url
+            .clone()
+            .filter(|value| !is_local_loopback_base_url(value)),
         "CTOX_DISABLE_EMBEDDING_BACKEND" => {
             if state.embedding.enabled {
                 None
@@ -510,7 +528,11 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
         }
         "CTOX_STT_MODEL" => state.transcription.configured_model.clone(),
         "CTOX_STT_PORT" => state.transcription.port.map(|value| value.to_string()),
-        "CTOX_STT_BASE_URL" => state.transcription.base_url.clone(),
+        "CTOX_STT_BASE_URL" => state
+            .transcription
+            .base_url
+            .clone()
+            .filter(|value| !is_local_loopback_base_url(value)),
         "CTOX_DISABLE_STT_BACKEND" => {
             if state.transcription.enabled {
                 None
@@ -520,7 +542,11 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
         }
         "CTOX_TTS_MODEL" => state.speech.configured_model.clone(),
         "CTOX_TTS_PORT" => state.speech.port.map(|value| value.to_string()),
-        "CTOX_TTS_BASE_URL" => state.speech.base_url.clone(),
+        "CTOX_TTS_BASE_URL" => state
+            .speech
+            .base_url
+            .clone()
+            .filter(|value| !is_local_loopback_base_url(value)),
         "CTOX_DISABLE_TTS_BACKEND" => {
             if state.speech.enabled {
                 None
@@ -530,7 +556,11 @@ pub fn owned_runtime_env_value(state: &InferenceRuntimeState, key: &str) -> Opti
         }
         "CTOX_VISION_MODEL" => state.vision.configured_model.clone(),
         "CTOX_VISION_PORT" => state.vision.port.map(|value| value.to_string()),
-        "CTOX_VISION_BASE_URL" => state.vision.base_url.clone(),
+        "CTOX_VISION_BASE_URL" => state
+            .vision
+            .base_url
+            .clone()
+            .filter(|value| !is_local_loopback_base_url(value)),
         "CTOX_DISABLE_VISION_BACKEND" => {
             if state.vision.enabled {
                 None
@@ -561,8 +591,6 @@ pub fn apply_runtime_state_to_env_map(
         "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN",
         "CTOX_CHAT_MODEL_REALIZED_CONTEXT",
         "CTOX_CHAT_MODEL_MAX_CONTEXT",
-        "CTOX_PROXY_HOST",
-        "CTOX_PROXY_PORT",
         "CTOX_API_PROVIDER",
         "CTOX_UPSTREAM_BASE_URL",
         "CTOX_CHAT_LOCAL_PRESET",
@@ -604,80 +632,114 @@ fn derive_runtime_state(
         requested_model.as_deref().or(base_model.as_deref()),
     );
     let local_runtime = infer_local_runtime_kind_from_env_map(env_map);
-    let proxy_host =
-        env_string(env_map, "CTOX_PROXY_HOST").unwrap_or_else(|| DEFAULT_PROXY_HOST.to_string());
-    let proxy_port = env_u16(env_map, "CTOX_PROXY_PORT").unwrap_or(DEFAULT_PROXY_PORT);
     let local_preset = env_string(env_map, "CTOX_CHAT_LOCAL_PRESET");
     let plan = if source.is_local() {
         runtime_plan::load_persisted_chat_runtime_plan(root)?
     } else {
         None
     };
-
-    let (active_model, engine_model, engine_port, realized_context_tokens, upstream_base_url) =
-        match source {
-            InferenceSource::Api => {
-                let api_provider = infer_api_provider_from_env_map(env_map);
-                let active_model = env_string(env_map, "CTOX_ACTIVE_MODEL")
-                    .filter(|model| engine::is_api_chat_model(model))
-                    .or_else(|| {
-                        env_string(env_map, "CTOX_CHAT_MODEL")
-                            .filter(|model| engine::is_api_chat_model(model))
+    let (
+        active_model,
+        engine_model,
+        engine_port,
+        configured_context_tokens,
+        realized_context_tokens,
+        upstream_base_url,
+    ) = match source {
+        InferenceSource::Api => {
+            let api_provider = infer_api_provider_from_env_map(env_map);
+            let active_model = env_string(env_map, "CTOX_ACTIVE_MODEL")
+                .filter(|model| engine::is_api_chat_model(model))
+                .or_else(|| {
+                    env_string(env_map, "CTOX_CHAT_MODEL")
+                        .filter(|model| engine::is_api_chat_model(model))
+                })
+                .or_else(|| requested_model.clone())
+                .or_else(|| Some(default_primary_model()));
+            let upstream = env_string(env_map, "CTOX_UPSTREAM_BASE_URL").unwrap_or_else(|| {
+                default_api_upstream_base_url_for_provider(&api_provider).to_string()
+            });
+            let configured_context_tokens = env_map
+                .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+                .and_then(|value| runtime_plan::parse_chat_context_tokens(value));
+            (
+                active_model,
+                None,
+                None,
+                configured_context_tokens,
+                None,
+                upstream,
+            )
+        }
+        InferenceSource::Local => {
+            let active_model = plan
+                .as_ref()
+                .map(|plan| plan.model.clone())
+                .or_else(|| env_string(env_map, "CTOX_ENGINE_MODEL"))
+                .or_else(|| env_string(env_map, "CTOX_ACTIVE_MODEL"))
+                .or_else(|| env_string(env_map, "CTOX_CHAT_MODEL"))
+                .or_else(|| requested_model.clone())
+                .or_else(|| Some(default_primary_model()));
+            let engine_model = active_model.clone();
+            let engine_port = env_u16(env_map, "CTOX_ENGINE_PORT")
+                .or_else(|| {
+                    engine_model.as_deref().and_then(|model| {
+                        engine::runtime_config_for_model(model)
+                            .ok()
+                            .map(|runtime| runtime.port)
                     })
-                    .or_else(|| requested_model.clone())
-                    .or_else(|| Some(default_primary_model()));
-                let upstream = env_string(env_map, "CTOX_UPSTREAM_BASE_URL").unwrap_or_else(|| {
-                    default_api_upstream_base_url_for_provider(&api_provider).to_string()
-                });
-                (active_model, None, None, None, upstream)
-            }
-            InferenceSource::Local => {
-                let active_model = plan
-                    .as_ref()
-                    .map(|plan| plan.model.clone())
-                    .or_else(|| env_string(env_map, "CTOX_ENGINE_MODEL"))
-                    .or_else(|| env_string(env_map, "CTOX_ACTIVE_MODEL"))
-                    .or_else(|| env_string(env_map, "CTOX_CHAT_MODEL"))
-                    .or_else(|| requested_model.clone())
-                    .or_else(|| Some(default_primary_model()));
-                let engine_model = active_model.clone();
-                let engine_port = env_u16(env_map, "CTOX_ENGINE_PORT")
-                    .or_else(|| {
-                        engine_model.as_deref().and_then(|model| {
-                            engine::runtime_config_for_model(model)
-                                .ok()
-                                .map(|runtime| runtime.port)
+                })
+                .or_else(|| plan.as_ref().map(|_| DEFAULT_LOCAL_ENGINE_PORT))
+                .or_else(|| Some(DEFAULT_LOCAL_ENGINE_PORT));
+            let configured_context_tokens = env_map
+                .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+                .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+                .or_else(|| plan.as_ref().map(|plan| plan.max_seq_len))
+                .or_else(|| {
+                    active_model.as_deref().and_then(|model| {
+                        engine::runtime_config_for_model(model)
+                            .ok()
+                            .and_then(|runtime| runtime.max_seq_len)
+                    })
+                })
+                .or_else(|| {
+                    (local_runtime == LocalRuntimeKind::LiteRt)
+                        .then(|| {
+                            active_model
+                                .as_deref()
+                                .and_then(validated_litert_context_cap_for_model)
                         })
-                    })
-                    .or_else(|| plan.as_ref().map(|_| DEFAULT_LOCAL_ENGINE_PORT))
-                    .or_else(|| Some(DEFAULT_LOCAL_ENGINE_PORT));
-                let realized_context_tokens = env_u32(env_map, "CTOX_CHAT_MODEL_REALIZED_CONTEXT")
-                    .or_else(|| env_u32(env_map, "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN"))
-                    .or_else(|| plan.as_ref().map(|plan| plan.max_seq_len))
-                    .or_else(|| env_u32(env_map, "CTOX_CHAT_MODEL_MAX_CONTEXT"))
-                    .or_else(|| {
-                        (local_runtime == LocalRuntimeKind::LiteRt)
-                            .then(|| {
-                                active_model
-                                    .as_deref()
-                                    .and_then(validated_litert_context_cap_for_model)
-                            })
-                            .flatten()
-                    });
-                let upstream =
-                    local_upstream_base_url(engine_port.unwrap_or(DEFAULT_LOCAL_ENGINE_PORT));
-                (
-                    active_model,
-                    engine_model,
-                    engine_port,
-                    realized_context_tokens,
-                    upstream,
-                )
-            }
-        };
+                        .flatten()
+                })
+                .or_else(|| Some(runtime_plan::default_chat_context_tokens()));
+            let realized_context_tokens = env_u32(env_map, "CTOX_CHAT_MODEL_REALIZED_CONTEXT")
+                .or_else(|| env_u32(env_map, "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN"))
+                .or_else(|| plan.as_ref().map(|plan| plan.max_seq_len))
+                .or(configured_context_tokens)
+                .or_else(|| {
+                    (local_runtime == LocalRuntimeKind::LiteRt)
+                        .then(|| {
+                            active_model
+                                .as_deref()
+                                .and_then(validated_litert_context_cap_for_model)
+                        })
+                        .flatten()
+                });
+            let upstream =
+                local_upstream_base_url(engine_port.unwrap_or(DEFAULT_LOCAL_ENGINE_PORT));
+            (
+                active_model,
+                engine_model,
+                engine_port,
+                configured_context_tokens,
+                realized_context_tokens,
+                upstream,
+            )
+        }
+    };
 
     Ok(InferenceRuntimeState {
-        version: 9,
+        version: 11,
         source,
         local_runtime,
         base_model,
@@ -685,9 +747,8 @@ fn derive_runtime_state(
         active_model,
         engine_model,
         engine_port,
+        configured_context_tokens,
         realized_context_tokens,
-        proxy_host,
-        proxy_port,
         upstream_base_url,
         local_preset,
         boost: derive_boost_runtime_state(env_map),
@@ -697,6 +758,35 @@ fn derive_runtime_state(
         speech: derive_auxiliary_runtime_state(env_map, "TTS"),
         vision: derive_auxiliary_runtime_state(env_map, "VISION"),
     })
+}
+
+fn open_runtime_state_db(root: &Path) -> Result<Connection> {
+    let path = runtime_state_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create runtime db dir {}", parent.display()))?;
+    }
+    let conn = Connection::open(&path)
+        .with_context(|| format!("failed to open runtime db {}", path.display()))?;
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS {RUNTIME_STATE_TABLE} (
+             state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+             state_json TEXT NOT NULL
+         );"
+    ))
+    .context("failed to initialize runtime state table")?;
+    Ok(conn)
+}
+
+fn load_runtime_state_json_from_db(conn: &Connection) -> Result<Option<String>> {
+    conn.query_row(
+        &format!("SELECT state_json FROM {RUNTIME_STATE_TABLE} WHERE state_id = 1"),
+        [],
+        |row| row.get(0),
+    )
+    .optional()
+    .context("failed to read runtime state from db")
 }
 
 fn migrate_runtime_state(root: &Path, state: &mut InferenceRuntimeState) -> Result<bool> {
@@ -756,6 +846,28 @@ fn migrate_runtime_state(root: &Path, state: &mut InferenceRuntimeState) -> Resu
     if state.version < 9 {
         state.vision = derive_auxiliary_runtime_state(&env_map, "VISION");
         state.version = 9;
+        migrated = true;
+    }
+    if state.version < 11 {
+        if state.source.is_local() {
+            state.upstream_base_url =
+                local_upstream_base_url(state.engine_port.unwrap_or(DEFAULT_LOCAL_ENGINE_PORT));
+        }
+        for auxiliary in [
+            &mut state.embedding,
+            &mut state.transcription,
+            &mut state.speech,
+            &mut state.vision,
+        ] {
+            if auxiliary
+                .base_url
+                .as_deref()
+                .is_some_and(is_local_loopback_base_url)
+            {
+                auxiliary.base_url = None;
+            }
+        }
+        state.version = 11;
         migrated = true;
     }
     if state.base_model.is_none() {
@@ -880,58 +992,27 @@ fn derive_auxiliary_runtime_state(
         enabled,
         configured_model,
         port: env_u16(env_map, &format!("CTOX_{role_prefix}_PORT")),
-        base_url: env_string(env_map, &format!("CTOX_{role_prefix}_BASE_URL")),
+        base_url: env_string(env_map, &format!("CTOX_{role_prefix}_BASE_URL"))
+            .filter(|value| !is_local_loopback_base_url(value)),
     }
 }
 
 fn load_runtime_env_map_for_resolution(root: &Path) -> Result<BTreeMap<String, String>> {
-    let path = root.join("runtime/engine.env");
-    if !path.exists() {
-        return Ok(BTreeMap::new());
+    let conn = open_runtime_state_db(root)?;
+    let mut stmt = conn
+        .prepare("SELECT env_key, env_value FROM runtime_env_kv ORDER BY env_key")
+        .context("failed to prepare runtime env resolution query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("failed to query runtime env resolution rows")?;
+    let mut env_map = BTreeMap::new();
+    for row in rows {
+        let (key, value) = row.context("failed to decode runtime env resolution row")?;
+        env_map.insert(key, value);
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read runtime config {}", path.display()))?;
-    Ok(parse_env_map(&raw))
-}
-
-fn parse_env_map(raw: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let normalized_key = key.trim();
-        if normalized_key.is_empty() {
-            continue;
-        }
-        out.insert(normalized_key.to_string(), unescape_env_value(value.trim()));
-    }
-    out
-}
-
-fn unescape_env_value(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let mut output = String::new();
-        let mut chars = inner.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    output.push(next);
-                }
-            } else {
-                output.push(ch);
-            }
-        }
-        output
-    } else {
-        trimmed.to_string()
-    }
+    Ok(env_map)
 }
 
 #[cfg(test)]
@@ -1028,32 +1109,30 @@ mod tests {
     }
 
     fn persist_plan(root: &Path, plan: &ChatRuntimePlan) {
-        let path = root.join("runtime/chat_plan.json");
-        let bytes = serde_json::to_vec_pretty(plan).unwrap();
-        std::fs::write(path, bytes).unwrap();
+        super::runtime_plan::store_persisted_chat_runtime_plan(root, Some(plan)).unwrap();
     }
 
     #[test]
     fn sync_runtime_state_prefers_resolved_local_plan() {
         let root = make_temp_root();
-        persist_plan(&root, &sample_plan("Qwen/Qwen3.5-35B-A3B"));
+        persist_plan(&root, &sample_plan("Qwen/Qwen3.6-35B-A3B"));
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_CHAT_MODEL_BASE".to_string(),
-            "Qwen/Qwen3.5-35B-A3B".to_string(),
+            "Qwen/Qwen3.6-35B-A3B".to_string(),
         );
         env_map.insert("CTOX_ACTIVE_MODEL".to_string(), "stale/value".to_string());
         let state = sync_runtime_state_from_env_map(&root, &env_map).unwrap();
         assert_eq!(state.source, InferenceSource::Local);
         assert_eq!(
             state.requested_model.as_deref(),
-            Some("Qwen/Qwen3.5-35B-A3B")
+            Some("Qwen/Qwen3.6-35B-A3B")
         );
-        assert_eq!(state.active_model.as_deref(), Some("Qwen/Qwen3.5-35B-A3B"));
+        assert_eq!(state.active_model.as_deref(), Some("Qwen/Qwen3.6-35B-A3B"));
         assert_eq!(
             state.engine_port,
-            engine::runtime_config_for_model("Qwen/Qwen3.5-35B-A3B")
+            engine::runtime_config_for_model("Qwen/Qwen3.6-35B-A3B")
                 .ok()
                 .map(|runtime| runtime.port)
         );
@@ -1072,9 +1151,8 @@ mod tests {
             active_model: Some("gpt-5.4".to_string()),
             engine_model: None,
             engine_port: None,
+            configured_context_tokens: None,
             realized_context_tokens: None,
-            proxy_host: DEFAULT_PROXY_HOST.to_string(),
-            proxy_port: DEFAULT_PROXY_PORT,
             upstream_base_url: DEFAULT_OPENAI_RESPONSES_BASE_URL.to_string(),
             local_preset: None,
             boost: BoostRuntimeState::default(),
@@ -1083,13 +1161,13 @@ mod tests {
                 enabled: true,
                 configured_model: Some("Qwen/Qwen3-Embedding-0.6B [CPU]".to_string()),
                 port: Some(2237),
-                base_url: Some("http://127.0.0.1:2237".to_string()),
+                base_url: None,
             },
             transcription: AuxiliaryRuntimeState {
                 enabled: false,
                 configured_model: Some("Systran/faster-whisper-small [CPU]".to_string()),
                 port: Some(2238),
-                base_url: Some("http://127.0.0.1:2238".to_string()),
+                base_url: None,
             },
             speech: AuxiliaryRuntimeState::default(),
             vision: AuxiliaryRuntimeState::default(),
@@ -1118,6 +1196,8 @@ mod tests {
             env_map.get("CTOX_DISABLE_STT_BACKEND").map(String::as_str),
             Some("1")
         );
+        assert!(!env_map.contains_key("CTOX_EMBEDDING_BASE_URL"));
+        assert!(!env_map.contains_key("CTOX_STT_BASE_URL"));
         assert!(!env_map.contains_key("CTOX_ENGINE_MODEL"));
         assert!(!env_map.contains_key("CTOX_ENGINE_PORT"));
     }
@@ -1138,7 +1218,7 @@ mod tests {
         );
         env_map.insert(
             "CTOX_TTS_BASE_URL".to_string(),
-            "http://127.0.0.1:2239".to_string(),
+            "ws://127.0.0.1:2239".to_string(),
         );
 
         let state = sync_runtime_state_from_env_map(&root, &env_map).unwrap();
@@ -1154,10 +1234,7 @@ mod tests {
             state.speech.configured_model.as_deref(),
             Some("speaches-ai/piper-en_US-lessac-medium [CPU EN]")
         );
-        assert_eq!(
-            state.speech.base_url.as_deref(),
-            Some("http://127.0.0.1:2239")
-        );
+        assert!(state.speech.base_url.is_none());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1169,13 +1246,12 @@ mod tests {
             source: InferenceSource::Local,
             local_runtime: LocalRuntimeKind::Candle,
             base_model: Some("openai/gpt-oss-20b".to_string()),
-            requested_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
+            requested_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
             active_model: Some("gpt-5.4-mini".to_string()),
-            engine_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
+            engine_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
             engine_port: Some(1234),
+            configured_context_tokens: Some(131_072),
             realized_context_tokens: Some(131_072),
-            proxy_host: DEFAULT_PROXY_HOST.to_string(),
-            proxy_port: DEFAULT_PROXY_PORT,
             upstream_base_url: local_upstream_base_url(DEFAULT_LOCAL_ENGINE_PORT),
             local_preset: Some("quality".to_string()),
             boost: BoostRuntimeState::default(),
@@ -1235,9 +1311,11 @@ mod tests {
             Some("low")
         );
         assert_eq!(reloaded.adapter_tuning.max_output_tokens_cap, Some(128));
-        let persisted_env = std::fs::read_to_string(root.join("runtime/engine.env")).unwrap();
-        assert!(!persisted_env.contains(model_adapters::adapter_reasoning_cap_env_key()));
-        assert!(!persisted_env.contains(model_adapters::adapter_max_output_tokens_cap_env_key()));
+        let persisted_env = load_runtime_env_map_for_resolution(&root).unwrap();
+        assert!(!persisted_env.contains_key(model_adapters::adapter_reasoning_cap_env_key()));
+        assert!(
+            !persisted_env.contains_key(model_adapters::adapter_max_output_tokens_cap_env_key())
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

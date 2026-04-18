@@ -5,11 +5,11 @@ use std::path::Path;
 use tracing::info;
 
 use engine_core::{
-    initialize_logging, DiffusionLoaderType, ModelSelected, PagedCacheType, SpeechLoaderType,
+    DiffusionLoaderType, ModelSelected, PagedCacheType, SpeechLoaderType, initialize_logging,
 };
+use engine_server_core::engine_for_server_builder::MistralRsForServerBuilder;
 #[cfg(unix)]
 use engine_server_core::local_ipc;
-use engine_server_core::engine_for_server_builder::MistralRsForServerBuilder;
 
 use crate::args::{
     AdapterOptions, DeviceOptions, FormatOptions, GlobalOptions, ModelFormat, ModelSourceOptions,
@@ -91,24 +91,27 @@ pub async fn run_server(
     #[cfg(unix)]
     let engine_for_local_ipc = engine.clone();
     match server.transport {
-        ServerTransport::LocalSocket => {
+        ServerTransport::LocalIpc => {
             #[cfg(unix)]
             {
-                let Some(socket_path) = server.socket_path.clone() else {
-                    anyhow::bail!("--transport local-socket requires --socket-path on unix");
+                let Some(transport_endpoint) = server.transport_endpoint.clone() else {
+                    anyhow::bail!("--transport local-ipc requires --transport-endpoint on unix");
                 };
                 info!(
-                    "Binding local responses socket on {} without HTTP listener.",
-                    socket_path.display()
+                    "Binding local responses IPC endpoint on {} without HTTP listener.",
+                    transport_endpoint.display()
                 );
-                local_ipc::serve_local_openresponses_socket(engine_for_local_ipc, socket_path)
-                    .await?;
+                local_ipc::serve_local_openresponses_socket(
+                    engine_for_local_ipc,
+                    transport_endpoint,
+                )
+                .await?;
                 Ok(())
             }
 
             #[cfg(not(unix))]
             {
-                anyhow::bail!("--transport local-socket is only supported on unix");
+                anyhow::bail!("--transport local-ipc is only supported on unix");
             }
         }
     }

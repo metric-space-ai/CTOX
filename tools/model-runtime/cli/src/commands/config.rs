@@ -4,13 +4,13 @@ use anyhow::Result;
 use tracing::info;
 
 use engine_core::initialize_logging;
+use engine_server_core::engine_for_server_builder::{MistralRsForServerBuilder, ModelConfig};
 #[cfg(unix)]
 use engine_server_core::local_ipc;
-use engine_server_core::engine_for_server_builder::{MistralRsForServerBuilder, ModelConfig};
 
 use crate::commands::run::interactive_mode;
 use crate::commands::serve::{convert_to_model_selected, run_server};
-use crate::config::{load_cli_config, CliConfig};
+use crate::config::{CliConfig, load_cli_config};
 use crate::{
     args::{CacheOptions, RuntimeOptions, ServerTransport},
     commands::run_interactive,
@@ -112,26 +112,29 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
     let engine_for_local_ipc = engine.clone();
 
     match server.transport {
-        ServerTransport::LocalSocket => {
+        ServerTransport::LocalIpc => {
             #[cfg(unix)]
             {
-                let Some(socket_path) = server.socket_path.clone() else {
+                let Some(transport_endpoint) = server.transport_endpoint.clone() else {
                     anyhow::bail!(
-                        "server.transport = \"local_socket\" requires server.socket_path"
+                        "server.transport = \"local_ipc\" requires server.transport_endpoint"
                     );
                 };
                 info!(
-                    "Binding local responses socket on {} without HTTP listener.",
-                    socket_path.display()
+                    "Binding local responses IPC endpoint on {} without HTTP listener.",
+                    transport_endpoint.display()
                 );
-                local_ipc::serve_local_openresponses_socket(engine_for_local_ipc, socket_path)
-                    .await?;
+                local_ipc::serve_local_openresponses_socket(
+                    engine_for_local_ipc,
+                    transport_endpoint,
+                )
+                .await?;
                 return Ok(());
             }
 
             #[cfg(not(unix))]
             {
-                anyhow::bail!("server.transport = \"local_socket\" is only supported on unix");
+                anyhow::bail!("server.transport = \"local_ipc\" is only supported on unix");
             }
         }
     }
@@ -146,16 +149,14 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         enable_thinking,
     } = cfg;
 
-    if let Some((model_type, runtime)) =
-        resolve_single_model_runtime(
-            models.as_slice(),
-            None,
-            runtime.clone(),
-            CacheOptions {
-                paged_attn: paged_attn.clone(),
-            },
-        )?
-    {
+    if let Some((model_type, runtime)) = resolve_single_model_runtime(
+        models.as_slice(),
+        None,
+        runtime.clone(),
+        CacheOptions {
+            paged_attn: paged_attn.clone(),
+        },
+    )? {
         return run_interactive(
             model_type,
             runtime,

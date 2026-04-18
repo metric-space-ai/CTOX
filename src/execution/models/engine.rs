@@ -12,7 +12,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use crate::execution::models::model_registry;
-use crate::inference::runtime_kernel;
+use crate::inference::runtime_env;
 use crate::inference::turn_contract;
 
 const TURBOQUANT2_CACHE_TYPE: &str = "turboquant2";
@@ -27,7 +27,7 @@ pub enum LocalModelFamily {
     GptOss,
     Qwen35Vision,
     Gemma4Vision,
-    NemotronCascade,
+    NemotronCascade2,
     Glm47Flash,
     Qwen3Embedding,
     WhisperTranscriptionCpu,
@@ -48,7 +48,7 @@ pub enum ChatModelFamily {
     GptOss,
     Qwen35,
     Gemma4,
-    NemotronCascade,
+    NemotronCascade2,
     Glm47Flash,
     MiniMax,
     Mistral,
@@ -186,7 +186,6 @@ pub struct EngineRuntimeConfig {
     pub family: LocalModelFamily,
     pub model: String,
     pub port: u16,
-    pub proxy_port: Option<u16>,
     pub max_seq_len: Option<u32>,
     pub max_seqs: u32,
     pub max_batch_size: u32,
@@ -230,8 +229,8 @@ pub use crate::execution::models::model_registry::SUPPORTED_ANTHROPIC_API_CHAT_M
 pub use crate::execution::models::model_registry::SUPPORTED_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_EMBEDDING_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_LOCAL_CHAT_FAMILIES;
-pub use crate::execution::models::model_registry::SUPPORTED_OPENAI_API_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_MINIMAX_API_CHAT_MODELS;
+pub use crate::execution::models::model_registry::SUPPORTED_OPENAI_API_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_OPENROUTER_API_CHAT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_STT_MODELS;
 pub use crate::execution::models::model_registry::SUPPORTED_TTS_MODELS;
@@ -302,13 +301,31 @@ pub fn load_source_origins_manifest(root: &Path) -> anyhow::Result<SourceOrigins
 }
 
 pub fn discover_source_layout_paths(root: &Path) -> SourceLayoutPaths {
-    let tools_root = root.join("tools");
-    let agent_runtime_root = tools_root.join("agent-runtime");
+    let default_runtime_tools = root.join("runtime/tools");
+    let tools_root = runtime_env::env_or_config(root, "CTOX_TOOLS_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            default_runtime_tools
+                .is_dir()
+                .then_some(default_runtime_tools)
+        })
+        .unwrap_or_else(|| root.join("tools"));
+    let default_agent_runtime_root = root.join("src/inference");
+    let agent_runtime_root = runtime_env::env_or_config(root, "CTOX_AGENT_RUNTIME_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            default_agent_runtime_root
+                .is_dir()
+                .then_some(default_agent_runtime_root)
+        })
+        .unwrap_or_else(|| root.join("src/inference"));
     let model_runtime_root = tools_root.join("model-runtime");
     SourceLayoutPaths {
         tools_root,
         agent_runtime_root,
-        model_runtime_binary: model_runtime_root.join("target/release/ctox-engine"),
+        model_runtime_binary: model_runtime_root.join("bin/ctox-engine"),
         model_runtime_root,
     }
 }
@@ -383,7 +400,7 @@ pub fn default_api_provider_for_model(model: &str) -> &'static str {
     }
 }
 
-pub fn uses_ctox_proxy_model(model: &str) -> bool {
+pub fn uses_ctox_responses_adapter_model(model: &str) -> bool {
     supports_local_chat_runtime(model)
 }
 
@@ -443,7 +460,7 @@ pub fn model_supports_paged_attention_cache(model: &str) -> bool {
                 LocalModelFamily::GptOss
                     | LocalModelFamily::Qwen35Vision
                     | LocalModelFamily::Gemma4Vision
-                    | LocalModelFamily::NemotronCascade
+                    | LocalModelFamily::NemotronCascade2
                     | LocalModelFamily::Glm47Flash
             )
         })
@@ -461,7 +478,7 @@ pub fn model_supports_pa_cache_type(model: &str, cache_type: &str) -> bool {
                     profile.runtime.family,
                     LocalModelFamily::GptOss
                         | LocalModelFamily::Qwen35Vision
-                        | LocalModelFamily::NemotronCascade
+                        | LocalModelFamily::NemotronCascade2
                         | LocalModelFamily::Glm47Flash
                 )
             })
@@ -479,7 +496,7 @@ pub fn build_engine_command(
     let mut command = vec![source_layout.model_runtime_binary.display().to_string()];
     match runtime.family {
         LocalModelFamily::GptOss
-        | LocalModelFamily::NemotronCascade
+        | LocalModelFamily::NemotronCascade2
         | LocalModelFamily::Glm47Flash => {
             command.extend([
                 "serve".to_string(),
@@ -591,10 +608,6 @@ pub fn build_clean_room_baseline_plan(
     }
 }
 
-fn escape_toml_inline_string(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
 pub fn source_layout_status(root: &Path) -> anyhow::Result<SourceLayoutStatusOutcome> {
     let manifest = load_source_origins_manifest(root)?;
     let mut results = Vec::new();
@@ -702,7 +715,7 @@ pub fn rewrite_responses_payload_to_sse(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     let response_id = payload
         .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("resp_ctox_proxy");
+        .unwrap_or("resp_ctox_gateway");
     let model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -825,7 +838,7 @@ fn responses_input_item_to_chat_message(item: &Value) -> Option<Value> {
             let call_id = object
                 .get("call_id")
                 .and_then(Value::as_str)
-                .unwrap_or("call_ctox_proxy");
+                .unwrap_or("call_ctox_gateway");
             let name = object
                 .get("name")
                 .and_then(Value::as_str)
@@ -850,7 +863,7 @@ fn responses_input_item_to_chat_message(item: &Value) -> Option<Value> {
             let call_id = object
                 .get("call_id")
                 .and_then(Value::as_str)
-                .unwrap_or("call_ctox_proxy");
+                .unwrap_or("call_ctox_gateway");
             let output = extract_function_call_output_text(object.get("output"));
             Some(json!({
                 "role": "tool",
@@ -1404,7 +1417,7 @@ pub(crate) fn responses_turn_builder(
         .get("id")
         .and_then(Value::as_str)
         .map(|value| format!("resp_{value}"))
-        .unwrap_or_else(|| "resp_ctox_proxy".to_string());
+        .unwrap_or_else(|| "resp_ctox_gateway".to_string());
     let created_at = payload
         .get("created")
         .and_then(Value::as_u64)
@@ -1468,7 +1481,7 @@ fn rewrite_responses_to_qwen_chat_completions(raw: &[u8]) -> anyhow::Result<Vec<
 
 #[cfg(test)]
 fn rewrite_responses_to_nemotron_chat_completions(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
-    crate::inference::model_adapters::nemotron::rewrite_request(raw)
+    crate::inference::model_adapters::nemotron_cascade2::rewrite_request(raw)
 }
 
 #[cfg(test)]
@@ -1499,7 +1512,11 @@ fn rewrite_nemotron_chat_completions_to_responses(
     raw: &[u8],
     fallback_model: Option<&str>,
 ) -> anyhow::Result<Vec<u8>> {
-    crate::inference::model_adapters::nemotron::rewrite_success_response(raw, fallback_model, None)
+    crate::inference::model_adapters::nemotron_cascade2::rewrite_success_response(
+        raw,
+        fallback_model,
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -1665,8 +1682,8 @@ mod tests {
 
     #[test]
     fn model_supports_vision_recognises_local_vision_families() {
-        // Qwen 3.5 chat family is marked vision-capable in the registry.
-        assert!(model_supports_vision("Qwen/Qwen3.5-27B"));
+        // Qwen 3.6 / 3.5 chat family is marked vision-capable in the registry.
+        assert!(model_supports_vision("Qwen/Qwen3.6-35B-A3B"));
         // Gemma 4 variant likewise.
         assert!(model_supports_vision("google/gemma-4-31B-it"));
         // Qwen3-VL-2B auxiliary itself is vision-capable.
@@ -1722,10 +1739,7 @@ mod tests {
         let blocks = extract_message_content_blocks(Some(&content));
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["type"], "image_url");
-        assert_eq!(
-            blocks[0]["image_url"]["url"],
-            "data:image/jpeg;base64,AAAA"
-        );
+        assert_eq!(blocks[0]["image_url"]["url"], "data:image/jpeg;base64,AAAA");
     }
 
     #[test]
@@ -1752,8 +1766,7 @@ mod tests {
 
     #[test]
     fn vision_aux_selection_maps_to_qwen3_vl_instruct() {
-        let selection =
-            auxiliary_model_selection(AuxiliaryRole::Vision, None);
+        let selection = auxiliary_model_selection(AuxiliaryRole::Vision, None);
         assert_eq!(selection.role, AuxiliaryRole::Vision);
         assert_eq!(selection.default_port, 1240);
         assert_eq!(selection.compute_target, ComputeTarget::Gpu);
@@ -1779,7 +1792,7 @@ mod tests {
         assert_eq!(command[1], "serve");
         assert_eq!(command[2], "-p");
         assert_eq!(command[4], "vision");
-        assert!(command.iter().any(|part| part == "Qwen/Qwen3.5-27B"));
+        assert!(command.iter().any(|part| part == "Qwen/Qwen3.6-35B-A3B"));
     }
 
     #[test]
@@ -1904,23 +1917,23 @@ mod tests {
     }
 
     #[test]
-    fn source_layout_paths_use_tools_roots() {
+    fn source_layout_paths_use_inference_runtime_root() {
         let deps = discover_source_layout_paths(Path::new("/tmp/ctox"));
         assert_eq!(deps.tools_root, PathBuf::from("/tmp/ctox/tools"));
         assert_eq!(
             deps.agent_runtime_root,
-            PathBuf::from("/tmp/ctox/tools/agent-runtime")
+            PathBuf::from("/tmp/ctox/src/inference")
         );
         assert_eq!(
             deps.model_runtime_binary,
-            PathBuf::from("/tmp/ctox/tools/model-runtime/target/release/ctox-engine")
+            PathBuf::from("/tmp/ctox/tools/model-runtime/bin/ctox-engine")
         );
     }
 
     #[test]
     fn family_profiles_drive_nccl_policy() {
         let gpt_oss = runtime_profile_for_model("openai/gpt-oss-20b").unwrap();
-        let qwen = runtime_profile_for_model("Qwen/Qwen3.5-27B").unwrap();
+        let qwen = runtime_profile_for_model("Qwen/Qwen3.6-35B-A3B").unwrap();
         let glm = runtime_profile_for_model("zai-org/GLM-4.7-Flash").unwrap();
         let embedding = runtime_profile_for_model("Qwen/Qwen3-Embedding-0.6B").unwrap();
         let stt = runtime_profile_for_model("engineai/Voxtral-Mini-4B-Realtime-2602").unwrap();
@@ -1969,7 +1982,7 @@ mod tests {
         assert_eq!(qwen_small.preferred_gpu_count, Some(1));
         assert_eq!(qwen_small.max_seq_len, 262_144);
 
-        let qwen_large = runtime_profile_for_model("Qwen/Qwen3.5-35B-A3B").unwrap();
+        let qwen_large = runtime_profile_for_model("Qwen/Qwen3.6-35B-A3B").unwrap();
         assert!(qwen_large.disable_nccl);
         assert_eq!(qwen_large.target_world_size, None);
         assert_eq!(qwen_large.preferred_gpu_count, Some(3));
@@ -2023,7 +2036,7 @@ mod tests {
             "f8e4m3".to_string(),
         );
         assert_eq!(
-            resolve_model_pa_cache_type("Qwen/Qwen3.5-27B", Some("turboquant3"), &env_map),
+            resolve_model_pa_cache_type("Qwen/Qwen3.6-35B-A3B", Some("turboquant3"), &env_map),
             Some(TURBOQUANT3_CACHE_TYPE.to_string())
         );
     }
@@ -2060,7 +2073,7 @@ mod tests {
     #[test]
     fn supported_cache_override_promotes_paged_attention_from_off() {
         assert_eq!(
-            resolve_model_paged_attn("Qwen/Qwen3.5-35B-A3B", "off", Some("turboquant3")),
+            resolve_model_paged_attn("Qwen/Qwen3.6-35B-A3B", "off", Some("turboquant3")),
             "auto"
         );
     }
@@ -2110,11 +2123,11 @@ mod tests {
     }
 
     #[test]
-    fn only_local_runtime_models_use_ctox_proxy_path() {
-        assert!(!uses_ctox_proxy_model("gpt-5.4"));
-        assert!(!uses_ctox_proxy_model("gpt-5.4-nano"));
-        assert!(uses_ctox_proxy_model("Qwen/Qwen3.5-4B"));
-        assert!(!uses_ctox_proxy_model("not-a-real-model"));
+    fn only_local_runtime_models_use_ctox_responses_adapter_path() {
+        assert!(!uses_ctox_responses_adapter_model("gpt-5.4"));
+        assert!(!uses_ctox_responses_adapter_model("gpt-5.4-nano"));
+        assert!(uses_ctox_responses_adapter_model("Qwen/Qwen3.5-4B"));
+        assert!(!uses_ctox_responses_adapter_model("not-a-real-model"));
     }
 
     #[test]
@@ -2911,7 +2924,10 @@ mod tests {
         let raw = "{\n\"cmd\": \"apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: foo.txt\n+hello\n*** End Patch\nPATCH\"\n}";
         let normalized = normalize_function_call_arguments("exec_command", raw);
         let value: Value = serde_json::from_str(&normalized).unwrap();
-        assert_eq!(value["cmd"].as_str().unwrap(), "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: foo.txt\n+hello\n*** End Patch\nPATCH");
+        assert_eq!(
+            value["cmd"].as_str().unwrap(),
+            "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: foo.txt\n+hello\n*** End Patch\nPATCH"
+        );
     }
 
     #[test]

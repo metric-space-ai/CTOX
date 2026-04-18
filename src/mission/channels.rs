@@ -20,7 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mission::communication_adapters;
 use crate::mission::communication_adapters::CommunicationTransportAdapter;
+use crate::mission::communication_gateway;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_TAKE_LIMIT: usize = 10;
 const QUEUE_CHANNEL_NAME: &str = "queue";
 const QUEUE_ACCOUNT_KEY: &str = "queue:system";
@@ -1380,7 +1382,6 @@ fn test_channel(
     channel: &str,
     account_key: Option<&str>,
 ) -> Result<Value> {
-    let conn = open_channel_db(db_path)?;
     match channel {
         "tui" => Ok(json!({
             "ok": true,
@@ -1390,6 +1391,8 @@ fn test_channel(
             "db_path": db_path,
         })),
         "email" => {
+            bootstrap_channel_account(root, "email")?;
+            let conn = open_channel_db(db_path)?;
             let resolved_account_key = resolve_account_key(&conn, "email", account_key)?;
             let account_config =
                 load_account_config(&conn, &resolved_account_key)?.ok_or_else(|| {
@@ -1415,6 +1418,8 @@ fn test_channel(
             }))
         }
         "jami" => {
+            bootstrap_channel_account(root, "jami")?;
+            let conn = open_channel_db(db_path)?;
             let resolved_account_key = resolve_account_key(&conn, "jami", account_key)?;
             let account_config =
                 load_account_config(&conn, &resolved_account_key)?.ok_or_else(|| {
@@ -1440,6 +1445,8 @@ fn test_channel(
             }))
         }
         "teams" => {
+            bootstrap_channel_account(root, "teams")?;
+            let conn = open_channel_db(db_path)?;
             let resolved_account_key = resolve_account_key(&conn, "teams", account_key)?;
             let account_config =
                 load_account_config(&conn, &resolved_account_key)?.ok_or_else(|| {
@@ -1465,6 +1472,78 @@ fn test_channel(
         }
         other => anyhow::bail!("unsupported channel test target: {other}"),
     }
+}
+
+fn bootstrap_channel_account(root: &Path, channel: &str) -> Result<()> {
+    match channel {
+        "email" => {
+            let settings = communication_gateway::runtime_settings_from_root(
+                root,
+                communication_gateway::CommunicationAdapterKind::Email,
+            );
+            if settings
+                .get("CTO_EMAIL_ADDRESS")
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
+            {
+                sync_prompt_identity(root, &settings)?;
+            }
+        }
+        "jami" => {
+            let mut settings = communication_gateway::runtime_settings_from_root(
+                root,
+                communication_gateway::CommunicationAdapterKind::Jami,
+            );
+            let configured_account_id = settings
+                .get("CTO_JAMI_ACCOUNT_ID")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let configured_profile_name = settings
+                .get("CTO_JAMI_PROFILE_NAME")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+
+            if configured_account_id.is_some() || configured_profile_name.is_some() {
+                let resolved = communication_adapters::jami().resolve_account(
+                    root,
+                    &communication_adapters::JamiResolveAccountCommandRequest {
+                        account_id: configured_account_id.as_deref(),
+                        profile_name: configured_profile_name.as_deref(),
+                    },
+                )?;
+                if resolved.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                    if let Some(account) =
+                        resolved.get("resolvedAccount").and_then(Value::as_object)
+                    {
+                        if let Some(account_id) = account
+                            .get("accountId")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                        {
+                            settings
+                                .insert("CTO_JAMI_ACCOUNT_ID".to_string(), account_id.to_string());
+                        }
+                        if let Some(profile_name) = account
+                            .get("displayName")
+                            .and_then(Value::as_str)
+                            .filter(|v| !v.trim().is_empty())
+                        {
+                            settings.insert(
+                                "CTO_JAMI_PROFILE_NAME".to_string(),
+                                profile_name.to_string(),
+                            );
+                        }
+                    }
+                }
+                sync_prompt_identity(root, &settings)?;
+            }
+        }
+        "teams" => {}
+        _ => {}
+    }
+    Ok(())
 }
 
 fn parse_send_request(args: &[String]) -> Result<ChannelSendRequest> {
@@ -1700,9 +1779,9 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     // Historical auto-handle rule: inbound messages whose external timestamp
     // predates the communication account's creation are marked as already
     // handled so we don't re-process mailbox history at first boot. The
-    // synthetic `queue` channel is programmatic — queue tasks are created
-    // after the account exists and must stay `pending` until leased — so
-    // it is excluded from the pre-account auto-handle.
+    // synthetic `queue` and `tui` channels are programmatic — work items are
+    // created after the account exists and must stay `pending` until leased —
+    // so they are excluded from the pre-account auto-handle.
     conn.execute(
         r#"
         INSERT INTO communication_routing_state (
@@ -1713,7 +1792,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
             CASE
                 WHEN m.direction = 'outbound' THEN 'handled'
                 WHEN m.trust_level = 'system_probe' THEN 'handled'
-                WHEN m.channel = 'queue' THEN 'pending'
+                WHEN m.channel IN ('queue', 'tui') THEN 'pending'
                 WHEN m.direction = 'inbound'
                      AND a.created_at IS NOT NULL
                      AND m.external_created_at <= a.created_at THEN 'handled'
@@ -1723,7 +1802,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
             NULL,
             CASE
                 WHEN m.direction = 'outbound' OR m.trust_level = 'system_probe' THEN m.observed_at
-                WHEN m.channel = 'queue' THEN NULL
+                WHEN m.channel IN ('queue', 'tui') THEN NULL
                 WHEN m.direction = 'inbound'
                      AND a.created_at IS NOT NULL
                      AND m.external_created_at <= a.created_at THEN m.observed_at
@@ -1913,69 +1992,131 @@ fn take_messages(
 ) -> Result<Vec<ChannelMessageView>> {
     let sql = if channel.is_some() {
         r#"
+        WITH eligible AS (
+            SELECT
+                m.message_key,
+                m.channel,
+                m.account_key,
+                m.thread_key,
+                m.remote_id,
+                m.direction,
+                m.folder_hint,
+                m.sender_display,
+                m.sender_address,
+                m.subject,
+                m.preview,
+                m.body_text,
+                m.status,
+                m.seen,
+                m.external_created_at,
+                m.observed_at,
+                m.metadata_json,
+                r.route_status,
+                r.lease_owner,
+                r.leased_at,
+                r.acked_at,
+                r.updated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.thread_key
+                    ORDER BY m.external_created_at ASC, m.observed_at ASC, m.message_key ASC
+                ) AS thread_rank
+            FROM communication_messages m
+            JOIN communication_routing_state r ON r.message_key = m.message_key
+            WHERE m.direction = 'inbound'
+              AND m.channel = ?1
+              AND r.route_status IN ('pending', 'leased')
+              AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?2)
+        )
         SELECT
-            m.message_key,
-            m.channel,
-            m.account_key,
-            m.thread_key,
-            m.remote_id,
-            m.direction,
-            m.folder_hint,
-            m.sender_display,
-            m.sender_address,
-            m.subject,
-            m.preview,
-            m.body_text,
-            m.status,
-            m.seen,
-            m.external_created_at,
-            m.observed_at,
-            m.metadata_json,
-            r.route_status,
-            r.lease_owner,
-            r.leased_at,
-            r.acked_at,
-            r.updated_at
-        FROM communication_messages m
-        JOIN communication_routing_state r ON r.message_key = m.message_key
-        WHERE m.direction = 'inbound'
-          AND m.channel = ?1
-          AND r.route_status IN ('pending', 'leased')
-          AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?2)
-        ORDER BY m.external_created_at ASC, m.observed_at ASC
+            message_key,
+            channel,
+            account_key,
+            thread_key,
+            remote_id,
+            direction,
+            folder_hint,
+            sender_display,
+            sender_address,
+            subject,
+            preview,
+            body_text,
+            status,
+            seen,
+            external_created_at,
+            observed_at,
+            metadata_json,
+            route_status,
+            lease_owner,
+            leased_at,
+            acked_at,
+            updated_at
+        FROM eligible
+        WHERE thread_rank = 1
+        ORDER BY external_created_at ASC, observed_at ASC, message_key ASC
         LIMIT ?3
         "#
     } else {
         r#"
+        WITH eligible AS (
+            SELECT
+                m.message_key,
+                m.channel,
+                m.account_key,
+                m.thread_key,
+                m.remote_id,
+                m.direction,
+                m.folder_hint,
+                m.sender_display,
+                m.sender_address,
+                m.subject,
+                m.preview,
+                m.body_text,
+                m.status,
+                m.seen,
+                m.external_created_at,
+                m.observed_at,
+                m.metadata_json,
+                r.route_status,
+                r.lease_owner,
+                r.leased_at,
+                r.acked_at,
+                r.updated_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY m.thread_key
+                    ORDER BY m.external_created_at ASC, m.observed_at ASC, m.message_key ASC
+                ) AS thread_rank
+            FROM communication_messages m
+            JOIN communication_routing_state r ON r.message_key = m.message_key
+            WHERE m.direction = 'inbound'
+              AND r.route_status IN ('pending', 'leased')
+              AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?1)
+        )
         SELECT
-            m.message_key,
-            m.channel,
-            m.account_key,
-            m.thread_key,
-            m.remote_id,
-            m.direction,
-            m.folder_hint,
-            m.sender_display,
-            m.sender_address,
-            m.subject,
-            m.preview,
-            m.body_text,
-            m.status,
-            m.seen,
-            m.external_created_at,
-            m.observed_at,
-            m.metadata_json,
-            r.route_status,
-            r.lease_owner,
-            r.leased_at,
-            r.acked_at,
-            r.updated_at
-        FROM communication_messages m
-        JOIN communication_routing_state r ON r.message_key = m.message_key
-        WHERE m.direction = 'inbound'
-          AND r.route_status IN ('pending', 'leased')
-          AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?1)
-        ORDER BY m.external_created_at ASC, m.observed_at ASC
+            message_key,
+            channel,
+            account_key,
+            thread_key,
+            remote_id,
+            direction,
+            folder_hint,
+            sender_display,
+            sender_address,
+            subject,
+            preview,
+            body_text,
+            status,
+            seen,
+            external_created_at,
+            observed_at,
+            metadata_json,
+            route_status,
+            lease_owner,
+            leased_at,
+            acked_at,
+            updated_at
+        FROM eligible
+        WHERE thread_rank = 1
+        ORDER BY external_created_at ASC, observed_at ASC, message_key ASC
         LIMIT ?2
         "#
     };
@@ -3322,7 +3463,7 @@ fn resolve_account_key(conn: &Connection, channel: &str, explicit: Option<&str>)
 fn resolve_db_path(root: &Path, explicit: Option<&str>) -> PathBuf {
     explicit
         .map(PathBuf::from)
-        .unwrap_or_else(|| crate::paths::mission_db(root))
+        .unwrap_or_else(|| root.join(DEFAULT_DB_RELATIVE_PATH))
 }
 
 fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Result<&'a str> {
@@ -3902,14 +4043,9 @@ mod tests {
             .iter()
             .all(|item| item.thread_key == "email/thread-a"));
 
-        let sender_search = search_messages(
-            &conn,
-            "redis",
-            Some("email"),
-            Some("owner@example.com"),
-            10,
-        )
-        .expect("failed to search sender-scoped messages");
+        let sender_search =
+            search_messages(&conn, "redis", Some("email"), Some("owner@example.com"), 10)
+                .expect("failed to search sender-scoped messages");
         assert_eq!(sender_search.len(), 1);
         assert_eq!(sender_search[0].message_key, "msg-3");
 

@@ -1,4 +1,20 @@
 #!/usr/bin/env python3
+"""CTOX Google bootstrap profile probe.
+
+Launches a headed Chrome with a cloned user profile, drives it with the
+sibling `browser_profile_probe.mjs` Playwright script to reach
+google.com/search, and emits a debug envelope on stdout that the Rust
+caller parses into a GoogleBootstrapProfile.
+
+All environment discovery is overridable via environment variables or
+CLI flags so the same script runs on fresh checkouts, in CI, and across
+macOS / Linux.
+
+Environment overrides:
+  CTOX_WEB_CHROME_BIN            Path to Chrome/Chromium executable.
+  CTOX_WEB_CHROME_USER_DATA_DIR  Source user-data-dir to clone from.
+  CTOX_WEB_BROWSER_REFERENCE_DIR Directory containing `node_modules/playwright`.
+"""
 
 import argparse
 import json
@@ -12,21 +28,96 @@ import time
 import urllib.request
 
 
-CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-CHROME_APP = "/Applications/Google Chrome.app"
-REFERENCE_DIR = pathlib.Path(
-    "/Users/michaelwelsch/Dokumente - MacBook Air von Michael/"
-    "Dokumente - MacBook Air von Michael/CTOX/runtime/browser/interactive-reference"
-)
-GOOGLE_SEARCH_URL = (
+DEFAULT_GOOGLE_SEARCH_URL = (
     "https://www.google.com/search?"
     "q=RFC+9110+HTTP+Semantics&hl=en-US&lr=lang_en&cr=countryUS&ie=utf8&oe=utf8&start=0"
 )
 
 
+def find_chrome_executable() -> pathlib.Path:
+    override = os.environ.get("CTOX_WEB_CHROME_BIN")
+    if override:
+        path = pathlib.Path(override)
+        if not path.exists():
+            raise SystemExit(
+                f"CTOX_WEB_CHROME_BIN={override} does not exist"
+            )
+        return path
+    if sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        ]
+    elif sys.platform.startswith("linux"):
+        candidates = [
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/snap/bin/chromium",
+        ]
+    else:
+        candidates = []
+    for candidate in candidates:
+        if pathlib.Path(candidate).exists():
+            return pathlib.Path(candidate)
+    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
+        found = shutil.which(name)
+        if found:
+            return pathlib.Path(found)
+    raise SystemExit(
+        "No Chrome/Chromium binary found. Install Chrome or set CTOX_WEB_CHROME_BIN."
+    )
+
+
+def find_chrome_user_data_dir() -> pathlib.Path:
+    override = os.environ.get("CTOX_WEB_CHROME_USER_DATA_DIR")
+    if override:
+        path = pathlib.Path(override)
+        if not path.exists():
+            raise SystemExit(
+                f"CTOX_WEB_CHROME_USER_DATA_DIR={override} does not exist"
+            )
+        return path
+    home = pathlib.Path.home()
+    if sys.platform == "darwin":
+        candidates = [home / "Library/Application Support/Google/Chrome"]
+    elif sys.platform.startswith("linux"):
+        candidates = [
+            home / ".config/google-chrome",
+            home / ".config/chromium",
+            home / "snap/chromium/common/chromium",
+        ]
+    else:
+        candidates = []
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise SystemExit(
+        "No Chrome user-data-dir found. Set CTOX_WEB_CHROME_USER_DATA_DIR."
+    )
+
+
+def find_reference_dir() -> pathlib.Path:
+    override = os.environ.get("CTOX_WEB_BROWSER_REFERENCE_DIR")
+    if override:
+        path = pathlib.Path(override)
+        if not (path / "node_modules" / "playwright").exists():
+            raise SystemExit(
+                f"{path}/node_modules/playwright is missing. "
+                "Run `ctox web browser-prepare --install-reference --install-browser`."
+            )
+        return path
+    raise SystemExit(
+        "CTOX_WEB_BROWSER_REFERENCE_DIR is required. "
+        "The Rust caller sets this to the Playwright workspace dir."
+    )
+
+
 def wait_for_devtools_url(port: int, timeout_s: float) -> dict:
     deadline = time.time() + timeout_s
-    last_error = None
+    last_error: Exception | None = None
     while time.time() < deadline:
         try:
             with urllib.request.urlopen(
@@ -39,16 +130,57 @@ def wait_for_devtools_url(port: int, timeout_s: float) -> dict:
     raise RuntimeError(f"DevTools not reachable on {port}: {last_error}")
 
 
-def wait_for_chrome_shutdown(timeout_s: float) -> None:
+def wait_for_chrome_shutdown(chrome_bin: pathlib.Path, timeout_s: float) -> None:
     deadline = time.time() + timeout_s
+    binary_name = chrome_bin.name
     while time.time() < deadline:
         proc = subprocess.run(
-            ["pgrep", "-x", "Google Chrome"], capture_output=True, text=True
+            ["pgrep", "-f", binary_name], capture_output=True, text=True
         )
         if proc.returncode != 0 or not proc.stdout.strip():
             return
         time.sleep(0.5)
-    raise RuntimeError("Google Chrome did not shut down in time")
+    # Non-fatal: the caller can retry; do not crash the probe because another
+    # Chrome is lingering — the profile clone runs against a copy either way.
+    print(
+        f"Warning: {binary_name} did not shut down within {timeout_s}s",
+        file=sys.stderr,
+    )
+
+
+def quit_running_chrome(chrome_bin: pathlib.Path) -> None:
+    """Ask the source Chrome to close cleanly before cloning its profile.
+
+    The user's running Chrome holds a SingletonLock and has in-flight SQLite
+    writes to Cookies/Local State. Cloning while it runs can catch partial
+    state. On macOS we politely ask via AppleScript; on Linux we skip
+    because there is no portable, non-destructive way to ask Chrome to
+    close without clobbering the user's session — use --leave-chrome-running
+    or close the browser manually.
+    """
+    if sys.platform == "darwin":
+        subprocess.run(
+            ["osascript", "-e", 'tell application "Google Chrome" to quit'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        wait_for_chrome_shutdown(chrome_bin, 60)
+    else:
+        print(
+            "Note: skipping auto-quit of running Chrome on this platform. "
+            "Close Chrome manually for best results, or pass --leave-chrome-running.",
+            file=sys.stderr,
+        )
+
+
+def restart_chrome_app(chrome_bin: pathlib.Path) -> None:
+    if sys.platform != "darwin":
+        return
+    subprocess.run(
+        ["open", "-a", "Google Chrome"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def clone_data_dir(source: pathlib.Path, full_clone: bool) -> pathlib.Path:
@@ -99,7 +231,13 @@ def clone_data_dir(source: pathlib.Path, full_clone: bool) -> pathlib.Path:
         subprocess.run(cmd, check=True)
         return target
 
-    for rel in ["Local State", "Default/Preferences", "Default/Cookies"]:
+    for rel in [
+        "Local State",
+        "Default/Preferences",
+        "Default/Cookies",
+        "Default/Network/Cookies",
+        "Default/Login Data",
+    ]:
         src = source / rel
         dst = target / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -109,202 +247,72 @@ def clone_data_dir(source: pathlib.Path, full_clone: bool) -> pathlib.Path:
 
 
 def run_probe(
+    reference_dir: pathlib.Path,
     devtools_url: str,
     target_url: str,
     output_dir: pathlib.Path,
     interactive_unlock: bool,
     wait_timeout_secs: int,
 ) -> subprocess.CompletedProcess[str]:
-    script = REFERENCE_DIR / ".ctox-browser-profile-probe.mjs"
-    script.write_text(
-        """
-import { chromium } from 'playwright';
-import fs from 'node:fs';
-const ws = process.argv[2];
-const targetUrl = process.argv[3];
-const outputDir = process.argv[4];
-const interactiveUnlock = process.argv[5] === '1';
-const waitTimeoutSecs = Number(process.argv[6] ?? '0');
-const browser = await chromium.connectOverCDP(ws);
-const contexts = browser.contexts();
-const context = contexts[0] ?? await browser.newContext();
-const page = await context.newPage();
-const cdp = await context.newCDPSession(page);
-await cdp.send('Network.enable');
-await cdp.send('Security.enable');
-const cdpEvents = [];
-const playwrightEvents = [];
-const recordCdp = (name) => (params) => cdpEvents.push({ event: name, params });
-for (const name of [
-  'Network.requestWillBeSent',
-  'Network.requestWillBeSentExtraInfo',
-  'Network.responseReceived',
-  'Network.responseReceivedExtraInfo',
-  'Network.loadingFinished',
-  'Network.loadingFailed',
-  'Security.securityStateChanged',
-]) {
-  cdp.on(name, recordCdp(name));
-}
-page.on('request', (request) => {
-  playwrightEvents.push({
-    event: 'request',
-    method: request.method(),
-    url: request.url(),
-    headers: request.headers(),
-    resourceType: request.resourceType(),
-  });
-});
-page.on('response', async (response) => {
-  playwrightEvents.push({
-    event: 'response',
-    url: response.url(),
-    status: response.status(),
-    headers: await response.allHeaders(),
-  });
-});
-page.on('requestfailed', (request) => {
-  playwrightEvents.push({
-    event: 'requestfailed',
-    url: request.url(),
-    method: request.method(),
-    failure: request.failure(),
-  });
-});
-const isUsableGoogleResult = (html, url) => {
-  const lowered = html.toLowerCase();
-  const loweredUrl = url.toLowerCase();
-  return lowered.includes('data-ved')
-    && !lowered.includes('/sorry/')
-    && !lowered.includes('sorry.google.com')
-    && !lowered.includes('unusual traffic')
-    && !lowered.includes('captcha-form')
-    && !lowered.includes('enablejs')
-    && !loweredUrl.includes('/sorry');
-};
-await page.goto('https://www.google.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-if (interactiveUnlock) {
-  await page.bringToFront().catch(() => {});
-  const deadline = Date.now() + (Math.max(30, waitTimeoutSecs) * 1000);
-  while (Date.now() < deadline) {
-    const currentHtml = await page.content();
-    if (isUsableGoogleResult(currentHtml, page.url())) {
-      break;
-    }
-    await page.waitForTimeout(1000);
-  }
-}
-const html = await page.content();
-const cookies = await context.cookies();
-const searchUrl = page.url();
-const searchPath = new URL(searchUrl).pathname + new URL(searchUrl).search;
-const mainRequest = [...playwrightEvents]
-  .reverse()
-  .find((event) => event.event === 'request' && event.resourceType === 'document' && event.url.includes('/search?')) ?? null;
-const mainResponse = [...playwrightEvents]
-  .reverse()
-  .find((event) => event.event === 'response' && event.url === searchUrl) ?? null;
-const mainCdpRequest = [...cdpEvents]
-  .reverse()
-  .find((event) => event.event === 'Network.requestWillBeSent' && event.params?.type === 'Document' && event.params?.request?.url?.includes('/search?'))?.params ?? null;
-const mainCdpRequestExtra = [...cdpEvents]
-  .reverse()
-  .find((event) => event.event === 'Network.requestWillBeSentExtraInfo' && event.params?.headers?.[':path'] === searchPath)?.params ?? null;
-const mainCdpResponse = [...cdpEvents]
-  .reverse()
-  .find((event) => event.event === 'Network.responseReceived' && event.params?.type === 'Document' && event.params?.response?.url === searchUrl)?.params?.response ?? null;
-const mainCookieHeader = mainRequest?.headers?.cookie ?? mainCdpRequestExtra?.headers?.cookie ?? '';
-const summary = {
-  title: await page.title(),
-  finalUrl: searchUrl,
-  dataVed: html.toLowerCase().includes('data-ved'),
-  sorry: html.toLowerCase().includes('/sorry/') || html.toLowerCase().includes('sorry.google.com') || html.toLowerCase().includes('unusual traffic'),
-  captcha: html.toLowerCase().includes('captcha-form'),
-  enablejs: html.toLowerCase().includes('enablejs'),
-  cookieCount: cookies.length,
-  cookieNames: cookies.map(c => c.name).sort().slice(0, 120),
-  googleCookies: cookies.filter(c => c.domain.includes('google')).map(c => ({
-    name: c.name,
-    domain: c.domain,
-    path: c.path,
-    secure: c.secure,
-    httpOnly: c.httpOnly,
-    sameSite: c.sameSite,
-  })),
-  mainRequestMethod: mainRequest?.method ?? mainCdpRequest?.request?.method ?? null,
-  mainRequestHeaders: mainRequest?.headers ?? null,
-  mainCdpRequestHeaders: mainCdpRequest?.request?.headers ?? null,
-  mainCdpRequestExtraHeaders: mainCdpRequestExtra?.headers ?? null,
-  mainResponseHeaders: mainResponse?.headers ?? null,
-  mainProtocol: mainCdpResponse?.protocol ?? null,
-  mainSecurityDetails: mainCdpResponse?.securityDetails ?? null,
-  mainCookieHeaderLength: mainCookieHeader.length,
-  mainCookieNames: mainCookieHeader
-    ? mainCookieHeader.split(';').map(part => part.split('=')[0]?.trim()).filter(Boolean).slice(0, 200)
-    : [],
-  artifactDir: outputDir,
-};
-fs.mkdirSync(outputDir, { recursive: true });
-fs.writeFileSync(`${outputDir}/capture-summary.json`, JSON.stringify(summary, null, 2));
-fs.writeFileSync(`${outputDir}/cdp-events.json`, JSON.stringify(cdpEvents, null, 2));
-fs.writeFileSync(`${outputDir}/playwright-events.json`, JSON.stringify(playwrightEvents, null, 2));
-fs.writeFileSync(`${outputDir}/page.html`, html);
-console.log(JSON.stringify(summary, null, 2));
-await browser.close();
-""".strip()
+    script = pathlib.Path(__file__).resolve().with_name("browser_profile_probe.mjs")
+    if not script.exists():
+        raise SystemExit(f"probe driver missing: {script}")
+    env = os.environ.copy()
+    env["HOME"] = str(pathlib.Path.home())
+    # Probe must complete within wait_timeout_secs + navigation + close overhead.
+    # Previously hardcoded to 120s, which silently killed interactive unlocks
+    # that asked for longer challenge windows.
+    subprocess_timeout = max(120, wait_timeout_secs + 60)
+    return subprocess.run(
+        [
+            "node",
+            str(script),
+            devtools_url,
+            target_url,
+            str(output_dir),
+            "1" if interactive_unlock else "0",
+            str(wait_timeout_secs),
+        ],
+        cwd=reference_dir,
+        capture_output=True,
+        text=True,
+        timeout=subprocess_timeout,
+        env=env,
     )
-    try:
-        env = os.environ.copy()
-        env["HOME"] = str(pathlib.Path.home())
-        return subprocess.run(
-            [
-                "node",
-                str(script),
-                devtools_url,
-                target_url,
-                str(output_dir),
-                "1" if interactive_unlock else "0",
-                str(wait_timeout_secs),
-            ],
-            cwd=REFERENCE_DIR,
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
-        )
-    finally:
-        try:
-            script.unlink()
-        except FileNotFoundError:
-            pass
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--full-clone", action="store_true")
     parser.add_argument("--quit-running-chrome", action="store_true")
+    parser.add_argument(
+        "--leave-chrome-running",
+        action="store_true",
+        help="Do not ask the user's Chrome to quit before cloning the profile.",
+    )
     parser.add_argument("--emit-fetch-json", action="store_true")
     parser.add_argument("--interactive-unlock", action="store_true")
     parser.add_argument("--wait-timeout-secs", type=int, default=300)
     parser.add_argument("--port", type=int, default=9222)
-    parser.add_argument("--url", default=GOOGLE_SEARCH_URL)
+    parser.add_argument("--url", default=DEFAULT_GOOGLE_SEARCH_URL)
     args = parser.parse_args()
 
-    base = pathlib.Path.home() / "Library/Application Support/Google/Chrome"
-    if args.quit_running_chrome:
-        subprocess.run(
-            ["osascript", "-e", 'tell application "Google Chrome" to quit'],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        wait_for_chrome_shutdown(60)
+    chrome_bin = find_chrome_executable()
+    source_data_dir = find_chrome_user_data_dir()
+    reference_dir = find_reference_dir()
 
-    data_dir = clone_data_dir(base, args.full_clone)
+    if args.quit_running_chrome and not args.leave_chrome_running:
+        quit_running_chrome(chrome_bin)
+
+    data_dir = clone_data_dir(source_data_dir, args.full_clone)
     capture_dir = data_dir / "capture"
     capture_dir.mkdir(parents=True, exist_ok=True)
     chrome_out = data_dir / "chrome.out"
     chrome_err = data_dir / "chrome.err"
+    # Intentionally omit --log-net-log and --net-log-capture-mode: they trigger
+    # Chrome's "unsupported command-line flag" warning banner on every launch,
+    # and no downstream consumer reads the net-log produced by this probe (the
+    # capture dir is wiped with the tempdir on exit).
     chrome_args = [
         f"--user-data-dir={data_dir}",
         "--profile-directory=Default",
@@ -313,16 +321,14 @@ def main() -> None:
         "--restore-last-session",
         "--no-first-run",
         "--no-default-browser-check",
-        f"--log-net-log={capture_dir / 'chrome-netlog.json'}",
-        "--net-log-capture-mode=Everything",
         "about:blank",
     ]
-    if sys.platform == "darwin" and pathlib.Path(CHROME_PATH).exists():
-        launch_cmd = [CHROME_PATH, *chrome_args]
-    elif sys.platform == "darwin":
-        launch_cmd = ["open", "-na", CHROME_APP, "--args", *chrome_args]
+    if sys.platform == "darwin" and chrome_bin.suffix == "":
+        # Launch the Chrome.app binary directly so the probe-owned process
+        # does not inherit the user's running session state.
+        launch_cmd = [str(chrome_bin), *chrome_args]
     else:
-        launch_cmd = [CHROME_PATH, *chrome_args]
+        launch_cmd = [str(chrome_bin), *chrome_args]
 
     proc = subprocess.Popen(
         launch_cmd,
@@ -334,6 +340,7 @@ def main() -> None:
     try:
         meta = wait_for_devtools_url(args.port, 45)
         result = run_probe(
+            reference_dir,
             meta["webSocketDebuggerUrl"],
             args.url,
             capture_dir,
@@ -372,12 +379,12 @@ def main() -> None:
         except Exception:
             proc.kill()
             proc.wait(timeout=5)
-        if args.quit_running_chrome and sys.platform == "darwin":
-            subprocess.run(
-                ["open", "-a", "Google Chrome"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+        if (
+            args.quit_running_chrome
+            and not args.leave_chrome_running
+            and sys.platform == "darwin"
+        ):
+            restart_chrome_app(chrome_bin)
 
     raise SystemExit(exit_code)
 

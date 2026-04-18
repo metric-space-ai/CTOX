@@ -10,8 +10,10 @@ mod export;
 mod install;
 mod mission;
 mod paths;
+mod persistence;
 mod secrets;
 mod service;
+mod skill_store;
 mod ui;
 mod web_stack;
 
@@ -74,7 +76,7 @@ use crate::inference::runtime_state;
 mod model_catalog_boundary_tests;
 
 fn print_help() {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = env!("CTOX_BUILD_VERSION");
     println!(
         "ctox {version} — autonomous agent runtime
 
@@ -86,6 +88,8 @@ EVERYDAY
   ctox start                     start the persistent mission loop (systemd service)
   ctox stop                      stop the mission loop
   ctox status                    show service status (JSON)
+  ctox chat <instruction>        submit a prompt to the running service
+                                 add --wait to block until the slice completes
   ctox tui                       open the TUI
   ctox version                   print the version string
 
@@ -105,9 +109,7 @@ ENGINE / GPU
   ctox doctor                    health check — update available? engine present? hints
 
 RUN / EXEC
-  ctox run-once --brief <text> [--model <id>] [--quality|--performance]
-  ctox runtime switch <model> <quality|performance>
-  ctox serve-responses-proxy
+  ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]
   ctox serve-litert-bridge --config <json>
 
 GOVERNANCE / MISSION
@@ -142,8 +144,7 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = resolve_workspace_root()?;
     service::db_migration::run_if_needed(&root)
-        .context("failed to consolidate legacy databases into runtime/ctox.db")?;
-    let clean_room_families = model_registry::supported_clean_room_family_selectors().join("|");
+        .context("failed to consolidate legacy databases into runtime/ctox.sqlite3")?;
 
     match args.first().map(String::as_str) {
         None => tui::run_tui(&root),
@@ -185,11 +186,21 @@ fn main() -> anyhow::Result<()> {
             Some("switch") => {
                 let model = args
                     .get(2)
-                    .context("usage: ctox runtime switch <model> <quality|performance>")?;
+                    .context(
+                        "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]",
+                    )?;
                 let preset = args
                     .get(3)
-                    .context("usage: ctox runtime switch <model> <quality|performance>")?;
-                let outcome = runtime_control::execute_runtime_switch(&root, model, Some(preset))?;
+                    .context(
+                        "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]",
+                    )?;
+                let context = find_flag_value(&args[4..], "--context");
+                let outcome = runtime_control::execute_runtime_switch_with_context(
+                    &root,
+                    model,
+                    Some(preset),
+                    context,
+                )?;
                 if let Some(plan) = runtime_plan::load_persisted_chat_runtime_plan(&root)? {
                     println!("{}", serde_json::to_string_pretty(&plan)?);
                 } else {
@@ -197,18 +208,18 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", serde_json::to_string_pretty(&state)?);
                 }
                 eprintln!(
-                    "ctox runtime switch requested model={} active_model={} phase={:?}",
-                    model, outcome.active_model, outcome.phase
+                    "ctox runtime switch requested model={} context={} active_model={} phase={:?}",
+                    model,
+                    context.unwrap_or("default"),
+                    outcome.active_model,
+                    outcome.phase
                 );
                 Ok(())
             }
-            _ => anyhow::bail!("usage: ctox runtime switch <model> <quality|performance>"),
+            _ => anyhow::bail!(
+                "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]"
+            ),
         },
-        Some("serve-responses-proxy") => {
-            let config = gateway::ProxyConfig::resolve_with_root(&root);
-            eprintln!("{}", serde_json::to_string_pretty(&config)?);
-            gateway::serve_proxy(config)
-        }
         Some("serve-litert-bridge") => {
             let config_path = find_flag_value(&args[1..], "--config")
                 .context("usage: ctox serve-litert-bridge --config <json-path>")?;
@@ -227,12 +238,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|value| value.parse::<u64>().ok());
                 let model = find_flag_value(&args[2..], "--model");
                 let reason = find_flag_value(&args[2..], "--reason");
-                let result = gateway::start_boost_lease(
-                    &root,
-                    model,
-                    minutes,
-                    reason,
-                )?;
+                let result = gateway::start_boost_lease(&root, model, minutes, reason)?;
                 println!("{}", serde_json::to_string_pretty(&result)?);
                 Ok(())
             }
@@ -273,6 +279,7 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&version)?);
             Ok(())
         }
+        Some("chat") => handle_chat(&root, &args[1..]),
         Some("start") => {
             println!("{}", service::start_background(&root)?);
             Ok(())
@@ -291,14 +298,8 @@ fn main() -> anyhow::Result<()> {
         Some("tui") => tui::run_tui(&root),
         Some("tui-smoke") => {
             let page = args.get(1).map(String::as_str).unwrap_or("chat");
-            let width: u16 = args
-                .get(2)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(120);
-            let height: u16 = args
-                .get(3)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(40);
+            let width: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(120);
+            let height: u16 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(40);
             tui::run_tui_smoke(&root, page, width, height)
         }
         Some("browser") => browser::handle_browser_command(&root, &args[1..]),
@@ -306,8 +307,12 @@ fn main() -> anyhow::Result<()> {
         Some("doc") => doc::handle_doc_command(&root, &args[1..]),
         Some("follow-up") => follow_up::handle_follow_up_command(&args[1..]),
         Some("governance") => governance::handle_governance_command(&root, &args[1..]),
-        Some("jami-daemon") => mission::communication_jami_native::handle_daemon_command(&root, &args[1..]),
-        Some("meeting") => mission::communication_meeting_native::handle_meeting_command(&root, &args[1..]),
+        Some("jami-daemon") => {
+            mission::communication_jami_native::handle_daemon_command(&root, &args[1..])
+        }
+        Some("meeting") => {
+            mission::communication_meeting_native::handle_meeting_command(&root, &args[1..])
+        }
         Some("plan") => plan::handle_plan_command(&root, &args[1..]),
         Some("queue") => queue::handle_queue_command(&root, &args[1..]),
         Some("scrape") => scrape::handle_scrape_command(&root, &args[1..]),
@@ -316,7 +321,9 @@ fn main() -> anyhow::Result<()> {
         Some("ticket") => tickets::handle_ticket_command(&root, &args[1..]),
         Some("web") => web::handle_web_command(&root, &args[1..]),
         Some("verification") => verification::handle_verification_command(&root, &args[1..]),
-        Some("state-invariants") => state_invariants::handle_state_invariants_command(&root, &args[1..]),
+        Some("state-invariants") => {
+            state_invariants::handle_state_invariants_command(&root, &args[1..])
+        }
         Some("update") | Some("upgrade") => install::handle_update_command(&root, &args[1..]),
         Some("engine") => install::handle_engine_command(&root, &args[1..]),
         Some("doctor") => install::handle_doctor_command(&root),
@@ -415,7 +422,9 @@ fn main() -> anyhow::Result<()> {
                     (tail.join(" "), 20_usize)
                 }
             } else {
-                anyhow::bail!("usage: ctox lcm-grep <db-path> <conversation-id|all> <scope> <mode> <query> [limit]");
+                anyhow::bail!(
+                    "usage: ctox lcm-grep <db-path> <conversation-id|all> <scope> <mode> <query> [limit]"
+                );
             };
             let result = lcm::run_grep(
                 PathBuf::from(db_path).as_path(),
@@ -700,7 +709,7 @@ fn main() -> anyhow::Result<()> {
                 .context("failed to parse conversation id")?;
             let db_path = find_flag_value(&args[1..], "--db")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| crate::paths::lcm_db(root));
+                .unwrap_or_else(|| root.join("runtime/ctox.sqlite3"));
             let output_path = find_flag_value(&args[1..], "--output").map(PathBuf::from);
             let settings = runtime_env::effective_runtime_env_map(&root).unwrap_or_default();
             let model = runtime_env::effective_chat_model_from_map(&settings)
@@ -771,7 +780,7 @@ fn main() -> anyhow::Result<()> {
             let mode = find_flag_value(&args[1..], "--mode").unwrap_or("current");
             let db_path = find_flag_value(&args[1..], "--db")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| crate::paths::lcm_db(root));
+                .unwrap_or_else(|| root.join("runtime/ctox.sqlite3"));
             let query = find_flag_value(&args[1..], "--query").map(ToOwned::to_owned);
             let continuity_kind = find_flag_value(&args[1..], "--kind").map(ToOwned::to_owned);
             let summary_id = find_flag_value(&args[1..], "--summary-id").map(ToOwned::to_owned);
@@ -806,31 +815,138 @@ fn main() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
-        Some("run-once") => handle_run_once(&root, &args[1..]),
         Some(unknown) => {
-            anyhow::bail!(
-                "unknown command `{unknown}` — run `ctox help` for usage"
-            );
+            anyhow::bail!("unknown command `{unknown}` — run `ctox help` for usage");
         }
     }
 }
 
-/// `ctox run-once` — drive a single CTOX mission from the initial brief all
-/// the way to its done-gate, then emit a trajectory.
-///
-/// A mission in CTOX is *not* a single LLM call: the agent can enqueue
-/// follow-ups, plans can emit new steps between turns, and those extend the
-/// mission until the continuity state reaches `is_open == false`. This CLI
-/// replicates the inner loop that `start_prompt_worker` runs inside the
-/// service daemon, without the service daemon itself — bench harnesses get
-/// the full CTOX operating model (Plan → Turn → Follow-up → Turn → … →
-/// Done-gate) in a single invocation.
-///
-/// Exit semantics for harness consumption:
-///   0   — mission closed (is_open == false). Done-gate reached.
-///   1   — a turn failed (error propagated via `anyhow`).
-///   2   — mission blocked (no more pending work but mission still open).
-///   4   — turn-cap reached (`--max-turns`, default 30).
+fn handle_chat(root: &Path, args: &[String]) -> anyhow::Result<()> {
+    let wait = args.iter().any(|arg| arg == "--wait");
+    let thread_key = find_flag_value(args, "--thread-key").map(str::to_owned);
+    let workspace = find_flag_value(args, "--workspace").map(PathBuf::from);
+    let atif_out = find_flag_value(args, "--atif-out").map(PathBuf::from);
+    let timeout_secs = find_flag_value(args, "--timeout-secs")
+        .map(|value| value.parse::<u64>())
+        .transpose()
+        .context("failed to parse --timeout-secs")?
+        .unwrap_or(1800);
+    if atif_out.is_some() && !wait {
+        anyhow::bail!("--atif-out requires --wait");
+    }
+
+    let mut prompt_parts = Vec::new();
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--wait" => idx += 1,
+            "--thread-key" | "--workspace" | "--atif-out" | "--timeout-secs" => {
+                idx += 2;
+            }
+            value => {
+                prompt_parts.push(value);
+                idx += 1;
+            }
+        }
+    }
+    let raw_prompt = prompt_parts.join(" ");
+    let prompt = build_chat_prompt(raw_prompt.trim(), workspace.as_deref())?;
+
+    let status = service::service_status_snapshot(root)?;
+    if !status.running {
+        anyhow::bail!(
+            "CTOX service is not running. Start it with `ctox start` or `ctox service --foreground`."
+        );
+    }
+
+    service::submit_chat_prompt_with_thread_key(root, &prompt, thread_key.as_deref())?;
+
+    let conversation_id =
+        inference::turn_loop::conversation_id_for_thread_key(thread_key.as_deref());
+    let mut final_status = None;
+    if wait {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let status = service::service_status_snapshot(root)?;
+            if !status.running {
+                anyhow::bail!("CTOX service stopped before the chat request completed");
+            }
+            if !status.busy && status.pending_count == 0 {
+                final_status = Some(status);
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "timed out waiting for CTOX to finish the chat request after {}s",
+                    timeout_secs
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    }
+
+    if let Some(out_path) = atif_out.as_deref() {
+        let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
+        let model_name = runtime_env::effective_chat_model_from_map(&settings)
+            .unwrap_or_else(|| model_registry::default_local_chat_model().to_string());
+        let session_id = thread_key
+            .clone()
+            .unwrap_or_else(|| format!("chat-{}", conversation_id));
+        let notes = final_status
+            .as_ref()
+            .and_then(|status| status.last_error.clone())
+            .map(|err| format!("service reported last_error: {err}"));
+        let trajectory = export::atif::build_trajectory(
+            &root.join("runtime/ctox.sqlite3"),
+            conversation_id,
+            &session_id,
+            "ctox",
+            env!("CTOX_BUILD_VERSION"),
+            &model_name,
+            notes,
+        )?;
+        export::atif::write_trajectory(&trajectory, out_path).with_context(|| {
+            format!("failed to write ATIF trajectory to {}", out_path.display())
+        })?;
+    }
+
+    let last_error = final_status
+        .as_ref()
+        .and_then(|status| status.last_error.clone());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "status": if wait { "completed" } else { "submitted" },
+            "conversation_id": conversation_id,
+            "thread_key": thread_key,
+            "waited": wait,
+            "last_error": last_error,
+        }))?
+    );
+
+    if let Some(err) = last_error {
+        anyhow::bail!(err);
+    }
+    Ok(())
+}
+
+fn build_chat_prompt(raw_prompt: &str, workspace: Option<&Path>) -> anyhow::Result<String> {
+    if raw_prompt.is_empty() {
+        anyhow::bail!(
+            "usage: ctox chat \"<instruction>\" [--thread-key <key>] [--workspace <path>] [--wait] [--timeout-secs <n>] [--atif-out <path>]"
+        );
+    }
+    if raw_prompt.starts_with("Work only inside this workspace:") || workspace.is_none() {
+        return Ok(raw_prompt.to_string());
+    }
+    let workspace = workspace.expect("workspace checked above");
+    Ok(format!(
+        "Work only inside this workspace:\n{}\n\n{}",
+        workspace.display(),
+        raw_prompt
+    ))
+}
+
 /// `ctox continuity-update` — tool-based continuity refresh primitive.
 ///
 /// The continuity refresh used to require the model to emit a textual
@@ -851,18 +967,16 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
     // Default to the conventional runtime DB if --db is not supplied. Codex-
     // exec children inherit CTOX_ROOT so this usually just works.
     let ctox_root_env = std::env::var("CTOX_ROOT").ok();
-    let default_db = ctox_root_env.as_deref().map(|r| {
-        crate::paths::lcm_db(Path::new(r))
-            .to_string_lossy()
-            .into_owned()
-    });
+    let default_db = ctox_root_env
+        .as_deref()
+        .map(|r| format!("{}/runtime/ctox.sqlite3", r.trim_end_matches('/')));
     let db_path = find_flag_value(args, "--db")
         .map(str::to_string)
         .or(default_db)
         .context("usage: ctox continuity-update --kind <narrative|anchors|focus> --mode <full|replace|diff> [--conversation-id <id>] [--db <path>] [--find <text>] [--replace <text>]")?;
     // conversation_id is optional: defaults to the constant CTOX chat
-    // conversation id used by run-once and the service daemon. Codex-exec
-    // children never need to know it explicitly.
+    // conversation id used by the service daemon. Codex-exec children
+    // never need to know it explicitly.
     let conversation_id: i64 = match find_flag_value(args, "--conversation-id") {
         Some(v) => v.parse().context("failed to parse --conversation-id")?,
         None => inference::turn_loop::CHAT_CONVERSATION_ID,
@@ -899,600 +1013,6 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
-}
-
-fn handle_run_once(root: &Path, args: &[String]) -> anyhow::Result<()> {
-    let brief = find_flag_value(args, "--brief").context(
-        "usage: ctox run-once --brief <text> [--model <id>] [--quality|--performance] \
-         [--workspace <path>] [--atif-out <path>] [--thread-key <key>] [--max-turns <n>] \
-         [--autonomy progressive|balanced|defensive] \
-         [--auto-approve-gates (deprecated alias for --autonomy progressive)]",
-    )?;
-    // Autonomy level: benchmark harnesses (Terminal-Bench) set
-    // `--autonomy progressive` to skip the owner-approval handshake.
-    // Default is whatever the TUI left in CTOX_AUTONOMY_LEVEL (via
-    // engine.env), falling back to balanced.
-    if let Some(level_str) = find_flag_value(args, "--autonomy") {
-        let level = autonomy::AutonomyLevel::from_str_lossy(level_str);
-        std::env::set_var("CTOX_AUTONOMY_LEVEL", level.as_str());
-    } else if args.iter().any(|arg| arg == "--auto-approve-gates") {
-        eprintln!("warning: --auto-approve-gates is deprecated; use --autonomy progressive");
-        std::env::set_var("CTOX_AUTONOMY_LEVEL", "progressive");
-    }
-    let model = find_flag_value(args, "--model");
-    let preset = if args.iter().any(|arg| arg == "--quality") {
-        Some("quality")
-    } else if args.iter().any(|arg| arg == "--performance") {
-        Some("performance")
-    } else {
-        None
-    };
-    let workspace_opt = find_flag_value(args, "--workspace").map(PathBuf::from);
-    let atif_out = find_flag_value(args, "--atif-out").map(PathBuf::from);
-    let thread_key = find_flag_value(args, "--thread-key")
-        .map(str::to_owned)
-        .unwrap_or_else(|| format!("run-once-{}", chrono::Utc::now().timestamp_millis()));
-    let max_turns: usize = find_flag_value(args, "--max-turns")
-        .map(|v| v.parse::<usize>())
-        .transpose()
-        .context("failed to parse --max-turns")?
-        .unwrap_or(30);
-
-    if let Some(model_id) = model {
-        let outcome = runtime_control::execute_runtime_switch(root, model_id, preset)?;
-        eprintln!(
-            "ctox run-once: model switch requested={} active_model={} phase={:?}",
-            model_id, outcome.active_model, outcome.phase
-        );
-    } else if preset.is_some() {
-        anyhow::bail!("--quality/--performance requires --model <id>");
-    }
-
-    // If the selected model needs the CTOX gateway proxy for wire-protocol
-    // translation (e.g. MiniMax: codex-exec speaks /v1/responses, MiniMax
-    // direct only has /v1/chat/completions), spawn the gateway in a
-    // background thread so codex-exec has somewhere to talk.
-    if let Some(model_id) = model {
-        if engine::default_api_provider_for_model(model_id) == "minimax" {
-            let root_for_proxy = root.to_path_buf();
-            std::thread::Builder::new()
-                .name("ctox-run-once-proxy".to_string())
-                .spawn(move || {
-                    let config = gateway::ProxyConfig::resolve_with_root(&root_for_proxy);
-                    eprintln!(
-                        "ctox run-once: spawning gateway on {} → upstream={}",
-                        config.listen_addr(),
-                        config.upstream_base_url
-                    );
-                    if let Err(err) = gateway::serve_proxy(config) {
-                        eprintln!("ctox run-once: gateway exited with error: {err}");
-                    }
-                })
-                .context("failed to spawn gateway thread")?;
-            // Wait briefly for the gateway to bind its port.
-            let listen_port = runtime_state::load_or_resolve_runtime_state(root)
-                .ok()
-                .and_then(|state| Some(state.proxy_port))
-                .unwrap_or(12434);
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                if std::net::TcpStream::connect(("127.0.0.1", listen_port)).is_ok() {
-                    eprintln!("ctox run-once: gateway up on 127.0.0.1:{listen_port}");
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(150));
-            }
-        }
-    }
-
-    let db_path = crate::paths::lcm_db(root);
-    if let Some(parent) = db_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-
-    let conversation_id =
-        inference::turn_loop::conversation_id_for_thread_key(Some(thread_key.as_str()));
-
-    eprintln!(
-        "ctox run-once: thread_key={} conversation_id={} brief_chars={} max_turns={}",
-        thread_key,
-        conversation_id,
-        brief.chars().count(),
-        max_turns
-    );
-
-    // Seed the mission with the brief as a queue task so it flows through
-    // exactly the same lease/ack machinery that channel-sourced prompts
-    // use in the service daemon.
-    let initial_title = {
-        let mut s: String = brief.chars().take(80).collect();
-        if brief.chars().count() > 80 {
-            s.push('…');
-        }
-        format!("run-once: {s}")
-    };
-    let _seed = channels::create_queue_task(
-        root,
-        channels::QueueTaskCreateRequest {
-            title: initial_title,
-            prompt: brief.to_string(),
-            thread_key: thread_key.clone(),
-            workspace_root: workspace_opt
-                .as_ref()
-                .map(|p| p.to_string_lossy().into_owned()),
-            priority: "normal".to_string(),
-            suggested_skill: None,
-            parent_message_key: None,
-        },
-    )
-    .context("failed to seed initial queue task for run-once mission")?;
-
-    let lease_owner = "run-once";
-    let mut mission_status: &str = "open";
-    let mut last_error: Option<String> = None;
-    let mut last_reply = String::new();
-    let mut turns_run: usize = 0;
-
-    let mut current = lease_next_for_thread(root, &thread_key, lease_owner)?;
-    if current.is_none() {
-        anyhow::bail!("failed to lease newly-created queue task for thread {thread_key}");
-    }
-
-    // Create a single PersistentSession for the entire run-once loop.
-    // Context accumulates across turns inside codex-core's thread state,
-    // so CompactPolicy can observe real growth and fire when needed.
-    let operator_settings =
-        inference::runtime_env::effective_operator_env_map(root).unwrap_or_default();
-    let mut persistent_session = match inference::turn_loop::PersistentSession::start(
-        root,
-        &operator_settings,
-    ) {
-        Ok(session) => {
-            eprintln!(
-                "ctox run-once: persistent session created (context accumulates across turns)"
-            );
-            Some(session)
-        }
-        Err(err) => {
-            eprintln!("ctox run-once: failed to create persistent session: {err:#} — falling back to per-turn clients");
-            None
-        }
-    };
-
-    while let Some((prompt_text, leased_keys, ws_override)) = current.take() {
-        turns_run += 1;
-        let workspace_ref = ws_override.as_deref().or(workspace_opt.as_deref());
-        let force_continuity_refresh = leased_keys
-            .iter()
-            .any(|key| key.starts_with("plan:system::"));
-
-        eprintln!(
-            "ctox run-once: turn {}/{} leased={:?} prompt_chars={}",
-            turns_run,
-            max_turns,
-            leased_keys,
-            prompt_text.chars().count()
-        );
-
-        let turn_result = inference::turn_loop::run_chat_turn_with_events_extended(
-            root,
-            &db_path,
-            &prompt_text,
-            workspace_ref,
-            conversation_id,
-            None,
-            force_continuity_refresh,
-            persistent_session.as_mut(),
-            |event| eprintln!("[ctox run-once t{turns_run}] {event}"),
-        );
-
-        match &turn_result {
-            Ok(reply) => {
-                last_reply.clone_from(reply);
-                if let Err(err) = channels::ack_leased_messages(root, &leased_keys, "handled") {
-                    eprintln!("ctox run-once: ack handled failed: {err}");
-                }
-                for key in &leased_keys {
-                    if key.starts_with("plan:system::") {
-                        if let Err(err) = plan::complete_step_by_message_key(root, key, reply) {
-                            eprintln!(
-                                "ctox run-once: complete_step_by_message_key({key}) failed: {err}"
-                            );
-                        }
-                    }
-                }
-            }
-            Err(err) => {
-                let err_text = err.to_string();
-                last_error = Some(err_text.clone());
-                eprintln!("ctox run-once: turn {turns_run} failed: {err_text}");
-                let _ = channels::ack_leased_messages(root, &leased_keys, "failed");
-
-                // Service-daemon parity: a turn that hit the runtime time
-                // budget is recoverable. CTOX' production behaviour is to
-                // enqueue a high-priority continuation slice with a "pick
-                // up where you left off" prompt and let the next turn
-                // resume from the LCM-persisted state. Without this,
-                // run-once misrepresents CTOX in benchmarks — weak models
-                // that legitimately need more wall time would get scored
-                // as full failures instead of as multi-slice missions.
-                if is_turn_timeout_blocker(&err_text) && turns_run < max_turns {
-                    match enqueue_timeout_continuation(
-                        root,
-                        &thread_key,
-                        workspace_opt
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().into_owned())
-                            .as_deref(),
-                        brief,
-                        &err_text,
-                        leased_keys.first().map(String::as_str),
-                    ) {
-                        Ok(title) => {
-                            eprintln!("ctox run-once: enqueued timeout continuation: {title}");
-                            // Fall through: sync mission state, then lease
-                            // the freshly enqueued continuation in the
-                            // next iteration.
-                        }
-                        Err(enq_err) => {
-                            eprintln!("ctox run-once: failed to enqueue continuation: {enq_err}");
-                            mission_status = "failed";
-                            break;
-                        }
-                    }
-                } else {
-                    mission_status = "failed";
-                    break;
-                }
-            }
-        }
-
-        // Narrow mid-work detection: only the unambiguous case. An
-        // unclosed `<think>` means the reasoning was cut off mid-
-        // stream and the model never got to act. Text-pattern matches
-        // on intent prefixes ("I'll ...", "Now ...") were too brittle
-        // across languages and model phrasings and created downstream
-        // false-positives in the tool-activity gate. The system-
-        // prompt Mission Control Contract now handles the cooperative
-        // case; the heuristic only catches the hard truncation case.
-        let last_reply_is_mid_work = turn_result
-            .as_ref()
-            .ok()
-            .map(|r| reply_looks_mid_work(r))
-            .unwrap_or(false);
-        if last_reply_is_mid_work && turns_run < max_turns {
-            match enqueue_midwork_continuation(
-                root,
-                &thread_key,
-                workspace_opt
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .as_deref(),
-                brief,
-                leased_keys.first().map(String::as_str),
-            ) {
-                Ok(title) => {
-                    eprintln!(
-                        "ctox run-once: turn {} ended mid-think — enqueued continuation: {title}",
-                        turns_run
-                    );
-                }
-                Err(err) => {
-                    eprintln!("ctox run-once: failed to enqueue mid-work continuation: {err}");
-                }
-            }
-        }
-
-        // Explicit closure check — only trust `mission_status == "done"`
-        // or `continuation_mode in {closed, dormant}`. Do NOT use
-        // `is_open=false` on its own: for a fresh mission the Focus
-        // document is still empty, which the derivation function
-        // reports as `is_open=false` even though the mission just
-        // started. The service daemon (service.rs:2320) already treats
-        // `is_open` as an idle-detection signal, not a termination
-        // signal; run-once now matches.
-        let explicitly_closed = match lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
-            .and_then(|engine| engine.sync_mission_state_from_continuity(conversation_id))
-        {
-            Ok(state) => {
-                let status = state.mission_status.to_ascii_lowercase();
-                let mode = state.continuation_mode.to_ascii_lowercase();
-                let closed = status == "done" || mode == "closed" || mode == "dormant";
-                eprintln!(
-                    "ctox run-once: after t{} status={} mode={} explicit_closed={} mid_work={}",
-                    turns_run, status, mode, closed, last_reply_is_mid_work
-                );
-                closed
-            }
-            Err(err) => {
-                eprintln!(
-                        "ctox run-once: sync_mission_state_from_continuity failed: {err}; treating mission as still open"
-                    );
-                false
-            }
-        };
-
-        if explicitly_closed {
-            mission_status = "handled";
-            break;
-        }
-
-        if turns_run >= max_turns {
-            mission_status = "cap";
-            break;
-        }
-
-        // Let plan steps that are now due emit new plan:system:: messages
-        // into the queue. This is the hook the watcher thread normally runs
-        // on its timer; run-once triggers it synchronously between turns.
-        if let Err(err) = plan::emit_due_steps(root) {
-            eprintln!("ctox run-once: plan::emit_due_steps failed: {err}");
-        }
-
-        current = lease_next_for_thread(root, &thread_key, lease_owner)?;
-        if current.is_none() {
-            // No pending queue work AND mission wasn't explicitly
-            // closed. This is the "natural end" case — model
-            // completed the task, didn't queue follow-ups. We treat
-            // it as handled; if the verifier disagrees, that's a
-            // model-side fail per the bench rules.
-            mission_status = "handled";
-            break;
-        }
-    }
-
-    // Shut down the persistent session cleanly.
-    if let Some(mut session) = persistent_session.take() {
-        eprintln!("ctox run-once: shutting down persistent session");
-        session.shutdown();
-    }
-
-    if let Some(out_path) = atif_out.as_deref() {
-        let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
-        let model_name = runtime_env::effective_chat_model_from_map(&settings)
-            .unwrap_or_else(|| "unknown".to_string());
-        let notes = match mission_status {
-            "handled" => Some(format!("mission handled in {turns_run} turn(s)")),
-            "failed" => Some(format!(
-                "mission failed on turn {turns_run}: {}",
-                last_error.as_deref().unwrap_or("<no error text>")
-            )),
-            "blocked" => Some(format!(
-                "mission blocked after {turns_run} turn(s): no more pending work but mission still open"
-            )),
-            "cap" => Some(format!(
-                "mission hit --max-turns cap ({max_turns}); mission still open"
-            )),
-            _ => None,
-        };
-        let trajectory = export::atif::build_trajectory(
-            &db_path,
-            conversation_id,
-            &thread_key,
-            "ctox",
-            env!("CARGO_PKG_VERSION"),
-            &model_name,
-            notes,
-        )?;
-        export::atif::write_trajectory(&trajectory, out_path).with_context(|| {
-            format!("failed to write ATIF trajectory to {}", out_path.display())
-        })?;
-        eprintln!(
-            "ctox run-once: wrote ATIF trajectory to {}",
-            out_path.display()
-        );
-    }
-
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "status": mission_status,
-            "conversation_id": conversation_id,
-            "thread_key": thread_key,
-            "turns_run": turns_run,
-            "reply_chars": last_reply.chars().count(),
-            "last_error": last_error,
-        }))?
-    );
-
-    match mission_status {
-        "handled" => Ok(()),
-        "failed" => Err(anyhow::anyhow!(
-            last_error.unwrap_or_else(|| "mission failed".to_string())
-        )),
-        "blocked" => std::process::exit(2),
-        "cap" => std::process::exit(4),
-        _ => std::process::exit(5),
-    }
-}
-
-/// Detect whether an error from `run_chat_turn_with_events_extended` was
-/// caused by hitting the per-turn time budget. Mirrors the heuristic used
-/// by `service::is_turn_timeout_blocker` so run-once and the service stay
-/// in agreement on what counts as a recoverable timeout.
-fn is_turn_timeout_blocker(value: &str) -> bool {
-    let lowered = value.to_ascii_lowercase();
-    lowered.contains("timed out after") || lowered.contains("time budget")
-}
-
-/// Detect the one unambiguous mid-work signal: a reply that contains an
-/// opening `<think>` tag but no matching close tag. This means the
-/// reasoning block was cut off mid-stream (upstream truncation, token
-/// cap, connection drop inside the stream, …) and the model never got
-/// to act on its thinking.
-///
-/// Earlier versions of this heuristic also pattern-matched intent
-/// prefixes ("I'll ...", "Now ...", etc.) and very short replies
-/// without completion keywords. Those were too brittle across model
-/// phrasings / languages and produced downstream false-positives
-/// (e.g. queuing a continuation after the work was already done, which
-/// then tripped the tool-activity gate). The cooperative path is now
-/// handled by the Mission Control Contract in the system prompt; this
-/// heuristic only catches the hard truncation case.
-/// Detect the only unambiguous, language-neutral mid-work signal:
-/// an unclosed `<think>` block. Any text-pattern matching on natural-
-/// language phrases (intent prefixes, completion keywords, imperative
-/// tails) was tried and discarded — it never generalized beyond a
-/// single model family and never produced a net score improvement in
-/// Terminal-Bench-2 runs. See benches/README for the measurement
-/// rationale. Cooperative mid-work signalling is now the Mission
-/// Control Contract in the system prompt; structural completion is
-/// handled by the run-once termination rule.
-fn reply_looks_mid_work(reply: &str) -> bool {
-    reply.contains("<think>") && !reply.contains("</think>")
-}
-
-/// Mid-work parallel to `enqueue_timeout_continuation`. Queues a follow-up
-/// slice asking the model to carry out the action it just announced but
-/// didn't yet execute.
-fn enqueue_midwork_continuation(
-    root: &Path,
-    thread_key: &str,
-    workspace_root: Option<&str>,
-    original_brief: &str,
-    parent_message_key: Option<&str>,
-) -> anyhow::Result<String> {
-    let goal_clip: String = original_brief.chars().take(60).collect();
-    let title = format!("Continue mid-work: {goal_clip}");
-    let prompt = format!(
-        "Your previous turn ended after announcing an intent (\"I'll ...\", \
-         \"Let me ...\", etc.) without carrying it out. The mission is not \
-         complete. Continue from where you left off:\n\n\
-         Current task:\n{}\n\n\
-         Required actions:\n\
-         - carry out the action you just announced\n\
-         - make concrete tool calls (file edits, shell commands, tests) — \
-         do not merely describe what you plan to do\n\
-         - the mission only ends when the required files or state are in \
-         place and verified\n\
-         - if more than one turn is still needed, leave exactly one open \
-         CTOX plan or queue item before the turn ends",
-        original_brief
-    );
-    let view = channels::create_queue_task(
-        root,
-        channels::QueueTaskCreateRequest {
-            title,
-            prompt,
-            thread_key: thread_key.to_string(),
-            workspace_root: workspace_root.map(str::to_owned),
-            priority: "high".to_string(),
-            suggested_skill: None,
-            parent_message_key: parent_message_key.map(str::to_owned),
-        },
-    )?;
-    Ok(view.title)
-}
-
-#[cfg(test)]
-mod run_once_tests {
-    use super::*;
-
-    #[test]
-    fn mid_work_detects_unclosed_think() {
-        assert!(reply_looks_mid_work(
-            "<think>I'm still analyzing the problem"
-        ));
-        assert!(reply_looks_mid_work("<think>no close tag at all"));
-    }
-
-    #[test]
-    fn mid_work_accepts_closed_think_regardless_of_tail() {
-        // A properly closed <think> block is not mid-work at the
-        // structural level. The heuristic no longer parses natural-
-        // language phrases in the tail: cooperative mid-work signalling
-        // lives in the system-prompt Mission Control Contract, and
-        // post-turn termination is the run-once rule's responsibility.
-        assert!(!reply_looks_mid_work(
-            "<think>done</think>\n\nAnswer written to /app/answer.txt."
-        ));
-        assert!(!reply_looks_mid_work(
-            "<think>just thinking</think>\n\nNow let me start nginx."
-        ));
-        assert!(!reply_looks_mid_work("<think>yes</think>"));
-    }
-
-    #[test]
-    fn mid_work_accepts_reply_without_think() {
-        assert!(!reply_looks_mid_work(""));
-        assert!(!reply_looks_mid_work("Done."));
-        assert!(!reply_looks_mid_work(
-            "Any reply without a think tag is not structurally mid-work."
-        ));
-    }
-}
-
-/// Mirrors the recovery path that `service::maybe_enqueue_timeout_continuation`
-/// runs inside the daemon: enqueue a high-priority follow-up slice with a
-/// "continue from the latest saved state" prompt. The next mission-loop
-/// iteration leases this continuation and resumes the mission with the
-/// existing LCM context intact.
-///
-/// We deliberately keep this thin (no governance event recording) since
-/// run-once is single-mission and doesn't need the cross-mission audit
-/// trail the service produces.
-fn enqueue_timeout_continuation(
-    root: &Path,
-    thread_key: &str,
-    workspace_root: Option<&str>,
-    original_brief: &str,
-    blocker: &str,
-    parent_message_key: Option<&str>,
-) -> anyhow::Result<String> {
-    let goal_clip: String = original_brief.chars().take(60).collect();
-    let title = format!("Continue after timeout: {goal_clip}");
-    let blocker_clip: String = blocker.trim().chars().take(220).collect();
-    let prompt = format!(
-        "Continue the interrupted task from the latest saved state.\n\n\
-         Current task:\n{}\n\n\
-         Runtime stop:\n{}\n\n\
-         Required actions:\n\
-         - re-check repo, runtime, queue, progress artifacts, and continuity\n\
-         - preserve any work that already landed\n\
-         - continue with the next smallest concrete step\n\
-         - if more than one turn is still needed, leave exactly one open CTOX plan or queue item before the turn ends\n\
-         - a sentence in the reply does not count as open work",
-        original_brief, blocker_clip
-    );
-    let view = channels::create_queue_task(
-        root,
-        channels::QueueTaskCreateRequest {
-            title,
-            prompt,
-            thread_key: thread_key.to_string(),
-            workspace_root: workspace_root.map(str::to_owned),
-            priority: "high".to_string(),
-            suggested_skill: None,
-            parent_message_key: parent_message_key.map(str::to_owned),
-        },
-    )?;
-    Ok(view.title)
-}
-
-/// Lease at most one pending queue message whose thread matches our mission.
-/// `channels::lease_pending_inbound_messages` leases across the whole queue;
-/// we filter to our thread here. Foreign messages (which shouldn't exist in
-/// a bench container but may exist in an exploratory host run) are released
-/// back with status `blocked` rather than consumed.
-fn lease_next_for_thread(
-    root: &Path,
-    thread_key: &str,
-    lease_owner: &str,
-) -> anyhow::Result<Option<(String, Vec<String>, Option<PathBuf>)>> {
-    let leased = channels::lease_pending_inbound_messages(root, 32, lease_owner)?;
-    let mut matched: Option<(String, Vec<String>, Option<PathBuf>)> = None;
-    for msg in leased {
-        if matched.is_none() && msg.thread_key == thread_key {
-            let prompt = msg.body_text;
-            let keys = vec![msg.message_key];
-            let workspace = msg.workspace_root.map(PathBuf::from);
-            matched = Some((prompt, keys, workspace));
-        } else {
-            let _ = channels::ack_leased_messages(root, &[msg.message_key], "blocked");
-        }
-    }
-    Ok(matched)
 }
 
 fn resolve_workspace_root() -> anyhow::Result<PathBuf> {

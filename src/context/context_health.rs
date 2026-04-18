@@ -4,12 +4,9 @@ use std::path::Path;
 
 use crate::lcm;
 
-const NARRATIVE_TEMPLATE: &str =
-    "# Narrative\n\n## Entries\n- entry_id:\n  event_type:\n  summary:\n  consequence:\n  source_class:\n  source_ref:\n  observed_at:\n";
-const ANCHORS_TEMPLATE: &str =
-    "# Anchors\n\n## Entries\n- anchor_id:\n  anchor_type:\n  statement:\n  source_class:\n  source_ref:\n  observed_at:\n  confidence:\n  supersedes:\n  expires_at:\n";
-const FOCUS_TEMPLATE: &str =
-    "# Focus\n\n## Contract\nmission:\nmission_state:\ncontinuation_mode:\ntrigger_intensity:\nslice:\nslice_state:\n\n## State\ngoal:\nblocker:\nmissing_dependency:\nnext_slice:\ndone_gate:\nretry_condition:\nclosure_confidence:\n\n## Sources\nsource_refs:\n- none\nupdated_at:\n";
+const NARRATIVE_TEMPLATE: &str = "# Narrative\n\n## Entries\n- entry_id:\n  event_type:\n  summary:\n  consequence:\n  source_class:\n  source_ref:\n  observed_at:\n";
+const ANCHORS_TEMPLATE: &str = "# Anchors\n\n## Entries\n- anchor_id:\n  anchor_type:\n  statement:\n  source_class:\n  source_ref:\n  observed_at:\n  confidence:\n  supersedes:\n  expires_at:\n";
+const FOCUS_TEMPLATE: &str = "# Focus\n\n## Contract\nmission:\nmission_state:\ncontinuation_mode:\ntrigger_intensity:\nslice:\nslice_state:\n\n## State\ngoal:\nblocker:\nmissing_dependency:\nnext_slice:\ndone_gate:\nretry_condition:\nclosure_confidence:\n\n## Sources\nsource_refs:\n- none\nupdated_at:\n";
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -184,7 +181,9 @@ pub fn assess_with_forgotten(
                 "Recent context is not dominated by internal repair or continuation prompts."
                     .to_string()
             } else {
-                format!("{repair_prompt_count} recent internal prompt(s) look like repair or continuation churn.")
+                format!(
+                    "{repair_prompt_count} recent internal prompt(s) look like repair or continuation churn."
+                )
             },
         },
     ];
@@ -299,10 +298,16 @@ fn warning_severity_label(severity: WarningSeverity) -> &'static str {
 fn health_warning_action_label(code: &str) -> &'static str {
     match code {
         "mission_switch_pending" => "pick one main task and rebuild the current-task summary",
-        "mission_contamination" => "drop stale mission detail that no longer matches the current task",
-        "thin_mission_contract" => "rewrite the current task in simple terms: what to do now, blocker, next step, completion rule",
+        "mission_contamination" => {
+            "drop stale mission detail that no longer matches the current task"
+        }
+        "thin_mission_contract" => {
+            "rewrite the current task in simple terms: what to do now, blocker, next step, completion rule"
+        }
         "missing_failure_memory" => "record what failed and what evidence would justify retrying",
-        "context_pressure" => "load less detail and rely on durable state until the current task is complete",
+        "context_pressure" => {
+            "load less detail and rely on durable state until the current task is complete"
+        }
         _ => "inspect the current task state before changing course",
     }
 }
@@ -1185,7 +1190,7 @@ mod tests {
                 conversation_id: 1,
                 kind: lcm::ContinuityKind::Anchors,
                 head_commit_id: "a1".to_string(),
-                content: "# Anchors\n\n## Entries\n- anchor_id: a-1\n  anchor_type: constraint\n  statement: runtime/ctox_lcm.db is canonical state.\n  source_class: static_policy\n  source_ref: contract://context\n  observed_at: 2026-03-31T00:00:00Z\n  confidence: high\n  supersedes:\n  expires_at:\n- anchor_id: a-2\n  anchor_type: retry_boundary\n  statement: Do not retry the same repair without new evidence.\n  source_class: tool_observed\n  source_ref: log://queue\n  observed_at: 2026-03-31T00:00:00Z\n  confidence: high\n  supersedes:\n  expires_at:\n".to_string(),
+                content: "# Anchors\n\n## Entries\n- anchor_id: a-1\n  anchor_type: constraint\n  statement: runtime/ctox.sqlite3 is canonical state.\n  source_class: static_policy\n  source_ref: contract://context\n  observed_at: 2026-03-31T00:00:00Z\n  confidence: high\n  supersedes:\n  expires_at:\n- anchor_id: a-2\n  anchor_type: retry_boundary\n  statement: Do not retry the same repair without new evidence.\n  source_class: tool_observed\n  source_ref: log://queue\n  observed_at: 2026-03-31T00:00:00Z\n  confidence: high\n  supersedes:\n  expires_at:\n".to_string(),
                 created_at: "2026-03-31T00:00:00Z".to_string(),
                 updated_at: "2026-03-31T00:00:00Z".to_string(),
             },
@@ -1288,7 +1293,7 @@ mod tests {
 
     #[test]
     fn verification_gap_counts_as_mission_contract_coverage() {
-        let snapshot = sample_snapshot(vec![("user", "continue benchmark report")], 10_000);
+        let snapshot = sample_snapshot(vec![("user", "continue progress report")], 10_000);
         let continuity = lcm::ContinuityShowAll {
             conversation_id: 1,
             narrative: healthy_continuity().narrative,
@@ -1297,12 +1302,12 @@ mod tests {
                 conversation_id: 1,
                 kind: lcm::ContinuityKind::Focus,
                 head_commit_id: "f1".to_string(),
-                content: "# Focus\n\n## Contract\nmission: airbnb benchmark\nmission_state: active\ncontinuation_mode: continuous\ntrigger_intensity: hot\nslice: report cycle 2\nslice_state: report_due\n\n## State\ngoal: deliver the benchmark report\nverification_gap: workspace state not yet re-verified after a prior timeout\nnext_slice: inspect workspace and update progress artifact\ndone_gate: progress artifact updated and report returned\nretry_condition:\nclosure_confidence: medium\n\n## Sources\nsource_refs:\n- file://ops/progress/progress-latest.md\nupdated_at: 2026-03-31T00:00:00Z\n".to_string(),
+                content: "# Focus\n\n## Contract\nmission: marketplace delivery mission\nmission_state: active\ncontinuation_mode: continuous\ntrigger_intensity: hot\nslice: report cycle 2\nslice_state: report_due\n\n## State\ngoal: deliver the progress report\nverification_gap: workspace state not yet re-verified after a prior timeout\nnext_slice: inspect workspace and update progress artifact\ndone_gate: progress artifact updated and report returned\nretry_condition:\nclosure_confidence: medium\n\n## Sources\nsource_refs:\n- file://ops/progress/progress-latest.md\nupdated_at: 2026-03-31T00:00:00Z\n".to_string(),
                 created_at: "2026-03-31T00:00:00Z".to_string(),
                 updated_at: "2026-03-31T00:00:00Z".to_string(),
             },
         };
-        let health = assess(&snapshot, &continuity, "continue benchmark report", 131_072);
+        let health = assess(&snapshot, &continuity, "continue progress report", 131_072);
         assert!(!health
             .warnings
             .iter()

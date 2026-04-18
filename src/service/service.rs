@@ -41,6 +41,7 @@ use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
@@ -72,6 +73,8 @@ use crate::lcm;
 use crate::mission::communication_adapters;
 use crate::mission::plan;
 use crate::mission::tickets;
+use crate::review;
+use crate::verification;
 use crate::schedule;
 use crate::scrape;
 use crate::state_invariants;
@@ -320,28 +323,11 @@ pub fn run_foreground(root: &Path) -> Result<()> {
         std::process::id(),
         root.display()
     );
-    // Propagate CTOX_AUTONOMY_LEVEL from engine.env into the process
-    // environment so downstream readers (plan step-prompt rendering,
-    // runtime-context block assembly, nag cadence, child session execution
-    // turns) see the current operator preference without re-reading
-    // the settings file. The level is a legitimate persistent
-    // operator setting exposed in the TUI — unlike the old benchmark
-    // flag, it IS meant to survive restarts. Legacy
-    // `CTOX_AUTO_APPROVE_GATES=1` is honoured by autonomy::from_env
-    // as a deprecated alias for `progressive`.
-    if let Ok(settings) = runtime_env::effective_operator_env_map(root) {
-        if let Some(value) = settings.get("CTOX_AUTONOMY_LEVEL") {
-            let trimmed = value.trim();
-            if matches!(trimmed, "progressive" | "balanced" | "defensive") {
-                std::env::set_var("CTOX_AUTONOMY_LEVEL", trimmed);
-            }
-        }
-    }
-    let active_level = crate::autonomy::AutonomyLevel::from_env();
+    let active_level = crate::autonomy::AutonomyLevel::from_root(root);
     eprintln!("ctox service autonomy level: {active_level}");
     channels::ensure_store(root)?;
     governance::ensure_governance(root)?;
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let _ = crate::lcm::LcmEngine::open(&db_path, crate::lcm::LcmConfig::default())?;
     let listen_addr = service_listen_addr(root);
     write_pid_file(root, std::process::id())?;
@@ -638,7 +624,7 @@ fn attempt_state_invariant_repair(
     lcm::MissionStateRepairOutcome,
     state_invariants::RuntimeStateInvariantReport,
 )> {
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let mut repair = engine.sync_mission_state_from_continuity_with_repair(conversation_id)?;
     let mut report = state_invariants::evaluate_runtime_state_invariants(root, conversation_id)?;
@@ -1085,13 +1071,21 @@ pub fn stop_background(root: &Path) -> Result<String> {
 }
 
 pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
+    submit_chat_prompt_with_thread_key(root, prompt, None)
+}
+
+pub fn submit_chat_prompt_with_thread_key(
+    root: &Path,
+    prompt: &str,
+    thread_key: Option<&str>,
+) -> Result<()> {
     #[cfg(unix)]
     {
         match send_service_ipc_request(
             root,
             ServiceIpcRequest::ChatSubmit {
                 prompt: prompt.to_string(),
-                thread_key: None,
+                thread_key: thread_key.map(str::to_owned),
             },
         )? {
             ServiceIpcResponse::Accepted(_) => return Ok(()),
@@ -1104,7 +1098,7 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
         let url = format!("{}/ctox/service/chat", service_base_url(root));
         let payload = serde_json::to_string(&ChatSubmitRequest {
             prompt: prompt.to_string(),
-            thread_key: None,
+            thread_key: thread_key.map(str::to_owned),
         })?;
         let response = ureq::post(&url)
             .set("content-type", "application/json")
@@ -1748,9 +1742,13 @@ fn service_log_path(root: &Path) -> std::path::PathBuf {
 }
 
 fn preferred_ctox_executable(root: &Path) -> Result<std::path::PathBuf> {
-    let candidate = root.join("target/release/ctox");
-    if candidate.is_file() {
-        return Ok(candidate);
+    if let Some(bin_dir) =
+        runtime_env::env_or_config(root, "CTOX_BIN_DIR").filter(|value| !value.trim().is_empty())
+    {
+        let candidate = PathBuf::from(bin_dir).join("ctox");
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
     }
     let current_exe =
         std::env::current_exe().context("failed to resolve current CTOX executable")?;
@@ -1762,9 +1760,13 @@ fn known_ctox_executable_displays(root: &Path) -> Vec<String> {
     if let Ok(current_exe) = std::env::current_exe() {
         displays.push(current_exe.display().to_string());
     }
-    let candidate_display = root.join("target/release/ctox").display().to_string();
-    if !displays.iter().any(|entry| entry == &candidate_display) {
-        displays.push(candidate_display);
+    if let Some(bin_dir) =
+        runtime_env::env_or_config(root, "CTOX_BIN_DIR").filter(|value| !value.trim().is_empty())
+    {
+        let candidate_display = PathBuf::from(bin_dir).join("ctox").display().to_string();
+        if !displays.iter().any(|entry| entry == &candidate_display) {
+            displays.push(candidate_display);
+        }
     }
     displays
 }
@@ -1971,7 +1973,7 @@ fn start_prompt_worker(
             clip_text(&job.preview, 120)
         );
         let panic_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let db_path = crate::paths::lcm_db(root);
+            let db_path = root.join("runtime/ctox.sqlite3");
             let event_state = state.clone();
             let event_source = job.source_label.clone();
             let workspace_root = job.workspace_root.as_deref().map(std::path::Path::new);
@@ -2027,6 +2029,22 @@ fn start_prompt_worker(
                 run_turn_end_state_invariant_check(&root, &state, conversation_id)
             {
                 mission_sync_outcome = Some(repaired);
+            }
+            // Completion review gate: when the executor's slice succeeded,
+            // hand the slice to a separate, skeptical reviewer agent (a fresh
+            // PersistentSession with its own clean context — no executor turn
+            // history). The reviewer either ratifies the result (PASS) or
+            // CTOX enqueues a rework slice with the reviewer's report as
+            // input. Errors / timeouts skip the review (no slice to judge).
+            if let Ok(reply_text) = result.as_ref() {
+                run_completion_review(
+                    &root,
+                    &state,
+                    &job,
+                    reply_text,
+                    conversation_id,
+                    mission_sync_outcome.as_ref(),
+                );
             }
             let mut next_prompt = None;
             {
@@ -2199,6 +2217,218 @@ fn start_prompt_worker(
     });
 }
 
+/// Hand the just-completed slice to a separate completion-reviewer agent.
+///
+/// The reviewer runs in a fresh `PersistentSession` (its own clean codex-core
+/// thread, no executor turn history) with a skeptical, scope-bound system
+/// prompt. It either ratifies the slice (PASS) or surfaces concrete
+/// objections (FAIL/PARTIAL). On rejection the reviewer's report is enqueued
+/// as a high-priority rework slice on the same thread — the original ack
+/// path is unchanged so the user still sees the executor's reply.
+///
+/// Failures inside the review path (LCM open errors, gateway timeouts) are
+/// swallowed and surfaced as events: the slice falls through unjudged rather
+/// than blocking the worker.
+fn run_completion_review(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+    job: &QueuedPrompt,
+    reply_text: &str,
+    conversation_id: i64,
+    mission_state: Option<&lcm::MissionStateRecord>,
+) {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let (mission_line, done_gate, focus_excerpt, anchors_excerpt) = {
+        let mission_record = mission_state.cloned().or_else(|| {
+            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
+                .and_then(|engine| engine.mission_state(conversation_id))
+                .ok()
+        });
+        let continuity = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
+            .and_then(|engine| engine.continuity_show_all(conversation_id))
+            .ok();
+        (
+            mission_record
+                .as_ref()
+                .map(|m| m.mission.clone())
+                .unwrap_or_default(),
+            mission_record
+                .as_ref()
+                .map(|m| m.done_gate.clone())
+                .unwrap_or_default(),
+            continuity
+                .as_ref()
+                .map(|c| clip_multiline(&c.focus.content, 1200))
+                .unwrap_or_default(),
+            continuity
+                .as_ref()
+                .map(|c| clip_multiline(&c.anchors.content, 1200))
+                .unwrap_or_default(),
+        )
+    };
+    let owner_visible = derive_owner_visible_for_review(&job.source_label);
+    let review_request = review::CompletionReviewRequest {
+        goal: job.goal.clone(),
+        prompt: job.prompt.clone(),
+        preview: job.preview.clone(),
+        source_label: job.source_label.clone(),
+        owner_visible,
+        mission: mission_line,
+        done_gate,
+        focus_excerpt,
+        anchors_excerpt,
+    };
+    let outcome = review::review_completion_if_needed(root, &review_request, reply_text);
+    if !outcome.required {
+        // Heuristic decided this slice does not need review — stay quiet.
+        return;
+    }
+    let verification_request = verification::SliceVerificationRequest {
+        conversation_id,
+        goal: review_request.goal.clone(),
+        prompt: review_request.prompt.clone(),
+        preview: review_request.preview.clone(),
+        source_label: review_request.source_label.clone(),
+        owner_visible,
+    };
+    if let Err(err) = verification::record_slice_assurance(
+        root,
+        &verification_request,
+        reply_text,
+        None,
+        Some(&outcome),
+    ) {
+        push_event(
+            state,
+            format!(
+                "Completion review persist failed for {}: {}",
+                job.source_label, err
+            ),
+        );
+    }
+    push_event(
+        state,
+        format!(
+            "Completion review {} for {} (score={}): {}",
+            outcome.verdict.as_gate_label(),
+            job.source_label,
+            outcome.score,
+            clip_text(&outcome.summary, 160),
+        ),
+    );
+    // Only enqueue a rework slice for actionable verdicts (FAIL / PARTIAL).
+    // `Unavailable` means the reviewer itself failed (timeout, gateway error)
+    // — the executor's work might be fine; we surface it but do not auto-rework
+    // on a flaky reviewer.
+    let actionable_rejection = outcome.requires_follow_up()
+        && !matches!(outcome.verdict, review::ReviewVerdict::Unavailable);
+    if actionable_rejection {
+        match enqueue_review_rework(root, job, &outcome) {
+            Ok(rework_title) => push_event(
+                state,
+                format!("Review rework enqueued: {rework_title}"),
+            ),
+            Err(err) => push_event(
+                state,
+                format!(
+                    "Review rework enqueue failed for {}: {}",
+                    job.source_label, err
+                ),
+            ),
+        }
+    }
+}
+
+/// Background-driven slices (watchdog, timeout continuation, queue-pressure
+/// guard, cron) are not directly owner-visible. The owner_visible flag feeds
+/// the review-trigger heuristic, so we err on the side of conservative review:
+/// foreground sources (TUI, queue, ticket channels, email) are owner-visible.
+fn derive_owner_visible_for_review(source_label: &str) -> bool {
+    let lowered = source_label.to_ascii_lowercase();
+    if lowered == QUEUE_GUARD_SOURCE_LABEL {
+        return false;
+    }
+    !(lowered.contains("watchdog")
+        || lowered.contains("timeout")
+        || lowered.starts_with("cron"))
+}
+
+/// Truncate a multi-line string to `max_chars` characters without collapsing
+/// whitespace. The standard `clip_text` helper collapses newlines into single
+/// spaces, which is wrong for Focus/Anchors continuity excerpts where line
+/// structure carries meaning for the reviewer.
+fn clip_multiline(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut clipped: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    clipped.push('…');
+    clipped
+}
+
+/// Enqueue a high-priority rework slice on the same thread as the rejected
+/// slice. The reviewer's verbatim report is included so the next executor
+/// turn has the open items inline — no need to consult assurance state.
+fn enqueue_review_rework(
+    root: &Path,
+    job: &QueuedPrompt,
+    outcome: &review::ReviewOutcome,
+) -> Result<String> {
+    let report_excerpt = clip_multiline(&outcome.report, 1500);
+    let summary_line = clip_text(&outcome.summary, 220);
+    let preview = clip_text(&job.preview, 80);
+    let title = format!(
+        "Review rework: {} ({})",
+        if preview.is_empty() {
+            "(no preview)"
+        } else {
+            preview.as_str()
+        },
+        outcome.verdict.as_gate_label()
+    );
+    let prompt = format!(
+        "The previous slice was reviewed by CTOX's completion reviewer and rejected.\n\n\
+Verdict: {}\n\
+Reviewer summary: {}\n\
+\n\
+=== Reviewer report (verbatim) ===\n\
+{}\n\
+\n\
+=== Original slice prompt (for context) ===\n\
+{}\n\
+\n\
+Address the open items listed in the reviewer report. Do not start unrelated work. \
+Either fix the gaps and verify them with direct checks, or explain why the reviewer's \
+objection is incorrect with concrete evidence.",
+        outcome.verdict.as_gate_label(),
+        summary_line,
+        report_excerpt,
+        job.prompt.trim(),
+    );
+    // Keep the rework on the original thread when one exists so the executor
+    // sees its own prior conversation context. Synthesize a fallback thread
+    // from the source label when the original came in without one (rare —
+    // mostly non-TUI background sources).
+    let thread_key = job
+        .thread_key
+        .clone()
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or_else(|| format!("review-rework:{}", job.source_label));
+    let view = channels::create_queue_task(
+        root,
+        channels::QueueTaskCreateRequest {
+            title,
+            prompt,
+            thread_key,
+            workspace_root: job.workspace_root.clone(),
+            priority: "high".to_string(),
+            suggested_skill: job.suggested_skill.clone(),
+            parent_message_key: job.leased_message_keys.first().cloned(),
+        },
+    )?;
+    Ok(view.title)
+}
+
 fn start_channel_router(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
     thread::spawn(move || loop {
         if let Err(err) = route_external_messages(&root, &state) {
@@ -2217,66 +2447,67 @@ fn start_channel_syncer(root: std::path::PathBuf) {
 }
 
 fn start_mission_watcher(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
-    thread::spawn(move || loop {
-        // Emit any due plan steps first so auto-advancing plans keep moving
-        // without requiring an explicit `ctox plan tick` call.
-        if let Err(err) = plan::emit_due_steps(&root) {
-            push_event(&state, format!("Plan emitter failed: {err}"));
-        }
-        // Autonomy-level dispatch:
-        //   progressive -> drain any open approval-gate so plans keep
-        //                  moving without human sign-off;
-        //   balanced / defensive -> run the reminder sweep that pings
-        //                  the owner through the configured channels
-        //                  and closes gates on structured email replies.
-        let level = crate::autonomy::AutonomyLevel::from_env();
-        if level.auto_closes_gates() {
-            match auto_close_pending_approval_gates(&root) {
-                Ok(count) if count > 0 => push_event(
-                    &state,
-                    format!(
-                        "Autonomy progressive: closed {count} pending approval-gate self-work item(s)"
+    thread::spawn(move || {
+        loop {
+            // Emit any due plan steps first so auto-advancing plans keep moving
+            // without requiring an explicit `ctox plan tick` call.
+            if let Err(err) = plan::emit_due_steps(&root) {
+                push_event(&state, format!("Plan emitter failed: {err}"));
+            }
+            // Autonomy-level dispatch:
+            //   progressive -> drain any open approval-gate so plans keep
+            //                  moving without human sign-off;
+            //   balanced / defensive -> run the reminder sweep that pings
+            //                  the owner through the configured channels
+            //                  and closes gates on structured email replies.
+            let level = crate::autonomy::AutonomyLevel::from_root(&root);
+            if level.auto_closes_gates() {
+                match auto_close_pending_approval_gates(&root) {
+                    Ok(count) if count > 0 => push_event(
+                        &state,
+                        format!(
+                            "Autonomy progressive: closed {count} pending approval-gate self-work item(s)"
+                        ),
                     ),
-                ),
-                Err(err) => push_event(
-                    &state,
-                    format!("Autonomy progressive sweep failed: {err}"),
-                ),
-                _ => {}
-            }
-        } else {
-            match crate::mission::approval_nag::sweep(&root) {
-                Ok(summary) => {
-                    if summary.sent > 0
-                        || summary.scheduled > 0
-                        || summary.replies_processed > 0
-                        || summary.completed > 0
-                    {
-                        push_event(
-                            &state,
-                            format!(
-                                "Approval nag: scheduled={} sent={} replies={} completed={}",
-                                summary.scheduled,
-                                summary.sent,
-                                summary.replies_processed,
-                                summary.completed
-                            ),
-                        );
+                    Err(err) => {
+                        push_event(&state, format!("Autonomy progressive sweep failed: {err}"))
                     }
+                    _ => {}
                 }
-                Err(err) => push_event(&state, format!("Approval nag sweep failed: {err}")),
+            } else {
+                match crate::mission::approval_nag::sweep(&root) {
+                    Ok(summary) => {
+                        if summary.sent > 0
+                            || summary.scheduled > 0
+                            || summary.replies_processed > 0
+                            || summary.completed > 0
+                        {
+                            push_event(
+                                &state,
+                                format!(
+                                    "Approval nag: scheduled={} sent={} replies={} completed={}",
+                                    summary.scheduled,
+                                    summary.sent,
+                                    summary.replies_processed,
+                                    summary.completed
+                                ),
+                            );
+                        }
+                    }
+                    Err(err) => push_event(&state, format!("Approval nag sweep failed: {err}")),
+                }
             }
+            if let Err(err) = monitor_mission_continuity(&root, &state) {
+                push_event(&state, format!("Mission watcher failed: {err}"));
+            }
+            thread::sleep(Duration::from_secs(MISSION_WATCHER_POLL_SECS));
         }
-        if let Err(err) = monitor_mission_continuity(&root, &state) {
-            push_event(&state, format!("Mission watcher failed: {err}"));
-        }
-        thread::sleep(Duration::from_secs(MISSION_WATCHER_POLL_SECS));
     });
 }
 
 /// Close every open `approval-gate` self-work item. Runs only when the
-/// active autonomy level is `progressive` (benchmark / non-interactive
-/// runs). Returns the count of items closed so callers can log it.
+/// active autonomy level is `progressive` for unattended continuous
+/// operation. Returns the count of items closed so callers can log it.
 fn auto_close_pending_approval_gates(root: &Path) -> Result<usize> {
     // Limit is generous; the sweep runs every mission-watcher tick so a
     // slow backlog still drains over a few iterations.
@@ -2306,7 +2537,7 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
         return Ok(());
     }
 
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let mission = engine.sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)?;
     // Normally we skip when the mission state says closed or allow_idle,
@@ -2943,8 +3174,8 @@ fn render_email_context_contract(root: &Path, message: &channels::RoutedInboundM
     } else {
         format!("{sender} {}", query_parts.join(" "))
     };
-    let db_path = crate::paths::mission_db(root);
-    let lcm_path = crate::paths::lcm_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let lcm_path = root.join("runtime/ctox.sqlite3");
     let lines = vec![
         "[Kommunikationskontext aktiv pruefen]".to_string(),
         "Vor einer Antwort nicht nur auf diese Mail-Huelle verlassen.".to_string(),
@@ -2990,7 +3221,7 @@ fn render_ticket_prompt(root: &Path, event: &tickets::RoutedTicketEvent) -> Stri
     let dry_run =
         serde_json::to_string_pretty(&event.dry_run_artifact).unwrap_or_else(|_| "{}".to_string());
     let ctox = preferred_ctox_executable(root)
-        .unwrap_or_else(|_| root.join("target/release/ctox"))
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| root.join("ctox")))
         .display()
         .to_string();
     let source_skill_query = format!(
@@ -3555,8 +3786,8 @@ fn default_follow_up_thread_key(goal: &str) -> String {
 }
 
 fn build_queue_guard_prompt(root: &Path, pending: usize) -> String {
-    let ctox_bin =
-        preferred_ctox_executable(root).unwrap_or_else(|_| root.join("target/release/ctox"));
+    let ctox_bin = preferred_ctox_executable(root)
+        .unwrap_or_else(|_| std::env::current_exe().unwrap_or_else(|_| root.join("ctox")));
     format!(
         "Use the queue-cleanup skill first. The CTOX service queue is under pressure with {pending} queued prompt(s). Before doing any normal work, inspect the service state for this root: {}. Prefer the local CLI binary `{}` with `status`, `schedule list`, and `queue list`. If that binary is unavailable, inspect `runtime/ctox_service.log` plus the runtime databases directly instead of assuming `ctox` is on PATH. Find the source of repeated or flooding work, pause or contain any schedule that is filling the queue, avoid duplicate follow-up tasks, and keep only the minimum safe next work moving. Use `ctox queue spill-candidates` to identify explicit spillover candidates, `ctox queue spill --message-key <key>` to park valid work in the internal ticket system, `ctox queue spills` to review parked work, and `ctox queue restore --message-key <key>` to rehydrate it later. Treat queue recovery as top priority and report what was paused, deduplicated, blocked, spilled, restored, or left active.",
         root.display(),
@@ -3850,7 +4081,7 @@ mod tests {
     fn boot_state_invariant_check_records_visible_violation_event() {
         let root = temp_root("boot-state-invariants");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -3896,7 +4127,7 @@ mod tests {
     fn boot_state_invariant_check_repairs_partial_commit_focus_conflict() {
         let root = temp_root("boot-state-invariants-repair");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -3949,7 +4180,7 @@ mod tests {
     fn boot_state_invariant_check_reopens_mission_when_runtime_work_is_still_open() {
         let root = temp_root("boot-state-runtime-open");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4026,7 +4257,7 @@ mod tests {
     fn turn_end_state_invariant_check_reopens_mission_when_runtime_work_is_still_open() {
         let root = temp_root("turn-state-runtime-open");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4110,7 +4341,7 @@ mod tests {
     fn turn_end_state_invariant_check_rebuilds_focus_after_refresh_skip() {
         let root = temp_root("turn-state-focus-refresh-skip");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4186,7 +4417,7 @@ mod tests {
     fn turn_end_state_invariant_check_hydrates_sparse_open_focus_from_runtime_title() {
         let root = temp_root("turn-state-sparse-open-focus");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4284,7 +4515,7 @@ mod tests {
     fn turn_end_state_invariant_check_repairs_partial_commit_focus_conflict() {
         let root = temp_root("turn-state-partial-commit");
         std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
@@ -4590,11 +4821,9 @@ mod tests {
         assert_eq!(next.suggested_skill.as_deref(), Some("system-onboarding"));
         assert!(shared.busy);
         assert_eq!(shared.active_source_label.as_deref(), Some("ticket:zammad"));
-        assert!(shared
-            .recent_events
-            .iter()
-            .any(|event| event
-                .contains("Started queued ticket:zammad prompt [skill system-onboarding]")));
+        assert!(shared.recent_events.iter().any(|event| {
+            event.contains("Started queued ticket:zammad prompt [skill system-onboarding]")
+        }));
     }
 
     #[test]
@@ -5450,9 +5679,11 @@ mod tests {
     fn mission_watcher_enqueues_continuation_for_open_idle_mission() {
         let root = temp_root("ctox-mission-watcher-open");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
-        let engine =
-            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
-                .expect("failed to open lcm");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
             .expect("failed to init continuity");
@@ -5491,9 +5722,11 @@ mod tests {
     fn mission_watcher_skips_closed_mission() {
         let root = temp_root("ctox-mission-watcher-closed");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
-        let engine =
-            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
-                .expect("failed to open lcm");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
             .expect("failed to init continuity");
@@ -5521,9 +5754,11 @@ mod tests {
     fn mission_watcher_respects_hard_runtime_blocker_cooldown() {
         let root = temp_root("ctox-mission-watcher-backoff");
         std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
-        let engine =
-            lcm::LcmEngine::open(&crate::paths::lcm_db(root), lcm::LcmConfig::default())
-                .expect("failed to open lcm");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
         let _ = engine
             .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
             .expect("failed to init continuity");
@@ -5581,9 +5816,9 @@ mod tests {
             &root,
             &state,
             QueuedPrompt {
-                prompt: "Continue benchmark".to_string(),
-                goal: "Continue benchmark".to_string(),
-                preview: "Continue benchmark".to_string(),
+                prompt: "Continue mission".to_string(),
+                goal: "Continue mission".to_string(),
+                preview: "Continue mission".to_string(),
                 source_label: "queue".to_string(),
                 suggested_skill: None,
                 leased_message_keys: Vec::new(),

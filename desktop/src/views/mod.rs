@@ -64,7 +64,7 @@ pub struct DataViewState {
     pub mission_states: Vec<db_reader::MissionStateRow>,
     pub continuity_docs: Vec<db_reader::ContinuityDocRow>,
 
-    // Agent DB (cto_agent.db)
+    // Runtime DB (ctox.sqlite3)
     pub ticket_items: Vec<db_reader::TicketItemRow>,
     pub ticket_cases: Vec<db_reader::TicketCaseRow>,
     pub comm_messages: Vec<db_reader::CommMessageRow>,

@@ -8,24 +8,21 @@ set -euo pipefail
 
 # ── Configurable defaults ────────────────────────────────────────────────────
 CTOX_REPO="${CTOX_REPO:-https://github.com/metric-space-ai/ctox.git}"
-# If CTOX_BRANCH is unset, we later resolve the latest release tag and check it
-# out. Explicit `--branch=...` or `CTOX_BRANCH=...` always wins and disables the
-# resolve step. `--dev` is an alias for "use main, no tag resolving".
-if [[ -n "${CTOX_BRANCH:-}" ]]; then
-  CTOX_BRANCH_EXPLICIT=1
-else
-  CTOX_BRANCH_EXPLICIT=0
-  CTOX_BRANCH="main"
-fi
+CTOX_BRANCH="${CTOX_BRANCH:-main}"
 INSTALL_ROOT="${CTOX_INSTALL_ROOT:-$HOME/.local/lib/ctox}"
 STATE_ROOT="${CTOX_STATE_ROOT:-$HOME/.local/state/ctox}"
 CACHE_ROOT="${CTOX_CACHE_ROOT:-$HOME/.cache/ctox}"
 BIN_DIR="${CTOX_BIN_DIR:-$HOME/.local/bin}"
+TOOLS_ROOT="${CTOX_TOOLS_ROOT:-$STATE_ROOT/tools}"
+DEPENDENCIES_ROOT="${CTOX_DEPENDENCIES_ROOT:-$STATE_ROOT/dependencies}"
+TOOLS_ROOT_EXPLICIT=0
+DEPENDENCIES_ROOT_EXPLICIT=0
+[[ -n "${CTOX_TOOLS_ROOT:-}" ]] && TOOLS_ROOT_EXPLICIT=1
+[[ -n "${CTOX_DEPENDENCIES_ROOT:-}" ]] && DEPENDENCIES_ROOT_EXPLICIT=1
 
 # CLI flags
 BACKEND_FLAG="${CTOX_BACKEND:-}"
 MODEL_FLAG="${CTOX_MODEL:-}"
-BINARY_INSTALL="${CTOX_BINARY_INSTALL:-1}"  # 1 = download pre-built CTOX CLI binary; 0 = cargo build from source
 
 # Default model — Gemma4-4B runs on CPU as minimal fallback
 DEFAULT_MODEL="google/gemma-4-E4B-it"
@@ -714,23 +711,6 @@ stop_ctox_services() {
 kill_residual_processes() {
   command -v pkill >/dev/null 2>&1 || return 0
   pkill -x ctox >/dev/null 2>&1 || true
-  pkill -x ctox-engine >/dev/null 2>&1 || true
-  pkill -x codex-exec >/dev/null 2>&1 || true
-}
-
-# ── Skills sync ──────────────────────────────────────────────────────────────
-sync_system_skills_to_agent_runtime() {
-  local source_root="$1"
-  local src="$source_root/skills/system"
-  local dest="$source_root/tools/agent-runtime/skills/src/assets/samples"
-  [[ -d "$src" ]] || return 0
-  mkdir -p "$dest"
-  find "$dest" -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} + 2>/dev/null || true
-  local skill_dir
-  for skill_dir in "$src"/*; do
-    [[ -d "$skill_dir" ]] || continue
-    cp -R "$skill_dir" "$dest/$(basename "$skill_dir")"
-  done
 }
 
 sync_skills_to_codex_home() {
@@ -782,14 +762,37 @@ prepare_speaches_runtime() {
 }
 
 # ── Browser / Playwright ─────────────────────────────────────────────────────
+# Installs the Playwright workspace at the INSTALLED ctox's runtime reference
+# dir (not the source tree), which is where ctox looks at runtime. Also
+# triggers the browser-binary install so `ctox web search` works without
+# requiring the user to run `ctox web browser-prepare` afterwards.
 setup_browser_runtime() {
   local source_root="$1"
   ensure_linux_browser_prereqs
   command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 && command -v npx >/dev/null 2>&1 || return 0
-  local ctox_bin="$source_root/target/release/ctox"
-  [[ -x "$ctox_bin" ]] || return 0
-  "$ctox_bin" browser install-reference >/dev/null 2>&1 || true
-  local browser_ref="$source_root/runtime/browser/interactive-reference"
+  # Prefer the managed-install binary so its runtime-root resolution lands at
+  # the final location the user will run. Fall back to the source-tree binary
+  # only if the managed symlink is not yet present.
+  local ctox_bin=""
+  if [[ -x "$BIN_DIR/ctox" ]]; then
+    ctox_bin="$BIN_DIR/ctox"
+  elif [[ -x "$INSTALL_ROOT/current/bin/ctox" ]]; then
+    ctox_bin="$INSTALL_ROOT/current/bin/ctox"
+  elif [[ -x "$source_root/bin/ctox" ]]; then
+    ctox_bin="$source_root/bin/ctox"
+  else
+    return 0
+  fi
+  # `web browser-prepare --install-reference --install-browser` is the
+  # documented one-shot: it installs package.json, runs npm install, and
+  # fetches the Chromium browser binary that Playwright drives.
+  "$ctox_bin" web browser-prepare --install-reference --install-browser >/dev/null 2>&1 || \
+    "$ctox_bin" browser install-reference >/dev/null 2>&1 || true
+  # Resolve the real reference dir via the doctor output so this works whether
+  # the user set CTOX_WEB_BROWSER_REFERENCE_DIR or relies on the default.
+  local browser_ref
+  browser_ref="$("$ctox_bin" web google-doctor 2>/dev/null | awk -F'"' '/"reference_dir"/ {print $4; exit}')"
+  [[ -z "$browser_ref" ]] && browser_ref="$source_root/runtime/browser/interactive-reference"
   if [[ -d "$browser_ref" ]]; then
     (cd "$browser_ref" && npm run doctor >/dev/null 2>&1) || true
     if "$ctox_bin" browser doctor 2>/dev/null | grep -q '"chromium_fallback_executable": null'; then
@@ -861,8 +864,8 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 WorkingDirectory=$wrapper_root
-EnvironmentFile=-$STATE_ROOT/engine.env
-ExecStart=$wrapper_root/target/release/ctox jami-daemon --foreground
+EnvironmentFile=-$STATE_ROOT/jami_dbus_env
+ExecStart=$BIN_DIR/ctox jami-daemon --foreground
 Restart=always
 RestartSec=5
 KillMode=control-group
@@ -938,21 +941,28 @@ write_wrapper_script() {
   local install_root_export=""
   [[ -n "$INSTALL_ROOT" ]] && install_root_export="export CTOX_INSTALL_ROOT=\"$INSTALL_ROOT\""
 
+  # CRITICAL: remove any existing $BIN_DIR/ctox *before* writing. If
+  # setup_managed_install left a symlink here pointing at the real Rust
+  # binary under $wrapper_root/bin/ctox, `cat >` would follow the
+  # symlink and overwrite the binary with this bash wrapper. The wrapper's
+  # `exec "$wrapper_root/bin/ctox"` then execs itself in an
+  # infinite loop, pegging a core at 100% CPU forever. We observed this
+  # manifest as a ~1.5h hang during `setup_browser_runtime` on a clean VPS.
+  rm -f "$BIN_DIR/ctox"
+
   cat > "$BIN_DIR/ctox" <<WRAPEOF
 #!/usr/bin/env bash
 set -euo pipefail
 export CTOX_ROOT="$wrapper_root"
 export CTOX_STATE_ROOT="$STATE_ROOT"
 $install_root_export
-exec "$wrapper_root/target/release/ctox" "\$@"
+exec "$wrapper_root/bin/ctox" "\$@"
 WRAPEOF
   chmod +x "$BIN_DIR/ctox"
 
-  # Also symlink engine and codex binaries
-  [[ -f "$wrapper_root/tools/model-runtime/target/release/ctox-engine" ]] && \
-    ln -sf "$wrapper_root/tools/model-runtime/target/release/ctox-engine" "$BIN_DIR/ctox-engine"
-  [[ -f "$wrapper_root/tools/agent-runtime/target/release/codex" ]] && \
-    ln -sf "$wrapper_root/tools/agent-runtime/target/release/codex" "$BIN_DIR/codex-ctox"
+  # Do not publish helper runtimes as public binaries. The supported install
+  # surface is `ctox`; `ctox-desktop-host` is an optional remote-access helper,
+  # and the GUI desktop app ships as a separate package.
 }
 
 # ── Rust toolchain ───────────────────────────────────────────────────────────
@@ -1085,134 +1095,19 @@ CUDASRC
   [[ "$ok" -eq 1 ]]
 }
 
-# ── Resolve the latest GitHub release tag for CTOX_REPO (prints tag to stdout).
-# Returns non-zero if no tag could be determined; caller should fall back.
-resolve_latest_release_tag() {
-  local repo_slug="${CTOX_REPO#https://github.com/}"
-  repo_slug="${repo_slug%.git}"
-  repo_slug="${repo_slug%/}"
-  [[ -z "$repo_slug" || "$repo_slug" == "$CTOX_REPO" ]] && return 1
-  local api_host="${CTOX_RELEASE_API:-https://api.github.com}"
-  local api_url="${api_host%/}/repos/${repo_slug}/releases/latest"
-  local auth_header=()
-  [[ -n "${GITHUB_TOKEN:-}" ]] && auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-  local body
-  body="$(curl -fsSL "${auth_header[@]}" -H 'Accept: application/vnd.github+json' "$api_url" 2>/dev/null)" || return 1
-  local tag
-  tag="$(printf '%s' "$body" | grep -E '"tag_name"\s*:' | head -n1 | sed -E 's/.*"tag_name"\s*:\s*"([^"]+)".*/\1/')"
-  [[ -n "$tag" ]] || return 1
-  printf '%s' "$tag"
-}
-
-# ── Binary asset naming (aligned with .github/workflows/release.yml) ────────
-ctox_bundle_asset_name() {
-  case "$PLATFORM:$ARCH" in
-    linux:x86_64)  printf 'ctox-linux-x64.tar.gz' ;;
-    linux:aarch64) printf 'ctox-linux-arm64.tar.gz' ;;
-    macos:x86_64)  printf 'ctox-macos-x64.tar.gz' ;;
-    macos:aarch64) printf 'ctox-macos-arm64.tar.gz' ;;
-    *)             printf '' ;;
-  esac
-}
-
-# Try to place a pre-built CTOX CLI binary into $source_root/target/release/ctox.
-# Returns 0 on success, 1 on any failure (caller should fall back to source build).
-download_ctox_binary() {
-  local source_root="$1"
-  local asset; asset="$(ctox_bundle_asset_name)"
-  [[ -z "$asset" ]] && return 1
-
-  local repo_slug="${CTOX_REPO#https://github.com/}"
-  repo_slug="${repo_slug%.git}"
-  repo_slug="${repo_slug%/}"
-  [[ -z "$repo_slug" || "$repo_slug" == "$CTOX_REPO" ]] && return 1
-
-  local api_host="${CTOX_RELEASE_API:-https://api.github.com}"
-  local api_url="${api_host%/}/repos/${repo_slug}/releases/latest"
-  local download_url sha_url tmp_dir
-  tmp_dir="$(mktemp -d)" || return 1
-
-  local auth_header=()
-  [[ -n "${GITHUB_TOKEN:-}" ]] && auth_header=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-
-  local meta_file="$tmp_dir/release.json"
-  if ! curl -fsSL "${auth_header[@]}" -H 'Accept: application/vnd.github+json' \
-         "$api_url" -o "$meta_file"; then
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  # Extract browser_download_url for the matching asset (no jq dependency).
-  download_url="$(grep -E '"browser_download_url"\s*:' "$meta_file" \
-    | grep "$asset\"" \
-    | head -n1 \
-    | sed -E 's/.*"browser_download_url"\s*:\s*"([^"]+)".*/\1/')"
-  sha_url="$(grep -E '"browser_download_url"\s*:' "$meta_file" \
-    | grep "${asset}.sha256\"" \
-    | head -n1 \
-    | sed -E 's/.*"browser_download_url"\s*:\s*"([^"]+)".*/\1/')"
-  if [[ -z "$download_url" ]]; then
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  local archive="$tmp_dir/$asset"
-  if ! curl -fsSL "${auth_header[@]}" "$download_url" -o "$archive"; then
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-
-  if [[ -n "$sha_url" ]]; then
-    local sha_file="$tmp_dir/${asset}.sha256"
-    if curl -fsSL "${auth_header[@]}" "$sha_url" -o "$sha_file"; then
-      local expected actual
-      expected="$(awk '{print $1}' "$sha_file")"
-      if command -v sha256sum >/dev/null 2>&1; then
-        actual="$(sha256sum "$archive" | awk '{print $1}')"
-      elif command -v shasum >/dev/null 2>&1; then
-        actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
-      else
-        actual=""
-      fi
-      if [[ -n "$actual" && "$actual" != "$expected" ]]; then
-        rm -rf "$tmp_dir"
-        return 1
-      fi
-    fi
-  fi
-
-  mkdir -p "$source_root/target/release"
-  if ! tar -xzf "$archive" -C "$tmp_dir"; then
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-  if [[ ! -f "$tmp_dir/target/release/ctox" ]]; then
-    rm -rf "$tmp_dir"
-    return 1
-  fi
-  cp "$tmp_dir/target/release/ctox" "$source_root/target/release/ctox"
-  chmod +x "$source_root/target/release/ctox"
-  rm -rf "$tmp_dir"
-  return 0
-}
-
 # ── Build ────────────────────────────────────────────────────────────────────
 build_ctox() {
   local source_root="$1"
   local cargo; cargo="$(resolve_cargo)"
 
-  # 1. Obtain main CTOX binary — try pre-built bundle first, fall back to source.
-  local built_from_binary=0
-  if [[ "$BINARY_INSTALL" == "1" ]]; then
-    if download_ctox_binary "$source_root"; then
-      built_from_binary=1
-      printf '  %bDownloaded pre-built ctox binary%b\n' "$C_GREEN" "$C_RESET"
-    else
-      printf '  %bNo pre-built binary available — falling back to source build%b\n' "$C_YELLOW" "$C_RESET"
-    fi
-  fi
-  if [[ "$built_from_binary" -eq 0 ]]; then
-    (cd "$source_root" && "$cargo" build --release --bin ctox) 2>&1 | tail -5
+  # 1. Build main CTOX binary
+  (cd "$source_root" && "$cargo" build --release --bin ctox) 2>&1 | tail -5
+  mkdir -p "$source_root/bin"
+  cp "$source_root/target/release/ctox" "$source_root/bin/" 2>/dev/null || true
+
+  if [[ -f "$source_root/desktop/Cargo.toml" ]]; then
+    (cd "$source_root" && "$cargo" build --release --manifest-path desktop/Cargo.toml --bin ctox-desktop-host) 2>&1 | tail -5
+    cp "$source_root/desktop/target/release/ctox-desktop-host" "$source_root/bin/" 2>/dev/null || true
   fi
 
   # 2. If CUDA features requested, prepare build environment
@@ -1255,7 +1150,7 @@ build_ctox() {
     fi
   fi
 
-  # 3. Build Candle engine (ctox-engine) with detected features
+  # 3. Build the internal inference runtime with detected features
   if [[ -f "$source_root/tools/model-runtime/Cargo.toml" && -n "$ENGINE_FEATURES" ]]; then
     local cargo_features=""
     for feat in $ENGINE_FEATURES; do
@@ -1263,38 +1158,61 @@ build_ctox() {
       cargo_features="${cargo_features}${feat}"
     done
 
-    # Build the ctox-engine binary (not the workspace default)
+    # Build the internal inference runtime binary (not the workspace default)
     (cd "$source_root/tools/model-runtime" && \
       "$cargo" build --release --package ctox-engine-cli --bin ctox-engine \
         --features "$cargo_features") 2>&1 | tail -5
 
     # Write feature stamp for runtime verification
     local stamp_dir="$source_root/tools/model-runtime/target/release"
-    mkdir -p "$stamp_dir"
+    local install_engine_dir="$TOOLS_ROOT/model-runtime/bin"
+    mkdir -p "$stamp_dir" "$install_engine_dir" "$TOOLS_ROOT/model-runtime"
     printf 'features=%s;cudarc=%s\n' \
       "${ENGINE_FEATURES:-cpu-only}" \
       "${CUDARC_CUDA_VERSION:-none}" \
       > "$stamp_dir/ctox-engine.features"
+    cp "$source_root/tools/model-runtime/target/release/ctox-engine" "$install_engine_dir/" 2>/dev/null || true
+    cp "$stamp_dir/ctox-engine.features" "$TOOLS_ROOT/model-runtime/ctox-engine.features" 2>/dev/null || true
 
     # Clean up any leftover .nvcc_tmp from previous installer versions
     rm -rf "$source_root/.nvcc_tmp" 2>/dev/null || true
   fi
 
-  # 4. Build agent-runtime (codex-exec + codex CLI)
-  if [[ -f "$source_root/tools/agent-runtime/Cargo.toml" ]]; then
-    ensure_codex_linux_build_prereqs
-    (cd "$source_root/tools/agent-runtime" && \
-      "$cargo" build --release -p codex-exec --bin codex-exec && \
-      "$cargo" build --release -p codex-cli --bin codex) 2>&1 | tail -5
+  # 4. Do not build or publish a secondary agent-runtime CLI. CTOX consumes
+  # the integrated agent-runtime source tree in-process via direct session.
+  if [[ -f "$source_root/src/inference/Cargo.toml" ]]; then
+    printf '  %b%bintegrated agent-runtime kept in-process; no standalone runtime CLI built%b\n' \
+      "$C_BOLD" "$C_GREY" "$C_RESET" >&2
   fi
+}
+
+# Prefer the built binary's embedded version, then git tags, then Cargo.toml.
+resolve_source_version() {
+  local source_root="$1"
+  local binary="$source_root/bin/ctox"
+
+  if [[ -x "$binary" ]]; then
+    local embedded
+    embedded="$("$binary" version 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    [[ -n "$embedded" ]] && { printf '%s\n' "$embedded"; return 0; }
+  fi
+
+  if command -v git >/dev/null 2>&1; then
+    local described
+    described="$(git -C "$source_root" describe --tags --dirty --match 'v[0-9]*' 2>/dev/null || true)"
+    described="${described#v}"
+    [[ -n "$described" ]] && { printf '%s\n' "$described"; return 0; }
+  fi
+
+  grep '^version' "$source_root/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/'
 }
 
 # ── Managed installation layout ─────────────────────────────────────────────
 setup_managed_install() {
   local source_root="$1"
-  mkdir -p "$INSTALL_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$BIN_DIR"
+  mkdir -p "$INSTALL_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$BIN_DIR" "$TOOLS_ROOT" "$DEPENDENCIES_ROOT"
 
-  local version; version="$(grep '^version' "$source_root/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+  local version; version="$(resolve_source_version "$source_root")"
   local release_name="v${version}"
   local release_dir="$INSTALL_ROOT/releases/$release_name"
 
@@ -1303,17 +1221,15 @@ setup_managed_install() {
 
   rsync -a --exclude='target' --exclude='runtime' --exclude='.git' "$source_root/" "$release_dir/"
 
-  mkdir -p "$release_dir/target/release"
-  cp "$source_root/target/release/ctox" "$release_dir/target/release/" 2>/dev/null || true
-  if [[ -d "$source_root/tools/model-runtime/target/release" ]]; then
-    mkdir -p "$release_dir/tools/model-runtime/target/release"
-    find "$source_root/tools/model-runtime/target/release" -maxdepth 1 -type f -executable \
-      -exec cp {} "$release_dir/tools/model-runtime/target/release/" \; 2>/dev/null || true
-  fi
-
+  mkdir -p "$release_dir/bin"
+  cp "$source_root/bin/ctox" "$release_dir/bin/" 2>/dev/null || true
+  cp "$source_root/bin/ctox-desktop-host" "$release_dir/bin/" 2>/dev/null || true
   ln -sfn "$release_dir" "$INSTALL_ROOT/current"
   [[ ! -e "$release_dir/runtime" ]] && ln -sfn "$STATE_ROOT" "$release_dir/runtime"
-  ln -sf "$INSTALL_ROOT/current/target/release/ctox" "$BIN_DIR/ctox"
+  ln -sf "$INSTALL_ROOT/current/bin/ctox" "$BIN_DIR/ctox"
+  if [[ -x "$INSTALL_ROOT/current/bin/ctox-desktop-host" ]]; then
+    ln -sf "$INSTALL_ROOT/current/bin/ctox-desktop-host" "$BIN_DIR/ctox-desktop-host"
+  fi
 
   cat > "$INSTALL_ROOT/install_manifest.json" <<MANIFEST
 {
@@ -1323,17 +1239,21 @@ setup_managed_install() {
   "current_release": "$release_name",
   "previous_release": null,
   "release_channel": {
-    "GitHub": {
-      "repo": "metric-space-ai/ctox",
-      "api_base": "https://api.github.com",
-      "token_env": null
-    }
+    "kind": "github",
+    "repo": "metric-space-ai/ctox",
+    "api_base": "https://api.github.com",
+    "token_env": null
   },
   "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 MANIFEST
 
-  [[ -n "$ENGINE_FEATURES" ]] && printf '%s\n' "$ENGINE_FEATURES" > "$STATE_ROOT/engine_features"
+  # `cond && action` returns non-zero when cond is false, which `set -e` would
+  # treat as fatal. Wrap in a conditional so CPU-only installs (no engine
+  # features) do not abort the installer at the very last step.
+  if [[ -n "$ENGINE_FEATURES" ]]; then
+    printf '%s\n' "$ENGINE_FEATURES" > "$STATE_ROOT/engine_features"
+  fi
 }
 
 # ── Jami DBus env file ────────────────────────────────────────────────────────
@@ -1347,44 +1267,20 @@ write_jami_dbus_env() {
   # Only write the file when a user bus socket actually exists
   if [[ -S "$bus_path" ]]; then
     printf 'DBUS_SESSION_BUS_ADDRESS=unix:path=%s\n' "$bus_path" > "$dbus_env_path"
-    # Ensure engine.env references the file
-    if ! grep -q 'CTO_JAMI_DBUS_ENV_FILE' "$state_root/engine.env" 2>/dev/null; then
-      printf 'CTO_JAMI_DBUS_ENV_FILE=%s\n' "$dbus_env_path" >> "$state_root/engine.env"
-    fi
   fi
 }
 
-# ── Linux desktop entry ──────────────────────────────────────────────────────
-install_linux_desktop_entry() {
-  [[ "$PLATFORM" == "linux" ]] || return 0
-  # Only install when a graphical session is likely present
-  [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}${XDG_SESSION_TYPE:-}" ]] || return 0
-  local source_root="$1"
-  local apps_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-  local icons_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/256x256/apps"
-  local desktop_file="$source_root/desktop/packaging/linux/ctox-desktop.desktop"
-  local icon_file="$source_root/desktop/CTOX_app_icon.png"
-
-  [[ -f "$desktop_file" ]] || return 0
-
-  mkdir -p "$apps_dir"
-  # Patch Exec= so it resolves via the symlinked binary
-  sed "s|^Exec=.*|Exec=$BIN_DIR/ctox-desktop|" "$desktop_file" > "$apps_dir/ctox-desktop.desktop"
-  chmod 644 "$apps_dir/ctox-desktop.desktop"
-
-  if [[ -f "$icon_file" ]]; then
-    mkdir -p "$icons_dir"
-    cp "$icon_file" "$icons_dir/ctox-desktop.png"
-  fi
-
-  command -v update-desktop-database >/dev/null 2>&1 && \
-    update-desktop-database "$apps_dir" 2>/dev/null || true
+# ── Runtime config SQLite bootstrap ──────────────────────────────────────────
+sql_escape() {
+  printf "%s" "$1" | sed "s/'/''/g"
 }
 
-# ── Full engine.env ──────────────────────────────────────────────────────────
-write_full_engine_env() {
+write_runtime_sqlite_config() {
   local state_root="$1"
   mkdir -p "$state_root"
+  local db_path="$state_root/ctox.sqlite3"
+  local engine_binary="$TOOLS_ROOT/model-runtime/bin/ctox-engine"
+  local engine_log="$state_root/logs/model-runtime/ctox-engine.log"
   local model="${SELECTED_MODEL:-$DEFAULT_MODEL}"
 
   # Model-specific defaults
@@ -1398,8 +1294,8 @@ write_full_engine_env() {
       port="1234"; arch=""; max_seq="131072"; isq=""; pa_mem_frac="0.80" ;;
     google/gemma-4-E4B-it)
       port="1234"; arch=""; max_seq="131072"; isq="" ;;
-    Qwen/Qwen3.5-27B)
-      port="1235"; arch=""; max_seq="4096"; isq="Q4K" ;;
+    Qwen/Qwen3.6-35B-A3B)
+      port="1235"; arch=""; max_seq="131072"; isq="Q4K"; pa_cache_type="turboquant3"; pa_mem_frac="0.80" ;;
     Qwen/Qwen3.5-9B|Qwen/Qwen3.5-4B)
       port="1235"; arch=""; max_seq="65536"; isq="Q4K" ;;
   esac
@@ -1418,50 +1314,67 @@ write_full_engine_env() {
     tts_model="speaches-ai/piper-en_US-lessac-medium [CPU EN]"
   fi
 
-  cat > "$state_root/engine.env" <<ENVEOF
-CTOX_ENGINE_MODEL=${model}
-CTOX_ENGINE_PORT=${CTOX_ENGINE_PORT:-$port}
-CTOX_ENGINE_ARCH=${CTOX_ENGINE_ARCH:-$arch}
-CTOX_ENGINE_MAX_SEQS=${CTOX_ENGINE_MAX_SEQS:-1}
-CTOX_ENGINE_MAX_BATCH_SIZE=${CTOX_ENGINE_MAX_BATCH_SIZE:-1}
-CTOX_ENGINE_MAX_SEQ_LEN=${max_seq}
-CTOX_ENGINE_PAGED_ATTN=${paged_attn}
-CTOX_ENGINE_TENSOR_PARALLEL_BACKEND=${tp_backend}
-CTOX_ENGINE_ISQ=${isq}
-CTOX_ENGINE_PA_CACHE_TYPE=${pa_cache_type}
-CTOX_ENGINE_PA_MEMORY_FRACTION=${pa_mem_frac}
-CTOX_ENGINE_PA_CONTEXT_LEN=${CTOX_ENGINE_PA_CONTEXT_LEN:-}
-CTOX_ENGINE_CUDA_VISIBLE_DEVICES=${CTOX_ENGINE_CUDA_VISIBLE_DEVICES:-}
-CTOX_ENGINE_DISABLE_NCCL=${disable_nccl}
-CTOX_ENGINE_MN_LOCAL_WORLD_SIZE=${world_size}
-CTOX_ENGINE_TOPOLOGY=${CTOX_ENGINE_TOPOLOGY:-}
-CTOX_ENGINE_NUM_DEVICE_LAYERS=${CTOX_ENGINE_NUM_DEVICE_LAYERS:-}
-CTOX_CHAT_MODEL=${CTOX_CHAT_MODEL:-$model}
-CTOX_CHAT_MODEL_MAX_CONTEXT=${CTOX_CHAT_MODEL_MAX_CONTEXT:-131072}
-CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT=${CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT:-75}
-CTOX_ACTIVE_MODEL=${CTOX_ACTIVE_MODEL:-$model}
-CTOX_PROXY_HOST=${CTOX_PROXY_HOST:-127.0.0.1}
-CTOX_PROXY_PORT=${CTOX_PROXY_PORT:-$proxy_port}
-CTOX_UPSTREAM_BASE_URL=${CTOX_UPSTREAM_BASE_URL:-http://127.0.0.1:$port}
-CTOX_EMBEDDING_MODEL=${CTOX_EMBEDDING_MODEL:-$emb_model}
-CTOX_EMBEDDING_PORT=${CTOX_EMBEDDING_PORT:-$emb_port}
-CTOX_EMBEDDING_ISQ=${CTOX_EMBEDDING_ISQ:-$emb_isq}
-CTOX_STT_MODEL=${CTOX_STT_MODEL:-$stt_model}
-CTOX_STT_PORT=${CTOX_STT_PORT:-$stt_port}
-CTOX_STT_ISQ=${CTOX_STT_ISQ:-$stt_isq}
-CTOX_TTS_MODEL=${CTOX_TTS_MODEL:-$tts_model}
-CTOX_TTS_PORT=${CTOX_TTS_PORT:-$tts_port}
-CTOX_TTS_ISQ=${CTOX_TTS_ISQ:-$tts_isq}
-CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES=${CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES:-}
-CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES=${CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES:-}
-CTOX_STT_CUDA_VISIBLE_DEVICES=${CTOX_STT_CUDA_VISIBLE_DEVICES:-}
-CTOX_TTS_CUDA_VISIBLE_DEVICES=${CTOX_TTS_CUDA_VISIBLE_DEVICES:-}
-CTOX_CHAT_SHARE_AUXILIARY_GPUS=${CTOX_CHAT_SHARE_AUXILIARY_GPUS:-1}
-CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP=${CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP:-}
-CTOX_EMBEDDING_GPU_LAYER_RESERVATION=${CTOX_EMBEDDING_GPU_LAYER_RESERVATION:-0.30}
-CTOX_STT_GPU_LAYER_RESERVATION=${CTOX_STT_GPU_LAYER_RESERVATION:-0.55}
-CTOX_TTS_GPU_LAYER_RESERVATION=${CTOX_TTS_GPU_LAYER_RESERVATION:-0.35}
-ENVEOF
+  sqlite3 "$db_path" <<SQL
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS runtime_env_kv (
+  env_key TEXT PRIMARY KEY,
+  env_value TEXT NOT NULL
+);
+BEGIN IMMEDIATE;
+DELETE FROM runtime_env_kv;
+INSERT INTO runtime_env_kv(env_key, env_value) VALUES
+('CTOX_ENGINE_MODEL', '$(sql_escape "${CTOX_ENGINE_MODEL:-$model}")'),
+('CTOX_ENGINE_PORT', '$(sql_escape "${CTOX_ENGINE_PORT:-$port}")'),
+('CTOX_ENGINE_ARCH', '$(sql_escape "${CTOX_ENGINE_ARCH:-$arch}")'),
+('CTOX_ENGINE_MAX_SEQS', '$(sql_escape "${CTOX_ENGINE_MAX_SEQS:-1}")'),
+('CTOX_ENGINE_MAX_BATCH_SIZE', '$(sql_escape "${CTOX_ENGINE_MAX_BATCH_SIZE:-1}")'),
+('CTOX_ENGINE_MAX_SEQ_LEN', '$(sql_escape "${CTOX_ENGINE_MAX_SEQ_LEN:-$max_seq}")'),
+('CTOX_ENGINE_PAGED_ATTN', '$(sql_escape "${CTOX_ENGINE_PAGED_ATTN:-$paged_attn}")'),
+('CTOX_ENGINE_TENSOR_PARALLEL_BACKEND', '$(sql_escape "${CTOX_ENGINE_TENSOR_PARALLEL_BACKEND:-$tp_backend}")'),
+('CTOX_ENGINE_ISQ', '$(sql_escape "${CTOX_ENGINE_ISQ:-$isq}")'),
+('CTOX_ENGINE_PA_CACHE_TYPE', '$(sql_escape "${CTOX_ENGINE_PA_CACHE_TYPE:-$pa_cache_type}")'),
+('CTOX_ENGINE_PA_MEMORY_FRACTION', '$(sql_escape "${CTOX_ENGINE_PA_MEMORY_FRACTION:-$pa_mem_frac}")'),
+('CTOX_ENGINE_PA_CONTEXT_LEN', '$(sql_escape "${CTOX_ENGINE_PA_CONTEXT_LEN:-}")'),
+('CTOX_ENGINE_CUDA_VISIBLE_DEVICES', '$(sql_escape "${CTOX_ENGINE_CUDA_VISIBLE_DEVICES:-}")'),
+('CTOX_ENGINE_DISABLE_NCCL', '$(sql_escape "${CTOX_ENGINE_DISABLE_NCCL:-$disable_nccl}")'),
+('CTOX_ENGINE_MN_LOCAL_WORLD_SIZE', '$(sql_escape "${CTOX_ENGINE_MN_LOCAL_WORLD_SIZE:-$world_size}")'),
+('CTOX_ENGINE_TOPOLOGY', '$(sql_escape "${CTOX_ENGINE_TOPOLOGY:-}")'),
+('CTOX_ENGINE_NUM_DEVICE_LAYERS', '$(sql_escape "${CTOX_ENGINE_NUM_DEVICE_LAYERS:-}")'),
+('CTOX_CHAT_MODEL', '$(sql_escape "${CTOX_CHAT_MODEL:-$model}")'),
+('CTOX_CHAT_MODEL_MAX_CONTEXT', '$(sql_escape "${CTOX_CHAT_MODEL_MAX_CONTEXT:-131072}")'),
+('CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT', '$(sql_escape "${CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT:-75}")'),
+('CTOX_ACTIVE_MODEL', '$(sql_escape "${CTOX_ACTIVE_MODEL:-$model}")'),
+('CTOX_PROXY_HOST', '$(sql_escape "${CTOX_PROXY_HOST:-127.0.0.1}")'),
+('CTOX_PROXY_PORT', '$(sql_escape "${CTOX_PROXY_PORT:-$proxy_port}")'),
+('CTOX_UPSTREAM_BASE_URL', '$(sql_escape "${CTOX_UPSTREAM_BASE_URL:-http://127.0.0.1:$port}")'),
+('CTOX_INSTALL_ROOT', '$(sql_escape "${CTOX_INSTALL_ROOT:-$INSTALL_ROOT}")'),
+('CTOX_STATE_ROOT', '$(sql_escape "${CTOX_STATE_ROOT:-$state_root}")'),
+('CTOX_CACHE_ROOT', '$(sql_escape "${CTOX_CACHE_ROOT:-$CACHE_ROOT}")'),
+('CTOX_BIN_DIR', '$(sql_escape "${CTOX_BIN_DIR:-$BIN_DIR}")'),
+('CTOX_TOOLS_ROOT', '$(sql_escape "${CTOX_TOOLS_ROOT:-$TOOLS_ROOT}")'),
+('CTOX_DEPENDENCIES_ROOT', '$(sql_escape "${CTOX_DEPENDENCIES_ROOT:-$DEPENDENCIES_ROOT}")'),
+('CTOX_ENGINE_BINARY', '$(sql_escape "${CTOX_ENGINE_BINARY:-$engine_binary}")'),
+('CTOX_ENGINE_LOG', '$(sql_escape "${CTOX_ENGINE_LOG:-$engine_log}")'),
+('CTOX_EMBEDDING_MODEL', '$(sql_escape "${CTOX_EMBEDDING_MODEL:-$emb_model}")'),
+('CTOX_EMBEDDING_PORT', '$(sql_escape "${CTOX_EMBEDDING_PORT:-$emb_port}")'),
+('CTOX_EMBEDDING_ISQ', '$(sql_escape "${CTOX_EMBEDDING_ISQ:-$emb_isq}")'),
+('CTOX_STT_MODEL', '$(sql_escape "${CTOX_STT_MODEL:-$stt_model}")'),
+('CTOX_STT_PORT', '$(sql_escape "${CTOX_STT_PORT:-$stt_port}")'),
+('CTOX_STT_ISQ', '$(sql_escape "${CTOX_STT_ISQ:-$stt_isq}")'),
+('CTOX_TTS_MODEL', '$(sql_escape "${CTOX_TTS_MODEL:-$tts_model}")'),
+('CTOX_TTS_PORT', '$(sql_escape "${CTOX_TTS_PORT:-$tts_port}")'),
+('CTOX_TTS_ISQ', '$(sql_escape "${CTOX_TTS_ISQ:-$tts_isq}")'),
+('CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES', '$(sql_escape "${CTOX_AUXILIARY_CUDA_VISIBLE_DEVICES:-}")'),
+('CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES', '$(sql_escape "${CTOX_EMBEDDING_CUDA_VISIBLE_DEVICES:-}")'),
+('CTOX_STT_CUDA_VISIBLE_DEVICES', '$(sql_escape "${CTOX_STT_CUDA_VISIBLE_DEVICES:-}")'),
+('CTOX_TTS_CUDA_VISIBLE_DEVICES', '$(sql_escape "${CTOX_TTS_CUDA_VISIBLE_DEVICES:-}")'),
+('CTOX_CHAT_SHARE_AUXILIARY_GPUS', '$(sql_escape "${CTOX_CHAT_SHARE_AUXILIARY_GPUS:-1}")'),
+('CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP', '$(sql_escape "${CTOX_AUXILIARY_GPU_LAYER_RESERVATION_MAP:-}")'),
+('CTOX_EMBEDDING_GPU_LAYER_RESERVATION', '$(sql_escape "${CTOX_EMBEDDING_GPU_LAYER_RESERVATION:-0.30}")'),
+('CTOX_STT_GPU_LAYER_RESERVATION', '$(sql_escape "${CTOX_STT_GPU_LAYER_RESERVATION:-0.55}")'),
+('CTOX_TTS_GPU_LAYER_RESERVATION', '$(sql_escape "${CTOX_TTS_GPU_LAYER_RESERVATION:-0.35}")');
+COMMIT;
+SQL
 }
 
 # ── Rebuild mode (called by `ctox update apply`) ────────────────────────────
@@ -1469,10 +1382,6 @@ run_rebuild() {
   local root="$1"
   root="$(cd "$root" && pwd)"  # absolute path
   detect_platform
-
-  # --rebuild is invoked by `ctox update apply --source` (source-mode updates),
-  # which always wants a fresh cargo build rather than re-downloading a binary.
-  BINARY_INSTALL=0
 
   if [[ -z "${CTOX_ENGINE_FEATURES:-}" && -f "${CTOX_STATE_ROOT:-$root/runtime}/engine_features" ]]; then
     ENGINE_FEATURES="$(cat "${CTOX_STATE_ROOT:-$root/runtime}/engine_features")"
@@ -1486,6 +1395,8 @@ run_rebuild() {
 
   # Ensure ctox is available as a command everywhere
   STATE_ROOT="${CTOX_STATE_ROOT:-$root/runtime}"
+  TOOLS_ROOT="${CTOX_TOOLS_ROOT:-$STATE_ROOT/tools}"
+  DEPENDENCIES_ROOT="${CTOX_DEPENDENCIES_ROOT:-$STATE_ROOT/dependencies}"
   write_wrapper_script "$root"
 
   # Ensure BIN_DIR is in PATH for future shells
@@ -1544,28 +1455,19 @@ parse_args() {
       --bin-dir=*)
         BIN_DIR="${1#*=}"
         ;;
+      --tools-root=*)
+        TOOLS_ROOT="${1#*=}"
+        TOOLS_ROOT_EXPLICIT=1
+        ;;
+      --dependencies-root=*)
+        DEPENDENCIES_ROOT="${1#*=}"
+        DEPENDENCIES_ROOT_EXPLICIT=1
+        ;;
       --repo=*)
         CTOX_REPO="${1#*=}"
         ;;
       --features=*)
         export CTOX_ENGINE_FEATURES="${1#*=}"
-        ;;
-      --from-source)
-        BINARY_INSTALL=0
-        ;;
-      --binary)
-        BINARY_INSTALL=1
-        ;;
-      --dev)
-        # "Follow main" mode: skip latest-release-tag resolution, use the default
-        # branch. Equivalent to --branch=main but without marking CTOX_BRANCH as
-        # user-explicit.
-        CTOX_BRANCH_EXPLICIT=1
-        CTOX_BRANCH="main"
-        ;;
-      --stable)
-        # Force latest-release-tag resolution even when CTOX_BRANCH was set.
-        CTOX_BRANCH_EXPLICIT=0
         ;;
       --model=*)
         MODEL_FLAG="${1#*=}"
@@ -1586,11 +1488,9 @@ parse_args() {
         printf '  --state-root=<path>         State directory (default: ~/.local/state/ctox)\n'
         printf '  --cache-root=<path>         Cache directory (default: ~/.cache/ctox)\n'
         printf '  --bin-dir=<path>            Binary symlink directory (default: ~/.local/bin)\n'
+        printf '  --tools-root=<path>         Canonical install root for helper tools (default: <state>/tools)\n'
+        printf '  --dependencies-root=<path>  Canonical install root for dependencies (default: <state>/dependencies)\n'
         printf '  --rebuild                   Rebuild in-place (used by ctox update)\n'
-        printf '  --binary                    Download pre-built CTOX CLI binary (default)\n'
-        printf '  --from-source               Build CTOX CLI from source instead of downloading\n'
-        printf '  --stable                    Install the latest release tag (default)\n'
-        printf '  --dev                       Install from the main branch (development)\n'
         printf '  --help                      Show this help\n\n'
         printf 'Environment:\n'
         printf '  CTOX_BACKEND                Same as --backend\n'
@@ -1601,6 +1501,8 @@ parse_args() {
         printf '  CTOX_STATE_ROOT             Same as --state-root\n'
         printf '  CTOX_CACHE_ROOT             Same as --cache-root\n'
         printf '  CTOX_BIN_DIR                Same as --bin-dir\n'
+        printf '  CTOX_TOOLS_ROOT             Canonical install root for CTOX-managed helper tools\n'
+        printf '  CTOX_DEPENDENCIES_ROOT      Canonical install root for downloaded dependencies/assets\n'
         printf '  CTOX_REPO                   Same as --repo\n'
         printf '  CTOX_BRANCH                 Same as --branch\n\n'
         exit 0
@@ -1615,6 +1517,12 @@ parse_args() {
 # ── Main install flow ────────────────────────────────────────────────────────
 main() {
   parse_args "$@"
+  if [[ "$TOOLS_ROOT_EXPLICIT" -eq 0 ]]; then
+    TOOLS_ROOT="$STATE_ROOT/tools"
+  fi
+  if [[ "$DEPENDENCIES_ROOT_EXPLICIT" -eq 0 ]]; then
+    DEPENDENCIES_ROOT="$STATE_ROOT/dependencies"
+  fi
 
   # Determine if online install or from existing checkout
   if [[ -f "$(dirname "${BASH_SOURCE[0]:-$0}")/Cargo.toml" ]]; then
@@ -1763,18 +1671,9 @@ main() {
   tui_start_step 6
   local source_root
   if [[ "$IS_ONLINE_INSTALL" -eq 1 ]]; then
-    # Resolve latest release tag unless the user explicitly pinned a branch
-    # (--branch=... or --dev) or a pre-release is requested via CTOX_BRANCH.
-    if [[ "$CTOX_BRANCH_EXPLICIT" -eq 0 ]]; then
-      local resolved_tag
-      resolved_tag="$(resolve_latest_release_tag || true)"
-      if [[ -n "$resolved_tag" ]]; then
-        CTOX_BRANCH="$resolved_tag"
-      fi
-    fi
     source_root="$CACHE_ROOT/src"
     if [[ -d "$source_root/.git" ]]; then
-      (cd "$source_root" && git fetch --tags origin "$CTOX_BRANCH" && git checkout "$CTOX_BRANCH") >/dev/null 2>&1
+      (cd "$source_root" && git fetch origin "$CTOX_BRANCH" && git checkout "origin/$CTOX_BRANCH") >/dev/null 2>&1
       tui_complete_step 6 "aktualisiert von $CTOX_BRANCH"
     else
       rm -rf "$source_root"
@@ -1788,8 +1687,7 @@ main() {
 
   # ── Step 7: Skills sync ──
   tui_start_step 7
-  sync_system_skills_to_agent_runtime "$source_root"
-  tui_complete_step 7 "System-Skills synchronisiert"
+  tui_complete_step 7 "System-Skills aus Repo-Quelle"
 
   # ── Step 8: Build (CTOX + Engine + Agent Runtime) ──
   tui_start_step 8
@@ -1811,7 +1709,7 @@ main() {
   write_wrapper_script "$active_root"
   sync_skills_to_codex_home "$source_root"
   write_platform_capabilities "$STATE_ROOT"
-  CTOX_DETECTED_GPU="$detected_gpu" write_full_engine_env "$STATE_ROOT"
+  CTOX_DETECTED_GPU="$detected_gpu" write_runtime_sqlite_config "$STATE_ROOT"
   tui_complete_step 9 "$INSTALL_ROOT"
 
   # ── Step 10: Services ──
@@ -1848,9 +1746,6 @@ main() {
 
   # Write Jami DBus env file so the Jami adapter can reach the daemon
   write_jami_dbus_env "$STATE_ROOT"
-
-  # Install Linux desktop entry if a graphical session is present
-  install_linux_desktop_entry "$source_root"
 
   # Set update channel
   "$BIN_DIR/ctox" update channel set-github --repo metric-space-ai/ctox 2>/dev/null || true

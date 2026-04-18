@@ -9,7 +9,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_PROVIDER=mock\n"
           }
         }
@@ -94,7 +94,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_PROVIDER=mock\n"
           }
         }

@@ -14,6 +14,7 @@ use openai_harmony::{
     load_harmony_encoding, HarmonyEncodingName,
 };
 use regex::Regex;
+use rusqlite::{Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
@@ -961,7 +962,7 @@ fn exact_text_output_budget(exact_text: &str) -> usize {
 fn current_runtime_root() -> PathBuf {
     std::env::current_dir()
         .ok()
-        .filter(|path| path.join("runtime/inference_runtime.json").exists())
+        .filter(|path| path.join("runtime/ctox.sqlite3").exists())
         .or_else(|| std::env::var("CTOX_ROOT").ok().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1053,9 +1054,17 @@ fn debug_dump_harmony_tool_state(
 
 fn current_runtime_state() -> Option<RuntimeStateSnapshot> {
     let root = current_runtime_root();
-    let path = root.join("runtime/inference_runtime.json");
-    let raw = std::fs::read(path).ok()?;
-    serde_json::from_slice(&raw).ok()
+    let path = root.join("runtime/ctox.sqlite3");
+    let conn = Connection::open(&path).ok()?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT state_json FROM runtime_state_store WHERE state_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()?;
+    serde_json::from_str(raw.as_deref()?).ok()
 }
 
 fn gpt_oss_harmony_reasoning_cap() -> String {

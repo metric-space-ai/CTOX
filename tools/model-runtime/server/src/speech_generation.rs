@@ -2,18 +2,20 @@
 
 use std::{error::Error, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     body::Bytes,
     extract::{Json, State},
     http::{self, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
+use base64::{prelude::BASE64_STANDARD, Engine};
 use engine_core::{
     speech_utils::{self, Sample},
     Constraint, MistralRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
     SpeechGenerationRequest as CoreSpeechGenerationRequest,
 };
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
@@ -208,6 +210,15 @@ fn normalize_speech_request(
         SpeechBackend::Qwen3Tts => normalize_qwen3_tts_request(oairequest),
         SpeechBackend::VoxtralTts => normalize_voxtral_tts_request(oairequest),
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalSpeechGenerationResponse {
+    pub response_format: AudioResponseFormat,
+    pub content_type: String,
+    pub sample_rate_hz: usize,
+    pub channels: usize,
+    pub audio_base64: String,
 }
 
 /// Represents different types of speech generation responses.
@@ -461,6 +472,47 @@ pub async fn speech_generation(
     process_non_streaming_response(&mut rx, state, response_format).await
 }
 
+pub async fn create_local_speech(
+    state: SharedMistralRsState,
+    oairequest: SpeechGenerationRequest,
+) -> Result<LocalSpeechGenerationResponse> {
+    let (tx, mut rx) = create_response_channel(None);
+
+    let (request, response_format) = parse_request(oairequest, state.clone(), tx).await?;
+    if !matches!(
+        response_format,
+        AudioResponseFormat::Wav | AudioResponseFormat::Pcm
+    ) {
+        anyhow::bail!("Only support wav/pcm response format.");
+    }
+
+    send_request(&state, request)
+        .await
+        .map_err(|err| anyhow::anyhow!(sanitize_error_message(err.as_ref())))?;
+
+    match rx.recv().await {
+        Some(Response::InternalError(err)) => {
+            Err(anyhow::anyhow!(sanitize_error_message(err.as_ref())))
+        }
+        Some(Response::ValidationError(err)) => {
+            Err(anyhow::anyhow!(sanitize_error_message(err.as_ref())))
+        }
+        Some(Response::CompletionModelError(message, _)) => Err(anyhow::anyhow!(message)),
+        Some(Response::Speech {
+            pcm,
+            rate,
+            channels,
+        }) => encode_local_speech_response(&pcm, rate, channels, response_format),
+        Some(other) => Err(anyhow::anyhow!(
+            "unexpected speech generation response: {}",
+            local_response_type_name(&other)
+        )),
+        None => Err(anyhow::anyhow!(
+            "no response received from speech generation model"
+        )),
+    }
+}
+
 /// Helper function to handle speech generation errors and logging them.
 pub fn handle_error(
     state: SharedMistralRsState,
@@ -470,6 +522,41 @@ pub fn handle_error(
     let e = anyhow::Error::msg(sanitized_msg);
     MistralRs::maybe_log_error(state, &*e);
     SpeechGenerationResponder::InternalError(e.into())
+}
+
+fn encode_local_speech_response(
+    pcm: &[f32],
+    rate: usize,
+    channels: usize,
+    response_format: AudioResponseFormat,
+) -> Result<LocalSpeechGenerationResponse> {
+    let pcm_endianness = "s16le";
+    let content_type = response_format.audio_content_type(rate, channels, pcm_endianness);
+    let encoded = match response_format {
+        AudioResponseFormat::Pcm => {
+            let samples: &[f32] = pcm;
+            let mut buf = Vec::with_capacity(samples.len() * std::mem::size_of::<i64>());
+            for &sample in samples {
+                buf.extend_from_slice(&sample.to_i16().to_le_bytes());
+            }
+            buf
+        }
+        AudioResponseFormat::Wav => {
+            let mut buf = Vec::new();
+            speech_utils::write_pcm_as_wav(&mut buf, pcm, rate as u32, channels as u16)
+                .context("failed to encode local WAV response")?;
+            buf
+        }
+        _ => anyhow::bail!("Only support wav/pcm response format."),
+    };
+
+    Ok(LocalSpeechGenerationResponse {
+        response_format,
+        content_type,
+        sample_rate_hz: rate,
+        channels,
+        audio_base64: BASE64_STANDARD.encode(encoded),
+    })
 }
 
 /// Process non-streaming speech generation responses.
@@ -515,39 +602,48 @@ pub fn match_responses(
             rate,
             channels,
         } => {
-            let pcm_endianness = "s16le";
-
-            let content_type = response_format.audio_content_type(rate, channels, pcm_endianness);
+            let local_response =
+                match encode_local_speech_response(&pcm, rate, channels, response_format) {
+                    Ok(response) => response,
+                    Err(err) => return SpeechGenerationResponder::InternalError(err.into()),
+                };
             let mut headers = HeaderMap::new();
             headers.insert(
                 http::header::CONTENT_TYPE,
-                HeaderValue::from_str(&content_type).unwrap(),
+                HeaderValue::from_str(&local_response.content_type).unwrap(),
             );
-
-            let encoded = match response_format {
-                AudioResponseFormat::Pcm => {
-                    let samples: &[f32] = &pcm;
-                    let mut buf = Vec::with_capacity(samples.len() * std::mem::size_of::<i64>());
-                    for &sample in samples {
-                        buf.extend_from_slice(&sample.to_i16().to_le_bytes());
-                    }
-                    buf
+            let bytes = match BASE64_STANDARD.decode(local_response.audio_base64) {
+                Ok(encoded) => Bytes::from(encoded),
+                Err(err) => {
+                    return SpeechGenerationResponder::InternalError(
+                        anyhow::Error::msg(format!(
+                            "failed to decode local speech response payload: {err}"
+                        ))
+                        .into(),
+                    )
                 }
-                AudioResponseFormat::Wav => {
-                    // Write WAV data into an in-memory buffer
-                    let mut buf = Vec::new();
-                    speech_utils::write_pcm_as_wav(&mut buf, &pcm, rate as u32, channels as u16)
-                        .unwrap();
-                    buf
-                }
-                _ => unreachable!("Should be validated above."),
             };
-
-            let bytes = Bytes::from(encoded);
 
             SpeechGenerationResponder::RawResponse((StatusCode::OK, headers, bytes).into_response())
         }
         Response::Raw { .. } => unreachable!(),
         Response::Embeddings { .. } => unreachable!(),
+    }
+}
+
+fn local_response_type_name(response: &Response) -> &'static str {
+    match response {
+        Response::InternalError(_) => "internal_error",
+        Response::ValidationError(_) => "validation_error",
+        Response::ModelError(_, _) => "model_error",
+        Response::Done(_) => "done",
+        Response::Chunk(_) => "chunk",
+        Response::CompletionModelError(_, _) => "completion_model_error",
+        Response::CompletionDone(_) => "completion_done",
+        Response::CompletionChunk(_) => "completion_chunk",
+        Response::ImageGeneration(_) => "image_generation",
+        Response::Speech { .. } => "speech",
+        Response::Raw { .. } => "raw",
+        Response::Embeddings { .. } => "embeddings",
     }
 }

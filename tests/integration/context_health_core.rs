@@ -6,7 +6,7 @@ use harness::TestRoot;
 #[test]
 fn context_health_flags_bootstrap_continuity_gaps() {
     let root = TestRoot::new("context-health-bootstrap");
-    let db = root.path("runtime/ctox_lcm.db");
+    let db = root.path("runtime/ctox.sqlite3");
     let db_str = db.to_string_lossy().to_string();
 
     root.run(&["lcm-init", &db_str]).success();

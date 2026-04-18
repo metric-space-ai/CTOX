@@ -77,7 +77,7 @@ impl CmdOutput {
 #[allow(dead_code)]
 impl TestRoot {
     pub fn db_path(&self) -> PathBuf {
-        self.path("runtime/cto_agent.db")
+        self.path("runtime/ctox.sqlite3")
     }
 }
 

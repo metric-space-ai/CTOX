@@ -22,16 +22,21 @@ use crate::inference::model_registry;
 use crate::inference::resource_state;
 use crate::inference::runtime_contract;
 use crate::inference::runtime_env;
+use crate::persistence;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-const MIN_POLICY_CONTEXT: u32 = 131_072;
+const MIN_SUPPORTED_CHAT_CONTEXT: u32 = 32_768;
+const DEFAULT_CHAT_CONTEXT: u32 = 131_072;
+const MAX_SUPPORTED_CHAT_CONTEXT: u32 = 262_144;
+#[cfg(test)]
+const MIN_POLICY_CONTEXT: u32 = DEFAULT_CHAT_CONTEXT;
 const QUALITY_MIN_COMPACTION_TOKENS: u32 = 12_288;
 const PERFORMANCE_MIN_COMPACTION_TOKENS: u32 = 8_192;
 const DEFAULT_GPU0_DESKTOP_RESERVE_MB: u64 = 1024;
-const CHAT_PLAN_RELATIVE_PATH: &str = "runtime/chat_plan.json";
-const RUNTIME_FLEET_PLAN_RELATIVE_PATH: &str = "runtime/runtime_fleet_plan.json";
-const NCCL_CAPABILITY_OVERRIDE_RELATIVE_PATH: &str = "runtime/nccl_capability_override.json";
+const CHAT_PLAN_STORAGE_KEY: &str = "chat_runtime_plan";
+const RUNTIME_FLEET_PLAN_STORAGE_KEY: &str = "runtime_fleet_plan";
+const NCCL_CAPABILITY_OVERRIDE_STORAGE_KEY: &str = "nccl_capability_override";
 const QUANT_ARTIFACTS_RELATIVE_DIR: &str = "runtime/uqff_cache";
 const QUANT_ARTIFACTS_ROOT_ENV: &str = "CTOX_UQFF_CACHE_ROOT";
 const NVIDIA_SMI_TIMEOUT_SECS: u64 = 10;
@@ -41,6 +46,70 @@ const NVIDIA_SMI_TIMEOUT_SECS: u64 = 10;
 pub enum ChatPreset {
     Quality,
     Performance,
+}
+
+const SUPPORTED_CHAT_CONTEXT_CHOICES: &[(&str, u32)] = &[
+    ("32k", 32_768),
+    ("64k", 65_536),
+    ("128k", 131_072),
+    ("256k", 262_144),
+];
+
+pub fn supported_chat_context_choices() -> Vec<&'static str> {
+    SUPPORTED_CHAT_CONTEXT_CHOICES
+        .iter()
+        .map(|(label, _)| *label)
+        .collect()
+}
+
+pub fn normalize_chat_context_tokens(value: u32) -> Option<u32> {
+    SUPPORTED_CHAT_CONTEXT_CHOICES
+        .iter()
+        .find_map(|(_, tokens)| (*tokens == value).then_some(*tokens))
+}
+
+pub fn parse_chat_context_tokens(value: &str) -> Option<u32> {
+    let compact = value.trim().to_ascii_lowercase().replace('_', "");
+    if compact.is_empty() {
+        return None;
+    }
+    if let Some(tokens) = SUPPORTED_CHAT_CONTEXT_CHOICES
+        .iter()
+        .find_map(|(label, tokens)| (*label == compact).then_some(*tokens))
+    {
+        return Some(tokens);
+    }
+    compact
+        .parse::<u32>()
+        .ok()
+        .and_then(normalize_chat_context_tokens)
+}
+
+pub fn default_chat_context_tokens() -> u32 {
+    DEFAULT_CHAT_CONTEXT
+}
+
+pub fn maximum_supported_chat_context() -> u32 {
+    MAX_SUPPORTED_CHAT_CONTEXT
+}
+
+pub fn configured_chat_context_tokens(env_map: &BTreeMap<String, String>) -> u32 {
+    env_map
+        .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+        .and_then(|value| parse_chat_context_tokens(value))
+        .unwrap_or(DEFAULT_CHAT_CONTEXT)
+}
+
+pub fn format_chat_context_choice(tokens: u32) -> String {
+    SUPPORTED_CHAT_CONTEXT_CHOICES
+        .iter()
+        .find_map(|(label, value)| (*value == tokens).then_some((*label).to_string()))
+        .unwrap_or_else(|| format!("{}k", tokens / 1024))
+}
+
+pub fn scale_compaction_tokens(baseline_tokens: u32, context_tokens: u32) -> u32 {
+    (((baseline_tokens as u128) * (context_tokens as u128)) / (DEFAULT_CHAT_CONTEXT as u128)).max(1)
+        as u32
 }
 
 impl ChatPreset {
@@ -78,6 +147,7 @@ pub struct HardwareProfile {
 struct PlatformFacts {
     hardware: HardwareProfile,
     cuda_available: bool,
+    metal_available: bool,
     nccl_available: bool,
     flash_attn_available: bool,
     validation_messages: Vec<String>,
@@ -265,7 +335,7 @@ fn generated_at_timestamp() -> String {
 }
 
 fn quant_artifacts_root(root: &Path) -> PathBuf {
-    if let Some(override_root) = std::env::var_os(QUANT_ARTIFACTS_ROOT_ENV) {
+    if let Some(override_root) = runtime_env::env_or_config(root, QUANT_ARTIFACTS_ROOT_ENV) {
         let candidate = PathBuf::from(override_root);
         if !candidate.as_os_str().is_empty() {
             return candidate;
@@ -371,24 +441,8 @@ pub fn available_chat_quant_artifact(root: &Path, plan: &ChatRuntimePlan) -> Opt
     (metadata.is_file() && metadata.len() > 0).then_some(path)
 }
 
-fn nccl_capability_override_path(root: &Path) -> PathBuf {
-    root.join(NCCL_CAPABILITY_OVERRIDE_RELATIVE_PATH)
-}
-
 fn load_nccl_capability_override(root: &Path) -> Result<Option<NcclCapabilityOverride>> {
-    let path = nccl_capability_override_path(root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read NCCL capability override {}", path.display()))?;
-    let override_state = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to parse NCCL capability override {}",
-            path.display()
-        )
-    })?;
-    Ok(Some(override_state))
+    persistence::load_json_payload(root, NCCL_CAPABILITY_OVERRIDE_STORAGE_KEY)
 }
 
 pub(crate) fn persist_nccl_capability_override(
@@ -397,29 +451,18 @@ pub(crate) fn persist_nccl_capability_override(
     reason: &str,
     signature: &str,
 ) -> Result<()> {
-    let path = nccl_capability_override_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create NCCL capability override dir {}",
-                parent.display()
-            )
-        })?;
-    }
     let override_state = NcclCapabilityOverride {
         detected_at: generated_at_timestamp(),
         model: model.to_string(),
         reason: reason.to_string(),
         signature: signature.to_string(),
     };
-    let bytes = serde_json::to_vec_pretty(&override_state)
-        .context("failed to encode NCCL capability override")?;
-    std::fs::write(&path, bytes).with_context(|| {
-        format!(
-            "failed to write NCCL capability override {}",
-            path.display()
-        )
-    })
+    persistence::store_json_payload(
+        root,
+        NCCL_CAPABILITY_OVERRIDE_STORAGE_KEY,
+        Some(&override_state),
+    )?;
+    Ok(())
 }
 
 fn chat_capacity_contract_from_plan(
@@ -446,7 +489,7 @@ fn chat_capacity_contract_from_plan(
     runtime_contract::ChatCapacityContract {
         model: plan.model.clone(),
         preset: plan.preset.label().to_string(),
-        min_context_tokens: MIN_POLICY_CONTEXT,
+        min_context_tokens: plan.max_seq_len,
         max_seq_len: plan.max_seq_len,
         hardware_fingerprint: plan.hardware_fingerprint.clone(),
         generated_at: generated_at_timestamp(),
@@ -470,15 +513,15 @@ pub struct CompactionPolicy {
     pub min_tokens: u32,
 }
 
-pub fn compaction_policy_for_preset(preset: ChatPreset) -> CompactionPolicy {
+pub fn compaction_policy_for_preset(preset: ChatPreset, context_tokens: u32) -> CompactionPolicy {
     match preset {
         ChatPreset::Quality => CompactionPolicy {
             threshold_percent: 75,
-            min_tokens: QUALITY_MIN_COMPACTION_TOKENS,
+            min_tokens: scale_compaction_tokens(QUALITY_MIN_COMPACTION_TOKENS, context_tokens),
         },
         ChatPreset::Performance => CompactionPolicy {
             threshold_percent: 70,
-            min_tokens: PERFORMANCE_MIN_COMPACTION_TOKENS,
+            min_tokens: scale_compaction_tokens(PERFORMANCE_MIN_COMPACTION_TOKENS, context_tokens),
         },
     }
 }
@@ -593,7 +636,7 @@ pub fn chat_preset_choices() -> Vec<&'static str> {
 }
 
 pub fn minimum_supported_chat_context() -> u32 {
-    MIN_POLICY_CONTEXT
+    MIN_SUPPORTED_CHAT_CONTEXT
 }
 
 fn required_context_floor_for_manifest(manifest: &model_manifest::RuntimeModelManifest) -> u32 {
@@ -613,24 +656,24 @@ fn required_context_floor_for_manifest(manifest: &model_manifest::RuntimeModelMa
     if let Some(candidate_floor) = candidate_floor {
         configured_floor = configured_floor.min(candidate_floor);
     }
-    align_context(configured_floor.min(MIN_POLICY_CONTEXT))
+    align_context(configured_floor.max(MIN_SUPPORTED_CHAT_CONTEXT))
 }
 
 fn plan_satisfies_required_context_policy(plan: &ChatRuntimePlan, required_context: u32) -> bool {
     plan.max_seq_len >= required_context
-        && (required_context < MIN_POLICY_CONTEXT || plan.min_context_floor_applied)
+        && (required_context < DEFAULT_CHAT_CONTEXT || plan.min_context_floor_applied)
 }
 
 pub fn plan_satisfies_context_policy(plan: &ChatRuntimePlan) -> bool {
-    plan_satisfies_required_context_policy(plan, MIN_POLICY_CONTEXT)
+    plan_satisfies_required_context_policy(plan, MIN_SUPPORTED_CHAT_CONTEXT)
 }
 
 #[allow(dead_code)]
 fn manifest_candidate_satisfies_context_policy(
     candidate: &model_manifest::PresetCandidateSpec,
 ) -> bool {
-    candidate.min_context_required >= MIN_POLICY_CONTEXT
-        && candidate.context_target_cap.unwrap_or(u32::MAX) >= MIN_POLICY_CONTEXT
+    candidate.min_context_required >= MIN_SUPPORTED_CHAT_CONTEXT
+        && candidate.context_target_cap.unwrap_or(u32::MAX) >= MIN_SUPPORTED_CHAT_CONTEXT
 }
 
 #[allow(dead_code)]
@@ -1056,7 +1099,8 @@ fn local_model_satisfies_context_policy_with_hardware(
         Some(profile) if !profile.gpus.is_empty() => profile,
         _ => return true,
     };
-    let required_context = required_context_floor_for_manifest(&manifest);
+    let required_context =
+        configured_chat_context_tokens(env_map).max(required_context_floor_for_manifest(&manifest));
     if qualification_profile_for_model(Some(root), model)
         .as_ref()
         .and_then(|profile| qualification_host_profile_for_hardware(profile, hardware))
@@ -1286,6 +1330,7 @@ pub fn apply_chat_runtime_plan(
     root: &Path,
     env_map: &mut BTreeMap<String, String>,
 ) -> Result<Option<ChatRuntimePlan>> {
+    let requested_context = configured_chat_context_tokens(env_map);
     let treat_existing_engine_limits_as_explicit = !env_map
         .get("CTOX_CHAT_RUNTIME_PLAN_ACTIVE")
         .map(|value| value.trim() == "1")
@@ -1347,7 +1392,8 @@ pub fn apply_chat_runtime_plan(
     let required_context_floor = runtime_manifest(Some(root), &bundle.model)
         .as_ref()
         .map(required_context_floor_for_manifest)
-        .unwrap_or(MIN_POLICY_CONTEXT);
+        .unwrap_or(MIN_SUPPORTED_CHAT_CONTEXT);
+    let policy_context = requested_context.max(required_context_floor);
     let explicit_model_requested = explicit_local_chat_model(env_map).is_some();
     let explicit_family_requested = explicit_local_chat_family(env_map).is_some();
     let enforce_global_context_policy = !explicit_family_requested && !explicit_model_requested;
@@ -1357,7 +1403,7 @@ pub fn apply_chat_runtime_plan(
         anyhow::bail!(
             "local chat model {} is unavailable on this system because CTOX now requires at least {} tokens of planned sequence length for both Quality and Performance presets",
             bundle.model,
-            MIN_POLICY_CONTEXT
+            policy_context
         );
     }
     let mut plan = bundle.selected_plan.clone();
@@ -1377,12 +1423,14 @@ pub fn apply_chat_runtime_plan(
     if let Some(cap) = explicit_max_seqs_cap {
         plan.max_seqs = plan.max_seqs.min(cap);
     }
-    if enforce_global_context_policy && !plan_satisfies_context_policy(&plan) {
+    if enforce_global_context_policy
+        && !plan_satisfies_required_context_policy(&plan, policy_context)
+    {
         anyhow::bail!(
             "local chat runtime plan for {} / {} does not satisfy the {} token minimum",
             plan.model,
             plan.preset.label(),
-            MIN_POLICY_CONTEXT
+            policy_context
         );
     }
     if !plan_satisfies_required_context_policy(&plan, required_context_floor) {
@@ -1640,7 +1688,7 @@ pub fn apply_chat_runtime_plan_env(
     env_map.insert("CTOX_CHAT_RUNTIME_PLAN_ACTIVE".to_string(), "1".to_string());
     env_map.insert(
         "CTOX_CHAT_RUNTIME_PLAN_PATH".to_string(),
-        root.join(CHAT_PLAN_RELATIVE_PATH).display().to_string(),
+        persistence::sqlite_path(root).display().to_string(),
     );
     Ok(())
 }
@@ -1653,27 +1701,11 @@ pub fn reconcile_chat_runtime_plan(root: &Path) -> Result<Option<ChatRuntimePlan
 }
 
 pub fn load_persisted_chat_runtime_plan(root: &Path) -> Result<Option<ChatRuntimePlan>> {
-    let path = root.join(CHAT_PLAN_RELATIVE_PATH);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read chat runtime plan {}", path.display()))?;
-    let plan = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse chat runtime plan {}", path.display()))?;
-    Ok(Some(plan))
+    persistence::load_json_payload(root, CHAT_PLAN_STORAGE_KEY)
 }
 
 pub fn load_persisted_runtime_fleet_plan(root: &Path) -> Result<Option<RuntimeFleetPlan>> {
-    let path = root.join(RUNTIME_FLEET_PLAN_RELATIVE_PATH);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("failed to read runtime fleet plan {}", path.display()))?;
-    let plan = serde_json::from_slice(&bytes)
-        .with_context(|| format!("failed to parse runtime fleet plan {}", path.display()))?;
-    Ok(Some(plan))
+    persistence::load_json_payload(root, RUNTIME_FLEET_PLAN_STORAGE_KEY)
 }
 
 pub fn clear_persisted_chat_runtime_plan(root: &Path) -> Result<()> {
@@ -1793,42 +1825,11 @@ pub fn clear_chat_plan_env(env_map: &mut BTreeMap<String, String>) {
 }
 
 fn persist_chat_runtime_plan(root: &Path, plan: Option<&ChatRuntimePlan>) -> Result<()> {
-    let path = root.join(CHAT_PLAN_RELATIVE_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create planner dir {}", parent.display()))?;
-    }
-    match plan {
-        Some(plan) => {
-            let bytes = serde_json::to_vec_pretty(plan).context("failed to encode planner json")?;
-            std::fs::write(&path, bytes)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-        }
-        None => {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-    Ok(())
+    persistence::store_json_payload(root, CHAT_PLAN_STORAGE_KEY, plan)
 }
 
 fn persist_runtime_fleet_plan(root: &Path, plan: Option<&RuntimeFleetPlan>) -> Result<()> {
-    let path = root.join(RUNTIME_FLEET_PLAN_RELATIVE_PATH);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create fleet planner dir {}", parent.display()))?;
-    }
-    match plan {
-        Some(plan) => {
-            let bytes =
-                serde_json::to_vec_pretty(plan).context("failed to encode runtime fleet json")?;
-            std::fs::write(&path, bytes)
-                .with_context(|| format!("failed to write {}", path.display()))?;
-        }
-        None => {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-    Ok(())
+    persistence::store_json_payload(root, RUNTIME_FLEET_PLAN_STORAGE_KEY, plan)
 }
 
 fn build_bundle_for_model(
@@ -1910,18 +1911,27 @@ fn plan_from_specs(
     specs: &[PlanSpec],
     env_map: &BTreeMap<String, String>,
 ) -> ChatRuntimePlan {
-    let candidates =
-        build_feasible_candidates(root, platform, manifest, harness, preset, specs, env_map);
+    let requested_context = configured_chat_context_tokens(env_map);
+    let adjusted_specs = adjust_plan_specs_for_requested_context(specs, requested_context);
+    let candidates = build_feasible_candidates(
+        root,
+        platform,
+        manifest,
+        harness,
+        preset,
+        &adjusted_specs,
+        env_map,
+    );
     if let Some(best) = rank_feasible_candidates(root, platform, harness.model, preset, &candidates)
     {
         return best;
     }
-    let fallback_spec = select_floor_fallback_spec(specs).unwrap_or(PlanSpec {
+    let fallback_spec = select_floor_fallback_spec(&adjusted_specs).unwrap_or(PlanSpec {
         quant: Q4K,
         backend: BackendMode::DeviceLayers,
-        context_target: Some(MIN_POLICY_CONTEXT),
+        context_target: Some(requested_context),
         context_fraction_milli: 1000,
-        min_context_required: MIN_POLICY_CONTEXT,
+        min_context_required: requested_context,
         per_gpu_headroom_mb: 0,
         max_batch_size: 1,
         max_seqs: 1,
@@ -1935,6 +1945,25 @@ fn plan_from_specs(
         fallback_spec,
         env_map,
     )
+}
+
+fn adjust_plan_specs_for_requested_context(
+    specs: &[PlanSpec],
+    requested_context: u32,
+) -> Vec<PlanSpec> {
+    specs
+        .iter()
+        .copied()
+        .map(|spec| PlanSpec {
+            context_target: Some(
+                spec.context_target
+                    .map(|cap| cap.min(requested_context))
+                    .unwrap_or(requested_context),
+            ),
+            min_context_required: spec.min_context_required.max(requested_context),
+            ..spec
+        })
+        .collect()
 }
 
 fn select_floor_fallback_spec(specs: &[PlanSpec]) -> Option<PlanSpec> {
@@ -2007,9 +2036,15 @@ fn build_qwen35_27b_bundle(
     hardware: &HardwareProfile,
     env_map: &BTreeMap<String, String>,
 ) -> ChatPresetBundle {
-    build_manifest_bundle_with_root(None, "Qwen/Qwen3.5-27B", selected_preset, hardware, env_map)
-        .expect("qwen3.5-27b manifest bundle should resolve")
-        .expect("qwen3.5-27b manifest bundle should exist")
+    build_manifest_bundle_with_root(
+        None,
+        "Qwen/Qwen3.6-35B-A3B",
+        selected_preset,
+        hardware,
+        env_map,
+    )
+    .expect("qwen3.6-35b-a3b manifest bundle should resolve")
+    .expect("qwen3.6-35b-a3b manifest bundle should exist")
 }
 
 #[cfg(test)]
@@ -2020,13 +2055,13 @@ fn build_qwen35_35b_a3b_bundle(
 ) -> ChatPresetBundle {
     build_manifest_bundle_with_root(
         None,
-        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B",
         selected_preset,
         hardware,
         env_map,
     )
-    .expect("qwen3.5-35b-a3b manifest bundle should resolve")
-    .expect("qwen3.5-35b-a3b manifest bundle should exist")
+    .expect("qwen3.6-35b-a3b manifest bundle should resolve")
+    .expect("qwen3.6-35b-a3b manifest bundle should exist")
 }
 
 #[cfg(test)]
@@ -2064,16 +2099,16 @@ fn build_gemma4_31b_bundle(
 }
 
 #[cfg(test)]
-fn build_nemotron_cascade_bundle(
+fn build_nemotron_cascade2_bundle(
     selected_preset: ChatPreset,
     hardware: &HardwareProfile,
     env_map: &BTreeMap<String, String>,
 ) -> ChatPresetBundle {
-    build_nemotron_cascade_bundle_with_root(None, selected_preset, hardware, env_map)
+    build_nemotron_cascade2_bundle_with_root(None, selected_preset, hardware, env_map)
 }
 
 #[cfg(test)]
-fn build_nemotron_cascade_bundle_with_root(
+fn build_nemotron_cascade2_bundle_with_root(
     root: Option<&Path>,
     selected_preset: ChatPreset,
     hardware: &HardwareProfile,
@@ -2328,7 +2363,6 @@ fn build_candidate(
     }
     let placement = model_placement_profile(root, harness.model);
     let runtime = resolve_harness_runtime(harness, &platform.hardware);
-    let compaction_policy = compaction_policy_for_preset(preset);
     let quant = spec.quant;
     let backend = spec.backend;
     let fixed_device_layers_override = match backend {
@@ -2390,7 +2424,6 @@ fn build_candidate(
             env_map,
             &placement,
             runtime,
-            compaction_policy,
             quant,
             backend,
             fixed_device_layers_override,
@@ -2412,7 +2445,6 @@ fn build_candidate_for_gpu_indices(
     env_map: &BTreeMap<String, String>,
     placement: &model_manifest::ManifestPlacementProfile,
     runtime: ResolvedHarnessRuntime,
-    compaction_policy: CompactionPolicy,
     quant: QuantOption,
     backend: BackendMode,
     fixed_device_layers_override: Option<&str>,
@@ -2563,6 +2595,7 @@ fn build_candidate_for_gpu_indices(
     if kv_budget_mb > kv_budget_cap_mb {
         return None;
     }
+    let compaction_policy = compaction_policy_for_preset(preset, plan_context);
     let activation_overhead_mb =
         measured_activation_overhead_mb(manifest, quant, plan_context, spec.max_seqs);
     let backend_runtime_overhead_mb =
@@ -2694,8 +2727,11 @@ fn build_candidate_for_gpu_indices(
     };
     let mut rationale = vec![
         format!(
-            "platform cuda={} nccl={} flash_attn={}",
-            platform.cuda_available, platform.nccl_available, platform.flash_attn_available
+            "platform cuda={} metal={} nccl={} flash_attn={}",
+            platform.cuda_available,
+            platform.metal_available,
+            platform.nccl_available,
+            platform.flash_attn_available
         ),
         format!("preset {}", preset.label()),
         format!("quant {}", quant.label),
@@ -2839,14 +2875,17 @@ fn build_floor_fallback_plan(
         }
     }
     if !launch_contract_allows_backend(&manifest.launch_contract, fallback_spec.backend) {
+        let fallback_context = required_context_floor_for_manifest(manifest);
+        let fallback_floor_label = format_chat_context_choice(fallback_context);
+        let fallback_compaction_policy = compaction_policy_for_preset(preset, fallback_context);
         return ChatRuntimePlan {
             model: harness.model.to_string(),
             preset,
             quantization: fallback_spec.quant.label.to_string(),
             runtime_isq: fallback_spec.quant.runtime_isq.map(str::to_string),
-            max_seq_len: required_context_floor_for_manifest(manifest),
-            compaction_threshold_percent: compaction_policy_for_preset(preset).threshold_percent,
-            compaction_min_tokens: compaction_policy_for_preset(preset).min_tokens,
+            max_seq_len: fallback_context,
+            compaction_threshold_percent: fallback_compaction_policy.threshold_percent,
+            compaction_min_tokens: fallback_compaction_policy.min_tokens,
             min_context_floor_applied: false,
             paged_attn: harness.runtime.paged_attn.to_string(),
             pa_cache_type: harness.runtime.pa_cache_type.map(str::to_string),
@@ -2898,14 +2937,18 @@ fn build_floor_fallback_plan(
             rationale: {
                 let mut rationale = vec![
                     format!(
-                        "platform cuda={} nccl={} flash_attn={}",
+                        "platform cuda={} metal={} nccl={} flash_attn={}",
                         platform.cuda_available,
+                        platform.metal_available,
                         platform.nccl_available,
                         platform.flash_attn_available
                     ),
                     format!("preset {}", preset.label()),
                     "policy floor fallback".to_string(),
-                    "launch contract disallowed the preferred backend; no qualifying 128k runtime contract could be proven".to_string(),
+                    format!(
+                        "launch contract disallowed the preferred backend; no qualifying {} runtime contract could be proven",
+                        fallback_floor_label
+                    ),
                 ];
                 rationale.extend(platform.validation_messages.iter().cloned());
                 rationale
@@ -2948,7 +2991,9 @@ fn build_floor_fallback_plan(
         env_map,
     )
     .unwrap_or_else(|| {
-        let compaction_policy = compaction_policy_for_preset(preset);
+        let fallback_context = required_context_floor_for_manifest(manifest);
+        let fallback_floor_label = format_chat_context_choice(fallback_context);
+        let compaction_policy = compaction_policy_for_preset(preset, fallback_context);
         let pa_cache_type = engine::resolve_model_pa_cache_type(
             harness.model,
             harness.runtime.pa_cache_type,
@@ -3012,7 +3057,7 @@ fn build_floor_fallback_plan(
             preset,
             quantization: fallback_spec.quant.label.to_string(),
             runtime_isq: fallback_spec.quant.runtime_isq.map(str::to_string),
-            max_seq_len: required_context_floor_for_manifest(manifest),
+            max_seq_len: fallback_context,
             compaction_threshold_percent: compaction_policy.threshold_percent,
             compaction_min_tokens: compaction_policy.min_tokens,
             min_context_floor_applied: false,
@@ -3071,14 +3116,17 @@ fn build_floor_fallback_plan(
             rationale: {
                 let mut rationale = vec![
                     format!(
-                        "platform cuda={} nccl={} flash_attn={}",
+                        "platform cuda={} metal={} nccl={} flash_attn={}",
                         platform.cuda_available,
+                        platform.metal_available,
                         platform.nccl_available,
                         platform.flash_attn_available
                     ),
                     "policy floor fallback".to_string(),
-                    "preserved runtime topology despite missing qualifying 128k contract"
-                        .to_string(),
+                    format!(
+                        "preserved runtime topology despite missing qualifying {} contract",
+                        fallback_floor_label
+                    ),
                 ];
                 rationale.extend(platform.validation_messages.iter().cloned());
                 rationale
@@ -3102,8 +3150,9 @@ fn build_floor_fallback_plan(
         ));
     }
     fallback.rationale.push(format!(
-        "hardware could not satisfy the full preset policy; kept {} and the 128k floor",
-        fallback_spec.quant.label
+        "hardware could not satisfy the full preset policy; kept {} and the {} floor",
+        fallback_spec.quant.label,
+        format_chat_context_choice(required_context_floor_for_manifest(manifest))
     ));
     fallback
 }
@@ -4093,6 +4142,79 @@ fn parse_csv_indices(raw: Option<&String>) -> Vec<usize> {
     .unwrap_or_default()
 }
 
+fn sysctl_string(name: &str) -> Option<String> {
+    let output = command_output_with_timeout(
+        Command::new("sysctl").args(["-n", name]),
+        Duration::from_secs(2),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn sysctl_u64(name: &str) -> Option<u64> {
+    sysctl_string(name)?.parse::<u64>().ok()
+}
+
+fn apple_metal_default_budget_mb(system_ram_mb: u64) -> u64 {
+    if system_ram_mb <= 36 * 1024 {
+        (system_ram_mb * 2) / 3
+    } else {
+        (system_ram_mb * 3) / 4
+    }
+}
+
+fn apple_metal_budget_mb(system_ram_mb: u64, wired_limit_mb: Option<u64>) -> u64 {
+    match wired_limit_mb {
+        Some(limit_mb) if limit_mb > 0 => limit_mb.min(system_ram_mb),
+        _ => apple_metal_default_budget_mb(system_ram_mb),
+    }
+}
+
+fn apple_metal_gpu_name() -> String {
+    match sysctl_string("machdep.cpu.brand_string") {
+        Some(value) if value.to_ascii_lowercase().contains("apple") => value,
+        _ => "Apple Metal GPU".to_string(),
+    }
+}
+
+fn hardware_looks_like_apple_metal(hardware: &HardwareProfile) -> bool {
+    !hardware.gpus.is_empty()
+        && hardware.gpus.iter().all(|gpu| {
+            let normalized = gpu.name.trim().to_ascii_lowercase();
+            normalized.contains("apple") || normalized.contains("metal")
+        })
+}
+
+fn detect_apple_metal_hardware_profile() -> Option<HardwareProfile> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let system_ram_bytes = sysctl_u64("hw.memsize")?;
+    let system_ram_mb = system_ram_bytes / (1024 * 1024);
+    if system_ram_mb == 0 {
+        return None;
+    }
+    let gpu_total_mb = apple_metal_budget_mb(system_ram_mb, sysctl_u64("iogpu.wired_limit_mb"));
+    if gpu_total_mb == 0 {
+        return None;
+    }
+    let gpu0_reserve = gpu0_desktop_reserve_mb();
+    let gpus = vec![HardwareGpu {
+        index: 0,
+        name: apple_metal_gpu_name(),
+        total_mb: gpu_total_mb,
+    }];
+    Some(HardwareProfile {
+        fingerprint: hardware_fingerprint(&gpus, gpu0_reserve),
+        gpus,
+        gpu0_desktop_reserve_mb: gpu0_reserve,
+    })
+}
+
 fn inspect_hardware_profile(root: &Path) -> Result<HardwareProfile> {
     let empty_profile = || {
         let gpu0_reserve = gpu0_desktop_reserve_mb();
@@ -4132,11 +4254,13 @@ fn inspect_hardware_profile(root: &Path) -> Result<HardwareProfile> {
         Duration::from_secs(NVIDIA_SMI_TIMEOUT_SECS),
     ) {
         Ok(output) => output,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(empty_profile()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(detect_apple_metal_hardware_profile().unwrap_or_else(empty_profile))
+        }
         Err(err) => return Err(err).context("failed to run nvidia-smi for hardware planner"),
     };
     if !output.status.success() {
-        return Ok(empty_profile());
+        return Ok(detect_apple_metal_hardware_profile().unwrap_or_else(empty_profile));
     }
 
     let mut gpus = Vec::new();
@@ -4159,7 +4283,7 @@ fn inspect_hardware_profile(root: &Path) -> Result<HardwareProfile> {
     }
     gpus.sort_by_key(|gpu| gpu.index);
     if gpus.is_empty() {
-        return Ok(empty_profile());
+        return Ok(detect_apple_metal_hardware_profile().unwrap_or_else(empty_profile));
     }
     let gpu0_reserve = gpu0_desktop_reserve_mb();
     Ok(HardwareProfile {
@@ -4232,22 +4356,27 @@ fn collect_platform_facts(root: Option<&Path>, hardware: &HardwareProfile) -> Pl
                 .ok()
                 .flatten()
         });
+    let inferred_metal = hardware_looks_like_apple_metal(hardware);
     let cuda_available = declared
         .as_ref()
         .map(|value| value.cuda_available)
-        .unwrap_or(!hardware.gpus.is_empty());
+        .unwrap_or(!hardware.gpus.is_empty() && !inferred_metal);
+    let metal_available = declared
+        .as_ref()
+        .map(|value| value.metal_available)
+        .unwrap_or(inferred_metal);
     let nccl_available = if nccl_override.is_some() {
         false
     } else {
         declared
             .as_ref()
             .map(|value| value.nccl_available)
-            .unwrap_or(hardware.gpus.len() > 1)
+            .unwrap_or(hardware.gpus.len() > 1 && !metal_available)
     };
     let flash_attn_available = declared
         .as_ref()
         .map(|value| value.flash_attn_available)
-        .unwrap_or(cuda_available);
+        .unwrap_or(cuda_available && !metal_available);
     let mut validation_messages = Vec::new();
     if let Some(override_state) = &nccl_override {
         validation_messages.push(format!(
@@ -4256,10 +4385,13 @@ fn collect_platform_facts(root: Option<&Path>, hardware: &HardwareProfile) -> Pl
         ));
     }
     if let Some(contract) = &declared {
-        if contract.cuda_available != !hardware.gpus.is_empty() {
+        let declared_gpu_available = contract.cuda_available || contract.metal_available;
+        if declared_gpu_available != !hardware.gpus.is_empty() {
             validation_messages.push(format!(
-                "platform contract says cuda_available={} but live hardware sees {} GPUs",
+                "platform contract says gpu_available={} (cuda={}, metal={}) but live hardware sees {} GPUs",
+                declared_gpu_available,
                 contract.cuda_available,
+                contract.metal_available,
                 hardware.gpus.len()
             ));
         }
@@ -4287,14 +4419,18 @@ fn collect_platform_facts(root: Option<&Path>, hardware: &HardwareProfile) -> Pl
             }
         }
     } else if !hardware.gpus.is_empty() {
-        validation_messages.push(
+        validation_messages.push(if inferred_metal {
+            "platform contract missing; inferred apple-metal capabilities from live hardware"
+                .to_string()
+        } else {
             "platform contract missing; inferred platform capabilities from live hardware"
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     PlatformFacts {
         hardware: hardware.clone(),
         cuda_available,
+        metal_available,
         nccl_available,
         flash_attn_available,
         validation_messages,
@@ -4308,7 +4444,9 @@ fn platform_supports_backend(
     launch_contract: &model_manifest::ManifestLaunchContract,
 ) -> bool {
     match backend {
-        BackendMode::DeviceLayers => platform.cuda_available && gpu_count >= 1,
+        BackendMode::DeviceLayers => {
+            (platform.cuda_available || platform.metal_available) && gpu_count >= 1
+        }
         BackendMode::Nccl => {
             platform.cuda_available
                 && platform.nccl_available
@@ -4445,7 +4583,7 @@ fn plan_qwen35_9b() -> ModelHarness {
 #[cfg(test)]
 fn plan_qwen35_27b() -> ModelHarness {
     ModelHarness {
-        model: "Qwen/Qwen3.5-27B",
+        model: "Qwen/Qwen3.6-35B-A3B",
         sizing: EmpiricalSizingProfile {
             non_repeating_weight_mb_q4: 1_660,
             repeating_layer_weight_mb_q4: 260,
@@ -4475,7 +4613,7 @@ fn plan_qwen35_27b() -> ModelHarness {
 #[cfg(test)]
 fn plan_qwen35_35b_a3b() -> ModelHarness {
     ModelHarness {
-        model: "Qwen/Qwen3.5-35B-A3B",
+        model: "Qwen/Qwen3.6-35B-A3B",
         sizing: EmpiricalSizingProfile {
             non_repeating_weight_mb_q4: 3_500,
             repeating_layer_weight_mb_q4: 450,
@@ -4717,7 +4855,7 @@ fn default_launch_contract() -> model_manifest::ManifestLaunchContract {
 #[cfg(test)]
 fn gpt_oss_launch_contract() -> model_manifest::ManifestLaunchContract {
     model_manifest::ManifestLaunchContract {
-        required_context_tokens: MIN_POLICY_CONTEXT,
+        required_context_tokens: MIN_SUPPORTED_CHAT_CONTEXT,
         require_primary_gpu_anchor: true,
         nccl_qualification: model_manifest::ManifestNcclQualification::Qualified,
         nccl_preserves_primary_gpu_anchor: true,
@@ -4728,7 +4866,7 @@ fn gpt_oss_launch_contract() -> model_manifest::ManifestLaunchContract {
 #[cfg(test)]
 fn qwen35_2b_launch_contract() -> model_manifest::ManifestLaunchContract {
     model_manifest::ManifestLaunchContract {
-        required_context_tokens: MIN_POLICY_CONTEXT,
+        required_context_tokens: MIN_SUPPORTED_CHAT_CONTEXT,
         require_primary_gpu_anchor: true,
         nccl_qualification: model_manifest::ManifestNcclQualification::Qualified,
         nccl_preserves_primary_gpu_anchor: true,
@@ -4739,7 +4877,7 @@ fn qwen35_2b_launch_contract() -> model_manifest::ManifestLaunchContract {
 #[cfg(test)]
 fn qwen35_4b_launch_contract() -> model_manifest::ManifestLaunchContract {
     model_manifest::ManifestLaunchContract {
-        required_context_tokens: MIN_POLICY_CONTEXT,
+        required_context_tokens: MIN_SUPPORTED_CHAT_CONTEXT,
         require_primary_gpu_anchor: true,
         nccl_qualification: model_manifest::ManifestNcclQualification::Qualified,
         nccl_preserves_primary_gpu_anchor: true,
@@ -4748,9 +4886,20 @@ fn qwen35_4b_launch_contract() -> model_manifest::ManifestLaunchContract {
 }
 
 #[cfg(test)]
+fn qwen35_35b_a3b_launch_contract() -> model_manifest::ManifestLaunchContract {
+    model_manifest::ManifestLaunchContract {
+        required_context_tokens: MIN_SUPPORTED_CHAT_CONTEXT,
+        require_primary_gpu_anchor: true,
+        nccl_qualification: model_manifest::ManifestNcclQualification::Unsupported,
+        nccl_preserves_primary_gpu_anchor: false,
+        allow_subset_anchored_nccl: false,
+    }
+}
+
+#[cfg(test)]
 fn gemma4_31b_launch_contract() -> model_manifest::ManifestLaunchContract {
     model_manifest::ManifestLaunchContract {
-        required_context_tokens: MIN_POLICY_CONTEXT,
+        required_context_tokens: MIN_SUPPORTED_CHAT_CONTEXT,
         require_primary_gpu_anchor: true,
         nccl_qualification: model_manifest::ManifestNcclQualification::Qualified,
         nccl_preserves_primary_gpu_anchor: true,
@@ -4764,6 +4913,7 @@ fn launch_contract_for_model(model: &str) -> model_manifest::ManifestLaunchContr
         "openai/gpt-oss-20b" => gpt_oss_launch_contract(),
         "Qwen/Qwen3.5-2B" => qwen35_2b_launch_contract(),
         "Qwen/Qwen3.5-4B" => qwen35_4b_launch_contract(),
+        "Qwen/Qwen3.6-35B-A3B" => qwen35_35b_a3b_launch_contract(),
         "google/gemma-4-E2B-it" => gemma4_31b_launch_contract(),
         "google/gemma-4-E4B-it" => gemma4_31b_launch_contract(),
         "google/gemma-4-31B-it" => gemma4_31b_launch_contract(),
@@ -4781,7 +4931,7 @@ fn default_placement_profile() -> model_manifest::ManifestPlacementProfile {
 
 #[cfg(test)]
 fn default_gpt_oss_manifest() -> model_manifest::RuntimeModelManifest {
-    manifest_from_harness(
+    let mut manifest = manifest_from_harness(
         plan_gpt_oss_20b(),
         default_placement_profile(),
         manifest_profile(
@@ -4793,7 +4943,7 @@ fn default_gpt_oss_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 0,
             )],
         ),
@@ -4807,7 +4957,7 @@ fn default_gpt_oss_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     0,
                 ),
                 manifest_candidate(
@@ -4817,12 +4967,18 @@ fn default_gpt_oss_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     0,
                 ),
             ],
         ),
-    )
+    );
+    manifest
+        .sizing
+        .measurement_components
+        .backend_runtime_overheads_mb_q4
+        .device_layers_mb = 256;
+    manifest
 }
 
 #[cfg(test)]
@@ -4840,7 +4996,7 @@ fn default_qwen35_2b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     256,
                 ),
                 manifest_candidate(
@@ -4850,7 +5006,7 @@ fn default_qwen35_2b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     256,
                 ),
             ],
@@ -4864,7 +5020,7 @@ fn default_qwen35_2b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 256,
             )],
         ),
@@ -4886,7 +5042,7 @@ fn default_qwen35_4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -4896,7 +5052,7 @@ fn default_qwen35_4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -4906,7 +5062,7 @@ fn default_qwen35_4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
             ],
@@ -4921,7 +5077,7 @@ fn default_qwen35_4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -4931,7 +5087,7 @@ fn default_qwen35_4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
             ],
@@ -4954,7 +5110,7 @@ fn default_qwen35_9b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -4964,7 +5120,7 @@ fn default_qwen35_9b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -4974,7 +5130,7 @@ fn default_qwen35_9b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
             ],
@@ -4988,7 +5144,7 @@ fn default_qwen35_9b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 768,
             )],
         ),
@@ -5010,7 +5166,7 @@ fn default_qwen35_27b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5020,7 +5176,7 @@ fn default_qwen35_27b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5030,7 +5186,7 @@ fn default_qwen35_27b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
             ],
@@ -5044,7 +5200,7 @@ fn default_qwen35_27b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 768,
             )],
         ),
@@ -5065,8 +5221,8 @@ fn default_qwen35_35b_a3b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1,
                     1000,
-                    Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    Some(262_144),
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5075,8 +5231,8 @@ fn default_qwen35_35b_a3b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1,
                     1000,
-                    Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    Some(262_144),
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5085,8 +5241,8 @@ fn default_qwen35_35b_a3b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1,
                     1000,
-                    Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    Some(262_144),
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     0,
                 ),
             ],
@@ -5100,8 +5256,8 @@ fn default_qwen35_35b_a3b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1,
                     1000,
-                    Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    Some(262_144),
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5110,8 +5266,8 @@ fn default_qwen35_35b_a3b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1,
                     1000,
-                    Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    Some(262_144),
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     0,
                 ),
             ],
@@ -5133,7 +5289,7 @@ fn default_gemma4_e2b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 192,
             )],
         ),
@@ -5146,7 +5302,7 @@ fn default_gemma4_e2b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 192,
             )],
         ),
@@ -5167,7 +5323,7 @@ fn default_gemma4_e4b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 256,
             )],
         ),
@@ -5180,7 +5336,7 @@ fn default_gemma4_e4b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 256,
             )],
         ),
@@ -5202,7 +5358,7 @@ fn default_gemma4_26b_a4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5212,7 +5368,7 @@ fn default_gemma4_26b_a4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5222,7 +5378,7 @@ fn default_gemma4_26b_a4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     256,
                 ),
             ],
@@ -5237,7 +5393,7 @@ fn default_gemma4_26b_a4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     256,
                 ),
                 manifest_candidate(
@@ -5247,7 +5403,7 @@ fn default_gemma4_26b_a4b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
             ],
@@ -5270,7 +5426,7 @@ fn default_gemma4_31b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5280,7 +5436,7 @@ fn default_gemma4_31b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5290,7 +5446,7 @@ fn default_gemma4_31b_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(131_072),
-                    MIN_POLICY_CONTEXT,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     256,
                 ),
             ],
@@ -5304,7 +5460,7 @@ fn default_gemma4_31b_manifest() -> model_manifest::RuntimeModelManifest {
                 1,
                 1000,
                 Some(131_072),
-                MIN_POLICY_CONTEXT,
+                MIN_SUPPORTED_CHAT_CONTEXT,
                 256,
             )],
         ),
@@ -5312,9 +5468,9 @@ fn default_gemma4_31b_manifest() -> model_manifest::RuntimeModelManifest {
 }
 
 #[cfg(test)]
-fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
+fn default_nemotron_cascade2_manifest() -> model_manifest::RuntimeModelManifest {
     manifest_from_harness(
-        plan_nemotron_cascade_from_manifest_seed(),
+        plan_nemotron_cascade2_from_manifest_seed(),
         default_placement_profile(),
         manifest_profile(
             model_manifest::RuntimeObjectiveLabel::Quality,
@@ -5326,7 +5482,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5336,7 +5492,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5346,7 +5502,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     0,
                 ),
             ],
@@ -5361,7 +5517,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
                     2,
                     1000,
                     Some(32_768),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     512,
                 ),
                 manifest_candidate(
@@ -5371,7 +5527,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
             ],
@@ -5380,7 +5536,7 @@ fn default_nemotron_manifest() -> model_manifest::RuntimeModelManifest {
 }
 
 #[cfg(test)]
-fn plan_nemotron_cascade_from_manifest_seed() -> ModelHarness {
+fn plan_nemotron_cascade2_from_manifest_seed() -> ModelHarness {
     ModelHarness {
         model: "nvidia/Nemotron-Cascade-2-30B-A3B",
         sizing: EmpiricalSizingProfile {
@@ -5424,7 +5580,7 @@ fn default_glm47_flash_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5434,7 +5590,7 @@ fn default_glm47_flash_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
             ],
@@ -5449,7 +5605,7 @@ fn default_glm47_flash_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
                 manifest_candidate(
@@ -5459,7 +5615,7 @@ fn default_glm47_flash_manifest() -> model_manifest::RuntimeModelManifest {
                     1,
                     1000,
                     Some(65_536),
-                    65_536,
+                    MIN_SUPPORTED_CHAT_CONTEXT,
                     768,
                 ),
             ],
@@ -5474,13 +5630,12 @@ fn default_runtime_manifest_for_model(model: &str) -> Option<model_manifest::Run
         "Qwen/Qwen3.5-2B" => default_qwen35_2b_manifest(),
         "Qwen/Qwen3.5-4B" => default_qwen35_4b_manifest(),
         "Qwen/Qwen3.5-9B" => default_qwen35_9b_manifest(),
-        "Qwen/Qwen3.5-27B" => default_qwen35_27b_manifest(),
-        "Qwen/Qwen3.5-35B-A3B" => default_qwen35_35b_a3b_manifest(),
+        "Qwen/Qwen3.6-35B-A3B" => default_qwen35_35b_a3b_manifest(),
         "google/gemma-4-E2B-it" => default_gemma4_e2b_manifest(),
         "google/gemma-4-E4B-it" => default_gemma4_e4b_manifest(),
         "google/gemma-4-26B-A4B-it" => default_gemma4_26b_a4b_manifest(),
         "google/gemma-4-31B-it" => default_gemma4_31b_manifest(),
-        "nvidia/Nemotron-Cascade-2-30B-A3B" => default_nemotron_manifest(),
+        "nvidia/Nemotron-Cascade-2-30B-A3B" => default_nemotron_cascade2_manifest(),
         "zai-org/GLM-4.7-Flash" => default_glm47_flash_manifest(),
         _ => return None,
     })
@@ -5518,11 +5673,19 @@ fn runtime_manifest(
         search_roots.push(root.to_path_buf());
     }
     search_roots.push(Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf());
-    search_roots.into_iter().find_map(|root| {
+    let manifest = search_roots.into_iter().find_map(|root| {
         model_manifest::load_runtime_model_manifest(&root, model)
             .ok()
             .flatten()
-    })
+    });
+    #[cfg(test)]
+    {
+        manifest.or_else(|| default_runtime_manifest_for_model(model))
+    }
+    #[cfg(not(test))]
+    {
+        manifest
+    }
 }
 
 fn default_auxiliary_manifest_for_model(
@@ -5591,13 +5754,13 @@ fn plan_specs_from_manifest_profile(
 
 #[cfg(test)]
 #[allow(dead_code)]
-fn plan_nemotron_cascade() -> ModelHarness {
-    plan_nemotron_cascade_from_manifest(&default_nemotron_manifest())
+fn plan_nemotron_cascade2() -> ModelHarness {
+    plan_nemotron_cascade2_from_manifest(&default_nemotron_cascade2_manifest())
 }
 
 #[cfg(test)]
 #[allow(dead_code)]
-fn plan_nemotron_cascade_from_manifest(
+fn plan_nemotron_cascade2_from_manifest(
     manifest: &model_manifest::RuntimeModelManifest,
 ) -> ModelHarness {
     harness_from_manifest(manifest)
@@ -5734,6 +5897,18 @@ mod tests {
         }
     }
 
+    fn apple_metal_hardware(total_mb: u64) -> HardwareProfile {
+        HardwareProfile {
+            fingerprint: "apple-metal-test".to_string(),
+            gpus: vec![HardwareGpu {
+                index: 0,
+                name: "Apple M5".to_string(),
+                total_mb,
+            }],
+            gpu0_desktop_reserve_mb: 1024,
+        }
+    }
+
     fn sum_device_layers(spec: &str) -> u32 {
         spec.split(';')
             .filter_map(|entry| entry.split_once(':'))
@@ -5760,21 +5935,27 @@ mod tests {
         root
     }
 
-    /// Inject a fake GPU totals spec for `inspect_hardware_profile` by
-    /// appending `CTOX_TEST_GPU_TOTALS_MB=<spec>` to `<root>/runtime/engine.env`.
-    /// The key is not allowlisted for process-env overrides, so writing to the
-    /// test-root's engine.env gives each test its own isolated fake hardware
-    /// without mutating process state.
-    fn write_test_gpu_totals(root: &Path, spec: &str) {
-        let runtime_dir = root.join("runtime");
-        std::fs::create_dir_all(&runtime_dir).unwrap();
-        let env_path = runtime_dir.join("engine.env");
-        let mut existing = std::fs::read_to_string(&env_path).unwrap_or_default();
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            existing.push('\n');
+    fn write_test_runtime_env(root: &Path, raw: &str) {
+        let mut env_map = BTreeMap::new();
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            env_map.insert(key.trim().to_string(), value.trim().to_string());
         }
-        existing.push_str(&format!("CTOX_TEST_GPU_TOTALS_MB={spec}\n"));
-        std::fs::write(&env_path, existing).unwrap();
+        runtime_env::save_runtime_env_map(root, &env_map).unwrap();
+    }
+
+    /// Inject a fake GPU totals spec for `inspect_hardware_profile` by writing
+    /// `CTOX_TEST_GPU_TOTALS_MB=<spec>` into the test root's SQLite runtime config.
+    fn write_test_gpu_totals(root: &Path, spec: &str) {
+        let mut env_map = runtime_env::load_runtime_env_map(root).unwrap_or_default();
+        env_map.insert("CTOX_TEST_GPU_TOTALS_MB".to_string(), spec.to_string());
+        runtime_env::save_runtime_env_map(root, &env_map).unwrap();
     }
 
     fn write_platform_contract(root: &Path, gpu_count: usize, total_mb: u64, nccl_available: bool) {
@@ -5782,6 +5963,7 @@ mod tests {
             "generated_at": "2026-04-05T00:00:00Z",
             "source": "test",
             "cuda_available": gpu_count > 0,
+            "metal_available": false,
             "nccl_available": nccl_available,
             "flash_attn_available": gpu_count > 0,
             "gpus": (0..gpu_count).map(|index| json!({
@@ -6189,12 +6371,10 @@ mod tests {
             "Qwen/Qwen3-Embedding-0.6B",
         )
         .unwrap();
-        assert!(
-            visible_devices
-                .as_deref()
-                .map(str::trim)
-                .is_none_or(|value| !value.is_empty())
-        );
+        assert!(visible_devices
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|value| !value.is_empty()));
     }
 
     #[test]
@@ -6265,7 +6445,7 @@ mod tests {
                 .selected_plan
                 .rationale
                 .iter()
-                .any(|line| line.contains("platform cuda=true nccl=false")),
+                .any(|line| line.contains("platform cuda=true metal=false nccl=false")),
             "{:#?}",
             bundle.selected_plan.rationale
         );
@@ -6444,6 +6624,47 @@ mod tests {
     }
 
     #[test]
+    fn apple_metal_budget_defaults_to_two_thirds_on_32gb_hosts() {
+        assert_eq!(apple_metal_default_budget_mb(32 * 1024), 21_845);
+        assert_eq!(apple_metal_budget_mb(32 * 1024, Some(0)), 21_845);
+        assert_eq!(apple_metal_budget_mb(32 * 1024, Some(24_000)), 24_000);
+    }
+
+    #[test]
+    fn chat_context_parser_accepts_32k_variants() {
+        assert_eq!(parse_chat_context_tokens("32k"), Some(32_768));
+        assert_eq!(parse_chat_context_tokens("32768"), Some(32_768));
+        assert_eq!(
+            supported_chat_context_choices(),
+            vec!["32k", "64k", "128k", "256k"]
+        );
+        assert_eq!(format_chat_context_choice(32_768), "32k");
+        assert_eq!(minimum_supported_chat_context(), 32_768);
+    }
+
+    #[test]
+    fn qwen4b_single_apple_metal_gpu_prefers_device_layers_without_nccl() {
+        let env_map = BTreeMap::new();
+        let plan = build_qwen35_4b_bundle(
+            ChatPreset::Performance,
+            &apple_metal_hardware(21_845),
+            &env_map,
+        )
+        .selected_plan;
+        assert!(plan_satisfies_context_policy(&plan), "{plan:?}");
+        assert!(plan.disable_nccl, "{plan:?}");
+        assert_eq!(plan.tensor_parallel_backend, None);
+        assert!(plan.device_layers.is_some(), "{plan:?}");
+        assert!(
+            plan.rationale
+                .iter()
+                .any(|line| line.contains("platform cuda=false metal=true nccl=false")),
+            "{:#?}",
+            plan.rationale
+        );
+    }
+
+    #[test]
     fn explicit_qwen4b_resource_contract_does_not_scale_kv_or_activation_with_weight_quant() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let manifest = model_manifest::load_runtime_model_manifest(root, "Qwen/Qwen3.5-4B")
@@ -6594,11 +6815,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(unique.join("runtime")).unwrap();
-        std::fs::write(
-            unique.join("runtime/engine.env"),
+        write_test_runtime_env(
+            &unique,
             "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-20b\n",
-        )
-        .unwrap();
+        );
 
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -6673,11 +6893,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(unique.join("runtime")).unwrap();
-        std::fs::write(
-            unique.join("runtime/engine.env"),
+        write_test_runtime_env(
+            &unique,
             "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=Qwen/Qwen3.5-4B\n",
-        )
-        .unwrap();
+        );
 
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -6713,11 +6932,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(unique.join("runtime")).unwrap();
-        std::fs::write(
-            unique.join("runtime/engine.env"),
+        write_test_runtime_env(
+            &unique,
             "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-20b\n",
-        )
-        .unwrap();
+        );
 
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -6825,17 +7043,82 @@ mod tests {
         let env_map = BTreeMap::new();
         let bundle = build_manifest_bundle_with_root(
             None,
-            "Qwen/Qwen3.5-27B",
+            "Qwen/Qwen3.6-35B-A3B",
             ChatPreset::Quality,
             &hardware(3, 24_576),
             &env_map,
         )
-        .expect("qwen3.5-27b manifest bundle should resolve")
-        .expect("qwen3.5-27b manifest bundle should exist");
+        .expect("qwen3.6-35b-a3b manifest bundle should resolve")
+        .expect("qwen3.6-35b-a3b manifest bundle should exist");
         let plan = bundle.selected_plan;
         assert!(plan_satisfies_context_policy(&plan), "{plan:?}");
         assert_eq!(plan.pa_cache_type.as_deref(), Some("turboquant3"));
         assert!(plan.isq_singlethread);
+    }
+
+    #[test]
+    fn qwen35_35b_a3b_manifest_accepts_32k_floor() {
+        let manifest = default_qwen35_35b_a3b_manifest();
+        assert_eq!(
+            required_context_floor_for_manifest(&manifest),
+            MIN_SUPPORTED_CHAT_CONTEXT
+        );
+        assert!(manifest
+            .quality
+            .candidates
+            .iter()
+            .all(|candidate| candidate.context_target_cap == Some(262_144)));
+    }
+
+    #[test]
+    fn qwen35_35b_a3b_targets_requested_context_variants_on_large_hosts() {
+        let root = temp_root("qwen36-context-variants");
+        write_platform_contract(&root, 4, 81_920, false);
+        for requested_context in [32_768, 65_536, 131_072, 262_144] {
+            let mut env_map = BTreeMap::new();
+            env_map.insert(
+                "CTOX_CHAT_MODEL_MAX_CONTEXT".to_string(),
+                requested_context.to_string(),
+            );
+            let bundle = build_manifest_bundle_with_root(
+                Some(&root),
+                "Qwen/Qwen3.6-35B-A3B",
+                ChatPreset::Quality,
+                &hardware(4, 81_920),
+                &env_map,
+            )
+            .expect("qwen3.6-35b-a3b manifest bundle should resolve")
+            .expect("qwen3.6-35b-a3b manifest bundle should exist");
+            assert_eq!(
+                bundle.selected_plan.max_seq_len, requested_context,
+                "requested_context={requested_context} bundle={bundle:#?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn gpt_oss_targets_requested_context_variants_on_large_hosts() {
+        for requested_context in [32_768, 65_536, 131_072] {
+            let mut env_map = BTreeMap::new();
+            env_map.insert(
+                "CTOX_CHAT_MODEL_MAX_CONTEXT".to_string(),
+                requested_context.to_string(),
+            );
+            let bundle = build_manifest_bundle_with_root(
+                None,
+                "openai/gpt-oss-20b",
+                ChatPreset::Quality,
+                &hardware(4, 81_920),
+                &env_map,
+            )
+            .expect("gpt-oss-20b manifest bundle should resolve")
+            .expect("gpt-oss-20b manifest bundle should exist");
+            assert_eq!(
+                bundle.selected_plan.max_seq_len, requested_context,
+                "requested_context={requested_context} bundle={bundle:#?}"
+            );
+        }
     }
 
     #[test]
@@ -6951,7 +7234,7 @@ mod tests {
     fn nemotron_uses_conservative_text_runtime_constraints() {
         let env_map = BTreeMap::new();
         let plan =
-            build_nemotron_cascade_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
+            build_nemotron_cascade2_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
                 .selected_plan;
         assert!(matches!(plan.quantization.as_str(), "Q6K" | "Q5K" | "Q4K"));
         assert_eq!(plan.paged_attn, "auto");
@@ -7039,11 +7322,7 @@ mod tests {
                 default_qwen35_9b_manifest(),
             ),
             (
-                "contracts/models/runtime_manifests/qwen3_5_27b.json",
-                default_qwen35_27b_manifest(),
-            ),
-            (
-                "contracts/models/runtime_manifests/qwen3_5_35b_a3b.json",
+                "contracts/models/runtime_manifests/qwen3_6_35b_a3b.json",
                 default_qwen35_35b_a3b_manifest(),
             ),
             (
@@ -7118,11 +7397,10 @@ mod tests {
         let manifests = [
             default_qwen35_4b_manifest(),
             default_qwen35_9b_manifest(),
-            default_qwen35_27b_manifest(),
             default_qwen35_35b_a3b_manifest(),
             default_gemma4_26b_a4b_manifest(),
             default_gemma4_31b_manifest(),
-            default_nemotron_manifest(),
+            default_nemotron_cascade2_manifest(),
             default_glm47_flash_manifest(),
         ];
         for manifest in manifests {
@@ -7201,7 +7479,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
     }
 
     #[test]
@@ -7231,7 +7509,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
     }
 
     #[test]
@@ -7257,7 +7535,7 @@ mod tests {
         .unwrap()
         .expect("expected qwen family performance bundle");
         assert_eq!(quality.model, performance.model);
-        assert_eq!(quality.model, "Qwen/Qwen3.5-35B-A3B");
+        assert_eq!(quality.model, "Qwen/Qwen3.6-35B-A3B");
     }
 
     #[test]
@@ -7302,7 +7580,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
         assert_eq!(bundle.selected_plan.cuda_visible_devices, "0,1,2");
     }
 
@@ -7317,7 +7595,7 @@ mod tests {
         assert!(families.contains(&"Qwen 3.5"));
         assert!(families.contains(&"GPT-OSS"));
         assert!(!families.contains(&"Gemma 4"));
-        assert!(!families.contains(&"Nemotron Cascade"));
+        assert!(!families.contains(&"Nemotron Cascade 2"));
         assert!(!families.contains(&"GLM 4.7 Flash"));
     }
 
@@ -7710,7 +7988,7 @@ mod tests {
     fn nemotron_presets_prioritize_quantization_context_and_parallelism() {
         let env_map = BTreeMap::new();
         let bundle =
-            build_nemotron_cascade_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map);
+            build_nemotron_cascade2_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map);
         let quality = bundle
             .plans
             .iter()
@@ -7748,8 +8026,9 @@ mod tests {
 
     #[test]
     fn compaction_policy_differs_by_preset() {
-        let quality = compaction_policy_for_preset(ChatPreset::Quality);
-        let performance = compaction_policy_for_preset(ChatPreset::Performance);
+        let quality = compaction_policy_for_preset(ChatPreset::Quality, DEFAULT_CHAT_CONTEXT);
+        let performance =
+            compaction_policy_for_preset(ChatPreset::Performance, DEFAULT_CHAT_CONTEXT);
 
         assert_eq!(quality.threshold_percent, 75);
         assert_eq!(quality.min_tokens, 12_288);
@@ -7764,7 +8043,7 @@ mod tests {
             "CTOX_ENGINE_PA_CACHE_TYPE_OVERRIDE".to_string(),
             "f8e4m3".to_string(),
         );
-        let plan = build_qwen35_27b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
+        let plan = build_qwen35_35b_a3b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
             .selected_plan;
         assert_eq!(plan.pa_cache_type.as_deref(), Some("turboquant3"));
     }
@@ -7799,7 +8078,7 @@ mod tests {
     fn nemotron_turboquant_runtime_plan_is_enabled_by_default() {
         let env_map = BTreeMap::new();
         let plan =
-            build_nemotron_cascade_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
+            build_nemotron_cascade2_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
                 .selected_plan;
         assert_eq!(plan.paged_attn, "auto");
         assert_eq!(plan.pa_cache_type.as_deref(), Some("turboquant3"));

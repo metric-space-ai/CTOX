@@ -4,7 +4,7 @@ This repository contains first-party CTOX code plus integrated hard forks.
 
 Primary integrated source trees:
 
-- tools/agent-runtime
+- src/inference
   Derived from https://github.com/openai/codex
   Upstream license: Apache-2.0
   Integrated into CTOX as a source-owned hard fork

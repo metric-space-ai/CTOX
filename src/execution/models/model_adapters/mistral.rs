@@ -158,7 +158,7 @@ pub fn rewrite_success_response(
                     let call_id = tool_call
                         .get("id")
                         .and_then(Value::as_str)
-                        .unwrap_or("call_ctox_proxy");
+                        .unwrap_or("call_ctox_gateway");
                     builder.push_function_call(
                         call_id,
                         name,
@@ -273,7 +273,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 messages.push(json!({
                     "role": "assistant",
                     "content": "",
@@ -291,7 +291,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 let output = engine::extract_function_call_output_text(object.get("output"));
                 messages.push(json!({
                     "role": "tool",

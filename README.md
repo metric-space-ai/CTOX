@@ -13,7 +13,7 @@ CTOX combines four layers:
 
 - a CTOX orchestration layer optimized for autonomous server and DevOps work
 - Codex as the current execution engine
-- a CTOX proxy server endpoint for OpenAI-compatible model access and sidecar routing
+- a CTOX model gateway that keeps the internal model contract on OpenAI Responses
 - a standalone local inference engine for on-host AI models
 
 
@@ -38,7 +38,7 @@ CTOX adds system behavior that standalone execution CLIs do not provide:
 
 CTOX currently uses Codex as its execution engine.
 
-That means CTOX delegates the bounded execution slice to `codex-exec`, but wraps that slice in:
+That means CTOX drives the bounded execution slice through the embedded `ctox-core` runtime, but wraps that slice in:
 
 - persistent mission context
 - durable routing and scheduling
@@ -51,22 +51,26 @@ This is the intended split between orchestration and execution:
 - CTOX owns persistence, orchestration, governance, communication, verification, and runtime control
 - Codex owns execution semantics inside the bounded agent run
 
-## Proxy Server
+## Model Gateway
 
-The CTOX proxy serves local models for LLM, embeddings, STT, and TTS workloads. It converts model-specific request formats and chat templates into an OpenAI-compatible `responses` surface.
+The CTOX model gateway serves local and adapter-mediated model workloads for LLM, embeddings, STT, and TTS. CTOX uses `responses` as its internal model contract; adapters translate to provider-native formats only at the outer edge. This is an internal gateway contract, not a public localhost inference proxy.
 
 It provides:
 
-- one OpenAI-style endpoint surface on `CTOX_PROXY_PORT`
-- `POST /v1/responses` as the primary chat path
-- request rewriting from `responses` into backend-specific forms for GPT-OSS, Qwen, Nemotron, GLM, and the local engine bridge
-- routing for `POST /v1/embeddings`, `POST /v1/audio/transcriptions`, `POST /v1/audio/speech`, and `POST /v1/audio/voices`
-- runtime telemetry on `GET /ctox/telemetry`
-- live model switching on `POST /ctox/switch`
+- one internal Responses-shaped gateway surface
+- adapter rewriting from `responses` into backend-specific upstream forms for GPT-OSS, Qwen, Nemotron, GLM, MiniMax, and the local engine bridges
+- routing for generation, embeddings, transcription, speech, and other auxiliary runtime roles
+- runtime telemetry and switch metadata for the CTOX control plane
 - backend readiness checks, startup, and recovery behavior
-- optional web-search augmentation on the `responses` path
 
-The proxy lets clients talk to one stable local API while CTOX handles model-family differences and host-side runtime behavior.
+The gateway gives CTOX and `ctox-core` one stable model contract while runtime control handles model-family differences and host-side behavior.
+
+For execution, `ctox-core` runs in two explicit provider modes:
+
+- `ctox_core_local` for managed local inference over private IPC
+- `ctox_core_api` for remote/API providers whose edge adapters still normalize back to Responses
+
+Both modes remain Responses-facing inside CTOX. `ctox_core_local` must execute over private IPC rather than machine-internal HTTP.
 
 ## Web Capability Model
 
@@ -81,10 +85,10 @@ CTOX uses four distinct web paths:
 
 CTOX carries two integrated hard-fork source trees inside the project:
 
-- `tools/agent-runtime`
+- `src/inference`
 - `tools/model-runtime/`
 
-`tools/agent-runtime` is the agent-execution hard fork. `tools/model-runtime` is
+`src/inference` is the integrated in-process inference workspace around the hard-forked `ctox-core` runtime. `tools/model-runtime` is
 the local model-serving hard fork that CTOX had previously carried under misleading
 `mistral.rs` / `engine` naming. These are integrated CTOX source trees, not package-manager
 dependencies and not live upstream checkouts. Run `ctox source-status` to validate the source
@@ -152,6 +156,22 @@ ctox start            # start the persistent loop
 ctox status           # check service status
 ctox                  # open the TUI
 ctox stop             # stop the persistent loop
+```
+
+## macOS Build Note
+
+This repository now ships a macOS-specific Cargo `rustc-wrapper` in
+`.cargo/config.toml` that clears `com.apple.quarantine` from the active Cargo
+registry/git caches and the current `target/` tree before invoking `rustc`.
+
+That is necessary because macOS may otherwise reject generated proc-macro and
+build dylibs with `library load disallowed by system policy` during local Rust
+builds.
+
+If an older build tree is already poisoned, you can still force a manual reset:
+
+```sh
+xattr -dr com.apple.quarantine target ~/.cargo/registry ~/.cargo/git
 ```
 
 ## Updates

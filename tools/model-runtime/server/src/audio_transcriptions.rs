@@ -1,17 +1,19 @@
 //! OpenAI-compatible audio transcription endpoint.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     extract::{Multipart, State},
     http::{self, HeaderMap, HeaderValue, StatusCode},
     response::IntoResponse,
 };
+use base64::{prelude::BASE64_STANDARD, Engine};
 use either::Either;
 use engine_core::{
     AudioInput, Constraint, MistralRs, NormalRequest, Request, RequestMessage, Response,
     SamplingParams,
 };
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{error::Error, sync::Arc};
 
@@ -25,9 +27,28 @@ use crate::{
 #[derive(Debug, Default)]
 struct ParsedTranscriptionRequest {
     file_bytes: Vec<u8>,
+    model: Option<String>,
     language: Option<String>,
     prompt: Option<String>,
     response_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAudioTranscriptionRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub file_base64: String,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub response_format: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalAudioTranscriptionResponse {
+    pub text: String,
 }
 
 pub enum AudioTranscriptionResponder {
@@ -110,6 +131,9 @@ async fn parse_transcription_request(
             "response_format" => {
                 parsed.response_format = Some(field.text().await?);
             }
+            "model" => {
+                parsed.model = Some(field.text().await?);
+            }
             _ => {
                 let _ = field.bytes().await;
             }
@@ -137,6 +161,125 @@ fn response_format_or_default(value: Option<String>) -> String {
     value
         .unwrap_or_else(|| "json".to_string())
         .to_ascii_lowercase()
+}
+
+fn decode_local_transcription_request(
+    request: LocalAudioTranscriptionRequest,
+) -> Result<ParsedTranscriptionRequest> {
+    let file_bytes = BASE64_STANDARD
+        .decode(request.file_base64.trim())
+        .context("failed to decode `file_base64` for local transcription request")?;
+    if file_bytes.is_empty() {
+        anyhow::bail!("local transcription request `file_base64` decoded to an empty file");
+    }
+    Ok(ParsedTranscriptionRequest {
+        file_bytes,
+        model: request.model,
+        language: request.language,
+        prompt: request.prompt,
+        response_format: request.response_format,
+    })
+}
+
+async fn submit_transcription_request(
+    state: SharedMistralRsState,
+    parsed: ParsedTranscriptionRequest,
+) -> Result<LocalAudioTranscriptionResponse> {
+    let audio = AudioInput::from_bytes(&parsed.file_bytes)
+        .context("failed to decode transcription audio")?;
+
+    if let Some(model) = parsed
+        .model
+        .as_deref()
+        .filter(|model| !model.trim().is_empty() && *model != "default")
+    {
+        crate::util::validate_model_name(model, state.clone())
+            .map_err(|err| anyhow::anyhow!(sanitize_error_message(err.as_ref())))?;
+    }
+
+    let prompt = build_transcription_prompt(parsed.language.as_deref(), parsed.prompt.as_deref());
+    let mut message = IndexMap::new();
+    message.insert("role".to_string(), Either::Left("user".to_string()));
+    message.insert(
+        "content".to_string(),
+        Either::Right(transcription_content(&prompt, &state)),
+    );
+
+    let (tx, mut rx) = create_response_channel(None);
+    let request = Request::Normal(Box::new(NormalRequest {
+        id: state.next_request_id(),
+        messages: RequestMessage::VisionChat {
+            images: Vec::new(),
+            audios: vec![audio],
+            messages: vec![message],
+            enable_thinking: Some(false),
+            reasoning_effort: None,
+        },
+        sampling_params: SamplingParams::deterministic(),
+        response: tx,
+        return_logprobs: false,
+        is_streaming: false,
+        suffix: None,
+        constraint: Constraint::None,
+        tool_choice: None,
+        tools: None,
+        logits_processors: None,
+        return_raw_logits: false,
+        web_search_options: None,
+        model_id: parsed
+            .model
+            .as_deref()
+            .filter(|model| !model.trim().is_empty() && *model != "default")
+            .map(str::to_string),
+        truncate_sequence: false,
+    }));
+
+    send_request(&state, request)
+        .await
+        .map_err(|err| anyhow::anyhow!(sanitize_error_message(err.as_ref())))?;
+
+    match rx.recv().await {
+        Some(Response::Done(done)) => Ok(LocalAudioTranscriptionResponse {
+            text: done
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.clone())
+                .unwrap_or_default(),
+        }),
+        Some(Response::ModelError(message, partial)) => {
+            let text = partial
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.clone())
+                .unwrap_or_default();
+            if text.is_empty() {
+                Err(anyhow::anyhow!(message))
+            } else {
+                Ok(LocalAudioTranscriptionResponse { text })
+            }
+        }
+        Some(Response::ValidationError(err)) => {
+            Err(anyhow::anyhow!(sanitize_error_message(err.as_ref())))
+        }
+        Some(Response::InternalError(err)) => {
+            Err(anyhow::anyhow!(sanitize_error_message(err.as_ref())))
+        }
+        Some(other) => Err(anyhow::anyhow!(
+            "unexpected transcription response: {}",
+            other_type_name(&other)
+        )),
+        None => Err(anyhow::anyhow!(
+            "no response received from transcription model"
+        )),
+    }
+}
+
+pub async fn create_local_transcription(
+    state: SharedMistralRsState,
+    request: LocalAudioTranscriptionRequest,
+) -> Result<LocalAudioTranscriptionResponse> {
+    let parsed = decode_local_transcription_request(request)?;
+    submit_transcription_request(state, parsed).await
 }
 
 fn transcription_success_response(
@@ -182,87 +325,10 @@ pub async fn audio_transcriptions(
         Err(err) => return AudioTranscriptionResponder::ValidationError(err.into()),
     };
 
-    let audio = match AudioInput::from_bytes(&parsed.file_bytes) {
-        Ok(audio) => audio,
-        Err(err) => return AudioTranscriptionResponder::ValidationError(err.into()),
-    };
-
-    let prompt = build_transcription_prompt(parsed.language.as_deref(), parsed.prompt.as_deref());
-    let mut message = IndexMap::new();
-    message.insert("role".to_string(), Either::Left("user".to_string()));
-    message.insert(
-        "content".to_string(),
-        Either::Right(transcription_content(&prompt, &state)),
-    );
-
-    let (tx, mut rx) = create_response_channel(None);
-    let request = Request::Normal(Box::new(NormalRequest {
-        id: state.next_request_id(),
-        messages: RequestMessage::VisionChat {
-            images: Vec::new(),
-            audios: vec![audio],
-            messages: vec![message],
-            enable_thinking: Some(false),
-            reasoning_effort: None,
-        },
-        sampling_params: SamplingParams::deterministic(),
-        response: tx,
-        return_logprobs: false,
-        is_streaming: false,
-        suffix: None,
-        constraint: Constraint::None,
-        tool_choice: None,
-        tools: None,
-        logits_processors: None,
-        return_raw_logits: false,
-        web_search_options: None,
-        model_id: None,
-        truncate_sequence: false,
-    }));
-
-    if let Err(err) = send_request(&state, request).await {
-        return handle_error(state, err.into());
-    }
-
-    match rx.recv().await {
-        Some(Response::Done(done)) => {
-            let text = done
-                .choices
-                .first()
-                .and_then(|choice| choice.message.content.clone())
-                .unwrap_or_default();
-            transcription_success_response(
-                &response_format_or_default(parsed.response_format),
-                text,
-            )
-        }
-        Some(Response::ModelError(message, partial)) => {
-            let text = partial
-                .choices
-                .first()
-                .and_then(|choice| choice.message.content.clone())
-                .unwrap_or_default();
-            if text.is_empty() {
-                AudioTranscriptionResponder::InternalError(anyhow::Error::msg(message).into())
-            } else {
-                transcription_success_response(
-                    &response_format_or_default(parsed.response_format),
-                    text,
-                )
-            }
-        }
-        Some(Response::ValidationError(err)) => AudioTranscriptionResponder::ValidationError(err),
-        Some(Response::InternalError(err)) => AudioTranscriptionResponder::InternalError(err),
-        Some(other) => AudioTranscriptionResponder::InternalError(
-            anyhow::Error::msg(format!(
-                "unexpected transcription response: {:?}",
-                other_type_name(&other)
-            ))
-            .into(),
-        ),
-        None => AudioTranscriptionResponder::InternalError(
-            anyhow::Error::msg("no response received from transcription model").into(),
-        ),
+    let response_format = response_format_or_default(parsed.response_format.clone());
+    match submit_transcription_request(state.clone(), parsed).await {
+        Ok(response) => transcription_success_response(&response_format, response.text),
+        Err(err) => handle_error(state, err.into()),
     }
 }
 

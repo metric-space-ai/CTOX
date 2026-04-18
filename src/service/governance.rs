@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_EVENT_LIMIT: usize = 8;
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,8 +80,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_queue_containment",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Prevents CTOX from self-flooding when pending prompt pressure crosses the configured queue threshold.",
+        description: "Prevents CTOX from self-flooding when pending prompt pressure crosses the configured queue threshold.",
     },
     DefaultMechanism {
         mechanism_id: "runtime_blocker_backoff",
@@ -88,8 +88,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_retry_backoff",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Delays new prompt dispatch while a hard runtime blocker cooldown is still active, so CTOX does not thrash the same broken runtime surface.",
+        description: "Delays new prompt dispatch while a hard runtime blocker cooldown is still active, so CTOX does not thrash the same broken runtime surface.",
     },
     DefaultMechanism {
         mechanism_id: "turn_timeout_continuation",
@@ -97,8 +96,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_continuation",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Preserves continuity when a turn hits the runtime time budget by creating an explicit continuation slice instead of dropping progress.",
+        description: "Preserves continuity when a turn hits the runtime time budget by creating an explicit continuation slice instead of dropping progress.",
     },
     DefaultMechanism {
         mechanism_id: "mission_idle_watchdog",
@@ -106,8 +104,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_mission_retrigger",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Re-triggers an open mission if CTOX goes idle without runnable work while the mission still claims to be open.",
+        description: "Re-triggers an open mission if CTOX goes idle without runnable work while the mission still claims to be open.",
     },
     DefaultMechanism {
         mechanism_id: "sender_authority_boundary",
@@ -115,8 +112,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_input_block",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Blocks inbound work from unauthorized email senders instead of letting unsafe requests enter the active loop.",
+        description: "Blocks inbound work from unauthorized email senders instead of letting unsafe requests enter the active loop.",
     },
     DefaultMechanism {
         mechanism_id: "secret_input_boundary",
@@ -124,8 +120,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_input_block",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service.rs",
-        description:
-            "Rejects secret-bearing email input and forces secret exchange back to the local TUI.",
+        description: "Rejects secret-bearing email input and forces secret exchange back to the local TUI.",
     },
     DefaultMechanism {
         mechanism_id: "context_health_assessment",
@@ -133,8 +128,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "advisory_diagnostic",
         prompt_visibility: "prompt_visible",
         module_hint: "src/context_health.rs",
-        description:
-            "Scores repetition, blocked-loop risk, mission thinness, and memory drift so CTOX can decide whether cleanup or replanning is warranted.",
+        description: "Scores repetition, blocked-loop risk, mission thinness, and memory drift so CTOX can decide whether cleanup or replanning is warranted.",
     },
     DefaultMechanism {
         mechanism_id: "context_health_repair_governor",
@@ -142,8 +136,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "advisory_governor",
         prompt_visibility: "inventory_only",
         module_hint: "src/context_health.rs",
-        description:
-            "Suggests whether a bounded context-health repair slice would be justified, but does not autonomously enqueue that repair work.",
+        description: "Suggests whether a bounded context-health repair slice would be justified, but does not autonomously enqueue that repair work.",
     },
     DefaultMechanism {
         mechanism_id: "state_invariant_guard",
@@ -151,8 +144,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_state_integrity_repair",
         prompt_visibility: "prompt_visible",
         module_hint: "src/service/state_invariants.rs",
-        description:
-            "Surfaces contradictions between stored mission state, continuity, and durable runtime work, and may perform a narrow recorded continuity/mission-state repair at boot or immediately after a turn when that repair is surfaced as a visible governance event.",
+        description: "Surfaces contradictions between stored mission state, continuity, and durable runtime work, and may perform a narrow recorded continuity/mission-state repair at boot or immediately after a turn when that repair is surfaced as a visible governance event.",
     },
     DefaultMechanism {
         mechanism_id: "mission_loop_governor",
@@ -160,8 +152,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "advisory_governor",
         prompt_visibility: "inventory_only",
         module_hint: "src/mission_governor.rs",
-        description:
-            "Detects repeated-blocker loop patterns and proposes a repair or replan slice instead of another blind retry, but remains advisory.",
+        description: "Detects repeated-blocker loop patterns and proposes a repair or replan slice instead of another blind retry, but remains advisory.",
     },
     DefaultMechanism {
         mechanism_id: "follow_up_evaluate",
@@ -169,8 +160,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "explicit_decision_tool",
         prompt_visibility: "inventory_only",
         module_hint: "src/follow_up.rs",
-        description:
-            "Turns explicit blocker, open-item, and review inputs into a durable follow-up decision without inferring hidden status from prose.",
+        description: "Turns explicit blocker, open-item, and review inputs into a durable follow-up decision without inferring hidden status from prose.",
     },
     DefaultMechanism {
         mechanism_id: "completion_review",
@@ -178,8 +168,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "explicit_read_only_review",
         prompt_visibility: "inventory_only",
         module_hint: "src/review.rs",
-        description:
-            "Runs a separate read-only completion review when explicitly requested, instead of acting as a hidden gate in the main service loop.",
+        description: "Runs a separate read-only completion review when explicitly requested, instead of acting as a hidden gate in the main service loop.",
     },
     DefaultMechanism {
         mechanism_id: "verification_assurance",
@@ -187,8 +176,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "explicit_evidence_tracking",
         prompt_visibility: "inventory_only",
         module_hint: "src/verification.rs",
-        description:
-            "Persists verification runs and mission claims when explicitly invoked, so CTOX can track evidence-bearing closure state across slices.",
+        description: "Persists verification runs and mission claims when explicitly invoked, so CTOX can track evidence-bearing closure state across slices.",
     },
     DefaultMechanism {
         mechanism_id: "ticket_control_gate",
@@ -196,8 +184,7 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         autonomy: "autonomous_ticket_control_gate",
         prompt_visibility: "prompt_visible",
         module_hint: "src/mission/tickets.rs",
-        description:
-            "Prevents ticket work from entering the active loop unless label binding, dry-run controls, and bundle-gated execution state are all explicit and audit-ready.",
+        description: "Prevents ticket work from entering the active loop unless label binding, dry-run controls, and bundle-gated execution state are all explicit and audit-ready.",
     },
 ];
 
@@ -213,13 +200,11 @@ pub fn handle_governance_command(root: &Path, args: &[String]) -> Result<()> {
             let snapshot = prompt_snapshot(root, conversation_id)?;
             print_json(&json!({"ok": true, "snapshot": snapshot}))
         }
-        "inventory" => {
-            print_json(&json!({
-                "ok": true,
-                "count": mechanism_inventory().len(),
-                "mechanisms": mechanism_inventory(),
-            }))
-        }
+        "inventory" => print_json(&json!({
+            "ok": true,
+            "count": mechanism_inventory().len(),
+            "mechanisms": mechanism_inventory(),
+        })),
         "events" => {
             let conversation_id = parse_conversation_id(args)?;
             let limit = parse_limit(args, DEFAULT_EVENT_LIMIT);
@@ -427,7 +412,7 @@ fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::mission_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn open_governance_db(root: &Path) -> Result<Connection> {

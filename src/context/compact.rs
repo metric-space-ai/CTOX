@@ -16,7 +16,7 @@
 //
 // Both layers can fire independently. Emergency always takes priority.
 
-use codex_protocol::protocol::EventMsg;
+use ctox_protocol::protocol::EventMsg;
 
 /// Emergency compaction fires at this fraction of context_window.
 /// 0.75 means: when the per-call input reaches 75% of the window, compact
@@ -298,7 +298,9 @@ impl CompactReason {
                 actual_pct,
                 threshold_pct,
             } => {
-                format!("self-output {output_tokens}/{total_context_tokens} = {actual_pct}% >= {threshold_pct}%")
+                format!(
+                    "self-output {output_tokens}/{total_context_tokens} = {actual_pct}% >= {threshold_pct}%"
+                )
             }
             CompactReason::TurnCount {
                 turns_since_last,
@@ -313,9 +315,7 @@ impl CompactReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_protocol::protocol::{
-        TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent,
-    };
+    use ctox_protocol::protocol::{TokenCountEvent, TokenUsage, TokenUsageInfo, TurnCompleteEvent};
 
     fn token_event(
         cum_in: i64,

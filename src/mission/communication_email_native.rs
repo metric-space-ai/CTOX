@@ -154,7 +154,7 @@ pub(crate) fn service_sync(
     if email.is_empty() {
         return Ok(None);
     }
-    let db_path = crate::paths::mission_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let mut args = vec!["sync".to_string(), "--email".to_string(), email];
     if let Some(provider) = settings
         .get("CTO_EMAIL_PROVIDER")
@@ -1473,7 +1473,7 @@ fn extract_addresses(raw: &str) -> Vec<String> {
 fn normalize_provider(value: &str) -> String {
     let normalized = value.trim().to_lowercase();
     match normalized.as_str() {
-        "" | "classic" | "smtp" | "imap-smtp" => "imap".to_string(),
+        "" | "classic" | "smtp" | "imap-smtp" | "one" | "one.com" | "onecom" => "imap".to_string(),
         "m365" | "graph-cloud" | "exchange-online" => "graph".to_string(),
         "outlook" | "exchange" => "ews".to_string(),
         "owa" => "owa".to_string(),
@@ -2100,14 +2100,14 @@ pub(crate) fn http_request(
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(error)) => {
-                return Err(anyhow!("HTTP transport failed for {url}: {error}"))
+                return Err(anyhow!("HTTP transport failed for {url}: {error}"));
             }
         },
         None => match request.call() {
             Ok(response) => response,
             Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(error)) => {
-                return Err(anyhow!("HTTP transport failed for {url}: {error}"))
+                return Err(anyhow!("HTTP transport failed for {url}: {error}"));
             }
         },
     };

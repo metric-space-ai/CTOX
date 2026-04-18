@@ -21,6 +21,7 @@ use crate::context_health::ContextHealthStatus;
 use crate::inference::engine;
 
 use super::compact_model_name;
+use super::mask_secret;
 use super::App;
 use super::Page;
 use super::SettingsView;
@@ -270,6 +271,10 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         render_settings_update(frame, app, outer[1]);
         return;
     }
+    if app.settings_view == SettingsView::Secrets {
+        render_secrets(frame, app, outer[1]);
+        return;
+    }
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
@@ -349,18 +354,45 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
     let header = Paragraph::new(Line::from(vec![
         Span::styled(
             " ctox update ",
-            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("[c]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[c]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" check  "),
-        Span::styled("[u]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[u]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" upgrade  "),
-        Span::styled("[e]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[e]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" engine rebuild  "),
-        Span::styled("[d]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[d]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" doctor  "),
-        Span::styled("[r]", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "[r]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(" refresh"),
     ]));
     frame.render_widget(header, split[0]);
@@ -574,6 +606,14 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
         .constraints([Constraint::Length(1), Constraint::Min(8)])
         .split(area);
     render_settings_view_tabs(frame, app, outer[0]);
+    if app.settings_view == SettingsView::Update {
+        render_settings_update(frame, app, outer[1]);
+        return;
+    }
+    if app.settings_view == SettingsView::Secrets {
+        render_secrets_narrow(frame, app, outer[1]);
+        return;
+    }
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(10), Constraint::Length(8)])
@@ -631,6 +671,86 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
             )),
         )
         .style(sidebar_style)
+        .wrap(Wrap { trim: false }),
+        layout[1],
+    );
+}
+
+fn render_secrets(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .split(area);
+    frame.render_widget(
+        List::new(secret_list_items(
+            app,
+            body[0].height.saturating_sub(2) as usize,
+        ))
+        .block(
+            pane_block().borders(Borders::TOP).title(Span::styled(
+                format!(" secrets ({}) ", app.secret_items.len()),
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ),
+        body[0],
+    );
+    frame.render_widget(
+        Paragraph::new(secret_details_text(
+            app,
+            body[1].width.saturating_sub(4) as usize,
+            body[1].height.saturating_sub(2) as usize,
+        ))
+        .block(
+            sidebar_block().borders(Borders::TOP).title(Span::styled(
+                " secret details ",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        )
+        .style(Style::default().fg(Color::White))
+        .wrap(Wrap { trim: false }),
+        body[1],
+    );
+}
+
+fn render_secrets_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(12)])
+        .split(area);
+    frame.render_widget(
+        List::new(secret_list_items(
+            app,
+            layout[0].height.saturating_sub(2) as usize,
+        ))
+        .block(
+            pane_block().borders(Borders::TOP).title(Span::styled(
+                format!(" secrets ({}) ", app.secret_items.len()),
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        ),
+        layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(secret_details_text(
+            app,
+            area.width.saturating_sub(6) as usize,
+            layout[1].height.saturating_sub(2) as usize,
+        ))
+        .block(
+            sidebar_block().borders(Borders::TOP).title(Span::styled(
+                " secret details ",
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
+            )),
+        )
+        .style(Style::default().fg(Color::White))
         .wrap(Wrap { trim: false }),
         layout[1],
     );
@@ -1444,10 +1564,105 @@ fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
         .join("\n")
 }
 
+fn secret_list_items(app: &App, max_rows: usize) -> Vec<ListItem<'static>> {
+    let count = app.secret_items.len();
+    if count == 0 {
+        return vec![ListItem::new("No encrypted secrets stored yet.")
+            .style(Style::default().fg(Color::DarkGray))];
+    }
+    let rows = max_rows.max(1);
+    let start = app.secrets_selected.saturating_sub(rows.saturating_sub(1));
+    let end = (start + rows).min(count);
+    app.secret_items[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, item)| {
+            let index = start + offset;
+            let label = format!(
+                "{:14} {:18} {}",
+                truncate_line(&item.scope, 14),
+                truncate_line(&item.name, 18),
+                truncate_line(&mask_secret(&item.saved_value), 24)
+            );
+            if index == app.secrets_selected {
+                ListItem::new(label).style(
+                    Style::default()
+                        .bg(Color::LightCyan)
+                        .fg(Color::Black)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                ListItem::new(label).style(Style::default().fg(Color::White))
+            }
+        })
+        .collect()
+}
+
+fn secret_details_text(app: &App, width: usize, height: usize) -> String {
+    let Some(item) = app.current_secret() else {
+        return "No encrypted secret selected.\n\nUse this tab to inspect and update values stored in the SQLite secret store.\n\nHotkeys:\n  ↑ ↓ select\n  type edits the value\n  Enter saves\n  r reloads"
+            .to_string();
+    };
+    let mut lines = vec![
+        format!(
+            "scope    {}",
+            truncate_line(&item.scope, width.saturating_sub(9))
+        ),
+        format!(
+            "name     {}",
+            truncate_line(&item.name, width.saturating_sub(9))
+        ),
+        format!(
+            "status   {}",
+            if app.secret_is_dirty(item) {
+                "draft differs from stored value"
+            } else {
+                "stored value loaded"
+            }
+        ),
+        String::new(),
+    ];
+    if let Some(description) = item.description.as_deref() {
+        lines.push("description".to_string());
+        push_wrapped_lines(&mut lines, description, width);
+        lines.push(String::new());
+    }
+    lines.push("stored value".to_string());
+    push_wrapped_lines(&mut lines, &item.saved_value, width);
+    lines.push(String::new());
+    lines.push("draft value".to_string());
+    push_wrapped_lines(&mut lines, &item.value, width);
+    if !item.metadata.is_null() && item.metadata != serde_json::json!({}) {
+        lines.push(String::new());
+        lines.push("metadata".to_string());
+        push_wrapped_lines(
+            &mut lines,
+            &serde_json::to_string_pretty(&item.metadata).unwrap_or_default(),
+            width,
+        );
+    }
+    lines.push(String::new());
+    lines.push(format!(
+        "updated  {}",
+        truncate_line(&item.updated_at, width.saturating_sub(9))
+    ));
+    lines.push(format!(
+        "created  {}",
+        truncate_line(&item.created_at, width.saturating_sub(9))
+    ));
+    lines.push(String::new());
+    lines.push("hotkeys  ↑ ↓ select · type edit · Enter save · Ctrl-S save · r reload".to_string());
+    lines
+        .into_iter()
+        .take(height.max(1))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn degraded_components_for_display(app: &App) -> Vec<&'static str> {
     let mut parts = app.runtime_health.degraded_components();
     if chat_source_is_api(app) {
-        parts.retain(|component| *component != "proxy");
+        parts.retain(|component| *component != "runtime");
     }
     parts
 }
@@ -2104,9 +2319,11 @@ fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout
     let selected = match app.settings_view {
         SettingsView::Model => 0,
         SettingsView::Communication => 1,
-        SettingsView::Update => 2,
+        SettingsView::Secrets => 2,
+        SettingsView::Paths => 3,
+        SettingsView::Update => 4,
     };
-    let titles = ["Model", "Communication", "Update"]
+    let titles = ["Model", "Communication", "Secrets", "Paths", "Update"]
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
@@ -3101,7 +3318,7 @@ mod tests {
         app.service_status.running = true;
         app.service_status.busy = true;
         app.runtime_health = crate::tui::RuntimeHealthState {
-            proxy_ready: true,
+            runtime_ready: true,
             embedding_ready: Some(true),
             stt_ready: Some(true),
             tts_ready: Some(true),
@@ -3301,8 +3518,8 @@ mod tests {
         app.page = Page::Settings;
         app.header.estimate_mode = true;
         app.header.chat_source = "local".to_string();
-        app.header.model = "Qwen/Qwen3.5-35B-A3B".to_string();
-        app.header.base_model = "Qwen/Qwen3.5-35B-A3B".to_string();
+        app.header.model = "Qwen/Qwen3.6-35B-A3B".to_string();
+        app.header.base_model = "Qwen/Qwen3.6-35B-A3B".to_string();
         app.header.gpu_cards = vec![super::super::GpuCardState {
             index: 0,
             name: "RTX A4500".to_string(),
@@ -3310,17 +3527,17 @@ mod tests {
             total_mb: 20_480,
             utilization: 0,
             allocations: vec![super::super::GpuModelUsage {
-                model: "Qwen/Qwen3.5-35B-A3B".to_string(),
-                short_label: "qwen35".to_string(),
+                model: "Qwen/Qwen3.6-35B-A3B".to_string(),
+                short_label: "qwen36".to_string(),
                 used_mb: 11_264,
             }],
         }];
 
         let text = settings_snapshot_text(&app, 80, 40);
 
-        assert!(text.contains("preview  Qwen/Qwen3.5-35B-A3B"), "{text}");
+        assert!(text.contains("preview  Qwen/Qwen3.6-35B-A3B"), "{text}");
         assert!(text.contains("local est"), "{text}");
-        assert!(text.contains("gpu0     qwen35 11264M"), "{text}");
+        assert!(text.contains("gpu0     qwen36 11264M"), "{text}");
     }
 
     #[test]
@@ -3545,7 +3762,7 @@ mod tests {
     #[test]
     fn settings_snapshot_uses_off_when_plan_disables_paged_attention() {
         let mut app = test_app();
-        let mut bundle = test_bundle("Qwen/Qwen3.5-35B-A3B", None);
+        let mut bundle = test_bundle("Qwen/Qwen3.6-35B-A3B", None);
         bundle.selected_plan.paged_attn = "off".to_string();
         bundle.plans[0].paged_attn = "off".to_string();
         bundle.plans[1].paged_attn = "off".to_string();

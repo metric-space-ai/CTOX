@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use rusqlite::{Connection, OpenFlags};
 
 use crate::{
     command_catalog::CommandEntry,
@@ -247,13 +248,26 @@ fn load_ctox_remote_env_map(installation: &Installation) -> Result<BTreeMap<Stri
 }
 
 fn load_env_map_from_local_root(root: &Path) -> Result<BTreeMap<String, String>> {
-    let path = root.join("runtime/engine.env");
+    let path = root.join("runtime/ctox.sqlite3");
     if !path.exists() {
         return Ok(BTreeMap::new());
     }
-    let raw = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    Ok(parse_env_map(&raw))
+    let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    let mut stmt = conn
+        .prepare("SELECT env_key, env_value FROM runtime_env_kv ORDER BY env_key")
+        .context("failed to prepare runtime env query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("failed to query runtime env rows")?;
+    let mut env_map = BTreeMap::new();
+    for row in rows {
+        let (key, value) = row.context("failed to decode runtime env row")?;
+        env_map.insert(key, value);
+    }
+    Ok(env_map)
 }
 
 fn load_env_map_over_ssh(
@@ -275,7 +289,7 @@ fn load_env_map_over_ssh(
     let script = format!(
         r#"
 set timeout 20
-spawn ssh -p {port} {target} "cat {root}/runtime/engine.env 2>/dev/null || true"
+spawn ssh -p {port} {target} "sqlite3 -readonly {root}/runtime/ctox.sqlite3 \"SELECT env_key || '=' || env_value FROM runtime_env_kv ORDER BY env_key;\" 2>/dev/null || true"
 expect {{
   "*password:*" {{ send "$env(CTOX_SSH_PASSWORD)\r"; exp_continue }}
   eof

@@ -30,8 +30,4 @@ fn clean_room_baseline_plan_returns_plan_json() {
         json["engine_command"].is_array(),
         "expected engine_command array in {json:#}"
     );
-    assert!(
-        json["codex_exec_command"].is_array(),
-        "expected codex_exec_command array in {json:#}"
-    );
 }

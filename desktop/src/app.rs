@@ -43,7 +43,7 @@ const TERMINAL_ZOOM_MIN: f32 = 0.75;
 const TERMINAL_ZOOM_MAX: f32 = 1.25;
 const COMMAND_COMPOSER_MIN_HEIGHT: f32 = 28.0;
 const COMMAND_COMPOSER_MAX_HEIGHT: f32 = 42.0;
-const COMPOSER_MODELS: &[&str] = &["GPT-5.4", "openai/gpt-oss-20b", "Qwen/Qwen3.5-35B-A3B"];
+const COMPOSER_MODELS: &[&str] = &["GPT-5.4", "openai/gpt-oss-20b", "Qwen/Qwen3.6-35B-A3B"];
 const COMPOSER_PRESETS: &[&str] = &["Quality", "Performance"];
 
 pub struct CtoxDesktopApp {
@@ -2863,9 +2863,16 @@ fn installation_probe_kind(installation: &Installation) -> Option<VersionProbeKi
                 .clone()
                 .or_else(|| {
                     installation
+                        .env
+                        .get("CTOX_BIN_DIR")
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| PathBuf::from(value).join("ctox"))
+                })
+                .or_else(|| {
+                    installation
                         .root_path
                         .as_ref()
-                        .map(|root| root.join("target/release/ctox"))
+                        .map(|root| root.join("bin/ctox"))
                 })?;
             Some(VersionProbeKind::Local { binary })
         }

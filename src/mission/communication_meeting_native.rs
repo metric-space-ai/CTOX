@@ -400,21 +400,17 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     // isn't — audio chunks are still captured and persisted to disk, and we
     // retry transcription at finalize time. But we warn clearly so the user
     // knows to run `ctox start` if they want live STT.
-    let engine_reachable = check_engine_reachable(&config.proxy_host, config.proxy_port);
+    let engine_reachable = check_engine_reachable(&config.root);
     session.engine_was_reachable_at_start = engine_reachable;
     if engine_reachable {
-        eprintln!(
-            "[meeting] STT engine reachable at http://{}:{}",
-            config.proxy_host, config.proxy_port
-        );
+        eprintln!("[meeting] STT runtime reachable via managed transport");
     } else {
-        eprintln!(
-            "[meeting] WARNING: STT engine not reachable at http://{}:{}",
-            config.proxy_host, config.proxy_port
-        );
+        eprintln!("[meeting] WARNING: STT runtime not reachable via managed transport");
         eprintln!("[meeting] Audio chunks will still be captured and saved to disk.");
         eprintln!("[meeting] To enable live transcription, run `ctox start` in another terminal.");
-        eprintln!("[meeting] Unsent chunks will be retried at meeting end if the engine becomes available.");
+        eprintln!(
+            "[meeting] Unsent chunks will be retried at meeting end if the engine becomes available."
+        );
     }
 
     // Spawn the Node.js process
@@ -490,8 +486,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 let chunk_for_stt = persisted_path.as_deref().unwrap_or(chunk_path);
 
                 match transcribe_audio_chunk(
-                    &config.proxy_host,
-                    config.proxy_port,
+                    &config.root,
                     Path::new(chunk_for_stt),
                     &config.stt_model,
                 ) {
@@ -703,14 +698,22 @@ fn finalize_meeting(
         chunk_count = session.transcript_chunks.len(),
         chat_count = session.chat_messages.len(),
         transcript_path = transcript_path.display(),
-        transcript = if transcript.is_empty() { "(empty)" } else { &transcript },
-        chat_log = if chat_log.is_empty() { "(no chat)" } else { &chat_log },
+        transcript = if transcript.is_empty() {
+            "(empty)"
+        } else {
+            &transcript
+        },
+        chat_log = if chat_log.is_empty() {
+            "(no chat)"
+        } else {
+            &chat_log
+        },
     );
 
     // Ingest the summary as a normal inbound message in the "meeting" channel.
     // The service loop's route_external_messages() will pick it up and route
     // it to the agent with the meeting-participant skill via metadata.
-    let db_path = crate::paths::mission_db(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
     let mut conn = open_channel_db(&db_path)?;
     let observed_at = now_iso_string();
     let message_key = format!(
@@ -782,7 +785,7 @@ fn retry_pending_audio_chunks(
     if session.pending_audio_chunks.is_empty() {
         return json!({"action": "skipped", "reason": "no pending chunks"});
     }
-    let engine_now_reachable = check_engine_reachable(&config.proxy_host, config.proxy_port);
+    let engine_now_reachable = check_engine_reachable(&config.root);
     if !engine_now_reachable {
         return json!({
             "action": "skipped",
@@ -799,12 +802,7 @@ fn retry_pending_audio_chunks(
     let mut still_failing = Vec::new();
     let pending = std::mem::take(&mut session.pending_audio_chunks);
     for chunk_path in pending {
-        match transcribe_audio_chunk(
-            &config.proxy_host,
-            config.proxy_port,
-            Path::new(&chunk_path),
-            &config.stt_model,
-        ) {
+        match transcribe_audio_chunk(&config.root, Path::new(&chunk_path), &config.stt_model) {
             Ok(text) if !text.is_empty() => {
                 session.transcript_chunks.push(text);
                 let _ = fs::remove_file(&chunk_path);
@@ -851,22 +849,9 @@ fn persist_audio_chunk(root: &Path, session_id: &str, source_path: &str) -> Opti
     }
 }
 
-/// Quick TCP-level reachability check for the STT engine.
-/// Returns true if we can open a socket to host:port within 500ms.
-pub(crate) fn check_engine_reachable(host: &str, port: u16) -> bool {
-    use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-    let addr_str = format!("{host}:{port}");
-    let addrs: Vec<SocketAddr> = match addr_str.to_socket_addrs() {
-        Ok(iter) => iter.collect(),
-        Err(_) => return false,
-    };
-    for addr in addrs {
-        if TcpStream::connect_timeout(&addr, Duration::from_millis(500)).is_ok() {
-            return true;
-        }
-    }
-    false
+/// Check whether the managed STT runtime responds on its configured transport.
+pub(crate) fn check_engine_reachable(root: &Path) -> bool {
+    super::communication_gateway::transcription_backend_reachable(root)
 }
 
 fn find_node_executable() -> Result<String> {
@@ -938,8 +923,6 @@ pub(crate) struct MeetingSessionConfig {
     pub bot_name: String,
     pub max_duration_minutes: u64,
     pub audio_chunk_seconds: u64,
-    pub proxy_host: String,
-    pub proxy_port: u16,
     pub stt_model: String,
 }
 
@@ -963,14 +946,6 @@ impl MeetingSessionConfig {
             .get("CTO_MEETING_AUDIO_CHUNK_SECONDS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(30u64);
-        let proxy_host = runtime
-            .get("CTOX_PROXY_HOST")
-            .cloned()
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-        let proxy_port = runtime
-            .get("CTOX_PROXY_PORT")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8080u16);
         let stt_model = runtime.get("CTOX_STT_MODEL").cloned().unwrap_or_default();
         Ok(Self {
             root: root.to_path_buf(),
@@ -979,8 +954,6 @@ impl MeetingSessionConfig {
             bot_name,
             max_duration_minutes,
             audio_chunk_seconds,
-            proxy_host,
-            proxy_port,
             stt_model,
         })
     }
@@ -2474,65 +2447,11 @@ fn build_zoom_chat_sender() -> &'static str {
 // ---------------------------------------------------------------------------
 
 pub(crate) fn transcribe_audio_chunk(
-    proxy_host: &str,
-    proxy_port: u16,
+    root: &Path,
     audio_path: &Path,
     stt_model: &str,
 ) -> Result<String> {
-    let boundary = format!("----ctox-meeting-{}", now_epoch_millis());
-    let file_bytes = fs::read(audio_path)
-        .with_context(|| format!("failed to read audio chunk {}", audio_path.display()))?;
-    let mut body = Vec::new();
-    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-    body.extend_from_slice(
-        format!(
-            "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\n",
-            audio_path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("audio.webm")
-        )
-        .as_bytes(),
-    );
-    body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
-    body.extend_from_slice(&file_bytes);
-    body.extend_from_slice(b"\r\n");
-    if !stt_model.trim().is_empty() {
-        body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
-        body.extend_from_slice(b"Content-Disposition: form-data; name=\"model\"\r\n\r\n");
-        body.extend_from_slice(stt_model.as_bytes());
-        body.extend_from_slice(b"\r\n");
-    }
-    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
-    let mut headers = BTreeMap::new();
-    headers.insert(
-        "content-type".to_string(),
-        format!("multipart/form-data; boundary={boundary}"),
-    );
-    let response = super::communication_email_native::http_request(
-        "POST",
-        &format!(
-            "http://{}:{}/v1/audio/transcriptions",
-            proxy_host, proxy_port
-        ),
-        &headers,
-        Some(&body),
-    )?;
-    if !(200..300).contains(&response.status) {
-        bail!(
-            "audio transcription returned HTTP {}: {}",
-            response.status,
-            String::from_utf8_lossy(&response.body)
-        );
-    }
-    let parsed = serde_json::from_slice::<Value>(&response.body).unwrap_or(Value::Null);
-    Ok(parsed
-        .get("text")
-        .and_then(Value::as_str)
-        .or_else(|| parsed.get("transcript").and_then(Value::as_str))
-        .unwrap_or("")
-        .trim()
-        .to_string())
+    super::communication_gateway::transcribe_audio_file(root, audio_path, stt_model)
 }
 
 // ---------------------------------------------------------------------------
@@ -2860,15 +2779,13 @@ pub(crate) fn load_meeting_transcript(root: &Path, session_id: &str) -> Result<V
     let session: Value = if session_path.exists() {
         let contents = fs::read_to_string(&session_path)
             .with_context(|| format!("read meeting session {}", session_path.display()))?;
-        serde_json::from_str(&contents).with_context(|| {
-            format!("parse meeting session JSON at {}", session_path.display())
-        })?
+        serde_json::from_str(&contents)
+            .with_context(|| format!("parse meeting session JSON at {}", session_path.display()))?
     } else {
         anyhow::bail!("no meeting session found with id {session_id}");
     };
 
-    let transcript_path =
-        meeting_sessions_dir(root).join(format!("{session_id}-transcript.txt"));
+    let transcript_path = meeting_sessions_dir(root).join(format!("{session_id}-transcript.txt"));
     let chatlog_path = meeting_sessions_dir(root).join(format!("{session_id}-chatlog.txt"));
 
     let transcript = fs::read_to_string(&transcript_path).unwrap_or_default();
@@ -3007,13 +2924,9 @@ mod tests {
 
     #[test]
     fn engine_reachable_check_returns_false_for_closed_port() {
-        // Port 1 is always unused for TCP in normal systems
-        assert!(!check_engine_reachable("127.0.0.1", 1));
-        // Invalid host
-        assert!(!check_engine_reachable(
-            "this-host-does-not-exist.invalid",
-            80
-        ));
+        assert!(!check_engine_reachable(Path::new(
+            "/definitely/not/a/ctox/root"
+        )));
     }
 
     #[test]
@@ -3025,8 +2938,6 @@ mod tests {
             bot_name: "CTOX Notetaker".to_string(),
             max_duration_minutes: 60,
             audio_chunk_seconds: 30,
-            proxy_host: "127.0.0.1".to_string(),
-            proxy_port: 8080,
             stt_model: String::new(),
         };
         let session = MeetingSession::new(&config);
@@ -3057,8 +2968,6 @@ mod tests {
             bot_name: "CTOX Notetaker".to_string(),
             max_duration_minutes: 180,
             audio_chunk_seconds: 30,
-            proxy_host: "127.0.0.1".to_string(),
-            proxy_port: 8080,
             stt_model: String::new(),
         };
         let session = MeetingSession::new(&config);
@@ -3082,8 +2991,6 @@ mod tests {
                 bot_name: "Test Bot".to_string(),
                 max_duration_minutes: 60,
                 audio_chunk_seconds: 30,
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 8080,
                 stt_model: String::new(),
             };
             let script = build_meeting_runner_script(&config).unwrap();
@@ -3158,8 +3065,6 @@ mod tests {
             bot_name: "CTOX Notetaker".to_string(),
             max_duration_minutes: 60,
             audio_chunk_seconds: 30,
-            proxy_host: "127.0.0.1".to_string(),
-            proxy_port: 8080,
             stt_model: String::new(),
         };
         let script = build_meeting_runner_script_with_timeout(&config).unwrap();

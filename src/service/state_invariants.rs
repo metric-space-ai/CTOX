@@ -59,7 +59,7 @@ pub fn evaluate_runtime_state_invariants(
     root: &Path,
     conversation_id: i64,
 ) -> Result<RuntimeStateInvariantReport> {
-    let lcm_db_path = crate::paths::lcm_db(root);
+    let lcm_db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&lcm_db_path, lcm::LcmConfig::default())?;
     let continuity = engine.stored_continuity_show_all(conversation_id)?;
     let preview_synced_mission_state =
@@ -340,7 +340,7 @@ mod tests {
 
     fn seed_focus(root: &PathBuf, focus_diff: &str) -> anyhow::Result<LcmEngine> {
         fs::create_dir_all(root.join("runtime"))?;
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
         let _ = engine.continuity_init_documents(1)?;
         engine.continuity_apply_diff(1, ContinuityKind::Focus, focus_diff)?;
@@ -388,7 +388,7 @@ mod tests {
             &root,
             "## Status\n+ Mission: Keep continuity primary.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: hot.\n## Next\n+ Next slice: verify the latest focus head.\n## Done / Gate\n+ Done gate: focus head stays aligned.\n+ Closure confidence: low.\n",
         )?;
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute(
             "UPDATE mission_states SET focus_head_commit_id = ?1 WHERE conversation_id = 1",
@@ -446,7 +446,7 @@ mod tests {
         let current = engine
             .stored_mission_state(1)?
             .context("missing stored mission state")?;
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = root.join("runtime/ctox.sqlite3");
         let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute(
             "UPDATE mission_states

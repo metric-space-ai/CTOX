@@ -188,7 +188,9 @@ fn normalize_messages(messages: &[Message]) -> Vec<Message> {
         normalized.insert(
             0,
             Message {
-                content: Some(MessageContent::from_text(leading_system_segments.join("\n\n"))),
+                content: Some(MessageContent::from_text(
+                    leading_system_segments.join("\n\n"),
+                )),
                 role: "system".to_string(),
                 name: None,
                 tool_calls: None,
@@ -209,7 +211,12 @@ fn normalize_message(message: &Message) -> Option<Message> {
             tool_calls: None,
             tool_call_id: None,
         }),
-        "assistant" if message.tool_calls.as_ref().is_some_and(|calls| !calls.is_empty()) => {
+        "assistant"
+            if message
+                .tool_calls
+                .as_ref()
+                .is_some_and(|calls| !calls.is_empty()) =>
+        {
             let mut parts = Vec::new();
             if let Some(text) = message
                 .content
@@ -284,7 +291,10 @@ fn normalize_message(message: &Message) -> Option<Message> {
 fn render_tool_call(tool_call: &ToolCall) -> String {
     let arguments = serde_json::from_str::<Value>(&tool_call.function.arguments)
         .unwrap_or_else(|_| Value::String(tool_call.function.arguments.clone()));
-    let mut lines = vec![format!("<tool_call>\n<function={}>", tool_call.function.name)];
+    let mut lines = vec![format!(
+        "<tool_call>\n<function={}>",
+        tool_call.function.name
+    )];
     match arguments {
         Value::Object(map) => {
             if map.is_empty() {

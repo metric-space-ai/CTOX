@@ -63,9 +63,11 @@ Three failure modes observed, all need treatment:
 ## CTOX fixes applied on this path (in upstream commits, not task-local)
 
 - **`f062a63` `run-once: don't close mission on is_open=false alone —
-  check reply completion`** — added mid-work heuristic
+  check reply completion`** — historical commit on the removed legacy
+  `run-once` CLI path; added the mid-work heuristic
   (`reply_looks_mid_work`) + auto-continuation (`enqueue_midwork_continuation`),
-  plus source-accurate rewrite of run-once termination. Validated in
+  plus source-accurate rewrite of that legacy single-mission termination
+  logic. Validated in
   `src/context/lcm.rs::mission_is_open` (line 4178): `is_open` defaults to
   `false` for fresh missions because the focus-continuity template is
   empty. Using `is_open == false` as mission-completion signal was a

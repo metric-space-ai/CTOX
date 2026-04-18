@@ -23,7 +23,7 @@ This skill does not decide by kernel heuristic that some string is a secret. The
 Prefer the one-step intake path:
 
 ```sh
-ctox secret intake --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>' --db "<path-to-ctox_lcm.db>" --conversation-id "<id>" --match-text "<secret>" [--label "<human label>"]
+ctox secret intake --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>' --db "<path-to-ctox.sqlite3>" --conversation-id "<id>" --match-text "<secret>" [--label "<human label>"]
 ```
 
 This stores the secret in the encrypted SQLite secret store and rewrites the specified conversation memory to `[secret-ref:<scope>/<name>]`.
@@ -33,7 +33,7 @@ This stores the secret in the encrypted SQLite secret store and rewrites the spe
 If the secret is already stored, rewrite memory only:
 
 ```sh
-ctox secret memory-rewrite --db "<path-to-ctox_lcm.db>" --conversation-id "<id>" --scope "<scope>" --name "<name>" --match-text "<secret>" [--label "<human label>"]
+ctox secret memory-rewrite --db "<path-to-ctox.sqlite3>" --conversation-id "<id>" --scope "<scope>" --name "<name>" --match-text "<secret>" [--label "<human label>"]
 ```
 
 If the secret was supplied outside the current conversation and no rewrite is needed:

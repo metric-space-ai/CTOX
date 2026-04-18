@@ -16,6 +16,7 @@ use std::time::SystemTime;
 
 use crate::channels;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_GOAL_THREAD_PREFIX: &str = "plan";
 const DEFAULT_RESULT_EXCERPT_CHARS: usize = 420;
 
@@ -475,7 +476,7 @@ fn load_goal_with_steps(root: &Path, goal_id: &str) -> Result<Option<GoalWithSte
 
 pub fn emit_next_step_for_goal(root: &Path, goal_id: &str) -> Result<Option<EmittedPlanStepView>> {
     let conn = open_plan_db(root)?;
-    let Some(pending) = prepare_next_step_emission(&conn, goal_id)? else {
+    let Some(pending) = prepare_next_step_emission(root, &conn, goal_id)? else {
         return Ok(None);
     };
     let message_key = channels::ingest_plan_message(
@@ -529,6 +530,7 @@ pub fn emit_next_step_for_goal(root: &Path, goal_id: &str) -> Result<Option<Emit
 }
 
 fn prepare_next_step_emission(
+    root: &Path,
     conn: &Connection,
     goal_id: &str,
 ) -> Result<Option<PendingStepEmission>> {
@@ -547,7 +549,7 @@ fn prepare_next_step_emission(
         tx.commit()?;
         return Ok(None);
     };
-    let prompt = render_step_prompt(&goal, &step, &list_completed_steps_tx(&tx, goal_id)?);
+    let prompt = render_step_prompt(root, &goal, &step, &list_completed_steps_tx(&tx, goal_id)?);
     let total_steps = total_steps_tx(&tx, goal_id)?;
     tx.commit()?;
     Ok(Some(PendingStepEmission {
@@ -683,6 +685,7 @@ fn reset_step_to_pending(root: &Path, step_id: &str, defer_until: Option<String>
 }
 
 fn render_step_prompt(
+    root: &Path,
     goal: &PlannedGoalView,
     step: &PlannedStepView,
     completed_steps: &[PlannedStepView],
@@ -692,7 +695,7 @@ fn render_step_prompt(
         format!("Plan step {}: {}", step.step_order, step.title),
         "Work only on this step. Do not silently skip ahead.".to_string(),
     ];
-    let autonomy = crate::autonomy::AutonomyLevel::from_env();
+    let autonomy = crate::autonomy::AutonomyLevel::from_root(root);
     lines.push(String::new());
     lines.push(autonomy.step_prompt_clause().to_string());
     if let Some(skill) = goal
@@ -1270,7 +1273,7 @@ fn schema_state(conn: &Connection) -> Result<serde_json::Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::mission_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn parse_ingest_request(args: &[String]) -> Result<PlanCreateRequest> {

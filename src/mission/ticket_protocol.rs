@@ -23,7 +23,6 @@ pub(crate) struct TicketCommentWritebackRequest<'a> {
     pub remote_ticket_id: &'a str,
     pub body: &'a str,
     pub internal: bool,
-    pub control_note: Option<TicketControlNote>,
 }
 
 #[derive(Debug, Clone)]
@@ -39,8 +38,6 @@ pub(crate) struct TicketTransitionWritebackRequest<'a> {
 pub(crate) struct TicketSelfWorkPublishRequest<'a> {
     pub title: &'a str,
     pub body: &'a str,
-    pub internal: bool,
-    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]

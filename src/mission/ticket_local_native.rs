@@ -17,6 +17,7 @@ use crate::mission::ticket_protocol::TicketSelfWorkAssignResult;
 use crate::mission::ticket_protocol::TicketSyncBatch;
 use crate::mission::ticket_protocol::TicketWritebackResult;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_LIST_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, Serialize)]
@@ -508,7 +509,7 @@ fn schema_state(conn: &Connection) -> Result<Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::ticket_local_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn now_iso_string() -> String {

@@ -18,9 +18,9 @@ use zeroize::Zeroize;
 use zeroize::Zeroizing;
 
 use crate::lcm;
+use crate::persistence;
 
-const MASTER_KEY_ENV: &str = "CTOX_SECRET_MASTER_KEY";
-const MASTER_KEY_RELATIVE_PATH: &str = "runtime/ctox_secret_master.key";
+const MASTER_KEY_STORAGE_KEY: &str = "secret_master_key_b64";
 
 type SecretMaterial = Zeroizing<Vec<u8>>;
 
@@ -48,7 +48,9 @@ pub fn handle_secret_command(root: &Path, args: &[String]) -> Result<()> {
             let conn = open_secret_db(root)?;
             ensure_secret_schema(&conn)?;
             let key_source = ensure_secret_master_key(root)?.1;
-            print_json(&json!({"ok": true, "db_path": resolve_db_path(root), "key_source": key_source}))
+            print_json(
+                &json!({"ok": true, "db_path": resolve_db_path(root), "key_source": key_source}),
+            )
         }
         "put" => {
             let scope = required_flag_value(args, "--scope")
@@ -127,11 +129,7 @@ pub fn handle_secret_command(root: &Path, args: &[String]) -> Result<()> {
                 secret_exists(root, scope, name)?,
                 "secret {scope}/{name} does not exist in the local secret store"
             );
-            let replacement = secret_reference_text(
-                scope,
-                name,
-                find_flag_value(args, "--label"),
-            );
+            let replacement = secret_reference_text(scope, name, find_flag_value(args, "--label"));
             let result = lcm::run_secret_rewrite(
                 Path::new(db_path),
                 conversation_id,
@@ -146,6 +144,25 @@ pub fn handle_secret_command(root: &Path, args: &[String]) -> Result<()> {
             "usage:\n  ctox secret init\n  ctox secret put --scope <scope> --name <name> --value <text> [--description <text>] [--metadata-json <json>]\n  ctox secret intake --scope <scope> --name <name> --value <text> [--description <text>] [--metadata-json <json>] [--db <path> --conversation-id <id> --match-text <text> [--label <text>]]\n  ctox secret list [--scope <scope>]\n  ctox secret show --scope <scope> --name <name>\n  ctox secret get --scope <scope> --name <name>\n  ctox secret delete --scope <scope> --name <name>\n  ctox secret memory-rewrite --db <path> --conversation-id <id> --scope <scope> --name <name> --match-text <text> [--label <text>]"
         ),
     }
+}
+
+pub fn list_secret_records(root: &Path, scope: Option<&str>) -> Result<Vec<SecretRecordView>> {
+    list_secrets(root, scope)
+}
+
+pub fn read_secret_value(root: &Path, scope: &str, name: &str) -> Result<String> {
+    get_secret_value(root, scope, name)
+}
+
+pub fn write_secret_record(
+    root: &Path,
+    scope: &str,
+    name: &str,
+    value: &str,
+    description: Option<String>,
+    metadata: Value,
+) -> Result<SecretRecordView> {
+    put_secret(root, scope, name, value, description, metadata)
 }
 
 #[derive(Debug, Clone)]
@@ -339,7 +356,7 @@ fn delete_secret(root: &Path, scope: &str, name: &str) -> Result<()> {
 }
 
 fn resolve_db_path(root: &Path) -> PathBuf {
-    crate::paths::mission_db(root)
+    persistence::sqlite_path(root)
 }
 
 fn open_secret_db(root: &Path) -> Result<Connection> {
@@ -376,47 +393,23 @@ fn ensure_secret_schema(conn: &Connection) -> Result<()> {
 }
 
 fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str)> {
-    if let Ok(value) = std::env::var(MASTER_KEY_ENV) {
-        let bytes = BASE64_STANDARD
-            .decode(value.trim())
-            .context("failed to decode CTOX_SECRET_MASTER_KEY base64")?;
-        if bytes.len() != 32 {
-            anyhow::bail!("CTOX_SECRET_MASTER_KEY must decode to exactly 32 bytes");
-        }
-        return Ok((Zeroizing::new(bytes), "env"));
-    }
-
-    let path = root.join(MASTER_KEY_RELATIVE_PATH);
-    if path.exists() {
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+    if let Some(raw) = persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)? {
         let bytes = BASE64_STANDARD
             .decode(raw.trim())
-            .with_context(|| format!("failed to decode {}", path.display()))?;
+            .context("failed to decode SQLite-stored secret master key")?;
         if bytes.len() != 32 {
-            anyhow::bail!("{} does not contain a 32-byte base64 key", path.display());
+            anyhow::bail!("stored secret master key must decode to exactly 32 bytes");
         }
-        return Ok((Zeroizing::new(bytes), "local_file"));
+        return Ok((Zeroizing::new(bytes), "sqlite"));
     }
 
     let mut key = Zeroizing::new(vec![0u8; 32]);
     SystemRandom::new()
         .fill(&mut key)
         .map_err(|_| anyhow::anyhow!("failed to generate secret master key"))?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
-    }
-    fs::write(&path, format!("{}\n", BASE64_STANDARD.encode(&key)))
-        .with_context(|| format!("failed to write {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&path)?.permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(&path, permissions)?;
-    }
-    Ok((key, "generated_local_file"))
+    let encoded = BASE64_STANDARD.encode(&key);
+    persistence::store_text_value(root, MASTER_KEY_STORAGE_KEY, Some(&encoded))?;
+    Ok((key, "generated_sqlite"))
 }
 
 struct EncryptedSecretValue {
@@ -541,11 +534,11 @@ fn print_json(value: &Value) -> Result<()> {
 //
 // These functions provide a thin API for storing and retrieving API keys
 // and other credentials in the encrypted SQLite secret store instead of
-// plaintext engine.env.  Scope is always "credentials".
+// plaintext runtime config rows. Scope is always "credentials".
 
 const CREDENTIAL_SCOPE: &str = "credentials";
 
-/// Keys that must be stored encrypted (never in plaintext engine.env).
+/// Keys that must be stored encrypted (never in plaintext runtime config rows).
 const SECRET_KEYS: &[&str] = &[
     "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
@@ -576,61 +569,20 @@ pub fn set_credential(root: &Path, key: &str, value: &str) -> Result<()> {
 }
 
 /// Retrieve a credential value from the encrypted secret store.
-/// Returns None if the key does not exist or on any error (fail-open for
-/// migration: caller falls back to engine.env / process env).
+/// Returns None if the key does not exist or on any error.
 pub fn get_credential(root: &Path, key: &str) -> Option<String> {
     get_secret_value(root, CREDENTIAL_SCOPE, key).ok()
 }
 
-/// Delete a credential from the encrypted secret store.
-pub fn delete_credential(root: &Path, key: &str) -> Result<()> {
-    delete_secret(root, CREDENTIAL_SCOPE, key)
-}
-
-/// Migrate secrets from a plaintext env map into the encrypted store.
-/// Returns the number of keys migrated.
-pub fn migrate_secrets_from_env_map(
-    root: &Path,
-    env_map: &mut std::collections::BTreeMap<String, String>,
-) -> usize {
-    let mut migrated = 0;
-    let secret_entries: Vec<(String, String)> = env_map
-        .iter()
-        .filter(|(k, v)| is_secret_key(k) && !v.trim().is_empty())
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    for (key, value) in &secret_entries {
-        // Only migrate if not already in the encrypted store.
-        if get_credential(root, key).is_some() {
-            // Already encrypted — just remove from plaintext map.
-            env_map.remove(key.as_str());
-            migrated += 1;
-            continue;
-        }
-        match set_credential(root, key, value) {
-            Ok(()) => {
-                env_map.remove(key.as_str());
-                migrated += 1;
-                eprintln!("[secrets] migrated {key} from engine.env to encrypted store");
-            }
-            Err(e) => {
-                eprintln!("[secrets] failed to migrate {key}: {e:#} — keeping in engine.env");
-            }
-        }
-    }
-    migrated
-}
-
 /// Merge encrypted credentials back into an env map so callers see a
-/// unified view.  Existing entries in the map are NOT overwritten (process
-/// env or engine.env take precedence when already present).
+/// unified view. Existing entries in the map are NOT overwritten.
 pub fn merge_credentials_into_env_map(
     root: &Path,
     env_map: &mut std::collections::BTreeMap<String, String>,
 ) {
     for &key in SECRET_KEYS {
         if env_map.contains_key(key) {
-            continue; // already populated (process env or engine.env residual)
+            continue; // already populated by the runtime config map
         }
         if let Some(value) = get_credential(root, key) {
             if !value.trim().is_empty() {
@@ -686,7 +638,7 @@ mod tests {
     fn secret_intake_stores_secret_and_rewrites_memory_reference() -> Result<()> {
         let root = temp_root("intake");
         fs::create_dir_all(&root)?;
-        let lcm_db = crate::paths::lcm_db(&root);
+        let lcm_db = root.join("runtime").join("ctox.sqlite3");
         if let Some(parent) = lcm_db.parent() {
             fs::create_dir_all(parent)?;
         }

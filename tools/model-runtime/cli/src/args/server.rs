@@ -8,25 +8,25 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerTransport {
-    LocalSocket,
+    LocalIpc,
 }
 
 impl Default for ServerTransport {
     fn default() -> Self {
-        Self::LocalSocket
+        Self::LocalIpc
     }
 }
 
 /// Local server configuration
 #[derive(Args, Clone, Deserialize)]
 pub struct ServerOptions {
-    /// Local Unix socket for direct in-process Responses streaming
+    /// Local IPC endpoint for direct in-process Responses streaming
     #[arg(long)]
     #[serde(default)]
-    pub socket_path: Option<PathBuf>,
+    pub transport_endpoint: Option<PathBuf>,
 
     /// Server transport contract
-    #[arg(long, value_enum, default_value_t = ServerTransport::LocalSocket)]
+    #[arg(long, value_enum, default_value_t = ServerTransport::LocalIpc)]
     #[serde(default)]
     pub transport: ServerTransport,
 
@@ -39,14 +39,13 @@ pub struct ServerOptions {
     #[arg(long)]
     #[serde(default)]
     pub mcp_config: Option<PathBuf>,
-
 }
 
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
-            socket_path: None,
-            transport: ServerTransport::LocalSocket,
+            transport_endpoint: None,
+            transport: ServerTransport::LocalIpc,
             mcp_port: None,
             mcp_config: None,
         }

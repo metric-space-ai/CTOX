@@ -510,12 +510,7 @@ mod tests {
     #[test]
     fn primary_generation_admission_uses_planned_gpu_budget() {
         let root = make_temp_root();
-        let plan_path = root.join("runtime/chat_plan.json");
-        std::fs::write(
-            plan_path,
-            serde_json::to_vec_pretty(&sample_plan()).unwrap(),
-        )
-        .unwrap();
+        runtime_plan::store_persisted_chat_runtime_plan(&root, Some(&sample_plan())).unwrap();
         let descriptor = RuntimeWorkloadDescriptor {
             role: BackendRole::Chat,
             model: "openai/gpt-oss-20b".to_string(),
@@ -558,17 +553,9 @@ mod tests {
     }
 
     #[test]
-    fn gpu_holder_detection_ignores_proxy_and_cpu_aux_without_gpu_claims() {
+    fn gpu_holder_detection_ignores_cpu_aux_without_gpu_claims() {
         let ownership = runtime_contract::RuntimeOwnershipState {
             version: 1,
-            proxy: Some(runtime_contract::ProxyRuntimeResidency {
-                phase: runtime_contract::RuntimeResidencyPhase::Active,
-                pid: Some(11),
-                host: "127.0.0.1".to_string(),
-                port: 12434,
-                health_path: "/health".to_string(),
-                updated_at_epoch_secs: 1,
-            }),
             workloads: vec![
                 runtime_contract::BackendRuntimeResidency {
                     role: BackendRole::Embedding,
@@ -586,7 +573,7 @@ mod tests {
                 runtime_contract::BackendRuntimeResidency {
                     role: BackendRole::Chat,
                     phase: runtime_contract::RuntimeResidencyPhase::Starting,
-                    model: "Qwen/Qwen3.5-27B".to_string(),
+                    model: "Qwen/Qwen3.6-35B-A3B".to_string(),
                     pid: Some(33),
                     port: Some(1235),
                     health_path: Some("/health".to_string()),

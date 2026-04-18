@@ -56,7 +56,7 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
     ];
     let forbidden = [
         "openai/gpt-oss-20b",
-        "Qwen/Qwen3.5-35B-A3B",
+        "Qwen/Qwen3.6-35B-A3B",
         "google/gemma-4-31B-it",
         "nvidia/Nemotron-Cascade-2-30B-A3B",
         "zai-org/GLM-4.7-Flash",

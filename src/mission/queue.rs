@@ -101,7 +101,8 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             let message_key = required_flag_value(args, "--message-key")
                 .or_else(|| args.get(1).map(String::as_str))
                 .context("usage: ctox queue show --message-key <key>")?;
-            let task = channels::load_queue_task(root, message_key)?.context("queue task not found")?;
+            let task =
+                channels::load_queue_task(root, message_key)?.context("queue task not found")?;
             print_json(&json!({"ok": true, "task": task}))
         }
         "edit" => {
@@ -109,7 +110,14 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("usage: ctox queue edit --message-key <key> [--title <label>] [--prompt <text>] [--thread-key <key>] [--workspace-root <path>] [--clear-workspace-root] [--skill <name>] [--clear-skill] [--priority <urgent|high|normal|low>]")?;
             ensure_edit_requested(
                 args,
-                &["--title", "--prompt", "--thread-key", "--workspace-root", "--skill", "--priority"],
+                &[
+                    "--title",
+                    "--prompt",
+                    "--thread-key",
+                    "--workspace-root",
+                    "--skill",
+                    "--priority",
+                ],
                 &["--clear-skill", "--clear-workspace-root"],
             )?;
             let task = channels::update_queue_task(
@@ -119,7 +127,8 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     title: find_flag_value(args, "--title").map(ToOwned::to_owned),
                     prompt: find_flag_value(args, "--prompt").map(ToOwned::to_owned),
                     thread_key: find_flag_value(args, "--thread-key").map(ToOwned::to_owned),
-                    workspace_root: find_flag_value(args, "--workspace-root").map(ToOwned::to_owned),
+                    workspace_root: find_flag_value(args, "--workspace-root")
+                        .map(ToOwned::to_owned),
                     clear_workspace_root: args.iter().any(|arg| arg == "--clear-workspace-root"),
                     priority: find_flag_value(args, "--priority").map(ToOwned::to_owned),
                     suggested_skill: find_flag_value(args, "--skill").map(ToOwned::to_owned),
@@ -574,7 +583,7 @@ fn render_queue_spill_body(task: &channels::QueueTaskView, reason: Option<&str>)
 }
 
 fn queue_bridge_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::mission_db(root)
+    root.join("runtime/ctox.sqlite3")
 }
 
 fn open_queue_bridge_db(root: &Path) -> Result<Connection> {

@@ -1269,13 +1269,8 @@ impl LcmEngine {
         }
         let created_at = iso_now();
         let diff_audit = format!("<tool:full_replace len={}>", rendered.len());
-        let commit_id = continuity_commit_id(
-            conversation_id,
-            kind,
-            &diff_audit,
-            &rendered,
-            &created_at,
-        );
+        let commit_id =
+            continuity_commit_id(conversation_id, kind, &diff_audit, &rendered, &created_at);
         let document_id = continuity_document_id(conversation_id, kind);
         tx.execute(
             "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
@@ -1350,13 +1345,8 @@ impl LcmEngine {
             find.len(),
             replace.len()
         );
-        let commit_id = continuity_commit_id(
-            conversation_id,
-            kind,
-            &diff_audit,
-            &rendered,
-            &created_at,
-        );
+        let commit_id =
+            continuity_commit_id(conversation_id, kind, &diff_audit, &rendered, &created_at);
         let document_id = continuity_document_id(conversation_id, kind);
         tx.execute(
             "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
@@ -3227,11 +3217,7 @@ pub fn run_continuity_full_replace(
     content: &str,
 ) -> Result<ContinuityDocumentState> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
-    engine.continuity_full_replace_document(
-        conversation_id,
-        ContinuityKind::parse(kind)?,
-        content,
-    )
+    engine.continuity_full_replace_document(conversation_id, ContinuityKind::parse(kind)?, content)
 }
 
 pub fn run_continuity_string_replace(
@@ -3327,7 +3313,9 @@ pub fn run_context_retrieve(
                     ContinuityKind::parse(kind)?,
                 )?)?)
             } else {
-                Ok(serde_json::to_value(engine.continuity_show_all(conversation_id)?)?)
+                Ok(serde_json::to_value(
+                    engine.continuity_show_all(conversation_id)?,
+                )?)
             }
         }
         "forgotten" => Ok(serde_json::to_value(engine.continuity_forgotten(
@@ -3346,11 +3334,13 @@ pub fn run_context_retrieve(
             )?)?)
         }
         "describe" => {
-            let summary_id = summary_id.context("context_retrieve mode=describe requires summary_id")?;
+            let summary_id =
+                summary_id.context("context_retrieve mode=describe requires summary_id")?;
             Ok(serde_json::to_value(engine.describe(summary_id)?)?)
         }
         "expand" => {
-            let summary_id = summary_id.context("context_retrieve mode=expand requires summary_id")?;
+            let summary_id =
+                summary_id.context("context_retrieve mode=expand requires summary_id")?;
             Ok(serde_json::to_value(engine.expand(
                 summary_id,
                 depth,
@@ -4760,7 +4750,8 @@ fn build_continuity_prompt_text(
     }
     prompt.push(String::new());
     prompt.push(
-        "If no update is needed, make no CLI call and reply with the single word `noop`.".to_string(),
+        "If no update is needed, make no CLI call and reply with the single word `noop`."
+            .to_string(),
     );
     prompt.push(String::new());
     prompt.push(format!("<DOCUMENT_KIND>\n{}\n</DOCUMENT_KIND>", kind_label));
@@ -5303,10 +5294,13 @@ mod tests {
         engine.continuity_apply_diff(
             17,
             ContinuityKind::Focus,
-            "## Status\n+ Mission: Keep the marketplace benchmark durable.\n+ Mission state: Still open; roadmap and progress docs were updated, but the mission has not reached a stable stopping point.\n+ Continuation mode: Keep the discovery work attached to the marketplace core and continue the same durable slice.\n+ Trigger intensity: High while the mission remains open and idle-watch pressure is present.\n## Blocker\n+ Current blocker: Keep the discovery work attached to the marketplace core.\n## Next\n+ Next slice: Carry the discovery expectations through the roadmap slice.\n## Done / Gate\n+ Done gate: Preserve mission continuity while advancing durable slices.\n+ Closure confidence: Low until the marketplace core reaches a stable stopping point.\n",
+            "## Status\n+ Mission: Keep the marketplace delivery mission durable.\n+ Mission state: Still open; roadmap and progress docs were updated, but the mission has not reached a stable stopping point.\n+ Continuation mode: Keep the discovery work attached to the marketplace core and continue the same durable slice.\n+ Trigger intensity: High while the mission remains open and idle-watch pressure is present.\n## Blocker\n+ Current blocker: Keep the discovery work attached to the marketplace core.\n## Next\n+ Next slice: Carry the discovery expectations through the roadmap slice.\n## Done / Gate\n+ Done gate: Preserve mission continuity while advancing durable slices.\n+ Closure confidence: Low until the marketplace core reaches a stable stopping point.\n",
         )?;
         let initial = engine.mission_state(17)?;
-        assert_eq!(initial.mission, "Keep the marketplace benchmark durable.");
+        assert_eq!(
+            initial.mission,
+            "Keep the marketplace delivery mission durable."
+        );
         assert_eq!(initial.mission_status, "active");
         assert_eq!(initial.continuation_mode, "continuous");
         assert_eq!(initial.trigger_intensity, "hot");
@@ -5317,10 +5311,13 @@ mod tests {
         engine.continuity_apply_diff(
             17,
             ContinuityKind::Focus,
-            "## Status\n- Mission: Keep the marketplace benchmark durable.\n## Next\n+ Next slice: Continue the same durable slice.\n",
+            "## Status\n- Mission: Keep the marketplace delivery mission durable.\n## Next\n+ Next slice: Continue the same durable slice.\n",
         )?;
         let synced = engine.sync_mission_state_from_continuity(17)?;
-        assert_eq!(synced.mission, "Keep the marketplace benchmark durable.");
+        assert_eq!(
+            synced.mission,
+            "Keep the marketplace delivery mission durable."
+        );
         assert_eq!(synced.continuation_mode, "continuous");
         assert_eq!(synced.trigger_intensity, "hot");
 

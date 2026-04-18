@@ -301,10 +301,11 @@ impl Installation {
         if let Some(preferred) = self.preferred_binary.clone() {
             candidates.push(preferred);
         }
-        candidates.push(root_path.join("target/debug/ctox"));
-        candidates.push(root_path.join("target/release/ctox"));
-        candidates.push(root_path.join("runtime/local-bin/debug/ctox"));
-        candidates.push(root_path.join("runtime/local-bin/release/ctox"));
+        if let Some(bin_dir) = self.env.get("CTOX_BIN_DIR").filter(|value| !value.trim().is_empty())
+        {
+            candidates.push(PathBuf::from(bin_dir).join("ctox"));
+        }
+        candidates.push(root_path.join("bin/ctox"));
         candidates
     }
 
@@ -340,10 +341,10 @@ pub fn resolve_ctox_launch_from_root(
     if let Some(preferred) = preferred_binary.clone() {
         candidates.push(preferred);
     }
-    candidates.push(root_path.join("target/debug/ctox"));
-    candidates.push(root_path.join("target/release/ctox"));
-    candidates.push(root_path.join("runtime/local-bin/debug/ctox"));
-    candidates.push(root_path.join("runtime/local-bin/release/ctox"));
+    if let Some(bin_dir) = env.get("CTOX_BIN_DIR").filter(|value| !value.trim().is_empty()) {
+        candidates.push(PathBuf::from(bin_dir).join("ctox"));
+    }
+    candidates.push(root_path.join("bin/ctox"));
 
     if let Some(binary) = candidates.into_iter().find(|candidate| candidate.is_file()) {
         // The local desktop wrapper runs inside a PTY on top of runtime state that may live on
@@ -361,7 +362,8 @@ pub fn resolve_ctox_launch_from_root(
     }
 
     anyhow::bail!(
-        "No CTOX binary found in this root. Build CTOX first so the desktop app can launch the real TUI instead of compiling in the terminal."
+        "No CTOX binary found in this root. Install or rebuild CTOX so {}/bin/ctox exists.",
+        root_path.display()
     )
 }
 

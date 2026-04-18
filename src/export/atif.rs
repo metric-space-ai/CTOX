@@ -71,7 +71,7 @@ pub struct FinalMetrics {
     pub total_completion_tokens: u64,
 }
 
-/// Build a trajectory from a CTOX conversation stored in `ctox_lcm.db`.
+/// Build a trajectory from a CTOX conversation stored in `ctox.sqlite3`.
 pub fn build_trajectory(
     db_path: &Path,
     conversation_id: i64,

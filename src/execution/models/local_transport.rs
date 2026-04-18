@@ -13,7 +13,7 @@
 //! - [`LocalTransport::UnixSocket`] — Unix domain socket (macOS, Linux).
 //! - [`LocalTransport::NamedPipe`] — Windows named pipe (real impl on Windows
 //!   via the `windows-sys` crate; returns `Unsupported` elsewhere).
-//! - [`LocalTransport::TcpLoopback`] — TCP on loopback; universal fallback.
+//! - [`LocalTransport::TcpLoopback`] — TCP on loopback; legacy fallback only.
 //!
 //! # Migration notes for callers
 //!
@@ -43,6 +43,9 @@ use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use serde::Deserialize;
+use serde::Serialize;
+
 #[cfg(unix)]
 use std::os::unix::net::UnixListener;
 #[cfg(unix)]
@@ -62,15 +65,13 @@ mod named_pipe {
     use std::io;
     use std::os::windows::io::FromRawHandle;
     use std::os::windows::io::OwnedHandle;
-    use std::time::Instant;
     use std::time::Duration;
+    use std::time::Instant;
     use windows_sys::Win32::Foundation::{
         CloseHandle, ERROR_FILE_NOT_FOUND, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE,
         INVALID_HANDLE_VALUE,
     };
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
-    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
     use windows_sys::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
         PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
@@ -207,19 +208,54 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// structs. The variants are `cfg`-independent on purpose so the enum stays
 /// exhaustive across platforms; connects on an unsupported platform return
 /// `io::ErrorKind::Unsupported` instead of being removed from the enum.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LocalTransport {
     /// Unix domain socket at `path`.
     UnixSocket { path: PathBuf },
     /// Windows named pipe, e.g. `ctox-primary-generation`. The full pipe path
     /// (`\\.\pipe\<name>`) is derived inside the connector.
     NamedPipe { name: String },
-    /// TCP on loopback. Works on every platform and is the Windows default
-    /// until named-pipe support lands.
+    /// TCP on loopback. Kept as a legacy fallback for non-inference callers;
+    /// managed CTOX inference runtimes should prefer Unix sockets or named
+    /// pipes instead.
     TcpLoopback { host: String, port: u16 },
 }
 
 impl LocalTransport {
+    /// Build the canonical Windows named-pipe endpoint string for `name`.
+    pub fn named_pipe_endpoint(name: &str) -> String {
+        format!(r"\\.\pipe\{name}")
+    }
+
+    /// Choose the canonical IPC transport for the current host.
+    ///
+    /// Managed CTOX inference backends should use this instead of
+    /// [`default_for_host`](Self::default_for_host) so local inference stays
+    /// on private IPC rather than falling back to loopback TCP.
+    pub fn ipc_for_host(unix_socket_path: PathBuf, windows_pipe_name: String) -> Self {
+        #[cfg(unix)]
+        {
+            let _ = windows_pipe_name;
+            Self::UnixSocket {
+                path: unix_socket_path,
+            }
+        }
+        #[cfg(windows)]
+        {
+            let _ = unix_socket_path;
+            Self::NamedPipe {
+                name: windows_pipe_name,
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = unix_socket_path;
+            Self::NamedPipe {
+                name: windows_pipe_name,
+            }
+        }
+    }
+
     /// Choose a sensible default transport for the current platform.
     ///
     /// `unix_socket_path` is used on Unix if provided; `tcp_port` seeds the
@@ -252,8 +288,39 @@ impl LocalTransport {
     pub fn display_label(&self) -> String {
         match self {
             Self::UnixSocket { path } => format!("unix:{}", path.display()),
-            Self::NamedPipe { name } => format!("pipe:\\\\.\\pipe\\{name}"),
+            Self::NamedPipe { name } => format!("pipe:{}", Self::named_pipe_endpoint(name)),
             Self::TcpLoopback { host, port } => format!("tcp:{host}:{port}"),
+        }
+    }
+
+    /// Canonical endpoint string for this transport.
+    ///
+    /// Unix sockets return their filesystem path, named pipes return the full
+    /// `\\.\pipe\...` endpoint, and TCP returns `host:port`.
+    pub fn endpoint_string(&self) -> String {
+        match self {
+            Self::UnixSocket { path } => path.display().to_string(),
+            Self::NamedPipe { name } => Self::named_pipe_endpoint(name),
+            Self::TcpLoopback { host, port } => format!("{host}:{port}"),
+        }
+    }
+
+    /// Returns `true` when this transport is private IPC suitable for the
+    /// managed `ctox_core_local` inference path.
+    pub fn is_private_ipc(&self) -> bool {
+        matches!(self, Self::UnixSocket { .. } | Self::NamedPipe { .. })
+    }
+
+    /// Parse a private IPC endpoint string previously emitted by
+    /// [`endpoint_string`](Self::endpoint_string).
+    pub fn from_ipc_endpoint_string(endpoint: &str) -> Self {
+        if let Some(name) = endpoint.strip_prefix(r"\\.\pipe\") {
+            return Self::NamedPipe {
+                name: name.to_string(),
+            };
+        }
+        Self::UnixSocket {
+            path: PathBuf::from(endpoint),
         }
     }
 
@@ -433,7 +500,10 @@ impl LocalTransport {
                 }
             }
             Self::TcpLoopback { host, port } => {
-                let Some(addr) = (host.as_str(), *port).to_socket_addrs().ok().and_then(|mut iter| iter.next())
+                let Some(addr) = (host.as_str(), *port)
+                    .to_socket_addrs()
+                    .ok()
+                    .and_then(|mut iter| iter.next())
                 else {
                     return false;
                 };
@@ -605,7 +675,7 @@ mod tests {
         let pipe = LocalTransport::NamedPipe {
             name: "ctox-primary".to_string(),
         };
-        assert_eq!(pipe.display_label(), "pipe:\\\\.\\pipe\\ctox-primary");
+        assert_eq!(pipe.display_label(), r"pipe:\\.\pipe\ctox-primary");
 
         let tcp = LocalTransport::TcpLoopback {
             host: "127.0.0.1".to_string(),
@@ -625,19 +695,39 @@ mod tests {
             Some("http://127.0.0.1:2234")
         );
 
-        assert!(
-            LocalTransport::UnixSocket {
-                path: PathBuf::from("/tmp/x.sock"),
-            }
-            .http_base_url()
-            .is_none()
-        );
-        assert!(
+        assert!(LocalTransport::UnixSocket {
+            path: PathBuf::from("/tmp/x.sock"),
+        }
+        .http_base_url()
+        .is_none());
+        assert!(LocalTransport::NamedPipe {
+            name: "x".to_string(),
+        }
+        .http_base_url()
+        .is_none());
+    }
+
+    #[test]
+    fn endpoint_string_formats_ipc_variants() {
+        let unix = LocalTransport::UnixSocket {
+            path: PathBuf::from("/tmp/ctox.sock"),
+        };
+        assert_eq!(unix.endpoint_string(), "/tmp/ctox.sock");
+
+        let pipe = LocalTransport::NamedPipe {
+            name: "ctox-primary".to_string(),
+        };
+        assert_eq!(pipe.endpoint_string(), r"\\.\pipe\ctox-primary");
+    }
+
+    #[test]
+    fn parses_named_pipe_ipc_endpoints() {
+        let transport = LocalTransport::from_ipc_endpoint_string(r"\\.\pipe\ctox-primary");
+        assert_eq!(
+            transport,
             LocalTransport::NamedPipe {
-                name: "x".to_string(),
+                name: "ctox-primary".to_string(),
             }
-            .http_base_url()
-            .is_none()
         );
     }
 

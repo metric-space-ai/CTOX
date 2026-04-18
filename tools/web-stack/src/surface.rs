@@ -11,6 +11,7 @@ use crate::browser::run_browser_automation;
 use crate::browser::BrowserAutomationRequest;
 use crate::browser::BrowserCaptureRequest;
 use crate::browser::BrowserPrepareOptions;
+use crate::web_search::run_ctox_google_bootstrap_doctor_tool;
 use crate::web_search::run_ctox_google_bootstrap_import_tool;
 use crate::web_search::run_ctox_google_bootstrap_refresh_tool;
 use crate::web_search::run_ctox_google_bootstrap_status_tool;
@@ -165,6 +166,10 @@ pub fn handle_web_command(
             let payload = run_ctox_google_bootstrap_status_tool(root)?;
             print_json(&payload)
         }
+        "google-doctor" | "google-bootstrap-doctor" => {
+            let payload = run_ctox_google_bootstrap_doctor_tool(root)?;
+            print_json(&payload)
+        }
         "google-bootstrap-import" => {
             let source = required_flag_value(args, "--file")
                 .or_else(|| args.get(1).map(String::as_str))
@@ -247,7 +252,7 @@ pub fn handle_web_command(
             print_json(&payload)
         }
         _ => anyhow::bail!(
-            "usage:\n  ctox web search --query <text> [--domain <host>]... [--context-size <low|medium|high>] [--cached] [--include-sources]\n  ctox web read --url <url> [--query <text>] [--find <text>]...\n  ctox web google-bootstrap-refresh --query <text> [--domain <host>]... [--timeout-ms <n>]\n  ctox web google-bootstrap-status\n  ctox web google-bootstrap-import --file <path>\n  ctox web scrape --target-key <key> --mode <latest|semantic> [--query <text>] [--limit <n>]\n  ctox web browser-prepare [--dir <path>] [--install-reference] [--install-browser] [--skip-npm-install]\n  ctox web browser-automation [--dir <path>] [--timeout-ms <n>] [--script-file <path>] < script.js\n  ctox web browser-capture --url <url> [--dir <path>] [--out-dir <path>] [--timeout-ms <n>]"
+            "usage:\n  ctox web search --query <text> [--domain <host>]... [--context-size <low|medium|high>] [--cached] [--include-sources]\n  ctox web read --url <url> [--query <text>] [--find <text>]...\n  ctox web google-bootstrap-refresh --query <text> [--domain <host>]... [--timeout-ms <n>]\n  ctox web google-bootstrap-status\n  ctox web google-bootstrap-import --file <path>\n  ctox web google-doctor\n  ctox web scrape --target-key <key> --mode <latest|semantic> [--query <text>] [--limit <n>]\n  ctox web browser-prepare [--dir <path>] [--install-reference] [--install-browser] [--skip-npm-install]\n  ctox web browser-automation [--dir <path>] [--timeout-ms <n>] [--script-file <path>] < script.js\n  ctox web browser-capture --url <url> [--dir <path>] [--out-dir <path>] [--timeout-ms <n>]"
         ),
     }
 }

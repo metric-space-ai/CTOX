@@ -33,7 +33,7 @@ ctox secret put --scope "<scope>" --name "<name>" --value "<secret>" --descripti
 Store a secret locally and immediately rewrite leaked memory references in one step:
 
 ```sh
-ctox secret intake --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>' --db "<path-to-ctox_lcm.db>" --conversation-id "<id>" --match-text "<secret>" [--label "<human label>"]
+ctox secret intake --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>' --db "<path-to-ctox.sqlite3>" --conversation-id "<id>" --match-text "<secret>" [--label "<human label>"]
 ```
 
 Retrieve a secret only for explicit local execution:
@@ -45,7 +45,7 @@ ctox secret get --scope "<scope>" --name "<name>"
 If a secret already leaked into the CTOX conversation memory, rewrite the LCM/continuity history to a stable keychain handle after storing the secret:
 
 ```sh
-ctox secret memory-rewrite --db "<path-to-ctox_lcm.db>" --conversation-id "<id>" --scope "<scope>" --name "<name>" --match-text "<secret>" [--label "<human label>"]
+ctox secret memory-rewrite --db "<path-to-ctox.sqlite3>" --conversation-id "<id>" --scope "<scope>" --name "<name>" --match-text "<secret>" [--label "<human label>"]
 ```
 
 Create an operator-visible access request in the ticket surface:

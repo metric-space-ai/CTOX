@@ -96,12 +96,7 @@ pub fn run_context_stress_with_options<S: lcm::Summarizer>(
         )?;
         add_round_messages(&engine, conversation_id, iterations, round)?;
 
-        let compaction = engine.compact(
-            conversation_id,
-            token_budget,
-            summarizer,
-            true,
-        )?;
+        let compaction = engine.compact(conversation_id, token_budget, summarizer, true)?;
         if compaction.action_taken {
             compactions_completed += 1;
         }

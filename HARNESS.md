@@ -6,7 +6,7 @@
 ║  ctox start → systemd Service → Persistent Loop                            ║
 ║                                                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐   ║
-║  │  Mission Queue (SQLite: runtime/ctox.db, mission-side tables)       │   ║
+║  │  Mission Queue (SQLite: runtime/ctox.sqlite3)                       │   ║
 ║  │                                                                     │   ║
 ║  │  Produzenten (schreiben via mission/channels):                      │   ║
 ║  │   • TUI Chat-Eingabe       "Deploy the new API version"             │   ║
@@ -15,7 +15,7 @@
 ║  │   • Plan-Steps             "Step 3: Run integration tests"          │   ║
 ║  │   • Ticket-Sync (Zammad)   "JIRA-4521: Fix login timeout"           │   ║
 ║  └────────────────────────┬────────────────────────────────────────────┘   ║
-║                           │ lease_next_for_thread()                        ║
+║                           │ create_queue_task() / lease_pending_*()        ║
 ║                           ▼                                                ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐   ║
 ║  │  CTOX Mission Loop (while service running)                          │   ║
@@ -61,7 +61,7 @@
 ║  │                           │                                         │   ║
 ║  │                           ▼                                         │   ║
 ║  │   ┌────────────────────────────────────────────────────────────┐    │   ║
-║  │   │ B. ctox-core Inner Loop (ein PersistentSession-Client)     │    │   ║
+║  │   │ B. ctox-core Inner Loop (ein Client pro Turn-Slice)        │    │   ║
 ║  │   │                                                            │    │   ║
 ║  │   │    Think → ToolCall → ToolResult → Think → ToolCall → ...  │    │   ║
 ║  │   │                                                            │    │   ║
@@ -98,25 +98,26 @@
 ║  │                           │                                         │   ║
 ║  │                           ▼                                         │   ║
 ║  │   ┌────────────────────────────────────────────────────────────┐    │   ║
-║  │   │ C. Continuity Refresh (3× run_turn auf selbem Client)      │    │   ║
+║  │   │ C. Optionaler Continuity Refresh (0-3 Turns, gleicher      │    │   ║
+║  │   │    Client)                                                 │    │   ║
 ║  │   │                                                            │    │   ║
 ║  │   │  Narrative: "Turn 5: Deployed to prod, smoke test passed"  │    │   ║
 ║  │   │  Anchors:   + "Production: api-v2.3 running on port 8443"  │    │   ║
 ║  │   │  Focus:     "Status: done. Done gate: ✓ curl returns 200"  │    │   ║
 ║  │   │                                                            │    │   ║
 ║  │   │  → Modell ruft `ctox continuity-update` CLI Tool auf       │    │   ║
-║  │   │  → Änderungen als Commits in ctox_lcm.db gespeichert       │    │   ║
+║  │   │  → Änderungen als Commits in ctox.sqlite3 gespeichert      │    │   ║
 ║  │   └────────────────────────────────────────────────────────────┘    │   ║
 ║  │                           │                                         │   ║
 ║  │                           ▼                                         │   ║
 ║  │   ┌────────────────────────────────────────────────────────────┐    │   ║
 ║  │   │ D. Mission-Status entscheiden                              │    │   ║
 ║  │   │                                                            │    │   ║
-║  │   │  Focus sagt status=done  → Mission abschließen             │    │   ║
-║  │   │  Focus sagt status=active + Queue leer                     │    │   ║
-║  │   │     → Re-Enqueue "Continue working on the task"            │    │   ║
-║  │   │  Focus sagt status=blocked → Watchdog / Ticket / Email     │    │   ║
-║  │   │  Queue hat nächsten Task → nächste Iteration               │    │   ║
+║  │   │  Focus/Mission-State sagt done → Mission schließen         │    │   ║
+║  │   │  Mission offen + idle → Mission-Watchdog queued Slice      │    │   ║
+║  │   │  Turn timeout → Timeout-Continuation als Queue-Task        │    │   ║
+║  │   │  Inbound/Ticket blocker → vor Active Loop als blocked ack  │    │   ║
+║  │   │  Queue/Worker hat nächsten Task → nächste Iteration        │    │   ║
 ║  │   └────────────────────────────────────────────────────────────┘    │   ║
 ║  │                                                                     │   ║
 ║  │  → LOOP zurück zu A. mit nächstem Task                              │   ║
@@ -124,16 +125,10 @@
 ║                                                                            ║
 ║  ┌─────────────────────────────────────────────────────────────────────┐   ║
 ║  │  Persistenz (runtime/)                                              │   ║
-║  │   ctox.db         Core-State (Queue, Tickets, Plan, Governance,     │   ║
-║  │                   Secrets, Communication, Knowledge/Skillbooks/     │   ║
-║  │                   Runbooks, LCM: Focus/Anchors/Narrative, Mission-  │   ║
-║  │                   State, Verification, Claims)                      │   ║
-║  │   ticket_local.db Tool-Store: lokaler Ticket-Adapter                │   ║
-║  │   ctox_scraping.db Tool-Store: Scrape-Capability                    │   ║
-║  │   documents/ctox_doc.db  Tool-Store: Doc-Stack (FTS5 + Embeddings)  │   ║
-║  │   backup/<ISO>/   Archivierte Vor-Merge-Kopien (cto_agent.db,       │   ║
-║  │                   ctox_lcm.db) vom einmaligen ctox.db-Merge         │   ║
-║  │   engine.env      Settings (CTOX_CHAT_MODEL_MAX_CONTEXT=131072)     │   ║
+║  │   ctox.sqlite3    Focus / Anchors / Narrative (Commit-Historie)     │   ║
+║  │   ctox.sqlite3    Queue, Tickets, Plan, Mission-State               │   ║
+║  │   ctox.sqlite3    Settings (CTOX_CHAT_MODEL_MAX_CONTEXT=131072)     │   ║
+║  │   context-log.jsonl  Token-/Turn-Forensik aus DirectSession         │   ║
 ║  └─────────────────────────────────────────────────────────────────────┘   ║
 ║                                                                            ║
 ║  Context Window: CTOX_CHAT_MODEL_MAX_CONTEXT (default 131072 = 128K)       ║
@@ -145,18 +140,22 @@
 
 | Element | Datei |
 |---|---|
-| `ctox start` | [src/main.rs:202](src/main.rs#L202) |
-| Mission-Loop / systemd-Service | [src/service/service.rs](src/service/service.rs) |
-| Zentrale DB-Pfade | [src/paths.rs](src/paths.rs) |
-| Einmalige `cto_agent.db` + `ctox_lcm.db` → `ctox.db` Merge-Migration | [src/service/db_migration.rs](src/service/db_migration.rs) |
-| `lease_next_for_thread()` | [src/main.rs:1389](src/main.rs#L1389) |
-| System Prompt "Mission Control Contract" | [assets/prompts/ctox_chat_system_prompt.md:97](assets/prompts/ctox_chat_system_prompt.md#L97) |
-| Continuity-Kinds Loop (Focus/Anchors/Narrative) | [src/execution/agent/turn_loop.rs:764](src/execution/agent/turn_loop.rs#L764) |
+| `ctox start` | [src/main.rs:265](src/main.rs#L265) |
+| Mission-Loop / systemd-Service | [src/service/service.rs:307](src/service/service.rs#L307) |
+| Queue-Pfad `runtime/ctox.sqlite3` | [src/service/service.rs:328](src/service/service.rs#L328) |
+| Queue task creation | [src/mission/channels.rs:685](src/mission/channels.rs#L685) |
+| Queue leasing / worker dispatch | [src/service/service.rs:2411](src/service/service.rs#L2411) · [src/service/service.rs:1962](src/service/service.rs#L1962) |
+| System Prompt "Mission Control Contract" | [assets/prompts/ctox_chat_system_prompt.md:105](assets/prompts/ctox_chat_system_prompt.md#L105) |
+| `PersistentSession` lifecycle | [src/execution/agent/direct_session.rs:43](src/execution/agent/direct_session.rs#L43) |
+| Service currently uses per-turn clients | [src/service/service.rs:1995](src/service/service.rs#L1995) |
+| Continuity-Kinds Loop (Focus/Anchors/Narrative) | [src/execution/agent/turn_loop.rs:588](src/execution/agent/turn_loop.rs#L588) |
+| ADAPTIVE-Refreshbudget 15% (`output_budget_pct`) | [src/execution/agent/turn_loop.rs:490](src/execution/agent/turn_loop.rs#L490) |
 | EMERGENCY-Schwelle 75% (`DEFAULT_CONTEXT_THRESHOLD`) | [src/context/lcm.rs:16](src/context/lcm.rs#L16) |
-| ADAPTIVE-Schwelle 15% (`output_budget_pct`) | [src/execution/agent/turn_loop.rs:668](src/execution/agent/turn_loop.rs#L668) |
-| Context-Window Default 131072 | [src/execution/agent/turn_loop.rs:1232](src/execution/agent/turn_loop.rs#L1232) |
-| `ctox continuity-update` CLI | [src/main.rs:509](src/main.rs#L509) · Driver [src/execution/agent/turn_loop.rs:824](src/execution/agent/turn_loop.rs#L824) |
-| `runtime/engine.env` | [src/execution/models/runtime_env.rs:9](src/execution/models/runtime_env.rs#L9) |
+| Context-Window Default 131072 | [src/context/compact.rs:166](src/context/compact.rs#L166) |
+| `ctox continuity-update` CLI | [src/main.rs:576](src/main.rs#L576) · Driver [src/execution/agent/turn_loop.rs:673](src/execution/agent/turn_loop.rs#L673) |
+| Mission-Watchdog Continuation | [src/service/service.rs:2343](src/service/service.rs#L2343) |
+| Timeout-Continuation | [src/service/service.rs:3290](src/service/service.rs#L3290) |
+| `runtime/context-log.jsonl` | [src/execution/agent/direct_session.rs:584](src/execution/agent/direct_session.rs#L584) |
 | `CTOX_CHAT_MODEL_MAX_CONTEXT=131072` seed | [install.sh:1276](install.sh#L1276) |
 | Producer Email / Cron / Tickets | [src/mission/communication_email_native.rs](src/mission/communication_email_native.rs) · [src/mission/schedule.rs](src/mission/schedule.rs) · [src/mission/tickets.rs](src/mission/tickets.rs) · [src/mission/ticket_zammad_native.rs](src/mission/ticket_zammad_native.rs) |
 
@@ -170,9 +169,9 @@
 
 ## Änderungen gegenüber der Ursprungsversion
 
-1. **`context-log.jsonl` entfernt** — keine solche Datei im Repo; Token-Metriken leben als `token_count`-Spalten in `ctox.db`.
-2. **"Auto-Continuation" aus der Producer-Liste entfernt** — es ist kein Producer, sondern der Status-Pfad "status=active + Queue leer → Re-Enqueue" in Sektion D.
-3. **Core-DB-Merge** von `cto_agent.db` + `ctox_lcm.db` auf `runtime/ctox.db` mit Auto-Migration beim ersten Start.
-4. **`lease_next()` → `lease_next_for_thread()`** (tatsächlicher Symbolname).
-5. **Producer-Zeile Ticket-Sync** konkretisiert auf Zammad (nativer Adapter im Code).
-6. **Compact-Policy-Schwellen** mit den echten Konstantennamen annotiert (`DEFAULT_CONTEXT_THRESHOLD`, `output_budget_pct`).
+1. **`context-log.jsonl` wieder aufgenommen** — der aktuelle Code schreibt Turn- und Token-Forensik aktiv nach `runtime/context-log.jsonl`; zusätzlich bleiben Token-Zähler in `ctox.sqlite3`.
+2. **Dispatch-Pfad korrigiert** — statt eines nicht vorhandenen `lease_next_for_thread()` zeigt die Grafik jetzt den realen Pfad aus Queue-Erzeugung, Leasing und Worker-Dispatch (`create_queue_task`, `lease_pending_*`, `start_prompt_worker`).
+3. **`PersistentSession` präzisiert** — im aktuellen Service-Lauf wird pro Turn-Slice ein Client aufgebaut; innerhalb eines einzelnen `run_chat_turn_with_events_extended`-Aufrufs teilen sich Main-Turn und Continuity-Refresh denselben Client.
+4. **Continuity-Refresh als optional markiert** — die drei Refresh-Turns laufen nur bei Output-Budget- oder State-Transition-Triggern, nicht nach jedem Turn blind.
+5. **Continuation-Pfade konkretisiert** — offene Arbeit wird derzeit vor allem über Mission-Watchdog- und Timeout-Continuation-Queue-Tasks fortgesetzt, nicht nur über einen simplen `status=active + Queue leer`-Pfad.
+6. **Quellverweise aktualisiert** — tote oder verschobene Links wurden auf die aktuell relevanten Stellen im Code angepasst.

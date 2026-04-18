@@ -11,12 +11,13 @@ use crossterm::terminal;
 use crossterm::terminal::ClearType;
 use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
-use qrcode::QrCode;
 use qrcode::types::Color as QrColor;
-use ratatui::Terminal;
+use qrcode::QrCode;
 use ratatui::backend::CrosstermBackend;
+use ratatui::Terminal;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -33,9 +34,9 @@ use std::time::Instant;
 
 use crate::channels;
 use crate::context_health;
+use crate::execution::models::vision_preprocessor;
 use crate::governance;
 use crate::inference::engine;
-use crate::execution::models::vision_preprocessor;
 use crate::inference::gateway::LoadObservation;
 use crate::inference::gateway::RuntimeTelemetry;
 use crate::inference::model_registry;
@@ -49,6 +50,7 @@ use crate::inference::turn_loop;
 use crate::lcm;
 use crate::live_context;
 use crate::mission::communication_adapters;
+use crate::secrets;
 use crate::service;
 
 mod render;
@@ -99,6 +101,42 @@ const GPU_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
 const GPU_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_secs(4);
 const PROXY_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(700);
 const PROXY_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_millis(1200);
+
+fn default_bin_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local/bin")
+}
+
+fn resolved_install_root_for_settings(root: &Path) -> Option<PathBuf> {
+    crate::install::version_info(root)
+        .ok()
+        .and_then(|info| info.install_root)
+}
+
+fn resolved_state_root_for_settings(root: &Path) -> PathBuf {
+    crate::install::version_info(root)
+        .map(|info| info.state_root)
+        .unwrap_or_else(|_| root.join("runtime"))
+}
+
+fn resolved_cache_root_for_settings(root: &Path) -> PathBuf {
+    crate::install::version_info(root)
+        .map(|info| info.cache_root)
+        .unwrap_or_else(|_| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache/ctox")
+        })
+}
+
+fn persisted_path_setting(root: &Path, key: &str, fallback: PathBuf) -> String {
+    runtime_env::env_or_config(root, key)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| fallback.display().to_string())
+}
 
 fn refresh_due(last_refresh_at: &mut Option<Instant>, interval: Duration) -> bool {
     let now = Instant::now();
@@ -206,11 +244,6 @@ fn api_key_configured(env_map: &BTreeMap<String, String>, provider: &str) -> boo
         .get(api_provider_key_env_var(provider))
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false)
-}
-
-fn api_models_available(env_map: &BTreeMap<String, String>) -> bool {
-    let provider = infer_api_provider(env_map);
-    !provider.eq_ignore_ascii_case("local") && api_key_configured(env_map, &provider)
 }
 
 fn infer_chat_source(env_map: &BTreeMap<String, String>) -> String {
@@ -356,8 +389,16 @@ fn supported_tts_model_choices() -> Vec<&'static str> {
     engine::SUPPORTED_TTS_MODELS.to_vec()
 }
 const DEFAULT_MAX_CONTEXT: usize = 131_072;
+const MAX_CONTEXT_WINDOW: usize = 262_144;
 const DEFAULT_COMPACTION_THRESHOLD_PERCENT: usize = 75;
 const DEFAULT_COMPACTION_MIN_TOKENS: usize = 12_288;
+
+fn default_compaction_min_tokens(context_tokens: usize) -> usize {
+    runtime_plan::scale_compaction_tokens(
+        DEFAULT_COMPACTION_MIN_TOKENS as u32,
+        context_tokens as u32,
+    ) as usize
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -370,6 +411,8 @@ enum Page {
 enum SettingsView {
     Model,
     Communication,
+    Secrets,
+    Paths,
     Update,
 }
 
@@ -397,6 +440,18 @@ struct SettingItem {
     choices: Vec<&'static str>,
     help: &'static str,
     kind: SettingKind,
+}
+
+#[derive(Debug, Clone)]
+struct SecretItem {
+    scope: String,
+    name: String,
+    description: Option<String>,
+    metadata: Value,
+    created_at: String,
+    updated_at: String,
+    value: String,
+    saved_value: String,
 }
 
 #[allow(dead_code)]
@@ -486,7 +541,7 @@ struct GpuCardState {
 
 #[derive(Debug, Clone, Default)]
 struct RuntimeHealthState {
-    proxy_ready: bool,
+    runtime_ready: bool,
     embedding_ready: Option<bool>,
     stt_ready: Option<bool>,
     tts_ready: Option<bool>,
@@ -495,8 +550,8 @@ struct RuntimeHealthState {
 impl RuntimeHealthState {
     fn degraded_components(&self) -> Vec<&'static str> {
         let mut parts = Vec::new();
-        if !self.proxy_ready {
-            parts.push("proxy");
+        if !self.runtime_ready {
+            parts.push("runtime");
         }
         if self.embedding_ready == Some(false) {
             parts.push("embed");
@@ -695,6 +750,8 @@ struct App {
     settings_items: Vec<SettingItem>,
     settings_selected: usize,
     settings_view: SettingsView,
+    secret_items: Vec<SecretItem>,
+    secrets_selected: usize,
     update_view: UpdateViewState,
     settings_menu_open: bool,
     settings_menu_index: usize,
@@ -725,9 +782,7 @@ struct App {
     /// Images the user has attached to the next chat submission. Populated
     /// by the `/image <path>` slash-command and by file-path drag-and-drop
     /// pastes. On submit, each pending image becomes a
-    /// `[[ctox:image:/absolute/path]]` marker prefixed to the prompt
-    /// text — the gateway-side vision preprocessor expands these markers
-    /// into real `input_image` content blocks.
+    /// `[[ctox:image:/absolute/path]]` marker prefixed to the prompt text.
     pending_images: Vec<PendingImage>,
 }
 
@@ -791,14 +846,8 @@ impl SkillState {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-struct SkillCatalogMetadata {
-    class: Option<SkillClass>,
-    state: Option<SkillState>,
-}
-
 pub fn run_tui(root: &Path) -> Result<()> {
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = crate::persistence::sqlite_path(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut stdout = io::stdout();
@@ -851,7 +900,7 @@ pub fn run_tui(root: &Path) -> Result<()> {
 pub fn run_tui_smoke(root: &Path, page_name: &str, width: u16, height: u16) -> Result<()> {
     use ratatui::backend::TestBackend;
 
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = crate::persistence::sqlite_path(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut app = App::new(root.to_path_buf(), db_path);
@@ -893,7 +942,7 @@ pub fn run_tui_inject(
 ) -> Result<String> {
     use ratatui::backend::TestBackend;
 
-    let db_path = crate::paths::lcm_db(root);
+    let db_path = crate::persistence::sqlite_path(root);
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut app = App::new(root.to_path_buf(), db_path);
@@ -972,6 +1021,8 @@ impl App {
             settings_items: load_settings_items(&root),
             settings_selected: 0,
             settings_view: SettingsView::Model,
+            secret_items: load_secret_items(&root),
+            secrets_selected: 0,
             update_view: UpdateViewState::default(),
             settings_menu_open: false,
             settings_menu_index: 0,
@@ -1003,6 +1054,9 @@ impl App {
         };
         if let Some(first) = app.visible_setting_indices().first().copied() {
             app.settings_selected = first;
+        }
+        if !app.secret_items.is_empty() {
+            app.secrets_selected = 0;
         }
         app
     }
@@ -1115,7 +1169,11 @@ impl App {
         if key_event.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key_event.code, KeyCode::Char('s'))
         {
-            self.save_settings()?;
+            if self.page == Page::Settings && self.settings_view == SettingsView::Secrets {
+                self.save_current_secret()?;
+            } else {
+                self.save_settings()?;
+            }
             return Ok(false);
         }
         // Ctrl-X on the Chat page clears any pending image attachments.
@@ -1176,18 +1234,14 @@ impl App {
                         self.page = Page::Settings;
                         self.switch_settings_view(SettingsView::Model);
                     }
-                    Page::Settings => match self.settings_view {
-                        SettingsView::Model => {
-                            self.switch_settings_view(SettingsView::Communication);
-                        }
-                        SettingsView::Communication => {
-                            self.switch_settings_view(SettingsView::Update);
-                        }
-                        SettingsView::Update => {
+                    Page::Settings => {
+                        if self.settings_view == SettingsView::Update {
                             self.page = Page::Chat;
                             self.switch_settings_view(SettingsView::Model);
+                        } else {
+                            self.switch_settings_view(next_settings_view(self.settings_view));
                         }
-                    },
+                    }
                 }
                 return Ok(false);
             }
@@ -1199,15 +1253,13 @@ impl App {
                         self.switch_settings_view(SettingsView::Update);
                     }
                     Page::Skills => self.page = Page::Chat,
-                    Page::Settings => match self.settings_view {
-                        SettingsView::Update => {
-                            self.switch_settings_view(SettingsView::Communication);
+                    Page::Settings => {
+                        if self.settings_view == SettingsView::Model {
+                            self.page = Page::Skills;
+                        } else {
+                            self.switch_settings_view(previous_settings_view(self.settings_view));
                         }
-                        SettingsView::Communication => {
-                            self.switch_settings_view(SettingsView::Model);
-                        }
-                        SettingsView::Model => self.page = Page::Skills,
-                    },
+                    }
                 }
                 return Ok(false);
             }
@@ -1240,6 +1292,9 @@ impl App {
     fn handle_settings_key(&mut self, key_event: KeyEvent) -> Result<()> {
         if self.settings_view == SettingsView::Update {
             return self.handle_update_view_key(key_event);
+        }
+        if self.settings_view == SettingsView::Secrets {
+            return self.handle_secrets_key(key_event);
         }
         if self.settings_menu_open {
             match key_event.code {
@@ -1309,6 +1364,27 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_secrets_key(&mut self, key_event: KeyEvent) -> Result<()> {
+        match key_event.code {
+            KeyCode::Up => self.move_secrets_selection(-1),
+            KeyCode::Down => self.move_secrets_selection(1),
+            KeyCode::Backspace => {
+                if let Some(item) = self.current_secret_mut() {
+                    item.value.pop();
+                }
+            }
+            KeyCode::Enter => self.save_current_secret()?,
+            KeyCode::Char('r') | KeyCode::Char('R') => self.reload_secrets(),
+            KeyCode::Char(ch) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                if let Some(item) = self.current_secret_mut() {
+                    item.value.push(ch);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn cycle_setting(&mut self, forward: bool) -> Result<()> {
@@ -1397,8 +1473,7 @@ impl App {
 
         // Compose the outgoing prompt: for each pending image emit the
         // canonical ctox:image marker on its own line, then the user's
-        // text. The gateway-side vision preprocessor expands each marker
-        // into a real input_image block before dispatch.
+        // text.
         let mut prompt = String::new();
         for image in &self.pending_images {
             prompt.push_str(&vision_preprocessor::encode_image_marker(&image.path));
@@ -1458,7 +1533,7 @@ impl App {
                     self.runtime_switch_in_flight = false;
                     self.runtime_switch_rx = None;
                     self.pending_runtime_transition_cards = None;
-                    self.status_line = format!("Settings saved, but proxy switch failed: {err}");
+                    self.status_line = format!("Settings saved, but runtime switch failed: {err}");
                     self.invalidate_runtime_observations();
                     self.refresh()?;
                 }
@@ -1667,6 +1742,7 @@ impl App {
                     | "OPENROUTER_API_KEY"
                     | "CTOX_CHAT_MODEL_FAMILY"
                     | "CTOX_CHAT_LOCAL_PRESET"
+                    | "CTOX_CHAT_MODEL_MAX_CONTEXT"
                     | "CTOX_CHAT_SKILL_PRESET"
                     | "CTOX_REFRESH_OUTPUT_BUDGET_PCT"
                     | "CTOX_AUTONOMY_LEVEL"
@@ -1712,6 +1788,18 @@ impl App {
                     | "CTO_TEAMS_TENANT_ID"
                     | "CTO_TEAMS_TEAM_ID"
                     | "CTO_TEAMS_CHANNEL_ID"
+            ),
+            SettingsView::Secrets => false,
+            SettingsView::Paths => matches!(
+                item.key,
+                "CTOX_INSTALL_ROOT"
+                    | "CTOX_STATE_ROOT"
+                    | "CTOX_CACHE_ROOT"
+                    | "CTOX_BIN_DIR"
+                    | "CTOX_SKILLS_ROOT"
+                    | "CTOX_GENERATED_SKILLS_ROOT"
+                    | "CTOX_TOOLS_ROOT"
+                    | "CTOX_DEPENDENCIES_ROOT"
             ),
             SettingsView::Update => false,
         }
@@ -1759,6 +1847,7 @@ impl App {
             "CTOX_CHAT_MODEL_FAMILY" => false,
             "CTOX_CHAT_MODEL" => true,
             "CTOX_CHAT_LOCAL_PRESET" => !local_runtime || local_runtime_is_candle,
+            "CTOX_CHAT_MODEL_MAX_CONTEXT" => local_runtime,
             "CTOX_CHAT_SKILL_PRESET" => true,
             "CTOX_REFRESH_OUTPUT_BUDGET_PCT" => true,
             "CTOX_AUTONOMY_LEVEL" => true,
@@ -1831,6 +1920,46 @@ impl App {
         item.value.trim() != item.saved_value.trim()
     }
 
+    fn current_secret(&self) -> Option<&SecretItem> {
+        self.secret_items.get(self.secrets_selected)
+    }
+
+    fn current_secret_mut(&mut self) -> Option<&mut SecretItem> {
+        self.secret_items.get_mut(self.secrets_selected)
+    }
+
+    fn secret_is_dirty(&self, item: &SecretItem) -> bool {
+        item.value != item.saved_value
+    }
+
+    fn move_secrets_selection(&mut self, delta: isize) {
+        if self.secret_items.is_empty() {
+            self.secrets_selected = 0;
+            return;
+        }
+        let next = if delta.is_negative() {
+            self.secrets_selected.saturating_sub(delta.unsigned_abs())
+        } else {
+            (self.secrets_selected + delta as usize).min(self.secret_items.len().saturating_sub(1))
+        };
+        self.secrets_selected = next;
+    }
+
+    fn reload_secrets(&mut self) {
+        self.secret_items = load_secret_items(&self.root);
+        if self.secrets_selected >= self.secret_items.len() {
+            self.secrets_selected = self.secret_items.len().saturating_sub(1);
+        }
+        self.status_line = if self.secret_items.is_empty() {
+            "Reloaded secret store. No encrypted secrets present.".to_string()
+        } else {
+            format!(
+                "Reloaded {} encrypted secret record(s).",
+                self.secret_items.len()
+            )
+        };
+    }
+
     fn move_settings_selection(&mut self, delta: isize) {
         let visible = self.visible_setting_indices();
         if visible.is_empty() {
@@ -1853,7 +1982,9 @@ impl App {
             return;
         }
         self.settings_view = view;
-        if let Some(first) = self.visible_setting_indices().first().copied() {
+        if view == SettingsView::Secrets {
+            self.reload_secrets();
+        } else if let Some(first) = self.visible_setting_indices().first().copied() {
             self.settings_selected = first;
         }
         if view == SettingsView::Update {
@@ -2034,6 +2165,12 @@ impl App {
                         item.value = item.choices[0].to_string();
                     }
                 }
+                "CTOX_CHAT_MODEL_MAX_CONTEXT" => {
+                    item.choices = runtime_plan::supported_chat_context_choices();
+                    if !item.choices.is_empty() && !choice_contains(&item.choices, &item.value) {
+                        item.value = item.choices[0].to_string();
+                    }
+                }
                 "CTOX_CHAT_SKILL_PRESET" => {
                     item.choices = CHAT_SKILL_PRESET_CHOICES.to_vec();
                     if !item.choices.is_empty() && !choice_contains(&item.choices, &item.value) {
@@ -2192,11 +2329,11 @@ impl App {
 
     fn refresh_chat_messages(&mut self) -> Result<()> {
         let settings = self.saved_settings_env_map();
-        let max_context = read_usize_setting(
-            &settings,
-            "CTOX_CHAT_MODEL_MAX_CONTEXT",
-            DEFAULT_MAX_CONTEXT,
-        );
+        let max_context = settings
+            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+            .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+            .map(|value| value as usize)
+            .unwrap_or(DEFAULT_MAX_CONTEXT);
         let engine = lcm::LcmEngine::open(&self.db_path, lcm::LcmConfig::default())?;
         let snapshot = engine.snapshot(turn_loop::CHAT_CONVERSATION_ID)?;
         let continuity = engine.continuity_show_all(turn_loop::CHAT_CONVERSATION_ID)?;
@@ -2296,6 +2433,7 @@ impl App {
         } else {
             &saved_settings
         };
+        let current_runtime_state = runtime_state::load_or_resolve_runtime_state(&self.root).ok();
         let selected_source = infer_chat_source(settings);
         let saved_source = infer_chat_source(&saved_settings);
         let display_source = if estimate_mode {
@@ -2363,7 +2501,16 @@ impl App {
         let saved_context = saved_bundle
             .as_ref()
             .map(|bundle| bundle.selected_plan.max_seq_len as usize);
-        let configured_context = planned_context
+        let configured_context = current_runtime_state
+            .as_ref()
+            .and_then(|state| state.configured_context_tokens.map(|value| value as usize))
+            .or_else(|| {
+                settings
+                    .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+                    .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+                    .map(|value| value as usize)
+            })
+            .or(planned_context)
             .or(saved_context)
             .or_else(|| {
                 engine::runtime_config_for_model(&model)
@@ -2371,15 +2518,20 @@ impl App {
                     .and_then(|runtime| runtime.max_seq_len.map(|value| value as usize))
             })
             .unwrap_or(DEFAULT_MAX_CONTEXT)
-            .min(DEFAULT_MAX_CONTEXT);
+            .min(MAX_CONTEXT_WINDOW);
         let realized_context = if estimate_mode {
             planned_context.unwrap_or(configured_context)
         } else {
             realized_context_from_runtime
+                .or_else(|| {
+                    current_runtime_state
+                        .as_ref()
+                        .and_then(|state| state.realized_context_tokens.map(|value| value as usize))
+                })
                 .or(saved_context)
                 .unwrap_or(configured_context)
         }
-        .min(DEFAULT_MAX_CONTEXT);
+        .min(MAX_CONTEXT_WINDOW);
         let load_observations = collect_runtime_load_observations(
             &self.root,
             runtime_telemetry.as_ref(),
@@ -2450,7 +2602,7 @@ impl App {
         );
         let effective_context = configured_context
             .min(realized_context)
-            .min(DEFAULT_MAX_CONTEXT);
+            .min(MAX_CONTEXT_WINDOW);
         let planned_compact_percent = selected_bundle
             .as_ref()
             .map(|bundle| bundle.selected_plan.compaction_threshold_percent as usize);
@@ -2492,7 +2644,7 @@ impl App {
                     read_usize_setting(
                         settings,
                         "CTOX_CHAT_COMPACTION_MIN_TOKENS",
-                        DEFAULT_COMPACTION_MIN_TOKENS,
+                        default_compaction_min_tokens(effective_context),
                     )
                 })
         } else {
@@ -2502,7 +2654,7 @@ impl App {
                     read_usize_setting(
                         &saved_settings,
                         "CTOX_CHAT_COMPACTION_MIN_TOKENS",
-                        DEFAULT_COMPACTION_MIN_TOKENS,
+                        default_compaction_min_tokens(effective_context),
                     )
                 })
         };
@@ -2624,6 +2776,47 @@ impl App {
         let _ = save_model_perf_stats(&self.root, &self.model_perf_stats);
     }
 
+    fn save_current_secret(&mut self) -> Result<()> {
+        let Some(current) = self.current_secret().cloned() else {
+            self.status_line = "No secret selected.".to_string();
+            return Ok(());
+        };
+        if !self.secret_is_dirty(&current) {
+            self.status_line = format!("Secret {}/{} unchanged.", current.scope, current.name);
+            return Ok(());
+        }
+        secrets::write_secret_record(
+            &self.root,
+            &current.scope,
+            &current.name,
+            &current.value,
+            current.description.clone(),
+            current.metadata.clone(),
+        )?;
+        if current.scope.eq_ignore_ascii_case("credentials") {
+            if let Some(setting) = self
+                .settings_items
+                .iter_mut()
+                .find(|item| item.key == current.name)
+            {
+                setting.value = current.value.clone();
+                setting.saved_value = current.value.clone();
+            }
+        }
+        let selected_scope = current.scope.clone();
+        let selected_name = current.name.clone();
+        self.reload_secrets();
+        if let Some(index) = self
+            .secret_items
+            .iter()
+            .position(|item| item.scope == selected_scope && item.name == selected_name)
+        {
+            self.secrets_selected = index;
+        }
+        self.status_line = format!("Saved encrypted secret {}/{}.", current.scope, current.name);
+        Ok(())
+    }
+
     fn save_settings(&mut self) -> Result<()> {
         let previous_env = runtime_env::load_runtime_env_map(&self.root).unwrap_or_default();
         let previous_runtime_state = runtime_state::load_or_resolve_runtime_state(&self.root)?;
@@ -2640,7 +2833,14 @@ impl App {
             if trimmed.is_empty() {
                 operator_env_map.remove(item.key);
             } else {
-                operator_env_map.insert(item.key.to_string(), trimmed.to_string());
+                let persisted_value = if item.key == "CTOX_CHAT_MODEL_MAX_CONTEXT" {
+                    runtime_plan::parse_chat_context_tokens(trimmed)
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| trimmed.to_string())
+                } else {
+                    trimmed.to_string()
+                };
+                operator_env_map.insert(item.key.to_string(), persisted_value);
             }
         }
         if let Some(family_label) = operator_env_map
@@ -2672,6 +2872,14 @@ impl App {
             selection_env_map.insert("CTOX_CHAT_LOCAL_PRESET".to_string(), preset.to_string());
         } else {
             selection_env_map.remove("CTOX_CHAT_LOCAL_PRESET");
+        }
+        if let Some(context) = self.value_for_setting("CTOX_CHAT_MODEL_MAX_CONTEXT") {
+            selection_env_map.insert(
+                "CTOX_CHAT_MODEL_MAX_CONTEXT".to_string(),
+                context.to_string(),
+            );
+        } else {
+            selection_env_map.remove("CTOX_CHAT_MODEL_MAX_CONTEXT");
         }
         normalize_runtime_model_settings(&mut selection_env_map);
         if infer_api_provider(&selection_env_map).eq_ignore_ascii_case("local")
@@ -2705,10 +2913,14 @@ impl App {
                     None
                 }
             });
+        let next_context = selection_env_map
+            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+            .and_then(|value| runtime_plan::parse_chat_context_tokens(value));
 
         let mut next_runtime_state = previous_runtime_state.clone();
         next_runtime_state.local_runtime =
             runtime_state::infer_local_runtime_kind_from_env_map(&selection_env_map);
+        next_runtime_state.configured_context_tokens = next_context;
         next_runtime_state.boost.model = self
             .value_for_setting("CTOX_CHAT_MODEL_BOOST")
             .map(ToOwned::to_owned);
@@ -2736,19 +2948,21 @@ impl App {
                 infer_local_runtime(&selection_env_map).as_str(),
                 Some(next),
                 next_preset.as_deref(),
+                next_context,
             )
-            .then(|| (next.to_string(), next_preset.clone()))
+            .then(|| (next.to_string(), next_preset.clone(), next_context))
         });
         self.settings_dirty = false;
         for item in &mut self.settings_items {
             item.saved_value = item.value.clone();
         }
         self.refresh_dynamic_setting_choices();
-        if self.service_status.running || self.runtime_health.proxy_ready {
+        self.refresh_skill_catalog();
+        if self.service_status.running || self.runtime_health.runtime_ready {
             let _ = supervisor::ensure_persistent_backends(&self.root);
         }
         self.invalidate_runtime_observations();
-        if let Some((model, preset)) = pending_switch {
+        if let Some((model, preset, context)) = pending_switch {
             let (tx, rx) = mpsc::channel();
             let root = self.root.clone();
             let status_model = model.clone();
@@ -2757,8 +2971,9 @@ impl App {
             self.runtime_switch_in_flight = true;
             self.runtime_switch_rx = Some(rx);
             thread::spawn(move || {
-                let result = apply_runtime_model_selection(&root, &model, preset.as_deref())
-                    .map_err(|err| err.to_string());
+                let result =
+                    apply_runtime_model_selection(&root, &model, preset.as_deref(), context)
+                        .map_err(|err| err.to_string());
                 let _ = tx.send(result);
             });
             self.status_line = format!(
@@ -3101,11 +3316,35 @@ impl App {
 }
 
 fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
-    let mut catalog = Vec::new();
-    let mut seen = HashSet::new();
-    for base in skill_roots(root) {
-        collect_skill_entries(root, &base, &mut seen, &mut catalog);
-    }
+    let _ = crate::skill_store::bootstrap_from_roots(root);
+    let mut catalog = crate::skill_store::list_skill_bundles(root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|bundle| {
+            let files =
+                crate::skill_store::list_skill_files(root, &bundle.skill_id).unwrap_or_default();
+            let helper_tools = files
+                .iter()
+                .filter_map(|file| file.relative_path.strip_prefix("scripts/"))
+                .filter(|value| !value.contains('/'))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            let resources = summarize_skill_resources(&files);
+            SkillCatalogEntry {
+                name: bundle.skill_name,
+                class: skill_class_from_store(&bundle.class),
+                state: skill_state_from_store(&bundle.state),
+                skill_path: bundle
+                    .source_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(format!("sqlite://{}", bundle.skill_id))),
+                description: bundle.description,
+                helper_tools,
+                resources,
+            }
+        })
+        .collect::<Vec<_>>();
     catalog.sort_by(|left, right| {
         left.class
             .rank()
@@ -3116,343 +3355,82 @@ fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
     catalog
 }
 
-fn skill_roots(root: &Path) -> Vec<PathBuf> {
-    let mut roots = vec![root.join("skills")];
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        roots.push(PathBuf::from(codex_home).join("skills"));
+fn skill_class_from_store(value: &str) -> SkillClass {
+    match value.trim() {
+        "codex_core" => SkillClass::CodexCore,
+        "installed_packs" => SkillClass::InstalledPacks,
+        "personal" => SkillClass::Personal,
+        _ => SkillClass::CtoxCore,
     }
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(&home).join(".codex/skills"));
-        roots.push(PathBuf::from(home).join(".agents/skills"));
-    }
-    roots
 }
 
-fn collect_skill_entries(
-    root: &Path,
-    base: &Path,
-    seen: &mut HashSet<PathBuf>,
-    catalog: &mut Vec<SkillCatalogEntry>,
-) {
-    if !base.exists() {
-        return;
+fn skill_state_from_store(value: &str) -> SkillState {
+    match value.trim() {
+        "authored" => SkillState::Authored,
+        "generated" => SkillState::Generated,
+        "draft" => SkillState::Draft,
+        _ => SkillState::Stable,
     }
-    let Ok(base_canon) = std::fs::canonicalize(base) else {
-        return;
-    };
-    let mut queue = vec![base_canon];
-    while let Some(dir) = queue.pop() {
-        let skill_md = dir.join("SKILL.md");
-        if skill_md.is_file() {
-            if let Ok(canon_skill) = std::fs::canonicalize(&skill_md) {
-                if seen.insert(canon_skill) {
-                    if let Some(entry) = parse_skill_catalog_entry(root, base, &dir, &skill_md) {
-                        catalog.push(entry);
-                    }
+}
+
+fn summarize_skill_resources(files: &[crate::skill_store::SkillFileView]) -> Vec<String> {
+    let mut groups: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    for prefix in ["references/", "assets/", "templates/", "agents/"] {
+        groups.insert(prefix, Vec::new());
+    }
+    for file in files {
+        for prefix in ["references/", "assets/", "templates/", "agents/"] {
+            if let Some(stripped) = file.relative_path.strip_prefix(prefix) {
+                let name = stripped.split('/').next().unwrap_or(stripped).to_string();
+                let group = groups.get_mut(prefix).expect("group inserted");
+                if !group.contains(&name) {
+                    group.push(name);
                 }
             }
+        }
+    }
+    let mut out = Vec::new();
+    for (prefix, mut entries) in groups {
+        if entries.is_empty() {
             continue;
         }
-        let Ok(read_dir) = std::fs::read_dir(&dir) else {
-            continue;
+        entries.sort();
+        let label = prefix.trim_end_matches('/');
+        let preview = entries
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if entries.len() > 5 {
+            format!(" (+{} more)", entries.len() - 5)
+        } else {
+            String::new()
         };
-        for child in read_dir.flatten() {
-            let child_path = child.path();
-            if child
-                .file_type()
-                .map(|file_type| file_type.is_dir())
-                .unwrap_or(false)
-            {
-                queue.push(child_path);
-            }
-        }
+        out.push(format!("{label}: {preview}{suffix}"));
     }
+    out
 }
 
-fn parse_skill_catalog_entry(
+fn apply_runtime_model_selection(
     root: &Path,
-    base: &Path,
-    dir: &Path,
-    skill_md: &Path,
-) -> Option<SkillCatalogEntry> {
-    let body = std::fs::read_to_string(skill_md).ok()?;
-    let metadata = parse_skill_catalog_metadata(&body);
-    let (class, state) = classify_skill(root, base, skill_md, &metadata);
-    Some(SkillCatalogEntry {
-        name: dir.file_name()?.to_string_lossy().to_string(),
-        class,
-        state,
-        skill_path: skill_md.to_path_buf(),
-        description: parse_skill_description(&body),
-        helper_tools: list_named_children(&dir.join("scripts")),
-        resources: collect_resource_summaries(dir),
-    })
-}
-
-fn parse_skill_description(body: &str) -> String {
-    let mut in_code_fence = false;
-    for line in body.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_fence = !in_code_fence;
-            continue;
-        }
-        if in_code_fence
-            || trimmed.is_empty()
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('-')
-            || trimmed.starts_with('*')
-            || trimmed.starts_with('<')
-        {
-            continue;
-        }
-        return trimmed.to_string();
-    }
-    "No inline summary available.".to_string()
-}
-
-fn collect_resource_summaries(dir: &Path) -> Vec<String> {
-    let mut resources = Vec::new();
-    push_resource_summary(&mut resources, "references", &dir.join("references"));
-    push_resource_summary(&mut resources, "assets", &dir.join("assets"));
-    push_resource_summary(&mut resources, "templates", &dir.join("templates"));
-    push_resource_summary(&mut resources, "agents", &dir.join("agents"));
-    resources
-}
-
-fn push_resource_summary(out: &mut Vec<String>, label: &str, dir: &Path) {
-    let entries = list_named_children(dir);
-    if entries.is_empty() {
-        return;
-    }
-    let preview = entries
-        .iter()
-        .take(5)
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let suffix = if entries.len() > 5 {
-        format!(" (+{} more)", entries.len() - 5)
-    } else {
-        String::new()
-    };
-    out.push(format!("{label}: {preview}{suffix}"));
-}
-
-fn list_named_children(dir: &Path) -> Vec<String> {
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut entries = read_dir
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let file_type = entry.file_type().ok()?;
-            if !(file_type.is_file() || file_type.is_dir()) {
-                return None;
-            }
-            Some(path.file_name()?.to_string_lossy().to_string())
-        })
-        .collect::<Vec<_>>();
-    entries.sort();
-    entries
-}
-
-fn parse_skill_catalog_metadata(body: &str) -> SkillCatalogMetadata {
-    let Some(frontmatter) = extract_frontmatter(body) else {
-        return SkillCatalogMetadata::default();
-    };
-
-    let mut metadata = SkillCatalogMetadata::default();
-    for raw_line in frontmatter.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((key, raw_value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
-        match key.trim() {
-            "class" => metadata.class = parse_skill_class(value),
-            "state" => metadata.state = parse_skill_state(value),
-            _ => {}
-        }
-    }
-    metadata
-}
-
-fn extract_frontmatter(body: &str) -> Option<&str> {
-    let body = body.strip_prefix("---\n")?;
-    let end = body.find("\n---")?;
-    body.get(..end)
-}
-
-fn parse_skill_class(value: &str) -> Option<SkillClass> {
-    if value.eq_ignore_ascii_case("codex-core")
-        || value.eq_ignore_ascii_case("codex_core")
-        || value.eq_ignore_ascii_case("codex")
-    {
-        return Some(SkillClass::CodexCore);
-    }
-    if value.eq_ignore_ascii_case("ctox-core")
-        || value.eq_ignore_ascii_case("ctox_core")
-        || value.eq_ignore_ascii_case("ctox")
-    {
-        return Some(SkillClass::CtoxCore);
-    }
-    if value.eq_ignore_ascii_case("installed-packs")
-        || value.eq_ignore_ascii_case("installed_pack")
-        || value.eq_ignore_ascii_case("pack")
-        || value.eq_ignore_ascii_case("packs")
-        || value.eq_ignore_ascii_case("curated")
-    {
-        return Some(SkillClass::InstalledPacks);
-    }
-    if value.eq_ignore_ascii_case("personal") {
-        return Some(SkillClass::Personal);
-    }
-    None
-}
-
-fn parse_skill_state(value: &str) -> Option<SkillState> {
-    if value.eq_ignore_ascii_case("stable") {
-        return Some(SkillState::Stable);
-    }
-    if value.eq_ignore_ascii_case("authored") {
-        return Some(SkillState::Authored);
-    }
-    if value.eq_ignore_ascii_case("generated") {
-        return Some(SkillState::Generated);
-    }
-    if value.eq_ignore_ascii_case("draft") {
-        return Some(SkillState::Draft);
-    }
-    None
-}
-
-fn classify_skill(
-    root: &Path,
-    base: &Path,
-    skill_md: &Path,
-    metadata: &SkillCatalogMetadata,
-) -> (SkillClass, SkillState) {
-    let mut class = metadata
-        .class
-        .unwrap_or_else(|| infer_skill_class(root, base, skill_md));
-    let mut state = metadata
-        .state
-        .unwrap_or_else(|| infer_skill_state(root, base, skill_md, class));
-
-    if class != SkillClass::Personal
-        && matches!(state, SkillState::Authored | SkillState::Generated)
-    {
-        state = SkillState::Stable;
-    }
-    if matches!(state, SkillState::Draft) && class == SkillClass::CodexCore {
-        class = SkillClass::Personal;
-    }
-    (class, state)
-}
-
-fn infer_skill_class(root: &Path, base: &Path, skill_md: &Path) -> SkillClass {
-    let repo_skills_root = root.join("skills");
-    if path_matches_prefix(skill_md, &repo_skills_root.join(".curated")) {
-        return SkillClass::InstalledPacks;
-    }
-    if path_matches_prefix(skill_md, &repo_skills_root.join(".system")) {
-        return SkillClass::CtoxCore;
-    }
-    if path_matches_prefix(skill_md, &repo_skills_root) {
-        return SkillClass::CtoxCore;
-    }
-
-    for global_root in global_skill_roots() {
-        if path_matches_prefix(skill_md, &global_root.join(".system")) {
-            return SkillClass::CodexCore;
-        }
-        if path_matches_prefix(skill_md, &global_root.join("packs")) {
-            return SkillClass::InstalledPacks;
-        }
-        if path_matches_prefix(skill_md, &global_root.join("personal")) {
-            return SkillClass::Personal;
-        }
-        if path_matches_prefix(skill_md, &global_root) {
-            return SkillClass::Personal;
-        }
-    }
-
-    let base_text = base.to_string_lossy();
-    let path_text = skill_md.to_string_lossy();
-    if (base_text.contains(".codex/skills") || base_text.contains(".agents/skills"))
-        && path_text.contains("/.system/")
-    {
-        SkillClass::CodexCore
-    } else if base_text.contains(".codex/skills") || base_text.contains(".agents/skills") {
-        SkillClass::Personal
-    } else {
-        SkillClass::CtoxCore
-    }
-}
-
-fn infer_skill_state(root: &Path, _base: &Path, skill_md: &Path, class: SkillClass) -> SkillState {
-    if class == SkillClass::Personal {
-        for global_root in global_skill_roots() {
-            if path_matches_prefix(skill_md, &global_root.join("personal/generated")) {
-                return SkillState::Generated;
-            }
-            if path_matches_prefix(skill_md, &global_root.join("personal/authored")) {
-                return SkillState::Authored;
-            }
-        }
-        let path_text = skill_md.to_string_lossy();
-        if path_text.contains("/personal/generated/") {
-            return SkillState::Generated;
-        }
-        if path_text.contains("/personal/authored/") {
-            return SkillState::Authored;
-        }
-        return SkillState::Authored;
-    }
-
-    if path_matches_prefix(skill_md, &root.join("skills/drafts")) {
-        return SkillState::Draft;
-    }
-
-    SkillState::Stable
-}
-
-fn global_skill_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        roots.push(PathBuf::from(codex_home).join("skills"));
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        roots.push(PathBuf::from(&home).join(".codex/skills"));
-        roots.push(PathBuf::from(home).join(".agents/skills"));
-    }
-    roots
-}
-
-fn path_matches_prefix(path: &Path, prefix: &Path) -> bool {
-    if path.starts_with(prefix) {
-        return true;
-    }
-
-    match (std::fs::canonicalize(path), std::fs::canonicalize(prefix)) {
-        (Ok(path), Ok(prefix)) => path.starts_with(prefix),
-        _ => false,
-    }
-}
-
-fn apply_runtime_model_selection(root: &Path, model: &str, preset: Option<&str>) -> Result<String> {
+    model: &str,
+    preset: Option<&str>,
+    context: Option<u32>,
+) -> Result<String> {
     let mut runtime_state = runtime_state::load_or_resolve_runtime_state(root)?;
     runtime_state.boost.active_until_epoch = None;
     runtime_state.boost.reason = None;
     let mut operator_env_map = runtime_env::load_runtime_env_map(root).unwrap_or_default();
     operator_env_map.retain(|key, _| !runtime_state::is_runtime_state_key(key));
     runtime_env::save_runtime_state_projection(root, &runtime_state, &operator_env_map)?;
-    let outcome = runtime_control::execute_runtime_switch(root, model, preset)?;
+    let context = context.map(|value| value.to_string());
+    let outcome = runtime_control::execute_runtime_switch_with_context(
+        root,
+        model,
+        preset,
+        context.as_deref(),
+    )?;
     Ok(format!(
         "Settings saved and runtime updated: {} ({}).",
         outcome.active_model,
@@ -3520,6 +3498,41 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         .get("CTOX_BOOST_DEFAULT_MINUTES")
         .cloned()
         .unwrap_or_else(|| "20".to_string());
+    let resolved_install_root = runtime_env::env_or_config(root, "CTOX_INSTALL_ROOT")
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| resolved_install_root_for_settings(root).map(|path| path.display().to_string()))
+        .unwrap_or_default();
+    let resolved_state_root = persisted_path_setting(
+        root,
+        "CTOX_STATE_ROOT",
+        resolved_state_root_for_settings(root),
+    );
+    let resolved_cache_root = persisted_path_setting(
+        root,
+        "CTOX_CACHE_ROOT",
+        resolved_cache_root_for_settings(root),
+    );
+    let resolved_bin_dir = persisted_path_setting(root, "CTOX_BIN_DIR", default_bin_dir());
+    let resolved_skills_root = persisted_path_setting(
+        root,
+        "CTOX_SKILLS_ROOT",
+        resolved_state_root_for_settings(root).join("skills"),
+    );
+    let resolved_generated_skills_root = persisted_path_setting(
+        root,
+        "CTOX_GENERATED_SKILLS_ROOT",
+        resolved_state_root_for_settings(root).join("generated-skills"),
+    );
+    let resolved_tools_root = persisted_path_setting(
+        root,
+        "CTOX_TOOLS_ROOT",
+        resolved_state_root_for_settings(root).join("tools"),
+    );
+    let resolved_dependencies_root = persisted_path_setting(
+        root,
+        "CTOX_DEPENDENCIES_ROOT",
+        resolved_state_root_for_settings(root).join("dependencies"),
+    );
     vec![
         SettingItem {
             key: "CTOX_SERVICE_TOGGLE",
@@ -3660,6 +3673,36 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             kind: SettingKind::Env,
         },
         SettingItem {
+            key: "CTOX_CHAT_MODEL_MAX_CONTEXT",
+            label: "Context Window",
+            value: runtime_plan::format_chat_context_choice(
+                current_runtime_state
+                    .as_ref()
+                    .and_then(|state| state.configured_context_tokens)
+                    .or_else(|| {
+                        env_map
+                            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+                            .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+                    })
+                    .unwrap_or_else(runtime_plan::default_chat_context_tokens),
+            ),
+            saved_value: runtime_plan::format_chat_context_choice(
+                current_runtime_state
+                    .as_ref()
+                    .and_then(|state| state.configured_context_tokens)
+                    .or_else(|| {
+                        env_map
+                            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+                            .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+                    })
+                    .unwrap_or_else(runtime_plan::default_chat_context_tokens),
+            ),
+            secret: false,
+            choices: runtime_plan::supported_chat_context_choices(),
+            help: "Choose the target chat context window. CTOX derives runtime planning, compaction floors, and refresh budgets from this setting.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
             key: "CTOX_CHAT_SKILL_PRESET",
             label: "Skill Preset",
             value: runtime_state::ChatSkillPreset::from_label(
@@ -3712,7 +3755,7 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
                 .unwrap_or_else(|| "balanced".to_string()),
             secret: false,
             choices: vec!["progressive", "balanced", "defensive"],
-            help: "How eagerly CTOX asks for owner approval before acting. Progressive: execute directly, auto-close approval-gate items (use for benchmarks / non-interactive runs). Balanced (default): approval-gate only for genuinely high-impact moves. Defensive: ask for approval on anything touching infrastructure, external services, or irreversible state, and nag faster.",
+            help: "How eagerly CTOX asks for owner approval before acting. Progressive: execute directly, auto-close approval-gate items (use for unattended / non-interactive runs). Balanced (default): approval-gate only for genuinely high-impact moves. Defensive: ask for approval on anything touching infrastructure, external services, or irreversible state, and nag faster.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -3732,7 +3775,7 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             saved_value: boost_minutes,
             secret: false,
             choices: vec!["10", "15", "20", "30", "45", "60"],
-            help: "Default lifetime in minutes for an automatic boost lease before the proxy falls back to the base model.",
+            help: "Default lifetime in minutes for an automatic boost lease before the runtime falls back to the base model.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -4249,6 +4292,86 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             help: "Channel ID within the team to monitor (optional).",
             kind: SettingKind::Env,
         },
+        SettingItem {
+            key: "CTOX_INSTALL_ROOT",
+            label: "Install Root",
+            value: resolved_install_root.clone(),
+            saved_value: resolved_install_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Managed release root for the live CTOX installation. Keep this explicit so the service does not spread across arbitrary shell defaults.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_STATE_ROOT",
+            label: "State Root",
+            value: resolved_state_root.clone(),
+            saved_value: resolved_state_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Primary mutable runtime root. SQLite, generated skills, queues, logs, and other live CTOX state should remain underneath this directory.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_CACHE_ROOT",
+            label: "Cache Root",
+            value: resolved_cache_root.clone(),
+            saved_value: resolved_cache_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Download and build cache root for install/update flows.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_BIN_DIR",
+            label: "Binary Dir",
+            value: resolved_bin_dir.clone(),
+            saved_value: resolved_bin_dir,
+            secret: false,
+            choices: Vec::new(),
+            help: "Directory that should contain the public CTOX launchers such as `ctox` and `ctox-desktop`.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_SKILLS_ROOT",
+            label: "Skills Root",
+            value: resolved_skills_root.clone(),
+            saved_value: resolved_skills_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Mutable installed/authored skill bundles root. CTOX now prefers this explicit path instead of roaming through `~/.codex` or other home-directory conventions.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_GENERATED_SKILLS_ROOT",
+            label: "Generated Skills",
+            value: resolved_generated_skills_root.clone(),
+            saved_value: resolved_generated_skills_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Runtime-generated skill bundle root. Keep generated skills under the CTOX state tree instead of scattering them elsewhere on the host.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_TOOLS_ROOT",
+            label: "Tools Root",
+            value: resolved_tools_root.clone(),
+            saved_value: resolved_tools_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Canonical root for CTOX-managed helper tools and bundled operational binaries.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_DEPENDENCIES_ROOT",
+            label: "Dependencies",
+            value: resolved_dependencies_root.clone(),
+            saved_value: resolved_dependencies_root,
+            secret: false,
+            choices: Vec::new(),
+            help: "Canonical root for heavyweight downloaded dependencies and model-side assets that must not leak across the wider system.",
+            kind: SettingKind::Env,
+        },
         // --- Phase 5: compact policy knobs ---------------------------------
         SettingItem {
             key: "CTOX_USE_DIRECT_SESSION",
@@ -4333,6 +4456,33 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
     ]
 }
 
+fn load_secret_items(root: &Path) -> Vec<SecretItem> {
+    let mut items = secrets::list_secret_records(root, None)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|record| {
+            let value =
+                secrets::read_secret_value(root, &record.scope, &record.secret_name).ok()?;
+            Some(SecretItem {
+                scope: record.scope,
+                name: record.secret_name,
+                description: record.description,
+                metadata: record.metadata,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                value: value.clone(),
+                saved_value: value,
+            })
+        })
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        left.scope
+            .cmp(&right.scope)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    items
+}
+
 fn settings_map_from_items(items: &[SettingItem]) -> BTreeMap<String, String> {
     let mut env_map = BTreeMap::new();
     for item in items {
@@ -4388,6 +4538,7 @@ fn relevant_header_estimate_setting(key: &str) -> bool {
             | "OPENROUTER_API_KEY"
             | "CTOX_CHAT_MODEL"
             | "CTOX_CHAT_LOCAL_PRESET"
+            | "CTOX_CHAT_MODEL_MAX_CONTEXT"
             | "CTOX_CHAT_SKILL_PRESET"
     )
 }
@@ -4398,6 +4549,7 @@ fn runtime_selection_changed(
     desired_local_runtime: &str,
     desired_model: Option<&str>,
     desired_preset: Option<&str>,
+    desired_context: Option<u32>,
 ) -> bool {
     let previous_model = previous_state
         .base_or_selected_model()
@@ -4415,6 +4567,9 @@ fn runtime_selection_changed(
         return true;
     }
     if previous_model != desired_model {
+        return true;
+    }
+    if previous_state.configured_context_tokens != desired_context {
         return true;
     }
     if previous_state.source.is_local() {
@@ -4444,6 +4599,7 @@ fn is_model_runtime_setting(key: &str) -> bool {
             | "CTOX_CHAT_MODEL_FAMILY"
             | "CTOX_CHAT_MODEL"
             | "CTOX_CHAT_LOCAL_PRESET"
+            | "CTOX_CHAT_MODEL_MAX_CONTEXT"
             | "CTOX_EMBEDDING_MODEL"
             | "CTOX_STT_MODEL"
             | "CTOX_TTS_MODEL"
@@ -4893,35 +5049,16 @@ fn collect_runtime_load_observations(
     observations
 }
 
-fn local_health_check(url: &str) -> bool {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_millis(100))
-        .timeout_read(Duration::from_millis(150))
-        .timeout_write(Duration::from_millis(150))
-        .build();
-    match agent.get(url).call() {
-        Ok(response) => response.status() < 500,
-        Err(ureq::Error::Status(code, _)) => code < 500,
-        Err(_) => false,
-    }
-}
-
 fn auxiliary_backend_ready(
     resolved_runtime: Option<&runtime_kernel::InferenceRuntimeKernel>,
     role: engine::AuxiliaryRole,
 ) -> Option<bool> {
     let binding = resolved_runtime?.binding_for_auxiliary_role(role)?;
-    Some(local_health_check(&format!(
-        "{}{}",
-        binding.base_url.trim_end_matches('/'),
-        binding.health_path
-    )))
+    Some(binding.transport.probe())
 }
 
 fn runtime_health_state(root: &Path, telemetry: Option<&RuntimeTelemetry>) -> RuntimeHealthState {
     let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
-    // When inference is purely API-backed the local proxy is not required;
-    // treat it as healthy so the TUI does not show a misleading "degraded".
     let chat_source_is_api = runtime_kernel::InferenceRuntimeKernel::resolve(root)
         .ok()
         .map(|k| {
@@ -4931,22 +5068,16 @@ fn runtime_health_state(root: &Path, telemetry: Option<&RuntimeTelemetry>) -> Ru
             )
         })
         .unwrap_or(false);
-    let proxy_ready = if chat_source_is_api && !supervisor::boundary_proxy_is_managed(root) {
-        true
-    } else {
-        telemetry
-            .map(|value| value.backend_healthy)
-            .or_else(|| (!supervisor::boundary_proxy_is_managed(root)).then_some(true))
-            .unwrap_or_else(|| {
-                crate::inference::gateway::current_runtime_telemetry(root).backend_healthy
-            })
-    };
-    // When running in pure API mode without a managed proxy, local
-    // auxiliary backends (embedding, STT, TTS) are optional — mark them
-    // as unknown (None) instead of failed so the TUI stays "healthy".
-    let skip_aux = chat_source_is_api && !supervisor::boundary_proxy_is_managed(root);
+    let runtime_ready = telemetry
+        .map(|value| value.backend_healthy)
+        .unwrap_or_else(|| {
+            crate::inference::gateway::current_runtime_telemetry(root).backend_healthy
+        });
+    // In pure API mode local auxiliaries are optional; keep them unknown
+    // instead of degraded when no local runtime is expected.
+    let skip_aux = chat_source_is_api;
     RuntimeHealthState {
-        proxy_ready,
+        runtime_ready,
         embedding_ready: if skip_aux {
             None
         } else {
@@ -5514,14 +5645,18 @@ fn previous_settings_view(view: SettingsView) -> SettingsView {
     match view {
         SettingsView::Model => SettingsView::Update,
         SettingsView::Communication => SettingsView::Model,
-        SettingsView::Update => SettingsView::Communication,
+        SettingsView::Secrets => SettingsView::Communication,
+        SettingsView::Paths => SettingsView::Secrets,
+        SettingsView::Update => SettingsView::Paths,
     }
 }
 
 fn next_settings_view(view: SettingsView) -> SettingsView {
     match view {
         SettingsView::Model => SettingsView::Communication,
-        SettingsView::Communication => SettingsView::Update,
+        SettingsView::Communication => SettingsView::Secrets,
+        SettingsView::Secrets => SettingsView::Paths,
+        SettingsView::Paths => SettingsView::Update,
         SettingsView::Update => SettingsView::Model,
     }
 }
@@ -5618,7 +5753,7 @@ fn estimate_max_context_window(
     live_context: usize,
 ) -> usize {
     if cards.is_empty() {
-        return DEFAULT_MAX_CONTEXT;
+        return MAX_CONTEXT_WINDOW;
     }
     let target_isq = settings
         .get("CTOX_ENGINE_ISQ")
@@ -5638,7 +5773,7 @@ fn estimate_max_context_window(
         .filter(|card| selected_gpu_indices.contains(&card.index))
         .collect::<Vec<_>>();
     if selected_cards.is_empty() {
-        return DEFAULT_MAX_CONTEXT;
+        return MAX_CONTEXT_WINDOW;
     }
     let total_budget_mb = selected_cards
         .iter()
@@ -5674,7 +5809,7 @@ fn estimate_max_context_window(
     } else {
         ((budget_f - fixed_overhead_mb) / slope_mb_per_token).round() as usize
     };
-    estimated_context.clamp(2048, DEFAULT_MAX_CONTEXT)
+    estimated_context.clamp(2048, MAX_CONTEXT_WINDOW)
 }
 
 fn render_qr_lines(payload: &str) -> Option<Vec<String>> {
@@ -5979,7 +6114,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         let root = temp_root("composer-badge");
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = crate::persistence::sqlite_path(&root);
         let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).unwrap();
 
         let mut app = App::new(root.clone(), db_path);
@@ -6033,7 +6168,7 @@ mod tests {
     #[test]
     fn image_slash_command_resolves_existing_file_and_rejects_non_image() {
         let root = temp_root("image-slash");
-        let db_path = crate::paths::lcm_db(root);
+        let db_path = crate::persistence::sqlite_path(&root);
         let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).unwrap();
         let mut app = App::new(root.clone(), db_path);
 
@@ -6154,7 +6289,7 @@ mod tests {
         assert!(choices.contains(&"Qwen 3.5"));
         assert!(choices.contains(&"Gemma 4"));
         assert!(!choices.contains(&"GPT-OSS"));
-        assert!(!choices.contains(&"Nemotron Cascade"));
+        assert!(!choices.contains(&"Nemotron Cascade 2"));
         assert!(!choices.contains(&"GLM 4.7 Flash"));
     }
 
@@ -6191,6 +6326,10 @@ mod tests {
         app.handle_settings_key(KeyEvent::new(KeyCode::Right, KeyModifiers::ALT))
             .unwrap();
         assert_eq!(app.settings_view, SettingsView::Communication);
+
+        app.handle_settings_key(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.settings_view, SettingsView::Secrets);
     }
 
     #[test]
@@ -6215,13 +6354,23 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Secrets);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Paths);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
         assert_eq!(app.page, Page::Chat);
         assert_eq!(app.settings_view, SettingsView::Model);
 
         app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
             .unwrap();
         assert_eq!(app.page, Page::Settings);
-        assert_eq!(app.settings_view, SettingsView::Communication);
+        assert_eq!(app.settings_view, SettingsView::Update);
     }
 
     #[test]
@@ -6424,11 +6573,9 @@ mod tests {
         let models = configured_runtime_models(&env_map);
 
         assert!(!models.iter().any(|model| model == "gpt-5.4-mini"));
-        assert!(
-            models
-                .iter()
-                .any(|model| model == "Qwen/Qwen3-Embedding-0.6B")
-        );
+        assert!(models
+            .iter()
+            .any(|model| model == "Qwen/Qwen3-Embedding-0.6B"));
     }
 
     #[test]
@@ -6581,7 +6728,7 @@ mod tests {
             ],
         }];
         let runtime_health = RuntimeHealthState {
-            proxy_ready: false,
+            runtime_ready: false,
             embedding_ready: Some(true),
             stt_ready: Some(true),
             tts_ready: Some(true),
@@ -6675,7 +6822,7 @@ mod tests {
         );
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "Qwen/Qwen3.5-35B-A3B".to_string(),
+            "Qwen/Qwen3.6-35B-A3B".to_string(),
         );
         runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
@@ -6713,12 +6860,10 @@ mod tests {
         assert_eq!(entry.class, SkillClass::CtoxCore);
         assert_eq!(entry.state, SkillState::Stable);
         assert!(entry.helper_tools.iter().any(|tool| tool == "demo_tool.py"));
-        assert!(
-            entry
-                .resources
-                .iter()
-                .any(|resource| resource.contains("references:"))
-        );
+        assert!(entry
+            .resources
+            .iter()
+            .any(|resource| resource.contains("references:")));
     }
 
     #[test]
@@ -6732,16 +6877,28 @@ mod tests {
         )
         .unwrap();
 
-        let codex_root = root.join("sandbox/.codex/skills");
-        let codex_dir = codex_root.join(".system/openai-docs");
-        fs::create_dir_all(&codex_dir).unwrap();
+        let external_root = root.join("sandbox/managed-skills");
+        let generated_root = root.join("runtime/generated-skills");
+        let mut env_map = BTreeMap::new();
+        env_map.insert(
+            "CTOX_SKILLS_ROOT".to_string(),
+            external_root.display().to_string(),
+        );
+        env_map.insert(
+            "CTOX_GENERATED_SKILLS_ROOT".to_string(),
+            generated_root.display().to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
+
+        let authored_dir = external_root.join("authored/openai-docs");
+        fs::create_dir_all(&authored_dir).unwrap();
         fs::write(
-            codex_dir.join("SKILL.md"),
+            authored_dir.join("SKILL.md"),
             "---\nname: openai-docs\ndescription: docs\n---\n",
         )
         .unwrap();
 
-        let personal_dir = codex_root.join("personal/generated/note-helper");
+        let personal_dir = generated_root.join("note-helper");
         fs::create_dir_all(&personal_dir).unwrap();
         fs::write(
             personal_dir.join("SKILL.md"),
@@ -6749,10 +6906,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut catalog = Vec::new();
-        let mut seen = HashSet::new();
-        collect_skill_entries(&root, &root.join("skills"), &mut seen, &mut catalog);
-        collect_skill_entries(&root, &codex_root, &mut seen, &mut catalog);
+        let catalog = load_skill_catalog(&root);
 
         let curated = catalog
             .iter()
@@ -6761,11 +6915,11 @@ mod tests {
         assert_eq!(curated.class, SkillClass::InstalledPacks);
         assert_eq!(curated.state, SkillState::Stable);
 
-        let codex = catalog
+        let authored = catalog
             .iter()
-            .find(|entry| entry.name == "openai-docs" && entry.class == SkillClass::CodexCore)
+            .find(|entry| entry.name == "openai-docs" && entry.class == SkillClass::Personal)
             .unwrap();
-        assert_eq!(codex.state, SkillState::Stable);
+        assert_eq!(authored.state, SkillState::Authored);
 
         let personal = catalog
             .iter()
@@ -6794,7 +6948,38 @@ mod tests {
         assert_eq!(app.settings_view, SettingsView::Communication);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Secrets);
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Paths);
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
         assert_eq!(app.page, Page::Chat);
+    }
+
+    #[test]
+    fn secrets_view_saves_back_into_encrypted_store() {
+        let root = temp_root("secret-save");
+        let db_path = root.join("runtime/test.sqlite3");
+        secrets::set_credential(&root, "OPENAI_API_KEY", "sk-old").unwrap();
+
+        let mut app = App::new(root.clone(), db_path);
+        app.switch_settings_view(SettingsView::Secrets);
+        let idx = app
+            .secret_items
+            .iter()
+            .position(|item| item.scope == "credentials" && item.name == "OPENAI_API_KEY")
+            .unwrap();
+        app.secrets_selected = idx;
+        app.current_secret_mut().unwrap().value = "sk-new".to_string();
+        app.save_current_secret().unwrap();
+
+        assert_eq!(
+            secrets::get_credential(&root, "OPENAI_API_KEY").as_deref(),
+            Some("sk-new")
+        );
     }
 
     #[test]

@@ -17,6 +17,7 @@ use std::time::SystemTime;
 
 use crate::channels;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const CRON_SCAN_MINUTES: i64 = 366 * 24 * 60;
 
 #[derive(Debug, Clone, Serialize)]
@@ -506,7 +507,7 @@ fn schema_state(conn: &Connection) -> Result<serde_json::Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::mission_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn parse_add_request(args: &[String]) -> Result<ScheduleCreateRequest> {
@@ -620,7 +621,7 @@ mod tests {
         .expect("ensure task");
 
         let run = emit_task_now(&root, &task.task_id).expect("emit run");
-        let db = Connection::open(crate::paths::mission_db(&root)).expect("open channel db");
+        let db = Connection::open(root.join("runtime/ctox.sqlite3")).expect("open channel db");
         let row = db
             .query_row(
                 "SELECT thread_key, subject, body_text, metadata_json FROM communication_messages WHERE message_key = ?1",

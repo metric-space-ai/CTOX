@@ -38,8 +38,7 @@ pub fn uses_ctox_web_stack() -> bool {
 
 pub fn compact_limit(model: &str, realized_context: usize) -> usize {
     match model {
-        "Qwen/Qwen3.5-27B" => 2_560.min(realized_context.saturating_sub(512)).max(1_536),
-        "Qwen/Qwen3.5-35B-A3B" => 1_536.min(realized_context.saturating_sub(256)).max(1_024),
+        "Qwen/Qwen3.6-35B-A3B" => 1_536.min(realized_context.saturating_sub(256)).max(1_024),
         _ => ((realized_context as f64) * 3.0 / 4.0).round() as usize,
     }
 }
@@ -169,7 +168,7 @@ pub fn rewrite_success_response(
                     let call_id = tool_call
                         .get("id")
                         .and_then(Value::as_str)
-                        .unwrap_or("call_ctox_proxy");
+                        .unwrap_or("call_ctox_gateway");
                     builder.push_function_call(call_id, name, arguments);
                 }
             }
@@ -320,7 +319,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 let output = engine::extract_function_call_output_text(object.get("output"));
                 messages.push(json!({
                     "role": "user",
@@ -462,7 +461,7 @@ fn parse_xml_tool_calls(text: &str) -> (Option<String>, Vec<XmlToolCall>) {
             arguments.insert(param_name.to_string(), Value::String(value));
         }
         tool_calls.push(XmlToolCall {
-            call_id: format!("call_ctox_proxy_{index}"),
+            call_id: format!("call_ctox_gateway_{index}"),
             name,
             arguments: Value::Object(arguments).to_string(),
         });

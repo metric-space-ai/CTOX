@@ -184,7 +184,7 @@ pub fn rewrite_success_response(
                         .get("arguments")
                         .cloned()
                         .unwrap_or_else(|| json!({}));
-                    let call_id = format!("call_ctox_proxy_{synthetic_tool_call_index}");
+                    let call_id = format!("call_ctox_gateway_{synthetic_tool_call_index}");
                     synthetic_tool_call_index += 1;
                     saw_tool_call = true;
                     builder.push_function_call(
@@ -212,7 +212,10 @@ pub fn rewrite_success_response(
     serde_json::to_vec(&response_payload).context("failed to encode GLM responses payload")
 }
 
-fn apply_exact_text_prompt(mut messages: Vec<Value>, exact_text_override: Option<&str>) -> Vec<Value> {
+fn apply_exact_text_prompt(
+    mut messages: Vec<Value>,
+    exact_text_override: Option<&str>,
+) -> Vec<Value> {
     if let Some(prompt) = build_exact_text_prompt(exact_text_override) {
         prepend_system_message(&mut messages, prompt);
     }
@@ -457,7 +460,7 @@ fn parse_xml_tool_calls(text: &str) -> (Option<String>, Vec<XmlToolCall>) {
             arguments.insert(key.to_string(), Value::String(value));
         }
         tool_calls.push(XmlToolCall {
-            call_id: format!("call_ctox_proxy_{index}"),
+            call_id: format!("call_ctox_gateway_{index}"),
             name,
             arguments: Value::Object(arguments).to_string(),
         });
@@ -502,9 +505,15 @@ mod tests {
         });
         let raw = serde_json::to_vec(&payload).unwrap();
         let rewritten: Value = serde_json::from_slice(&rewrite_request(&raw).unwrap()).unwrap();
-        let tools = rewritten.get("tools").and_then(Value::as_array).expect("tools array should be present");
+        let tools = rewritten
+            .get("tools")
+            .and_then(Value::as_array)
+            .expect("tools array should be present");
         assert!(!tools.is_empty(), "tools array should not be empty");
-        assert!(rewritten.get("tool_choice").is_some(), "tool_choice should be forwarded");
+        assert!(
+            rewritten.get("tool_choice").is_some(),
+            "tool_choice should be forwarded"
+        );
     }
 
     #[test]

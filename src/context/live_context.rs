@@ -8,6 +8,7 @@ use std::path::Path;
 use crate::channels;
 use crate::context_health;
 use crate::governance;
+use crate::inference::runtime_plan;
 use crate::lcm;
 use crate::plan;
 use crate::schedule;
@@ -158,6 +159,7 @@ pub fn render_runtime_prompt(
         prompt_view.mission_start_seq,
     );
     let prompt = render_chat_prompt(
+        root,
         &runtime_blocks,
         governance_snapshot,
         health,
@@ -220,6 +222,7 @@ pub fn prompt_context_breakdown(
         + rendered_context.entries.len().saturating_sub(1)
         + context_notice_chars;
     let rendered_prompt = render_chat_prompt(
+        root,
         &runtime_blocks,
         governance_snapshot,
         health,
@@ -343,7 +346,10 @@ pub fn render_live_prompt_artifact(
         &continuity,
         &forgotten_entries,
         &latest_user_prompt,
-        read_usize_setting(settings, "CTOX_CHAT_MODEL_MAX_CONTEXT", 131_072) as i64,
+        settings
+            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+            .and_then(|value| runtime_plan::parse_chat_context_tokens(value))
+            .unwrap_or_else(runtime_plan::default_chat_context_tokens) as i64,
     );
     let governance_snapshot =
         governance::prompt_snapshot(root, conversation_id).unwrap_or_default();
@@ -362,6 +368,7 @@ pub fn render_live_prompt_artifact(
 }
 
 pub(crate) fn render_chat_prompt(
+    root: &Path,
     runtime_blocks: &PromptRuntimeBlocks,
     governance_snapshot: &governance::GovernancePromptSnapshot,
     health: &context_health::ContextHealthSnapshot,
@@ -391,7 +398,7 @@ pub(crate) fn render_chat_prompt(
         String::new(),
         governance::render_prompt_block(governance_snapshot),
         String::new(),
-        render_autonomy_policy_block(),
+        render_autonomy_policy_block(root),
         String::new(),
         context_health::render_prompt_block(health),
         String::new(),
@@ -416,9 +423,9 @@ pub(crate) fn render_chat_prompt(
 /// eagerly it should escalate decisions via approval-gate self-work
 /// items. The text varies with `CTOX_AUTONOMY_LEVEL` (progressive /
 /// balanced / defensive); the service propagates that variable from
-/// `engine.env` at boot.
-fn render_autonomy_policy_block() -> String {
-    let level = crate::autonomy::AutonomyLevel::from_env();
+/// the persisted runtime config at boot.
+fn render_autonomy_policy_block(root: &Path) -> String {
+    let level = crate::autonomy::AutonomyLevel::from_root(root);
     format!(
         "Autonomy policy:\nlevel: {}\npolicy: {}",
         level,
@@ -640,7 +647,7 @@ pub(crate) struct MissionContext {
     pub(crate) start_seq: Option<i64>,
     pub(crate) workspace_root: Option<String>,
     pub(crate) main_objective: Option<String>,
-    pub(crate) benchmark_report_cycle: Option<String>,
+    pub(crate) report_cycle: Option<String>,
     pub(crate) progress_artifact: Option<String>,
     pub(crate) report_headings: Vec<String>,
     pub(crate) non_negotiable_rules: Vec<String>,
@@ -906,11 +913,8 @@ pub(crate) fn derive_mission_context(
         );
         context.non_negotiable_rules =
             extract_bullet_list(&message.content, "Non-negotiable rules:");
-        context.report_headings = extract_bullet_list(
-            &message.content,
-            "When later asked for a benchmark progress report, use these exact headings:",
-        );
-    } else if looks_like_benchmark_report_prompt(latest_user_prompt) {
+        context.report_headings = extract_report_headings(&message.content);
+    } else if looks_like_progress_report_prompt(latest_user_prompt) {
         context.start_seq = latest_user_seq;
     }
     if looks_like_service_continuation_prompt(latest_user_prompt) {
@@ -918,10 +922,10 @@ pub(crate) fn derive_mission_context(
         context.turn_class = "continue".to_string();
         context.read_scope = "narrow".to_string();
     }
-    if looks_like_benchmark_report_prompt(latest_user_prompt) {
+    if looks_like_progress_report_prompt(latest_user_prompt) {
         context.turn_class = "report".to_string();
         context.read_scope = "wide".to_string();
-        context.benchmark_report_cycle =
+        context.report_cycle =
             first_non_empty_line(latest_user_prompt).map(|line| collapse_spaces(line.trim()));
         context.progress_artifact =
             extract_block_value(latest_user_prompt, "First update this file:");
@@ -933,7 +937,7 @@ pub(crate) fn derive_mission_context(
         }
         if context.main_objective.is_none() {
             context.main_objective = Some(
-                "Build and operate a credible Airbnb-style marketplace clone over many execution slices while preserving mission alignment, handling sidequests, and maintaining stable context quality.".to_string(),
+                "Continue the active durable mission, re-verify the current workspace state, and return a structured progress report.".to_string(),
             );
         }
         if context.mission_id.is_none() {
@@ -941,12 +945,9 @@ pub(crate) fn derive_mission_context(
                 context.workspace_root.as_deref(),
                 context.main_objective.as_deref(),
             )
-            .or_else(|| Some("airbnb_bench".to_string()));
+            .or_else(|| Some("active_mission".to_string()));
         }
-        let headings = extract_bullet_list(
-            latest_user_prompt,
-            "Then reply in chat using these exact headings:",
-        );
+        let headings = extract_reply_headings(latest_user_prompt);
         if !headings.is_empty() {
             context.report_headings = headings;
         }
@@ -966,18 +967,7 @@ pub(crate) fn derive_mission_context(
     context
 }
 
-fn derive_mission_id(workspace_root: Option<&str>, objective: Option<&str>) -> Option<String> {
-    if let Some(workspace_root) = workspace_root {
-        if workspace_root.contains("airbnb_clone_bench") {
-            return Some("airbnb_bench".to_string());
-        }
-    }
-    if objective
-        .map(|goal| goal.to_ascii_lowercase().contains("airbnb"))
-        .unwrap_or(false)
-    {
-        return Some("airbnb_bench".to_string());
-    }
+fn derive_mission_id(_workspace_root: Option<&str>, objective: Option<&str>) -> Option<String> {
     objective
         .map(|goal| {
             goal.split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -993,12 +983,15 @@ fn derive_mission_id(workspace_root: Option<&str>, objective: Option<&str>) -> O
 fn looks_like_mission_bootstrap(content: &str) -> bool {
     content.contains("Work only inside this workspace:")
         && content.contains("Main objective:")
-        && (content.contains("benchmark mission") || content.contains("long-horizon"))
+        && (content.contains("durable mission") || content.contains("long-horizon"))
 }
 
-fn looks_like_benchmark_report_prompt(content: &str) -> bool {
+fn looks_like_progress_report_prompt(content: &str) -> bool {
     content.contains("AIRBNB_BENCH_REPORT_CYCLE_")
+        || content.contains("MISSION_PROGRESS_REPORT_CYCLE_")
         || (content.contains("Benchmark progress report is due now.")
+            && content.contains("First update this file:"))
+        || (content.contains("Mission progress report is due now.")
             && content.contains("First update this file:"))
 }
 
@@ -1053,6 +1046,17 @@ fn extract_bullet_list(content: &str, header: &str) -> Vec<String> {
     Vec::new()
 }
 
+fn extract_report_headings(content: &str) -> Vec<String> {
+    extract_bullet_list(
+        content,
+        "When later asked for a mission progress report, use these exact headings:",
+    )
+}
+
+fn extract_reply_headings(content: &str) -> Vec<String> {
+    extract_bullet_list(content, "Then reply in chat using these exact headings:")
+}
+
 fn first_non_empty_line(content: &str) -> Option<&str> {
     content.lines().map(str::trim).find(|line| !line.is_empty())
 }
@@ -1080,7 +1084,7 @@ fn synthesize_focus_block(context: &MissionContext) -> String {
     if let Some(objective) = &context.main_objective {
         lines.push(format!("- Main task: {}", objective));
     }
-    if let Some(cycle) = &context.benchmark_report_cycle {
+    if let Some(cycle) = &context.report_cycle {
         lines.push(format!("- Current step: {}", cycle.to_ascii_lowercase()));
         lines.push("- Current status: report_due".to_string());
     } else {
@@ -1174,7 +1178,7 @@ fn prioritized_anchor_rules(rules: &[String]) -> Vec<String> {
         "sidequest",
         "durable next",
         "progress-latest",
-        "benchmark report",
+        "progress report",
         "explicit docs",
     ];
     let mut scored = rules
@@ -1210,7 +1214,7 @@ fn anchor_code_for_rule(rule: &str) -> Option<&'static str> {
         Some("leave durable next slices")
     } else if normalized.contains("progress-latest.md") && normalized.contains("canonical") {
         Some("use the canonical progress file")
-    } else if normalized.contains("benchmark report")
+    } else if normalized.contains("progress report")
         && normalized.contains("update")
         && normalized.contains("first")
     {
@@ -1229,7 +1233,7 @@ fn synthesize_narrative_block(context: &MissionContext) -> String {
     let mut lines = vec!["Narrative:".to_string()];
     if let Some(workspace) = &context.workspace_root {
         lines.push(format!(
-            "- benchmark mission opened in {}",
+            "- durable mission opened in {}",
             compact_workspace_path(workspace, context.workspace_root.as_deref())
         ));
     }
@@ -1239,7 +1243,7 @@ fn synthesize_narrative_block(context: &MissionContext) -> String {
             blocker
         ));
     }
-    if let Some(cycle) = &context.benchmark_report_cycle {
+    if let Some(cycle) = &context.report_cycle {
         lines.push(format!("- current turn requests {}", cycle));
     }
     if lines.len() == 1 {
@@ -1487,7 +1491,7 @@ fn mission_search_terms(context: &MissionContext) -> Vec<String> {
         if workspace.contains("airbnb_clone_bench") {
             terms.push("airbnb_clone_bench".to_string());
             terms.push("airbnb".to_string());
-            terms.push("benchmark".to_string());
+            terms.push("progress".to_string());
         }
     }
     if let Some(objective) = &context.main_objective {
@@ -1498,7 +1502,7 @@ fn mission_search_terms(context: &MissionContext) -> Vec<String> {
                 .map(|part| part.to_ascii_lowercase()),
         );
     }
-    if let Some(cycle) = &context.benchmark_report_cycle {
+    if let Some(cycle) = &context.report_cycle {
         let normalized = cycle.to_ascii_lowercase();
         terms.push(normalized.clone());
         terms.extend(
@@ -1574,8 +1578,8 @@ pub(crate) fn sanitize_context_message(content: &str) -> String {
     if looks_like_mission_bootstrap(trimmed) {
         return summarize_mission_bootstrap_prompt(trimmed);
     }
-    if looks_like_benchmark_report_prompt(trimmed) {
-        return summarize_benchmark_report_request(trimmed);
+    if looks_like_progress_report_prompt(trimmed) {
+        return summarize_progress_report_request(trimmed);
     }
     if let Some(summary) = summarize_inbound_email_wrapper(trimmed) {
         return clip_prompt_text(&summary, 8_000);
@@ -1597,9 +1601,9 @@ fn summarize_mission_bootstrap_prompt(content: &str) -> String {
         .map(|path| compact_workspace_path(path, Some(path)))
         .unwrap_or_else(|| "<workspace>".to_string());
     let objective = extract_block_value(content, "Main objective:")
-        .unwrap_or_else(|| "start the active benchmark mission".to_string());
+        .unwrap_or_else(|| "start the active durable mission".to_string());
     let mut lines = vec![
-        "benchmark_mission_bootstrap:".to_string(),
+        "durable_mission_bootstrap:".to_string(),
         format!("workspace_root: {workspace}"),
         format!(
             "mission_id: {}",
@@ -1607,20 +1611,17 @@ fn summarize_mission_bootstrap_prompt(content: &str) -> String {
                 .unwrap_or_else(|| "active_mission".to_string())
         ),
     ];
-    let headings = extract_bullet_list(
-        content,
-        "When later asked for a benchmark progress report, use these exact headings:",
-    );
+    let headings = extract_report_headings(content);
     if !headings.is_empty() {
         lines.push(format!("report_headings: {}", headings.join("|")));
     }
     lines.join("\n")
 }
 
-fn summarize_benchmark_report_request(content: &str) -> String {
+fn summarize_progress_report_request(content: &str) -> String {
     let cycle = first_non_empty_line(content)
         .map(|line| collapse_spaces(line))
-        .unwrap_or_else(|| "AIRBNB_BENCH_REPORT".to_string());
+        .unwrap_or_else(|| "MISSION_PROGRESS_REPORT".to_string());
     let progress_artifact = extract_block_value(content, "First update this file:")
         .map(|path| {
             let workspace_root = path
@@ -1629,9 +1630,9 @@ fn summarize_benchmark_report_request(content: &str) -> String {
             compact_workspace_path(&path, workspace_root.as_deref())
         })
         .unwrap_or_else(|| "<workspace>/ops/progress/progress-latest.md".to_string());
-    let headings = extract_bullet_list(content, "Then reply in chat using these exact headings:");
+    let headings = extract_reply_headings(content);
     let mut lines = vec![
-        "benchmark_report_request:".to_string(),
+        "progress_report_request:".to_string(),
         format!("cycle: {cycle}"),
         format!("progress_artifact: {progress_artifact}"),
     ];
@@ -1759,13 +1760,6 @@ pub(crate) fn strip_prompt_comments(prompt: &str) -> String {
     rendered
 }
 
-fn read_usize_setting(settings: &BTreeMap<String, String>, key: &str, default: usize) -> usize {
-    settings
-        .get(key)
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(default)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1833,7 +1827,7 @@ mod tests {
             start_seq: None,
             workspace_root: None,
             main_objective: Some("vpn support".to_string()),
-            benchmark_report_cycle: None,
+            report_cycle: None,
             progress_artifact: None,
             report_headings: Vec::new(),
             non_negotiable_rules: Vec::new(),
@@ -1861,6 +1855,7 @@ mod tests {
             workflow_state: "Open CTOX work that counts right now:\nqueue_items: []".to_string(),
         };
         let prompt = render_chat_prompt(
+            Path::new("/tmp/ctox"),
             &runtime_blocks,
             &governance::GovernancePromptSnapshot::default(),
             &context_health::ContextHealthSnapshot {

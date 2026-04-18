@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 
-const DEFAULT_MESSAGE_ID: &str = "msg_ctox_proxy";
+const DEFAULT_MESSAGE_ID: &str = "msg_ctox_gateway";
 const RESPONSE_OBJECT: &str = "response";
 const COMPLETED_STATUS: &str = "completed";
 const ASSISTANT_ROLE: &str = "assistant";

@@ -132,7 +132,7 @@ mod tests {
             Some("baseline_observe_only")
         );
 
-        let conn = Connection::open(crate::paths::mission_db(&root))?;
+        let conn = Connection::open(root.join("runtime/ctox.sqlite3"))?;
         let ticket_count: i64 =
             conn.query_row("SELECT COUNT(*) FROM ticket_items", [], |row| row.get(0))?;
         let event_count: i64 =

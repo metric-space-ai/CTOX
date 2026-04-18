@@ -1,5 +1,7 @@
 use anyhow::Context;
 use anyhow::Result;
+use rusqlite::params;
+use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
@@ -7,10 +9,10 @@ use std::path::PathBuf;
 use crate::inference::runtime_state;
 use crate::secrets;
 
-const DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH: &str = "runtime/engine.env";
+const RUNTIME_ENV_TABLE: &str = "runtime_env_kv";
 
 pub fn runtime_config_path(root: &Path) -> PathBuf {
-    root.join(DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH)
+    crate::persistence::sqlite_path(root)
 }
 
 pub fn load_runtime_env_map(root: &Path) -> Result<BTreeMap<String, String>> {
@@ -35,15 +37,7 @@ pub fn effective_runtime_env_map(root: &Path) -> Result<BTreeMap<String, String>
 pub fn effective_operator_env_map(root: &Path) -> Result<BTreeMap<String, String>> {
     let mut env_map = load_persisted_runtime_env_map(root)?;
     env_map.retain(|key, _| !runtime_state::is_runtime_state_key(key));
-    for (key, value) in std::env::vars() {
-        if !process_env_override_allowed(&key)
-            || value.trim().is_empty()
-            || runtime_state::is_runtime_state_key(&key)
-        {
-            continue;
-        }
-        env_map.insert(key, value);
-    }
+    secrets::merge_credentials_into_env_map(root, &mut env_map);
     Ok(env_map)
 }
 
@@ -52,10 +46,8 @@ pub fn save_runtime_env_map(root: &Path, env_map: &BTreeMap<String, String>) -> 
     let mut clean_map = env_map.clone();
     for (key, value) in env_map {
         if secrets::is_secret_key(key) && !value.trim().is_empty() {
-            if let Err(e) = secrets::set_credential(root, key, value) {
-                eprintln!("[secrets] failed to encrypt {key}: {e:#} — keeping in engine.env");
-                continue;
-            }
+            secrets::set_credential(root, key, value)
+                .with_context(|| format!("failed to persist secret {key} into encrypted store"))?;
             clean_map.remove(key);
         }
     }
@@ -85,28 +77,13 @@ pub fn env_or_config(root: &Path, key: &str) -> Option<String> {
             }
         }
     }
-    // For secret keys, check encrypted store first, then process env.
+    // Secret keys are resolved only from the encrypted store.
     if secrets::is_secret_key(key) {
-        if let Some(value) = secrets::get_credential(root, key) {
-            if !value.trim().is_empty() {
-                return Some(value);
-            }
-        }
+        return secrets::get_credential(root, key).filter(|value| !value.trim().is_empty());
     }
-    process_env_value(key).or_else(|| {
-        load_runtime_env_map(root)
-            .ok()
-            .and_then(|map| map.get(key).cloned())
-            .filter(|value| !value.trim().is_empty())
-    })
-}
-
-fn process_env_value(key: &str) -> Option<String> {
-    if !process_env_override_allowed(key) {
-        return None;
-    }
-    std::env::var(key)
+    load_runtime_env_map(root)
         .ok()
+        .and_then(|map| map.get(key).cloned())
         .filter(|value| !value.trim().is_empty())
 }
 
@@ -196,116 +173,70 @@ pub fn auxiliary_backend_enabled(root: &Path, role_prefix: &str) -> bool {
     true
 }
 
-fn parse_env_map(raw: &str) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let Some((key, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        let normalized_key = key.trim();
-        if normalized_key.is_empty() {
-            continue;
-        }
-        out.insert(normalized_key.to_string(), unescape_env_value(value.trim()));
-    }
-    out
-}
-
 fn load_persisted_runtime_env_map(root: &Path) -> Result<BTreeMap<String, String>> {
-    let path = runtime_config_path(root);
-    if !path.exists() {
-        return Ok(BTreeMap::new());
-    }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read runtime config {}", path.display()))?;
-    let mut env_map = parse_env_map(&raw);
-
-    // One-time migration: move any plaintext secret keys from engine.env
-    // into the encrypted store and rewrite engine.env without them.
-    let migrated = secrets::migrate_secrets_from_env_map(root, &mut env_map);
-    if migrated > 0 {
-        // Rewrite engine.env without the migrated secret keys.
-        if let Err(e) = write_runtime_env_map(root, &env_map) {
-            eprintln!("[secrets] failed to rewrite engine.env after migration: {e:#}");
-        }
-    }
+    let conn = open_runtime_persistence_db(root)?;
+    let env_map = load_runtime_env_map_from_db(&conn)?;
     Ok(env_map)
 }
 
 fn write_runtime_env_map(root: &Path, env_map: &BTreeMap<String, String>) -> Result<()> {
-    let path = runtime_config_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create runtime config dir {}", parent.display()))?;
-    }
-    let mut output = String::new();
+    let mut conn = open_runtime_persistence_db(root)?;
+    let tx = conn
+        .transaction()
+        .context("failed to open runtime env transaction")?;
+    tx.execute(&format!("DELETE FROM {RUNTIME_ENV_TABLE}"), [])
+        .context("failed to clear runtime env table")?;
     for (key, value) in env_map {
         if key.trim().is_empty() {
             continue;
         }
-        output.push_str(key);
-        output.push('=');
-        output.push_str(&escape_env_value(value));
-        output.push('\n');
+        tx.execute(
+            &format!("INSERT INTO {RUNTIME_ENV_TABLE} (env_key, env_value) VALUES (?1, ?2)"),
+            params![key, value],
+        )
+        .with_context(|| format!("failed to persist runtime key {key}"))?;
     }
-    std::fs::write(&path, output)
-        .with_context(|| format!("failed to write runtime config {}", path.display()))
+    tx.commit()
+        .context("failed to commit runtime env transaction")?;
+    Ok(())
 }
 
-fn process_env_override_allowed(key: &str) -> bool {
-    if key.starts_with("OPENAI_")
-        || key.starts_with("OPENROUTER_")
-        || key.starts_with("ANTHROPIC_")
-        || key.starts_with("MINIMAX_")
-        || key.starts_with("CODEX_")
-        || key.starts_with("CTO_")
-    {
-        return true;
+fn open_runtime_persistence_db(root: &Path) -> Result<Connection> {
+    let path = runtime_config_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create runtime db dir {}", parent.display()))?;
     }
-    matches!(
-        key,
-        "HF_TOKEN"
-            | "HF_HOME"
-            | "HUGGINGFACE_HUB_TOKEN"
-            | "PATH"
-            | "LD_LIBRARY_PATH"
-            | "DYLD_LIBRARY_PATH"
-            | "LIBRARY_PATH"
-            | "CPATH"
-            | "CPLUS_INCLUDE_PATH"
-            | "CUDA_HOME"
-            | "CUDA_PATH"
-            | "CUDA_ROOT"
-            | "CUDA_TOOLKIT_ROOT_DIR"
-            | "CUDA_BIN_PATH"
-            | "CUDARC_CUDA_VERSION"
-            | "NVCC"
-            | "CUDACXX"
-            | "CTOX_ENV"
-            | "CTOX_ENGINE_ENV_FILE"
-            | "CTOX_ENGINE_BINARY"
-            | "CTOX_ENGINE_LOG"
-            | "CTOX_CHAT_SKILL_PRESET"
-            | "CTOX_CUDA_HOME"
-            | "CTOX_CUDA_PATH"
-            | "CTOX_CUDA_ROOT"
-            | "CTOX_CUDA_BIN_PATH"
-            | "CTOX_RESOURCE_SNAPSHOT_JSON"
-            // CTOX_TEST_GPU_TOTALS_MB intentionally NOT allowlisted — tests
-            // must inject fake GPU totals via the test-root's engine.env so
-            // parallel tests stay isolated from each other's process state.
-            // Phase 1/2 refactor: direct-session gate + compact policy knobs.
-            | "CTOX_USE_DIRECT_SESSION"
-            | "CTOX_DEBUG_DIRECT_SESSION"
-            | "CTOX_COMPACT_TRIGGER"
-            | "CTOX_COMPACT_MODE"
-            | "CTOX_COMPACT_FIXED_INTERVAL"
-            | "CTOX_COMPACT_ADAPTIVE_THRESHOLD"
-    )
+    let conn = Connection::open(&path)
+        .with_context(|| format!("failed to open runtime db {}", path.display()))?;
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode=WAL;
+         CREATE TABLE IF NOT EXISTS {RUNTIME_ENV_TABLE} (
+             env_key TEXT PRIMARY KEY,
+             env_value TEXT NOT NULL
+         );"
+    ))
+    .context("failed to initialize runtime env table")?;
+    Ok(conn)
+}
+
+fn load_runtime_env_map_from_db(conn: &Connection) -> Result<BTreeMap<String, String>> {
+    let mut stmt = conn
+        .prepare(&format!(
+            "SELECT env_key, env_value FROM {RUNTIME_ENV_TABLE} ORDER BY env_key"
+        ))
+        .context("failed to prepare runtime env query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("failed to read runtime env rows")?;
+    let mut env_map = BTreeMap::new();
+    for row in rows {
+        let (key, value) = row.context("failed to decode runtime env row")?;
+        env_map.insert(key, value);
+    }
+    Ok(env_map)
 }
 
 fn parse_boolish(value: &str) -> Option<bool> {
@@ -323,73 +254,10 @@ fn is_disabled_selector(value: &str) -> bool {
     )
 }
 
-fn escape_env_value(value: &str) -> String {
-    if value.is_empty()
-        || value.chars().any(|ch| {
-            !(ch.is_ascii_alphanumeric()
-                || matches!(ch, '_' | '-' | '.' | '/' | ':' | ',' | '@' | '%' | '+'))
-        })
-    {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
-    } else {
-        value.to_string()
-    }
-}
-
-fn unescape_env_value(value: &str) -> String {
-    let trimmed = value.trim();
-    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
-        let inner = &trimmed[1..trimmed.len() - 1];
-        let mut output = String::new();
-        let mut chars = inner.chars();
-        while let Some(ch) = chars.next() {
-            if ch == '\\' {
-                if let Some(next) = chars.next() {
-                    output.push(next);
-                }
-            } else {
-                output.push(ch);
-            }
-        }
-        output
-    } else {
-        trimmed.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct ScopedEnvVar {
-        key: String,
-        previous: Option<String>,
-    }
-
-    impl ScopedEnvVar {
-        fn set(key: &str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            std::env::set_var(key, value);
-            Self {
-                key: key.to_string(),
-                previous,
-            }
-        }
-    }
-
-    impl Drop for ScopedEnvVar {
-        fn drop(&mut self) {
-            if let Some(previous) = self.previous.as_ref() {
-                std::env::set_var(&self.key, previous);
-            } else {
-                std::env::remove_var(&self.key);
-            }
-        }
-    }
 
     fn make_temp_root() -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -434,14 +302,12 @@ mod tests {
     }
 
     #[test]
-    fn effective_runtime_env_map_ignores_process_runtime_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn effective_runtime_env_map_reads_persisted_values_only() {
         let root = make_temp_root();
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_ENGINE_FEATURES".to_string(), "persisted".to_string());
         save_runtime_env_map(&root, &env_map).unwrap();
 
-        let _override = ScopedEnvVar::set("CTOX_ENGINE_FEATURES", "process");
         let effective = effective_runtime_env_map(&root).unwrap();
 
         assert_eq!(
@@ -453,7 +319,6 @@ mod tests {
 
     #[test]
     fn effective_operator_env_map_excludes_runtime_projection_keys() {
-        let _guard = ENV_LOCK.lock().unwrap();
         let root = make_temp_root();
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_DISABLE_MISSION_WATCHDOG".to_string(), "1".to_string());
@@ -489,14 +354,12 @@ mod tests {
     }
 
     #[test]
-    fn env_or_config_ignores_process_runtime_overrides() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn env_or_config_reads_persisted_non_secret_values() {
         let root = make_temp_root();
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_DISABLE_MISSION_WATCHDOG".to_string(), "0".to_string());
         save_runtime_env_map(&root, &env_map).unwrap();
 
-        let _override = ScopedEnvVar::set("CTOX_DISABLE_MISSION_WATCHDOG", "1");
         assert_eq!(
             env_or_config(&root, "CTOX_DISABLE_MISSION_WATCHDOG").as_deref(),
             Some("0")
@@ -505,40 +368,31 @@ mod tests {
     }
 
     #[test]
-    fn env_or_config_keeps_process_secrets_and_bootstrap_keys() {
-        let _guard = ENV_LOCK.lock().unwrap();
+    fn env_or_config_reads_secrets_only_from_store() {
         let root = make_temp_root();
 
-        let _openai = ScopedEnvVar::set("OPENAI_API_KEY", "sk-test");
-        let _openrouter = ScopedEnvVar::set("OPENROUTER_API_KEY", "or-test");
-        let _cuda = ScopedEnvVar::set("CTOX_CUDA_HOME", "/opt/cuda");
-        let _engine_log = ScopedEnvVar::set("CTOX_ENGINE_LOG", "/tmp/ctox-engine.log");
+        secrets::set_credential(&root, "OPENAI_API_KEY", "sk-store").unwrap();
+        secrets::set_credential(&root, "OPENROUTER_API_KEY", "or-store").unwrap();
 
         assert_eq!(
             env_or_config(&root, "OPENAI_API_KEY").as_deref(),
-            Some("sk-test")
+            Some("sk-store")
         );
         assert_eq!(
             env_or_config(&root, "OPENROUTER_API_KEY").as_deref(),
-            Some("or-test")
+            Some("or-store")
         );
-        assert_eq!(
-            env_or_config(&root, "CTOX_CUDA_HOME").as_deref(),
-            Some("/opt/cuda")
-        );
-        assert_eq!(
-            env_or_config(&root, "CTOX_ENGINE_LOG").as_deref(),
-            Some("/tmp/ctox-engine.log")
-        );
+        assert_eq!(env_or_config(&root, "CTOX_CUDA_HOME").as_deref(), None);
+        assert_eq!(env_or_config(&root, "CTOX_ENGINE_LOG").as_deref(), None);
 
         let effective = effective_runtime_env_map(&root).unwrap();
         assert_eq!(
             effective.get("OPENAI_API_KEY").map(String::as_str),
-            Some("sk-test")
+            Some("sk-store")
         );
         assert_eq!(
             effective.get("OPENROUTER_API_KEY").map(String::as_str),
-            Some("or-test")
+            Some("or-store")
         );
         assert_eq!(
             effective.get("CTOX_CUDA_HOME").map(String::as_str),
@@ -568,9 +422,8 @@ mod tests {
             active_model: Some("gpt-5.4".to_string()),
             engine_model: None,
             engine_port: None,
+            configured_context_tokens: None,
             realized_context_tokens: None,
-            proxy_host: runtime_state::default_proxy_host().to_string(),
-            proxy_port: runtime_state::default_proxy_port(),
             upstream_base_url: runtime_state::default_api_upstream_base_url().to_string(),
             local_preset: None,
             boost: runtime_state::BoostRuntimeState::default(),

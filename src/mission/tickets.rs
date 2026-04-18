@@ -31,6 +31,7 @@ use crate::mission::ticket_adapters;
 use crate::mission::ticket_protocol;
 use crate::mission::ticket_translation;
 
+const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_LIST_LIMIT: usize = 20;
 const DEFAULT_AUDIT_LIMIT: usize = 30;
 const DEFAULT_APPROVAL_MODE: &str = "human_approval_required";
@@ -649,7 +650,9 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
             let system = required_flag_value(args, "--system")
                 .context("usage: ctox ticket knowledge-bootstrap --system <name>")?;
             let entries = refresh_observed_ticket_knowledge(root, system)?;
-            print_json(&json!({"ok": true, "system": system, "count": entries.len(), "entries": entries}))
+            print_json(
+                &json!({"ok": true, "system": system, "count": entries.len(), "entries": entries}),
+            )
         }
         "knowledge-list" => {
             let system = find_flag_value(args, "--system");
@@ -745,9 +748,11 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
                 if !object.contains_key("skill") {
                     object.insert(
                         "skill".to_string(),
-                        json!(explicit_skill
-                            .clone()
-                            .unwrap_or_else(|| "ticket-access-and-secrets".to_string())),
+                        json!(
+                            explicit_skill
+                                .clone()
+                                .unwrap_or_else(|| "ticket-access-and-secrets".to_string())
+                        ),
                     );
                 }
             }
@@ -779,7 +784,9 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("ticket self-work item not found")?;
             let assignments = list_ticket_self_work_assignments(root, work_id, DEFAULT_LIST_LIMIT)?;
             let notes = list_ticket_self_work_notes(root, work_id, DEFAULT_LIST_LIMIT)?;
-            print_json(&json!({"ok": true, "item": item, "assignments": assignments, "notes": notes}))
+            print_json(
+                &json!({"ok": true, "item": item, "assignments": assignments, "notes": notes}),
+            )
         }
         "self-work-put" => {
             let system = required_flag_value(args, "--system").context(
@@ -883,8 +890,9 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
             print_json(&json!({"ok": true, "count": events.len(), "events": events}))
         }
         "ack" => {
-            let status = required_flag_value(args, "--status")
-                .context("usage: ctox ticket ack --status <handled|failed|duplicate|blocked> <event-key>...")?;
+            let status = required_flag_value(args, "--status").context(
+                "usage: ctox ticket ack --status <handled|failed|duplicate|blocked> <event-key>...",
+            )?;
             let event_keys = positional_after_flags(&args[1..]);
             if event_keys.is_empty() {
                 anyhow::bail!(
@@ -943,12 +951,15 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
             print_json(&json!({"ok": true, "assignment": assignment}))
         }
         "bundle-put" => {
-            let label = required_flag_value(args, "--label")
-                .context("usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>")?;
-            let runbook_id = required_flag_value(args, "--runbook-id")
-                .context("usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>")?;
-            let policy_id = required_flag_value(args, "--policy-id")
-                .context("usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>")?;
+            let label = required_flag_value(args, "--label").context(
+                "usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>",
+            )?;
+            let runbook_id = required_flag_value(args, "--runbook-id").context(
+                "usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>",
+            )?;
+            let policy_id = required_flag_value(args, "--policy-id").context(
+                "usage: ctox ticket bundle-put --label <label> --runbook-id <id> --policy-id <id>",
+            )?;
             let actions = find_flag_value(args, "--actions")
                 .map(parse_json_string_array)
                 .transpose()?
@@ -1027,8 +1038,9 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
             print_json(&json!({"ok": true, "count": grants.len(), "grants": grants}))
         }
         "dry-run" => {
-            let ticket_key = required_flag_value(args, "--ticket-key")
-                .context("usage: ctox ticket dry-run --ticket-key <key> [--understanding <text>]")?;
+            let ticket_key = required_flag_value(args, "--ticket-key").context(
+                "usage: ctox ticket dry-run --ticket-key <key> [--understanding <text>]",
+            )?;
             let record = create_dry_run(
                 root,
                 ticket_key,
@@ -1051,10 +1063,12 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
             print_json(&json!({"ok": true, "case": case, "dry_run": dry_run}))
         }
         "approve" => {
-            let case_id = required_flag_value(args, "--case-id")
-                .context("usage: ctox ticket approve --case-id <id> --status <approved|rejected>")?;
-            let status = required_flag_value(args, "--status")
-                .context("usage: ctox ticket approve --case-id <id> --status <approved|rejected>")?;
+            let case_id = required_flag_value(args, "--case-id").context(
+                "usage: ctox ticket approve --case-id <id> --status <approved|rejected>",
+            )?;
+            let status = required_flag_value(args, "--status").context(
+                "usage: ctox ticket approve --case-id <id> --status <approved|rejected>",
+            )?;
             let case = decide_case_approval(
                 root,
                 case_id,
@@ -1077,12 +1091,8 @@ pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
                 .context("usage: ctox ticket verify --case-id <id> --status <passed|failed> [--summary <text>]")?;
             let status = required_flag_value(args, "--status")
                 .context("usage: ctox ticket verify --case-id <id> --status <passed|failed> [--summary <text>]")?;
-            let case = record_verification(
-                root,
-                case_id,
-                status,
-                find_flag_value(args, "--summary"),
-            )?;
+            let case =
+                record_verification(root, case_id, status, find_flag_value(args, "--summary"))?;
             print_json(&json!({"ok": true, "case": case}))
         }
         "learn-candidate-create" => {
@@ -1418,6 +1428,15 @@ pub(crate) fn put_ticket_source_skill_binding(
         "unsupported source skill status: {status}"
     );
     anyhow::ensure!(!origin.is_empty(), "source skill origin must not be empty");
+    let normalized_artifact_path = artifact_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if let Some(raw) = normalized_artifact_path.as_deref() {
+        if let Some(dir) = resolve_skill_bundle_dir_hint(root, raw) {
+            let _ = crate::skill_store::upsert_skill_bundle_from_dir(root, &dir);
+        }
+    }
     let conn = open_ticket_db(root)?;
     let now = now_iso_string();
     conn.execute(
@@ -1440,7 +1459,7 @@ pub(crate) fn put_ticket_source_skill_binding(
             archetype,
             status,
             origin,
-            artifact_path.map(str::trim).filter(|value| !value.is_empty()),
+            normalized_artifact_path.as_deref(),
             notes.map(str::trim).filter(|value| !value.is_empty()),
             now,
             now,
@@ -2279,8 +2298,6 @@ pub(crate) fn publish_ticket_self_work_item(
         ticket_protocol::TicketSelfWorkPublishRequest {
             title: &item.title,
             body: &item.body_text,
-            internal: true,
-            metadata: item.metadata.clone(),
         },
     )?;
     let published_item = mark_ticket_self_work_published(
@@ -3298,16 +3315,26 @@ fn resolve_source_skill_artifact_path(
     root: &Path,
     binding: &TicketSourceSkillBindingView,
 ) -> Option<std::path::PathBuf> {
+    if let Ok(Some(path)) =
+        crate::skill_store::resolve_materialized_skill_dir(root, &binding.skill_name)
+    {
+        return Some(path);
+    }
     let raw = binding.artifact_path.as_deref()?.trim();
-    if raw.is_empty() {
+    resolve_skill_bundle_dir_hint(root, raw)
+}
+
+fn resolve_skill_bundle_dir_hint(root: &Path, raw: &str) -> Option<std::path::PathBuf> {
+    if raw.trim().is_empty() {
         return None;
     }
-    let path = Path::new(raw);
-    if path.is_absolute() {
-        Some(path.to_path_buf())
+    let path = Path::new(raw.trim());
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        Some(root.join(path))
-    }
+        root.join(path)
+    };
+    candidate.exists().then_some(candidate)
 }
 
 fn resolve_repo_script_path(root: &Path, relative: &str) -> Option<std::path::PathBuf> {
@@ -3848,20 +3875,14 @@ fn embed_texts_for_ticket_skills(
     if let Some(binding) =
         resolved_runtime.binding_for_auxiliary_role(engine::AuxiliaryRole::Embedding)
     {
-        match &binding.transport {
-            LocalTransport::UnixSocket { .. } | LocalTransport::NamedPipe { .. } => {
-                let label = binding.transport.display_label();
-                return embed_texts_for_ticket_skills_via_local_socket(
-                    &binding.transport,
-                    inputs,
-                    model,
-                )
-                .with_context(|| format!("failed to reach embedding transport {label}"));
-            }
-            LocalTransport::TcpLoopback { .. } => {
-                // fall through to HTTP path using binding.base_url
-            }
+        if !binding.transport.is_private_ipc() {
+            anyhow::bail!(
+                "ctox_core_local requires private IPC for local embedding inference; loopback HTTP transport is not allowed"
+            );
         }
+        let label = binding.transport.display_label();
+        return embed_texts_for_ticket_skills_via_local_socket(&binding.transport, inputs, model)
+            .with_context(|| format!("failed to reach embedding transport {label}"));
     }
     let base_url = resolved_runtime
         .auxiliary_base_url(engine::AuxiliaryRole::Embedding)
@@ -5608,49 +5629,6 @@ fn record_verification(
     load_case(root, case_id)?.context("failed to load case after verification")
 }
 
-fn build_writeback_control_note(
-    root: &Path,
-    case: &TicketCaseView,
-    operation: &str,
-) -> Result<ticket_protocol::TicketControlNote> {
-    let latest_verification = load_latest_verification_for_case(root, &case.case_id)?;
-    Ok(ticket_protocol::TicketControlNote {
-        schema: "ctox.ticket.control_note.v1".to_string(),
-        operation: operation.to_string(),
-        case_id: case.case_id.clone(),
-        ticket_key: case.ticket_key.clone(),
-        label: case.label.clone(),
-        bundle_label: case.bundle_label.clone(),
-        bundle_version: case.bundle_version,
-        approval_mode: case.approval_mode.clone(),
-        autonomy_level: case.autonomy_level.clone(),
-        support_mode: case.support_mode.clone(),
-        risk_level: case.risk_level.clone(),
-        verification_status: latest_verification.as_ref().map(|item| item.0.clone()),
-        verification_summary: latest_verification.and_then(|item| item.1),
-    })
-}
-
-fn load_latest_verification_for_case(
-    root: &Path,
-    case_id: &str,
-) -> Result<Option<(String, Option<String>)>> {
-    let conn = open_ticket_db(root)?;
-    conn.query_row(
-        r#"
-        SELECT status, summary
-        FROM ticket_verifications
-        WHERE case_id = ?1
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-        params![case_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    )
-    .optional()
-    .map_err(anyhow::Error::from)
-}
-
 fn writeback_comment(
     root: &Path,
     case_id: &str,
@@ -5692,7 +5670,6 @@ fn writeback_comment(
             remote_ticket_id: &ticket.remote_ticket_id,
             body,
             internal,
-            control_note: None,
         },
     )?;
     let _ = sync_ticket_system(root, &ticket.source_system)?;
@@ -6724,7 +6701,7 @@ fn schema_state(conn: &Connection) -> Result<Value> {
 }
 
 fn resolve_db_path(root: &Path) -> std::path::PathBuf {
-    crate::paths::mission_db(root)
+    root.join(DEFAULT_DB_RELATIVE_PATH)
 }
 
 fn canonical_ticket_key(system: &str, remote_ticket_id: &str) -> String {

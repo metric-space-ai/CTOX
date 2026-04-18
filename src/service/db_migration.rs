@@ -103,10 +103,10 @@ fn attach_and_copy(conn: &Connection, legacy_path: &Path, alias: &str) -> Result
              WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL \
              ORDER BY rowid"
         ))?;
-        stmt.query_map([], |row| {
+        let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (name, sql) in &tables {
         if is_fts_shadow_name(name) {
@@ -126,9 +126,8 @@ fn attach_and_copy(conn: &Connection, legacy_path: &Path, alias: &str) -> Result
                 let mut cstmt = conn.prepare(
                     "SELECT name FROM pragma_table_info(?1) WHERE name NOT LIKE 'sqlite_%'",
                 )?;
-                cstmt
-                    .query_map([name.as_str()], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
+                let rows = cstmt.query_map([name.as_str()], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
             };
             if cols.is_empty() {
                 continue;
@@ -156,10 +155,10 @@ fn attach_and_copy(conn: &Connection, legacy_path: &Path, alias: &str) -> Result
              WHERE type IN ('index', 'trigger', 'view') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL \
              ORDER BY CASE type WHEN 'view' THEN 0 WHEN 'trigger' THEN 1 ELSE 2 END, rowid"
         ))?;
-        stmt.query_map([], |row| {
+        let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     for (name, sql) in &aux {
         conn.execute_batch(sql)

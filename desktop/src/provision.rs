@@ -67,6 +67,19 @@ fn provision_localhost(request: &ProvisionRequest, tx: &Sender<ProvisionEvent>) 
             tx,
             "[2/3] Building CTOX",
         )?;
+        let ctox_source = request.source_root.join("target/release/ctox");
+        let ctox_target = request.source_root.join("bin/ctox");
+        if let Some(parent) = ctox_target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::copy(&ctox_source, &ctox_target).with_context(|| {
+            format!(
+                "failed to stage CTOX binary from {} to {}",
+                ctox_source.display(),
+                ctox_target.display()
+            )
+        })?;
     }
     run_streaming(
         Command::new("cargo")
@@ -80,9 +93,24 @@ fn provision_localhost(request: &ProvisionRequest, tx: &Sender<ProvisionEvent>) 
         tx,
         "Building desktop host",
     )?;
+    let desktop_host_source = request
+        .source_root
+        .join("desktop/target/release/ctox-desktop-host");
+    let desktop_host_target = request.source_root.join("bin/ctox-desktop-host");
+    if let Some(parent) = desktop_host_target.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::copy(&desktop_host_source, &desktop_host_target).with_context(|| {
+        format!(
+            "failed to stage desktop host from {} to {}",
+            desktop_host_source.display(),
+            desktop_host_target.display()
+        )
+    })?;
 
     Ok(format!(
-        "Localhost vorbereitet.\nStartkommando:\n{}/desktop/target/release/ctox-desktop-host --root {} --signal {} --token <TOKEN> --password <PASSWORT> --room {} --name localhost",
+        "Localhost vorbereitet.\nStartkommando:\n{}/bin/ctox-desktop-host --root {} --signal {} --token <TOKEN> --password <PASSWORT> --room {} --name localhost",
         request.source_root.display(),
         request.source_root.display(),
         request.remote.signaling_urls.first().cloned().unwrap_or_default(),
@@ -205,11 +233,15 @@ fn provision_ssh(request: &ProvisionRequest, tx: &Sender<ProvisionEvent>) -> Res
            if [ -f install.sh ]; then \
              bash install.sh --rebuild . ; \
            else \
-             cargo build --release --bin ctox ; \
+             cargo build --release --bin ctox && \
+             mkdir -p bin && \
+             cp target/release/ctox bin/ctox ; \
            fi && \
            if [ -f desktop/Cargo.toml ]; then \
              export PATH=$HOME/.cargo/bin:$PATH && \
-             cargo build --release --manifest-path desktop/Cargo.toml --bin ctox-desktop-host ; \
+             cargo build --release --manifest-path desktop/Cargo.toml --bin ctox-desktop-host && \
+             mkdir -p bin && \
+             cp desktop/target/release/ctox-desktop-host bin/ctox-desktop-host ; \
            fi && \
            echo CTOX_BUILD_SUCCESS || echo CTOX_BUILD_FAILED \
          ) > {build_log} 2>&1 &",
@@ -291,7 +323,7 @@ fn provision_ssh(request: &ProvisionRequest, tx: &Sender<ProvisionEvent>) -> Res
         &format!(
             "cd {remote_root} && \
              pkill -x ctox-desktop-host 2>/dev/null; sleep 1; \
-             nohup ./desktop/target/release/ctox-desktop-host \
+             nohup ./bin/ctox-desktop-host \
                --root {remote_root} \
                --signal '{signal_url}' \
                --token '{token}' \
@@ -530,7 +562,6 @@ fn provision_ssh_remote_installer(
     Ok(format!(
         "Remote host {remote_target} is ready. CTOX was installed via {label}.\n\
          Next: configure the WebRTC signaling + credentials in the Instance \
-         settings, then start `ctox-desktop-host --signal … --token … --password … --room …` on the host."
+         settings, then start `~/.local/bin/ctox-desktop-host --signal … --token … --password … --room …` on the host."
     ))
 }
-

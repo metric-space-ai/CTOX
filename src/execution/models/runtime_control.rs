@@ -4,15 +4,13 @@ use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
-use std::io::ErrorKind;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::inference::engine;
+use crate::inference::local_transport::LocalTransport;
 use crate::inference::model_adapters;
 use crate::inference::runtime_contract;
 use crate::inference::runtime_env;
@@ -20,9 +18,10 @@ use crate::inference::runtime_kernel;
 use crate::inference::runtime_plan;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
+use crate::persistence;
 
-const RUNTIME_SWITCH_RELATIVE_PATH: &str = "runtime/runtime_switch.json";
-const RUNTIME_SWITCH_LOCK_RELATIVE_PATH: &str = "runtime/runtime_switch.lock";
+const RUNTIME_SWITCH_STORAGE_KEY: &str = "runtime_switch_transaction";
+const RUNTIME_SWITCH_LEASE_KEY: &str = "runtime_switch_lease";
 const LOCAL_RUNTIME_READY_STABILITY_PASSES: usize = 3;
 const LOCAL_RUNTIME_READY_STABILITY_POLL_MILLIS: u64 = 200;
 const RUNTIME_SWITCH_LEASE_POLL_MILLIS: u64 = 250;
@@ -90,56 +89,32 @@ pub struct RuntimeSwitchExecution {
 }
 
 struct RuntimeSwitchLease {
-    path: PathBuf,
+    root: PathBuf,
 }
 
 impl Drop for RuntimeSwitchLease {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = persistence::release_lease(&self.root, RUNTIME_SWITCH_LEASE_KEY);
     }
 }
 
-pub fn runtime_switch_path(root: &Path) -> PathBuf {
-    root.join(RUNTIME_SWITCH_RELATIVE_PATH)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct RuntimeSwitchLeaseRecord {
+    owner_pid: u32,
+    model: String,
+    acquired_at_epoch_secs: u64,
 }
 
 pub fn load_runtime_switch_transaction(root: &Path) -> Result<Option<RuntimeSwitchTransaction>> {
-    let path = runtime_switch_path(root);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(&path).with_context(|| {
-        format!(
-            "failed to read runtime switch transaction {}",
-            path.display()
-        )
-    })?;
-    let txn = serde_json::from_slice(&bytes).with_context(|| {
-        format!(
-            "failed to parse runtime switch transaction {}",
-            path.display()
-        )
-    })?;
-    Ok(Some(txn))
+    persistence::load_json_payload(root, RUNTIME_SWITCH_STORAGE_KEY)
 }
 
 pub fn persist_runtime_switch_transaction(
     root: &Path,
     transaction: &RuntimeSwitchTransaction,
 ) -> Result<()> {
-    let path = runtime_switch_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create runtime switch dir {}", parent.display()))?;
-    }
-    let bytes = serde_json::to_vec_pretty(transaction)
-        .context("failed to encode runtime switch transaction")?;
-    std::fs::write(&path, bytes).with_context(|| {
-        format!(
-            "failed to write runtime switch transaction {}",
-            path.display()
-        )
-    })
+    persistence::store_json_payload(root, RUNTIME_SWITCH_STORAGE_KEY, Some(transaction))?;
+    Ok(())
 }
 
 pub fn apply_runtime_selection(
@@ -147,8 +122,17 @@ pub fn apply_runtime_selection(
     model: &str,
     preset: Option<&str>,
 ) -> Result<RuntimeSelectionChange> {
+    apply_runtime_selection_with_context(root, model, preset, None)
+}
+
+pub fn apply_runtime_selection_with_context(
+    root: &Path,
+    model: &str,
+    preset: Option<&str>,
+    context: Option<&str>,
+) -> Result<RuntimeSelectionChange> {
     let previous_plan = runtime_plan::load_persisted_chat_runtime_plan(root)?;
-    let change = persist_runtime_selection(root, model, preset)?;
+    let change = persist_runtime_selection(root, model, preset, context)?;
     let now = runtime_contract::current_epoch_secs();
     persist_runtime_switch_transaction(
         root,
@@ -184,6 +168,15 @@ pub fn execute_runtime_switch(
     model: &str,
     preset: Option<&str>,
 ) -> Result<RuntimeSwitchExecution> {
+    execute_runtime_switch_with_context(root, model, preset, None)
+}
+
+pub fn execute_runtime_switch_with_context(
+    root: &Path,
+    model: &str,
+    preset: Option<&str>,
+    context: Option<&str>,
+) -> Result<RuntimeSwitchExecution> {
     let _lease = acquire_runtime_switch_lease(root, model)?;
     let requested_model = model.trim();
     if requested_model.is_empty() {
@@ -191,7 +184,7 @@ pub fn execute_runtime_switch(
     }
 
     let previous_plan_digest = runtime_plan::load_persisted_chat_runtime_plan_digest(root)?;
-    let change = apply_runtime_selection(root, requested_model, preset)?;
+    let change = apply_runtime_selection_with_context(root, requested_model, preset, context)?;
     let _ = update_runtime_switch_phase(root, RuntimeSwitchPhase::Preparing, None);
 
     let next_state = runtime_state::load_or_resolve_runtime_state(root)?;
@@ -297,77 +290,55 @@ fn commit_runtime_switch_if_ready(
     }
 }
 
-fn runtime_switch_lock_path(root: &Path) -> PathBuf {
-    root.join(RUNTIME_SWITCH_LOCK_RELATIVE_PATH)
-}
-
 fn acquire_runtime_switch_lease(root: &Path, model: &str) -> Result<RuntimeSwitchLease> {
-    let path = runtime_switch_lock_path(root);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create runtime dir {}", parent.display()))?;
-    }
     let deadline = Instant::now() + Duration::from_secs(RUNTIME_SWITCH_LEASE_WAIT_SECS);
     loop {
-        match try_create_runtime_switch_lease(&path, model) {
-            Ok(lease) => return Ok(lease),
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                if runtime_switch_lock_is_stale(&path) {
-                    let _ = std::fs::remove_file(&path);
-                    continue;
-                }
-                if Instant::now() >= deadline {
-                    anyhow::bail!(
-                        "another runtime switch is already in progress (lock: {})",
-                        path.display()
-                    );
-                }
-                thread::sleep(Duration::from_millis(RUNTIME_SWITCH_LEASE_POLL_MILLIS));
-            }
-            Err(err) => {
-                return Err(err).with_context(|| {
-                    format!("failed to acquire runtime switch lock {}", path.display())
-                });
-            }
+        let lease_record = RuntimeSwitchLeaseRecord {
+            owner_pid: std::process::id(),
+            model: model.trim().to_string(),
+            acquired_at_epoch_secs: runtime_contract::current_epoch_secs(),
+        };
+        let payload = serde_json::to_string(&lease_record)
+            .context("failed to encode runtime switch lease")?;
+        if persistence::try_acquire_lease(root, RUNTIME_SWITCH_LEASE_KEY, &payload)? {
+            return Ok(RuntimeSwitchLease {
+                root: root.to_path_buf(),
+            });
         }
+        if runtime_switch_lock_is_stale(root)? {
+            let _ = persistence::release_lease(root, RUNTIME_SWITCH_LEASE_KEY);
+            continue;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("another runtime switch is already in progress");
+        }
+        thread::sleep(Duration::from_millis(RUNTIME_SWITCH_LEASE_POLL_MILLIS));
     }
 }
 
-fn try_create_runtime_switch_lease(
-    path: &Path,
-    model: &str,
-) -> std::io::Result<RuntimeSwitchLease> {
-    let mut handle = OpenOptions::new().write(true).create_new(true).open(path)?;
-    writeln!(handle, "pid={}", std::process::id())?;
-    writeln!(handle, "model={}", model.trim())?;
-    Ok(RuntimeSwitchLease {
-        path: path.to_path_buf(),
+fn load_runtime_switch_lease_record(root: &Path) -> Result<Option<RuntimeSwitchLeaseRecord>> {
+    let raw = persistence::load_lease_value(root, RUNTIME_SWITCH_LEASE_KEY)?;
+    raw.map(|raw| {
+        serde_json::from_str::<RuntimeSwitchLeaseRecord>(&raw)
+            .context("failed to decode runtime switch lease")
     })
+    .transpose()
 }
 
-fn runtime_switch_lock_is_stale(path: &Path) -> bool {
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return true;
-    };
-    let pid = raw
-        .lines()
-        .find_map(|line| line.strip_prefix("pid="))
-        .and_then(|value| value.trim().parse::<u32>().ok());
-    match pid {
-        Some(pid) => !runtime_switch_owner_is_alive(pid),
-        None => true,
+fn runtime_switch_lock_is_stale(root: &Path) -> Result<bool> {
+    match load_runtime_switch_lease_record(root)? {
+        Some(record) => Ok(!runtime_switch_owner_is_alive(record.owner_pid)),
+        None => Ok(false),
     }
 }
 
 fn stale_runtime_switch_lock_detected(root: &Path) -> bool {
-    let path = runtime_switch_lock_path(root);
-    path.exists() && runtime_switch_lock_is_stale(&path)
+    runtime_switch_lock_is_stale(root).unwrap_or(false)
 }
 
 fn clear_stale_runtime_switch_lock(root: &Path) {
-    let path = runtime_switch_lock_path(root);
     if stale_runtime_switch_lock_detected(root) {
-        let _ = std::fs::remove_file(path);
+        let _ = persistence::release_lease(root, RUNTIME_SWITCH_LEASE_KEY);
     }
 }
 
@@ -463,6 +434,7 @@ fn same_runtime_target(
     previous.source == next.source
         && previous.local_runtime == next.local_runtime
         && previous.active_or_selected_model() == next.active_or_selected_model()
+        && previous.configured_context_tokens == next.configured_context_tokens
         && previous.upstream_base_url == next.upstream_base_url
 }
 
@@ -497,9 +469,9 @@ fn runtime_state_is_healthy(root: &Path, state: &runtime_state::InferenceRuntime
         runtime_state::InferenceSource::Local => {
             let readiness = local_runtime_readiness(root, state);
             readiness
-                .socket_path
-                .as_deref()
-                .map(socket_listener_accepts)
+                .transport
+                .as_ref()
+                .map(LocalTransport::probe)
                 .unwrap_or(false)
                 || readiness
                     .health_url
@@ -507,7 +479,7 @@ fn runtime_state_is_healthy(root: &Path, state: &runtime_state::InferenceRuntime
                     .map(probe_backend_health_url)
                     .unwrap_or(false)
                 || (local_runtime_is_owned_and_active(root, state)
-                    && readiness.socket_path.is_none()
+                    && readiness.transport.is_none()
                     && readiness.health_url.is_none())
         }
     }
@@ -575,10 +547,8 @@ fn local_runtime_is_stably_ready(
     }
     let readiness = local_runtime_readiness(root, state);
     let owned_and_active = local_runtime_is_owned_and_active(root, state);
-    if let Some(socket_path) = readiness.socket_path.as_deref() {
-        if owned_and_active
-            && socket_listener_accepts_stably(socket_path, required_passes, poll_interval)
-        {
+    if let Some(transport) = readiness.transport.as_ref() {
+        if owned_and_active && transport_accepts_stably(transport, required_passes, poll_interval) {
             return true;
         }
     }
@@ -590,7 +560,7 @@ fn local_runtime_is_stably_ready(
     {
         return true;
     }
-    owned_and_active && readiness.socket_path.is_none() && readiness.health_url.is_none()
+    owned_and_active && readiness.transport.is_none() && readiness.health_url.is_none()
 }
 
 fn promote_local_runtime_starting_workload_if_ready(
@@ -607,8 +577,8 @@ fn promote_local_runtime_starting_workload_if_ready(
         return false;
     };
     let readiness = local_runtime_readiness(root, state);
-    let socket_ready = readiness.socket_path.as_deref().is_some_and(|socket_path| {
-        socket_listener_accepts_stably(socket_path, required_passes, poll_interval)
+    let socket_ready = readiness.transport.as_ref().is_some_and(|transport| {
+        transport_accepts_stably(transport, required_passes, poll_interval)
     });
     let health_ready = readiness
         .health_url
@@ -668,7 +638,7 @@ fn local_runtime_is_owned_and_active(
                         state,
                         pid,
                         active_model,
-                        readiness.socket_path.as_deref(),
+                        readiness.transport.as_ref(),
                     )
             })
         })
@@ -707,7 +677,7 @@ fn local_runtime_starting_workload_is_alive(
                 state,
                 pid,
                 active_model,
-                readiness.socket_path.as_deref(),
+                readiness.transport.as_ref(),
             )
     })
 }
@@ -735,7 +705,7 @@ fn local_runtime_requested_workload_is_alive(
                 state,
                 pid,
                 active_model,
-                readiness.socket_path.as_deref(),
+                readiness.transport.as_ref(),
             )
     })
 }
@@ -777,7 +747,7 @@ fn runtime_process_matches_local_backend(
     state: &runtime_state::InferenceRuntimeState,
     pid: u32,
     active_model: &str,
-    socket_path: Option<&Path>,
+    transport: Option<&LocalTransport>,
 ) -> bool {
     if pid == std::process::id() {
         return true;
@@ -809,7 +779,7 @@ fn runtime_process_matches_local_backend(
     if !command.contains("ctox-engine") {
         return false;
     }
-    if command.contains("tools/model-runtime/target/release/ctox-engine from-config") {
+    if command.contains("ctox-engine") && command.contains("from-config") {
         return expected_local_engine_config_path(root, state)
             .map(|expected| command.contains(expected.display().to_string().as_str()))
             .unwrap_or(false);
@@ -817,8 +787,8 @@ fn runtime_process_matches_local_backend(
     if command.contains(active_model) {
         return true;
     }
-    socket_path
-        .map(|path| command.contains(&path.display().to_string()))
+    transport
+        .map(|transport| command.contains(&transport.endpoint_string()))
         .unwrap_or(false)
 }
 
@@ -831,14 +801,12 @@ fn expected_local_engine_config_path(
     if active_model.is_empty() {
         return None;
     }
-    let socket_component = runtime_kernel::managed_runtime_socket_path(
+    let socket_component = runtime_kernel::managed_runtime_transport(
         root,
         runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
     )
-    .file_name()
-    .and_then(|value| value.to_str())
-    .map(sanitize_managed_engine_config_path_component)
-    .unwrap_or_else(|| "tcp".to_string());
+    .endpoint_string();
+    let socket_component = sanitize_managed_engine_config_path_component(&socket_component);
     let model_digest = format!("{:x}", sha2::Sha256::digest(active_model.as_bytes()));
     Some(
         root.join("runtime")
@@ -861,14 +829,12 @@ fn expected_local_litert_config_path(
     if active_model.is_empty() {
         return None;
     }
-    let socket_component = runtime_kernel::managed_runtime_socket_path(
+    let socket_component = runtime_kernel::managed_runtime_transport(
         root,
         runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
     )
-    .file_name()
-    .and_then(|value| value.to_str())
-    .map(sanitize_managed_engine_config_path_component)
-    .unwrap_or_else(|| "tcp".to_string());
+    .endpoint_string();
+    let socket_component = sanitize_managed_engine_config_path_component(&socket_component);
     let model_digest = format!("{:x}", sha2::Sha256::digest(active_model.as_bytes()));
     Some(
         root.join("runtime")
@@ -898,13 +864,13 @@ fn local_runtime_readiness_label(
 ) -> String {
     let readiness = local_runtime_readiness(root, state);
     match (
-        readiness.socket_path.as_deref(),
+        readiness.transport.as_ref(),
         readiness.health_url.as_deref(),
     ) {
-        (Some(socket_path), Some(health_url)) => {
-            format!("socket {} or {}", socket_path.display(), health_url)
+        (Some(transport), Some(health_url)) => {
+            format!("transport {} or {}", transport.display_label(), health_url)
         }
-        (Some(socket_path), None) => format!("socket {}", socket_path.display()),
+        (Some(transport), None) => format!("transport {}", transport.display_label()),
         (None, Some(health_url)) => health_url.to_string(),
         (None, None) => "local_runtime".to_string(),
     }
@@ -912,7 +878,7 @@ fn local_runtime_readiness_label(
 
 #[derive(Debug, Clone)]
 struct LocalRuntimeReadiness {
-    socket_path: Option<PathBuf>,
+    transport: Option<LocalTransport>,
     health_url: Option<String>,
 }
 
@@ -920,37 +886,37 @@ fn local_runtime_readiness(
     root: &Path,
     state: &runtime_state::InferenceRuntimeState,
 ) -> LocalRuntimeReadiness {
-    let fallback_socket_path = runtime_kernel::managed_runtime_socket_path(
-        root,
-        runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
-    );
-    let socket_path = Some(fallback_socket_path);
+    let transport = if state.source.is_local() {
+        Some(runtime_kernel::managed_runtime_transport(
+            root,
+            runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
+        ))
+    } else {
+        None
+    };
     let health_url = if state.source.is_local() {
         None
     } else {
-        Some(format!("{}/health", state.upstream_base_url.trim_end_matches('/')))
+        Some(format!(
+            "{}/health",
+            state.upstream_base_url.trim_end_matches('/')
+        ))
     };
 
     LocalRuntimeReadiness {
-        socket_path,
+        transport,
         health_url,
     }
 }
 
-#[cfg(unix)]
-fn socket_listener_accepts(path: &Path) -> bool {
-    use std::os::unix::net::UnixStream;
-
-    if !path.exists() {
-        return false;
-    }
-    UnixStream::connect(path).is_ok()
-}
-
-fn socket_listener_accepts_stably(path: &Path, attempts: usize, poll_interval: Duration) -> bool {
+fn transport_accepts_stably(
+    transport: &LocalTransport,
+    attempts: usize,
+    poll_interval: Duration,
+) -> bool {
     let attempts = attempts.max(1);
     for idx in 0..attempts {
-        if !socket_listener_accepts(path) {
+        if !transport.probe() {
             return false;
         }
         if idx + 1 < attempts {
@@ -958,11 +924,6 @@ fn socket_listener_accepts_stably(path: &Path, attempts: usize, poll_interval: D
         }
     }
     true
-}
-
-#[cfg(not(unix))]
-fn socket_listener_accepts(_path: &Path) -> bool {
-    false
 }
 
 fn maybe_retry_chat_backend_without_nccl(root: &Path, active_model: &str) -> Result<bool> {
@@ -1034,6 +995,7 @@ fn persist_runtime_selection(
     root: &Path,
     model: &str,
     preset: Option<&str>,
+    context: Option<&str>,
 ) -> Result<RuntimeSelectionChange> {
     let requested_model = model.trim();
     if requested_model.is_empty() {
@@ -1043,6 +1005,14 @@ fn persist_runtime_selection(
     let previous_state = runtime_state::load_or_resolve_runtime_state(root)?;
     let mut env_map = runtime_env::effective_operator_env_map(root).unwrap_or_default();
     overlay_process_runtime_selection_env(&mut env_map);
+    if let Some(context) = context.map(str::trim).filter(|value| !value.is_empty()) {
+        let normalized = runtime_plan::parse_chat_context_tokens(context)
+            .with_context(|| format!("unsupported chat context selection: {context}"))?;
+        env_map.insert(
+            "CTOX_CHAT_MODEL_MAX_CONTEXT".to_string(),
+            normalized.to_string(),
+        );
+    }
     let inferred_provider = runtime_state::infer_api_provider_from_env_map(&env_map);
     let requested_source = if (!inferred_provider.eq_ignore_ascii_case("local")
         && engine::api_provider_supports_model(&inferred_provider, requested_model))
@@ -1061,6 +1031,7 @@ fn persist_runtime_selection(
                 .to_string()
         });
     let explicit_local_runtime = explicit_local_runtime_override(&env_map);
+    let configured_context = runtime_plan::configured_chat_context_tokens(&env_map);
 
     sanitize_runtime_selection_env(&mut env_map);
     let mut next_state = build_selected_runtime_state(
@@ -1069,6 +1040,7 @@ fn persist_runtime_selection(
         explicit_local_runtime,
         requested_model,
         normalized_preset.as_deref(),
+        configured_context,
     );
     apply_selection_runtime_projection(root, &mut env_map, &mut next_state, None)?;
 
@@ -1100,9 +1072,9 @@ fn restore_runtime_selection(
                 .label()
                 .to_string()
         });
-
     let mut env_map = runtime_env::effective_operator_env_map(root).unwrap_or_default();
     overlay_process_runtime_selection_env(&mut env_map);
+    let configured_context = runtime_plan::configured_chat_context_tokens(&env_map);
     sanitize_runtime_selection_env(&mut env_map);
     let mut next_state = build_selected_runtime_state(
         &previous_state,
@@ -1110,6 +1082,7 @@ fn restore_runtime_selection(
         local_runtime,
         requested_model,
         normalized_preset.as_deref(),
+        configured_context,
     );
     apply_selection_runtime_projection(root, &mut env_map, &mut next_state, previous_plan)?;
 
@@ -1135,6 +1108,7 @@ fn overlay_process_runtime_selection_env(env_map: &mut BTreeMap<String, String>)
         "CTOX_UPSTREAM_BASE_URL",
         "CTOX_CHAT_MODEL",
         "CTOX_CHAT_MODEL_BASE",
+        "CTOX_CHAT_MODEL_MAX_CONTEXT",
     ] {
         let Ok(value) = std::env::var(key) else {
             continue;
@@ -1163,6 +1137,7 @@ fn build_selected_runtime_state(
     local_runtime_override: Option<runtime_state::LocalRuntimeKind>,
     requested_model: &str,
     preset: Option<&str>,
+    configured_context_tokens: u32,
 ) -> runtime_state::InferenceRuntimeState {
     let mut next_state = previous_state.clone();
     next_state.version = previous_state.version.max(7);
@@ -1180,19 +1155,10 @@ fn build_selected_runtime_state(
     next_state.requested_model = Some(requested_model.to_string());
     next_state.active_model = Some(requested_model.to_string());
     next_state.local_preset = preset.map(ToOwned::to_owned);
+    next_state.configured_context_tokens = Some(configured_context_tokens);
     next_state.boost.active_until_epoch = None;
     next_state.boost.reason = None;
     next_state.adapter_tuning = runtime_state::AdapterRuntimeTuning::default();
-    next_state.proxy_host = if previous_state.proxy_host.trim().is_empty() {
-        runtime_state::default_proxy_host().to_string()
-    } else {
-        previous_state.proxy_host.clone()
-    };
-    next_state.proxy_port = if previous_state.proxy_port == 0 {
-        runtime_state::default_proxy_port()
-    } else {
-        previous_state.proxy_port
-    };
 
     match source {
         runtime_state::InferenceSource::Api => {
@@ -1217,7 +1183,7 @@ fn build_selected_runtime_state(
             next_state.engine_port = Some(engine_port);
             next_state.realized_context_tokens =
                 if next_state.local_runtime == runtime_state::LocalRuntimeKind::LiteRt {
-                    runtime_state::validated_litert_context_cap_for_model(requested_model)
+                    Some(configured_context_tokens)
                 } else {
                     None
                 };
@@ -1252,11 +1218,7 @@ fn apply_selection_runtime_projection(
                 .get("CTOX_UPSTREAM_BASE_URL")
                 .map(String::as_str)
                 .filter(|value| !value.trim().is_empty())
-                .filter(|value| {
-                    let trimmed = value.trim().to_ascii_lowercase();
-                    !(trimmed.starts_with("http://127.0.0.1")
-                        || trimmed.starts_with("http://localhost"))
-                })
+                .filter(|value| !runtime_state::is_local_loopback_base_url(value))
                 .map(str::to_string)
                 .unwrap_or_else(|| {
                     runtime_state::default_api_upstream_base_url_for_provider(&api_provider)
@@ -1279,17 +1241,22 @@ fn apply_selection_runtime_projection(
                 let validated_context =
                     runtime_state::validated_litert_context_cap_for_model(request_model)
                         .context("LiteRT runtime selection missing a qualified artifact mapping")?;
-                if validated_context < 131_072 {
+                let requested_context = next_state
+                    .configured_context_tokens
+                    .unwrap_or(validated_context);
+                if requested_context != validated_context {
                     anyhow::bail!(
-                        "LiteRT artifact for {} is only validated to {} tokens; CTOX local runtime requires 131072",
+                        "LiteRT artifact for {} is fixed at {} tokens, but CTOX requested {}. Build or select a matching LiteRT artifact for that context size.",
                         request_model,
-                        validated_context
+                        validated_context,
+                        requested_context
                     );
                 }
                 runtime_plan::clear_chat_plan_env(env_map);
                 runtime_plan::store_persisted_chat_runtime_plan(root, None)?;
                 runtime_plan::store_persisted_runtime_fleet_plan(root, None)?;
                 next_state.local_preset = None;
+                next_state.configured_context_tokens = Some(validated_context);
                 next_state.realized_context_tokens = Some(validated_context);
             } else {
                 let selected_plan = if let Some(plan) = previous_plan {
@@ -1383,6 +1350,7 @@ fn apply_local_runtime_plan(
     next_state.active_model = Some(plan.model.clone());
     next_state.engine_model = Some(plan.model.clone());
     next_state.engine_port = Some(engine_port);
+    next_state.configured_context_tokens = Some(plan.max_seq_len);
     next_state.realized_context_tokens = Some(plan.max_seq_len);
     next_state.local_preset = Some(plan.preset.label().to_string());
     next_state.upstream_base_url = runtime_state::local_upstream_base_url(engine_port);
@@ -1428,16 +1396,11 @@ fn apply_auxiliary_runtime_plan(
         };
         return;
     };
-    let host = runtime_state::default_proxy_host();
     target.enabled = true;
     target.configured_model = Some(plan.display_model.clone());
     target.port = Some(plan.port);
-    target.base_url = Some(match role {
-        engine::AuxiliaryRole::Embedding
-        | engine::AuxiliaryRole::Stt
-        | engine::AuxiliaryRole::Vision => format!("http://{host}:{}", plan.port),
-        engine::AuxiliaryRole::Tts => format!("ws://{host}:{}", plan.port),
-    });
+    let _ = role;
+    target.base_url = None;
 }
 
 pub fn update_runtime_switch_phase(
@@ -1689,9 +1652,8 @@ mod tests {
             active_model: None,
             engine_model: None,
             engine_port: None,
+            configured_context_tokens: None,
             realized_context_tokens: None,
-            proxy_host: runtime_state::default_proxy_host().to_string(),
-            proxy_port: runtime_state::default_proxy_port(),
             upstream_base_url: runtime_state::default_api_upstream_base_url().to_string(),
             local_preset: None,
             boost: runtime_state::BoostRuntimeState::default(),
@@ -1815,7 +1777,7 @@ mod tests {
         state.requested_model = Some("Qwen/Qwen3.5-9B".to_string());
         state.engine_model = Some("Qwen/Qwen3.5-9B".to_string());
         state.engine_port = Some(1234);
-        state.upstream_base_url = "http://127.0.0.1:1234".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1234);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -1828,8 +1790,8 @@ mod tests {
                 requested_preset: Some("Performance".to_string()),
                 previous_source: Some(runtime_state::InferenceSource::Local),
                 previous_local_runtime: Some(runtime_state::LocalRuntimeKind::Candle),
-                previous_requested_model: Some("Qwen/Qwen3.5-27B".to_string()),
-                previous_active_model: Some("Qwen/Qwen3.5-27B".to_string()),
+                previous_requested_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
+                previous_active_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
                 previous_preset: Some("Quality".to_string()),
                 previous_plan: None,
                 next_active_model: Some("Qwen/Qwen3.5-9B".to_string()),
@@ -1839,14 +1801,14 @@ mod tests {
             },
         )
         .unwrap();
-        let socket_path = runtime_kernel::managed_runtime_socket_path(
+        let ipc_path = runtime_kernel::managed_runtime_ipc_path(
             &root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         );
-        if let Some(parent) = socket_path.parent() {
+        if let Some(parent) = ipc_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = UnixListener::bind(&ipc_path).unwrap();
         let accept_loop = {
             let listener = listener.try_clone().unwrap();
             thread::spawn(move || {
@@ -1908,7 +1870,7 @@ mod tests {
         state.source = runtime_state::InferenceSource::Local;
         state.active_model = Some("openai/gpt-oss-20b".to_string());
         state.requested_model = Some("openai/gpt-oss-20b".to_string());
-        state.upstream_base_url = "http://127.0.0.1:1234".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1234);
         runtime_contract::sync_backend_runtime_residency(
             &root,
             runtime_contract::BackendRuntimeResidency {
@@ -1948,7 +1910,7 @@ mod tests {
         state.requested_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_port = Some(1234);
-        state.upstream_base_url = "http://127.0.0.1:1234".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1234);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -1972,14 +1934,14 @@ mod tests {
             },
         )
         .unwrap();
-        let socket_path = runtime_kernel::managed_runtime_socket_path(
+        let ipc_path = runtime_kernel::managed_runtime_ipc_path(
             &root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         );
-        if let Some(parent) = socket_path.parent() {
+        if let Some(parent) = ipc_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = UnixListener::bind(&ipc_path).unwrap();
         let accept_loop = {
             let listener = listener.try_clone().unwrap();
             thread::spawn(move || {
@@ -2020,7 +1982,7 @@ mod tests {
 
         accept_loop.join().unwrap();
         drop(listener);
-        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_file(ipc_path);
     }
 
     #[cfg(unix)]
@@ -2034,7 +1996,7 @@ mod tests {
         state.requested_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_port = Some(1234);
-        state.upstream_base_url = "http://127.0.0.1:1234".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1234);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -2058,14 +2020,14 @@ mod tests {
             },
         )
         .unwrap();
-        let socket_path = runtime_kernel::managed_runtime_socket_path(
+        let ipc_path = runtime_kernel::managed_runtime_ipc_path(
             &root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         );
-        if let Some(parent) = socket_path.parent() {
+        if let Some(parent) = ipc_path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        let listener = UnixListener::bind(&ipc_path).unwrap();
 
         let txn = reconcile_runtime_switch_transaction(&root)
             .unwrap()
@@ -2073,7 +2035,7 @@ mod tests {
         assert_ne!(txn.phase, RuntimeSwitchPhase::Committed);
 
         drop(listener);
-        let _ = std::fs::remove_file(socket_path);
+        let _ = std::fs::remove_file(ipc_path);
     }
 
     #[test]
@@ -2112,18 +2074,18 @@ mod tests {
         runtime_env::save_runtime_env_map(&root, &BTreeMap::new()).unwrap();
         let mut state = runtime_state::load_or_resolve_runtime_state(&root).unwrap();
         state.source = runtime_state::InferenceSource::Local;
-        state.active_model = Some("Qwen/Qwen3.5-27B".to_string());
-        state.requested_model = Some("Qwen/Qwen3.5-27B".to_string());
-        state.engine_model = Some("Qwen/Qwen3.5-27B".to_string());
+        state.active_model = Some("Qwen/Qwen3.6-35B-A3B".to_string());
+        state.requested_model = Some("Qwen/Qwen3.6-35B-A3B".to_string());
+        state.engine_model = Some("Qwen/Qwen3.6-35B-A3B".to_string());
         state.engine_port = Some(1235);
-        state.upstream_base_url = "http://127.0.0.1:1235".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1235);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
             &RuntimeSwitchTransaction {
                 version: 3,
                 phase: RuntimeSwitchPhase::Committed,
-                requested_model: "Qwen/Qwen3.5-27B".to_string(),
+                requested_model: "Qwen/Qwen3.6-35B-A3B".to_string(),
                 requested_source: runtime_state::InferenceSource::Local,
                 requested_local_runtime: runtime_state::LocalRuntimeKind::Candle,
                 requested_preset: Some("Quality".to_string()),
@@ -2133,7 +2095,7 @@ mod tests {
                 previous_active_model: Some("Qwen/Qwen3.5-9B".to_string()),
                 previous_preset: Some("Quality".to_string()),
                 previous_plan: None,
-                next_active_model: Some("Qwen/Qwen3.5-27B".to_string()),
+                next_active_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
                 started_at_epoch_secs: runtime_contract::current_epoch_secs(),
                 updated_at_epoch_secs: runtime_contract::current_epoch_secs(),
                 error: None,
@@ -2161,7 +2123,7 @@ mod tests {
         state.requested_model = Some("google/gemma-4-E2B-it".to_string());
         state.engine_model = Some("google/gemma-4-E2B-it".to_string());
         state.engine_port = Some(1235);
-        state.upstream_base_url = "http://127.0.0.1:1235".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1235);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -2227,7 +2189,7 @@ mod tests {
         state.requested_model = Some("zai-org/GLM-4.7-Flash".to_string());
         state.engine_model = Some("zai-org/GLM-4.7-Flash".to_string());
         state.engine_port = Some(1236);
-        state.upstream_base_url = "http://127.0.0.1:1236".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1236);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -2240,8 +2202,8 @@ mod tests {
                 requested_preset: Some("Quality".to_string()),
                 previous_source: Some(runtime_state::InferenceSource::Local),
                 previous_local_runtime: Some(runtime_state::LocalRuntimeKind::Candle),
-                previous_requested_model: Some("Qwen/Qwen3.5-27B".to_string()),
-                previous_active_model: Some("Qwen/Qwen3.5-27B".to_string()),
+                previous_requested_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
+                previous_active_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
                 previous_preset: Some("Quality".to_string()),
                 previous_plan: None,
                 next_active_model: Some("zai-org/GLM-4.7-Flash".to_string()),
@@ -2308,14 +2270,14 @@ mod tests {
             source: runtime_state::InferenceSource::Local,
             active_model: Some("Qwen/Qwen3.5-4B".to_string()),
             requested_model: Some("Qwen/Qwen3.5-4B".to_string()),
-            upstream_base_url: "http://127.0.0.1:1234".to_string(),
+            upstream_base_url: runtime_state::local_upstream_base_url(1234),
             ..test_runtime_state(runtime_state::InferenceSource::Local)
         };
         let next_state = runtime_state::InferenceRuntimeState {
             source: runtime_state::InferenceSource::Local,
             active_model: Some("Qwen/Qwen3.5-4B".to_string()),
             requested_model: Some("Qwen/Qwen3.5-4B".to_string()),
-            upstream_base_url: "http://127.0.0.1:1234".to_string(),
+            upstream_base_url: runtime_state::local_upstream_base_url(1234),
             ..test_runtime_state(runtime_state::InferenceSource::Local)
         };
         let change = RuntimeSelectionChange {
@@ -2330,26 +2292,32 @@ mod tests {
     #[test]
     fn stale_runtime_switch_lock_is_reclaimed() {
         let root = make_temp_root();
-        let path = runtime_switch_lock_path(&root);
-        std::fs::write(&path, "pid=999999\nmodel=stale\n").unwrap();
+        let stale = RuntimeSwitchLeaseRecord {
+            owner_pid: 999_999,
+            model: "stale".to_string(),
+            acquired_at_epoch_secs: runtime_contract::current_epoch_secs(),
+        };
+        let payload = serde_json::to_string(&stale).unwrap();
+        assert!(persistence::try_acquire_lease(&root, RUNTIME_SWITCH_LEASE_KEY, &payload).unwrap());
 
         let lease = acquire_runtime_switch_lease(&root, "Qwen/Qwen3.5-4B").unwrap();
-        assert!(path.exists());
+        assert!(load_runtime_switch_lease_record(&root).unwrap().is_some());
         drop(lease);
-        assert!(!path.exists());
+        assert!(load_runtime_switch_lease_record(&root).unwrap().is_none());
     }
 
     #[test]
     fn current_runtime_switch_lock_is_not_stale() {
         let root = make_temp_root();
-        let path = runtime_switch_lock_path(&root);
-        std::fs::write(
-            &path,
-            format!("pid={}\nmodel=current\n", std::process::id()),
-        )
-        .unwrap();
+        let current = RuntimeSwitchLeaseRecord {
+            owner_pid: std::process::id(),
+            model: "current".to_string(),
+            acquired_at_epoch_secs: runtime_contract::current_epoch_secs(),
+        };
+        let payload = serde_json::to_string(&current).unwrap();
+        assert!(persistence::try_acquire_lease(&root, RUNTIME_SWITCH_LEASE_KEY, &payload).unwrap());
 
-        assert!(!runtime_switch_lock_is_stale(&path));
+        assert!(!runtime_switch_lock_is_stale(&root).unwrap());
     }
 
     #[test]
@@ -2362,7 +2330,7 @@ mod tests {
         state.requested_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_model = Some("openai/gpt-oss-20b".to_string());
         state.engine_port = Some(1234);
-        state.upstream_base_url = "http://127.0.0.1:1234".to_string();
+        state.upstream_base_url = runtime_state::local_upstream_base_url(1234);
         runtime_env::save_runtime_state_projection(&root, &state, &BTreeMap::new()).unwrap();
         persist_runtime_switch_transaction(
             &root,
@@ -2386,8 +2354,13 @@ mod tests {
             },
         )
         .unwrap();
-        let lock_path = runtime_switch_lock_path(&root);
-        std::fs::write(&lock_path, "pid=999999\nmodel=zai-org/GLM-4.7-Flash\n").unwrap();
+        let stale = RuntimeSwitchLeaseRecord {
+            owner_pid: 999_999,
+            model: "zai-org/GLM-4.7-Flash".to_string(),
+            acquired_at_epoch_secs: runtime_contract::current_epoch_secs(),
+        };
+        let payload = serde_json::to_string(&stale).unwrap();
+        assert!(persistence::try_acquire_lease(&root, RUNTIME_SWITCH_LEASE_KEY, &payload).unwrap());
         runtime_contract::sync_backend_runtime_residency(
             &root,
             runtime_contract::BackendRuntimeResidency {
@@ -2413,7 +2386,7 @@ mod tests {
         assert!(txn.error.as_deref().is_some_and(|value| {
             value.contains("runtime switch owner disappeared before commit")
         }));
-        assert!(!lock_path.exists());
+        assert!(load_runtime_switch_lease_record(&root).unwrap().is_none());
     }
 
     #[test]
@@ -2881,12 +2854,12 @@ mod tests {
     #[test]
     fn local_runtime_health_accepts_managed_socket_without_http_health() {
         let root = make_temp_root();
-        let socket_path = runtime_kernel::managed_runtime_socket_path(
+        let ipc_path = runtime_kernel::managed_runtime_ipc_path(
             &root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         );
-        fs::create_dir_all(socket_path.parent().expect("socket parent")).unwrap();
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::create_dir_all(ipc_path.parent().expect("ipc parent")).unwrap();
+        let listener = UnixListener::bind(&ipc_path).unwrap();
 
         let state = runtime_state::InferenceRuntimeState {
             version: 5,
@@ -2897,10 +2870,9 @@ mod tests {
             active_model: Some("openai/gpt-oss-20b".to_string()),
             engine_model: Some("openai/gpt-oss-20b".to_string()),
             engine_port: Some(1234),
+            configured_context_tokens: Some(131_072),
             realized_context_tokens: Some(131_072),
-            proxy_host: "127.0.0.1".to_string(),
-            proxy_port: 12434,
-            upstream_base_url: "http://127.0.0.1:9".to_string(),
+            upstream_base_url: runtime_state::local_upstream_base_url(9),
             local_preset: Some("Quality".to_string()),
             boost: runtime_state::BoostRuntimeState::default(),
             adapter_tuning: runtime_state::AdapterRuntimeTuning::default(),
@@ -2919,19 +2891,19 @@ mod tests {
     #[test]
     fn cutover_ready_local_switch_commits_immediately_when_backend_is_ready() {
         let root = make_temp_root();
-        let socket_path = runtime_kernel::managed_runtime_socket_path(
+        let ipc_path = runtime_kernel::managed_runtime_ipc_path(
             &root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         );
-        fs::create_dir_all(socket_path.parent().expect("socket parent")).unwrap();
-        let listener = UnixListener::bind(&socket_path).unwrap();
+        fs::create_dir_all(ipc_path.parent().expect("ipc parent")).unwrap();
+        let listener = UnixListener::bind(&ipc_path).unwrap();
 
         persist_runtime_switch_transaction(
             &root,
             &RuntimeSwitchTransaction {
                 version: 3,
                 phase: RuntimeSwitchPhase::CutoverReady,
-                requested_model: "Qwen/Qwen3.5-35B-A3B".to_string(),
+                requested_model: "Qwen/Qwen3.6-35B-A3B".to_string(),
                 requested_source: runtime_state::InferenceSource::Local,
                 requested_local_runtime: runtime_state::LocalRuntimeKind::Candle,
                 requested_preset: Some("Performance".to_string()),
@@ -2941,7 +2913,7 @@ mod tests {
                 previous_active_model: Some("openai/gpt-oss-20b".to_string()),
                 previous_preset: Some("Quality".to_string()),
                 previous_plan: None,
-                next_active_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
+                next_active_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
                 started_at_epoch_secs: runtime_contract::current_epoch_secs(),
                 updated_at_epoch_secs: runtime_contract::current_epoch_secs(),
                 error: None,
@@ -2954,7 +2926,7 @@ mod tests {
             runtime_contract::BackendRuntimeResidency {
                 role: runtime_contract::BackendRole::Chat,
                 phase: runtime_contract::RuntimeResidencyPhase::Active,
-                model: "Qwen/Qwen3.5-35B-A3B".to_string(),
+                model: "Qwen/Qwen3.6-35B-A3B".to_string(),
                 pid: Some(std::process::id()),
                 port: Some(1234),
                 health_path: Some("/health".to_string()),
@@ -2971,15 +2943,14 @@ mod tests {
             version: 5,
             source: runtime_state::InferenceSource::Local,
             local_runtime: runtime_state::LocalRuntimeKind::Candle,
-            base_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
-            requested_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
-            active_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
-            engine_model: Some("Qwen/Qwen3.5-35B-A3B".to_string()),
+            base_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
+            requested_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
+            active_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
+            engine_model: Some("Qwen/Qwen3.6-35B-A3B".to_string()),
             engine_port: Some(1234),
+            configured_context_tokens: Some(65_536),
             realized_context_tokens: Some(65_536),
-            proxy_host: "127.0.0.1".to_string(),
-            proxy_port: 12434,
-            upstream_base_url: "http://127.0.0.1:9".to_string(),
+            upstream_base_url: runtime_state::local_upstream_base_url(9),
             local_preset: Some("Performance".to_string()),
             boost: runtime_state::BoostRuntimeState::default(),
             adapter_tuning: runtime_state::AdapterRuntimeTuning::default(),

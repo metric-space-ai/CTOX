@@ -23,7 +23,7 @@ The workspace is currently organized by serving-role modules:
 Current active support in CTOX is intentionally narrow:
 
 - `openai/gpt-oss-20b`
-- `Qwen/Qwen3.5-27B`
+- `Qwen/Qwen3.6-35B-A3B`
 
 Other upstream model families or larger variants may still exist in the source tree, but they are
 not part of the active CTOX support matrix until they are validated end-to-end on target hosts.

@@ -1,9 +1,7 @@
 //! Read-only access to CTOX SQLite databases for the desktop visualizations.
 //!
-//! Three databases per installation:
-//! - **State DB** (`~/.codex/state_5.sqlite`): threads, jobs, agent_jobs, stage1_outputs, dynamic_tools
-//! - **Logs DB** (`~/.codex/logs_1.sqlite`): structured log entries
-//! - **LCM DB** (`<root>/runtime/ctox_lcm.db`): messages, summaries, mission state, continuity
+//! Desktop reads the local Codex UI state databases plus CTOX's single runtime
+//! database at `<root>/runtime/ctox.sqlite3`.
 
 use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags, params};
@@ -15,8 +13,8 @@ use rusqlite::{Connection, OpenFlags, params};
 const STATE_DB_NAME: &str = "state_5.sqlite";
 // Try newest version first, fall back to older
 const LOGS_DB_NAMES: &[&str] = &["logs_2.sqlite", "logs_1.sqlite"];
-const LCM_DB_NAME: &str = "runtime/ctox_lcm.db";
-const AGENT_DB_NAME: &str = "runtime/cto_agent.db";
+const LCM_DB_NAME: &str = "runtime/ctox.sqlite3";
+const AGENT_DB_NAME: &str = "runtime/ctox.sqlite3";
 
 fn codex_home() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("CODEX_HOME") {
@@ -844,7 +842,7 @@ pub fn query_context_items(root: &Path, conversation_id: i64) -> Vec<ContextItem
 }
 
 // ---------------------------------------------------------------------------
-// Agent DB types and queries (cto_agent.db)
+// Runtime DB types and queries (ctox.sqlite3)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]

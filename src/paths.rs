@@ -1,15 +1,14 @@
 //! Centralized runtime database paths.
 //!
 //! All core state lives in a single consolidated sqlite file, [`core_db`] =
-//! `runtime/ctox.db`. Mission-side tables (queue, tickets, governance,
+//! `runtime/ctox.sqlite3`. Mission-side tables (queue, tickets, governance,
 //! secrets, channels, schedule, plans, approval nag, knowledge) and LCM-side
 //! tables (messages, summaries, continuity, mission state, verification,
 //! claims) share that file. [`mission_db`] and [`lcm_db`] are thin aliases
 //! that exist for call-site clarity — both resolve to the same path.
 //!
-//! A first-start migration merges the historical `cto_agent.db` and
-//! `ctox_lcm.db` files into `ctox.db` and moves the originals into a dated
-//! backup folder; see [`crate::service::db_migration`].
+//! Historical `cto_agent.db` and `ctox_lcm.db` paths remain exposed only so
+//! compatibility migration code can detect and import them when present.
 //!
 //! Tool-owned sqlite stores keep their own files and are exposed here so
 //! `ctox source-status` and other callers can locate them without duplicating
@@ -27,7 +26,7 @@ pub fn backup_dir(root: &Path) -> PathBuf {
 
 /// The consolidated core state database.
 pub fn core_db(root: &Path) -> PathBuf {
-    runtime_dir(root).join("ctox.db")
+    runtime_dir(root).join("ctox.sqlite3")
 }
 
 /// Alias of [`core_db`] used by mission-side call sites for readability.

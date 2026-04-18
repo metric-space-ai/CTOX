@@ -1,3 +1,0 @@
-interface:
-  display_name: "Recovery Assurance"
-  short_description: "Verify backup and restore readiness"

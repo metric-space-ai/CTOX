@@ -626,13 +626,6 @@ fn render_optional_zammad_article_body(
     }
 }
 
-fn render_zammad_article_body(
-    body: &str,
-    _control_note: Option<&crate::mission::ticket_protocol::TicketControlNote>,
-) -> Result<String> {
-    Ok(body.trim().to_string())
-}
-
 fn update_ticket_state(config: &ZammadConfig, remote_ticket_id: &str, state: &str) -> Result<()> {
     let _response = request_json(
         config,
@@ -834,30 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn control_note_is_not_rendered_into_zammad_article_body() -> Result<()> {
-        let rendered = render_zammad_article_body(
-            "Handled by CTOX.",
-            Some(&crate::mission::ticket_protocol::TicketControlNote {
-                schema: "ctox.ticket.control_note.v1".to_string(),
-                operation: "transition".to_string(),
-                case_id: "case-1".to_string(),
-                ticket_key: "zammad:1".to_string(),
-                label: "support/test".to_string(),
-                bundle_label: "support/test".to_string(),
-                bundle_version: 1,
-                approval_mode: "bounded_auto_execute".to_string(),
-                autonomy_level: "A2".to_string(),
-                support_mode: "support_case".to_string(),
-                risk_level: "medium".to_string(),
-                verification_status: Some("passed".to_string()),
-                verification_summary: Some("ok".to_string()),
-            }),
-        )?;
-        assert_eq!(rendered, "Handled by CTOX.");
-        Ok(())
-    }
-
-    #[test]
     fn zammad_sync_and_writebacks_use_expected_endpoints() -> Result<()> {
         let (base_url, rx) = spawn_mock_server()?;
         let settings = settings_with_base_url(&base_url);
@@ -886,7 +855,6 @@ mod tests {
                 remote_ticket_id: "1",
                 body: "handled",
                 internal: true,
-                control_note: None,
             },
         )?;
         assert_eq!(comment.remote_event_ids, vec!["99".to_string()]);
@@ -910,8 +878,6 @@ mod tests {
             &TicketSelfWorkPublishRequest {
                 title: "CTOX self work",
                 body: "review the observed source profile",
-                internal: true,
-                metadata: json!({"kind": "review-source-profile"}),
             },
         )?;
         assert_eq!(published.remote_ticket_id.as_deref(), Some("55"));

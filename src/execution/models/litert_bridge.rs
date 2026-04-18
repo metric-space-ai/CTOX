@@ -4,6 +4,7 @@ use crate::inference::local_transport::LocalTransport;
 use crate::inference::model_adapters;
 use anyhow::Context;
 use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
 use std::io::BufRead;
@@ -34,24 +35,19 @@ pub struct LiteRtBridgeConfig {
     pub context_tokens: u32,
     #[serde(default)]
     pub validated_context_tokens: Option<u32>,
-    /// Unix-domain socket path. Used on macOS / Linux. Ignored on Windows
-    /// unless `tcp_port` is also unset (in which case bind fails with a clear
-    /// Unsupported error).
+    /// Canonical local IPC endpoint string for the bridge. On Unix this is a
+    /// filesystem socket path; on Windows it is the full named-pipe endpoint
+    /// (`\\.\pipe\...`).
     #[serde(default)]
-    pub socket_path: Option<String>,
-    /// TCP loopback port. Required on Windows; optional on Unix where it
-    /// takes precedence over `socket_path` when both are set. Enables the
-    /// bridge to run behind `LocalTransport::TcpLoopback`.
-    #[serde(default)]
-    pub tcp_port: Option<u16>,
+    pub transport_endpoint: Option<String>,
     #[serde(default)]
     pub speculative_decoding: Option<String>,
     #[serde(default)]
     pub verbose: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-struct LocalSocketResponsesRequest {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LocalIpcResponsesRequest {
     #[serde(default)]
     instructions: String,
     input: Vec<Value>,
@@ -71,6 +67,28 @@ struct LocalSocketResponsesRequest {
     prompt_cache_key: Option<String>,
     #[serde(default)]
     text: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LocalIpcRequest {
+    ResponsesCreate(LocalIpcResponsesRequest),
+    RuntimeHealth,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum LocalIpcUnaryResponse {
+    RuntimeHealth {
+        healthy: bool,
+        default_model: Option<String>,
+        loaded_models: Vec<String>,
+    },
+}
+
+enum LiteRtBridgeOutput {
+    StreamLines(Vec<String>),
+    UnaryJson(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,9 +111,9 @@ pub fn serve_from_config_path(_root: &Path, config_path: &Path) -> anyhow::Resul
 
 fn serve(config: LiteRtBridgeConfig) -> anyhow::Result<()> {
     if let Some(validated_context_tokens) = config.validated_context_tokens {
-        if config.context_tokens > validated_context_tokens {
+        if config.context_tokens != validated_context_tokens {
             anyhow::bail!(
-                "LiteRT bridge for {} is only validated to {} tokens, but CTOX requested {}",
+                "LiteRT bridge for {} is fixed at {} tokens, but CTOX requested {}",
                 config.model_reference,
                 validated_context_tokens,
                 config.context_tokens
@@ -103,19 +121,11 @@ fn serve(config: LiteRtBridgeConfig) -> anyhow::Result<()> {
         }
     }
     let _ = resolve_model_path(&config)?;
-    let transport = if let Some(port) = config.tcp_port {
-        LocalTransport::TcpLoopback {
-            host: "127.0.0.1".to_string(),
-            port,
-        }
-    } else {
-        let socket_path = config
-            .socket_path
-            .as_deref()
-            .map(PathBuf::from)
-            .context("LiteRT bridge config requires socket_path or tcp_port")?;
-        LocalTransport::UnixSocket { path: socket_path }
-    };
+    let transport_endpoint = config
+        .transport_endpoint
+        .as_deref()
+        .context("LiteRT bridge config requires a local IPC endpoint in transport_endpoint")?;
+    let transport = LocalTransport::from_ipc_endpoint_string(transport_endpoint);
     let mut listener = transport.bind().with_context(|| {
         format!(
             "failed to bind LiteRT transport {}",
@@ -153,7 +163,7 @@ fn handle_stream(config: &LiteRtBridgeConfig, mut stream: LocalStream) -> anyhow
         return Ok(());
     }
     match execute_request(config, request_line.trim()) {
-        Ok(lines) => {
+        Ok(LiteRtBridgeOutput::StreamLines(lines)) => {
             for line in lines {
                 stream
                     .write_all(line.as_bytes())
@@ -165,6 +175,17 @@ fn handle_stream(config: &LiteRtBridgeConfig, mut stream: LocalStream) -> anyhow
             stream
                 .flush()
                 .context("failed to flush LiteRT socket response")?;
+        }
+        Ok(LiteRtBridgeOutput::UnaryJson(line)) => {
+            stream
+                .write_all(line.as_bytes())
+                .context("failed to write LiteRT unary socket response")?;
+            stream
+                .write_all(b"\n")
+                .context("failed to terminate LiteRT unary socket response")?;
+            stream
+                .flush()
+                .context("failed to flush LiteRT unary socket response")?;
         }
         Err(err) => {
             let payload = json!({
@@ -190,12 +211,29 @@ fn handle_stream(config: &LiteRtBridgeConfig, mut stream: LocalStream) -> anyhow
     Ok(())
 }
 
-fn execute_request(config: &LiteRtBridgeConfig, raw_request: &str) -> anyhow::Result<Vec<String>> {
-    let mut request_value: Value =
-        serde_json::from_str(raw_request).context("failed to parse local socket request")?;
+fn execute_request(
+    config: &LiteRtBridgeConfig,
+    raw_request: &str,
+) -> anyhow::Result<LiteRtBridgeOutput> {
+    let request = serde_json::from_str::<LocalIpcRequest>(raw_request)
+        .context("failed to parse local IPC request")?;
+    let mut request_value = match request {
+        LocalIpcRequest::ResponsesCreate(request) => {
+            serde_json::to_value(request).context("failed to encode LiteRT local IPC request")?
+        }
+        LocalIpcRequest::RuntimeHealth => {
+            let health = LocalIpcUnaryResponse::RuntimeHealth {
+                healthy: true,
+                default_model: Some(config.model_reference.clone()),
+                loaded_models: vec![config.model_reference.clone()],
+            };
+            let line = serde_json::to_string(&health).context("failed to encode LiteRT health")?;
+            return Ok(LiteRtBridgeOutput::UnaryJson(line));
+        }
+    };
     request_value["model"] = Value::String(config.model_reference.clone());
-    let local_request: LocalSocketResponsesRequest = serde_json::from_value(request_value.clone())
-        .context("failed to decode LiteRT local socket request")?;
+    let local_request: LocalIpcResponsesRequest = serde_json::from_value(request_value.clone())
+        .context("failed to decode LiteRT local IPC request")?;
     let request_bytes =
         serde_json::to_vec(&request_value).context("failed to encode LiteRT request payload")?;
     let route = model_adapters::ResolvedResponsesAdapterRoute::resolve(
@@ -204,32 +242,32 @@ fn execute_request(config: &LiteRtBridgeConfig, raw_request: &str) -> anyhow::Re
         false,
     )?
     .context("LiteRT bridge only supports models with a local responses adapter")?;
-    let chat_request: Value = serde_json::from_slice(route.forwarded_body())
-        .context("failed to parse forwarded chat-completions request")?;
+    let upstream_request: Value = serde_json::from_slice(route.forwarded_body())
+        .context("failed to parse LiteRT adapter upstream request")?;
     let prompt_style = prompt_style_for_model(&config.model_reference)?;
     let prompt = render_prompt(
         prompt_style,
-        &chat_request,
+        &upstream_request,
         context_summary(&local_request, config),
     );
     let generated_text = run_litert_cli(config, &prompt)?;
     let chat_completion = build_chat_completion_response(&config.model_reference, &generated_text);
     let chat_response_raw = serde_json::to_vec(&chat_completion)
-        .context("failed to encode synthetic LiteRT chat completion response")?;
+        .context("failed to encode synthetic LiteRT upstream response")?;
     let responses_raw = route
         .response_plan()
         .rewrite_success_response(&chat_response_raw, Some(&config.model_reference))
-        .context("failed to normalize LiteRT chat completion into responses payload")?;
+        .context("failed to normalize LiteRT upstream response into canonical responses payload")?;
     let responses_payload: Value = serde_json::from_slice(&responses_raw)
         .context("failed to parse normalized LiteRT responses payload")?;
-    Ok(render_socket_events(
+    Ok(LiteRtBridgeOutput::StreamLines(render_socket_events(
         &responses_payload,
         local_request.stream,
         &config.model_reference,
-    ))
+    )))
 }
 
-fn context_summary(request: &LocalSocketResponsesRequest, config: &LiteRtBridgeConfig) -> String {
+fn context_summary(request: &LocalIpcResponsesRequest, config: &LiteRtBridgeConfig) -> String {
     let mut parts = vec![
         format!("Target context budget: {} tokens.", config.context_tokens),
         format!("Conversation items in this turn: {}.", request.input.len()),

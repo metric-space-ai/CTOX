@@ -25,8 +25,6 @@ use std::io::ErrorKind;
 use std::io::Result as IoResult;
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
-#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -39,6 +37,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::inference::engine;
+use crate::inference::local_transport::LocalTransport;
 use crate::inference::model_registry;
 use crate::inference::runtime_contract;
 use crate::inference::runtime_control;
@@ -54,10 +53,8 @@ const PERSISTENT_BACKEND_SHUTDOWN_POLL_MILLIS: u64 = 150;
 const RUNTIME_SWITCH_COMMAND_FRAGMENT: &str = "runtime switch";
 const QUANT_ARTIFACT_BUILD_LOCKS_RELATIVE_DIR: &str = "runtime/uqff_cache_locks";
 const CHAT_QUANT_ARTIFACT_PENDING_SUFFIX: &str = ".pending";
-const MANAGED_ENGINE_FROM_CONFIG_COMMAND: &str =
-    "tools/model-runtime/target/release/ctox-engine from-config";
-const MANAGED_ENGINE_QUANTIZE_COMMAND: &str =
-    "tools/model-runtime/target/release/ctox-engine quantize";
+const MANAGED_ENGINE_FROM_CONFIG_COMMAND: &str = "ctox-engine from-config";
+const MANAGED_ENGINE_QUANTIZE_COMMAND: &str = "ctox-engine quantize";
 const MANAGED_LITERT_SERVE_COMMAND_FRAGMENT: &str = "serve-litert-bridge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +77,7 @@ struct ManagedBackendSpec {
     display_model: String,
     request_model: String,
     port: u16,
-    socket_path: Option<String>,
+    transport_endpoint: Option<String>,
     health_path: &'static str,
     launcher_kind: ManagedLauncherKind,
     compute_target: Option<engine::ComputeTarget>,
@@ -93,7 +90,7 @@ struct ManagedBackendLaunchSpec {
     display_model: String,
     request_model: String,
     port: u16,
-    socket_path: Option<String>,
+    transport_endpoint: Option<String>,
     health_path: String,
     launcher_kind: String,
     compute_target: Option<String>,
@@ -244,13 +241,12 @@ impl ManagedBackendRole {
                     display_model: runtime.clone(),
                     request_model: runtime,
                     port,
-                    socket_path: Some(
-                        runtime_kernel::managed_runtime_socket_path(
+                    transport_endpoint: Some(
+                        runtime_kernel::managed_runtime_transport(
                             root,
                             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
                         )
-                        .display()
-                        .to_string(),
+                        .endpoint_string(),
                     ),
                     health_path: "/health",
                     launcher_kind: ManagedLauncherKind::Engine,
@@ -279,13 +275,12 @@ impl ManagedBackendRole {
                     display_model: selection.choice.to_string(),
                     request_model: selection.request_model.to_string(),
                     port,
-                    socket_path: Some(
-                        runtime_kernel::managed_runtime_socket_path(
+                    transport_endpoint: Some(
+                        runtime_kernel::managed_runtime_transport(
                             root,
                             runtime_kernel::InferenceWorkloadRole::Embedding,
                         )
-                        .display()
-                        .to_string(),
+                        .endpoint_string(),
                     ),
                     health_path: "/health",
                     launcher_kind: ManagedLauncherKind::Engine,
@@ -314,13 +309,12 @@ impl ManagedBackendRole {
                     display_model: selection.choice.to_string(),
                     request_model: selection.request_model.to_string(),
                     port,
-                    socket_path: Some(
-                        runtime_kernel::managed_runtime_socket_path(
+                    transport_endpoint: Some(
+                        runtime_kernel::managed_runtime_transport(
                             root,
                             runtime_kernel::InferenceWorkloadRole::Transcription,
                         )
-                        .display()
-                        .to_string(),
+                        .endpoint_string(),
                     ),
                     health_path: "/health",
                     launcher_kind: ManagedLauncherKind::Engine,
@@ -349,13 +343,12 @@ impl ManagedBackendRole {
                     display_model: selection.choice.to_string(),
                     request_model: selection.request_model.to_string(),
                     port,
-                    socket_path: Some(
-                        runtime_kernel::managed_runtime_socket_path(
+                    transport_endpoint: Some(
+                        runtime_kernel::managed_runtime_transport(
                             root,
                             runtime_kernel::InferenceWorkloadRole::Speech,
                         )
-                        .display()
-                        .to_string(),
+                        .endpoint_string(),
                     ),
                     health_path: "/health",
                     launcher_kind: ManagedLauncherKind::Engine,
@@ -384,13 +377,12 @@ impl ManagedBackendRole {
                     display_model: selection.choice.to_string(),
                     request_model: selection.request_model.to_string(),
                     port,
-                    socket_path: Some(
-                        runtime_kernel::managed_runtime_socket_path(
+                    transport_endpoint: Some(
+                        runtime_kernel::managed_runtime_transport(
                             root,
                             runtime_kernel::InferenceWorkloadRole::Vision,
                         )
-                        .display()
-                        .to_string(),
+                        .endpoint_string(),
                     ),
                     health_path: "/health",
                     launcher_kind: ManagedLauncherKind::Engine,
@@ -421,7 +413,7 @@ fn managed_spec_from_binding(
         display_model: binding.display_model.clone(),
         request_model: binding.request_model.clone(),
         port: binding.port,
-        socket_path: binding.socket_path.clone(),
+        transport_endpoint: Some(binding.transport.endpoint_string()),
         health_path: binding.health_path,
         launcher_kind: match binding.launcher_kind {
             runtime_kernel::RuntimeLauncherKind::Engine => ManagedLauncherKind::Engine,
@@ -463,16 +455,6 @@ pub fn ensure_persistent_backends(root: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn ensure_boundary_proxy_process(root: &Path) -> Result<()> {
-    ensure_proxy_process(root)
-}
-
-pub fn restart_boundary_proxy_process(root: &Path) -> Result<()> {
-    stop_process(root, proxy_pid_path(root))?;
-    release_proxy_runtime_ownership(root);
-    ensure_proxy_process(root)
-}
-
 pub fn ensure_chat_backend_ready(root: &Path, force_restart: bool) -> Result<()> {
     ensure_backend_process(root, ManagedBackendRole::Chat, force_restart)
 }
@@ -506,7 +488,7 @@ pub fn release_chat_backend(root: &Path, port: Option<u16>) -> Result<()> {
     stop_process(root, backend_pid_path(root, ManagedBackendRole::Chat))?;
     release_backend_runtime_ownership(root, ManagedBackendRole::Chat);
     let _ = clear_backend_startup_locks(root);
-    let _ = clear_managed_socket_file(runtime_kernel::managed_runtime_socket_path(
+    let _ = clear_managed_socket_file(runtime_kernel::managed_runtime_transport(
         root,
         runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
     ));
@@ -627,32 +609,8 @@ fn backend_contract_role(role: ManagedBackendRole) -> runtime_contract::BackendR
     }
 }
 
-fn release_proxy_runtime_ownership(root: &Path) {
-    let _ = runtime_contract::release_proxy_runtime_residency(root);
-}
-
 fn release_backend_runtime_ownership(root: &Path, role: ManagedBackendRole) {
     let _ = runtime_contract::release_backend_runtime_residency(root, backend_contract_role(role));
-}
-
-fn sync_proxy_runtime_ownership(
-    root: &Path,
-    host: &str,
-    port: u16,
-    pid: Option<u32>,
-    phase: runtime_contract::RuntimeResidencyPhase,
-) -> Result<()> {
-    runtime_contract::sync_proxy_runtime_residency(
-        root,
-        runtime_contract::ProxyRuntimeResidency {
-            phase,
-            pid,
-            host: host.to_string(),
-            port,
-            health_path: "/ctox/telemetry".to_string(),
-            updated_at_epoch_secs: runtime_contract::current_epoch_secs(),
-        },
-    )
 }
 
 fn backend_runtime_descriptor(
@@ -672,10 +630,6 @@ fn backend_runtime_descriptor(
 pub fn shutdown_persistent_backends(root: &Path) -> Result<()> {
     let mut failures = Vec::new();
 
-    if let Err(err) = stop_process(root, proxy_pid_path(root)) {
-        failures.push(format!("proxy stop: {err}"));
-    }
-    release_proxy_runtime_ownership(root);
     for role in MANAGED_BACKEND_ROLES {
         if let Err(err) = stop_process(root, backend_pid_path(root, role)) {
             failures.push(format!("{} stop: {err}", role.as_env_value()));
@@ -695,7 +649,6 @@ pub fn shutdown_persistent_backends(root: &Path) -> Result<()> {
     if let Err(err) = clear_backend_startup_locks(root) {
         failures.push(format!("startup lock cleanup: {err}"));
     }
-    release_proxy_runtime_ownership(root);
     for role in MANAGED_BACKEND_ROLES {
         release_backend_runtime_ownership(root, role);
     }
@@ -722,20 +675,16 @@ pub fn persistent_backend_alerts(root: &Path) -> Result<Vec<String>> {
 }
 
 fn persistent_backend_residue(root: &Path) -> Result<Vec<String>> {
-    persistent_backend_residue_with_scope(root, true)
+    persistent_backend_residue_with_scope(root)
 }
 
 fn managed_runtime_fleet_residue(root: &Path) -> Result<Vec<String>> {
-    persistent_backend_residue_with_scope(root, false)
+    persistent_backend_residue_with_scope(root)
 }
 
-fn persistent_backend_residue_with_scope(root: &Path, include_proxy: bool) -> Result<Vec<String>> {
+fn persistent_backend_residue_with_scope(root: &Path) -> Result<Vec<String>> {
     let mut residue = Vec::new();
-    let pid_paths = if include_proxy {
-        managed_pid_paths(root)
-    } else {
-        managed_backend_pid_paths(root)
-    };
+    let pid_paths = managed_pid_paths(root);
     for pid_path in pid_paths {
         if let Some(pid) = read_pid(&pid_path) {
             if process_is_alive(pid) {
@@ -745,16 +694,12 @@ fn persistent_backend_residue_with_scope(root: &Path, include_proxy: bool) -> Re
             }
         }
     }
-    for socket_path in managed_socket_paths(root) {
-        if socket_path.exists() && !socket_listener_accepts(&socket_path) {
-            residue.push(format!("stale socket {}", socket_path.display()));
+    for transport in managed_transport_endpoints(root) {
+        if transport_endpoint_exists(&transport) && !transport.probe() {
+            residue.push(format!("stale transport {}", transport.display_label()));
         }
     }
-    let ports = if include_proxy {
-        managed_runtime_ports(root)?
-    } else {
-        managed_backend_runtime_ports(root)?
-    };
+    let ports = managed_runtime_ports(root)?;
     for port in ports {
         let listeners = listening_pids_for_port(root, port)?;
         if !listeners.is_empty() {
@@ -813,11 +758,7 @@ fn managed_runtime_fleet_idle(root: &Path) -> Result<bool> {
 }
 
 fn managed_pid_paths(root: &Path) -> Vec<PathBuf> {
-    let mut paths = vec![proxy_pid_path(root)];
-    for role in MANAGED_BACKEND_ROLES {
-        paths.push(backend_pid_path(root, role));
-    }
-    paths
+    managed_backend_pid_paths(root)
 }
 
 fn clear_managed_pid_files(root: &Path) {
@@ -840,21 +781,21 @@ fn clear_managed_backend_pid_files(root: &Path) {
     }
 }
 
-fn managed_socket_paths(root: &Path) -> Vec<PathBuf> {
+fn managed_transport_endpoints(root: &Path) -> Vec<LocalTransport> {
     vec![
-        runtime_kernel::managed_runtime_socket_path(
+        runtime_kernel::managed_runtime_transport(
             root,
             runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
         ),
-        runtime_kernel::managed_runtime_socket_path(
+        runtime_kernel::managed_runtime_transport(
             root,
             runtime_kernel::InferenceWorkloadRole::Embedding,
         ),
-        runtime_kernel::managed_runtime_socket_path(
+        runtime_kernel::managed_runtime_transport(
             root,
             runtime_kernel::InferenceWorkloadRole::Transcription,
         ),
-        runtime_kernel::managed_runtime_socket_path(
+        runtime_kernel::managed_runtime_transport(
             root,
             runtime_kernel::InferenceWorkloadRole::Speech,
         ),
@@ -862,23 +803,28 @@ fn managed_socket_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn clear_managed_socket_files(root: &Path) {
-    for path in managed_socket_paths(root) {
-        let _ = std::fs::remove_file(path);
+    for transport in managed_transport_endpoints(root) {
+        let _ = clear_managed_socket_file(transport);
     }
 }
 
 fn clear_managed_runtime_socket_files(root: &Path) {
-    for path in managed_socket_paths(root) {
-        let _ = clear_managed_socket_file(path);
+    for transport in managed_transport_endpoints(root) {
+        let _ = clear_managed_socket_file(transport);
     }
 }
 
-fn clear_managed_socket_file(path: PathBuf) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
+fn clear_managed_socket_file(transport: LocalTransport) -> Result<()> {
+    match transport {
+        LocalTransport::UnixSocket { path } => {
+            if !path.exists() {
+                return Ok(());
+            }
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove managed socket {}", path.display()))
+        }
+        LocalTransport::NamedPipe { .. } | LocalTransport::TcpLoopback { .. } => Ok(()),
     }
-    std::fs::remove_file(&path)
-        .with_context(|| format!("failed to remove managed socket {}", path.display()))
 }
 
 fn backend_startup_lock_paths(root: &Path) -> Result<Vec<PathBuf>> {
@@ -916,22 +862,6 @@ fn clear_backend_startup_locks(root: &Path) -> Result<()> {
 }
 
 fn managed_runtime_ports(root: &Path) -> Result<Vec<u16>> {
-    let mut ports = Vec::new();
-    if let Some(proxy_port) = managed_proxy_port(root) {
-        push_unique_port(&mut ports, proxy_port);
-    }
-    append_managed_backend_runtime_ports(root, &mut ports)?;
-    if let Ok(ownership) = runtime_contract::load_runtime_ownership_state(root) {
-        if let Some(proxy) = ownership.proxy {
-            push_unique_port(&mut ports, proxy.port);
-        }
-    }
-    ports.sort_unstable();
-    ports.dedup();
-    Ok(ports)
-}
-
-fn managed_backend_runtime_ports(root: &Path) -> Result<Vec<u16>> {
     let mut ports = Vec::new();
     append_managed_backend_runtime_ports(root, &mut ports)?;
     ports.sort_unstable();
@@ -1005,29 +935,6 @@ fn append_managed_backend_runtime_ports(root: &Path, ports: &mut Vec<u16>) -> Re
         }
     }
     Ok(())
-}
-
-pub fn boundary_proxy_is_managed(root: &Path) -> bool {
-    if read_pid(&proxy_pid_path(root))
-        .filter(|pid| process_is_alive(*pid))
-        .is_some()
-    {
-        return true;
-    }
-    runtime_contract::load_runtime_ownership_state(root)
-        .ok()
-        .and_then(|state| state.proxy)
-        .is_some()
-}
-
-fn managed_proxy_port(root: &Path) -> Option<u16> {
-    if !boundary_proxy_is_managed(root) {
-        return None;
-    }
-    runtime_state::load_or_resolve_runtime_state(root)
-        .ok()
-        .map(|state| state.proxy_port)
-        .or_else(|| Some(runtime_state::default_proxy_port()))
 }
 
 fn push_unique_port(ports: &mut Vec<u16>, port: u16) {
@@ -1236,112 +1143,6 @@ fn try_create_backend_startup_lease(
     })
 }
 
-fn ensure_proxy_process(root: &Path) -> Result<()> {
-    let resolved = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
-    let state = runtime_state::load_or_resolve_runtime_state(root).ok();
-    let host = resolved
-        .as_ref()
-        .map(|runtime| runtime.proxy.listen_host.clone())
-        .or_else(|| state.as_ref().map(|runtime| runtime.proxy_host.clone()))
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = resolved
-        .as_ref()
-        .map(|runtime| runtime.proxy.listen_port)
-        .or_else(|| state.as_ref().map(|runtime| runtime.proxy_port))
-        .unwrap_or(12434);
-    let health_url = format!("http://{host}:{port}/ctox/telemetry");
-    let pid_path = proxy_pid_path(root);
-    if health_check(&health_url) {
-        if let Some(pid) = read_pid(&pid_path).filter(|pid| process_is_alive(*pid)) {
-            sync_proxy_runtime_ownership(
-                root,
-                &host,
-                port,
-                Some(pid),
-                runtime_contract::RuntimeResidencyPhase::Active,
-            )?;
-        } else if let Some(listener_pid) = listening_pids_for_port(root, port)?.into_iter().next() {
-            std::fs::write(&pid_path, format!("{listener_pid}\n")).with_context(|| {
-                format!("failed to write proxy pid file {}", pid_path.display())
-            })?;
-            sync_proxy_runtime_ownership(
-                root,
-                &host,
-                port,
-                Some(listener_pid),
-                runtime_contract::RuntimeResidencyPhase::Active,
-            )?;
-        }
-        return Ok(());
-    }
-
-    if let Some(pid) = read_pid(&pid_path).filter(|pid| process_is_alive(*pid)) {
-        let listeners = listening_pids_for_port(root, port)?;
-        if listeners.contains(&pid) {
-            sync_proxy_runtime_ownership(
-                root,
-                &host,
-                port,
-                Some(pid),
-                runtime_contract::RuntimeResidencyPhase::Starting,
-            )?;
-            return Ok(());
-        }
-        stop_process(root, pid_path.clone())?;
-        release_proxy_runtime_ownership(root);
-    }
-    if let Some(listener_pid) = listening_pids_for_port(root, port)?.into_iter().next() {
-        std::fs::write(&pid_path, format!("{listener_pid}\n"))
-            .with_context(|| format!("failed to write proxy pid file {}", pid_path.display()))?;
-        sync_proxy_runtime_ownership(
-            root,
-            &host,
-            port,
-            Some(listener_pid),
-            runtime_contract::RuntimeResidencyPhase::Starting,
-        )?;
-        return Ok(());
-    }
-    stop_process(root, pid_path.clone())?;
-    release_proxy_runtime_ownership(root);
-
-    let runtime_dir = root.join("runtime");
-    std::fs::create_dir_all(&runtime_dir)
-        .with_context(|| format!("failed to create runtime dir {}", runtime_dir.display()))?;
-    let log_path = runtime_dir.join("ctox_proxy.log");
-    let log_file = open_log_file(&log_path)?;
-    let log_file_err = log_file
-        .try_clone()
-        .with_context(|| format!("failed to clone proxy log {}", log_path.display()))?;
-    let exe = std::env::current_exe().context("failed to resolve current CTOX executable")?;
-    let mut command = Command::new(&exe);
-    command
-        .arg("serve-responses-proxy")
-        .current_dir(root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(log_file_err));
-    apply_clean_child_env(&mut command);
-    if let Some(codex_home) = inherited_env_value("CODEX_HOME") {
-        command.env("CODEX_HOME", codex_home);
-    }
-    command.env("CTOX_ROOT", root);
-    configure_managed_child_process_with_parent_death(&mut command, true);
-    let child = command
-        .spawn()
-        .context("failed to spawn CTOX responses proxy")?;
-    std::fs::write(&pid_path, format!("{}\n", child.id()))
-        .with_context(|| format!("failed to write proxy pid file {}", pid_path.display()))?;
-    sync_proxy_runtime_ownership(
-        root,
-        &host,
-        port,
-        Some(child.id()),
-        runtime_contract::RuntimeResidencyPhase::Starting,
-    )?;
-    Ok(())
-}
-
 fn apply_managed_backend_bootstrap_env(command: &mut Command) {
     apply_clean_child_env(command);
     for key in MANAGED_BACKEND_BOOTSTRAP_ENV_KEYS {
@@ -1378,7 +1179,7 @@ fn build_managed_backend_launch_spec(
         display_model: spec.display_model.clone(),
         request_model: spec.request_model.clone(),
         port: spec.port,
-        socket_path: spec.socket_path.clone(),
+        transport_endpoint: spec.transport_endpoint.clone(),
         health_path: spec.health_path.to_string(),
         launcher_kind: spec.launcher_kind.as_str().to_string(),
         compute_target: spec
@@ -1402,10 +1203,8 @@ fn sanitize_config_path_component(value: &str) -> String {
 
 fn managed_engine_runtime_config_path(root: &Path, spec: &ManagedBackendSpec) -> PathBuf {
     let socket_component = spec
-        .socket_path
+        .transport_endpoint
         .as_deref()
-        .and_then(|value| Path::new(value).file_name())
-        .and_then(|value| value.to_str())
         .map(sanitize_config_path_component)
         .unwrap_or_else(|| "tcp".to_string());
     let model_digest = format!("{:x}", sha2::Sha256::digest(spec.request_model.as_bytes()));
@@ -1422,10 +1221,8 @@ fn managed_engine_runtime_config_path(root: &Path, spec: &ManagedBackendSpec) ->
 
 fn managed_litert_runtime_config_path(root: &Path, spec: &ManagedBackendSpec) -> PathBuf {
     let socket_component = spec
-        .socket_path
+        .transport_endpoint
         .as_deref()
-        .and_then(|value| Path::new(value).file_name())
-        .and_then(|value| value.to_str())
         .map(sanitize_config_path_component)
         .unwrap_or_else(|| "tcp".to_string());
     let model_digest = format!("{:x}", sha2::Sha256::digest(spec.request_model.as_bytes()));
@@ -1502,9 +1299,12 @@ fn render_managed_engine_runtime_config(launch_spec: &ManagedBackendLaunchSpec) 
     }
 
     out.push_str("[server]\n");
-    out.push_str("transport = \"local_socket\"\n");
-    if let Some(socket_path) = launch_spec.socket_path.as_deref() {
-        out.push_str(&format!("socket_path = \"{}\"\n", toml_escape(socket_path)));
+    out.push_str("transport = \"local_ipc\"\n");
+    if let Some(transport_endpoint) = launch_spec.transport_endpoint.as_deref() {
+        out.push_str(&format!(
+            "transport_endpoint = \"{}\"\n",
+            toml_escape(transport_endpoint)
+        ));
     }
     out.push('\n');
 
@@ -1650,7 +1450,7 @@ fn render_managed_litert_runtime_config(launch_spec: &ManagedBackendLaunchSpec) 
         "context_tokens": config.context_tokens,
         "validated_context_tokens": config.validated_context_tokens,
         "port": launch_spec.port,
-        "socket_path": launch_spec.socket_path,
+        "transport_endpoint": launch_spec.transport_endpoint,
         "health_path": launch_spec.health_path,
         "speculative_decoding": config.speculative_decoding,
         "verbose": config.verbose,
@@ -1833,7 +1633,8 @@ fn build_managed_litert_launch_config(
         .map(|artifact| artifact.validated_context_tokens)
         .unwrap_or(131_072);
     let context_tokens = runtime_state
-        .realized_context_tokens
+        .configured_context_tokens
+        .or(runtime_state.realized_context_tokens)
         .unwrap_or(validated_context_tokens);
     let mut model_file =
         runtime_env::env_or_config(root, &format!("CTOX_{role_prefix}_LITERT_MODEL_FILE"))
@@ -1866,9 +1667,9 @@ fn build_managed_litert_launch_config(
             spec.request_model
         );
     }
-    if context_tokens > validated_context_tokens {
+    if context_tokens != validated_context_tokens {
         anyhow::bail!(
-            "managed LiteRT backend for {} is only validated to {} tokens, but CTOX requested {}",
+            "managed LiteRT backend for {} is fixed at {} tokens, but CTOX requested {}. Build or select a matching LiteRT artifact for that context size.",
             spec.request_model,
             validated_context_tokens,
             context_tokens
@@ -1916,7 +1717,7 @@ fn default_litert_artifact_for_model(model: &str) -> Option<LiteRtArtifactSpec> 
 }
 
 fn is_qwen35_vision_request_model(model: &str) -> bool {
-    model.starts_with("Qwen/Qwen3.5-")
+    model.starts_with("Qwen/Qwen3.5-") || model.starts_with("Qwen/Qwen3.6-")
 }
 
 fn resolve_managed_engine_binary(
@@ -1933,8 +1734,7 @@ fn resolve_managed_engine_binary(
         .unwrap_or_else(|| engine::discover_source_layout_paths(root).model_runtime_binary);
     if !binary.is_file() {
         anyhow::bail!(
-            "ctox-engine binary missing at {}. Build it with: \
-             `cd tools/model-runtime && cargo build --release --bin ctox-engine`",
+            "ctox-engine binary missing at {}. Reinstall the CTOX tools payload or run `ctox engine rebuild`.",
             binary.display()
         );
     }
@@ -1950,7 +1750,7 @@ fn resolve_managed_engine_binary(
 }
 
 fn resolve_managed_litert_bridge_binary(
-    root: &Path,
+    _root: &Path,
     launch_spec: &ManagedBackendLaunchSpec,
 ) -> Result<PathBuf> {
     let Some(config) = launch_spec.litert_config.as_ref() else {
@@ -1962,10 +1762,6 @@ fn resolve_managed_litert_bridge_binary(
         .map(PathBuf::from)
         .filter(|path| path.is_file())
         .or_else(|| std::env::current_exe().ok().filter(|path| path.is_file()))
-        .or_else(|| {
-            let candidate = root.join("target/release/ctox");
-            candidate.is_file().then_some(candidate)
-        })
         .context("managed LiteRT backend could not resolve the ctox bridge binary")?;
     if !binary.is_file() {
         anyhow::bail!(
@@ -2331,7 +2127,7 @@ fn dedupe_socket_backed_backend_processes(
     spec: &ManagedBackendSpec,
     pid_path: &Path,
 ) -> Result<()> {
-    if spec.socket_path.is_none() {
+    if spec.transport_endpoint.is_none() {
         return Ok(());
     }
     let matching = matching_socket_pids_for_backend(root, spec)?;
@@ -2808,10 +2604,9 @@ fn ready_backend_process_pid(
     spec: &ManagedBackendSpec,
     pid_path: &Path,
 ) -> Result<Option<u32>> {
-    if let Some(socket_path) = spec.socket_path.as_deref() {
-        let socket_path = Path::new(socket_path);
-        if !socket_listener_accepts_stably(
-            socket_path,
+    if let Some(transport) = spec_local_transport(spec) {
+        if !transport_accepts_stably(
+            &transport,
             BACKEND_READY_STABILITY_PASSES,
             Duration::from_millis(BACKEND_READY_STABILITY_POLL_MILLIS),
         ) {
@@ -2839,10 +2634,9 @@ fn backend_process_owns_ready_transport(
     if !process_is_alive(pid) {
         return Ok(false);
     }
-    if let Some(socket_path) = spec.socket_path.as_deref() {
-        let socket_path = Path::new(socket_path);
-        if socket_listener_accepts_stably(
-            socket_path,
+    if let Some(transport) = spec_local_transport(spec) {
+        if transport_accepts_stably(
+            &transport,
             BACKEND_READY_STABILITY_PASSES,
             Duration::from_millis(BACKEND_READY_STABILITY_POLL_MILLIS),
         ) {
@@ -2852,7 +2646,9 @@ fn backend_process_owns_ready_transport(
         // reject new probe connects. Preserve the live workload as long as the
         // process still matches the expected launch spec and the socket file is
         // still present.
-        if socket_path.exists() && socket_backed_process_matches_spec(root, spec, pid)? {
+        if transport_endpoint_exists(&transport)
+            && socket_backed_process_matches_spec(root, spec, pid)?
+        {
             return Ok(true);
         }
         return Ok(false);
@@ -2868,7 +2664,7 @@ fn backend_process_matches_launch_spec(
     if !process_is_alive(pid) {
         return Ok(false);
     }
-    if spec.socket_path.is_some() {
+    if spec.transport_endpoint.is_some() {
         return socket_backed_process_matches_spec(root, spec, pid);
     }
 
@@ -2899,7 +2695,7 @@ fn socket_backed_process_matches_spec(
     spec: &ManagedBackendSpec,
     pid: u32,
 ) -> Result<bool> {
-    let Some(socket_path) = spec.socket_path.as_deref() else {
+    let Some(transport_endpoint) = spec.transport_endpoint.as_deref() else {
         return Ok(false);
     };
     let output = Command::new("ps")
@@ -2922,7 +2718,7 @@ fn socket_backed_process_matches_spec(
         let expected = managed_litert_runtime_config_path(root, spec);
         return Ok(command.contains(expected.display().to_string().as_str()));
     }
-    if !command.contains(socket_path) {
+    if !command.contains(transport_endpoint) {
         return Ok(false);
     }
     if spec.launcher_kind == ManagedLauncherKind::Engine
@@ -2940,7 +2736,7 @@ fn matching_socket_pid_for_backend(root: &Path, spec: &ManagedBackendSpec) -> Re
 }
 
 fn matching_socket_pids_for_backend(root: &Path, spec: &ManagedBackendSpec) -> Result<Vec<u32>> {
-    let Some(socket_path) = spec.socket_path.as_deref() else {
+    let Some(transport_endpoint) = spec.transport_endpoint.as_deref() else {
         return Ok(Vec::new());
     };
     let output = Command::new("ps")
@@ -2974,7 +2770,7 @@ fn matching_socket_pids_for_backend(root: &Path, spec: &ManagedBackendSpec) -> R
             }
             continue;
         }
-        if !command.contains(socket_path) {
+        if !command.contains(transport_endpoint) {
             continue;
         }
         if spec.launcher_kind == ManagedLauncherKind::Engine
@@ -2989,6 +2785,38 @@ fn matching_socket_pids_for_backend(root: &Path, spec: &ManagedBackendSpec) -> R
     pids.sort_unstable();
     pids.dedup();
     Ok(pids)
+}
+
+fn spec_local_transport(spec: &ManagedBackendSpec) -> Option<LocalTransport> {
+    spec.transport_endpoint
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(LocalTransport::from_ipc_endpoint_string)
+}
+
+fn transport_endpoint_exists(transport: &LocalTransport) -> bool {
+    match transport {
+        LocalTransport::UnixSocket { path } => path.exists(),
+        LocalTransport::NamedPipe { .. } => true,
+        LocalTransport::TcpLoopback { .. } => true,
+    }
+}
+
+fn transport_accepts_stably(
+    transport: &LocalTransport,
+    attempts: usize,
+    poll_interval: Duration,
+) -> bool {
+    let attempts = attempts.max(1);
+    for idx in 0..attempts {
+        if !transport.probe() {
+            return false;
+        }
+        if idx + 1 < attempts {
+            thread::sleep(poll_interval);
+        }
+    }
+    true
 }
 
 fn stop_duplicate_socket_backed_backend_processes(
@@ -3015,32 +2843,6 @@ fn stop_duplicate_socket_backed_backend_processes(
 fn backend_startup_in_progress(root: &Path, port: u16) -> bool {
     let path = backend_startup_lock_path(root, port);
     path.exists() && !lock_file_is_stale(root, &path)
-}
-
-#[cfg(unix)]
-fn socket_listener_accepts(path: &Path) -> bool {
-    if !path.exists() {
-        return false;
-    }
-    UnixStream::connect(path).is_ok()
-}
-
-fn socket_listener_accepts_stably(path: &Path, attempts: usize, poll_interval: Duration) -> bool {
-    let attempts = attempts.max(1);
-    for idx in 0..attempts {
-        if !socket_listener_accepts(path) {
-            return false;
-        }
-        if idx + 1 < attempts {
-            thread::sleep(poll_interval);
-        }
-    }
-    true
-}
-
-#[cfg(not(unix))]
-fn socket_listener_accepts(_path: &Path) -> bool {
-    true
 }
 
 const BACKEND_READY_STABILITY_PASSES: usize = 3;
@@ -3093,7 +2895,7 @@ const SHARED_MANAGED_BACKEND_OVERRIDE_KEYS: &[&str] = &[
     "CTOX_ENGINE_ARCH",
 ];
 
-/// Keys where the plan is authoritative and engine.env overrides are rejected.
+/// Keys where the plan is authoritative and persisted runtime-config overrides are rejected.
 /// These control critical inference behavior that must match the planner's
 /// memory model and hardware analysis — silent overrides cause OOM or
 /// silent performance degradation.
@@ -3367,10 +3169,6 @@ fn health_check(url: &str) -> bool {
         Err(ureq::Error::Status(code, _)) => code < 500,
         Err(_) => false,
     }
-}
-
-fn proxy_pid_path(root: &Path) -> PathBuf {
-    root.join("runtime/ctox_proxy.pid")
 }
 
 fn backend_pid_path(root: &Path, role: ManagedBackendRole) -> PathBuf {
@@ -3684,7 +3482,7 @@ fn workspace_managed_runtime_processes(root: &Path) -> Result<Vec<(u32, u32)>> {
 }
 
 fn command_is_managed_runtime_launcher(command: &str) -> bool {
-    command.contains(RUNTIME_SWITCH_COMMAND_FRAGMENT) || command.contains("serve-responses-proxy")
+    command.contains(RUNTIME_SWITCH_COMMAND_FRAGMENT)
 }
 
 #[cfg(unix)]
@@ -3821,27 +3619,6 @@ mod tests {
             assert!(port_set.contains(&expected), "missing port {expected}");
         }
         assert!(!port_set.contains(&12434), "unexpected boundary proxy port");
-    }
-
-    #[test]
-    fn managed_runtime_ports_include_boundary_proxy_only_when_managed() {
-        let root = std::env::temp_dir().join(format!(
-            "ctox-supervisor-managed-proxy-port-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(root.join("runtime")).unwrap();
-        std::fs::write(proxy_pid_path(&root), format!("{}\n", std::process::id())).unwrap();
-
-        let ports = managed_runtime_ports(&root).unwrap();
-        let port_set = ports.into_iter().collect::<BTreeSet<_>>();
-
-        assert!(
-            port_set.contains(&12434),
-            "missing managed boundary proxy port"
-        );
     }
 
     #[test]
@@ -3982,11 +3759,22 @@ mod tests {
     }
 
     fn persist_chat_plan(root: &Path, plan: &runtime_plan::ChatRuntimePlan) {
-        std::fs::write(
-            root.join("runtime/chat_plan.json"),
-            serde_json::to_vec_pretty(plan).unwrap(),
-        )
-        .unwrap();
+        runtime_plan::store_persisted_chat_runtime_plan(root, Some(plan)).unwrap();
+    }
+
+    fn persist_runtime_env_text(root: &Path, raw: &str) {
+        let mut env_map = BTreeMap::new();
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let Some((key, value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            env_map.insert(key.trim().to_string(), value.trim().to_string());
+        }
+        runtime_env::save_runtime_env_map(root, &env_map).unwrap();
     }
 
     #[test]
@@ -4003,9 +3791,8 @@ mod tests {
                 active_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_model: Some("openai/gpt-oss-20b".to_string()),
                 engine_port: Some(1234),
+                configured_context_tokens: Some(131_072),
                 realized_context_tokens: Some(131_072),
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 12434,
                 upstream_base_url: "http://127.0.0.1:1234".to_string(),
                 local_preset: Some("Quality".to_string()),
                 boost: runtime_state::BoostRuntimeState::default(),
@@ -4017,17 +3804,16 @@ mod tests {
             },
         )
         .unwrap();
-        std::fs::write(
-            root.join("runtime/engine.env"),
-            "CTOX_ENGINE_BINARY=/tmp/ctox-engine\nCTOX_ENGINE_LOG=/tmp/ctox-engine.log\nCTOX_CHAT_SHARE_AUXILIARY_GPUS=0\nCTOX_PROXY_PORT=9999\nCTOX_SHOULD_NOT_LEAK=1\n",
-        )
-        .unwrap();
+        persist_runtime_env_text(
+            &root,
+            "CTOX_ENGINE_BINARY=/tmp/ctox-engine\nCTOX_ENGINE_LOG=/tmp/ctox-engine.log\nCTOX_CHAT_SHARE_AUXILIARY_GPUS=0\nCTOX_UNUSED_LEGACY_SETTING=1\nCTOX_SHOULD_NOT_LEAK=1\n",
+        );
         persist_chat_plan(&root, &sample_chat_plan("openai/gpt-oss-20b"));
         let spec = ManagedBackendSpec {
             display_model: "openai/gpt-oss-20b".to_string(),
             request_model: "openai/gpt-oss-20b".to_string(),
             port: 1234,
-            socket_path: None,
+            transport_endpoint: None,
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: None,
@@ -4065,23 +3851,22 @@ mod tests {
             Some(&"/tmp/ctox-engine.log".to_string())
         );
         assert!(!env.contains_key("CTOX_CHAT_SHARE_AUXILIARY_GPUS"));
-        assert!(!env.contains_key("CTOX_PROXY_PORT"));
+        assert!(!env.contains_key("CTOX_UNUSED_LEGACY_SETTING"));
         assert!(!env.contains_key("CTOX_SHOULD_NOT_LEAK"));
     }
 
     #[test]
     fn managed_aux_launch_env_keeps_role_overrides_only() {
         let root = temp_root("launch-env-aux");
-        std::fs::write(
-            root.join("runtime/engine.env"),
-            "CTOX_ENGINE_BINARY=/tmp/ctox-engine\nCTOX_ENGINE_LOG=/tmp/ctox-engine.log\nCTOX_STT_MAX_SEQ_LEN=4096\nCTOX_PROXY_PORT=9999\nCTOX_SHOULD_NOT_LEAK=1\n",
-        )
-        .unwrap();
+        persist_runtime_env_text(
+            &root,
+            "CTOX_ENGINE_BINARY=/tmp/ctox-engine\nCTOX_ENGINE_LOG=/tmp/ctox-engine.log\nCTOX_STT_MAX_SEQ_LEN=4096\nCTOX_UNUSED_LEGACY_SETTING=1\nCTOX_SHOULD_NOT_LEAK=1\n",
+        );
         let spec = ManagedBackendSpec {
             display_model: "engineai/Voxtral-Mini-4B-Realtime-2602".to_string(),
             request_model: "engineai/Voxtral-Mini-4B-Realtime-2602".to_string(),
             port: 1238,
-            socket_path: None,
+            transport_endpoint: None,
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: Some(engine::ComputeTarget::Gpu),
@@ -4115,7 +3900,7 @@ mod tests {
             env.get("CTOX_ENGINE_CUDA_VISIBLE_DEVICES"),
             Some(&"2".to_string())
         );
-        assert!(!env.contains_key("CTOX_PROXY_PORT"));
+        assert!(!env.contains_key("CTOX_UNUSED_LEGACY_SETTING"));
         assert!(!env.contains_key("CTOX_SHOULD_NOT_LEAK"));
         assert!(!env.contains_key("CTOX_CHAT_RUNTIME_PLAN_ACTIVE"));
     }
@@ -4128,7 +3913,7 @@ mod tests {
             display_model: "openai/gpt-oss-20b".to_string(),
             request_model: "openai/gpt-oss-20b".to_string(),
             port: 1234,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: None,
@@ -4149,7 +3934,7 @@ mod tests {
         assert_eq!(launch_spec.request_model, "openai/gpt-oss-20b");
         assert_eq!(launch_spec.port, 1234);
         assert_eq!(
-            launch_spec.socket_path.as_deref(),
+            launch_spec.transport_endpoint.as_deref(),
             Some("/tmp/ctox-primary.sock")
         );
         assert_eq!(launch_spec.launcher_kind, "engine");
@@ -4173,9 +3958,8 @@ mod tests {
                 active_model: Some("google/gemma-4-E4B-it".to_string()),
                 engine_model: Some("google/gemma-4-E4B-it".to_string()),
                 engine_port: Some(1235),
+                configured_context_tokens: Some(131_072),
                 realized_context_tokens: Some(131_072),
-                proxy_host: "127.0.0.1".to_string(),
-                proxy_port: 12434,
                 upstream_base_url: "http://127.0.0.1:1235".to_string(),
                 local_preset: None,
                 boost: runtime_state::BoostRuntimeState::default(),
@@ -4191,7 +3975,7 @@ mod tests {
             display_model: "google/gemma-4-E4B-it".to_string(),
             request_model: "google/gemma-4-E4B-it".to_string(),
             port: 1235,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::LiteRt,
             compute_target: Some(engine::ComputeTarget::Cpu),
@@ -4231,7 +4015,7 @@ mod tests {
             display_model: "openai/gpt-oss-20b".to_string(),
             request_model: "openai/gpt-oss-20b".to_string(),
             port: 1234,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
             launcher_kind: "engine".to_string(),
             compute_target: Some("gpu".to_string()),
@@ -4253,7 +4037,7 @@ mod tests {
 
         let rendered = render_managed_engine_runtime_config(&launch_spec);
         assert!(rendered.contains("command = \"serve\""));
-        assert!(rendered.contains("socket_path = \"/tmp/ctox-primary.sock\""));
+        assert!(rendered.contains("transport_endpoint = \"/tmp/ctox-primary.sock\""));
         assert!(rendered.contains("model_id = \"openai/gpt-oss-20b\""));
         assert!(rendered.contains("arch = \"gpt-oss\""));
         assert!(rendered.contains("in_situ_quant = \"Q4K\""));
@@ -4266,7 +4050,7 @@ mod tests {
                 display_model: launch_spec.display_model.clone(),
                 request_model: launch_spec.request_model.clone(),
                 port: launch_spec.port,
-                socket_path: launch_spec.socket_path.clone(),
+                transport_endpoint: launch_spec.transport_endpoint.clone(),
                 health_path: "/health",
                 launcher_kind: ManagedLauncherKind::Engine,
                 compute_target: Some(engine::ComputeTarget::Gpu),
@@ -4285,7 +4069,7 @@ mod tests {
             display_model: "google/gemma-4-E2B-it".to_string(),
             request_model: "google/gemma-4-E2B-it".to_string(),
             port: 1234,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
             launcher_kind: "engine".to_string(),
             compute_target: Some("gpu".to_string()),
@@ -4306,7 +4090,7 @@ mod tests {
     #[test]
     fn managed_engine_launch_rejects_cpu_only_binary_on_gpu_host() {
         let root = temp_root("engine-command-mismatch");
-        let engine_binary = root.join("tools/model-runtime/target/release/ctox-engine");
+        let engine_binary = root.join("runtime/tools/model-runtime/bin/ctox-engine");
         std::fs::create_dir_all(engine_binary.parent().unwrap()).unwrap();
         std::fs::write(
             &engine_binary,
@@ -4326,7 +4110,7 @@ mod tests {
             display_model: "openai/gpt-oss-20b".to_string(),
             request_model: "openai/gpt-oss-20b".to_string(),
             port: 1234,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
             launcher_kind: "engine".to_string(),
             compute_target: Some("gpu".to_string()),
@@ -4350,7 +4134,7 @@ mod tests {
     #[test]
     fn managed_engine_parallel_isq_override_suppresses_singlethread_env() {
         let root = temp_root("engine-command-parallel-isq");
-        let engine_binary = root.join("tools/model-runtime/target/release/ctox-engine");
+        let engine_binary = root.join("runtime/tools/model-runtime/bin/ctox-engine");
         std::fs::create_dir_all(engine_binary.parent().unwrap()).unwrap();
         std::fs::write(
             &engine_binary,
@@ -4371,7 +4155,7 @@ mod tests {
             display_model: "zai-org/GLM-4.7-Flash".to_string(),
             request_model: "zai-org/GLM-4.7-Flash".to_string(),
             port: 1234,
-            socket_path: Some("/tmp/ctox-primary.sock".to_string()),
+            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
             launcher_kind: "engine".to_string(),
             compute_target: Some("gpu".to_string()),
@@ -4476,7 +4260,7 @@ mod tests {
             display_model: plan.model.clone(),
             request_model: plan.model.clone(),
             port: 1234,
-            socket_path: Some(root.join("runtime/primary.sock").display().to_string()),
+            transport_endpoint: Some(root.join("runtime/primary.sock").display().to_string()),
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: None,
@@ -4665,7 +4449,7 @@ mod tests {
             display_model: "Qwen/Qwen3-Embedding-0.6B [GPU]".to_string(),
             request_model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
             port: 1237,
-            socket_path: Some(root.join("runtime/embedding.sock").display().to_string()),
+            transport_endpoint: Some(root.join("runtime/embedding.sock").display().to_string()),
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: Some(engine::ComputeTarget::Gpu),
@@ -4706,7 +4490,7 @@ mod tests {
             display_model: "Qwen/Qwen3-Embedding-0.6B [GPU]".to_string(),
             request_model: "Qwen/Qwen3-Embedding-0.6B".to_string(),
             port: 1237,
-            socket_path: Some(root.join("runtime/embedding.sock").display().to_string()),
+            transport_endpoint: Some(root.join("runtime/embedding.sock").display().to_string()),
             health_path: "/health",
             launcher_kind: ManagedLauncherKind::Engine,
             compute_target: Some(engine::ComputeTarget::Gpu),
@@ -4844,10 +4628,10 @@ mod tests {
     #[test]
     fn managed_runtime_launcher_matcher_tracks_runtime_switch() {
         assert!(command_is_managed_runtime_launcher(
-            "/home/test/CTOX/target/release/ctox runtime switch Qwen/Qwen3.5-27B quality"
+            "/home/test/CTOX/bin/ctox runtime switch Qwen/Qwen3.6-35B-A3B quality"
         ));
-        assert!(command_is_managed_runtime_launcher(
-            "/home/test/CTOX/target/release/ctox serve-responses-proxy"
+        assert!(!command_is_managed_runtime_launcher(
+            "/home/test/CTOX/bin/ctox legacy-command"
         ));
         assert!(!command_is_managed_runtime_launcher(
             "/usr/bin/python unrelated.py"
@@ -4857,10 +4641,10 @@ mod tests {
     #[test]
     fn managed_engine_process_matcher_tracks_only_persistent_backends() {
         assert!(managed_engine_process_command(
-            "/home/test/CTOX/tools/model-runtime/target/release/ctox-engine from-config --file /tmp/engine.toml"
+            "/home/test/CTOX/runtime/tools/model-runtime/bin/ctox-engine from-config --file /tmp/engine.toml"
         ));
         assert!(!managed_engine_process_command(
-            "/home/test/CTOX/tools/model-runtime/target/release/ctox-engine quantize auto -m zai-org/GLM-4.7-Flash"
+            "/home/test/CTOX/runtime/tools/model-runtime/bin/ctox-engine quantize auto -m zai-org/GLM-4.7-Flash"
         ));
         assert!(!managed_engine_process_command(
             "/usr/bin/python unrelated.py"
@@ -4870,10 +4654,10 @@ mod tests {
     #[test]
     fn managed_engine_quantize_matcher_tracks_quantize_workers() {
         assert!(managed_engine_quantize_command(
-            "/home/test/CTOX/tools/model-runtime/target/release/ctox-engine quantize auto -m zai-org/GLM-4.7-Flash"
+            "/home/test/CTOX/runtime/tools/model-runtime/bin/ctox-engine quantize auto -m zai-org/GLM-4.7-Flash"
         ));
         assert!(!managed_engine_quantize_command(
-            "/home/test/CTOX/tools/model-runtime/target/release/ctox-engine from-config --file /tmp/engine.toml"
+            "/home/test/CTOX/runtime/tools/model-runtime/bin/ctox-engine from-config --file /tmp/engine.toml"
         ));
     }
 

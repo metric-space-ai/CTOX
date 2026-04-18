@@ -9,7 +9,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
           }
         }
@@ -50,7 +50,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
           }
         }
@@ -86,7 +86,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=6000000\n"
           }
         }
@@ -126,7 +126,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
           }
         }
@@ -167,7 +167,7 @@
       "setup": [
         {
           "write_text": {
-            "path": "${TMP_ROOT}/runtime/engine.env",
+            "path": "${TMP_ROOT}/runtime/ctox.sqlite3",
             "content": "CTOX_WEB_SEARCH_TIMEOUT_MS=20000\nCTOX_WEB_SEARCH_MAX_PAGE_BYTES=2000000\n"
           }
         }

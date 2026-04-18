@@ -25,6 +25,11 @@ struct GithubRelease {
     html_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CliVersionResponse {
+    version: String,
+}
+
 /// Blocking GitHub API call. Caller should run this off the UI thread (e.g.
 /// std::thread::spawn) and cache the result for at least a few minutes —
 /// GitHub rate-limits anonymous clients at 60 requests/hour.
@@ -32,7 +37,7 @@ pub fn fetch_latest_release() -> Result<LatestRelease> {
     let url = format!("{GITHUB_API_BASE}/repos/{DEFAULT_RELEASE_REPO}/releases/latest");
     let agent = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
-        .user_agent(concat!("ctox-desktop/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("ctox-desktop/", env!("CTOX_BUILD_VERSION")))
         .build()
         .context("failed to build http client")?;
     let response = agent
@@ -64,20 +69,16 @@ pub fn probe_local_version(binary: &Path) -> Result<String> {
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout.lines().next().unwrap_or("").trim().to_owned();
-    if first_line.is_empty() {
+    let version = parse_version_output(&stdout)
+        .ok_or_else(|| anyhow::anyhow!("{} version produced no output", binary.display()))?;
+    if version.is_empty() {
         anyhow::bail!("{} version produced no output", binary.display());
     }
-    Ok(first_line)
+    Ok(version)
 }
 
 /// Probe a remote host over SSH for its `ctox version` output.
-pub fn probe_remote_version(
-    user: &str,
-    host: &str,
-    port: u16,
-    password: &str,
-) -> Result<String> {
+pub fn probe_remote_version(user: &str, host: &str, port: u16, password: &str) -> Result<String> {
     if password.is_empty() {
         anyhow::bail!("remote ssh password is empty");
     }
@@ -105,16 +106,24 @@ pub fn probe_remote_version(
         );
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let first_line = stdout
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .to_owned();
-    if first_line.is_empty() {
+    let version = parse_version_output(&stdout)
+        .ok_or_else(|| anyhow::anyhow!("remote `ctox version` produced no output"))?;
+    if version.is_empty() {
         anyhow::bail!("remote `ctox version` produced no output");
     }
-    Ok(first_line)
+    Ok(version)
+}
+
+fn parse_version_output(stdout: &str) -> Option<String> {
+    serde_json::from_str::<CliVersionResponse>(stdout)
+        .ok()
+        .map(|payload| payload.version)
+        .or_else(|| {
+            stdout
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .map(|line| line.trim().to_owned())
+        })
 }
 
 /// Normalize a version string (`"ctox 0.1.0"`, `"v0.1.0"`, `"0.1.0"`) to a
@@ -140,4 +149,21 @@ pub fn update_available(installed_raw: &str, latest_tag: &str) -> bool {
     let installed = normalize_tag(installed_raw);
     let latest = normalize_tag(latest_tag);
     !installed.is_empty() && installed != latest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pretty_json_version_output() {
+        let stdout = "{\n  \"version\": \"0.3.2\"\n}\n";
+        assert_eq!(parse_version_output(stdout).as_deref(), Some("0.3.2"));
+    }
+
+    #[test]
+    fn falls_back_to_plain_text_output() {
+        let stdout = "0.3.2\nextra\n";
+        assert_eq!(parse_version_output(stdout).as_deref(), Some("0.3.2"));
+    }
 }

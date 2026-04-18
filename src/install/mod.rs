@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::inference::engine;
+use crate::inference::runtime_env;
 use crate::service;
 
 const INSTALL_MANIFEST_FILE_NAME: &str = "install_manifest.json";
@@ -52,7 +53,7 @@ impl InstallLayout {
         let active_root = resolve_active_root(root);
         let install_root = resolve_install_root(root);
         let state_root = resolve_state_root(root)?;
-        let cache_root = resolve_cache_root()?;
+        let cache_root = resolve_cache_root(root)?;
         Ok(Self {
             workspace_root,
             active_root,
@@ -92,7 +93,7 @@ pub struct InstallManifest {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ReleaseChannelConfig {
     #[serde(rename = "github")]
@@ -103,6 +104,64 @@ pub enum ReleaseChannelConfig {
         #[serde(default)]
         token_env: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum ReleaseChannelConfigRepr {
+    Tagged {
+        kind: ReleaseChannelKind,
+        repo: String,
+        #[serde(default = "default_github_api_base_string")]
+        api_base: String,
+        #[serde(default)]
+        token_env: Option<String>,
+    },
+    Legacy {
+        #[serde(rename = "GitHub")]
+        github: LegacyGitHubReleaseChannel,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ReleaseChannelKind {
+    Github,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyGitHubReleaseChannel {
+    repo: String,
+    #[serde(default = "default_github_api_base_string")]
+    api_base: String,
+    #[serde(default)]
+    token_env: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ReleaseChannelConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let repr = ReleaseChannelConfigRepr::deserialize(deserializer)?;
+        Ok(match repr {
+            ReleaseChannelConfigRepr::Tagged {
+                kind: ReleaseChannelKind::Github,
+                repo,
+                api_base,
+                token_env,
+            } => Self::GitHub {
+                repo,
+                api_base,
+                token_env,
+            },
+            ReleaseChannelConfigRepr::Legacy { github } => Self::GitHub {
+                repo: github.repo,
+                api_base: github.api_base,
+                token_env: github.token_env,
+            },
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -200,8 +259,8 @@ struct GitHubReleaseResponse {
 struct GitHubReleaseAsset {
     name: String,
     browser_download_url: String,
-    #[serde(default)]
-    size: Option<u64>,
+    #[serde(default, rename = "size")]
+    _size: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -221,7 +280,7 @@ pub fn version_info(root: &Path) -> Result<VersionInfo> {
     let manifest = load_install_manifest(&layout.install_manifest_path())?;
     let release_channel = resolve_release_channel(&layout, manifest.as_ref());
     Ok(VersionInfo {
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: build_version().to_string(),
         install_mode: if layout.managed() {
             "managed".to_string()
         } else {
@@ -263,12 +322,8 @@ pub fn handle_engine_command(root: &Path, args: &[String]) -> Result<()> {
         }
         Some("status") => {
             let layout = InstallLayout::resolve(root)?;
-            let stamp_path = layout
-                .active_root
-                .join("tools/model-runtime/target/release/ctox-engine.features");
-            let binary_path = layout
-                .active_root
-                .join("tools/model-runtime/target/release/ctox-engine");
+            let stamp_path = managed_engine_feature_stamp_path(&layout.active_root);
+            let binary_path = managed_engine_binary_path(&layout.active_root);
             let stamp = fs::read_to_string(&stamp_path).ok();
             println!(
                 "{}",
@@ -292,12 +347,8 @@ pub fn handle_engine_command(root: &Path, args: &[String]) -> Result<()> {
 pub fn handle_doctor_command(root: &Path) -> Result<()> {
     let layout = InstallLayout::resolve(root)?;
     let manifest = load_install_manifest(&layout.install_manifest_path())?;
-    let engine_binary = layout
-        .active_root
-        .join("tools/model-runtime/target/release/ctox-engine");
-    let engine_stamp = layout
-        .active_root
-        .join("tools/model-runtime/target/release/ctox-engine.features");
+    let engine_binary = managed_engine_binary_path(&layout.active_root);
+    let engine_stamp = managed_engine_feature_stamp_path(&layout.active_root);
     let stamp = fs::read_to_string(&engine_stamp).ok();
     let mut hints: Vec<String> = Vec::new();
     if !engine_binary.is_file() {
@@ -337,7 +388,7 @@ pub fn handle_doctor_command(root: &Path) -> Result<()> {
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
-            "cli_version": env!("CARGO_PKG_VERSION"),
+            "cli_version": build_version(),
             "managed_install": layout.managed(),
             "active_root": layout.active_root,
             "engine_binary": engine_binary,
@@ -375,12 +426,12 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             let layout = InstallLayout::resolve(root)?;
             let manifest = load_install_manifest(&layout.install_manifest_path())?;
             let update = load_update_state(&layout.update_state_path())?;
-            let release_channel = resolve_release_channel(&layout, manifest.as_ref())
-                .map(|entry| entry.config);
+            let release_channel =
+                resolve_release_channel(&layout, manifest.as_ref()).map(|entry| entry.config);
             println!(
                 "{}",
                 serde_json::to_string_pretty(&UpdateStatus {
-                    version: env!("CARGO_PKG_VERSION").to_string(),
+                    version: build_version().to_string(),
                     managed_install: layout.managed(),
                     workspace_root: layout.workspace_root,
                     active_root: layout.active_root,
@@ -412,7 +463,14 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
                 .unwrap_or_else(default_release_name);
             let force = has_flag(args, "--force");
             let skip_build = has_flag(args, "--skip-build");
-            let result = adopt_installation(root, &install_root, &state_root, &release, force, skip_build)?;
+            let result = adopt_installation(
+                root,
+                &install_root,
+                &state_root,
+                &release,
+                force,
+                skip_build,
+            )?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
@@ -480,8 +538,12 @@ fn handle_update_channel_command(root: &Path, args: &[String]) -> Result<()> {
         Some("show") => {
             let layout = InstallLayout::resolve(root)?;
             let manifest = load_install_manifest(&layout.install_manifest_path())?;
-            let channel = resolve_release_channel(&layout, manifest.as_ref()).map(|entry| entry.config);
-            println!("{}", serde_json::to_string_pretty(&json!({ "channel": channel }))?);
+            let channel =
+                resolve_release_channel(&layout, manifest.as_ref()).map(|entry| entry.config);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "channel": channel }))?
+            );
             Ok(())
         }
         Some("set-github") => {
@@ -503,11 +565,14 @@ fn handle_update_channel_command(root: &Path, args: &[String]) -> Result<()> {
             });
             manifest.updated_at = now_rfc3339();
             persist_install_manifest(&layout.install_manifest_path(), &manifest)?;
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "configured": true,
-                "channel": manifest.release_channel,
-                "manifest_path": layout.install_manifest_path(),
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "configured": true,
+                    "channel": manifest.release_channel,
+                    "manifest_path": layout.install_manifest_path(),
+                }))?
+            );
             Ok(())
         }
         Some("clear") => {
@@ -517,10 +582,13 @@ fn handle_update_channel_command(root: &Path, args: &[String]) -> Result<()> {
             manifest.release_channel = None;
             manifest.updated_at = now_rfc3339();
             persist_install_manifest(&layout.install_manifest_path(), &manifest)?;
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "configured": false,
-                "manifest_path": layout.install_manifest_path(),
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "configured": false,
+                    "manifest_path": layout.install_manifest_path(),
+                }))?
+            );
             Ok(())
         }
         _ => anyhow::bail!(
@@ -541,7 +609,7 @@ fn check_remote_update(root: &Path) -> Result<RemoteUpdateCheck> {
             status: "remote_unconfigured".to_string(),
             reason: Some("No release channel is configured yet. Use `ctox update channel set-github --repo <owner/repo>` or continue with `ctox update apply --source <path>`.".to_string()),
             current_release,
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: build_version().to_string(),
             channel: None,
             latest_release: None,
             latest_name: None,
@@ -558,7 +626,7 @@ fn check_remote_update(root: &Path) -> Result<RemoteUpdateCheck> {
     let update_available = current_release
         .as_deref()
         .map(|value| value != latest.tag_name)
-        .unwrap_or_else(|| latest.tag_name != env!("CARGO_PKG_VERSION"));
+        .unwrap_or_else(|| latest.tag_name != build_release_tag());
     Ok(RemoteUpdateCheck {
         configured: true,
         status: if update_available {
@@ -568,7 +636,7 @@ fn check_remote_update(root: &Path) -> Result<RemoteUpdateCheck> {
         },
         reason: Some(format!("release channel resolved from {}", channel.source)),
         current_release,
-        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        current_version: build_version().to_string(),
         channel: Some(channel.config),
         latest_release: Some(latest.tag_name.clone()),
         latest_name: latest.name.clone(),
@@ -661,7 +729,7 @@ fn adopt_installation(
         &UpdateState {
             schema_version: 1,
             phase: "adopted".to_string(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: build_version().to_string(),
             current_release: manifest.current_release.clone(),
             previous_release: None,
             target_release: None,
@@ -722,7 +790,7 @@ fn apply_update(
         &UpdateState {
             schema_version: 1,
             phase: "preparing".to_string(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: build_version().to_string(),
             current_release: previous_release.clone(),
             previous_release: previous_release.clone(),
             target_release: Some(release.to_string()),
@@ -811,7 +879,7 @@ fn apply_update(
     let completed = UpdateState {
         schema_version: 1,
         phase: "completed".to_string(),
-        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        current_version: build_version().to_string(),
         current_release: manifest.current_release.clone(),
         previous_release,
         target_release: Some(release.to_string()),
@@ -872,7 +940,7 @@ fn rollback_update(root: &Path) -> Result<RollbackResult> {
         &UpdateState {
             schema_version: 1,
             phase: "rolled_back".to_string(),
-            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            current_version: build_version().to_string(),
             current_release: manifest.current_release.clone(),
             previous_release: manifest.previous_release.clone(),
             target_release: None,
@@ -896,7 +964,7 @@ fn persist_update_phase(path: &Path, phase: &str, error: Option<&str>) -> Result
     let mut state = load_update_state(path)?.unwrap_or(UpdateState {
         schema_version: 1,
         phase: "idle".to_string(),
-        current_version: env!("CARGO_PKG_VERSION").to_string(),
+        current_version: build_version().to_string(),
         current_release: None,
         target_release: None,
         previous_release: None,
@@ -951,7 +1019,9 @@ fn resolve_active_root(root: &Path) -> PathBuf {
 }
 
 fn resolve_install_root(root: &Path) -> Option<PathBuf> {
-    if let Some(install_root) = env::var_os("CTOX_INSTALL_ROOT") {
+    if let Some(install_root) = runtime_env::env_or_config(root, "CTOX_INSTALL_ROOT")
+        .filter(|value| !value.trim().is_empty())
+    {
         return Some(PathBuf::from(install_root));
     }
     let file_name = root.file_name().and_then(OsStr::to_str)?;
@@ -965,7 +1035,9 @@ fn resolve_install_root(root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_state_root(root: &Path) -> Result<PathBuf> {
-    if let Some(state_root) = env::var_os("CTOX_STATE_ROOT") {
+    if let Some(state_root) =
+        runtime_env::env_or_config(root, "CTOX_STATE_ROOT").filter(|value| !value.trim().is_empty())
+    {
         return Ok(PathBuf::from(state_root));
     }
     let runtime_path = root.join("runtime");
@@ -975,11 +1047,28 @@ fn resolve_state_root(root: &Path) -> Result<PathBuf> {
     Ok(runtime_path)
 }
 
-fn resolve_cache_root() -> Result<PathBuf> {
-    if let Some(cache_root) = env::var_os("CTOX_CACHE_ROOT") {
+fn resolve_cache_root(root: &Path) -> Result<PathBuf> {
+    if let Some(cache_root) =
+        runtime_env::env_or_config(root, "CTOX_CACHE_ROOT").filter(|value| !value.trim().is_empty())
+    {
         return Ok(PathBuf::from(cache_root));
     }
     Ok(default_cache_root())
+}
+
+fn resolve_tools_root(root: &Path) -> PathBuf {
+    runtime_env::env_or_config(root, "CTOX_TOOLS_ROOT")
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("runtime/tools"))
+}
+
+fn managed_engine_binary_path(root: &Path) -> PathBuf {
+    resolve_tools_root(root).join("model-runtime/bin/ctox-engine")
+}
+
+fn managed_engine_feature_stamp_path(root: &Path) -> PathBuf {
+    resolve_tools_root(root).join("model-runtime/ctox-engine.features")
 }
 
 fn resolve_release_channel(
@@ -1047,9 +1136,8 @@ fn fetch_remote_release(
                 // tarball. GitHub doesn't publish a "release" for a branch, so
                 // we can't list release assets here — callers must use the
                 // source-mode path for Branch requests.
-                let tarball_url = format!(
-                    "https://codeload.github.com/{repo}/tar.gz/refs/heads/{branch}"
-                );
+                let tarball_url =
+                    format!("https://codeload.github.com/{repo}/tar.gz/refs/heads/{branch}");
                 return Ok(GitHubReleaseResponse {
                     tag_name: format!("branch-{branch}"),
                     name: Some(format!("{branch} (development snapshot)")),
@@ -1157,7 +1245,10 @@ fn verify_sha256_asset(
     let response = github_request(channel, &sha_asset.browser_download_url)?
         .call()
         .with_context(|| {
-            format!("failed to download {sha_asset_name} from {}", sha_asset.browser_download_url)
+            format!(
+                "failed to download {sha_asset_name} from {}",
+                sha_asset.browser_download_url
+            )
         })?;
     let expected_line = response
         .into_string()
@@ -1265,7 +1356,7 @@ fn github_request(channel: &ReleaseChannelConfig, url: &str) -> Result<ureq::Req
     let mut request = agent
         .get(url)
         .set("accept", "application/vnd.github+json")
-        .set("user-agent", &format!("ctox/{}", env!("CARGO_PKG_VERSION")));
+        .set("user-agent", &format!("ctox/{}", build_version()));
     if let Some(token) = github_token(channel) {
         request = request.set("authorization", &format!("Bearer {token}"));
     }
@@ -1389,7 +1480,10 @@ fn run_release_installer(release_root: &Path, state_root: &Path) -> Result<()> {
     let script = release_root.join("install.sh");
     let legacy_script = release_root.join("scripts/install/install_ctox.sh");
     let (chosen_script, args) = if script.is_file() {
-        (&script, vec!["--rebuild", release_root.to_str().unwrap_or(".")])
+        (
+            &script,
+            vec!["--rebuild", release_root.to_str().unwrap_or(".")],
+        )
     } else if legacy_script.is_file() {
         (&legacy_script, vec![])
     } else {
@@ -1438,11 +1532,7 @@ fn validate_release_source(source_root: &Path) -> Result<()> {
     );
 }
 
-fn copy_workspace(
-    source_root: &Path,
-    release_root: &Path,
-    kind: UpdateSourceKind,
-) -> Result<()> {
+fn copy_workspace(source_root: &Path, release_root: &Path, kind: UpdateSourceKind) -> Result<()> {
     ensure_dir(release_root)?;
     copy_filtered(source_root, release_root, &|path, is_dir| {
         let Some(name) = path.file_name().and_then(OsStr::to_str) else {
@@ -1462,7 +1552,7 @@ fn copy_workspace(
 }
 
 fn validate_binary_bundle(source_root: &Path) -> Result<()> {
-    let binary = source_root.join("target/release/ctox");
+    let binary = source_root.join("bin/ctox");
     if !binary.exists() {
         anyhow::bail!(
             "binary bundle is missing the ctox executable at {}",
@@ -1473,13 +1563,9 @@ fn validate_binary_bundle(source_root: &Path) -> Result<()> {
 }
 
 fn carry_over_engine_from_previous(previous_root: &Path, release_root: &Path) -> Result<()> {
-    let previous_engine = previous_root.join("tools/model-runtime/target/release");
-    if !previous_engine.is_dir() {
-        return Ok(());
-    }
-    let destination = release_root.join("tools/model-runtime/target/release");
-    ensure_dir(&destination)?;
-    copy_filtered(&previous_engine, &destination, &|_path, _is_dir| false)
+    let _ = previous_root;
+    let _ = release_root;
+    Ok(())
 }
 
 fn copy_filtered<F>(source_root: &Path, destination_root: &Path, skip: &F) -> Result<()>
@@ -1616,7 +1702,7 @@ fn write_managed_wrapper(install_root: &Path, state_root: &Path) -> Result<()> {
     }
     let current_root = install_root.join("current");
     let script = format!(
-        "#!/usr/bin/env bash\nset -euo pipefail\nexport CTOX_ROOT=\"{}\"\nexport CTOX_STATE_ROOT=\"{}\"\nexport CTOX_INSTALL_ROOT=\"{}\"\nexec \"{}/target/release/ctox\" \"$@\"\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nexport CTOX_ROOT=\"{}\"\nexport CTOX_STATE_ROOT=\"{}\"\nexport CTOX_INSTALL_ROOT=\"{}\"\nexec \"{}/bin/ctox\" \"$@\"\n",
         current_root.display(),
         state_root.display(),
         install_root.display(),
@@ -1715,24 +1801,64 @@ fn default_github_api_base_string() -> String {
 fn default_release_name() -> String {
     format!(
         "v{}-{}",
-        env!("CARGO_PKG_VERSION"),
+        build_version(),
         current_utc().format("%Y%m%dT%H%M%SZ")
     )
 }
 
 fn release_name_for_source(source_root: &Path) -> Option<String> {
-    let cargo_toml = fs::read_to_string(source_root.join("Cargo.toml")).ok()?;
-    let version = cargo_toml
-        .lines()
-        .map(str::trim)
-        .find_map(|line| line.strip_prefix("version = "))?
-        .trim_matches('"')
-        .to_string();
+    let version =
+        git_describe_version(source_root).or_else(|| cargo_manifest_version(source_root))?;
     Some(format!(
         "v{}-{}",
         version,
         current_utc().format("%Y%m%dT%H%M%SZ")
     ))
+}
+
+fn build_version() -> &'static str {
+    env!("CTOX_BUILD_VERSION")
+}
+
+fn build_release_tag() -> String {
+    let version = build_version();
+    if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    }
+}
+
+fn git_describe_version(source_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(source_root)
+        .arg("describe")
+        .arg("--tags")
+        .arg("--dirty")
+        .arg("--match")
+        .arg("v[0-9]*")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+
+    Some(raw.strip_prefix('v').unwrap_or(raw.as_str()).to_string())
+}
+
+fn cargo_manifest_version(source_root: &Path) -> Option<String> {
+    let cargo_toml = fs::read_to_string(source_root.join("Cargo.toml")).ok()?;
+    cargo_toml
+        .lines()
+        .map(str::trim)
+        .find_map(|line| line.strip_prefix("version = "))
+        .map(|value| value.trim_matches('"').to_string())
 }
 
 fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {

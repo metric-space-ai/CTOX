@@ -49,20 +49,19 @@ impl ctox_doc_stack::EmbeddingExecutor for CtoxDocEmbeddingExecutor {
         if let Some(binding) =
             resolved_runtime.binding_for_auxiliary_role(engine::AuxiliaryRole::Embedding)
         {
-            match &binding.transport {
-                LocalTransport::UnixSocket { .. } | LocalTransport::NamedPipe { .. } => {
-                    return embed_texts_via_local_socket(&binding.transport, inputs, model)
-                        .with_context(|| {
-                            format!(
-                                "failed to reach embedding transport for local documents at {}",
-                                binding.transport.display_label()
-                            )
-                        });
-                }
-                LocalTransport::TcpLoopback { .. } => {
-                    // fall through to HTTP path using binding.base_url
-                }
+            if !binding.transport.is_private_ipc() {
+                anyhow::bail!(
+                    "ctox_core_local requires private IPC for local document embeddings; loopback HTTP transport is not allowed"
+                );
             }
+            return embed_texts_via_local_socket(&binding.transport, inputs, model).with_context(
+                || {
+                    format!(
+                        "failed to reach embedding transport for local documents at {}",
+                        binding.transport.display_label()
+                    )
+                },
+            );
         }
 
         let base_url = resolved_runtime

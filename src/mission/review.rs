@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::path::Path;
 use std::time::Duration;
 
+use crate::execution::agent::direct_session::PersistentSession;
 use crate::inference::runtime_env;
 
 const REVIEW_TIMEOUT_SECS: u64 = 90;
@@ -11,33 +12,58 @@ const REVIEW_SYSTEM_PROMPT: &str = r#"You are CTOX's completion reviewer.
 
 Your job is to stop CTOX from treating an under-verified execution slice as complete.
 
-Operate in strict read-only review mode:
+You are a SEPARATE AGENT from the executor that produced the slice. You did not write the work. You have no attachment to it. Your bias is skepticism, not endorsement.
+
+Strict scope rule:
+- You review ONLY the slice described in the user message under SCOPE and WHAT EXECUTOR DID.
+- Do not invent new acceptance criteria beyond the explicit done_gate.
+- Do not review unrelated mission work, prior turns, or hypothetical issues.
+- If the slice's scope is ambiguous, return PARTIAL with a one-line clarification request rather than guessing.
+
+Verification discipline (strict read-only review mode):
 - Do not modify project files.
 - Do not run git write operations.
 - Do not install packages or change system configuration.
 - Prefer direct checks against the current repo, runtime, processes, logs, and tests over prose-only reasoning.
-- If a claim can be verified with a command, do that instead of merely restating the claim.
+- If a claim can be verified with a command, run the command instead of restating the claim.
+
+Done-gate-first discipline:
+- If an explicit done_gate is provided in SCOPE, test that done_gate FIRST. If unmet, FAIL — regardless of other evidence.
+- If no explicit done_gate is provided, derive the narrowest checkable claim from the slice prompt and test that.
 
 When the slice claims an install, rollout, migration, repair, or service readiness, inspect the live surface.
 When the slice claims a code or config change is complete, inspect current workspace state and run the narrowest relevant checks.
-If evidence is incomplete, return PARTIAL instead of PASS.
+If evidence is incomplete or you cannot complete a check, return PARTIAL instead of PASS.
 
 Respond in exactly this shape:
 VERDICT: PASS|FAIL|PARTIAL
-SUMMARY: <one sentence>
+SUMMARY: <one sentence — must reference the specific done_gate or claim being judged>
 OPEN_ITEMS:
 - <item>
 EVIDENCE:
 - <command or check> => <observed result>
 "#;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CompletionReviewRequest {
     pub goal: String,
     pub prompt: String,
     pub preview: String,
     pub source_label: String,
     pub owner_visible: bool,
+    /// High-level mission line from MissionStateRecord (one-liner).
+    /// Empty if no mission context is available.
+    pub mission: String,
+    /// Explicit done-gate from MissionStateRecord. The reviewer is
+    /// instructed to test this FIRST before any other criterion.
+    /// Empty if no done-gate has been set.
+    pub done_gate: String,
+    /// Focus continuity excerpt (current task focus / next slice / blocker).
+    /// Already-clipped text; passed through verbatim into the review brief.
+    pub focus_excerpt: String,
+    /// Anchors continuity excerpt (key facts discovered during the mission).
+    /// Already-clipped text; passed through verbatim into the review brief.
+    pub anchors_excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -100,18 +126,19 @@ pub fn review_completion_if_needed(
 
     let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
     let review_prompt = build_review_prompt(request, result_text, &reasons);
-    match crate::execution::agent::direct_session::run_direct_session(
-        crate::execution::agent::direct_session::DirectSessionRequest {
-            root,
-            settings: &settings,
-            prompt: &review_prompt,
-            workspace_root: None,
-            timeout: Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
-            base_instructions: Some(REVIEW_SYSTEM_PROMPT),
-            include_apply_patch_tool: Some(false),
-            conversation_id: 0,
-        },
-    ) {
+    let report = (|| -> anyhow::Result<String> {
+        let mut session = PersistentSession::start(root, &settings)?;
+        let result = session.run_turn(
+            &review_prompt,
+            Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
+            Some(REVIEW_SYSTEM_PROMPT),
+            Some(false),
+            0,
+        );
+        session.shutdown();
+        result
+    })();
+    match report {
         Ok(report) => parse_review_report(score, reasons, &report),
         Err(err) => ReviewOutcome {
             required: true,
@@ -237,13 +264,78 @@ fn build_review_prompt(
     } else {
         reasons.join(", ")
     };
+    let mission_line = if request.mission.trim().is_empty() {
+        "(no mission line on record)".to_string()
+    } else {
+        clip_text(request.mission.trim(), 240)
+    };
+    let done_gate_block = if request.done_gate.trim().is_empty() {
+        "(none provided — derive the narrowest checkable claim from the slice prompt and test that)"
+            .to_string()
+    } else {
+        request.done_gate.trim().to_string()
+    };
+    let focus_block = if request.focus_excerpt.trim().is_empty() {
+        "(focus continuity is empty)".to_string()
+    } else {
+        request.focus_excerpt.trim().to_string()
+    };
+    let anchors_block = if request.anchors_excerpt.trim().is_empty() {
+        "(no anchors recorded)".to_string()
+    } else {
+        request.anchors_excerpt.trim().to_string()
+    };
+    let source = request.source_label.as_str();
+    let owner_visible = if request.owner_visible { "yes" } else { "no" };
+    let goal = request.goal.trim();
+    let prompt = request.prompt.trim();
+    let result = result_text.trim();
+
     format!(
-        "Review whether the latest CTOX execution slice is actually safe to treat as complete.\n\nReview trigger reasons: {reason_block}\nSource label: {}\nOwner visible: {}\nGoal:\n{}\n\nOriginal slice prompt:\n{}\n\nLatest reported result:\n{}\n\nUse direct evidence where feasible. If the slice claims a runtime change, inspect the live runtime or repo state. If it claims a fix or artifact change, inspect current workspace state and run the narrowest relevant checks. If the slice is not safe to treat as complete yet, do not wave it through.",
-        request.source_label,
-        if request.owner_visible { "yes" } else { "no" },
-        request.goal.trim(),
-        request.prompt.trim(),
-        result_text.trim(),
+        "==REVIEWER ROLE==\n\
+You are a separate, skeptical CTOX completion reviewer. You did not produce the work below — you are reviewing it cold. Your bias is skepticism, not endorsement. Operate strictly read-only: do not modify files, do not run git write operations, do not install or restart services. Use shell/read tools only to verify claims.\n\
+\n\
+==SCOPE (review ONLY what is below — do not invent new criteria)==\n\
+Mission: {mission_line}\n\
+Source label: {source}\n\
+Owner visible: {owner_visible}\n\
+Trigger reasons: {reason_block}\n\
+\n\
+Explicit done_gate (test this FIRST):\n\
+{done_gate_block}\n\
+\n\
+==CONTEXT (read-only, for grounding only — do not extend scope from this)==\n\
+Focus snapshot:\n\
+{focus_block}\n\
+\n\
+Anchors snapshot:\n\
+{anchors_block}\n\
+\n\
+==WHAT THE EXECUTOR DID==\n\
+Slice goal:\n\
+{goal}\n\
+\n\
+Slice prompt the executor was given:\n\
+{prompt}\n\
+\n\
+Latest reported result from the executor:\n\
+{result}\n\
+\n\
+==REVIEW INSTRUCTIONS==\n\
+1. Test the done_gate first if one is provided. If unmet, return FAIL.\n\
+2. If the done_gate is missing or unclear, derive the narrowest checkable claim from the slice prompt and test that.\n\
+3. Use direct evidence (shell/read tools) instead of prose-only reasoning.\n\
+4. If the scope of the slice is ambiguous or under-specified, return PARTIAL with a one-line clarification request — do not guess.\n\
+5. Do not review unrelated mission work or prior turns. Stay inside the slice.\n\
+6. If you cannot complete a check (timeout, missing artifact, permission), return PARTIAL — never PASS by default.\n\
+\n\
+Respond in exactly this shape:\n\
+VERDICT: PASS|FAIL|PARTIAL\n\
+SUMMARY: <one sentence — must reference the specific done_gate or claim being judged>\n\
+OPEN_ITEMS:\n\
+- <item>\n\
+EVIDENCE:\n\
+- <command or check> => <observed result>\n"
     )
 }
 
@@ -340,6 +432,7 @@ mod tests {
             preview: "Install Redis".to_string(),
             source_label: "queue".to_string(),
             owner_visible: true,
+            ..CompletionReviewRequest::default()
         };
         let (required, score, reasons) = assess_review_requirement(
             &request,
@@ -360,12 +453,36 @@ mod tests {
             preview: "Queue summary".to_string(),
             source_label: "tui".to_string(),
             owner_visible: true,
+            ..CompletionReviewRequest::default()
         };
         let (required, _, _) = assess_review_requirement(
             &request,
             "Explained the current queue backlog and highlighted the blocked task.",
         );
         assert!(!required);
+    }
+
+    #[test]
+    fn build_review_prompt_includes_role_scope_and_done_gate_blocks() {
+        let request = CompletionReviewRequest {
+            goal: "Roll out v2.3".to_string(),
+            prompt: "Deploy v2.3 to staging and run smoke tests.".to_string(),
+            preview: "v2.3 rollout".to_string(),
+            source_label: "queue".to_string(),
+            owner_visible: true,
+            mission: "Stabilize staging deploys".to_string(),
+            done_gate: "curl -f https://staging/health returns 200".to_string(),
+            focus_excerpt: "Active task: deploy v2.3".to_string(),
+            anchors_excerpt: "Repo: /opt/api".to_string(),
+        };
+        let rendered = build_review_prompt(&request, "Smoke test passed.", &["closure_claim".to_string()]);
+        assert!(rendered.contains("==REVIEWER ROLE=="));
+        assert!(rendered.contains("==SCOPE"));
+        assert!(rendered.contains("Explicit done_gate"));
+        assert!(rendered.contains("curl -f https://staging/health"));
+        assert!(rendered.contains("Stabilize staging deploys"));
+        assert!(rendered.contains("==WHAT THE EXECUTOR DID=="));
+        assert!(rendered.contains("Smoke test passed."));
     }
 
     #[test]

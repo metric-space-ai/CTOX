@@ -31,15 +31,12 @@ Current scope:
 
 Opt-in live gates:
 
-- `integration/proxy_e2e.rs` runs `scripts/ctox_proxy_validate.py` when `CTOX_PROXY_E2E_MODELS` is set.
 - `integration/qualification_gate.rs` runs `scripts/ctox_model_qualify.py` when `CTOX_QUALIFY_MODEL` is set.
 
 Useful commands:
 
 - Deterministic core suite:
   `cargo test --test service_surface --test durable_queue --test channels_core --test follow_up_core --test schedule_core --test governance_core --test lcm_core --test context_health_core --test plan_core --test scrape_core --test verification_core`
-- Proxy load/switch gate:
-  `CTOX_PROXY_E2E_MODELS="openai/gpt-oss-20b,Qwen/Qwen3.5-35B-A3B" cargo test --test proxy_e2e`
 - Model suitability gate:
   `CTOX_QUALIFY_MODEL="openai/gpt-oss-20b" CTOX_QUALIFY_SCENARIOS="minimal_ctox_stability,continuity_recall" cargo test --test qualification_gate`
 

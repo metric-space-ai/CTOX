@@ -42,8 +42,7 @@ DEFAULT_CONTAINER_ROOT = "/opt/ctox"
 DEFAULT_CODEX_HOME = "/root/.codex"
 DEFAULT_ATIF_CONTAINER_PATH = "/logs/agent/trajectory.json"
 DEFAULT_CONTEXT_LOG_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/context-log.jsonl"
-DEFAULT_LCM_DB_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/ctox_lcm.db"
-DEFAULT_AGENT_DB_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/cto_agent.db"
+DEFAULT_RUNTIME_DB_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/ctox.sqlite3"
 DEFAULT_SERVICE_LOG_CONTAINER_PATH = "/logs/agent/service.log"
 DEFAULT_RUN_TIMEOUT_SEC = 1800
 
@@ -115,7 +114,19 @@ rm -f {DEFAULT_CONTAINER_ROOT}/runtime/*.db \
   {DEFAULT_CONTAINER_ROOT}/runtime/runtime_state.json \
   {DEFAULT_CONTAINER_ROOT}/runtime/continuity.json \
   {DEFAULT_CONTAINER_ROOT}/runtime/cto-agent.lock
-printf 'CTOX_CHAT_TURN_TIMEOUT_SECS={turn_timeout}\\n' > {DEFAULT_CONTAINER_ROOT}/runtime/engine.env
+python3 - <<'PY'
+import sqlite3
+db_path = "{DEFAULT_RUNTIME_DB_CONTAINER_PATH}"
+conn = sqlite3.connect(db_path)
+conn.execute("CREATE TABLE IF NOT EXISTS runtime_env_kv (env_key TEXT PRIMARY KEY, env_value TEXT NOT NULL)")
+conn.execute(
+    "INSERT INTO runtime_env_kv (env_key, env_value) VALUES (?, ?) "
+    "ON CONFLICT(env_key) DO UPDATE SET env_value = excluded.env_value",
+    ("CTOX_CHAT_TURN_TIMEOUT_SECS", "{turn_timeout}")
+)
+conn.commit()
+conn.close()
+PY
 rm -f /tmp/ctox-bundle.tgz
 """
         await self.exec_as_root(environment, command=extract_cmd)
@@ -266,8 +277,7 @@ rm -f /tmp/ctox-bundle.tgz
         for container_path, host_name in (
             (DEFAULT_ATIF_CONTAINER_PATH, "trajectory.json"),
             (DEFAULT_CONTEXT_LOG_CONTAINER_PATH, "context-log.jsonl"),
-            (DEFAULT_LCM_DB_CONTAINER_PATH, "ctox_lcm.db"),
-            (DEFAULT_AGENT_DB_CONTAINER_PATH, "cto_agent.db"),
+            (DEFAULT_RUNTIME_DB_CONTAINER_PATH, "ctox.sqlite3"),
             (DEFAULT_SERVICE_LOG_CONTAINER_PATH, "service.log"),
         ):
             try:

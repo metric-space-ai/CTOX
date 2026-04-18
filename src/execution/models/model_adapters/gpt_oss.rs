@@ -12,7 +12,6 @@ use super::ResponsesTransportKind;
 const DEFAULT_HARMONY_REASONING_CAP: &str = "low";
 const DEFAULT_RUNTIME_OUTPUT_BUDGET: usize = 131_072;
 const DEFAULT_HARMONY_MIN_OUTPUT_TOKENS: usize = 128;
-const DEFAULT_EXACT_TEXT_MAX_OUTPUT_TOKENS: usize = 64;
 const HARMONY_STOP_MARKERS: &[&str] = &["<|return|>", "<|call|>"];
 const LOCAL_COMPACT_INSTRUCTIONS: &str = "You are Codex running through CTOX on a local responses-backed runtime. Be concise and tool-accurate. Emit either one tool call or one final answer per turn. Prefer exec_command for shell work and apply_patch for file edits. Do not restate instructions. If the task requires creating or modifying files, running builds or tests, or proving a result inside a workspace, your next completion must be a tool call, not a final answer. You must not claim success, emit an exact marker, or give a final answer until tool output has verified the required result. When the user asks for an exact marker or short final answer, return only that required text after any needed tool calls and verification.";
 
@@ -264,7 +263,7 @@ pub fn rewrite_success_response(
         .get("id")
         .and_then(Value::as_str)
         .map(|value| format!("resp_{value}"))
-        .unwrap_or_else(|| "resp_ctox_proxy".to_string());
+        .unwrap_or_else(|| "resp_ctox_gateway".to_string());
     let created_at = payload
         .get("created")
         .and_then(Value::as_u64)
@@ -396,7 +395,7 @@ pub(crate) fn rewrite_chat_success_response(
                         let call_id = tool_call
                             .get("id")
                             .and_then(Value::as_str)
-                            .unwrap_or("call_ctox_proxy");
+                            .unwrap_or("call_ctox_gateway");
                         builder.push_function_call(
                             call_id,
                             name,
@@ -495,19 +494,6 @@ pub(crate) fn ensure_thinking_output_floor(model_id: &str, requested: usize) -> 
         return requested;
     }
     requested.max(DEFAULT_HARMONY_MIN_OUTPUT_TOKENS)
-}
-
-pub(crate) fn apply_exact_text_output_budget(
-    requested: usize,
-    exact_text_override: Option<&str>,
-) -> usize {
-    let Some(exact_text) = exact_text_override
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-    else {
-        return requested;
-    };
-    requested.min(exact_text_output_budget(exact_text))
 }
 
 pub(crate) fn default_output_budget(model_id: &str) -> usize {
@@ -708,16 +694,10 @@ fn cap_max_output_tokens(requested: usize, cap: Option<usize>) -> usize {
     requested.min(cap)
 }
 
-fn exact_text_output_budget(exact_text: &str) -> usize {
-    let exact_chars = exact_text.chars().count();
-    let padded = exact_chars.saturating_mul(2).saturating_add(16);
-    padded.clamp(16, DEFAULT_EXACT_TEXT_MAX_OUTPUT_TOKENS)
-}
-
 fn current_runtime_root() -> PathBuf {
     std::env::current_dir()
         .ok()
-        .filter(|path| path.join("runtime/inference_runtime.json").exists())
+        .filter(|path| crate::persistence::sqlite_path(path).exists())
         .or_else(|| std::env::var("CTOX_ROOT").ok().map(PathBuf::from))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
@@ -1071,7 +1051,7 @@ fn build_chat_messages(items: &[Value], instructions: Option<&str>) -> Vec<Value
                 let call_id = object
                     .get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call_ctox_proxy");
+                    .unwrap_or("call_ctox_gateway");
                 let output = engine::extract_function_call_output_text(object.get("output"));
                 messages.push(json!({
                     "role": "user",
@@ -1218,7 +1198,7 @@ fn parse_chat_tool_calls(text: &str) -> (Option<String>, Vec<ChatXmlToolCall>) {
             arguments.insert(param_name.to_string(), Value::String(value));
         }
         tool_calls.push(ChatXmlToolCall {
-            call_id: format!("call_ctox_proxy_{index}"),
+            call_id: format!("call_ctox_gateway_{index}"),
             name,
             arguments: Value::Object(arguments).to_string(),
         });

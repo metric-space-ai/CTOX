@@ -1,9 +1,7 @@
 # Tools Tree
 
-The `tools/` tree is where CTOX keeps its integrated hard-fork runtime trees.
+The `tools/` tree is where CTOX keeps its integrated local runtime trees.
 
-- `tools/agent-runtime/`
-  Integrated execution hard fork derived from `openai/codex`.
 - `tools/model-runtime/`
   Integrated local serving hard fork with Candle-focused lineage and CTOX-specific custom code.
 
