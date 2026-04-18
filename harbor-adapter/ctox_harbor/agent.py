@@ -74,7 +74,6 @@ set -e
 mkdir -p {DEFAULT_CONTAINER_ROOT}
 tar -xzf /tmp/ctox-bundle.tgz -C {DEFAULT_CONTAINER_ROOT} --strip-components=1
 chmod +x {DEFAULT_CONTAINER_ROOT}/target/release/ctox
-chmod +x {DEFAULT_CONTAINER_ROOT}/tools/agent-runtime/target/release/codex-exec
 chmod +x {DEFAULT_CONTAINER_ROOT}/tools/model-runtime/target/release/ctox-engine
 
 loader="{DEFAULT_CONTAINER_ROOT}/lib/ld-linux-x86-64.so.2"
@@ -97,12 +96,10 @@ EOF
 }}
 
 wrap_binary "{DEFAULT_CONTAINER_ROOT}/target/release/ctox"
-wrap_binary "{DEFAULT_CONTAINER_ROOT}/tools/agent-runtime/target/release/codex-exec"
 wrap_binary "{DEFAULT_CONTAINER_ROOT}/tools/model-runtime/target/release/ctox-engine"
 
-mkdir -p {DEFAULT_CONTAINER_ROOT}/src {DEFAULT_CONTAINER_ROOT}/tools/agent-runtime
+mkdir -p {DEFAULT_CONTAINER_ROOT}/src
 [ -f {DEFAULT_CONTAINER_ROOT}/src/main.rs ] || printf '%s\n' 'fn main() {{}}' > {DEFAULT_CONTAINER_ROOT}/src/main.rs
-[ -f {DEFAULT_CONTAINER_ROOT}/tools/agent-runtime/Cargo.toml ] || printf '%s\n' '[package]' 'name = "codex-exec"' > {DEFAULT_CONTAINER_ROOT}/tools/agent-runtime/Cargo.toml
 
 ln -sf {DEFAULT_CONTAINER_ROOT}/target/release/ctox /usr/local/bin/ctox
 mkdir -p {DEFAULT_CONTAINER_ROOT}/runtime
