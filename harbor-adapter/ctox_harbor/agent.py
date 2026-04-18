@@ -8,12 +8,12 @@ The contract:
    The bundle path on the host is supplied via the `CTOX_HOST_TARBALL`
    environment variable so the same adapter works across machines.
 
-2. `run(instruction, environment, context)` invokes `ctox run-once` inside
-   the container with `--brief <instruction> --model gpt-5.4 --quality`, and
-   points `--atif-out` at `/logs/agent/trajectory.json`. The OpenAI API key
-   and CTOX_ROOT are forwarded into the container via the `env=` kwarg.
-   After the run, we copy `trajectory.json` back to `self.logs_dir` on the
-   host so `populate_context_post_run` can read it.
+2. `run(instruction, environment, context)` starts `ctox service --foreground`
+   inside the container, submits the task through `ctox chat --wait`, and
+   points `--atif-out` at `/logs/agent/trajectory.json`. The provider API key
+   and CTOX_ROOT are forwarded into the container via the `env=` kwarg. After
+   the run, we copy the trajectory and forensic artifacts back to `self.logs_dir`
+   on the host so Harbor can inspect the real service path.
 
 3. `populate_context_post_run(context)` reads the downloaded trajectory and
    fills in token/cost accounting on the AgentContext. It is tolerant of a
@@ -22,7 +22,7 @@ The contract:
 Design intent: the adapter is deliberately thin. All CTOX-specific behaviour
 (queueing, continuity, plan execution, skill invocation) lives inside CTOX
 itself. The adapter's job is just to bridge Harbor's installed-agent contract
-to CTOX's `run-once` CLI.
+to CTOX's canonical service + chat flow.
 """
 
 from __future__ import annotations
@@ -42,11 +42,14 @@ DEFAULT_CONTAINER_ROOT = "/opt/ctox"
 DEFAULT_CODEX_HOME = "/root/.codex"
 DEFAULT_ATIF_CONTAINER_PATH = "/logs/agent/trajectory.json"
 DEFAULT_CONTEXT_LOG_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/context-log.jsonl"
+DEFAULT_LCM_DB_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/ctox_lcm.db"
+DEFAULT_AGENT_DB_CONTAINER_PATH = f"{DEFAULT_CONTAINER_ROOT}/runtime/cto_agent.db"
+DEFAULT_SERVICE_LOG_CONTAINER_PATH = "/logs/agent/service.log"
 DEFAULT_RUN_TIMEOUT_SEC = 1800
 
 
 class CtoxAgent(BaseInstalledAgent):
-    """Harbor adapter that runs each task through `ctox run-once`."""
+    """Harbor adapter that runs each task through the CTOX service path."""
 
     @staticmethod
     def name() -> str:  # type: ignore[override]
@@ -74,7 +77,8 @@ set -e
 mkdir -p {DEFAULT_CONTAINER_ROOT}
 tar -xzf /tmp/ctox-bundle.tgz -C {DEFAULT_CONTAINER_ROOT} --strip-components=1
 chmod +x {DEFAULT_CONTAINER_ROOT}/target/release/ctox
-chmod +x {DEFAULT_CONTAINER_ROOT}/tools/model-runtime/target/release/ctox-engine
+optional_engine={DEFAULT_CONTAINER_ROOT}/tools/model-runtime/target/release/ctox-engine
+[ -f "$optional_engine" ] && chmod +x "$optional_engine"
 
 loader="{DEFAULT_CONTAINER_ROOT}/lib/ld-linux-x86-64.so.2"
 libpath="{DEFAULT_CONTAINER_ROOT}/lib"
@@ -122,7 +126,7 @@ rm -f /tmp/ctox-bundle.tgz
         # to stderr without needing a TTY or model.
         await self.exec_as_agent(
             environment,
-            command="/usr/local/bin/ctox run-once 2>&1 | head -1 || true",
+            command="/usr/local/bin/ctox help >/dev/null",
         )
 
     async def run(  # type: ignore[override]
@@ -194,7 +198,6 @@ rm -f /tmp/ctox-bundle.tgz
         )
         bench_model = os.environ.get("CTOX_BENCH_MODEL", "gpt-5.4")
         bench_preset = os.environ.get("CTOX_BENCH_PRESET", "quality")
-        preset_flag = f"--{bench_preset}" if bench_preset in ("quality", "performance") else ""
         inline_exports = " ".join(
             f"{key}={shlex.quote(value)}"
             for key, value in (
@@ -222,14 +225,29 @@ rm -f /tmp/ctox-bundle.tgz
         cmd = (
             f"cd {shlex.quote(workspace)} && "
             f"export {inline_exports} && "
-            f"/usr/local/bin/ctox run-once "
-            f"--brief {shlex.quote(bench_instruction)} "
-            f"--model {shlex.quote(bench_model)} "
-            f"--autonomy progressive "
-            f"{preset_flag} "
+            f"/usr/local/bin/ctox runtime switch "
+            f"{shlex.quote(bench_model)} {shlex.quote(bench_preset)} && "
+            f"/usr/local/bin/ctox service --foreground --autonomy progressive "
+            f"> {DEFAULT_SERVICE_LOG_CONTAINER_PATH} 2>&1 & "
+            f"service_pid=$!; "
+            f"cleanup() {{ "
+            f"/usr/local/bin/ctox stop >/dev/null 2>&1 || true; "
+            f"kill \"$service_pid\" >/dev/null 2>&1 || true; "
+            f"wait \"$service_pid\" >/dev/null 2>&1 || true; "
+            f"}}; "
+            f"trap cleanup EXIT; "
+            f"for _ in $(seq 1 100); do "
+            f"if /usr/local/bin/ctox status >/tmp/ctox-status.json 2>/dev/null && "
+            f"grep -q '\"running\": true' /tmp/ctox-status.json; then break; fi; "
+            f"sleep 0.2; "
+            f"done; "
+            f"/usr/local/bin/ctox chat "
+            f"{shlex.quote(bench_instruction)} "
+            f"--wait "
             f"--workspace {shlex.quote(workspace)} "
+            f"--thread-key {shlex.quote(thread_key)} "
             f"--atif-out {DEFAULT_ATIF_CONTAINER_PATH} "
-            f"--thread-key {shlex.quote(thread_key)}"
+            f"--timeout-secs {DEFAULT_RUN_TIMEOUT_SEC}"
         )
 
         run_exc: Exception | None = None
@@ -243,23 +261,24 @@ rm -f /tmp/ctox-bundle.tgz
         except Exception as exc:  # noqa: BLE001 — propagate after trajectory copy
             run_exc = exc
 
-        # Copy the trajectory out regardless of success — it's the most
-        # useful debug artifact on failure. `populate_context_post_run` is
-        # tolerant of a missing file.
         host_logs_dir = Path(self.logs_dir)
         host_logs_dir.mkdir(parents=True, exist_ok=True)
-        host_trajectory = host_logs_dir / "trajectory.json"
-        try:
-            await environment.download_file(
-                DEFAULT_ATIF_CONTAINER_PATH, str(host_trajectory)
-            )
-        except Exception as copy_exc:  # noqa: BLE001
-            # Downgrade to warning: if the run itself failed, the trajectory
-            # may not have been written, which is expected.
-            print(
-                f"ctox-harbor: failed to copy trajectory from container: "
-                f"{copy_exc}"
-            )
+        for container_path, host_name in (
+            (DEFAULT_ATIF_CONTAINER_PATH, "trajectory.json"),
+            (DEFAULT_CONTEXT_LOG_CONTAINER_PATH, "context-log.jsonl"),
+            (DEFAULT_LCM_DB_CONTAINER_PATH, "ctox_lcm.db"),
+            (DEFAULT_AGENT_DB_CONTAINER_PATH, "cto_agent.db"),
+            (DEFAULT_SERVICE_LOG_CONTAINER_PATH, "service.log"),
+        ):
+            try:
+                await environment.download_file(
+                    container_path, str(host_logs_dir / host_name)
+                )
+            except Exception as copy_exc:  # noqa: BLE001
+                print(
+                    f"ctox-harbor: failed to copy {container_path} from container: "
+                    f"{copy_exc}"
+                )
 
         if run_exc is not None:
             raise run_exc
