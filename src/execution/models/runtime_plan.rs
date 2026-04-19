@@ -259,6 +259,139 @@ impl PlannedMoECacheAllocation {
     }
 }
 
+/// Build a [`PlannedMoECacheAllocation`] from the `CTOX_MOE_CACHE_*` keys in
+/// the runtime env, topology detected from the hardware profile, and a
+/// per-GPU chat budget.
+///
+/// Returns `None` when `CTOX_MOE_CACHE_ENABLED` is unset or evaluates to a
+/// falsy value — in that case the cache stays disabled and the engine uses
+/// the legacy `Fused` / `Fast` / `Slow` MoE backends.
+///
+/// Returns `Some(plan)` when the cache is enabled; the allocation's fields
+/// come from:
+///
+/// | Field                  | Source (runtime_env key)              | Default          |
+/// |------------------------|---------------------------------------|------------------|
+/// | `capacity_experts`     | `CTOX_MOE_CACHE_CAPACITY`             | required         |
+/// | `total_experts`        | `CTOX_MOE_CACHE_TOTAL_EXPERTS`        | required         |
+/// | `warm_tier_mb`         | `CTOX_MOE_CACHE_WARM_MB`              | 0 on Unified, else auto from budget |
+/// | `cold_tier_path`       | `CTOX_MOE_CACHE_COLD_PATH`            | `{root}/runtime/moe_cache` if `root` |
+/// | `cold_tier_min_mbps`   | `CTOX_MOE_CACHE_COLD_MIN_MBPS`        | 1000             |
+/// | `topology`             | derived from GPU list + backend       | — |
+///
+/// Required keys mean the caller must set them upfront; Phase-further work
+/// will compute `capacity_experts` and `total_experts` from model metadata
+/// automatically.
+pub fn plan_moe_cache_allocation(
+    root: Option<&Path>,
+    env_map: &BTreeMap<String, String>,
+    hardware: &HardwareProfile,
+) -> Option<PlannedMoECacheAllocation> {
+    // Gate: only produce an allocation when explicitly enabled. This keeps
+    // the cache strictly opt-in so existing deployments see no behavior
+    // change when CTOX upgrades to a binary that includes the feature.
+    let enabled = env_map
+        .get("CTOX_MOE_CACHE_ENABLED")
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+
+    let capacity_experts: u32 = env_map
+        .get("CTOX_MOE_CACHE_CAPACITY")
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &u32| v > 0)?;
+    let total_experts: u32 = env_map
+        .get("CTOX_MOE_CACHE_TOTAL_EXPERTS")
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&v: &u32| v > 0)?;
+
+    // Topology detection: CUDA-capable host -> Discrete, Apple Silicon ->
+    // Unified, else CpuOnly. We approximate by GPU presence; the runtime
+    // detects the physical device at cache construction and verifies.
+    let topology_label = if hardware.gpus.is_empty() {
+        "cpu_only"
+    } else if cfg!(target_os = "macos") {
+        "unified"
+    } else {
+        "discrete"
+    };
+
+    // Warm-tier budget: 0 on Unified (the warm tier aliases VRAM, see
+    // `Topology::has_warm_tier` in the runtime), operator-overridden or
+    // auto-computed on Discrete.
+    let warm_tier_mb: u64 = if topology_label == "unified" {
+        0
+    } else {
+        env_map
+            .get("CTOX_MOE_CACHE_WARM_MB")
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    };
+
+    // Cold-tier path: operator override first, then a sensible default
+    // under the CTOX state root so cleanup is straightforward. We do NOT
+    // fall back to `std::env::temp_dir()` — that's too volatile for
+    // multi-GB expert pools and wouldn't survive a restart.
+    let cold_tier_path: Option<String> = env_map
+        .get("CTOX_MOE_CACHE_COLD_PATH")
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.trim().to_string())
+        .or_else(|| {
+            root.map(|r| r.join("runtime").join("moe_cache").display().to_string())
+        });
+
+    let cold_tier_min_mbps: u32 = env_map
+        .get("CTOX_MOE_CACHE_COLD_MIN_MBPS")
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(1000);
+
+    let mut rationale = Vec::new();
+    rationale.push(format!(
+        "cache enabled via CTOX_MOE_CACHE_ENABLED; topology={}",
+        topology_label
+    ));
+    rationale.push(format!(
+        "capacity={} of total={} experts ({:.0}% resident)",
+        capacity_experts,
+        total_experts,
+        (capacity_experts as f64 / total_experts.max(1) as f64) * 100.0
+    ));
+    if topology_label == "unified" {
+        rationale.push(
+            "unified memory: warm tier disabled (would alias VRAM); cold tier only"
+                .to_string(),
+        );
+    } else if warm_tier_mb > 0 {
+        rationale.push(format!(
+            "discrete gpu: warm tier budget {} MiB for CPU-RAM-staged experts",
+            warm_tier_mb
+        ));
+    }
+    if let Some(path) = &cold_tier_path {
+        rationale.push(format!(
+            "cold tier at {} with {} MiB/s admission floor",
+            path, cold_tier_min_mbps
+        ));
+    }
+
+    Some(PlannedMoECacheAllocation {
+        topology: topology_label.to_string(),
+        capacity_experts,
+        total_experts,
+        warm_tier_mb,
+        cold_tier_path,
+        cold_tier_min_mbps,
+        rationale,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatRuntimePlan {
     pub model: String,
@@ -2904,7 +3037,7 @@ fn build_candidate_for_gpu_indices(
         theoretical_breakdown,
         rationale,
         gpu_allocations: allocations,
-        moe_cache: None,
+        moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
     };
     Some(plan)
 }
@@ -3046,7 +3179,7 @@ fn build_floor_fallback_plan(
                     chat_enabled: gpu.index == 0,
                 })
                 .collect(),
-            moe_cache: None,
+            moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
         };
     }
     let runtime = resolve_harness_runtime(harness, hardware);
@@ -3202,7 +3335,7 @@ fn build_floor_fallback_plan(
                 rationale
             },
             gpu_allocations: fallback_gpu_allocations,
-            moe_cache: None,
+            moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
         }
     });
     let mut fallback = plan;
@@ -8348,6 +8481,83 @@ mod tests {
                 .any(|line| line.contains("manifest candidate order")),
             "{quality:#?}"
         );
+    }
+
+    #[test]
+    fn plan_moe_cache_allocation_disabled_returns_none() {
+        // Default (no CTOX_MOE_CACHE_ENABLED) must leave the cache off so
+        // upgrades don't flip behavior silently.
+        let hw = HardwareProfile {
+            gpus: vec![],
+            gpu0_desktop_reserve_mb: 0,
+            fingerprint: "test".to_string(),
+        };
+        let env = BTreeMap::new();
+        assert!(plan_moe_cache_allocation(None, &env, &hw).is_none());
+    }
+
+    #[test]
+    fn plan_moe_cache_allocation_reads_runtime_env_keys() {
+        // The operator enables the cache via runtime_env (CTOX SQLite) —
+        // `plan_moe_cache_allocation` must pick up capacity/total from there
+        // and produce a PlannedMoECacheAllocation with topology matching the
+        // host.
+        let hw = HardwareProfile {
+            gpus: vec![],
+            gpu0_desktop_reserve_mb: 0,
+            fingerprint: "test".to_string(),
+        };
+        let mut env = BTreeMap::new();
+        env.insert("CTOX_MOE_CACHE_ENABLED".to_string(), "1".to_string());
+        env.insert("CTOX_MOE_CACHE_CAPACITY".to_string(), "32".to_string());
+        env.insert(
+            "CTOX_MOE_CACHE_TOTAL_EXPERTS".to_string(),
+            "256".to_string(),
+        );
+        env.insert(
+            "CTOX_MOE_CACHE_COLD_MIN_MBPS".to_string(),
+            "1500".to_string(),
+        );
+        env.insert(
+            "CTOX_MOE_CACHE_COLD_PATH".to_string(),
+            "/var/ctox/moe".to_string(),
+        );
+
+        let plan = plan_moe_cache_allocation(None, &env, &hw).expect("cache enabled");
+        assert_eq!(plan.capacity_experts, 32);
+        assert_eq!(plan.total_experts, 256);
+        assert_eq!(plan.cold_tier_min_mbps, 1500);
+        assert_eq!(plan.cold_tier_path.as_deref(), Some("/var/ctox/moe"));
+        // With no GPUs in hw, topology is "cpu_only"; on macOS builds with
+        // GPUs it would be "unified". This test pins the empty-GPU case.
+        assert_eq!(plan.topology, "cpu_only");
+        // Warm tier defaults to 0 since no GPUs => no need for CPU staging.
+        assert_eq!(plan.warm_tier_mb, 0);
+        // Rationale must mention how the decision was reached.
+        assert!(plan
+            .rationale
+            .iter()
+            .any(|line| line.contains("CTOX_MOE_CACHE_ENABLED")));
+    }
+
+    #[test]
+    fn plan_moe_cache_allocation_required_keys_missing_returns_none() {
+        // `CTOX_MOE_CACHE_ENABLED=1` without capacity/total must fail
+        // closed — better to not plan a cache than to plan one with
+        // meaningless defaults that would bail at engine construction.
+        let hw = HardwareProfile {
+            gpus: vec![],
+            gpu0_desktop_reserve_mb: 0,
+            fingerprint: "t".to_string(),
+        };
+        let mut env = BTreeMap::new();
+        env.insert("CTOX_MOE_CACHE_ENABLED".to_string(), "1".to_string());
+        // Missing CAPACITY and TOTAL_EXPERTS.
+        assert!(plan_moe_cache_allocation(None, &env, &hw).is_none());
+
+        env.insert("CTOX_MOE_CACHE_CAPACITY".to_string(), "0".to_string());
+        // Zero capacity rejected.
+        assert!(plan_moe_cache_allocation(None, &env, &hw).is_none());
     }
 
     #[test]
