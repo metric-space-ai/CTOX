@@ -206,6 +206,43 @@ mod tests {
             },
         ));
     }
+
+    #[test]
+    fn cache_capacity_forces_cached_backend_on_any_device() {
+        // `MoEExecutionPolicy::cache_capacity = Some(K)` must override the
+        // normal capability-based selection and pick `Cached` on every
+        // device. Regression guard for the planner → engine contract:
+        // when the planner sets `moe_cache: Some(...)`, the engine must
+        // honor it rather than falling back to Fused/Fast/Slow based on
+        // device caps.
+        use candle_core::Device;
+
+        let policy = MoEExecutionPolicy {
+            cache_capacity: Some(16),
+            ..MoEExecutionPolicy::default()
+        };
+        // CPU device + cached policy ⇒ Cached.
+        let sel = MoEExpertsBackend::select(&Device::Cpu, false, &None, policy);
+        assert!(matches!(sel, MoEExpertsBackend::Cached));
+        // Even when capability-based selection would pick Fast/Fused, the
+        // policy override wins. We can't construct a Metal/Cuda Device in a
+        // host-agnostic unit test, but the precedence check in
+        // `select` runs before capability detection, so the CPU check
+        // above exercises the same code path.
+    }
+
+    #[test]
+    fn cached_backend_is_allowed_on_cuda_without_slow_flag() {
+        // Cached backend is always allowed on any device — unlike `Slow`
+        // which is CUDA-rejected by default. The cache is the answer to
+        // the VRAM-pressure problem that originally motivated Slow's
+        // CUDA rejection, so it doesn't need `allow_slow_backend_on_cuda`.
+        assert!(MoEExpertsBackend::backend_allowed_on_device(
+            true,
+            MoEExpertsBackend::Cached,
+            MoEExecutionPolicy::default(),
+        ));
+    }
 }
 
 /// Internal representation of fused expert weights for CUDA kernels
