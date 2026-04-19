@@ -371,30 +371,46 @@ pub fn estimate_kv_cache_bytes(
 /// caller-supplied KV-cache reserve. This is the amount of RAM/VRAM the
 /// model weights can occupy.
 ///
-/// `is_unified`: on Apple Silicon unified memory, `hardware.gpus` reports a
-///   single pseudo-GPU with all of physical RAM; we trust that directly.
-///   On discrete systems, `gpus` is VRAM only, and we add 24 GiB as a
-///   conservative host-RAM-overflow estimate.
+/// # Inputs
 ///
-/// `kv_cache_reserve_mb`: pre-computed KV budget (see
-///   [`estimate_kv_cache_bytes`]). Pass 0 to skip the explicit KV subtraction
-///   and rely on the flat OS-overhead reserve alone.
+/// * `is_unified`: on Apple Silicon unified memory, `hardware.gpus` reports
+///   a single pseudo-GPU with all of physical RAM. On discrete systems,
+///   `gpus` is VRAM only, and we add 24 GiB as a conservative host-RAM
+///   overflow estimate.
+///
+/// * `kv_cache_reserve_mb`: pre-computed KV budget (see
+///   [`estimate_kv_cache_bytes`]). Pass 0 to skip the explicit KV
+///   subtraction.
+///
+/// * `observed_available_mb`: when `Some(n)`, an authoritative runtime
+///   measurement of free memory (e.g. from the engine's `doctor --json`
+///   output written into runtime_env as `CTOX_OBSERVED_HOST_AVAILABLE_MB`).
+///   Takes precedence — the OS-overhead guess is already baked into the
+///   real number. When `None`, falls back to `total × 70 %`.
+///
+/// The previous `total × 88 %` heuristic was too optimistic: on a busy
+/// macOS box the engine's `doctor` reports only ~44 % actually available
+/// (OS + Metal heap + other apps). 70 % splits the difference — better
+/// than raw total, still optimistic enough that the planner doesn't
+/// spuriously enable the cache on a half-loaded box. Callers with
+/// authoritative measurements should pass `observed_available_mb`.
 pub fn estimate_weight_residency_budget_bytes(
     hardware: &HardwareProfile,
     is_unified: bool,
     kv_cache_reserve_mb: u64,
+    observed_available_mb: Option<u64>,
 ) -> u64 {
-    let total_mb: u64 = if is_unified {
-        hardware.gpus.iter().map(|g| g.total_mb).sum()
+    let base_mb = if let Some(mb) = observed_available_mb {
+        mb
     } else {
-        hardware.gpus.iter().map(|g| g.total_mb).sum::<u64>() + 24 * 1024
+        let total_mb: u64 = if is_unified {
+            hardware.gpus.iter().map(|g| g.total_mb).sum()
+        } else {
+            hardware.gpus.iter().map(|g| g.total_mb).sum::<u64>() + 24 * 1024
+        };
+        total_mb * 70 / 100
     };
-    // OS + runtime overhead: 12% of total. Tighter than the previous 25%
-    // because we now subtract KV explicitly — the 25% was absorbing both.
-    let os_overhead_mb = total_mb * 12 / 100;
-    let weight_budget_mb = total_mb
-        .saturating_sub(os_overhead_mb)
-        .saturating_sub(kv_cache_reserve_mb);
+    let weight_budget_mb = base_mb.saturating_sub(kv_cache_reserve_mb);
     weight_budget_mb * 1024 * 1024
 }
 
@@ -417,9 +433,14 @@ pub fn auto_detect_moe_cache_capacity(
     is_unified: bool,
     isq_label: Option<&str>,
     kv_cache_reserve_mb: u64,
+    observed_available_mb: Option<u64>,
 ) -> Option<u32> {
-    let budget_bytes =
-        estimate_weight_residency_budget_bytes(hardware, is_unified, kv_cache_reserve_mb);
+    let budget_bytes = estimate_weight_residency_budget_bytes(
+        hardware,
+        is_unified,
+        kv_cache_reserve_mb,
+        observed_available_mb,
+    );
     let moe_bytes = estimate_moe_weights_bytes(arch, isq_label);
     // Non-MoE weights (embeddings, lm_head, attention, norms) are ~15% of
     // total for Qwen3.6-style A3B architectures. Subtract from budget.
@@ -542,17 +563,31 @@ pub fn plan_moe_cache_allocation_with_arch(
                 /*kv_bits=*/ 16,
             );
             let kv_reserve_mb = est_kv_bytes / 1024 / 1024;
+            // Operator can inject the engine's `doctor` observed-available
+            // number via runtime_env: `CTOX_OBSERVED_HOST_AVAILABLE_MB=<n>`.
+            // When present, takes precedence over the total-based heuristic.
+            let observed_available_mb = env_map
+                .get("CTOX_OBSERVED_HOST_AVAILABLE_MB")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|&v| v > 0);
             let auto_capacity = auto_detect_moe_cache_capacity(
                 arch,
                 hardware,
                 is_unified,
                 isq_label,
                 kv_reserve_mb,
+                observed_available_mb,
             )?;
             let total = u32::try_from(arch.num_experts).unwrap_or(u32::MAX);
             let mut rationale = Vec::new();
+            let budget_source = if observed_available_mb.is_some() {
+                "observed"
+            } else {
+                "estimated"
+            };
             rationale.push(format!(
-                "auto-activated: MoE weights exceed host budget at quant={} (KV reserve {} MiB)",
+                "auto-activated: MoE weights exceed {} host budget at quant={} (KV reserve {} MiB)",
+                budget_source,
                 isq_label.unwrap_or("unquantized"),
                 kv_reserve_mb
             ));
@@ -8785,9 +8820,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_q4k_on_32gb_apple_silicon_disables_cache() {
-        // Apple Silicon M5 32 GB + Qwen3.6 at Q4K: MoE ≈ 16 GiB, fits with
-        // room for KV (~5 GiB at 262k) + overhead. Cache must auto-disable.
+    fn auto_detect_q4k_fits_when_observed_available_is_large() {
+        // Apple Silicon M5 32 GB, Qwen3.6 at Q4K (~15 GiB MoE). When the
+        // caller passes an authoritative `observed_available_mb` showing
+        // the box has plenty of free RAM (fresh boot, 28 GiB free), the
+        // Q4K model fits — cache auto-disables.
         let hw = HardwareProfile {
             gpus: vec![HardwareGpu {
                 index: 0,
@@ -8799,18 +8836,27 @@ mod tests {
         };
         let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
         // 5 GiB KV reserve (262k, BF16, 10 full-attn layers).
-        let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, Some("Q4K"), 5 * 1024);
+        // 28 GiB observed-available (fresh boot).
+        let capacity = auto_detect_moe_cache_capacity(
+            &arch,
+            &hw,
+            true,
+            Some("Q4K"),
+            5 * 1024,
+            Some(28 * 1024),
+        );
         assert!(
             capacity.is_none(),
-            "Q4K Qwen3.6 should fit on 32 GiB M5; got Some({:?})",
+            "Q4K Qwen3.6 on 28 GiB free + 5 GiB KV reserve must fit; got Some({:?})",
             capacity
         );
     }
 
     #[test]
-    fn auto_detect_bf16_on_32gb_apple_silicon_enables_cache() {
-        // Same host, unquantized BF16 model: MoE ≈ 64 GiB ≫ 32 GiB.
-        // Cache must auto-enable with computed K.
+    fn auto_detect_q4k_enables_cache_on_busy_host_with_observed_available() {
+        // Same host, but the box is busy: only 12 GiB observed-available
+        // (matches the engine's `doctor` output on a running macOS with
+        // many apps open). Now even Q4K doesn't fit — cache must engage.
         let hw = HardwareProfile {
             gpus: vec![HardwareGpu {
                 index: 0,
@@ -8821,18 +8867,46 @@ mod tests {
             fingerprint: "m5".to_string(),
         };
         let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
-        let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024);
+        let capacity = auto_detect_moe_cache_capacity(
+            &arch,
+            &hw,
+            true,
+            Some("Q4K"),
+            5 * 1024,
+            Some(12 * 1024),
+        );
+        assert!(
+            capacity.is_some(),
+            "Q4K Qwen3.6 on busy 12 GiB-free host must need cache; got None"
+        );
+    }
+
+    #[test]
+    fn auto_detect_bf16_on_32gb_apple_silicon_enables_cache() {
+        // Unquantized BF16: MoE ≈ 61 GiB ≫ any realistic budget on a 32 GiB
+        // box. Cache must auto-enable regardless of observed-available.
+        let hw = HardwareProfile {
+            gpus: vec![HardwareGpu {
+                index: 0,
+                name: "Apple M5".to_string(),
+                total_mb: 32 * 1024,
+            }],
+            gpu0_desktop_reserve_mb: 1024,
+            fingerprint: "m5".to_string(),
+        };
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        // Heuristic fallback (no observed_available): 32 GiB × 70 % = 22.4
+        // GiB - 5 GiB KV = 17.4 GiB. Non-MoE reserve = 61/6 ≈ 10 GiB.
+        // moe_budget = 7.4 GiB. K = 7.4 / 0.24 (per-expert) ≈ 31.
+        let capacity =
+            auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024, None);
         let k = capacity.expect("BF16 Qwen3.6 must require cache on 32 GiB M5");
-        // Floor: 2 × num_experts_per_tok = 16. Upper bound: num_experts = 256.
         assert!(k >= 16, "K={} below floor 2×top_k=16", k);
         assert!(k <= 256, "K={} above num_experts=256", k);
-        // BF16 math: per-expert = 240 MiB × 40 layers aggregated, so total
-        // MoE footprint ≈ 61 GiB. Budget after OS overhead + 5 GiB KV ≈
-        // 23 GiB; non-MoE reserve ≈ 10 GiB; moe_budget ≈ 13 GiB;
-        // K ≈ 13 GiB / 240 MiB ≈ 55. Envelope ±30%:
+        // Envelope ±40% around predicted 31:
         assert!(
-            (40..=80).contains(&k),
-            "K={} outside expected ~55 for BF16 on 32 GiB M5",
+            (16..=60).contains(&k),
+            "K={} outside expected ~31 for BF16 on 32 GiB M5 with heuristic budget",
             k
         );
     }
