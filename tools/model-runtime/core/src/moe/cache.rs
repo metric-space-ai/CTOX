@@ -188,6 +188,41 @@ impl PoolBacking {
             }
         }
     }
+
+    /// Hint the kernel that the given range is no longer needed in the page
+    /// cache. The OS is free to reclaim those pages; a subsequent access
+    /// will cold-load them again from disk.
+    ///
+    /// Used after promotion (we've pulled bytes out of the pool onto the
+    /// device, so the CPU-side page cache copy is now redundant) to keep
+    /// the page cache targeted at experts that are actively hot — prevents
+    /// a 30-GB pool from squatting on all the available RAM for stale
+    /// slots that may never be touched again this run.
+    ///
+    /// # Safety
+    /// `MADV_DONTNEED` on a writable mmap can discard *unsaved* writes for
+    /// the range. In this cache the invariant is that every write to a slot
+    /// completes (and is flushed) *before* any reader observes the slot
+    /// state change to `InPool`. Callers only invoke this on slots that are
+    /// `InPool` and have been fully staged — no writer is active on the
+    /// range, so no data is at risk. Wrapped in `unsafe` here because
+    /// `memmap2` forces the caller to acknowledge the contract.
+    fn advise_dontneed(&self, offset: usize, len: usize) {
+        if let Self::Ssd { mmap, .. } = self {
+            let end = offset.saturating_add(len).min(mmap.len());
+            if end > offset {
+                // SAFETY: slot is fully staged and not being written; see
+                // function-level comment for the invariant.
+                unsafe {
+                    let _ = mmap.unchecked_advise_range(
+                        memmap2::UncheckedAdvice::DontNeed,
+                        offset,
+                        end - offset,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Static pool: backing storage + per-expert metadata.
@@ -233,10 +268,17 @@ impl StaticPool {
                 .map_mut(&file)
                 .map_err(candle_core::Error::wrap)?
         };
-        // Hint to the OS: we will read large sequential ranges. On Linux this
-        // maps to `posix_fadvise(SEQUENTIAL) + MADV_SEQUENTIAL`; on macOS it
-        // still maps to `madvise(MADV_SEQUENTIAL)` via memmap2.
-        let _ = mmap.advise(memmap2::Advice::Sequential);
+        // Default the base advice to `Random`: MoE routing drives accesses in
+        // a data-dependent, non-sequential pattern, so encouraging the OS to
+        // stream-read adjacent pages would pollute the page cache with
+        // experts that won't be touched. Per-access `WillNeed` hints (see
+        // `prefetch_many`) take over the prefetch job explicitly.
+        //
+        // On Linux this maps to `madvise(MADV_RANDOM)` — disables read-ahead
+        // on the range. On macOS it maps to `madvise(MADV_RANDOM)` with the
+        // same effect. On both OSes, subsequent `WillNeed` on a specific
+        // slot re-enables readahead for that slot's byte range only.
+        let _ = mmap.advise(memmap2::Advice::Random);
 
         Ok(Self {
             slot_size,
@@ -720,6 +762,16 @@ impl MoEExpertCache {
         );
         inner.slots[victim] = SlotState::InPool;
         self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+
+        // Tell the kernel we just pulled the incoming slot's bytes onto the
+        // device, so the CPU-side page-cache copy is now redundant. Lets the
+        // OS reclaim those pages if it's under memory pressure instead of
+        // squatting on them for experts that may not be touched again soon.
+        // The corresponding `WillNeed` on a future re-activation will cold-
+        // load the pages again. No-op on RAM backing.
+        let incoming_off = inner.pool.slot_offset(idx);
+        let incoming_len = inner.pool.metadata[idx].total_len() as usize;
+        inner.pool.backing.advise_dontneed(incoming_off, incoming_len);
 
         // Promote incoming.
         inner.slots[idx] = SlotState::Resident(triple.clone());
