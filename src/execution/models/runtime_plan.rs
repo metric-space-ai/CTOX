@@ -259,6 +259,185 @@ impl PlannedMoECacheAllocation {
     }
 }
 
+/// Static MoE architectural facts needed by the planner to decide whether
+/// the expert cache is needed (i.e. does the full model fit in the host's
+/// RAM/VRAM budget?). Pulled from the model's HF config.json — the planner
+/// hard-codes these for known MoE models so we don't have to parse the
+/// config at plan time.
+#[derive(Debug, Clone, Copy)]
+pub struct MoeArchInfo {
+    pub hidden_size: u64,
+    pub num_hidden_layers: u64,
+    pub num_experts: u64,
+    pub num_experts_per_tok: u64,
+    pub moe_intermediate_size: u64,
+    pub shared_expert_intermediate_size: u64,
+}
+
+/// Look up the static MoE architecture for a known canonical model id.
+///
+/// Returns `None` for non-MoE models and for MoE models we haven't
+/// cataloged yet — callers treat `None` as "planner cannot auto-decide
+/// cache; fall back to operator `CTOX_MOE_CACHE_*` overrides or leave the
+/// cache disabled".
+pub fn resolve_moe_arch_info(canonical_model: &str) -> Option<MoeArchInfo> {
+    match canonical_model {
+        // Source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B/raw/main/config.json
+        // Verified against the engine's `qwen3_5_moe::TextConfig` expectations.
+        "Qwen/Qwen3.6-35B-A3B" => Some(MoeArchInfo {
+            hidden_size: 2048,
+            num_hidden_layers: 40,
+            num_experts: 256,
+            num_experts_per_tok: 8,
+            moe_intermediate_size: 512,
+            shared_expert_intermediate_size: 512,
+        }),
+        _ => None,
+    }
+}
+
+/// Approximate bits-per-parameter after quantization. Used by the auto-fit
+/// heuristic to compute model footprint. These are rough — precise sizing
+/// depends on block boundaries, scale/zero-point overhead etc. — but
+/// accurate to ~10% which is enough to decide fits-or-not.
+fn quant_bits_per_param(isq_label: Option<&str>) -> u32 {
+    match isq_label.unwrap_or("unquantized").to_ascii_uppercase().as_str() {
+        "Q4K" | "Q4_K_M" | "Q4_K_S" => 4,
+        "Q5K" | "Q5_K_M" | "Q5_K_S" => 5,
+        "Q6K" | "Q6_K" => 6,
+        "Q8_0" | "Q8K" => 8,
+        "FP8" | "F8Q8" => 8,
+        "MXFP4" | "MXFP4_NATIVE" => 4,
+        _ => 16, // BF16/FP16 fallback
+    }
+}
+
+/// Estimate how many bytes the MoE expert weights alone will occupy at the
+/// given quantization. Excludes attention, embeddings, lm_head — those are
+/// counted separately by the existing `EmpiricalSizingProfile`.
+pub fn estimate_moe_weights_bytes(arch: &MoeArchInfo, isq_label: Option<&str>) -> u64 {
+    let bits = u64::from(quant_bits_per_param(isq_label));
+    // Per expert: 3 matrices (gate, up, down). Two are hidden×moe, one is
+    // moe×hidden. Total params per expert = 3 * hidden * moe.
+    let routed_params_per_expert = 3 * arch.hidden_size * arch.moe_intermediate_size;
+    let routed_params_total =
+        routed_params_per_expert * arch.num_experts * arch.num_hidden_layers;
+    // Shared expert runs on every MoE layer — 3 matrices too.
+    let shared_params_per_layer = 3 * arch.hidden_size * arch.shared_expert_intermediate_size;
+    let shared_params_total = shared_params_per_layer * arch.num_hidden_layers;
+    let total_params = routed_params_total + shared_params_total;
+    // bits × params / 8 = bytes. Rounded up.
+    (total_params * bits + 7) / 8
+}
+
+/// Estimate the per-expert slot size (for the cache pool). Used to compute
+/// the K such that `K * per_expert_bytes` ≈ target resident footprint.
+pub fn estimate_per_expert_bytes(arch: &MoeArchInfo, isq_label: Option<&str>) -> u64 {
+    let bits = u64::from(quant_bits_per_param(isq_label));
+    let params = 3 * arch.hidden_size * arch.moe_intermediate_size;
+    (params * bits + 7) / 8 * arch.num_hidden_layers
+}
+
+/// Estimate the KV-cache footprint (bytes) for a hybrid-attention MoE model.
+///
+/// Qwen3.5/3.6 use `full_attention_interval=4` — only every 4th layer holds
+/// a full-attention KV cache; the rest use linear-attention recurrent state
+/// whose footprint is context-independent and negligible at inference time.
+/// So the KV footprint is `full_attention_layers × context × num_kv_heads ×
+/// head_dim × 2 × dtype_bytes`.
+///
+/// `kv_bits` is the effective bits-per-element of the KV cache (e.g. 3 for
+/// `turboquant3`, 16 for BF16 default).
+pub fn estimate_kv_cache_bytes(
+    num_hidden_layers: u64,
+    full_attention_interval: u64,
+    context_len: u64,
+    num_kv_heads: u64,
+    head_dim: u64,
+    kv_bits: u64,
+) -> u64 {
+    let full_attn_layers = if full_attention_interval == 0 {
+        num_hidden_layers
+    } else {
+        num_hidden_layers / full_attention_interval
+    };
+    // × 2 for K and V separately.
+    let per_layer_per_token_bits = 2 * num_kv_heads * head_dim * kv_bits;
+    let bits = full_attn_layers * context_len * per_layer_per_token_bits;
+    (bits + 7) / 8
+}
+
+/// Host weight-residency budget, accounting for OS + runtime overhead + a
+/// caller-supplied KV-cache reserve. This is the amount of RAM/VRAM the
+/// model weights can occupy.
+///
+/// `is_unified`: on Apple Silicon unified memory, `hardware.gpus` reports a
+///   single pseudo-GPU with all of physical RAM; we trust that directly.
+///   On discrete systems, `gpus` is VRAM only, and we add 24 GiB as a
+///   conservative host-RAM-overflow estimate.
+///
+/// `kv_cache_reserve_mb`: pre-computed KV budget (see
+///   [`estimate_kv_cache_bytes`]). Pass 0 to skip the explicit KV subtraction
+///   and rely on the flat OS-overhead reserve alone.
+pub fn estimate_weight_residency_budget_bytes(
+    hardware: &HardwareProfile,
+    is_unified: bool,
+    kv_cache_reserve_mb: u64,
+) -> u64 {
+    let total_mb: u64 = if is_unified {
+        hardware.gpus.iter().map(|g| g.total_mb).sum()
+    } else {
+        hardware.gpus.iter().map(|g| g.total_mb).sum::<u64>() + 24 * 1024
+    };
+    // OS + runtime overhead: 12% of total. Tighter than the previous 25%
+    // because we now subtract KV explicitly — the 25% was absorbing both.
+    let os_overhead_mb = total_mb * 12 / 100;
+    let weight_budget_mb = total_mb
+        .saturating_sub(os_overhead_mb)
+        .saturating_sub(kv_cache_reserve_mb);
+    weight_budget_mb * 1024 * 1024
+}
+
+/// Decide whether the MoE cache should auto-activate for this model/host.
+///
+/// Returns `None` when the model fits in the host weight budget — no cache,
+/// engine uses its legacy `Fused`/`Fast`/`Slow` backends with zero swap
+/// overhead. Returns `Some(capacity)` when the model would exceed the
+/// budget; `capacity` is the number of experts the budget can hold in
+/// RAM/VRAM, the rest need to go through the cache pool (SSD or tiered
+/// RAM).
+///
+/// `is_unified` distinguishes Apple-Silicon unified memory from discrete
+/// GPU+RAM topology (see [`estimate_weight_residency_budget_bytes`]).
+/// `kv_cache_reserve_mb` is subtracted from the budget so a huge context
+/// doesn't cause the estimate to over-allocate for weights.
+pub fn auto_detect_moe_cache_capacity(
+    arch: &MoeArchInfo,
+    hardware: &HardwareProfile,
+    is_unified: bool,
+    isq_label: Option<&str>,
+    kv_cache_reserve_mb: u64,
+) -> Option<u32> {
+    let budget_bytes =
+        estimate_weight_residency_budget_bytes(hardware, is_unified, kv_cache_reserve_mb);
+    let moe_bytes = estimate_moe_weights_bytes(arch, isq_label);
+    // Non-MoE weights (embeddings, lm_head, attention, norms) are ~15% of
+    // total for Qwen3.6-style A3B architectures. Subtract from budget.
+    let non_moe_reserve_bytes = moe_bytes / 6; // ~17%
+    let moe_budget = budget_bytes.saturating_sub(non_moe_reserve_bytes);
+    if moe_bytes <= moe_budget {
+        return None;
+    }
+    let per_expert = estimate_per_expert_bytes(arch, isq_label).max(1);
+    let capacity = (moe_budget / per_expert) as u32;
+    let capacity = capacity.min(u32::try_from(arch.num_experts).unwrap_or(u32::MAX));
+    // Floor at num_experts_per_tok * 2 so we don't starve — a single forward
+    // must always fit its active set.
+    let min_capacity = u32::try_from(arch.num_experts_per_tok * 2).unwrap_or(1);
+    let capacity = capacity.max(min_capacity);
+    Some(capacity)
+}
+
 /// Build a [`PlannedMoECacheAllocation`] from the `CTOX_MOE_CACHE_*` keys in
 /// the runtime env, topology detected from the hardware profile, and a
 /// per-GPU chat budget.
@@ -287,10 +466,31 @@ pub fn plan_moe_cache_allocation(
     env_map: &BTreeMap<String, String>,
     hardware: &HardwareProfile,
 ) -> Option<PlannedMoECacheAllocation> {
-    // Gate: only produce an allocation when explicitly enabled. This keeps
-    // the cache strictly opt-in so existing deployments see no behavior
-    // change when CTOX upgrades to a binary that includes the feature.
-    let enabled = env_map
+    plan_moe_cache_allocation_with_arch(root, env_map, hardware, None, None)
+}
+
+/// Variant of [`plan_moe_cache_allocation`] that also knows the model's
+/// architecture and chosen quantization — enables **auto-activation**:
+/// if the full MoE weights fit in the host's RAM/VRAM budget, returns
+/// `None` (no cache, zero swap overhead); otherwise computes `K` such
+/// that the resident-expert footprint matches the budget and tiers the
+/// rest onto the pool.
+///
+/// Operator override via `CTOX_MOE_CACHE_ENABLED=1` + explicit
+/// `CTOX_MOE_CACHE_CAPACITY` still works (it takes precedence), but the
+/// default for a cataloged MoE model is now "decide automatically".
+#[allow(clippy::too_many_lines)]
+pub fn plan_moe_cache_allocation_with_arch(
+    root: Option<&Path>,
+    env_map: &BTreeMap<String, String>,
+    hardware: &HardwareProfile,
+    arch: Option<&MoeArchInfo>,
+    isq_label: Option<&str>,
+) -> Option<PlannedMoECacheAllocation> {
+    // Operator override wins: explicit `ENABLED=1` + explicit CAPACITY +
+    // TOTAL_EXPERTS takes precedence over auto-detection, so ops can force
+    // the cache on during testing even when the model would fit.
+    let operator_enabled = env_map
         .get("CTOX_MOE_CACHE_ENABLED")
         .map(|v| {
             matches!(
@@ -299,18 +499,69 @@ pub fn plan_moe_cache_allocation(
             )
         })
         .unwrap_or(false);
-    if !enabled {
-        return None;
-    }
 
-    let capacity_experts: u32 = env_map
-        .get("CTOX_MOE_CACHE_CAPACITY")
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|&v: &u32| v > 0)?;
-    let total_experts: u32 = env_map
-        .get("CTOX_MOE_CACHE_TOTAL_EXPERTS")
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|&v: &u32| v > 0)?;
+    // Auto-activation path (no operator override): only for cataloged MoE
+    // models where we have architecture metadata. If the model fits, we
+    // return None — the engine uses its legacy backends with zero cache
+    // overhead. If it doesn't fit, compute K from the budget.
+    let (capacity_experts, total_experts, auto_rationale): (u32, u32, Vec<String>) =
+        if operator_enabled {
+            let capacity = env_map
+                .get("CTOX_MOE_CACHE_CAPACITY")
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|&v: &u32| v > 0)?;
+            let total = env_map
+                .get("CTOX_MOE_CACHE_TOTAL_EXPERTS")
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|&v: &u32| v > 0)?;
+            (
+                capacity,
+                total,
+                vec!["cache enabled via CTOX_MOE_CACHE_ENABLED operator override".to_string()],
+            )
+        } else {
+            let arch = arch?;
+            let is_unified = cfg!(target_os = "macos") && !hardware.gpus.is_empty();
+            // KV-cache reserve: rough upper bound from `arch` + a worst-case
+            // 262k native context at BF16 K+V. The planner's
+            // `TheoreticalResourceBreakdown` has the precise number but is
+            // computed *after* us; this estimate biases toward "reserve
+            // more, auto-disable cache less aggressively" so KV doesn't
+            // silently squeeze out resident experts.
+            // Qwen3.6-style hybrid: full_attention_interval=4 ⇒ 10 of 40
+            // layers hold KV; kv_heads=2, head_dim=256 per their config.
+            // We don't have those exact numbers per-model here, so estimate
+            // from the routed-attention share: assume 1/4 of layers hold
+            // KV, num_kv_heads≈2, head_dim≈hidden/num_heads (~128–256).
+            let est_kv_bytes = estimate_kv_cache_bytes(
+                arch.num_hidden_layers,
+                /*full_attention_interval=*/ 4,
+                /*context_len=*/ 262_144,
+                /*num_kv_heads=*/ 2,
+                /*head_dim=*/ 256,
+                /*kv_bits=*/ 16,
+            );
+            let kv_reserve_mb = est_kv_bytes / 1024 / 1024;
+            let auto_capacity = auto_detect_moe_cache_capacity(
+                arch,
+                hardware,
+                is_unified,
+                isq_label,
+                kv_reserve_mb,
+            )?;
+            let total = u32::try_from(arch.num_experts).unwrap_or(u32::MAX);
+            let mut rationale = Vec::new();
+            rationale.push(format!(
+                "auto-activated: MoE weights exceed host budget at quant={} (KV reserve {} MiB)",
+                isq_label.unwrap_or("unquantized"),
+                kv_reserve_mb
+            ));
+            rationale.push(format!(
+                "computed K={} from budget / per-expert-bytes, floor=2*top_k",
+                auto_capacity
+            ));
+            (auto_capacity, total, rationale)
+        };
 
     // Topology detection: CUDA-capable host -> Discrete, Apple Silicon ->
     // Unified, else CpuOnly. We approximate by GPU presence; the runtime
@@ -352,16 +603,13 @@ pub fn plan_moe_cache_allocation(
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(1000);
 
-    let mut rationale = Vec::new();
+    let mut rationale = auto_rationale;
     rationale.push(format!(
-        "cache enabled via CTOX_MOE_CACHE_ENABLED; topology={}",
-        topology_label
-    ));
-    rationale.push(format!(
-        "capacity={} of total={} experts ({:.0}% resident)",
+        "capacity={} of total={} experts ({:.0}% resident) on {}",
         capacity_experts,
         total_experts,
-        (capacity_experts as f64 / total_experts.max(1) as f64) * 100.0
+        (capacity_experts as f64 / total_experts.max(1) as f64) * 100.0,
+        topology_label,
     ));
     if topology_label == "unified" {
         rationale.push(
@@ -3037,7 +3285,13 @@ fn build_candidate_for_gpu_indices(
         theoretical_breakdown,
         rationale,
         gpu_allocations: allocations,
-        moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
+        moe_cache: plan_moe_cache_allocation_with_arch(
+            root,
+            env_map,
+            hardware,
+            resolve_moe_arch_info(harness.model).as_ref(),
+            Some(quant.label),
+        ),
     };
     Some(plan)
 }
@@ -3179,7 +3433,13 @@ fn build_floor_fallback_plan(
                     chat_enabled: gpu.index == 0,
                 })
                 .collect(),
-            moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
+            moe_cache: plan_moe_cache_allocation_with_arch(
+                root,
+                env_map,
+                hardware,
+                resolve_moe_arch_info(harness.model).as_ref(),
+                Some(fallback_spec.quant.label),
+            ),
         };
     }
     let runtime = resolve_harness_runtime(harness, hardware);
@@ -3335,7 +3595,13 @@ fn build_floor_fallback_plan(
                 rationale
             },
             gpu_allocations: fallback_gpu_allocations,
-            moe_cache: plan_moe_cache_allocation(root, env_map, hardware),
+            moe_cache: plan_moe_cache_allocation_with_arch(
+                root,
+                env_map,
+                hardware,
+                resolve_moe_arch_info(harness.model).as_ref(),
+                Some(fallback_spec.quant.label),
+            ),
         }
     });
     let mut fallback = plan;
@@ -8481,6 +8747,102 @@ mod tests {
                 .any(|line| line.contains("manifest candidate order")),
             "{quality:#?}"
         );
+    }
+
+    #[test]
+    fn estimate_kv_cache_bytes_matches_hybrid_attention_math() {
+        // Qwen3.6 reference numbers from the model card:
+        // 40 layers, full_attention_interval=4 ⇒ 10 KV-holding layers.
+        // num_kv_heads=2, head_dim=256, BF16 KV ⇒ 16 bits per element.
+        // Per full-attn layer per token: 2 (K+V) × 2 heads × 256 dim × 16 bits
+        //   = 16384 bits = 2048 bytes.
+        // At 262144 context: 2048 × 262144 = 536_870_912 bytes per layer.
+        // 10 layers: ≈ 5_368_709_120 bytes (~5 GiB).
+        let bytes = estimate_kv_cache_bytes(40, 4, 262_144, 2, 256, 16);
+        // Allow ~1% slop for the rounding-up in bits-to-bytes conversion.
+        assert!(
+            bytes >= 5_300_000_000 && bytes <= 5_500_000_000,
+            "KV estimate {} bytes outside expected ~5 GiB range",
+            bytes
+        );
+    }
+
+    #[test]
+    fn estimate_moe_weights_bytes_qwen3_6_at_q4k() {
+        // Qwen3.6: 256 routed experts × 40 layers × 3 matrices × (2048 × 512)
+        // params + 40 layers × 3 × (2048 × 512) shared expert.
+        // Routed params: 256 × 40 × 3 × 2048 × 512 = 32.2 Gparams.
+        // Shared params: 40 × 3 × 2048 × 512 = 126 Mparams.
+        // Total: ~32.3 Gparams × 0.5 bytes (Q4K) ≈ 15.05 GiB.
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let bytes = estimate_moe_weights_bytes(&arch, Some("Q4K"));
+        let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            (14.5..=15.5).contains(&gib),
+            "Q4K MoE weights estimate {:.2} GiB outside expected ~15 GiB range",
+            gib
+        );
+    }
+
+    #[test]
+    fn auto_detect_q4k_on_32gb_apple_silicon_disables_cache() {
+        // Apple Silicon M5 32 GB + Qwen3.6 at Q4K: MoE ≈ 16 GiB, fits with
+        // room for KV (~5 GiB at 262k) + overhead. Cache must auto-disable.
+        let hw = HardwareProfile {
+            gpus: vec![HardwareGpu {
+                index: 0,
+                name: "Apple M5".to_string(),
+                total_mb: 32 * 1024,
+            }],
+            gpu0_desktop_reserve_mb: 1024,
+            fingerprint: "m5".to_string(),
+        };
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        // 5 GiB KV reserve (262k, BF16, 10 full-attn layers).
+        let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, Some("Q4K"), 5 * 1024);
+        assert!(
+            capacity.is_none(),
+            "Q4K Qwen3.6 should fit on 32 GiB M5; got Some({:?})",
+            capacity
+        );
+    }
+
+    #[test]
+    fn auto_detect_bf16_on_32gb_apple_silicon_enables_cache() {
+        // Same host, unquantized BF16 model: MoE ≈ 64 GiB ≫ 32 GiB.
+        // Cache must auto-enable with computed K.
+        let hw = HardwareProfile {
+            gpus: vec![HardwareGpu {
+                index: 0,
+                name: "Apple M5".to_string(),
+                total_mb: 32 * 1024,
+            }],
+            gpu0_desktop_reserve_mb: 1024,
+            fingerprint: "m5".to_string(),
+        };
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024);
+        let k = capacity.expect("BF16 Qwen3.6 must require cache on 32 GiB M5");
+        // Floor: 2 × num_experts_per_tok = 16. Upper bound: num_experts = 256.
+        assert!(k >= 16, "K={} below floor 2×top_k=16", k);
+        assert!(k <= 256, "K={} above num_experts=256", k);
+        // BF16 math: per-expert = 240 MiB × 40 layers aggregated, so total
+        // MoE footprint ≈ 61 GiB. Budget after OS overhead + 5 GiB KV ≈
+        // 23 GiB; non-MoE reserve ≈ 10 GiB; moe_budget ≈ 13 GiB;
+        // K ≈ 13 GiB / 240 MiB ≈ 55. Envelope ±30%:
+        assert!(
+            (40..=80).contains(&k),
+            "K={} outside expected ~55 for BF16 on 32 GiB M5",
+            k
+        );
+    }
+
+    #[test]
+    fn auto_detect_returns_none_for_unknown_model() {
+        // Unknown canonical model ⇒ no MoeArchInfo ⇒
+        // plan_moe_cache_allocation_with_arch returns None without an arch
+        // entry. Test the arch-resolution path directly.
+        assert!(resolve_moe_arch_info("some-unknown/model-v1").is_none());
     }
 
     #[test]
