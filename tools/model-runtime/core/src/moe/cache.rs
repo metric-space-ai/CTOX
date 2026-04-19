@@ -661,28 +661,37 @@ impl MoEExpertCache {
         }
 
         // Materialize incoming expert from the pool slot.
-        let triple = {
+        let (total_bytes, triple) = {
             let (gate, up, down) = inner.pool.read_slot(idx)?;
-            ExpertTriple {
-                gate: ReplicatedLayer::deserialize(
-                    Cow::Borrowed(gate),
-                    &self.cfg.device,
-                    &self.comm,
-                    self.guard.clone(),
-                )?,
-                up: ReplicatedLayer::deserialize(
-                    Cow::Borrowed(up),
-                    &self.cfg.device,
-                    &self.comm,
-                    self.guard.clone(),
-                )?,
-                down: ReplicatedLayer::deserialize(
-                    Cow::Borrowed(down),
-                    &self.cfg.device,
-                    &self.comm,
-                    self.guard.clone(),
-                )?,
-            }
+            let total_bytes = gate.len() + up.len() + down.len();
+            (
+                total_bytes,
+                ExpertTriple {
+                    gate: ReplicatedLayer::deserialize(
+                        Cow::Borrowed(gate),
+                        &self.cfg.device,
+                        &self.comm,
+                        self.guard.clone(),
+                    )?,
+                    up: ReplicatedLayer::deserialize(
+                        Cow::Borrowed(up),
+                        &self.cfg.device,
+                        &self.comm,
+                        self.guard.clone(),
+                    )?,
+                    down: ReplicatedLayer::deserialize(
+                        Cow::Borrowed(down),
+                        &self.cfg.device,
+                        &self.comm,
+                        self.guard.clone(),
+                    )?,
+                },
+            )
+        };
+        let backing_kind = if inner.pool.backing.is_ssd() {
+            "ssd"
+        } else {
+            "ram"
         };
 
         // Pick eviction victim using atomic snapshots of counters; require
@@ -716,6 +725,14 @@ impl MoEExpertCache {
         inner.slots[idx] = SlotState::Resident(triple.clone());
         self.stats.misses.fetch_add(1, Ordering::Relaxed);
         self.stats.promotions.fetch_add(1, Ordering::Relaxed);
+
+        tracing::trace!(
+            expert = idx,
+            victim = victim,
+            tier = backing_kind,
+            bytes = total_bytes,
+            "moe cache miss + promotion"
+        );
 
         Ok(triple)
     }
