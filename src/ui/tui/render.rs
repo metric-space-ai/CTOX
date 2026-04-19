@@ -3261,6 +3261,7 @@ mod tests {
             },
             rationale: vec!["test".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         }
     }
 

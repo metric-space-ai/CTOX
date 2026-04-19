@@ -2442,6 +2442,7 @@ mod tests {
             },
             rationale: vec!["test".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         };
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -2557,6 +2558,7 @@ mod tests {
                 free_headroom_mb: 1_000,
                 chat_enabled: true,
             }],
+            moe_cache: None,
         };
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -2701,6 +2703,7 @@ mod tests {
                 free_headroom_mb: 1_000,
                 chat_enabled: true,
             }],
+            moe_cache: None,
         };
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
@@ -2808,6 +2811,7 @@ mod tests {
                 free_headroom_mb: 1_000,
                 chat_enabled: true,
             }],
+            moe_cache: None,
         };
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());

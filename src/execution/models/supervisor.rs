@@ -3755,6 +3755,7 @@ mod tests {
                 free_headroom_mb: 0,
                 chat_enabled: true,
             }],
+            moe_cache: None,
         }
     }
 
@@ -4253,6 +4254,7 @@ mod tests {
             },
             rationale: vec!["test".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         };
         runtime_plan::store_persisted_chat_runtime_plan(&root, Some(&plan)).unwrap();
 
@@ -4364,6 +4366,7 @@ mod tests {
             },
             rationale: vec!["test".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         };
         runtime_plan::store_persisted_chat_runtime_plan(&root, Some(&plan)).unwrap();
         let pending = pending_chat_quant_artifact_path(&root, &plan).unwrap();
@@ -4581,6 +4584,7 @@ mod tests {
             },
             rationale: vec!["test".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         };
         let fleet_plan = runtime_plan::RuntimeFleetPlan {
             version: 1,

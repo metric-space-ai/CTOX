@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::cuda::moe;
 use crate::layers::Activation;
+use crate::moe::cache::{CacheConfig, ExpertTriple, MoEExpertCache, Topology};
 use crate::moe::shard;
 
 fn qmethod_matmul_autocast(xs: &Tensor, layer: &dyn QuantMethod) -> candle_core::Result<Tensor> {
@@ -42,6 +43,17 @@ pub struct MoEExpertsConfig {
 pub struct MoEExecutionPolicy {
     pub backend_override: Option<MoEExpertsBackend>,
     pub allow_slow_backend_on_cuda: bool,
+    /// Cache-backed expert swapping. `None` disables the cache; `Some(k)` keeps
+    /// `k` experts resident on the device and tiers the rest onto Warm (CPU RAM
+    /// on discrete GPUs) or Cold (SSD stub on unified memory) storage.
+    ///
+    /// When `Some`, `backend_override` is ignored — the cached backend is
+    /// always used regardless of device, since it supersedes the slow loop.
+    pub cache_capacity: Option<usize>,
+    /// Optional cap on the CPU-RAM warm-tier bytes (discrete GPUs only). Build
+    /// fails if the warm tier would exceed this budget. Ignored on unified
+    /// memory and CPU-only topologies.
+    pub cache_warm_tier_budget_bytes: Option<usize>,
 }
 
 /// Backend selection for MoE experts
@@ -53,11 +65,21 @@ pub enum MoEExpertsBackend {
     Fast,
     /// Use loop-based implementation (fallback for quantized)
     Slow,
+    /// Loop-based backend with LFU-evicted per-expert tiered cache. Used when
+    /// total expert weights exceed the device VRAM budget. See
+    /// [`crate::moe::cache::MoEExpertCache`].
+    Cached,
 }
 
 impl MoEExpertsBackend {
     fn backend_allowed_on_device(is_cuda: bool, backend: Self, policy: MoEExecutionPolicy) -> bool {
-        !is_cuda || !matches!(backend, Self::Slow) || policy.allow_slow_backend_on_cuda
+        // The `Cached` backend is always allowed on any device — it shares the
+        // Slow backend's loop but addresses the CUDA-VRAM pressure problem
+        // that originally motivated Slow's CUDA exclusion.
+        !is_cuda
+            || !matches!(backend, Self::Slow)
+            || policy.allow_slow_backend_on_cuda
+            || matches!(backend, Self::Cached)
     }
 
     fn select_from_caps(
@@ -96,6 +118,17 @@ impl MoEExpertsBackend {
         quantization_config: &Option<QuantizedConfig>,
         policy: MoEExecutionPolicy,
     ) -> Self {
+        // Cache opt-in wins — it is the only backend that can run models whose
+        // total expert weights exceed the device VRAM budget.
+        if policy.cache_capacity.is_some() {
+            tracing::info!(
+                "Using MoE experts backend `cached` for device {:?} (capacity={:?}).",
+                device.location(),
+                policy.cache_capacity
+            );
+            return Self::Cached;
+        }
+
         if let Some(backend) = policy.backend_override {
             tracing::info!(
                 "Using MoE experts backend override {:?} for device {:?}.",
@@ -103,6 +136,7 @@ impl MoEExpertsBackend {
                     Self::Fused => "fused",
                     Self::Fast => "fast",
                     Self::Slow => "slow",
+                    Self::Cached => "cached",
                 },
                 device.location()
             );
@@ -124,6 +158,7 @@ impl MoEExpertsBackend {
                 Self::Fused => "fused",
                 Self::Fast => "fast",
                 Self::Slow => "slow",
+                Self::Cached => "cached",
             },
             device.location(),
             loading_isq,
@@ -197,6 +232,11 @@ struct SlowExpertsWeights {
     experts: PackedExperts,
 }
 
+/// Internal representation for cache-backed experts with on-demand tier transitions.
+struct CachedExpertsWeights {
+    cache: Arc<MoEExpertCache>,
+}
+
 /// MoE experts layer without gate
 ///
 /// This struct encapsulates the expert weights and forward logic,
@@ -214,6 +254,7 @@ enum MoEExpertsBackendImpl {
     Fused(FusedExpertsWeights),
     Fast(FastExpertsWeights),
     Slow(SlowExpertsWeights),
+    Cached(CachedExpertsWeights),
 }
 
 impl MoEExperts {
@@ -277,7 +318,7 @@ impl MoEExperts {
             MoEExpertsBackend::Fused | MoEExpertsBackend::Fast => {
                 experts_root.clone().set_device(layer_device.clone())
             }
-            MoEExpertsBackend::Slow => experts_root.clone(),
+            MoEExpertsBackend::Slow | MoEExpertsBackend::Cached => experts_root.clone(),
         };
 
         // Detect format: stacked has "gate_up_proj", per-expert has "0.gate_proj"
@@ -315,6 +356,22 @@ impl MoEExperts {
                 comm,
                 quantization_config,
             )?),
+            MoEExpertsBackend::Cached => {
+                let capacity = policy.cache_capacity.ok_or_else(|| {
+                    candle_core::Error::msg(
+                        "Cached MoE backend requires MoEExecutionPolicy::cache_capacity",
+                    )
+                })?;
+                MoEExpertsBackendImpl::Cached(Self::load_cached(
+                    cfg,
+                    experts_vb,
+                    comm,
+                    quantization_config,
+                    layer_device.clone(),
+                    capacity,
+                    policy.cache_warm_tier_budget_bytes,
+                )?)
+            }
         };
 
         Ok(Self {
@@ -482,6 +539,86 @@ impl MoEExperts {
         })
     }
 
+    /// Load cache-backed experts: build `PackedExperts` as for the Slow path,
+    /// then hand the per-expert triples to [`MoEExpertCache`], which will
+    /// serialize and tier down experts beyond `capacity` so their GPU memory
+    /// is released.
+    ///
+    /// Only the per-expert `PackedExperts` layout is supported — stacked/fused
+    /// formats (e.g. AFQ `gate_up_proj`) pack all experts into a single kernel
+    /// target and cannot be swapped at the individual-expert granularity.
+    #[allow(clippy::too_many_arguments)]
+    fn load_cached(
+        cfg: &MoEExpertsConfig,
+        experts_vb: ShardedVarBuilder,
+        comm: &Arc<engine_quant::Comm>,
+        quantization_config: &Option<QuantizedConfig>,
+        layer_device: Device,
+        capacity: usize,
+        warm_tier_budget_bytes: Option<usize>,
+    ) -> Result<CachedExpertsWeights> {
+        let packed = PackedExperts::new(
+            cfg.num_experts,
+            cfg.hidden_size,
+            cfg.moe_intermediate_size,
+            quantization_config,
+            false,
+            comm,
+            experts_vb,
+        )?;
+
+        if packed.gate_proj.len() != cfg.num_experts
+            || packed.up_proj.len() != cfg.num_experts
+            || packed.down_proj.len() != cfg.num_experts
+        {
+            candle_core::bail!(
+                "Cached MoE backend requires per-expert PackedExperts layout (got gate={}, up={}, down={} for num_experts={})",
+                packed.gate_proj.len(),
+                packed.up_proj.len(),
+                packed.down_proj.len(),
+                cfg.num_experts
+            );
+        }
+
+        let triples: Vec<ExpertTriple> = packed
+            .gate_proj
+            .into_iter()
+            .zip(packed.up_proj)
+            .zip(packed.down_proj)
+            .map(|((gate, up), down)| ExpertTriple { gate, up, down })
+            .collect();
+
+        let topology = Topology::detect(&layer_device);
+        // Engine-internal env vars (not a CTOX user-facing toggle — CTOX
+        // translates its typed `PlannedMoECacheAllocation` into these before
+        // launching the engine, mirroring how `ENGINE_*` vars are produced
+        // elsewhere in the model-runtime).
+        let cold_tier_path = std::env::var("ENGINE_MOE_CACHE_COLD_PATH")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        let cold_tier_min_mbps = std::env::var("ENGINE_MOE_CACHE_COLD_MIN_MBPS")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let cache = MoEExpertCache::new(
+            triples,
+            CacheConfig {
+                capacity,
+                topology,
+                device: layer_device,
+                warm_tier_budget_bytes,
+                cold_tier_path,
+                cold_tier_min_mbps,
+            },
+            comm.clone(),
+        )?;
+
+        Ok(CachedExpertsWeights {
+            cache: Arc::new(cache),
+        })
+    }
+
     /// Load slow (loop-based) weights using PackedExperts
     fn load_slow(
         cfg: &MoEExpertsConfig,
@@ -546,6 +683,9 @@ impl MoEExperts {
             }
             MoEExpertsBackendImpl::Slow(weights) => {
                 self.forward_slow(xs, &topk_weights, topk_ids, weights)?
+            }
+            MoEExpertsBackendImpl::Cached(weights) => {
+                self.forward_cached(xs, &topk_weights, topk_ids, weights)?
             }
         };
 
@@ -836,6 +976,91 @@ impl MoEExperts {
         ys.reshape((b_size * seq_len, hidden_dim))
     }
 
+    /// Cache-backed forward pass: identical structure to `forward_slow`, but each
+    /// `expert_idx` access is routed through [`MoEExpertCache::ensure_resident`]
+    /// which may evict an LFU victim and materialize the incoming expert from
+    /// the warm or cold tier before the matmul.
+    fn forward_cached(
+        &self,
+        xs: &Tensor,
+        topk_weights: &Tensor,
+        topk_ids: &Tensor,
+        weights: &CachedExpertsWeights,
+    ) -> Result<Tensor> {
+        let (b_size, seq_len, hidden_dim) = xs.dims3()?;
+        let xs = xs.reshape(((), hidden_dim))?;
+
+        let routing_weights = topk_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+        let experts_per_tok = topk_ids.to_vec2::<u32>()?;
+        let num_experts = weights.cache.num_experts();
+
+        let mut top_x = vec![vec![]; num_experts];
+        let mut selected_experts = vec![vec![]; num_experts];
+
+        for (row_idx, (rw, expert_idxs)) in routing_weights
+            .iter()
+            .zip(experts_per_tok.iter())
+            .enumerate()
+        {
+            for (&rw, &expert_idx) in rw.iter().zip(expert_idxs.iter()) {
+                #[allow(clippy::cast_possible_truncation)]
+                top_x[expert_idx as usize].push(row_idx as u32);
+                selected_experts[expert_idx as usize].push(rw)
+            }
+        }
+
+        let mut ys = xs.zeros_like()?;
+        for expert_idx in 0..num_experts {
+            let top_x_expert = &top_x[expert_idx];
+            if top_x_expert.is_empty() {
+                continue;
+            }
+
+            // Pull this expert into VRAM (may evict LFU victim + materialize
+            // from warm/cold tier). `triple` holds cheap Arc clones that
+            // survive even if the slot is later demoted again.
+            let triple = weights.cache.ensure_resident(expert_idx)?;
+
+            let top_x_tensor = Tensor::new(top_x_expert.as_slice(), xs.device())?;
+            let selected_experts_tensor =
+                Tensor::new(selected_experts[expert_idx].as_slice(), xs.device())?
+                    .reshape(((), 1))?
+                    .to_dtype(xs.dtype())?;
+            let current_state = xs
+                .index_select(&top_x_tensor, 0)?
+                .reshape(((), hidden_dim))?;
+
+            let gate_out =
+                qmethod_matmul_autocast(&current_state, &*triple.gate)?.apply(&self.act)?;
+            let up_out = qmethod_matmul_autocast(&current_state, &*triple.up)?;
+            if !gate_out.device().same_device(up_out.device()) {
+                candle_core::bail!(
+                    "moe cached activation mul device mismatch: gate={:?} up={:?}",
+                    gate_out.device().location(),
+                    up_out.device().location()
+                );
+            }
+            let current_hidden_states =
+                qmethod_matmul_autocast(&(gate_out * up_out)?, &*triple.down)?;
+
+            if !current_hidden_states
+                .device()
+                .same_device(selected_experts_tensor.device())
+            {
+                candle_core::bail!(
+                    "moe cached routing mul device mismatch: hidden={:?} weights={:?}",
+                    current_hidden_states.device().location(),
+                    selected_experts_tensor.device().location()
+                );
+            }
+            let current_hidden_states =
+                current_hidden_states.broadcast_mul(&selected_experts_tensor)?;
+            ys = ys.index_add(&top_x_tensor, &current_hidden_states, 0)?;
+        }
+
+        ys.reshape((b_size * seq_len, hidden_dim))
+    }
+
     /// Get mutable references to quantizable layers for ISQ
     pub fn get_isq_layers(&mut self) -> Vec<&mut Arc<dyn QuantMethod>> {
         match &mut self.backend {
@@ -862,6 +1087,13 @@ impl MoEExperts {
                 }
                 layers
             }
+            // Cache-backed experts expose no ISQ surface: only a subset of
+            // experts is resident at any moment, and the rest live as
+            // serialized bytes behind a `Mutex`. Post-hoc ISQ on cached
+            // experts would require a re-materialize-then-requantize-then-
+            // reserialize round-trip for every expert, which belongs with
+            // Phase 2 async prefetch, not here.
+            MoEExpertsBackendImpl::Cached(_) => vec![],
         }
     }
 
@@ -870,6 +1102,7 @@ impl MoEExperts {
             MoEExpertsBackendImpl::Fused(_) => 0,
             MoEExpertsBackendImpl::Fast(_) => 3,
             MoEExpertsBackendImpl::Slow(weights) => weights.experts.gate_proj.len() * 3,
+            MoEExpertsBackendImpl::Cached(_) => 0,
         }
     }
 }

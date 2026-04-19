@@ -1105,6 +1105,7 @@ mod tests {
                 free_headroom_mb: 0,
                 chat_enabled: true,
             }],
+            moe_cache: None,
         }
     }
 

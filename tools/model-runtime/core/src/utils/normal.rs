@@ -238,6 +238,15 @@ impl RuntimeLoadPolicy {
             moe: MoEExecutionPolicy {
                 backend_override: moe_backend_override_from_env(),
                 allow_slow_backend_on_cuda: env_flag_enabled("ENGINE_ALLOW_SLOW_MOE_BACKEND"),
+                cache_capacity: std::env::var("ENGINE_MOE_CACHE_CAPACITY")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .filter(|&c| c > 0),
+                cache_warm_tier_budget_bytes: std::env::var("ENGINE_MOE_CACHE_WARM_MB")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .filter(|&mb| mb > 0)
+                    .map(|mb| mb * 1024 * 1024),
             },
         }
     }

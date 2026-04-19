@@ -196,6 +196,69 @@ pub struct NcclCapabilityOverride {
     pub signature: String,
 }
 
+/// MoE expert-cache allocation recorded in the chat runtime plan.
+///
+/// A `None` field on [`ChatRuntimePlan::moe_cache`] means the cache is
+/// disabled — the model is loaded fully into VRAM using the existing Fused /
+/// Fast / Slow MoE backends. A `Some(plan)` means the engine must select the
+/// cache-backed backend and honor the budgets below.
+///
+/// Topology drives which tiers the engine populates; see
+/// `tools/model-runtime/core/src/moe/cache.rs` for the runtime side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannedMoECacheAllocation {
+    /// Detected hardware topology: `"unified"`, `"discrete"`, or `"cpu_only"`.
+    pub topology: String,
+    /// Number of experts kept resident on the GPU (K). The remaining
+    /// `total_experts - capacity_experts` are tiered onto warm/cold storage.
+    pub capacity_experts: u32,
+    /// Total number of experts in the model. Persisted for observability so
+    /// operators can see the cache pressure without re-inspecting the model.
+    pub total_experts: u32,
+    /// Upper bound on the warm tier (CPU RAM bytes, serialized QuantMethod
+    /// form). Relevant only on `"discrete"` topology; `0` on unified.
+    pub warm_tier_mb: u64,
+    /// Cold-tier (SSD) backing store path. `None` disables the cold tier and
+    /// forces `capacity_experts + warm_tier_mb` to cover the full working set.
+    pub cold_tier_path: Option<String>,
+    /// Minimum sustained sequential-read bandwidth required from the cold
+    /// tier's SSD. If the startup probe cannot reach this floor, the engine
+    /// fails closed rather than risk thrashing on a slow disk. Phase 2.
+    pub cold_tier_min_mbps: u32,
+    /// Human-readable trail explaining how `capacity_experts` and the tier
+    /// budgets were chosen. Flows into `ChatRuntimePlan::rationale` for
+    /// debugging; kept here so the cache plan is self-contained.
+    pub rationale: Vec<String>,
+}
+
+impl PlannedMoECacheAllocation {
+    /// Produce the `ENGINE_MOE_CACHE_*` environment variables that the engine
+    /// reads in `tools/model-runtime/core/src/utils/normal.rs` to configure
+    /// the cache. This is the bridge between CTOX's typed deploy plan and the
+    /// engine's env-based launch contract — keep it in lockstep with the
+    /// engine-side `RuntimeLoadPolicy::from_env`.
+    pub fn to_engine_env_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = vec![
+            (
+                "ENGINE_MOE_CACHE_CAPACITY".to_string(),
+                self.capacity_experts.to_string(),
+            ),
+            (
+                "ENGINE_MOE_CACHE_WARM_MB".to_string(),
+                self.warm_tier_mb.to_string(),
+            ),
+            (
+                "ENGINE_MOE_CACHE_COLD_MIN_MBPS".to_string(),
+                self.cold_tier_min_mbps.to_string(),
+            ),
+        ];
+        if let Some(path) = &self.cold_tier_path {
+            pairs.push(("ENGINE_MOE_CACHE_COLD_PATH".to_string(), path.clone()));
+        }
+        pairs
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatRuntimePlan {
     pub model: String,
@@ -234,6 +297,11 @@ pub struct ChatRuntimePlan {
     pub theoretical_breakdown: TheoreticalResourceBreakdown,
     pub rationale: Vec<String>,
     pub gpu_allocations: Vec<PlannedGpuAllocation>,
+    /// MoE expert-cache allocation. `None` = cache disabled (legacy behavior);
+    /// `Some` = engine must use `MoEExpertsBackend::Cached` with these budgets.
+    /// `#[serde(default)]` so older persisted plans stay deserializable.
+    #[serde(default)]
+    pub moe_cache: Option<PlannedMoECacheAllocation>,
 }
 
 impl ChatRuntimePlan {
@@ -2836,6 +2904,7 @@ fn build_candidate_for_gpu_indices(
         theoretical_breakdown,
         rationale,
         gpu_allocations: allocations,
+        moe_cache: None,
     };
     Some(plan)
 }
@@ -2977,6 +3046,7 @@ fn build_floor_fallback_plan(
                     chat_enabled: gpu.index == 0,
                 })
                 .collect(),
+            moe_cache: None,
         };
     }
     let runtime = resolve_harness_runtime(harness, hardware);
@@ -3132,6 +3202,7 @@ fn build_floor_fallback_plan(
                 rationale
             },
             gpu_allocations: fallback_gpu_allocations,
+            moe_cache: None,
         }
     });
     let mut fallback = plan;
@@ -6159,6 +6230,7 @@ mod tests {
                     chat_enabled: false,
                 },
             ],
+            moe_cache: None,
         };
 
         let fleet =
@@ -6248,6 +6320,7 @@ mod tests {
                     chat_enabled: true,
                 })
                 .collect(),
+            moe_cache: None,
         };
 
         let fleet =
@@ -8191,6 +8264,7 @@ mod tests {
             },
             rationale: vec!["stale persisted nemotron plan".to_string()],
             gpu_allocations: vec![],
+            moe_cache: None,
         };
         store_persisted_chat_runtime_plan(&unique, Some(&stale_plan)).unwrap();
 
@@ -8273,6 +8347,130 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("manifest candidate order")),
             "{quality:#?}"
+        );
+    }
+
+    #[test]
+    fn moe_cache_to_engine_env_pairs_matches_engine_contract() {
+        // This test pins the engine launcher contract: the exact env-var
+        // names the engine reads in `RuntimeLoadPolicy::from_env` over in
+        // `tools/model-runtime/core/src/utils/normal.rs`. If you add a new
+        // field to the cache policy, extend both sides in lockstep.
+        let alloc = PlannedMoECacheAllocation {
+            topology: "unified".to_string(),
+            capacity_experts: 16,
+            total_experts: 128,
+            warm_tier_mb: 0,
+            cold_tier_path: Some("/var/ctox/moe_cache".to_string()),
+            cold_tier_min_mbps: 1500,
+            rationale: vec![],
+        };
+        let pairs: std::collections::BTreeMap<_, _> =
+            alloc.to_engine_env_pairs().into_iter().collect();
+        assert_eq!(pairs.get("ENGINE_MOE_CACHE_CAPACITY").map(String::as_str), Some("16"));
+        assert_eq!(pairs.get("ENGINE_MOE_CACHE_WARM_MB").map(String::as_str), Some("0"));
+        assert_eq!(pairs.get("ENGINE_MOE_CACHE_COLD_MIN_MBPS").map(String::as_str), Some("1500"));
+        assert_eq!(
+            pairs.get("ENGINE_MOE_CACHE_COLD_PATH").map(String::as_str),
+            Some("/var/ctox/moe_cache")
+        );
+
+        // Without a cold path, the COLD_PATH key must be absent (engine treats
+        // absence as "no cold tier" and falls back to RAM-only).
+        let alloc_no_cold = PlannedMoECacheAllocation {
+            cold_tier_path: None,
+            ..alloc
+        };
+        let pairs_no_cold: std::collections::BTreeMap<_, _> =
+            alloc_no_cold.to_engine_env_pairs().into_iter().collect();
+        assert!(!pairs_no_cold.contains_key("ENGINE_MOE_CACHE_COLD_PATH"));
+    }
+
+    #[test]
+    fn moe_cache_field_json_roundtrip() {
+        // Regression guard for the Phase 1b addition: a plan with `moe_cache`
+        // populated must serialize and deserialize back to the same payload so
+        // that the cache allocation survives the runtime persistence round
+        // trip (ctox.sqlite3 → JSON payload → ChatRuntimePlan).
+        let alloc = PlannedMoECacheAllocation {
+            topology: "unified".to_string(),
+            capacity_experts: 16,
+            total_experts: 128,
+            warm_tier_mb: 0,
+            cold_tier_path: Some("/var/ctox/moe_cache".to_string()),
+            cold_tier_min_mbps: 1500,
+            rationale: vec![
+                "apple-silicon unified memory: skipping CPU-RAM warm tier".to_string(),
+                "K=16 from CTOX_MOE_CACHE_CAPACITY override".to_string(),
+            ],
+        };
+        let encoded = serde_json::to_string(&alloc).unwrap();
+        let decoded: PlannedMoECacheAllocation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(alloc, decoded);
+    }
+
+    #[test]
+    fn chat_runtime_plan_moe_cache_default_is_none() {
+        // Older persisted plans that predate Phase 1b (no `moe_cache` field
+        // in their JSON) must still deserialize — the `#[serde(default)]`
+        // attribute on the field is what makes that safe. The `json!` macro
+        // would blow past the default recursion limit here, so build the
+        // payload as a raw string.
+        let legacy = r#"{
+            "model": "Qwen/Qwen3.5-9B",
+            "preset": "quality",
+            "quantization": "Q4K",
+            "runtime_isq": null,
+            "max_seq_len": 131072,
+            "compaction_threshold_percent": 75,
+            "compaction_min_tokens": 4096,
+            "min_context_floor_applied": true,
+            "paged_attn": "on",
+            "pa_cache_type": null,
+            "pa_memory_fraction": null,
+            "pa_context_len": null,
+            "disable_nccl": false,
+            "tensor_parallel_backend": null,
+            "mn_local_world_size": null,
+            "max_batch_size": 1,
+            "max_seqs": 1,
+            "cuda_visible_devices": "0",
+            "device_layers": null,
+            "topology": null,
+            "allow_device_layers_with_topology": false,
+            "nm_device_ordinal": 0,
+            "base_device_ordinal": 0,
+            "moe_experts_backend": null,
+            "disable_flash_attn": false,
+            "force_no_mmap": false,
+            "force_language_model_only": false,
+            "require_prebuilt_uqff_for_chat_start": false,
+            "isq_singlethread": false,
+            "isq_cpu_threads": null,
+            "expected_tok_s": 0.0,
+            "hardware_fingerprint": "legacy",
+            "theoretical_breakdown": {
+                "contract_source": "legacy",
+                "effective_total_budget_mb": 0,
+                "kv_budget_cap_mb": 0,
+                "kv_budget_fraction_milli": 0,
+                "weight_residency_mb": 0,
+                "kv_cache_mb": 0,
+                "fixed_runtime_base_overhead_mb": 0,
+                "backend_runtime_overhead_mb": 0,
+                "activation_overhead_mb": 0,
+                "load_peak_overhead_mb": 0,
+                "safety_headroom_mb": 0,
+                "required_effective_total_budget_mb": 0,
+                "required_total_mb": 0
+            },
+            "rationale": [],
+            "gpu_allocations": []
+        }"#;
+        let decoded: ChatRuntimePlan = serde_json::from_str(legacy).unwrap();
+        assert!(
+            decoded.moe_cache.is_none(),
+            "legacy plan should deserialize with moe_cache: None"
         );
     }
 }
