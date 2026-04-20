@@ -555,15 +555,52 @@ impl MoEExpertCache {
         // ran on ALL experts just to compute max-slot-size, then all of
         // its bytes were discarded on Resident slots anyway), so we now
         // do a single pass and serialize each expert exactly once.
+        // Staging policy — IMPORTANT when `experts` are on CPU (the Cached
+        // backend's load path forces Device::Cpu to avoid libcuda's per-context
+        // rwlock serializing 30k+ D->H memcpy calls during load):
+        //
+        //   - serialize each expert from wherever it lives (CPU cheap, CUDA
+        //     slow-but-correct) into the pool once;
+        //   - for resident slots (idx < capacity), re-materialize onto
+        //     `cfg.device` via `deserialize(bytes, cfg.device)`. This is the
+        //     only path that puts an expert on CUDA at load time. For a
+        //     40-layer Qwen3.6 load with capacity=4 that's 40*4*3 = 480 H->D
+        //     memcpys — vs. 40*256*3 = ~30 720 D->H memcpys in the old path;
+        //   - for non-resident slots, drop the original Arc (frees whichever
+        //     device it was on) and keep only the pool bytes.
         let t_stage = Instant::now();
         let mut slots: Vec<SlotState> = Vec::with_capacity(num_experts);
+        let device = cfg.device.clone();
+        let guard = QuantizeOntoGuard::new();
         for (idx, triple) in experts.into_iter().enumerate() {
-            let gate = triple.gate.serialize()?;
-            let up = triple.up.serialize()?;
-            let down = triple.down.serialize()?;
-            pool.write_slot(idx, &gate, &up, &down)?;
+            let gate_bytes = triple.gate.serialize()?;
+            let up_bytes = triple.up.serialize()?;
+            let down_bytes = triple.down.serialize()?;
+            pool.write_slot(idx, &gate_bytes, &up_bytes, &down_bytes)?;
             if idx < capacity {
-                slots.push(SlotState::Resident(triple));
+                // Drop the (possibly-on-CPU) triple; reconstitute on target device.
+                drop(triple);
+                let resident = ExpertTriple {
+                    gate: ReplicatedLayer::deserialize(
+                        Cow::Owned(gate_bytes),
+                        &device,
+                        &comm,
+                        guard.clone(),
+                    )?,
+                    up: ReplicatedLayer::deserialize(
+                        Cow::Owned(up_bytes),
+                        &device,
+                        &comm,
+                        guard.clone(),
+                    )?,
+                    down: ReplicatedLayer::deserialize(
+                        Cow::Owned(down_bytes),
+                        &device,
+                        &comm,
+                        guard.clone(),
+                    )?,
+                };
+                slots.push(SlotState::Resident(resident));
             } else {
                 drop(triple);
                 slots.push(SlotState::InPool);

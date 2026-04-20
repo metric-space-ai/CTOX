@@ -355,7 +355,17 @@ impl MoEExperts {
             MoEExpertsBackend::Fused | MoEExpertsBackend::Fast => {
                 experts_root.clone().set_device(layer_device.clone())
             }
-            MoEExpertsBackend::Slow | MoEExpertsBackend::Cached => experts_root.clone(),
+            MoEExpertsBackend::Slow => experts_root.clone(),
+            // Cached backend MUST load experts on CPU: all 256 experts would
+            // otherwise materialize on CUDA, only to be immediately serialized
+            // back through the (globally-locked) CUDA D->H memcpy path as the
+            // cache stages them into its static pool. That path is gated by
+            // libcuda's per-context rwlock, so N parallel rayon workers still
+            // serialize through a single lock — turning a 40-layer MoE load
+            // into an hours-long stall. Loading on CPU avoids the D->H hop
+            // entirely; the cache then materializes only the first `capacity`
+            // experts onto CUDA via `deserialize(bytes, cuda_device)`.
+            MoEExpertsBackend::Cached => experts_root.clone().set_device(Device::Cpu),
         };
 
         // Detect format: stacked has "gate_up_proj", per-expert has "0.gate_proj"
