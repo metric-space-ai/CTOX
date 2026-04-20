@@ -45,8 +45,10 @@ pub mod capture;
 pub mod config;
 pub mod model;
 pub mod ring;
+pub mod runner;
 
 pub use capture::FeatureCapture;
 pub use config::DFlashDraftConfig;
 pub use model::DFlashDraftModel;
 pub use ring::{TargetFeatureRing, DEFAULT_RING_CAP};
+pub use runner::{DFlashDraftRunner, DraftStepOpts, DraftStepOutput};
