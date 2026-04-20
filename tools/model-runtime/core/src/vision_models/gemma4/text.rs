@@ -867,10 +867,22 @@ impl DecoderLayer {
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: Option<&FlashParams>,
     ) -> Result<Tensor> {
+        let stage_timing = std::env::var_os("ENGINE_GEMMA4_STAGE_TIMING").is_some();
+        let mut stage_times: Vec<(&'static str, u128)> = Vec::new();
+        let mark = |label: &'static str, dev: &Device, t: &mut Vec<(&'static str, u128)>, last: &mut std::time::Instant| {
+            if stage_timing {
+                let _ = dev.synchronize();
+                t.push((label, last.elapsed().as_micros()));
+                *last = std::time::Instant::now();
+            }
+        };
+        let dev = xs.device().clone();
+        let mut stage_start = std::time::Instant::now();
         let mut xs = xs.clone();
 
         let residual = xs.clone();
         let normed = self.input_layernorm.forward(&xs)?;
+        mark("input_ln", &dev, &mut stage_times, &mut stage_start);
         let attn_out = self
             .self_attn
             .forward(
@@ -883,8 +895,10 @@ impl DecoderLayer {
                 flash_params,
             )?
             .apply(&self.post_attention_layernorm)?;
+        mark("attn", &dev, &mut stage_times, &mut stage_start);
 
         xs = (attn_out + &residual)?;
+        mark("attn_resid", &dev, &mut stage_times, &mut stage_start);
 
         // Feedforward
         let residual = xs.clone();
@@ -938,9 +952,13 @@ impl DecoderLayer {
         } else {
             // Dense path: MLP only
             let normed_in = xs.apply(&self.pre_feedforward_layernorm)?;
+            mark("pre_ff_ln", &dev, &mut stage_times, &mut stage_start);
             let mlp_out = self.mlp.forward(&normed_in)?;
+            mark("mlp", &dev, &mut stage_times, &mut stage_start);
             let mlp_out = mlp_out.apply(&self.post_feedforward_layernorm)?;
+            mark("post_ff_ln", &dev, &mut stage_times, &mut stage_start);
             xs = (&residual + mlp_out)?;
+            mark("mlp_resid", &dev, &mut stage_times, &mut stage_start);
         };
 
         // PLE: per-layer embedding injection (after feedforward, before layer scalar)
@@ -978,9 +996,26 @@ impl DecoderLayer {
             }
         }
 
+        mark("ple", &dev, &mut stage_times, &mut stage_start);
         // Apply layer scalar
         if let Some(ref scalar) = self.layer_scalar {
             xs = xs.broadcast_mul(scalar)?;
+        }
+        mark("layer_scalar", &dev, &mut stage_times, &mut stage_start);
+        if stage_timing && !stage_times.is_empty() {
+            let total_us: u128 = stage_times.iter().map(|(_, us)| us).sum();
+            let parts: Vec<String> = stage_times
+                .iter()
+                .map(|(label, us)| format!("{label}={us}"))
+                .collect();
+            eprintln!(
+                "[gemma4-stage] layer_idx={} sliding={} shared_kv={} total={} {}",
+                self.layer_idx,
+                self.self_attn.is_sliding,
+                self.self_attn.kv_shared_layer_index.is_some(),
+                total_us,
+                parts.join(" ")
+            );
         }
 
         Ok(xs)
