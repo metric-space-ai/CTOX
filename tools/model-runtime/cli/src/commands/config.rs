@@ -36,17 +36,23 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         paged_attn,
         models,
         default_model_id,
+        speculative,
     } = cfg;
 
-    if let Some((model_type, runtime)) = resolve_single_model_runtime(
-        models.as_slice(),
-        default_model_id.as_deref(),
-        runtime.clone(),
-        CacheOptions {
-            paged_attn: paged_attn.clone(),
-        },
-    )? {
-        return run_server(model_type, server, runtime, global.to_global_options()?).await;
+    // Single-model fast path doesn't yet know about spec decoding, so bail
+    // out of it when the config demands a draft — we go through the
+    // multi-model/builder path below which does support it.
+    if speculative.is_none() {
+        if let Some((model_type, runtime)) = resolve_single_model_runtime(
+            models.as_slice(),
+            default_model_id.as_deref(),
+            runtime.clone(),
+            CacheOptions {
+                paged_attn: paged_attn.clone(),
+            },
+        )? {
+            return run_server(model_type, server, runtime, global.to_global_options()?).await;
+        }
     }
 
     let global = global.to_global_options()?;
@@ -107,6 +113,28 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         builder = builder.with_search_embedding_model(model.into());
     }
 
+    // Speculative-decoding wiring. The target is the first entry in
+    // `models`; the draft model goes through the same ModelEntry →
+    // ModelSelected conversion as the target. The builder then wraps the
+    // target Loader in a `SpeculativeLoader` at build-time, so the
+    // pipeline that comes out of `.build()` is a `SpeculativePipeline`.
+    if let Some(spec) = speculative {
+        let draft_cpu = spec.draft.device.cpu.unwrap_or(false);
+        let draft_model_type =
+            spec.draft.to_model_type(draft_cpu, CacheOptions::default());
+        let draft_selected = crate::commands::serve::convert_to_model_selected(&draft_model_type)?;
+        info!(
+            "Speculative decoding enabled: target='{}' draft='{}' gamma={}",
+            models
+                .first()
+                .map(|m| m.model_id.as_str())
+                .unwrap_or("<unknown>"),
+            spec.draft.model_id,
+            spec.gamma,
+        );
+        builder = builder.with_speculative_draft(draft_selected, spec.gamma);
+    }
+
     let engine = builder.build().await?;
     #[cfg(unix)]
     let engine_for_local_ipc = engine.clone();
@@ -147,23 +175,26 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         paged_attn,
         models,
         enable_thinking,
+        speculative,
     } = cfg;
 
-    if let Some((model_type, runtime)) = resolve_single_model_runtime(
-        models.as_slice(),
-        None,
-        runtime.clone(),
-        CacheOptions {
-            paged_attn: paged_attn.clone(),
-        },
-    )? {
-        return run_interactive(
-            model_type,
-            runtime,
-            global.to_global_options()?,
-            enable_thinking,
-        )
-        .await;
+    if speculative.is_none() {
+        if let Some((model_type, runtime)) = resolve_single_model_runtime(
+            models.as_slice(),
+            None,
+            runtime.clone(),
+            CacheOptions {
+                paged_attn: paged_attn.clone(),
+            },
+        )? {
+            return run_interactive(
+                model_type,
+                runtime,
+                global.to_global_options()?,
+                enable_thinking,
+            )
+            .await;
+        }
     }
 
     let global = global.to_global_options()?;
@@ -218,6 +249,18 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
 
     if let Some(model) = runtime.search_embedding_model {
         builder = builder.with_search_embedding_model(model.into());
+    }
+
+    if let Some(spec) = speculative {
+        let draft_cpu = spec.draft.device.cpu.unwrap_or(false);
+        let draft_model_type =
+            spec.draft.to_model_type(draft_cpu, CacheOptions::default());
+        let draft_selected = crate::commands::serve::convert_to_model_selected(&draft_model_type)?;
+        info!(
+            "Speculative decoding enabled (interactive): draft='{}' gamma={}",
+            spec.draft.model_id, spec.gamma,
+        );
+        builder = builder.with_speculative_draft(draft_selected, spec.gamma);
     }
 
     let engine = builder.build().await?;

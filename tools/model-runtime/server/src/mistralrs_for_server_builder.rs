@@ -263,6 +263,13 @@ pub struct MistralRsForServerBuilder {
 
     /// PagedAttention KV cache type
     paged_cache_type: PagedCacheType,
+
+    /// Optional speculative-decoding draft model. When set, the target
+    /// loader is wrapped in a `SpeculativeLoader` which in turn produces
+    /// a `SpeculativePipeline` at load time — one draft pipeline feeding
+    /// `gamma` tokens per step into the target's verify pass. Tokenizer
+    /// vocabulary must match between target and draft.
+    speculative_draft: Option<(ModelSelected, usize)>,
 }
 
 impl Default for MistralRsForServerBuilder {
@@ -295,6 +302,7 @@ impl Default for MistralRsForServerBuilder {
             search_callback: defaults::SEARCH_CALLBACK,
             mcp_client_config: None,
             paged_cache_type: defaults::PAGED_CACHE_TYPE,
+            speculative_draft: None,
         }
     }
 }
@@ -352,6 +360,25 @@ impl MistralRsForServerBuilder {
     /// Sets the model to be used.
     pub fn with_model(mut self, model: ModelSelected) -> Self {
         self.model = Some(model);
+        self
+    }
+
+    /// Enable speculative decoding. The `draft` model is run for `gamma`
+    /// steps and its tokens are verified by the main target model in a
+    /// single forward pass. Tokenizer vocabularies must match.
+    pub fn with_speculative_draft(mut self, draft: ModelSelected, gamma: usize) -> Self {
+        self.speculative_draft = Some((draft, gamma));
+        self
+    }
+
+    /// Optional-wrapper helper for ergonomic config-file wiring.
+    pub fn with_speculative_draft_optional(
+        mut self,
+        draft_and_gamma: Option<(ModelSelected, usize)>,
+    ) -> Self {
+        if let Some((draft, gamma)) = draft_and_gamma {
+            self = self.with_speculative_draft(draft, gamma);
+        }
         self
     }
 
@@ -670,11 +697,37 @@ impl MistralRsForServerBuilder {
         let jinja_explicit_for_config = self.jinja_explicit.clone();
 
         // Configure this last to prevent arg moves
-        let loader: Box<dyn Loader> = LoaderBuilder::new(model)
+        let target_loader: Box<dyn Loader> = LoaderBuilder::new(model)
             .with_no_kv_cache(self.no_kv_cache)
-            .with_chat_template(self.chat_template)
-            .with_jinja_explicit(self.jinja_explicit)
+            .with_chat_template(self.chat_template.clone())
+            .with_jinja_explicit(self.jinja_explicit.clone())
             .build()?;
+
+        // Wrap in a SpeculativeLoader when a draft model was configured.
+        // The target's own loader handles weights/arch/etc.; the draft is
+        // loaded via a second LoaderBuilder and both are threaded into
+        // `engine_core::SpeculativeLoader`, which at `load_model_from_hf`
+        // time produces a `SpeculativePipeline` with the configured gamma.
+        let loader: Box<dyn Loader> = if let Some((draft_model, gamma)) =
+            self.speculative_draft.clone()
+        {
+            info!(
+                "Wrapping target loader in SpeculativeLoader (gamma={gamma}) — \
+                 draft will run {gamma} token(s)/step and target verifies."
+            );
+            let draft_loader: Box<dyn Loader> = LoaderBuilder::new(draft_model)
+                .with_no_kv_cache(self.no_kv_cache)
+                .with_chat_template(self.chat_template)
+                .with_jinja_explicit(self.jinja_explicit)
+                .build()?;
+            Box::new(engine_core::SpeculativeLoader {
+                target: target_loader,
+                draft: draft_loader,
+                config: engine_core::SpeculativeConfig { gamma },
+            })
+        } else {
+            target_loader
+        };
 
         engine_instance_info(&*loader);
 

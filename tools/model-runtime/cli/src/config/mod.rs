@@ -35,6 +35,11 @@ pub struct ServeConfig {
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub default_model_id: Option<String>,
+    /// Optional speculative-decoding spec. When set, the first entry in
+    /// `models` is the target; `speculative.draft` is loaded as the draft
+    /// pipeline and wrapped via `SpeculativePipeline`. Tokenizers must match.
+    #[serde(default)]
+    pub speculative: Option<SpeculativeSpec>,
 }
 
 #[derive(Deserialize, Default)]
@@ -49,6 +54,21 @@ pub struct RunConfig {
     pub models: Vec<ModelEntry>,
     #[serde(default)]
     pub enable_thinking: bool,
+    /// See [`ServeConfig::speculative`].
+    #[serde(default)]
+    pub speculative: Option<SpeculativeSpec>,
+}
+
+/// Draft-model spec for speculative decoding. Picks up where
+/// `engine_core::SpeculativePipeline` leaves off: the core was already
+/// written, this surface just threads it through the `from-config` CLI.
+#[derive(Deserialize, Clone)]
+pub struct SpeculativeSpec {
+    /// Number of draft tokens per step (γ in the paper). Typical: 4–8.
+    pub gamma: usize,
+    /// Draft model entry (same schema as an entry in `models`). Its
+    /// tokenizer vocabulary must match the target model exactly.
+    pub draft: ModelEntry,
 }
 
 #[derive(Deserialize, Default, Clone)]
