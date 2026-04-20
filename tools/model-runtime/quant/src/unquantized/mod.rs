@@ -543,8 +543,21 @@ impl QuantMethod for UnquantLinear {
                     }
 
                     let _acquired_quantize_guard = guard.acquire(&device);
+                    // IMPORTANT: use `Cow::Borrowed` here, *not*
+                    // `Cow::Owned(q_buf)`. `QStorage::from_data` passes
+                    // the Cow to `as_t_slice::<BlockQ4K>(data)`, which
+                    // consumes the Cow, extracts a raw pointer, and
+                    // returns `&[BlockQ4K]`. With `Cow::Owned` the Vec
+                    // is dropped at the end of `as_t_slice` before the
+                    // `cuda::memcpy_htod` reads the bytes — UAF that
+                    // reliably segfaults under concurrent MoE loads
+                    // (the allocator reuses the 150-MB page before the
+                    // H→D copy fires). By passing `Cow::Borrowed` we
+                    // keep the Vec alive in this frame through the
+                    // entire `from_data` call.
                     let storage =
-                        QStorage::from_data(Cow::Owned(q_buf), &device, dtype)?;
+                        QStorage::from_data(Cow::Borrowed(q_buf.as_slice()), &device, dtype)?;
+                    drop(q_buf); // explicit: alive until after from_data returned
                     let shape = weight_for_isq.shape().clone();
                     n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     Arc::new(QTensor::new(storage, shape)?)

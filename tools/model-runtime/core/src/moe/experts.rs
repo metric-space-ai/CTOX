@@ -997,7 +997,14 @@ impl MoEExperts {
                 .chain(expert_dims.iter().copied())
                 .collect();
 
-            let storage = QStorage::from_data(Cow::Owned(q_buf), target_device, dtype)?;
+            // IMPORTANT: see matching comment in quant/unquantized/mod.rs —
+            // `Cow::Owned` here triggers a UAF inside
+            // `QStorage::from_data -> as_t_slice` because the Vec is dropped
+            // before the CUDA memcpy_htod runs. Using `Cow::Borrowed` keeps
+            // the Vec alive in this frame until after the call returns.
+            let storage =
+                QStorage::from_data(Cow::Borrowed(q_buf.as_slice()), target_device, dtype)?;
+            drop(q_buf);
             let qt = QTensor::new(storage, stacked_shape)?;
 
             Ok(Arc::new(engine_quant::GgufMatMul::new(
