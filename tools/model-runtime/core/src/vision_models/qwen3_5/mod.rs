@@ -7,7 +7,7 @@ use std::{
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use engine_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
-use text::Qwen3_5TextModel;
+pub use text::Qwen3_5TextModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -25,7 +25,7 @@ use crate::{
 };
 
 pub(crate) mod config;
-mod text;
+pub mod text;
 
 pub(crate) use config::Config;
 // Re-export the processor from qwen3_vl since the input processing is identical
