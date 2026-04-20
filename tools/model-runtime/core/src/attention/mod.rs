@@ -204,7 +204,13 @@ impl Sdpa {
             // [32, 64, 72, 80, 96, 128, 256]
             &[32, 64, 72, 80, 96, 128]
         };
-        if [q, k, v].into_iter().all(|x| x.device().is_metal())
+        // Diagnostic: ENGINE_DISABLE_METAL_SDPA skips the Metal-native SDPA
+        // fast path and forces the generic naive_sdpa + cuBLASLt routes. Used
+        // to isolate whether a performance regression originates in the
+        // Metal kernel itself vs. the surrounding tensor plumbing.
+        let metal_sdpa_disabled = std::env::var_os("ENGINE_DISABLE_METAL_SDPA").is_some();
+        if !metal_sdpa_disabled
+            && [q, k, v].into_iter().all(|x| x.device().is_metal())
             && all_head_dims_match
             && valid_head_dims.contains(&head_dim)
             && can_use_mask

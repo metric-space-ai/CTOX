@@ -302,7 +302,7 @@ impl SpeculativePipeline {
             let accepted_total = next & ACCEPT_STATS_COUNT_MASK;
             let mean = (accepted_total as f64) / (steps as f64);
             tracing::info!(
-                "spec accept-rate: mean={:.2}/{gamma} over last {steps} steps ({accepted_total} accepted)"
+                "spec accept-rate: mean={mean:.2}/{gamma} over last {steps} steps ({accepted_total} accepted)"
             );
         }
     }
