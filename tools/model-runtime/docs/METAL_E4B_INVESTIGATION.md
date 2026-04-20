@@ -95,45 +95,66 @@ saturiert laufen. Dann entweder (a) MSL fused-kernel schreiben, (b) MPSGraph
 introduzieren, oder (c) explizit bestätigen dass es Hardware-Limit ist und
 User auf M5 Pro/Max-Hardware oder CUDA verweisen.
 
-## Update: sticky-compute-encoder-Experiment (candle-fork c3bb5bf+053097d3)
+## Update: sticky-compute-encoder-Experiment — **FALSIFIED**
 
-Parallele-GPU-Sättigung ist oben als Haupt-Hypothese genannt, aber es gibt
-noch einen zweiten plausiblen Kosten-Vektor der *nicht* von GPU-Parallelism
-abhängt: CPU-seitige Metal-Syscalls zum Erzeugen und Beenden von
-Compute-Encodern. E4B dispatched ~3150 Kernels pro Decode-Token → ~6300
-Encoder-create/endEncoding-Syscalls.
+Als zweite plausible Kosten-Hypothese (neben GPU-Sättigung) wurde
+CPU-seitiger Metal-Syscall-Overhead getestet: E4B dispatched ~3150
+Kernels pro Decode-Token, jeder mit encoder-create + endEncoding =
+~6300 Syscalls/Token.
 
-Die hier eingeführte Fork-Änderung (commit `053097d3` im lokalen
-`~/candle-fork-ctox`, zusätzlich exportiert als
-`candle-patches/0003-metal-sticky-encoder.patch`) cached den
-`MTLComputeCommandEncoder` pro Pool-Entry und recycled ihn über alle
-Dispatches bis zum nächsten Blit- oder Command-Buffer-Boundary. Default
-aktiv; per `CANDLE_METAL_STICKY_ENCODER=0` abschaltbar.
+Fork-Änderung in commit `053097d3` cached `MTLComputeCommandEncoder`
+pro Pool-Entry und recycelte ihn über alle Dispatches bis zum nächsten
+Blit- oder Command-Buffer-Boundary.
 
-Implementierung:
+**Benchmark-Ergebnis auf Apple M5, Gemma 4 E4B Q4K, 3 iter + 1 warmup:**
 
-- `candle-metal-kernels/src/metal/encoder.rs` — `ComputeCommandEncoder`
-  bekommt ein `auto_end: bool` Feld und einen `new_sticky()`-Konstruktor.
-  Drop überspringt `endEncoding` wenn `!auto_end`, löst aber das Semaphor.
-- `candle-metal-kernels/src/metal/commands.rs` — `EntryState` cached das
-  Metal-Encoder-`Retained`. `finalize_compute_entry` liefert einen
-  `new_sticky`-Wrapper um den Cache. `finalize_blit_entry` und
-  `commit_swap_locked` rufen `end_cached_encoder_locked` auf, um den
-  gecachten Encoder vor dem Blit oder Commit zu beenden.
+| Metrik              | sticky OFF    | sticky ON      | post-revert  |
+|---------------------|---------------|----------------|--------------|
+| decode T/s          | 18.0 ± 0.1    | 18.1 ± 0.2     | 19.9 ± 0.1   |
+| prefill T/s         | 226.1 ± 2.3   | 222.5 ± 6.3    | 266 ± 6      |
 
-**Status:** Nicht gebenched. Der CLAUDE.md-Leitfaden verbietet
-`cargo build` auf der Operator-Maschine; die Validierung muss der User
-selbst fahren:
+Sticky-ON vs sticky-OFF lag im Noise (+0.5%). Die post-revert-Spalte
+(sticky-code komplett entfernt, nicht nur per env-flag deaktiviert)
+zeigt eine minimale CPU-Überhead-Reduktion ~+10% decode / ~+18%
+prefill gegenüber dem sticky-code-branching-path — aber immer noch
+meilenweit von E2B's 241 T/s entfernt.
 
-```
-cd tools/model-runtime
-cargo build --release -p ctox-engine-cli --features metal
-./target/release/ctox-engine-cli bench gemma4-e4b --metal
-```
+**Syscall-Overhead ist nicht der dominante Flaschenhals für E4B Metal
+decode auf base M5.** Die sticky-encoder-Änderung wurde aus dem Fork
+revertiert (siehe fork-HEAD). Die `useResource`-Strip-Patches
+(`quantized.rs.patch`, `sdpa.rs.patch`) bleiben — sie sind messbar
++5-9% Gewinn.
 
-Wenn das Decode >17 T/s erreicht, ist die Syscall-Overhead-Hypothese
-bestätigt. Wenn es bei ~17 T/s bleibt, ist das Fork-Limit tatsächlich
-GPU-Kernel-Saturation (s.o.) und der nächste Schritt ist Kernel-Fusion
-oder MPSGraph.
+**Konsequenz für weitere Arbeit:** Der dominante Faktor muss GPU-seitig
+sein. Zwei kandidierende Mechanismen, beide mit der Hardware-Signatur
+kompatibel:
 
-`CANDLE_METAL_STICKY_ENCODER=0` gibt einen Clean-Rollback ohne Rebuild.
+1. **Memory-Bandwidth-Bound**: Q4K E4B liest ~3 GB Gewichte/Token.
+   Base M5 hat ~153 GB/s → 19.6 ms/token theoretisches Limit = ~50 T/s.
+   Beobachtete 18 T/s = 36% Effizienz der Peak-Bandwidth; plausibel,
+   weil E4B's große Matmul-Shapes (2560×10240) nicht in L2 passen
+   und jeder Dispatch gezwungen ist, von DRAM zu streamen.
+2. **SIMD-Group-Saturation**: E4B's Matmul-Shapes saturieren alle
+   verfügbaren SIMD-Groups mit einem Dispatch → keine Parallelität
+   zwischen aufeinanderfolgenden Kernels (vs E2B's kleinere Shapes,
+   die mehrere Kernels gleichzeitig laufen lassen können).
+
+Beide Mechanismen können nur mit einer der folgenden Maßnahmen
+umgangen werden:
+
+- **Fused MLP MSL-Kernel** (`gate → silu → mul → down` in einem
+  Shader): reduziert Memory-Bandwidth durch Register-Tiling (gate/up
+  Outputs bleiben in Registern statt zurück in DRAM). Effort: mehrere
+  Tage kompetente Metal-Shader-Arbeit.
+- **MPSGraph-Integration**: Apple's Graph-Framework fused automatisch.
+  Aber: candle's Q4K-Format ist nicht MPSGraph-native → massiver Rewrite.
+- **Hardware**: M5 Pro (~275 GB/s, 2× GPU-Cores) oder M5 Max
+  (~546 GB/s, 4× GPU-Cores). Code-Fix entfällt.
+- **Kleinere Quantisierung** (Q3K, Q2K): -25 bis -40% Memory-Traffic.
+  Qualität-Trade-off erheblich.
+- **Speculative Decoding**: Draft mit E2B (241 T/s), verify mit E4B.
+  2-3× praktischer Speedup wenn Draft-Accuracy hoch. Nicht-triviale
+  Pipeline-Änderung aber außerhalb des Metal-Kernel-Layers.
+
+**Stand:** Keine Single-Commit-Lösung auf base M5. Produktionsempfehlung
+oben (CUDA / M5 Pro oder Max für E4B) bleibt gültig.
