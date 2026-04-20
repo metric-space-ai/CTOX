@@ -450,6 +450,7 @@ impl MoEExpertCache {
     /// - The warm budget is set and would be exceeded, without a cold
     ///   fallback configured.
     pub fn new(experts: Vec<ExpertTriple>, cfg: CacheConfig, comm: Arc<Comm>) -> Result<Self> {
+        let t_construct = Instant::now();
         if experts.is_empty() {
             candle_core::bail!("MoEExpertCache: experts vec is empty");
         }
@@ -554,6 +555,7 @@ impl MoEExpertCache {
         // ran on ALL experts just to compute max-slot-size, then all of
         // its bytes were discarded on Resident slots anyway), so we now
         // do a single pass and serialize each expert exactly once.
+        let t_stage = Instant::now();
         let mut slots: Vec<SlotState> = Vec::with_capacity(num_experts);
         for (idx, triple) in experts.into_iter().enumerate() {
             let gate = triple.gate.serialize()?;
@@ -567,9 +569,18 @@ impl MoEExpertCache {
                 slots.push(SlotState::InPool);
             }
         }
+        let stage_ms = t_stage.elapsed().as_millis();
         // One flush after all initial writes so the cold tier is durable
         // before the cache accepts queries.
         let _ = pool.backing.flush();
+        tracing::info!(
+            "MoE cache built: {} experts, capacity={}, slot_size={} KiB, total_construct_ms={}, stage_ms={}",
+            num_experts,
+            capacity,
+            slot_size / 1024,
+            t_construct.elapsed().as_millis(),
+            stage_ms,
+        );
 
         let lfu_counts = (0..num_experts).map(|_| AtomicU32::new(0)).collect();
         let last_access = (0..num_experts).map(|_| AtomicU32::new(0)).collect();
