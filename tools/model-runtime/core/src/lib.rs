@@ -116,7 +116,8 @@ pub use pipeline::{
     LlamaLoader, Loader, LocalModelPaths, LoraAdapterPaths, MistralLoader, MixtralLoader,
     Modalities, ModelKind, ModelPaths, MultimodalPromptPrefixer, NormalLoader, NormalLoaderBuilder,
     NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader, Phi3VLoader, Qwen2Loader,
-    SpeculativeConfig, SpeculativeLoader, SpeculativePipeline, SpeechLoader, SpeechPipeline,
+    DFlashLoader, DFlashPipeline, SpeculativeConfig, SpeculativeLoader, SpeculativePipeline,
+    SpeechLoader, SpeechPipeline,
     Starcoder2Loader, SupportedModality, TokenSource, VisionLoader, VisionLoaderBuilder,
     VisionLoaderType, VisionSpecificConfig, UQFF_MULTI_FILE_DELIMITER,
 };
