@@ -8,25 +8,17 @@
 //! and
 //! [`crate::vision_models::qwen3_5::Qwen3_5TextModel::apply_lm_head`].
 //!
-//! The third, [`forward_with_capture`], is the one that needs to
-//! assemble:
-//!   - position_ids (MRoPE, text-only branch, positions
-//!     `[past_kv_len..past_kv_len + seq_len]`),
-//!   - causal `attention_mask`,
-//!   - `FlashParams` + `context_lens`,
-//!   - paged-attention metadata (or `None` in the simple non-paged
-//!     case),
-//! then call
-//! `Qwen3_5TextModel::forward_embeds_with_capture`.
+//! The third, `forward_with_capture`, delegates to
+//! [`crate::vision_models::qwen3_5::Qwen3_5TextModel::forward_with_dflash_capture`]
+//! — a sibling helper on the text model that assembles MRoPE
+//! position_ids, causal attention mask, and `FlashParams` for an
+//! arbitrary-length `input_ids` slice at a given `past_kv_len`.
 //!
-//! Commit 6 ships only the accessors and the struct skeleton; the
-//! forward body is a `todo!` placeholder. Commit 7 fills it in with
-//! the full metadata-assembly logic and the first end-to-end smoke
-//! test will follow immediately after. Splitting it this way keeps
-//! each commit small enough to review and means the trait-impl
-//! structure — where the target lives, how it's constructed, how the
-//! struct threads the existing text model reference — is settled
-//! before the ~200 lines of forward-metadata plumbing lands.
+//! Keeping the metadata assembly on the text model (rather than in
+//! this trait impl) means the logic lives next to the regular
+//! inference path it mirrors — if the engine's input processor grows
+//! a new field or the rotary embedding changes, the DFlash helper
+//! sits right there and is easy to keep in sync.
 
 use std::sync::Arc;
 
@@ -61,19 +53,12 @@ impl Qwen35DFlashTarget {
 impl DFlashTargetForward for Qwen35DFlashTarget {
     fn forward_with_capture(
         &self,
-        _input_ids: &Tensor,
-        _past_kv_len: usize,
-        _capture: &mut FeatureCapture,
+        input_ids: &Tensor,
+        past_kv_len: usize,
+        capture: &mut FeatureCapture,
     ) -> Result<Tensor> {
-        // Lands in commit 7. Keeping the unimplemented marker here
-        // rather than at compile time so the trait surface is already
-        // usable for the scheduler-wiring commit (commit 7) and for
-        // unit tests that mock the target without touching forward.
-        candle_core::bail!(
-            "Qwen35DFlashTarget::forward_with_capture is not implemented yet — \
-             wait for the next dflash commit which lands the position_ids / \
-             FlashParams / paged-attn assembly."
-        )
+        self.text
+            .forward_with_dflash_capture(input_ids, past_kv_len, Some(capture))
     }
 
     fn embed_tokens(&self) -> &Embedding {

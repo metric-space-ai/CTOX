@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{DType, Device, DeviceLocation, Module, Result, Tensor, D};
 use candle_nn::Embedding;
 use engine_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -737,6 +737,134 @@ impl Qwen3_5TextModel {
             xs = xs.to_device(&lm_head_device)?;
         }
         engine_quant::MatMul.qmethod_matmul(&xs, &*self.lm_head)
+    }
+
+    /// Standalone forward for DFlash speculative decoding.
+    ///
+    /// Wraps [`Self::forward_embeds_with_capture`] with all the
+    /// metadata that the DFlash pipeline needs to assemble for a
+    /// text-only, non-paged-attention forward: a simple MRoPE
+    /// position_ids tensor (positions
+    /// `[past_kv_len..past_kv_len + seq_len]` broadcast to all three
+    /// MRoPE dims — text inputs have no image/video deltas), a
+    /// causal attention mask built on the fly, and a `FlashParams`
+    /// populated so the hot attention path matches the one the
+    /// normal inference loop produces via `make_prompt_chunk`.
+    ///
+    /// - `input_ids`: `[1, seq_len]` raw token IDs.
+    /// - `past_kv_len`: how many tokens are already in the KV cache;
+    ///   the fed tokens take positions `[past_kv_len ..
+    ///   past_kv_len + seq_len]`.
+    /// - `capture`: see [`crate::models::dflash_draft::FeatureCapture`];
+    ///   populated in place with the post-layer hidden states at
+    ///   the requested layer indices.
+    ///
+    /// Returns logits `[1, seq_len, vocab_size]`.
+    ///
+    /// Non-paged by design — the DFlash pipeline (commit 8) owns its
+    /// own lightweight verify-KV state via the hybrid cache already
+    /// attached to the model, and does not go through the
+    /// scheduler's `PagedAttentionInputMetadata`. That simplification
+    /// is what makes the stepper self-contained; paged-attention
+    /// integration is a later optimisation.
+    pub fn forward_with_dflash_capture(
+        &self,
+        input_ids: &Tensor,
+        past_kv_len: usize,
+        capture: Option<&mut crate::models::dflash_draft::FeatureCapture>,
+    ) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        if batch != 1 {
+            candle_core::bail!(
+                "forward_with_dflash_capture: only batch=1 supported (got {batch})"
+            );
+        }
+        let device = self.device.clone();
+        let dtype = self.dtype;
+
+        // ── Embed tokens.
+        let xs = self.embed_tokens.forward(input_ids)?;
+
+        // ── position_ids: `[3, 1, seq_len]`, all three MRoPE slots
+        //    identical for pure-text inputs.
+        let positions = Tensor::arange(
+            past_kv_len as u32,
+            (past_kv_len + seq_len) as u32,
+            &device,
+        )?
+        .reshape((1, 1, seq_len))?
+        .to_dtype(candle_core::DType::I64)?;
+        let position_ids = positions.repeat((3, 1, 1))?;
+
+        // ── Causal attention mask: `[1, 1, seq_len, past_kv_len + seq_len]`
+        //    with `-inf` on the upper triangle (after shifting by
+        //    past_kv_len — earlier past positions are always visible).
+        let total_k = past_kv_len + seq_len;
+        let mask = if seq_len == 1 {
+            // Pure decode step — every past position is visible, no
+            // masking needed. Pass None so the attention path takes
+            // its fast "no mask" branch.
+            None
+        } else {
+            let mut data = vec![0.0f32; seq_len * total_k];
+            for i in 0..seq_len {
+                for j in (past_kv_len + i + 1)..total_k {
+                    data[i * total_k + j] = f32::NEG_INFINITY;
+                }
+            }
+            Some(
+                Tensor::from_vec(data, (1, 1, seq_len, total_k), &device)?
+                    .to_dtype(dtype)?,
+            )
+        };
+
+        // ── FlashParams. The attention kernel may switch between
+        //    flash and non-flash based on `using_flash_attn()` + the
+        //    head_dim gate (see `attention/mod.rs`). In the flash
+        //    branch it reads `cumulative_seqlens_{q,k}` — we populate
+        //    them so both branches yield the same numerical result.
+        let flash_attn = crate::using_flash_attn();
+        let flash_params = if flash_attn {
+            use std::collections::HashMap;
+            let cu_q = Tensor::from_vec(vec![0u32, seq_len as u32], (2,), &device)?;
+            let cu_k = Tensor::from_vec(vec![0u32, total_k as u32], (2,), &device)?;
+            let mut cu_q_map: HashMap<DeviceLocation, Tensor> = HashMap::new();
+            let mut cu_k_map: HashMap<DeviceLocation, Tensor> = HashMap::new();
+            cu_q_map.insert(device.location(), cu_q);
+            cu_k_map.insert(device.location(), cu_k);
+            FlashParams {
+                max_q: seq_len as u32,
+                max_k: total_k as u32,
+                cumulative_seqlens_q: cu_q_map,
+                cumulative_seqlens_k: cu_k_map,
+                causal: true,
+            }
+        } else {
+            FlashParams::empty(true)
+        };
+
+        // ── `context_lens` asks the model to return logits for ALL
+        //    fed positions (start=0, len=seq_len). DFlash chain verify
+        //    compares target's argmax at every position with the
+        //    corresponding draft candidate.
+        let context_lens = vec![(0usize, seq_len)];
+
+        // ── Seqlen offsets (unused by forward_embeds_with_capture but
+        //    required by the signature; list one value per seq).
+        let seqlen_offsets: Vec<usize> = vec![past_kv_len];
+
+        self.forward_embeds_with_capture(
+            xs,
+            mask.as_ref(),
+            &position_ids,
+            &seqlen_offsets,
+            context_lens,
+            /* metadata       */ None,
+            &flash_params,
+            /* visual_pos_masks      */ None,
+            /* deepstack_visual_embeds */ None,
+            capture,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
