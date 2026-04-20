@@ -380,4 +380,24 @@ extern "C" {
         hidden_dim: i32,
         stream: i64,
     );
+    pub(crate) fn moe_router_bf16(
+        logits: *const c_void,
+        topk_ids: *mut c_void,
+        topk_weights: *mut c_void,
+        num_tokens: i32,
+        num_experts: i32,
+        topk: i32,
+        norm_topk_prob: i32,
+        stream: i64,
+    );
+    pub(crate) fn moe_router_f16(
+        logits: *const c_void,
+        topk_ids: *mut c_void,
+        topk_weights: *mut c_void,
+        num_tokens: i32,
+        num_experts: i32,
+        topk: i32,
+        norm_topk_prob: i32,
+        stream: i64,
+    );
 }
