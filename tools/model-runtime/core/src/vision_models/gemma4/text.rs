@@ -1608,7 +1608,14 @@ impl TextModel {
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
         let sliding_attention_mask = DeviceMappedMask::new(sliding_attention_mask, &*self.mapper)?;
 
+        let trace_timing = std::env::var_os("ENGINE_GEMMA4_LAYER_TIMING").is_some();
+        let mut layer_timings: Vec<(usize, bool, bool, u128)> = Vec::new();
         for (i, layer) in self.layers.iter().enumerate() {
+            let layer_start = if trace_timing {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
             xs = self.mapper.map(xs, i)?;
             let per_layer_input = per_layer_inputs
                 .as_ref()
@@ -1653,6 +1660,32 @@ impl TextModel {
                 layer_metadata,
                 this_layer_flash,
             )?;
+            if let Some(start) = layer_start {
+                // Force synchronization for accurate timing on accelerator
+                // devices: without this, .elapsed() measures only the
+                // kernel-enqueue time, not actual execution.
+                let _ = xs.device().synchronize();
+                let elapsed = start.elapsed().as_micros();
+                layer_timings.push((
+                    i,
+                    layer.self_attn.is_sliding,
+                    layer.self_attn.kv_shared_layer_index.is_some(),
+                    elapsed,
+                ));
+            }
+        }
+        if trace_timing && !layer_timings.is_empty() {
+            let total_us: u128 = layer_timings.iter().map(|(_, _, _, us)| us).sum();
+            eprintln!(
+                "[gemma4-timing] total_layers_us={} n_layers={}",
+                total_us,
+                layer_timings.len()
+            );
+            for (i, sliding, shared, us) in &layer_timings {
+                eprintln!(
+                    "[gemma4-timing] layer={i:2} sliding={sliding} shared_kv={shared} us={us}"
+                );
+            }
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;
