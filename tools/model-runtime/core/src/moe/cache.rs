@@ -133,6 +133,12 @@ impl SlotMetadata {
 /// tier, fast) or a memory-mapped SSD file (cold tier, larger). Both are
 /// fixed-size at construction and never reallocated.
 enum PoolBacking {
+    /// Degenerate backing used when `capacity == num_experts` — no tier-out
+    /// ever happens, so we skip allocating any slab at all. Methods that
+    /// would read/write pool bytes panic if called; the cache invariant is
+    /// that every slot is always `SlotState::Resident` in this mode so
+    /// those code paths are never reached.
+    None,
     /// RAM slab: a single `Vec<u8>` of `slot_size * num_experts` bytes.
     /// Fastest materialization path. Used on discrete GPU with enough
     /// host RAM, or when no SSD path is configured.
@@ -153,6 +159,10 @@ enum PoolBacking {
 impl PoolBacking {
     fn slice(&self) -> &[u8] {
         match self {
+            // Never called in all-resident mode: reads go through the fast
+            // `SlotState::Resident` path in `ensure_resident` and never fall
+            // through to pool I/O.
+            Self::None => &[],
             Self::Ram(v) => v,
             Self::Ssd { mmap, .. } => &mmap[..],
         }
@@ -160,6 +170,8 @@ impl PoolBacking {
 
     fn slice_mut(&mut self) -> &mut [u8] {
         match self {
+            // Same invariant: no writes happen in all-resident mode.
+            Self::None => unreachable!("slice_mut on all-resident (no-pool) backing"),
             Self::Ram(v) => v,
             Self::Ssd { mmap, .. } => &mut mmap[..],
         }
@@ -173,6 +185,7 @@ impl PoolBacking {
     /// no-op; for SSD it flushes the mmap pages.
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
+            Self::None => Ok(()),
             Self::Ram(_) => Ok(()),
             Self::Ssd { mmap, .. } => mmap.flush_async(),
         }
@@ -240,6 +253,17 @@ pub struct StaticPool {
 }
 
 impl StaticPool {
+    /// Zero-byte pool used by the all-resident fast path. Slot reads/writes
+    /// are unreachable on this pool because every slot is kept `Resident`.
+    fn new_empty(num_experts: usize) -> Self {
+        Self {
+            slot_size: 0,
+            num_experts,
+            metadata: vec![SlotMetadata::empty(); num_experts],
+            backing: PoolBacking::None,
+        }
+    }
+
     fn new_ram(slot_size: u64, num_experts: usize) -> Self {
         let len = slot_size.saturating_mul(num_experts as u64) as usize;
         Self {
@@ -527,6 +551,59 @@ impl MoEExpertCache {
         // (vs. the previous two passes). The memory saved by dropping the
         // pre-serialized cache is significant on a 256×3 MoE layer —
         // hundreds of MiB at full-precision weights.
+        // All-resident fast path. When `capacity >= num_experts` no expert
+        // will ever be tiered out, so the entire pool (serialized-byte staging
+        // area, ~15 GiB RAM at Q4K for a 40-layer Qwen3.6) and every slot
+        // lock are dead weight. Skip the probe-serialize, skip the pool
+        // allocation, and build a resident-only cache that goes straight to
+        // `SlotState::Resident` for every expert via `deserialize(bytes,
+        // cfg.device)`. Cache hits then take a single lock-free read of the
+        // Arc triple — identical cost to any other non-cached backend.
+        if capacity >= num_experts {
+            let t_stage = Instant::now();
+            let mut slots: Vec<SlotState> = Vec::with_capacity(num_experts);
+            let device = cfg.device.clone();
+            let guard = QuantizeOntoGuard::new();
+            for triple in experts.into_iter() {
+                let gate_bytes = triple.gate.serialize()?;
+                let up_bytes = triple.up.serialize()?;
+                let down_bytes = triple.down.serialize()?;
+                let gate_owned: Cow<'static, [u8]> = Cow::Owned(gate_bytes.into_owned());
+                let up_owned: Cow<'static, [u8]> = Cow::Owned(up_bytes.into_owned());
+                let down_owned: Cow<'static, [u8]> = Cow::Owned(down_bytes.into_owned());
+                drop(triple);
+                let resident = ExpertTriple {
+                    gate: ReplicatedLayer::deserialize(gate_owned, &device, &comm, guard.clone())?,
+                    up: ReplicatedLayer::deserialize(up_owned, &device, &comm, guard.clone())?,
+                    down: ReplicatedLayer::deserialize(down_owned, &device, &comm, guard.clone())?,
+                };
+                slots.push(SlotState::Resident(resident));
+            }
+            let pool = StaticPool::new_empty(num_experts);
+            let stage_ms = t_stage.elapsed().as_millis();
+            tracing::info!(
+                "MoE cache built (all-resident, no pool): {} experts, capacity={}, total_construct_ms={}, stage_ms={}",
+                num_experts,
+                capacity,
+                t_construct.elapsed().as_millis(),
+                stage_ms,
+            );
+            let lfu_counts = (0..num_experts).map(|_| AtomicU32::new(0)).collect();
+            let last_access = (0..num_experts).map(|_| AtomicU32::new(0)).collect();
+            return Ok(Self {
+                num_experts,
+                cfg: CacheConfig { capacity, ..cfg },
+                comm,
+                guard: QuantizeOntoGuard::new(),
+                inner: RwLock::new(CacheInner { slots, pool }),
+                lfu_counts,
+                last_access,
+                clock: AtomicU32::new(0),
+                accesses_since_decay: AtomicU32::new(0),
+                stats: AtomicStats::default(),
+            });
+        }
+
         let probe_triple = experts
             .first()
             .ok_or_else(|| candle_core::Error::msg("cache: empty experts"))?;
