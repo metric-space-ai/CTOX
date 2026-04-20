@@ -365,13 +365,13 @@ impl Pipeline for DFlashPipeline {
                 ),
             }
         };
-        // Current KV length of the target's hybrid cache == how many
-        // tokens have been committed so far minus one (the last
-        // committed token is re-fed as the first element of the
-        // verify block, not yet absorbed into the cache). This
-        // matches the behaviour of speculative.rs where the target
-        // verify forward starts at `past = current_seq_len`.
-        let past_kv_len = seq.get_toks().len().saturating_sub(1);
+        // After prefill the target's hybrid KV cache holds one entry
+        // per committed prompt token — `past_kv_len == seq.len()`.
+        // The next forward feeds B+1 tokens starting at absolute
+        // position `past_kv_len`; the first entry is the previously
+        // committed bootstrap token so its KV gets re-written at the
+        // tail slot rather than extending the past.
+        let past_kv_len = seq.get_toks().len();
 
         let outcome = decode_step(
             target_text,
