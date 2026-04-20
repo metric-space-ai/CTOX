@@ -3,6 +3,7 @@ name: queue-orchestrator
 description: Use when work should be added to, inspected in, reprioritized within, or otherwise managed through the explicit CTOX queue that feeds the normal inbound routing path.
 metadata:
   short-description: Manage the explicit CTOX execution queue
+cluster: mission_orchestration
 ---
 
 # Queue Orchestrator

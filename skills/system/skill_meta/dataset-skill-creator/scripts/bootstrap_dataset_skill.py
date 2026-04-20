@@ -66,7 +66,7 @@ def main() -> None:
     if strategy == "ticket-operating-model":
         command = [
             sys.executable,
-            str(REPO_ROOT / "skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py"),
+            str(REPO_ROOT / "skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py"),
             "--input",
             str(input_path),
             "--output-dir",
@@ -91,13 +91,13 @@ def main() -> None:
                 raise SystemExit(f"{args.openai_api_key_env} must be set when --openai-model is used")
         run(command, env=env)
         query_command = (
-            f"python3 skills/system/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py "
+            f"python3 skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py "
             f"--model-dir {analysis_dir} --query '<new ticket text>' --top-k 3"
         )
     elif strategy == "ticket-dataset-knowledge":
         command = [
             sys.executable,
-            str(REPO_ROOT / "skills/system/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py"),
+            str(REPO_ROOT / "skills/system/knowledge_bootstrap/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py"),
             "--input-xlsx",
             str(input_path),
             "--output-dir",
@@ -112,7 +112,7 @@ def main() -> None:
 
     create_command = [
         sys.executable,
-        str(REPO_ROOT / "skills/system/dataset-skill-creator/scripts/create_dataset_skill.py"),
+        str(REPO_ROOT / "skills/system/skill_meta/dataset-skill-creator/scripts/create_dataset_skill.py"),
         "--skill-name",
         args.skill_name,
         "--skill-path",

@@ -3,6 +3,7 @@ name: communication-context
 description: Use when CTOX must reconstruct the relevant communication state before replying on email, Jami, or TUI, especially when approvals, blockers, prior promises, or cross-channel context may change the answer.
 metadata:
   short-description: Search and reconstruct communication state before replying
+cluster: communication
 ---
 
 # Communication Context

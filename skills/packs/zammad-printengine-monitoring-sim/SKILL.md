@@ -23,8 +23,8 @@ real tool path and a real evidence file, not from ticket history alone.
 ## Tool
 
 ```sh
-python3 skills/system/zammad-printengine-monitoring-sim/scripts/check_printengine_alert.py \
-  --snapshot skills/system/zammad-printengine-monitoring-sim/references/printengine_alert_snapshot.json \
+python3 skills/packs/zammad-printengine-monitoring-sim/scripts/check_printengine_alert.py \
+  --snapshot skills/packs/zammad-printengine-monitoring-sim/references/printengine_alert_snapshot.json \
   --service prestige_printengine
 ```
 

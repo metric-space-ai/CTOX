@@ -3,6 +3,7 @@ name: skill-updater
 description: Update or modify already installed Codex skills under $CODEX_HOME/skills or $CODEX_HOME/skills/.system. Use when a user wants to change an installed skill, refresh its metadata, validate it, or make a safety backup before editing.
 metadata:
   short-description: Modify installed skills and refresh their metadata
+cluster: skill_meta
 ---
 
 # Skill Updater

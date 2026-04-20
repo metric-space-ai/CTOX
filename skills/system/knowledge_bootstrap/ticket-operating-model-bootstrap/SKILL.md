@@ -3,6 +3,7 @@ name: ticket-operating-model-bootstrap
 description: Learn how a concrete helpdesk actually handles tickets by deriving recurring ticket families, handling playbooks, state norms, note-style references, and fast retrieval artifacts from a historical ticket dataset.
 metadata:
   short-description: Learn a desk's real ticket-handling model from history
+cluster: knowledge_bootstrap
 ---
 
 # Ticket Operating Model Bootstrap
@@ -67,7 +68,7 @@ The output must answer, for repeated ticket families:
 Build the operating model:
 
 ```bash
-python3 skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
+python3 skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
   --input-xlsx <path> \
   --output-dir <dir> \
   --top-families 20 \
@@ -77,7 +78,7 @@ python3 skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_oper
 Refine the strongest families into operator-facing decision support with `gpt-5.4-nano`:
 
 ```bash
-OPENAI_API_KEY=... python3 skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
+OPENAI_API_KEY=... python3 skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
   --input-xlsx <path> \
   --output-dir <dir> \
   --top-families 20 \
@@ -89,7 +90,7 @@ OPENAI_API_KEY=... python3 skills/system/ticket-operating-model-bootstrap/script
 Add retrieval vectors when the host can sustain local embeddings:
 
 ```bash
-python3 skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
+python3 skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py \
   --input-xlsx <path> \
   --output-dir <dir> \
   --top-families 20 \
@@ -101,7 +102,7 @@ python3 skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_oper
 Query the resulting operating model for a new ticket:
 
 ```bash
-python3 skills/system/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py \
+python3 skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py \
   --model-dir <dir> \
   --query "<new ticket text>" \
   --top-k 8

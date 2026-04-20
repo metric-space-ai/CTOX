@@ -1,6 +1,7 @@
 ---
 name: service-deployment
 description: Install, configure, start, verify, and hand off a local or external-backed service using inspectable helper scripts, explicit secret classification, and durable completion or blocked state. Use when CTOX must bring a service to a working deployed state rather than only plan a generic change.
+cluster: host_ops
 ---
 
 # Service Deployment

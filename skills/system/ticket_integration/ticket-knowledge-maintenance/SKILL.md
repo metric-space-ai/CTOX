@@ -3,6 +3,7 @@ name: ticket-knowledge-maintenance
 description: Use when CTOX must keep the ticket knowledge plane current from a live desk and turn observed gaps into visible, operator-meaningful internal work rather than hidden background assumptions.
 metadata:
   short-description: Maintain ticket knowledge through visible self-work
+cluster: ticket_integration
 ---
 
 # Ticket Knowledge Maintenance

@@ -3400,7 +3400,7 @@ pub(crate) fn query_ticket_source_skill(
                 .context("active source skill binding does not have a usable artifact path")?;
             let script = resolve_repo_script_path(
                 root,
-                "skills/system/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py",
+                "skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py",
             )
             .context("ticket operating-model query helper is not available in this runtime root")?;
             if !script.exists() {

@@ -717,24 +717,18 @@ sync_skills_to_codex_home() {
   local source_root="$1"
   local codex_home="${CODEX_HOME:-$HOME/.codex}"
   local target="$codex_home/skills"
-  local system_target="$target/.system"
-  local src_system="$source_root/skills/system"
   local src_packs="$source_root/skills/packs"
-  mkdir -p "$target" "$system_target"
+  mkdir -p "$target"
 
-  if [[ -d "$src_system" ]]; then
-    for d in "$src_system"/*; do
-      [[ -d "$d" ]] || continue
-      local name; name="$(basename "$d")"
-      rm -rf "$system_target/$name"
-      cp -R "$d" "$system_target/$name"
-    done
-  fi
+  # System skills are embedded into the ctox binary via include_dir! and
+  # registered into SQLite + materialized to $CODEX_HOME/skills/.system/ at
+  # service start by install_system_skills() in src/inference/core/. We do
+  # not copy them here — the Rust path is the source of truth.
+
   if [[ -d "$src_packs" ]]; then
     for d in "$src_packs"/*; do
       [[ -d "$d" ]] || continue
       local name; name="$(basename "$d")"
-      [[ -d "$src_system/$name" ]] && continue
       rm -rf "$target/$name"
       cp -R "$d" "$target/$name"
     done

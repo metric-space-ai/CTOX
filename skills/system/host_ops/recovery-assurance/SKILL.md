@@ -1,6 +1,7 @@
 ---
 name: recovery-assurance
 description: Verify backup and restore readiness for hosts and services. Use when CTOX needs to inspect snapshot or backup coverage, retention, restore procedures, database dump validity, off-host copies, or disaster recovery confidence after a critical change or as a recurring assurance check.
+cluster: host_ops
 ---
 
 # Recovery Assurance

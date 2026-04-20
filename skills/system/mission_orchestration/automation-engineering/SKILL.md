@@ -1,6 +1,7 @@
 ---
 name: automation-engineering
 description: Replace repeated manual operational work with safe scripts, queued tasks, or scheduled CTOX work. Use when the same host or admin procedure keeps recurring, an incident pattern should become automation, or a manual checklist should be turned into tested repo-managed automation without bypassing the existing CTOX queue and schedule flow.
+cluster: mission_orchestration
 ---
 
 # Automation Engineering

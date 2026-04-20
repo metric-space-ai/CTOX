@@ -12,6 +12,7 @@ ctox-pdf-parse = { path = "tools/pdf-parse" }
 ctox-web-stack = { path = "tools/web-stack" }
 crossterm = "0.28"
 git2 = "0.20"
+include_dir = "0.7"
 libc = "0.2"
 mailparse = "0.16"
 native-tls = "0.2"

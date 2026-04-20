@@ -6,7 +6,7 @@ Use four layers:
 
 1. Skill layer
    - stable instructions and helper tools
-   - lives in `skills/system/universal-scraping/`
+   - lives in `skills/system/communication/universal-scraping/`
 2. Registry layer
    - mutable metadata for targets, revisions, templates, runs, and artifacts
    - lives in `runtime/ctox_scraping.db`

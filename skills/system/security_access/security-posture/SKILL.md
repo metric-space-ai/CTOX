@@ -1,6 +1,7 @@
 ---
 name: security-posture
 description: Audit host and service security posture through concrete admin evidence such as users and groups, sudo, listening sockets, firewall state, certificate expiry, secret exposure, package or vulnerability posture, and config drift. Use when CTOX needs to inspect rights, certificates, network exposure, secret handling, or basic hardening state before recommending or applying narrow fixes.
+cluster: security_access
 ---
 
 # Security Posture

@@ -327,6 +327,9 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     eprintln!("ctox service autonomy level: {active_level}");
     channels::ensure_store(root)?;
     governance::ensure_governance(root)?;
+    if let Err(err) = crate::skill_store::bootstrap_embedded_system_skills(root) {
+        eprintln!("ctox service: bootstrap_embedded_system_skills failed: {err:#}");
+    }
     let db_path = root.join("runtime/ctox.sqlite3");
     let _ = crate::lcm::LcmEngine::open(&db_path, crate::lcm::LcmConfig::default())?;
     let listen_addr = service_listen_addr(root);

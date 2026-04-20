@@ -3,6 +3,7 @@ name: skillbook-runbook-bootstrap
 description: Use when CTOX should turn a bounded knowledge source such as a PDF, table, manual, or exported document set into a main skill, one or more skillbooks, and standardized runbook items that can be embedded and retrieved reliably.
 metadata:
   short-description: Build skillbooks and runbook items from source material
+cluster: knowledge_bootstrap
 ---
 
 # Skillbook Runbook Bootstrap
@@ -54,7 +55,7 @@ Read the supplement contract in [references/execution-supplement-contract.md](re
 Build a bundle from one skillbook-like file plus one runbook-like file:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/build_skillbook_runbook_bundle.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/build_skillbook_runbook_bundle.py \
   --skillbook "<path-to-skillbook.md>" \
   --runbook "<path-to-runbook.md>" \
   --main-skill-id "<main-skill-id>" \
@@ -66,7 +67,7 @@ python3 skills/system/skillbook-runbook-bootstrap/scripts/build_skillbook_runboo
 Extract builder-oriented evidence and candidate gaps from ticket history:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/extract_ticket_history_builder_inputs.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/extract_ticket_history_builder_inputs.py \
   --input "<ticket-history.jsonl>" \
   --system "<source-system>" \
   --output-dir "<output-dir>"
@@ -75,7 +76,7 @@ python3 skills/system/skillbook-runbook-bootstrap/scripts/extract_ticket_history
 Build a desk-only candidate bundle from extracted ticket history:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/build_ticket_history_desk_bundle.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/build_ticket_history_desk_bundle.py \
   --system "<source-system>" \
   --history-report "<history_build_report.json>" \
   --history-gaps "<history_build_gaps.json>" \
@@ -88,7 +89,7 @@ python3 skills/system/skillbook-runbook-bootstrap/scripts/build_ticket_history_d
 Render a builder result for internal review only:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/report_builder_self_work.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/report_builder_self_work.py \
   --system "<source-system>" \
   --history-report "<history_build_report.json>" \
   --history-gaps "<history_build_gaps.json>" \
@@ -99,7 +100,7 @@ python3 skills/system/skillbook-runbook-bootstrap/scripts/report_builder_self_wo
 Publish a real knowledge event after a runbook or skillbook state change:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/publish_knowledge_event.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/publish_knowledge_event.py \
   --ctox-bin "<path-to-ctox>" \
   --system "<source-system>" \
   --events-json "<knowledge_events.json>" \
@@ -110,7 +111,7 @@ python3 skills/system/skillbook-runbook-bootstrap/scripts/publish_knowledge_even
 Enrich a history-derived candidate bundle with explicit execution supplements:
 
 ```sh
-python3 skills/system/skillbook-runbook-bootstrap/scripts/enrich_ticket_history_bundle.py \
+python3 skills/system/knowledge_bootstrap/skillbook-runbook-bootstrap/scripts/enrich_ticket_history_bundle.py \
   --bundle-dir "<candidate-bundle-dir>" \
   --supplements "<execution-supplements.jsonl>" \
   --output-dir "<output-dir>"

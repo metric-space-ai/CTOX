@@ -3,6 +3,7 @@ name: secret-hygiene
 description: Use when CTOX notices or strongly suspects that a user pasted a credential, token, password, or private key into TUI, mail, chat, or ticket context and the secret must be moved into the encrypted secret store and replaced by a stable reference.
 metadata:
   short-description: Vault leaked secrets and rewrite memory references
+cluster: security_access
 ---
 
 # Secret Hygiene

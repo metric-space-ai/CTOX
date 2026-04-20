@@ -1,6 +1,7 @@
 ---
 name: change-lifecycle
 description: Plan and execute controlled admin changes such as patches, config edits, restarts, upgrades, and rollbacks. Use when CTOX must stage a host or service change, compare current versus target config, verify preconditions, prepare rollback, or drive a maintenance-window task from dry run through post-change verification.
+cluster: host_ops
 ---
 
 # Change Lifecycle

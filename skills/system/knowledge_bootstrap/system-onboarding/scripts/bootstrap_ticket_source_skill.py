@@ -68,7 +68,7 @@ def main() -> None:
 
     bootstrap_command = [
         sys.executable,
-        str(REPO_ROOT / "skills/system/dataset-skill-creator/scripts/bootstrap_dataset_skill.py"),
+        str(REPO_ROOT / "skills/system/skill_meta/dataset-skill-creator/scripts/bootstrap_dataset_skill.py"),
         "--input",
         str(export_path),
         "--source-kind",
@@ -106,7 +106,7 @@ def main() -> None:
     run(
         [
             sys.executable,
-            str(REPO_ROOT / "skills/system/dataset-skill-creator/scripts/bench_generated_skill.py"),
+            str(REPO_ROOT / "skills/system/skill_meta/dataset-skill-creator/scripts/bench_generated_skill.py"),
             "--skill-dir",
             str(skill_dir),
             "--model-dir",
@@ -175,7 +175,7 @@ def main() -> None:
         env=ctox_env,
     )
 
-    guide_script = REPO_ROOT / "skills/system/system-onboarding/scripts/upsert_onboarding_guide.py"
+    guide_script = REPO_ROOT / "skills/system/knowledge_bootstrap/system-onboarding/scripts/upsert_onboarding_guide.py"
     if guide_script.exists():
         run(
             [

@@ -103,7 +103,7 @@ def current_state(ctox_bin: str, system: str, env: dict[str, str]) -> dict[str, 
 
 
 def ensure_guide(ctox_bin: str, system: str, env: dict[str, str], publish: bool) -> None:
-    guide_script = REPO_ROOT / "skills/system/system-onboarding/scripts/upsert_onboarding_guide.py"
+    guide_script = REPO_ROOT / "skills/system/knowledge_bootstrap/system-onboarding/scripts/upsert_onboarding_guide.py"
     command = [
         sys.executable,
         str(guide_script),
@@ -368,7 +368,7 @@ def main() -> None:
     if state["active_binding"] is None:
         bootstrap_command = [
             sys.executable,
-            str(REPO_ROOT / "skills/system/system-onboarding/scripts/bootstrap_ticket_source_skill.py"),
+            str(REPO_ROOT / "skills/system/knowledge_bootstrap/system-onboarding/scripts/bootstrap_ticket_source_skill.py"),
             "--system",
             args.system,
             "--skill-name",

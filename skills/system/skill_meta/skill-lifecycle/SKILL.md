@@ -3,6 +3,7 @@ name: skill-lifecycle
 description: Track the lifecycle state of CTOX skills from draft through candidate and promoted use, document why a skill changed state, and keep skill evolution reviewable instead of implicit.
 metadata:
   short-description: Manage skill promotion and deprecation states
+cluster: skill_meta
 ---
 
 # Skill Lifecycle
@@ -50,7 +51,7 @@ This skill exists so that skill growth does not become "some folder changed on d
 Prefer the open helper:
 
 ```sh
-python3 skills/system/skill-lifecycle/scripts/record_skill_lifecycle.py \
+python3 skills/system/skill_meta/skill-lifecycle/scripts/record_skill_lifecycle.py \
   --ledger contracts/history/skill-lifecycle-ledger.md \
   --skill "<skill-name>" \
   --from-state "<old-state>" \

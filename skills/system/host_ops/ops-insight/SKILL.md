@@ -1,6 +1,7 @@
 ---
 name: ops-insight
 description: Condense queue state, plans, schedules, incidents, resource pressure, and change results into operational scorecards and decision briefs. Use when CTOX needs to summarize ongoing operations, highlight risk, rank backlog, or produce evidence-based daily or weekly ops reviews from the existing CTOX substrate and concrete host facts.
+cluster: host_ops
 ---
 
 # Ops Insight

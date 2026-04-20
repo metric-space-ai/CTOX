@@ -3,6 +3,7 @@ name: plan-orchestrator
 description: Use when a task first needs explicit decomposition or revalidation before execution, especially when Codex should produce a compact plan artifact without leaking planning traces into the later execution context.
 metadata:
   short-description: Draft compact CTOX plans without context bleed
+cluster: mission_orchestration
 ---
 
 # Plan Orchestrator

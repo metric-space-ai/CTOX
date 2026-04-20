@@ -1,6 +1,7 @@
 ---
 name: discovery-graph
 description: Build or refresh a concrete infrastructure inventory from real host, network, service, storage, runtime, journal, and repo discovery commands. Use when CTOX needs to inspect a machine or repo, gather raw discovery evidence, translate it into the shared SQLite discovery model, and leave behind explicit entities, relations, evidence, and rerunnable discovery runs instead of ad hoc shell output.
+cluster: knowledge_bootstrap
 ---
 
 # Discovery Graph

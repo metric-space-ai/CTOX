@@ -1,6 +1,7 @@
 ---
 name: secret-management
 description: Classify, generate, reference, and persist service credentials as open helper-driven local secret material plus shared-kernel metadata. Use when CTOX must decide whether a credential is generated, discovered, owner-supplied, or an external reference, and when generated admin access must not be forgotten.
+cluster: security_access
 ---
 
 # Secret Management

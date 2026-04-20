@@ -1,6 +1,7 @@
 ---
 name: dataset-skill-creator
 description: Create a reusable custom skill from a concrete dataset or from dataset-derived analysis artifacts. Use when CTOX should turn a data source into an operational Codex skill with SKILL.md, references, optional scripts/assets, and validation instead of leaving the result as raw knowledge bundles, RAG files, or one-off summaries.
+cluster: skill_meta
 ---
 
 # Dataset Skill Creator
@@ -67,7 +68,7 @@ The generated skill must tell CTOX:
 Generate a new dataset-backed skill from an analysis bundle:
 
 ```bash
-python3 skills/system/dataset-skill-creator/scripts/create_dataset_skill.py \
+python3 skills/system/skill_meta/dataset-skill-creator/scripts/create_dataset_skill.py \
   --skill-name <skill-name> \
   --skill-path <output-root> \
   --archetype <operating-model|lookup-reference|workflow|policy-gate> \
@@ -80,7 +81,7 @@ python3 skills/system/dataset-skill-creator/scripts/create_dataset_skill.py \
 Run the full raw-dataset pipeline when CTOX should first analyze the dataset and then synthesize the skill:
 
 ```bash
-python3 skills/system/dataset-skill-creator/scripts/bootstrap_dataset_skill.py \
+python3 skills/system/skill_meta/dataset-skill-creator/scripts/bootstrap_dataset_skill.py \
   --input <dataset.xlsx|csv|json> \
   --source-kind <ticket-history> \
   --skill-name <skill-name> \

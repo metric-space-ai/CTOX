@@ -3,6 +3,7 @@ name: system-onboarding
 description: Use when CTOX is assigned to any new system (codebase, platform, API, ticket system, database, infrastructure) and must build a knowledge base, skillbooks, runbooks, and operator-visible review tickets through generic primitives.
 metadata:
   short-description: Onboard any system through skill-driven discovery and knowledge building
+cluster: knowledge_bootstrap
 ---
 
 # System Onboarding
@@ -133,7 +134,7 @@ ctox ticket monitoring-ingest --system "<system>" --snapshot-json '<json>'
 Build and activate a desk-specific operating skill when the source has enough history:
 
 ```sh
-python3 skills/system/system-onboarding/scripts/bootstrap_ticket_source_skill.py \
+python3 skills/system/knowledge_bootstrap/system-onboarding/scripts/bootstrap_ticket_source_skill.py \
   --system "<system>" \
   --skill-name "<system>-desk-operator" \
   --dataset-label "<human dataset label>" \
@@ -169,7 +170,7 @@ Create only the items that are supported by observed evidence.
 The default execution path is the deterministic runner:
 
 ```sh
-python3 skills/system/system-onboarding/scripts/run_onboarding_plan.py \
+python3 skills/system/knowledge_bootstrap/system-onboarding/scripts/run_onboarding_plan.py \
   --ctox-bin "<path-to-ctox>" \
   --system "<system>" \
   --env-file "<runtime.env>" \

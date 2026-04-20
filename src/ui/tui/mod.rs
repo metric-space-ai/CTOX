@@ -782,6 +782,7 @@ struct SkillCatalogEntry {
     name: String,
     class: SkillClass,
     state: SkillState,
+    cluster: String,
     skill_path: PathBuf,
     description: String,
     helper_tools: Vec<String>,
@@ -3307,6 +3308,7 @@ impl App {
 }
 
 fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
+    let _ = crate::skill_store::bootstrap_embedded_system_skills(root);
     let _ = crate::skill_store::bootstrap_from_roots(root);
     let mut catalog = crate::skill_store::list_skill_bundles(root)
         .unwrap_or_default()
@@ -3325,6 +3327,7 @@ fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
                 name: bundle.skill_name,
                 class: skill_class_from_store(&bundle.class),
                 state: skill_state_from_store(&bundle.state),
+                cluster: bundle.cluster,
                 skill_path: bundle
                     .source_path
                     .as_deref()
@@ -3340,6 +3343,7 @@ fn load_skill_catalog(root: &Path) -> Vec<SkillCatalogEntry> {
         left.class
             .rank()
             .cmp(&right.class.rank())
+            .then(left.cluster.cmp(&right.cluster))
             .then(left.name.cmp(&right.name))
             .then(left.skill_path.cmp(&right.skill_path))
     });

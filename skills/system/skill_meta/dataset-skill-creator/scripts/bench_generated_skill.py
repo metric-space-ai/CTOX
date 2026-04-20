@@ -60,7 +60,7 @@ def build_case_query(title: str, request: str) -> str:
 def load_family_rows(input_path: Path, min_family_size: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     module = load_module(
         "ticket_operating_model_build",
-        REPO_ROOT / "skills/system/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py",
+        REPO_ROOT / "skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/build_ticket_operating_model.py",
     )
     _sheet_name, rows = module.load_rows(input_path)
     headers = rows[0].values.keys()
@@ -107,7 +107,7 @@ def load_family_rows(input_path: Path, min_family_size: int) -> tuple[list[dict[
 def query_family(model_dir: Path, query: str) -> dict[str, Any]:
     command = [
         sys.executable,
-        str(REPO_ROOT / "skills/system/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py"),
+        str(REPO_ROOT / "skills/system/knowledge_bootstrap/ticket-operating-model-bootstrap/scripts/query_ticket_operating_model.py"),
         "--model-dir",
         str(model_dir),
         "--query",

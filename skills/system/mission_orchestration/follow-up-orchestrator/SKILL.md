@@ -3,6 +3,7 @@ name: follow-up-orchestrator
 description: Use at the end of a meaningful multi-step turn to decide whether the work is actually complete, blocked, needs replanning, or should produce a concrete follow-up task proposal.
 metadata:
   short-description: Evaluate completion and propose follow-up work
+cluster: mission_orchestration
 ---
 
 # Follow-up Orchestrator

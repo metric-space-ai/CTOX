@@ -1,6 +1,7 @@
 ---
 name: incident-response
 description: Triage active incidents from alerts or failures into explicit hypotheses, mitigations, evidence, and next actions. Use when CTOX must react to outages, latency spikes, bad deploys, disk pressure, failing jobs, or repeated alert clusters and keep a crisp incident timeline grounded in concrete system state.
+cluster: host_ops
 ---
 
 # Incident Response

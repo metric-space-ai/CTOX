@@ -1,6 +1,7 @@
 ---
 name: canonical-delivery-template
 description: Canonical template and escalation policy for CTOX delivery skills. Use when creating or refining install, provisioning, configuration, migration, and secret-handling skills so they stay compatible with the shared SQLite evidence kernel and the operator-facing completion contract.
+cluster: skill_meta
 ---
 
 # Canonical Delivery Template

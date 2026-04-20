@@ -13,7 +13,7 @@ Do **not** rely on grep/memory/assumptions about what a given subsystem is suppo
 
 ## Operator Guardrails (hard rules)
 
-- **No compilation on the operator machine.** Never invoke `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo run`, `cargo fmt`, or anything that walks the target/ tree. This applies even to "just a quick sanity check" — the operator machine is not a build host. All build/test validation goes through the GitHub Actions CI/CD pipeline (`.github/workflows/ci.yml`, `.github/workflows/release.yml`). Triggering a release: push a tag `vX.Y.Z` on `main`. Inspect runs with `gh run list` / `gh run view`.
+- **Local builds are allowed.** `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo run`, and `cargo fmt` may be run on the operator machine for verification. Releases still go through the GitHub Actions pipeline (`.github/workflows/ci.yml`, `.github/workflows/release.yml`); trigger a release by pushing a tag `vX.Y.Z` on `main`. Inspect runs with `gh run list` / `gh run view`.
 - **No unsolicited branches or worktrees.** Work directly on `main` in the origin checkout. Do not create `claude/*` branches or `.claude/worktrees/*` directories without an explicit request. The existing intended workflow is commit-to-main + push; branches are only for explicitly-requested PRs.
 - **No global env-var controls for runtime state.** Runtime configuration belongs in typed `AppConfig` and CTOX's persisted SQLite runtime store via `runtime_env::env_or_config(root, ...)`. Do not add new process-environment toggles for production behavior. Tests that need host-state overrides must write to the test root's SQLite runtime config, not `std::env::set_var`.
 

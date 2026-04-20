@@ -1,6 +1,7 @@
 ---
 name: canonical-ops-template
 description: Canonical template and refinement policy for CTOX operational system skills. Use when creating, updating, or refining the shared ops skill family so discovery, reliability, incident, change, security, recovery, automation, and insight remain compatible through one SQLite evidence kernel, open helper resources, and consistent escalation boundaries.
+cluster: skill_meta
 ---
 
 # Canonical Ops Template

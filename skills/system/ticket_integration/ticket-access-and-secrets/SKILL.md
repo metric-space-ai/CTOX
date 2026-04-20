@@ -3,6 +3,7 @@ name: ticket-access-and-secrets
 description: Use when CTOX needs credentials, access rights, or approval boundaries for ticket work and must handle them through encrypted local storage plus explicit access requests.
 metadata:
   short-description: Request rights and store secrets safely for ticket work
+cluster: ticket_integration
 ---
 
 # Ticket Access And Secrets

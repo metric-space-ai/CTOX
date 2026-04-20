@@ -1,6 +1,7 @@
 ---
 name: universal-scraping
 description: Plan, build, revise, schedule, and operate reusable scraping workflows when CTOX must extract structured data from websites, APIs, feeds, documents, or browser-backed portals without reinventing the storage, script, and run-management model each time.
+cluster: communication
 ---
 
 # Universal Scraping
@@ -28,7 +29,7 @@ Target-specific generated scripts and run artifacts belong under `runtime/`, wit
 
 This skill uses a hybrid model:
 
-1. repo-managed skill resources under `skills/system/universal-scraping/`
+1. repo-managed skill resources under `skills/system/communication/universal-scraping/`
 2. mutable target workspaces under `runtime/scraping/targets/<target_key>/`
 3. mutable registry state in `runtime/ctox_scraping.db`
 4. optional compact evidence in the shared SQLite kernel with `skill_key=universal_scraping`

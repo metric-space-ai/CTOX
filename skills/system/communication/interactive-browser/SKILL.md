@@ -3,6 +3,7 @@ name: interactive-browser
 description: Use a real browser through js_repl-backed Playwright when CTOX needs live DOM state, client-side JavaScript execution, auth/session behavior, screenshots, or true UI interaction instead of search, source reading, or durable scraping.
 metadata:
   short-description: Real browser interaction through js_repl and Playwright
+cluster: communication
 ---
 
 # Interactive Browser

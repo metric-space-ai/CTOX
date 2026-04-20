@@ -864,10 +864,18 @@ fn skill_list_items(app: &App, width: usize, max_rows: usize) -> Vec<ListItem<'s
         .into_iter()
         .filter_map(|index| app.skill_catalog.get(index).map(|entry| (index, entry)))
         .map(|(index, entry)| {
+            // For clustered system skills the second column is the cluster name
+            // (more informative than "CTOX Core" repeated 39 times). For
+            // non-system entries we fall back to the class label.
+            let secondary = if entry.cluster.is_empty() {
+                entry.class.label().to_string()
+            } else {
+                entry.cluster.clone()
+            };
             let row = format!(
                 "{:18} {}",
                 truncate_line(&entry.name, 18),
-                truncate_line(entry.class.label(), width.saturating_sub(20))
+                truncate_line(&secondary, width.saturating_sub(20))
             );
             let base_style = Style::default().fg(skill_class_color(entry.class.label()));
             if index == app.skills_selected {
@@ -905,7 +913,7 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
     let Some(entry) = app.skill_catalog.get(app.skills_selected) else {
         return vec![Line::from("No skills found.")];
     };
-    lines.push(Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             entry.name.clone(),
             Style::default()
@@ -917,7 +925,15 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
             entry.class.label(),
             Style::default().fg(skill_class_color(entry.class.label())),
         ),
-    ]));
+    ];
+    if !entry.cluster.is_empty() {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            format!("[{}]", entry.cluster),
+            Style::default().fg(Color::LightCyan),
+        ));
+    }
+    lines.push(Line::from(header_spans));
     lines.push(Line::from(format!(
         "path {}",
         truncate_line(&entry.skill_path.to_string_lossy(), width.saturating_sub(5))
@@ -3784,6 +3800,7 @@ mod tests {
             name: "service-deployment".to_string(),
             class: super::super::SkillClass::CtoxCore,
             state: super::super::SkillState::Stable,
+            cluster: "host_ops".to_string(),
             skill_path: PathBuf::from("/tmp/service-deployment/SKILL.md"),
             description: "Use when CTOX needs to install, configure, start and verify software."
                 .to_string(),
@@ -3812,6 +3829,7 @@ mod tests {
                 name: format!("skill-{index:02}"),
                 class: super::super::SkillClass::InstalledPacks,
                 state: super::super::SkillState::Stable,
+                cluster: String::new(),
                 skill_path: PathBuf::from(format!("/tmp/skill-{index:02}/SKILL.md")),
                 description: format!("Description for skill-{index:02}."),
                 helper_tools: vec![],

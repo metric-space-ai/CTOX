@@ -3,6 +3,7 @@ name: self-improving-review
 description: Use after CTOX creates, edits, or refines skills, helpers, or skill contracts and needs to verify that the self-optimization actually worked, document the learning, and report the successful improvement to the owner.
 metadata:
   short-description: Review successful skill self-improvement before reporting it
+cluster: skill_meta
 ---
 
 # Self-Improving Review
@@ -66,7 +67,7 @@ Gather these before concluding the review:
 Prefer the open helper:
 
 ```sh
-python3 skills/system/self-improving-review/scripts/record_skill_review.py \
+python3 skills/system/skill_meta/self-improving-review/scripts/record_skill_review.py \
   --ledger contracts/history/skill-improvement-ledger.md \
   --status successful \
   --summary "<what changed>" \

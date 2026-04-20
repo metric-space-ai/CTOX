@@ -1,6 +1,7 @@
 ---
 name: acceptance-verification
 description: Prove that a deployed service is actually usable, not merely running, by checking layered acceptance gates such as process, listener, HTTP, authenticated admin/API access, safe mutating smoke checks, and persistence. Use when CTOX must decide whether a deployment truly passed or still needs repair.
+cluster: host_ops
 ---
 
 # Acceptance Verification

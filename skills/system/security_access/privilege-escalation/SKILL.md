@@ -1,6 +1,7 @@
 ---
 name: privilege-escalation
 description: Use when CTOX must perform a local privileged action through a visible sudo path backed by a local secret reference. This skill exists so root-level work is explicit, inspectable, and bounded instead of silently failing on interactive sudo prompts.
+cluster: security_access
 ---
 
 # Privilege Escalation

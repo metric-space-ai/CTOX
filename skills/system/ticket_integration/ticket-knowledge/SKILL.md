@@ -3,6 +3,7 @@ name: ticket-knowledge
 description: Use when Codex is handling ticket work and must load or inspect the SQLite-backed ticket knowledge plane before any operational action.
 metadata:
   short-description: Load and inspect ticket knowledge before ticket handling
+cluster: ticket_integration
 ---
 
 # Ticket Knowledge

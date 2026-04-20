@@ -3,6 +3,7 @@ name: owner-communication
 description: Use when CTOX needs to communicate with the owner through TUI, email, or Jami, choose the correct communication path, continue an existing owner thread, or decide how proactive outbound owner contact should work.
 metadata:
   short-description: Route owner communication across TUI, email, and Jami
+cluster: communication
 ---
 
 # Owner Communication

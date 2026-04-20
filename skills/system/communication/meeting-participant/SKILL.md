@@ -3,6 +3,7 @@ name: meeting-participant
 description: Use when CTOX is mentioned in a live meeting chat (@CTOX), when processing a post-meeting transcript, or when a scheduled meeting task fires. This skill governs how the agent participates in meetings, responds to live questions, and extracts actionable knowledge from meeting content.
 metadata:
   short-description: Live meeting participation and transcript processing
+cluster: communication
 ---
 
 # Meeting Participant

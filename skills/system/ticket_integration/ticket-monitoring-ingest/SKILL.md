@@ -3,6 +3,7 @@ name: ticket-monitoring-ingest
 description: Use when CTOX can learn service, process, or infrastructure reality from monitoring systems and should project that evidence into the ticket knowledge plane.
 metadata:
   short-description: Ingest monitoring evidence into ticket knowledge
+cluster: ticket_integration
 ---
 
 # Ticket Monitoring Ingest

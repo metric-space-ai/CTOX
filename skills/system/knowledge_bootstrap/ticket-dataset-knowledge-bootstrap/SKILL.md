@@ -3,6 +3,7 @@ name: ticket-dataset-knowledge-bootstrap
 description: Build a real ticket knowledge base from a large ticket export or record list by deriving a source profile, promoted taxonomies, representative examples, and reusable projections instead of stopping at counts or flat summaries.
 metadata:
   short-description: Build a reusable ticket knowledge base from a ticket dataset
+cluster: knowledge_bootstrap
 ---
 
 # Ticket Dataset Knowledge Bootstrap
@@ -74,7 +75,7 @@ If the host or batch runner cannot sustain long mixed embedding-plus-LLM jobs, r
 Run the bundled script:
 
 ```bash
-python3 skills/system/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py \
+python3 skills/system/knowledge_bootstrap/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py \
   --input-xlsx <path> \
   --output-dir <dir> \
   --embedding-provider sentence-transformers \
@@ -92,7 +93,7 @@ If the dataset is too large for one semantic pass, limit semantic clustering thr
 Host-constrained staged exemplar:
 
 ```bash
-python3 skills/system/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py \
+python3 skills/system/knowledge_bootstrap/ticket-dataset-knowledge-bootstrap/scripts/build_ticket_dataset_knowledgebase.py \
   --input-xlsx <path> \
   --output-dir <dir> \
   --embedding-provider sentence-transformers \

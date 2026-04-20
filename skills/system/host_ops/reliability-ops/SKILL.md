@@ -1,6 +1,7 @@
 ---
 name: reliability-ops
 description: Evaluate live service health, anomalies, capacity pressure, and host resource behavior using concrete observability commands and logs. Use when services are slow, failing, resource-bound, or need recurring health review, including CPU, memory, disk, network, or GPU investigation with htop, btop, top, vmstat, iostat, ss, journalctl, nvidia-smi, and service-specific checks.
+cluster: host_ops
 ---
 
 # Reliability Ops

@@ -3,6 +3,7 @@ name: tabular-knowledge-bootstrap
 description: Build reusable knowledge from tabular or record-shaped source systems such as ticket exports, CMDB tables, monitoring inventories, CSV/XLSX sheets, SQL query results, or JSON arrays by first normalizing them into the shared SQLite discovery kernel and only then projecting them into domain-specific knowledge planes.
 metadata:
   short-description: Normalize tabular source systems into reusable discovery knowledge
+cluster: knowledge_bootstrap
 ---
 
 # Tabular Knowledge Bootstrap

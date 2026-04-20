@@ -1,6 +1,7 @@
 ---
 name: queue-cleanup
 description: Use when the CTOX service queue is under pressure, duplicate scheduled work is piling up, pending prompts are growing too fast, or CTOX risks blocking itself behind repeated queue or scheduler work. This skill investigates queue pressure, pauses flooding schedules when needed, deduplicates future work, and restores a stable queue before normal execution resumes.
+cluster: mission_orchestration
 ---
 
 # Queue Cleanup
