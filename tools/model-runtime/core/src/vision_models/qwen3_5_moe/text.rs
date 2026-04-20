@@ -804,6 +804,20 @@ pub struct Qwen3_5MoeTextModel {
     pub(super) device: Device,
     pub(super) dtype: DType,
     pub(super) max_seq_len: usize,
+    /// Opt-in CUDA graph replay for the decode hot-path. Constructed
+    /// lazily on the first decode step (batch=1, seq_len=1) when
+    /// `ENGINE_DECODE_GRAPH=1` is set; stays `None` otherwise.
+    ///
+    /// Once captured, every subsequent decode step skips candle's
+    /// per-op kernel launches and replays the whole forward as one
+    /// graph launch — the single biggest decode speedup left on the
+    /// table for this model (est. +40-80 tok/s on A6000).
+    ///
+    /// Guarded by `std::sync::Mutex` because the field lives behind
+    /// an `&self` forward call but the graph state mutates on
+    /// first-capture.
+    #[cfg(feature = "cuda")]
+    decode_graph: std::sync::Mutex<Option<crate::cuda::decode_graph::DecodeGraph>>,
 }
 
 impl Qwen3_5MoeTextModel {
@@ -1051,6 +1065,8 @@ impl Qwen3_5MoeTextModel {
             device: normal_loading_metadata.real_device.clone(),
             dtype: vb.dtype(),
             mapper,
+            #[cfg(feature = "cuda")]
+            decode_graph: std::sync::Mutex::new(None),
         })
     }
 
@@ -1058,8 +1074,80 @@ impl Qwen3_5MoeTextModel {
         self.embed_tokens.forward(input_ids)
     }
 
+    /// Outer `forward_embeds` — thin wrapper that routes through a
+    /// CUDA-graph replay when `ENGINE_DECODE_GRAPH=1` and the call is
+    /// a decode step (batch=1, seq_len=1, CUDA device). All the real
+    /// work is in `forward_embeds_inner`.
+    ///
+    /// **Status**: scaffolding only. The current implementation runs
+    /// eagerly in all cases — the `DecodeGraph::run` closure calls
+    /// the existing forward unchanged. To get the real speedup, the
+    /// TODO items in `DecodeGraph`'s module doc need to be addressed
+    /// (persistent input/output buffers, eliminating any remaining
+    /// D→H syncs inside `forward_embeds_inner`). Shipping this
+    /// wrapper now so the integration point is fixed and the next
+    /// session can enable the flag without touching the forward API.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_embeds(
+        &self,
+        xs: Tensor,
+        attention_mask: Option<&Tensor>,
+        position_ids: &Tensor,
+        _seqlen_offsets: &[usize],
+        context_lens: Vec<(usize, usize)>,
+        metadata: Option<(Vec<(Tensor, Tensor)>, &PagedAttentionInputMetadata)>,
+        flash_params: &FlashParams,
+        visual_pos_masks: Option<&Tensor>,
+        deepstack_visual_embeds: Option<&[Tensor]>,
+    ) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        {
+            let dims = xs.dims();
+            let is_decode_step = dims.len() >= 2
+                && dims[0] == 1
+                && dims[1] == 1
+                && xs.device().is_cuda()
+                && crate::cuda::decode_graph::enabled_by_env();
+            if is_decode_step {
+                let mut graph_guard = self.decode_graph.lock().unwrap();
+                let graph = graph_guard.get_or_insert_with(|| {
+                    crate::cuda::decode_graph::DecodeGraph::new(
+                        xs.device()
+                            .as_cuda_device()
+                            .expect("is_cuda gate; device must be CUDA"),
+                        /*min_warmups=*/ 2,
+                    )
+                });
+                return graph.run(|| {
+                    self.forward_embeds_inner(
+                        xs.clone(),
+                        attention_mask,
+                        position_ids,
+                        _seqlen_offsets,
+                        context_lens.clone(),
+                        metadata.as_ref().map(|(v, m)| (v.clone(), *m)),
+                        flash_params,
+                        visual_pos_masks,
+                        deepstack_visual_embeds,
+                    )
+                });
+            }
+        }
+        self.forward_embeds_inner(
+            xs,
+            attention_mask,
+            position_ids,
+            _seqlen_offsets,
+            context_lens,
+            metadata,
+            flash_params,
+            visual_pos_masks,
+            deepstack_visual_embeds,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_embeds_inner(
         &self,
         mut xs: Tensor,
         attention_mask: Option<&Tensor>,

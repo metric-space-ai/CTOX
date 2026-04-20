@@ -1,3 +1,4 @@
+pub mod decode_graph;
 pub mod ffi;
 pub mod gdn;
 pub mod moe;
