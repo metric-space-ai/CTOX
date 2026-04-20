@@ -43,6 +43,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod driver;
 pub mod model;
 pub mod qwen35_target;
 pub mod ring;
@@ -52,6 +53,7 @@ pub mod target;
 
 pub use capture::FeatureCapture;
 pub use config::DFlashDraftConfig;
+pub use driver::{decode_step, prefill, run_greedy, GreedyRunOutcome};
 pub use model::DFlashDraftModel;
 pub use qwen35_target::Qwen35DFlashTarget;
 pub use ring::{TargetFeatureRing, DEFAULT_RING_CAP};
