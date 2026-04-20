@@ -362,4 +362,22 @@ extern "C" {
         dtype: i32,
         stream: i64,
     );
+    pub(crate) fn moe_weighted_sum_bf16(
+        ys: *const c_void,
+        topk_weights: *const c_void,
+        out: *mut c_void,
+        num_tokens: i32,
+        topk: i32,
+        hidden_dim: i32,
+        stream: i64,
+    );
+    pub(crate) fn moe_weighted_sum_f16(
+        ys: *const c_void,
+        topk_weights: *const c_void,
+        out: *mut c_void,
+        num_tokens: i32,
+        topk: i32,
+        hidden_dim: i32,
+        stream: i64,
+    );
 }

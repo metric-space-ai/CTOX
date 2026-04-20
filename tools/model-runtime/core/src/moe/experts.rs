@@ -1207,7 +1207,6 @@ impl MoEExperts {
                 .reshape((num_tokens, self.num_experts_per_tok, hidden_dim))?
         };
 
-        let topk_weights = topk_weights.unsqueeze(D::Minus1)?;
         if !ys.device().same_device(topk_weights.device()) {
             candle_core::bail!(
                 "moe fast routing mul device mismatch: ys={:?} topk_weights={:?}",
@@ -1215,6 +1214,24 @@ impl MoEExperts {
                 topk_weights.device().location()
             );
         }
+
+        // Fused reduction: cast-to-f32 + topk-weight broadcast-mul + sum
+        // over topk axis + cast-back. One CUDA kernel replaces the four
+        // candle ops the naive path would issue. Shapes at call time:
+        //   ys           : (num_tokens, topk, hidden_dim)
+        //   topk_weights : (num_tokens, topk)                <- pre-unsqueeze
+        //   out          : (num_tokens, hidden_dim)
+        #[cfg(feature = "cuda")]
+        if ys.device().is_cuda()
+            && matches!(ys.dtype(), DType::BF16 | DType::F16)
+            && !std::env::var("ENGINE_DISABLE_MOE_REDUCE_CUDA")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false)
+        {
+            return crate::cuda::moe_reduce::moe_weighted_sum_cuda(&ys, topk_weights);
+        }
+
+        let topk_weights = topk_weights.unsqueeze(D::Minus1)?;
         ys.to_dtype(DType::F32)?
             .broadcast_mul(&topk_weights)?
             .sum(D::Minus2)?
