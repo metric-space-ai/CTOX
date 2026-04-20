@@ -1228,7 +1228,7 @@ impl MoEExperts {
                 .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
                 .unwrap_or(false)
         {
-            return crate::cuda::moe_reduce::moe_weighted_sum_cuda(&ys, topk_weights);
+            return crate::cuda::moe_reduce::moe_weighted_sum_cuda(&ys, &topk_weights);
         }
 
         let topk_weights = topk_weights.unsqueeze(D::Minus1)?;

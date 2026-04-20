@@ -594,19 +594,61 @@ impl SparseMoeBlock {
         }
 
         let router_logits = self.gate.forward(&xs_flat)?;
-        let routing_weights =
-            candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
 
-        let topk_ids = routing_weights
-            .arg_sort_last_dim(false)?
-            .narrow(D::Minus1, 0, self.num_experts_per_tok)?
-            .contiguous()?;
+        // Fused softmax + top-k + normalize in a single CUDA kernel when
+        // available. Replaces the 6-op candle chain
+        //   softmax -> arg_sort -> narrow -> contiguous -> gather -> div
+        // which otherwise spawns 6 kernel launches per MoE layer (240/token
+        // on a 40-layer Qwen3.6). Falls back to the pure-candle path for
+        // non-CUDA devices or for num_experts outside the kernel's
+        // compile-time specializations (64/128/256).
+        #[cfg(feature = "cuda")]
+        let (topk_ids, topk_weights) = {
+            let num_experts = router_logits.dim(candle_core::D::Minus1)?;
+            let disable = std::env::var("ENGINE_DISABLE_MOE_ROUTER_CUDA")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            let kernel_supports = matches!(num_experts, 64 | 128 | 256)
+                && self.num_experts_per_tok <= 16
+                && router_logits.device().is_cuda()
+                && matches!(router_logits.dtype(), DType::BF16 | DType::F16);
+            if !disable && kernel_supports {
+                crate::cuda::moe_router::moe_router_cuda(
+                    &router_logits,
+                    self.num_experts_per_tok,
+                    self.norm_topk_prob,
+                )?
+            } else {
+                let routing_weights =
+                    candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
+                let topk_ids = routing_weights
+                    .arg_sort_last_dim(false)?
+                    .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+                    .contiguous()?;
+                let mut topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
+                if self.norm_topk_prob {
+                    topk_weights =
+                        topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
+                }
+                (topk_ids, topk_weights)
+            }
+        };
 
-        let mut topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
-
-        if self.norm_topk_prob {
-            topk_weights = topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
-        }
+        #[cfg(not(feature = "cuda"))]
+        let (topk_ids, topk_weights) = {
+            let routing_weights =
+                candle_nn::ops::softmax_last_dim(&router_logits.to_dtype(DType::F32)?)?;
+            let topk_ids = routing_weights
+                .arg_sort_last_dim(false)?
+                .narrow(D::Minus1, 0, self.num_experts_per_tok)?
+                .contiguous()?;
+            let mut topk_weights = routing_weights.gather(&topk_ids, D::Minus1)?;
+            if self.norm_topk_prob {
+                topk_weights =
+                    topk_weights.broadcast_div(&topk_weights.sum_keepdim(D::Minus1)?)?;
+            }
+            (topk_ids, topk_weights)
+        };
 
         let mut y = self
             .experts
