@@ -1,10 +1,14 @@
 use std::collections::HashMap;
 
 use candle_core::backend::BackendStorage;
+#[cfg(feature = "cuda")]
 use candle_core::cuda::cudarc::driver::{result, DevicePtr};
 use candle_core::{DType, Device, Result, Storage, Tensor};
 #[allow(unused_imports)]
-use engine_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache, turbo_rotate};
+use engine_paged_attn::{kv_scale_update, paged_attention, reshape_and_cache};
+#[cfg(feature = "cuda")]
+#[allow(unused_imports)]
+use engine_paged_attn::turbo_rotate;
 
 const KV_SCALE_UPDATE_ITERATION: i32 = 128;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -1629,6 +1633,7 @@ fn rotate_turbo3_tensor(t: &Tensor, forward: bool) -> Result<Tensor> {
     } else {
         t.clone()
     };
+    #[cfg(feature = "cuda")]
     if layout_aligned.device().is_cuda() {
         let rotated = turbo_rotate(&layout_aligned, forward)?;
         return if t.shape().dims().len() == 4 {
@@ -1819,6 +1824,7 @@ fn tensor_to_u32_2d(t: &Tensor) -> Result<Vec<Vec<u32>>> {
     }
 }
 
+#[cfg(feature = "cuda")]
 fn read_cuda_block_u8(t: &Tensor, block_number: usize, block_bytes: usize) -> Result<Vec<u8>> {
     let (storage, layout) = t.storage_and_layout();
     let storage = match &*storage {
@@ -1833,6 +1839,12 @@ fn read_cuda_block_u8(t: &Tensor, block_number: usize, block_bytes: usize) -> Re
     Ok(host)
 }
 
+#[cfg(not(feature = "cuda"))]
+fn read_cuda_block_u8(_t: &Tensor, _block_number: usize, _block_bytes: usize) -> Result<Vec<u8>> {
+    candle_core::bail!("turboquant paged-KV helpers are CUDA-only; build with --features cuda");
+}
+
+#[cfg(feature = "cuda")]
 fn write_cuda_block_u8(t: &Tensor, block_number: usize, data: &[u8]) -> Result<()> {
     use candle_core::cuda_backend::WrapErr;
 
@@ -1848,6 +1860,11 @@ fn write_cuda_block_u8(t: &Tensor, block_number: usize, data: &[u8]) -> Result<(
     let (dst_ptr, _guard) = view.device_ptr(&stream);
     unsafe { result::memcpy_htod_async(dst_ptr, data, stream.cu_stream()) }.w()?;
     Ok(())
+}
+
+#[cfg(not(feature = "cuda"))]
+fn write_cuda_block_u8(_t: &Tensor, _block_number: usize, _data: &[u8]) -> Result<()> {
+    candle_core::bail!("turboquant paged-KV helpers are CUDA-only; build with --features cuda");
 }
 
 #[cfg(test)]

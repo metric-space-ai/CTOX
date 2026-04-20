@@ -1085,6 +1085,29 @@ impl ModelConfigLike for Gemma4ModelConfigLike {
             .sum();
         total / num_layers
     }
+
+    /// Gemma 4 E-variants mix sliding (head_dim=256) and full (head_dim=512)
+    /// attention, so a single global preallocated cache shape is unsafe. Return
+    /// `true` only when every layer in the model truly shares the same KV
+    /// geometry.
+    fn has_uniform_kv_geometry(&self) -> bool {
+        let first_k = self.per_layer_k_head_dim.first().copied();
+        let first_v = self.per_layer_v_head_dim.first().copied();
+        let first_kv = self.per_layer_num_kv_heads.first().copied();
+        let k_uniform = self
+            .per_layer_k_head_dim
+            .iter()
+            .all(|d| Some(*d) == first_k);
+        let v_uniform = self
+            .per_layer_v_head_dim
+            .iter()
+            .all(|d| Some(*d) == first_v);
+        let kv_uniform = self
+            .per_layer_num_kv_heads
+            .iter()
+            .all(|d| Some(*d) == first_kv);
+        k_uniform && v_uniform && kv_uniform
+    }
 }
 
 #[allow(dead_code)]

@@ -585,6 +585,19 @@ impl QuantizedSerde for GgufMatMul {
 }
 
 impl GgufMatMul {
+    /// Return the underlying `Arc<QTensor>` that this `GgufMatMul` wraps,
+    /// if the weight is a quantized tensor (not a dense BF16/F16 fallback).
+    /// Used by [`stack_gguf_experts`] to build an `(n_experts, out, in)`
+    /// stacked tensor out of per-expert caches at MoE load time, so the
+    /// forward path can dispatch through a single grouped-GEMM kernel
+    /// instead of N per-expert matmul launches.
+    pub fn qtensor_arc(&self) -> Option<Arc<QTensor>> {
+        match &self.w {
+            QMatMul::QTensor(q) => Some(q.clone()),
+            _ => None,
+        }
+    }
+
     pub fn get_isq_type_from_uqff(data: Cow<[u8]>) -> Result<IsqType> {
         let mut buffer = Cursor::new(data);
 
@@ -628,4 +641,149 @@ impl GgufMatMul {
 
         IsqType::try_from(dtype)
     }
+}
+
+/// Stack `num_experts` per-expert [`GgufMatMul`] arcs into a single
+/// [`GgufMatMul`] whose backing [`QTensor`] has shape
+/// `(num_experts, out_features, in_features)`. Enables the candle
+/// `qmatmul_indexed_moe_forward` grouped-GEMM CUDA kernel to dispatch
+/// all top-k experts in one launch — eliminating the per-expert matmul
+/// loop that otherwise caps MoE decode throughput for per-expert
+/// backends.
+///
+/// All inputs must be GGUF-backed quantized tensors (ISQ output), all
+/// on the same device, all sharing the same Q-dtype and per-expert
+/// shape. Bias is unsupported in the stacked form (the MoE forward
+/// path never uses it).
+///
+/// Concatenation works at the raw block-byte level: the Q-format's
+/// block layout is row-major within each expert, and experts are
+/// concatenated along a new leading axis — no unpacking, no
+/// re-quantization, so no accuracy loss.
+pub fn stack_gguf_experts(
+    experts: &[Arc<dyn QuantMethod>],
+    target_device: &Device,
+) -> Result<Arc<dyn QuantMethod>> {
+    if experts.is_empty() {
+        candle_core::bail!("stack_gguf_experts: experts vec is empty");
+    }
+    // `QuantMethod` isn't `Any`, so we can't downcast the trait object.
+    // Instead we go through `QuantizedSerde::serialize` which produces a
+    // UQFF-versioned byte stream that embeds the raw Q-block bytes along
+    // with shape + dtype. Parsing is ~20 lines, stable across crate
+    // versions (the header format is pinned by `UQFF_VERSION`), and
+    // avoids any assumptions about the concrete `QuantMethod` type.
+    let mut per_expert_w: Vec<Vec<u8>> = Vec::with_capacity(experts.len());
+    let mut first_dtype: Option<GgmlDType> = None;
+    let mut first_shape: Option<Vec<usize>> = None;
+    for (i, e) in experts.iter().enumerate() {
+        if e.name() != "gguf" {
+            candle_core::bail!(
+                "stack_gguf_experts: expert[{i}] backend is `{}`, expected `gguf`",
+                e.name()
+            );
+        }
+        let bytes = e.serialize().map_err(|err| {
+            candle_core::Error::msg(format!("stack_gguf_experts: serialize[{i}] failed: {err}"))
+        })?;
+        let mut cur = std::io::Cursor::new(bytes.as_ref());
+        // version (u32) + type (u8) + w_len (u32) + has_bias (u8)
+        // + dtype (u32) + shape_len (u32) + dims (u32 each) + w bytes
+        let _version = cur.read_u32::<LittleEndian>()?;
+        let type_tag = {
+            let mut b = [0u8; 1];
+            cur.read_exact(&mut b)?;
+            b[0]
+        };
+        if type_tag != QuantizedSerdeType::Gguf as u8 {
+            candle_core::bail!(
+                "stack_gguf_experts: expert[{i}] type tag {} != Gguf",
+                type_tag
+            );
+        }
+        let w_len = cur.read_u32::<LittleEndian>()? as usize;
+        let _has_bias = {
+            let mut b = [0u8; 1];
+            cur.read_exact(&mut b)?;
+            b[0]
+        };
+        let dtype_u = cur.read_u32::<LittleEndian>()?;
+        let dtype = match dtype_u {
+            0 => GgmlDType::F32,
+            1 => GgmlDType::F16,
+            2 => GgmlDType::Q4_0,
+            3 => GgmlDType::Q4_1,
+            6 => GgmlDType::Q5_0,
+            7 => GgmlDType::Q5_1,
+            8 => GgmlDType::Q8_0,
+            9 => GgmlDType::Q8_1,
+            10 => GgmlDType::Q2K,
+            11 => GgmlDType::Q3K,
+            12 => GgmlDType::Q4K,
+            13 => GgmlDType::Q5K,
+            14 => GgmlDType::Q6K,
+            15 => GgmlDType::Q8K,
+            30 => GgmlDType::BF16,
+            other => candle_core::bail!("stack_gguf_experts: unknown dtype tag {other}"),
+        };
+        let shape_len = cur.read_u32::<LittleEndian>()? as usize;
+        let mut shape = Vec::with_capacity(shape_len);
+        for _ in 0..shape_len {
+            shape.push(cur.read_u32::<LittleEndian>()? as usize);
+        }
+        // Now cursor is at the start of the raw W bytes.
+        let offset = cur.position() as usize;
+        let w_slice = &bytes[offset..offset + w_len];
+        if let Some(fs) = &first_shape {
+            if fs != &shape {
+                candle_core::bail!(
+                    "stack_gguf_experts: shape mismatch expert[{i}]={:?} != expert[0]={:?}",
+                    shape,
+                    fs
+                );
+            }
+            if first_dtype != Some(dtype) {
+                candle_core::bail!(
+                    "stack_gguf_experts: dtype mismatch expert[{i}]={:?} != expert[0]={:?}",
+                    dtype,
+                    first_dtype
+                );
+            }
+        } else {
+            first_shape = Some(shape);
+            first_dtype = Some(dtype);
+        }
+        per_expert_w.push(w_slice.to_vec());
+    }
+
+    let first_shape = first_shape.unwrap();
+    let first_dtype = first_dtype.unwrap();
+    if first_shape.len() != 2 {
+        candle_core::bail!(
+            "stack_gguf_experts: expected per-expert rank-2 QTensor, got shape {:?}",
+            first_shape
+        );
+    }
+
+    // Concatenate block-packed W bytes. Block layout is row-major per
+    // expert, so prepending a leading expert axis just lays out experts
+    // back-to-back — which is exactly what a stacked rank-3 QTensor
+    // expects, and what `qmatmul_indexed_moe_forward` consumes.
+    let total_bytes: usize = per_expert_w.iter().map(|v| v.len()).sum();
+    let mut stacked_bytes = Vec::with_capacity(total_bytes);
+    for w in &per_expert_w {
+        stacked_bytes.extend_from_slice(w);
+    }
+
+    let stacked_shape: Vec<usize> = std::iter::once(experts.len())
+        .chain(first_shape.iter().copied())
+        .collect();
+
+    let storage = QStorage::from_data(Cow::Owned(stacked_bytes), target_device, first_dtype)?;
+    let q_weight = Arc::new(QTensor::new(storage, stacked_shape)?);
+
+    Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+        q_weight,
+        b: None,
+    })?))
 }

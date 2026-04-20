@@ -276,8 +276,20 @@ struct SlowExpertsWeights {
 }
 
 /// Internal representation for cache-backed experts with on-demand tier transitions.
+///
+/// When the configured `capacity` matches `num_experts`, `fused` is populated
+/// with a stacked-Q-tensor `FastExpertsWeights`. The forward path then
+/// dispatches through candle's grouped-GEMM `qmatmul_indexed_moe_forward`
+/// kernel (one kernel launch per projection per layer) instead of the
+/// per-expert loop — same performance as the native `Fast` backend, but
+/// loaded via the Cached backend's per-expert ISQ path so we don't peak
+/// at 60 GiB of BF16 weights during load.
 struct CachedExpertsWeights {
     cache: Arc<MoEExpertCache>,
+    /// All-resident grouped-GEMM fast path. `Some(_)` iff the cache holds
+    /// every expert resident and the per-expert QuantMethods were stackable
+    /// into a single rank-3 `(num_experts, out, in)` QTensor.
+    fused: Option<FastExpertsWeights>,
 }
 
 /// MoE experts layer without gate
@@ -740,6 +752,56 @@ impl MoEExperts {
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
+        // All-resident grouped-GEMM fast path. When every expert stays
+        // resident anyway, we'd pay the Cached-loop dispatch overhead for
+        // no reason — 8 top-k matmuls per layer per token, each its own
+        // kernel launch, for a ~100 tok/s ceiling on A6000. Build a
+        // single `(num_experts, out, in)` stacked `GgufMatMul` per
+        // projection and route the forward through candle's
+        // `qmatmul_indexed_moe_forward` kernel (one launch for all top-k
+        // experts). Stacking is done via raw Q-block byte concatenation,
+        // so no accuracy loss and no re-quantization.
+        //
+        // Only meaningful on CUDA with a Q-dtype the MoE kernel supports
+        // (Q4K/Q5K/Q6K/Q8_0). On other backends the stacked build is
+        // skipped and the forward falls through to the per-expert loop.
+        let fused = if capacity >= cfg.num_experts
+            && layer_device.is_cuda()
+            && triples.first().map(|t| t.gate.name() == "gguf").unwrap_or(false)
+        {
+            let t_fuse = std::time::Instant::now();
+            let gate_arcs: Vec<_> = triples.iter().map(|t| t.gate.clone()).collect();
+            let up_arcs: Vec<_> = triples.iter().map(|t| t.up.clone()).collect();
+            let down_arcs: Vec<_> = triples.iter().map(|t| t.down.clone()).collect();
+            match (
+                engine_quant::stack_gguf_experts(&gate_arcs, &layer_device),
+                engine_quant::stack_gguf_experts(&up_arcs, &layer_device),
+                engine_quant::stack_gguf_experts(&down_arcs, &layer_device),
+            ) {
+                (Ok(g), Ok(u), Ok(d)) => {
+                    tracing::info!(
+                        "Cached MoE: built fused grouped-GEMM tensors for {} experts in {}ms \
+                         — forward will dispatch via single gather kernel",
+                        triples.len(),
+                        t_fuse.elapsed().as_millis(),
+                    );
+                    Some(FastExpertsWeights {
+                        fused_gate_proj: g,
+                        fused_up_proj: u,
+                        fused_down_proj: d,
+                    })
+                }
+                _ => {
+                    tracing::warn!(
+                        "Cached MoE: grouped-GEMM stacking failed — falling back to per-expert loop"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let cache = MoEExpertCache::new(
             triples,
             CacheConfig {
@@ -755,6 +817,7 @@ impl MoEExperts {
 
         Ok(CachedExpertsWeights {
             cache: Arc::new(cache),
+            fused,
         })
     }
 
@@ -1126,6 +1189,17 @@ impl MoEExperts {
         topk_ids: &Tensor,
         weights: &CachedExpertsWeights,
     ) -> Result<Tensor> {
+        // All-resident grouped-GEMM fast path. The cache constructor
+        // already built a stacked `FastExpertsWeights` when
+        // `capacity >= num_experts`, and at that configuration the cache
+        // is guaranteed to always hit — so skip the per-expert loop
+        // entirely and dispatch through the Fast backend's single-kernel
+        // gather path. Same kernel the native Fast backend uses, just
+        // reached via the Cached backend's load pipeline.
+        if let Some(fused) = &weights.fused {
+            return self.forward_fast(xs, topk_weights, topk_ids, fused);
+        }
+
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
         let xs = xs.reshape(((), hidden_dim))?;
 

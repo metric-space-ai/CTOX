@@ -39,6 +39,27 @@ pub trait ModelConfigLike {
             .sum();
         total / num_layers
     }
+    /// Returns `true` when every decoder layer shares the same KV geometry
+    /// (num_kv_heads, k_head_dim, v_head_dim). Models with hybrid attention
+    /// (e.g. Gemma 4 with sliding head_dim=256 and full head_dim=512) must
+    /// override this to `false` so that per-sequence preallocated caches are
+    /// skipped — a single global `(1, num_kv_heads, seq, head_dim)` shape
+    /// cannot represent mixed-geometry layers without a shape mismatch on
+    /// `KvCache::append`.
+    fn has_uniform_kv_geometry(&self) -> bool {
+        let num_layers = self.num_layers();
+        if num_layers <= 1 {
+            return true;
+        }
+        let base_kv = self.num_kv_heads_for_layer(0);
+        let base_k = self.k_head_dim_for_layer(0);
+        let base_v = self.v_head_dim_for_layer(0);
+        (1..num_layers).all(|i| {
+            self.num_kv_heads_for_layer(i) == base_kv
+                && self.k_head_dim_for_layer(i) == base_k
+                && self.v_head_dim_for_layer(i) == base_v
+        })
+    }
 }
 
 #[derive(Clone)]

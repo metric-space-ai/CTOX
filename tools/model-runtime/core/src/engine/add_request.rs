@@ -477,6 +477,20 @@ impl Engine {
                 ModelCategory::Text | ModelCategory::Vision { .. }
             ) && get_mut_arcmutex!(self.pipeline)
                 .do_preallocated_cache()
+                && {
+                    // Skip preallocation when the model's decoder layers have
+                    // heterogeneous KV geometry (e.g. Gemma 4 hybrid attention
+                    // with sliding head_dim=256 and full head_dim=512). A
+                    // single preallocated `(1, num_kv_heads, seq, head_dim)`
+                    // shape cannot represent mixed-geometry layers without a
+                    // shape mismatch on `KvCache::append`.
+                    let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
+                    metadata
+                        .model_metadata
+                        .as_ref()
+                        .map(|m| m.has_uniform_kv_geometry())
+                        .unwrap_or(true)
+                }
             {
                 let metadata = get_mut_arcmutex!(self.pipeline).get_metadata();
                 let model_metadata = metadata
