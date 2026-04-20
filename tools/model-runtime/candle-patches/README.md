@@ -5,7 +5,8 @@ decode throughput. Not yet upstreamed because they require discussion with
 the candle maintainers. Reproduce by:
 
 1. Clone candle at rev `c3bb5bf` somewhere outside the CTOX workspace.
-2. Apply the patches in `quantized.rs.patch` and `sdpa.rs.patch`.
+2. Apply the patches in order: `quantized.rs.patch`, `sdpa.rs.patch`,
+   then `0003-metal-sticky-encoder.patch`.
 3. Point `tools/model-runtime/Cargo.toml` at the patched candle via
    `[patch."https://github.com/huggingface/candle.git"]`.
 
@@ -34,6 +35,13 @@ Correctness: diff-tested against the default build — identical outputs.
   and call_quantized_matmul_mm_t (the Q-quant paths).
 - `sdpa.rs.patch` — strip useResource from call_sdpa_vector (the decode
   hot-path SDPA kernel).
+- `0003-metal-sticky-encoder.patch` — opt-in (default-on) sticky
+  `MTLComputeCommandEncoder` reuse across dispatches on the same command
+  buffer. Adds `ComputeCommandEncoder::new_sticky`, caches the encoder in
+  `EntryState.current_encoder`, and ends it explicitly before blit or
+  commit. Saves 2 Metal syscalls per dispatch (~6300/token on Gemma 4
+  E4B). Disable with `CANDLE_METAL_STICKY_ENCODER=0`. Perf impact not yet
+  measured — user to bench on Apple M5.
 
 The mask and intermediate-buffer useResource calls in other SDPA
 variants are left untouched because they're on less-hot paths and

@@ -94,3 +94,46 @@ Kernel-Dispatches genau vermessen. Das identifiziert exakt welche Shader
 saturiert laufen. Dann entweder (a) MSL fused-kernel schreiben, (b) MPSGraph
 introduzieren, oder (c) explizit bestätigen dass es Hardware-Limit ist und
 User auf M5 Pro/Max-Hardware oder CUDA verweisen.
+
+## Update: sticky-compute-encoder-Experiment (candle-fork c3bb5bf+053097d3)
+
+Parallele-GPU-Sättigung ist oben als Haupt-Hypothese genannt, aber es gibt
+noch einen zweiten plausiblen Kosten-Vektor der *nicht* von GPU-Parallelism
+abhängt: CPU-seitige Metal-Syscalls zum Erzeugen und Beenden von
+Compute-Encodern. E4B dispatched ~3150 Kernels pro Decode-Token → ~6300
+Encoder-create/endEncoding-Syscalls.
+
+Die hier eingeführte Fork-Änderung (commit `053097d3` im lokalen
+`~/candle-fork-ctox`, zusätzlich exportiert als
+`candle-patches/0003-metal-sticky-encoder.patch`) cached den
+`MTLComputeCommandEncoder` pro Pool-Entry und recycled ihn über alle
+Dispatches bis zum nächsten Blit- oder Command-Buffer-Boundary. Default
+aktiv; per `CANDLE_METAL_STICKY_ENCODER=0` abschaltbar.
+
+Implementierung:
+
+- `candle-metal-kernels/src/metal/encoder.rs` — `ComputeCommandEncoder`
+  bekommt ein `auto_end: bool` Feld und einen `new_sticky()`-Konstruktor.
+  Drop überspringt `endEncoding` wenn `!auto_end`, löst aber das Semaphor.
+- `candle-metal-kernels/src/metal/commands.rs` — `EntryState` cached das
+  Metal-Encoder-`Retained`. `finalize_compute_entry` liefert einen
+  `new_sticky`-Wrapper um den Cache. `finalize_blit_entry` und
+  `commit_swap_locked` rufen `end_cached_encoder_locked` auf, um den
+  gecachten Encoder vor dem Blit oder Commit zu beenden.
+
+**Status:** Nicht gebenched. Der CLAUDE.md-Leitfaden verbietet
+`cargo build` auf der Operator-Maschine; die Validierung muss der User
+selbst fahren:
+
+```
+cd tools/model-runtime
+cargo build --release -p ctox-engine-cli --features metal
+./target/release/ctox-engine-cli bench gemma4-e4b --metal
+```
+
+Wenn das Decode >17 T/s erreicht, ist die Syscall-Overhead-Hypothese
+bestätigt. Wenn es bei ~17 T/s bleibt, ist das Fork-Limit tatsächlich
+GPU-Kernel-Saturation (s.o.) und der nächste Schritt ist Kernel-Fusion
+oder MPSGraph.
+
+`CANDLE_METAL_STICKY_ENCODER=0` gibt einen Clean-Rollback ohne Rebuild.
