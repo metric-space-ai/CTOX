@@ -817,7 +817,7 @@ impl MistralRsForServerBuilder {
         };
 
         // Create the first model's pipeline
-        let loader: Box<dyn Loader> = LoaderBuilder::new(model)
+        let target_loader: Box<dyn Loader> = LoaderBuilder::new(model)
             .with_no_kv_cache(self.no_kv_cache)
             .with_chat_template(
                 first_model
@@ -832,6 +832,30 @@ impl MistralRsForServerBuilder {
                     .or(self.jinja_explicit.clone()),
             )
             .build()?;
+
+        // Same speculative-decoding wrap as the single-model path (build()).
+        // Multi-model mode applies the draft to the *first* model, which is
+        // the target by convention.
+        let loader: Box<dyn Loader> = if let Some((draft_model, gamma)) =
+            self.speculative_draft.clone()
+        {
+            info!(
+                "Wrapping first model's loader in SpeculativeLoader (gamma={gamma}) \
+                 — multi-model mode."
+            );
+            let draft_loader: Box<dyn Loader> = LoaderBuilder::new(draft_model)
+                .with_no_kv_cache(self.no_kv_cache)
+                .with_chat_template(self.chat_template.clone())
+                .with_jinja_explicit(self.jinja_explicit.clone())
+                .build()?;
+            Box::new(engine_core::SpeculativeLoader {
+                target: target_loader,
+                draft: draft_loader,
+                config: engine_core::SpeculativeConfig { gamma },
+            })
+        } else {
+            target_loader
+        };
 
         engine_instance_info(&*loader);
 

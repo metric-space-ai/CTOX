@@ -39,6 +39,12 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         speculative,
     } = cfg;
 
+    tracing::info!(
+        "run_serve_config: models={} speculative={}",
+        models.len(),
+        speculative.is_some(),
+    );
+
     // Single-model fast path doesn't yet know about spec decoding, so bail
     // out of it when the config demands a draft — we go through the
     // multi-model/builder path below which does support it.
