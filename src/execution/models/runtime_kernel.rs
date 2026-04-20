@@ -16,7 +16,6 @@ use crate::inference::runtime_state;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeLauncherKind {
     Engine,
-    LiteRt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,17 +282,16 @@ fn resolve_primary_generation(
     let port = state.engine_port.unwrap_or(runtime.port);
     let launcher_kind = match state.local_runtime {
         runtime_state::LocalRuntimeKind::Candle => RuntimeLauncherKind::Engine,
-        runtime_state::LocalRuntimeKind::LiteRt => RuntimeLauncherKind::LiteRt,
     };
     let visible_devices = match state.local_runtime {
-        runtime_state::LocalRuntimeKind::Candle | runtime_state::LocalRuntimeKind::LiteRt => {
-            runtime_plan::load_persisted_chat_runtime_plan(root)
-                .ok()
-                .flatten()
-                .map(|plan| plan.cuda_visible_devices)
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| runtime_env::env_or_config(root, "CTOX_ENGINE_CUDA_VISIBLE_DEVICES"))
-        }
+        runtime_state::LocalRuntimeKind::Candle => runtime_plan::load_persisted_chat_runtime_plan(
+            root,
+        )
+        .ok()
+        .flatten()
+        .map(|plan| plan.cuda_visible_devices)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| runtime_env::env_or_config(root, "CTOX_ENGINE_CUDA_VISIBLE_DEVICES")),
     };
     let transport = managed_runtime_transport(root, InferenceWorkloadRole::PrimaryGeneration);
     let transport_endpoint = Some(transport.endpoint_string());

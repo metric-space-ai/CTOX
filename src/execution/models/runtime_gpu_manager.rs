@@ -271,7 +271,6 @@ fn even_shares(total: u64, count: usize) -> Vec<u64> {
 fn launcher_kind_label(kind: runtime_kernel::RuntimeLauncherKind) -> &'static str {
     match kind {
         runtime_kernel::RuntimeLauncherKind::Engine => "engine",
-        runtime_kernel::RuntimeLauncherKind::LiteRt => "litert",
     }
 }
 

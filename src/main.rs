@@ -43,7 +43,6 @@ pub mod inference {
     pub use crate::execution::agent::turn_engine;
     pub use crate::execution::agent::turn_loop;
     pub use crate::execution::models::engine;
-    pub use crate::execution::models::litert_bridge;
     pub use crate::execution::models::local_transport;
     pub use crate::execution::models::model_adapters;
     pub use crate::execution::models::model_manifest;
@@ -110,7 +109,6 @@ ENGINE / GPU
 
 RUN / EXEC
   ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]
-  ctox serve-litert-bridge --config <json>
 
 GOVERNANCE / MISSION
   ctox governance <subcmd>       governance decisions and audits
@@ -220,11 +218,6 @@ fn main() -> anyhow::Result<()> {
                 "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k]"
             ),
         },
-        Some("serve-litert-bridge") => {
-            let config_path = find_flag_value(&args[1..], "--config")
-                .context("usage: ctox serve-litert-bridge --config <json-path>")?;
-            inference::litert_bridge::serve_from_config_path(&root, Path::new(config_path))
-        }
         Some("boost") => match args.get(1).map(String::as_str) {
             Some("status") => {
                 println!(

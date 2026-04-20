@@ -29,7 +29,6 @@ const DEFAULT_OPENROUTER_RESPONSES_BASE_URL: &str = "https://openrouter.ai/api/v
 const DEFAULT_MINIMAX_RESPONSES_BASE_URL: &str = "https://api.minimax.io";
 const API_PROVIDER_LOCAL: &str = "local";
 const LOCAL_RUNTIME_CANDLE: &str = "candle";
-const LOCAL_RUNTIME_LITERT: &str = "litert";
 const API_PROVIDER_OPENAI: &str = "openai";
 const API_PROVIDER_ANTHROPIC: &str = "anthropic";
 const API_PROVIDER_OPENROUTER: &str = "openrouter";
@@ -109,15 +108,12 @@ pub fn default_local_runtime_kind() -> LocalRuntimeKind {
 #[serde(rename_all = "snake_case")]
 pub enum LocalRuntimeKind {
     Candle,
-    #[serde(rename = "litert")]
-    LiteRt,
 }
 
 impl LocalRuntimeKind {
     pub fn as_env_value(self) -> &'static str {
         match self {
             Self::Candle => LOCAL_RUNTIME_CANDLE,
-            Self::LiteRt => LOCAL_RUNTIME_LITERT,
         }
     }
 
@@ -237,35 +233,22 @@ pub fn normalize_api_provider(provider: &str) -> &'static str {
     }
 }
 
-pub fn normalize_local_runtime_kind(runtime: &str) -> &'static str {
-    match runtime.trim().to_ascii_lowercase().as_str() {
-        LOCAL_RUNTIME_LITERT => LOCAL_RUNTIME_LITERT,
-        _ => LOCAL_RUNTIME_CANDLE,
-    }
+pub fn normalize_local_runtime_kind(_runtime: &str) -> &'static str {
+    // LiteRT has been removed; Candle is the only supported local runtime.
+    LOCAL_RUNTIME_CANDLE
 }
 
 pub fn infer_local_runtime_kind_from_env_map(
-    env_map: &BTreeMap<String, String>,
+    _env_map: &BTreeMap<String, String>,
 ) -> LocalRuntimeKind {
-    match env_string(env_map, "CTOX_LOCAL_RUNTIME")
-        .as_deref()
-        .map(normalize_local_runtime_kind)
-    {
-        Some(LOCAL_RUNTIME_LITERT) => LocalRuntimeKind::LiteRt,
-        _ => LocalRuntimeKind::Candle,
-    }
+    // CTOX now ships only the Candle-based local runtime. The env override is
+    // retained for compatibility but ignored — any setting normalizes to
+    // Candle.
+    LocalRuntimeKind::Candle
 }
 
 pub fn preferred_local_runtime_kind_for_model(_model: &str) -> Option<LocalRuntimeKind> {
     None
-}
-
-pub fn validated_litert_context_cap_for_model(model: &str) -> Option<u32> {
-    match model.trim() {
-        "google/gemma-4-E2B-it" => Some(131_072),
-        "google/gemma-4-E4B-it" => Some(131_072),
-        _ => None,
-    }
 }
 
 pub fn is_openai_compatible_api_upstream(upstream_base_url: &str) -> bool {
@@ -702,29 +685,11 @@ fn derive_runtime_state(
                             .and_then(|runtime| runtime.max_seq_len)
                     })
                 })
-                .or_else(|| {
-                    (local_runtime == LocalRuntimeKind::LiteRt)
-                        .then(|| {
-                            active_model
-                                .as_deref()
-                                .and_then(validated_litert_context_cap_for_model)
-                        })
-                        .flatten()
-                })
                 .or_else(|| Some(runtime_plan::default_chat_context_tokens()));
             let realized_context_tokens = env_u32(env_map, "CTOX_CHAT_MODEL_REALIZED_CONTEXT")
                 .or_else(|| env_u32(env_map, "CTOX_ENGINE_REALIZED_MAX_SEQ_LEN"))
                 .or_else(|| plan.as_ref().map(|plan| plan.max_seq_len))
-                .or(configured_context_tokens)
-                .or_else(|| {
-                    (local_runtime == LocalRuntimeKind::LiteRt)
-                        .then(|| {
-                            active_model
-                                .as_deref()
-                                .and_then(validated_litert_context_cap_for_model)
-                        })
-                        .flatten()
-                });
+                .or(configured_context_tokens);
             let upstream =
                 local_upstream_base_url(engine_port.unwrap_or(DEFAULT_LOCAL_ENGINE_PORT));
             (
@@ -1265,28 +1230,6 @@ mod tests {
 
         assert_eq!(state.base_or_selected_model(), Some("openai/gpt-oss-20b"));
         assert_eq!(state.active_or_selected_model(), Some("gpt-5.4-mini"));
-    }
-
-    #[test]
-    fn sync_runtime_state_uses_validated_litert_context_cap_instead_of_assuming_128k() {
-        let root = make_temp_root();
-        let mut env_map = BTreeMap::new();
-        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
-        env_map.insert("CTOX_LOCAL_RUNTIME".to_string(), "litert".to_string());
-        env_map.insert(
-            "CTOX_CHAT_MODEL_BASE".to_string(),
-            "google/gemma-4-E2B-it".to_string(),
-        );
-        env_map.insert(
-            "CTOX_ACTIVE_MODEL".to_string(),
-            "google/gemma-4-E2B-it".to_string(),
-        );
-
-        let state = sync_runtime_state_from_env_map(&root, &env_map).unwrap();
-        assert_eq!(state.local_runtime, LocalRuntimeKind::LiteRt);
-        assert_eq!(state.realized_context_tokens, Some(131_072));
-
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

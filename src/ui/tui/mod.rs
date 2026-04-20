@@ -64,10 +64,7 @@ const DEFAULT_COMMUNICATION_PATH: &str = "tui";
 const CHAT_PRESET_CHOICES: &[&str] = &["Quality", "Performance"];
 const CHAT_SKILL_PRESET_CHOICES: &[&str] = &["Standard", "Simple"];
 const API_PROVIDER_CHOICES: &[&str] = &["local", "openai", "anthropic", "openrouter", "minimax"];
-const LOCAL_RUNTIME_CHOICES: &[&str] = &["candle", "litert"];
-const LITERT_LOCAL_CHAT_MODEL_CHOICES: &[&str] =
-    &["google/gemma-4-E4B-it", "google/gemma-4-E2B-it"];
-const LITERT_LOCAL_CHAT_FAMILY_CHOICES: &[&str] = &["Gemma 4"];
+const LOCAL_RUNTIME_CHOICES: &[&str] = &["candle"];
 const NO_GPU_LOCAL_CHAT_MODEL_CHOICES: &[&str] = &[
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.5-2B",
@@ -170,9 +167,6 @@ fn supported_local_chat_model_choices_with_gpu(
     env_map: &BTreeMap<String, String>,
     gpu_available: bool,
 ) -> Vec<&'static str> {
-    if infer_local_runtime(env_map).eq_ignore_ascii_case("litert") {
-        return LITERT_LOCAL_CHAT_MODEL_CHOICES.to_vec();
-    }
     if gpu_available {
         runtime_plan::local_models_satisfying_context_policy(
             root,
@@ -202,9 +196,6 @@ fn supported_local_chat_family_choices_with_gpu(
     env_map: &BTreeMap<String, String>,
     gpu_available: bool,
 ) -> Vec<&'static str> {
-    if infer_local_runtime(env_map).eq_ignore_ascii_case("litert") {
-        return LITERT_LOCAL_CHAT_FAMILY_CHOICES.to_vec();
-    }
     let mut choices = runtime_plan::local_chat_family_choices(root, env_map);
     if !gpu_available {
         choices.retain(|choice| {
@@ -3561,7 +3552,7 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             saved_value: inferred_local_runtime,
             secret: false,
             choices: LOCAL_RUNTIME_CHOICES.to_vec(),
-            help: "Choose which local runtime family owns the selected local chat model: Candle for the existing CUDA path, LiteRT for the smaller validated CPU/macOS/Windows path.",
+            help: "Local runtime family for the selected local chat model. Candle is the only supported local inference engine.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -6294,22 +6285,6 @@ mod tests {
     }
 
     #[test]
-    fn litert_local_choices_only_include_qualified_gemma_models() {
-        let root = temp_root("litert-qualified-models");
-        let mut env_map = BTreeMap::new();
-        env_map.insert("CTOX_LOCAL_RUNTIME".to_string(), "litert".to_string());
-
-        let model_choices = supported_local_chat_model_choices_with_gpu(&root, &env_map, false);
-        assert_eq!(
-            model_choices,
-            vec!["google/gemma-4-E4B-it", "google/gemma-4-E2B-it"]
-        );
-
-        let family_choices = supported_local_chat_family_choices_with_gpu(&root, &env_map, false);
-        assert_eq!(family_choices, vec!["Gemma 4"]);
-    }
-
-    #[test]
     fn settings_view_shortcuts_switch_between_model_and_communication() {
         let root = temp_root("settings-view-shortcuts");
         let db_path = root.join("runtime/test.sqlite3");
@@ -6544,25 +6519,6 @@ mod tests {
         assert_eq!(skill_preset_pos, preset_pos + 1);
     }
 
-    #[test]
-    fn litert_local_runtime_hides_local_preset() {
-        let root = temp_root("litert-preset-hidden");
-        let db_path = root.join("runtime/test.sqlite3");
-        let mut env_map = BTreeMap::new();
-        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
-        env_map.insert("CTOX_LOCAL_RUNTIME".to_string(), "litert".to_string());
-        runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
-
-        let app = App::new(root, db_path);
-        let visible = app
-            .visible_setting_indices()
-            .into_iter()
-            .map(|idx| app.settings_items[idx].key)
-            .collect::<Vec<_>>();
-
-        assert!(visible.contains(&"CTOX_LOCAL_RUNTIME"));
-        assert!(!visible.contains(&"CTOX_CHAT_LOCAL_PRESET"));
-    }
 
     #[test]
     fn configured_runtime_models_skip_remote_chat_model_for_api_source() {

@@ -55,19 +55,16 @@ const QUANT_ARTIFACT_BUILD_LOCKS_RELATIVE_DIR: &str = "runtime/uqff_cache_locks"
 const CHAT_QUANT_ARTIFACT_PENDING_SUFFIX: &str = ".pending";
 const MANAGED_ENGINE_FROM_CONFIG_COMMAND: &str = "ctox-engine from-config";
 const MANAGED_ENGINE_QUANTIZE_COMMAND: &str = "ctox-engine quantize";
-const MANAGED_LITERT_SERVE_COMMAND_FRAGMENT: &str = "serve-litert-bridge";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManagedLauncherKind {
     Engine,
-    LiteRt,
 }
 
 impl ManagedLauncherKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Engine => "engine",
-            Self::LiteRt => "litert",
         }
     }
 }
@@ -96,7 +93,6 @@ struct ManagedBackendLaunchSpec {
     compute_target: Option<String>,
     visible_devices: Option<String>,
     engine_config: ManagedEngineLaunchConfig,
-    litert_config: Option<ManagedLiteRtLaunchConfig>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -137,29 +133,6 @@ struct ManagedEngineLaunchConfig {
     /// engine-side consumer and `PlannedMoECacheAllocation::to_engine_env_pairs`
     /// in runtime_plan.rs for the planner-side producer.
     moe_cache_env: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ManagedLiteRtLaunchConfig {
-    bridge_binary_path: Option<String>,
-    cli_path: Option<String>,
-    log_path: Option<String>,
-    backend: String,
-    context_tokens: u32,
-    validated_context_tokens: u32,
-    model_reference: String,
-    model_file: Option<String>,
-    huggingface_repo: Option<String>,
-    huggingface_token: Option<String>,
-    speculative_decoding: String,
-    verbose: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LiteRtArtifactSpec {
-    huggingface_repo: &'static str,
-    model_file: &'static str,
-    validated_context_tokens: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -424,7 +397,6 @@ fn managed_spec_from_binding(
         health_path: binding.health_path,
         launcher_kind: match binding.launcher_kind {
             runtime_kernel::RuntimeLauncherKind::Engine => ManagedLauncherKind::Engine,
-            runtime_kernel::RuntimeLauncherKind::LiteRt => ManagedLauncherKind::LiteRt,
         },
         compute_target: binding.compute_target,
     }
@@ -1057,10 +1029,6 @@ fn managed_engine_quantize_command(command: &str) -> bool {
     command.contains(MANAGED_ENGINE_QUANTIZE_COMMAND)
 }
 
-fn managed_litert_process_command(command: &str) -> bool {
-    command.contains(MANAGED_LITERT_SERVE_COMMAND_FRAGMENT)
-}
-
 fn lock_file_pid(path: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(path).ok()?;
     raw.lines().find_map(|line| {
@@ -1096,7 +1064,6 @@ fn lock_file_is_stale(root: &Path, path: &Path) -> bool {
                     && (command.contains(RUNTIME_SWITCH_COMMAND_FRAGMENT)
                         || command.contains("service --foreground")))
                     || managed_engine_process_command(&command)
-                    || managed_litert_process_command(&command)
                     || managed_engine_quantize_command(&command));
             !owned_by_ctox
         }
@@ -1165,20 +1132,11 @@ fn build_managed_backend_launch_spec(
     spec: &ManagedBackendSpec,
     admission: &runtime_gpu_manager::GpuAdmission,
 ) -> Result<ManagedBackendLaunchSpec> {
-    let (engine_config, litert_config) = match spec.launcher_kind {
+    let engine_config = match spec.launcher_kind {
         ManagedLauncherKind::Engine => {
             ensure_chat_quant_artifact_for_launch(root, role)?;
-            (
-                build_managed_engine_launch_config(root, role, spec, admission)?,
-                None,
-            )
+            build_managed_engine_launch_config(root, role, spec, admission)?
         }
-        ManagedLauncherKind::LiteRt => (
-            ManagedEngineLaunchConfig::default(),
-            Some(build_managed_litert_launch_config(
-                root, role, spec, admission,
-            )?),
-        ),
     };
     Ok(ManagedBackendLaunchSpec {
         version: 2,
@@ -1194,7 +1152,6 @@ fn build_managed_backend_launch_spec(
             .map(|target| target.as_env_value().to_string()),
         visible_devices: admission.visible_devices.clone(),
         engine_config,
-        litert_config,
     })
 }
 
@@ -1219,24 +1176,6 @@ fn managed_engine_runtime_config_path(root: &Path, spec: &ManagedBackendSpec) ->
         .join("managed_engine_configs")
         .join(format!(
             "{}_{}_{}_{}.toml",
-            spec.launcher_kind.as_str(),
-            spec.port,
-            socket_component,
-            &model_digest[..12]
-        ))
-}
-
-fn managed_litert_runtime_config_path(root: &Path, spec: &ManagedBackendSpec) -> PathBuf {
-    let socket_component = spec
-        .transport_endpoint
-        .as_deref()
-        .map(sanitize_config_path_component)
-        .unwrap_or_else(|| "tcp".to_string());
-    let model_digest = format!("{:x}", sha2::Sha256::digest(spec.request_model.as_bytes()));
-    root.join("runtime")
-        .join("managed_litert_configs")
-        .join(format!(
-            "{}_{}_{}_{}.json",
             spec.launcher_kind.as_str(),
             spec.port,
             socket_component,
@@ -1441,58 +1380,6 @@ fn persist_managed_engine_runtime_config(
     Ok(path)
 }
 
-fn render_managed_litert_runtime_config(launch_spec: &ManagedBackendLaunchSpec) -> Result<String> {
-    let Some(config) = launch_spec.litert_config.as_ref() else {
-        anyhow::bail!("missing litert launch config for managed LiteRT backend");
-    };
-    let json = serde_json::json!({
-        "version": launch_spec.version,
-        "role": launch_spec.role,
-        "cli_path": config.cli_path,
-        "model_reference": config.model_reference,
-        "model_file": config.model_file,
-        "huggingface_repo": config.huggingface_repo,
-        "huggingface_token": config.huggingface_token,
-        "backend": config.backend,
-        "context_tokens": config.context_tokens,
-        "validated_context_tokens": config.validated_context_tokens,
-        "port": launch_spec.port,
-        "transport_endpoint": launch_spec.transport_endpoint,
-        "health_path": launch_spec.health_path,
-        "speculative_decoding": config.speculative_decoding,
-        "verbose": config.verbose,
-        "visible_devices": launch_spec.visible_devices,
-        "compute_target": launch_spec.compute_target,
-        "log_path": config.log_path,
-    });
-    serde_json::to_string_pretty(&json).context("failed to encode managed LiteRT runtime config")
-}
-
-fn persist_managed_litert_runtime_config(
-    root: &Path,
-    spec: &ManagedBackendSpec,
-    launch_spec: &ManagedBackendLaunchSpec,
-) -> Result<PathBuf> {
-    let path = managed_litert_runtime_config_path(root, spec);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
-            format!(
-                "failed to create managed litert runtime config dir {}",
-                parent.display()
-            )
-        })?;
-    }
-    std::fs::write(&path, render_managed_litert_runtime_config(launch_spec)?).with_context(
-        || {
-            format!(
-                "failed to write managed litert runtime config {}",
-                path.display()
-            )
-        },
-    )?;
-    Ok(path)
-}
-
 fn ambient_env_flag_enabled(key: &str) -> bool {
     std::env::var(key).ok().is_some_and(|value| {
         matches!(
@@ -1636,118 +1523,6 @@ fn build_managed_engine_launch_config(
     })
 }
 
-fn build_managed_litert_launch_config(
-    root: &Path,
-    role: ManagedBackendRole,
-    spec: &ManagedBackendSpec,
-    admission: &runtime_gpu_manager::GpuAdmission,
-) -> Result<ManagedLiteRtLaunchConfig> {
-    let runtime_state = runtime_state::load_or_resolve_runtime_state(root)?;
-    let backend = runtime_env::env_or_config(root, "CTOX_LITERT_BACKEND")
-        .filter(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "cpu" | "gpu"))
-        .unwrap_or_else(|| {
-            if admission
-                .visible_devices
-                .as_deref()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-            {
-                "gpu".to_string()
-            } else if spec.compute_target == Some(engine::ComputeTarget::Gpu) {
-                "gpu".to_string()
-            } else {
-                "cpu".to_string()
-            }
-        });
-    let role_prefix = role.as_env_value().to_ascii_uppercase();
-    let default_artifact = default_litert_artifact_for_model(&spec.request_model);
-    let validated_context_tokens = default_artifact
-        .map(|artifact| artifact.validated_context_tokens)
-        .unwrap_or(131_072);
-    let context_tokens = runtime_state
-        .configured_context_tokens
-        .or(runtime_state.realized_context_tokens)
-        .unwrap_or(validated_context_tokens);
-    let mut model_file =
-        runtime_env::env_or_config(root, &format!("CTOX_{role_prefix}_LITERT_MODEL_FILE"))
-            .or_else(|| runtime_env::env_or_config(root, "CTOX_LITERT_MODEL_FILE"));
-    let mut huggingface_repo =
-        runtime_env::env_or_config(root, &format!("CTOX_{role_prefix}_LITERT_HUGGINGFACE_REPO"))
-            .or_else(|| runtime_env::env_or_config(root, "CTOX_LITERT_HUGGINGFACE_REPO"));
-    let huggingface_token = runtime_env::env_or_config(
-        root,
-        &format!("CTOX_{role_prefix}_LITERT_HUGGINGFACE_TOKEN"),
-    )
-    .or_else(|| runtime_env::env_or_config(root, "CTOX_LITERT_HUGGINGFACE_TOKEN"))
-    .or_else(|| std::env::var("HF_TOKEN").ok())
-    .or_else(|| std::env::var("HUGGING_FACE_HUB_TOKEN").ok());
-    if model_file.is_none() {
-        model_file = default_artifact.map(|artifact| artifact.model_file.to_string());
-    }
-    if huggingface_repo.is_none() {
-        huggingface_repo = default_artifact.map(|artifact| artifact.huggingface_repo.to_string());
-    }
-    if model_file.is_none() && huggingface_repo.is_none() {
-        if spec.request_model.trim() == "google/gemma-4-E2B-it" {
-            anyhow::bail!(
-                "managed LiteRT backend does not have an active default artifact mapping for {}; the published E2B LiteRT bundle is currently disabled after host forensics found a stale MTP build. Rebuild the artifact and set CTOX_LITERT_MODEL_FILE or CTOX_LITERT_HUGGINGFACE_REPO explicitly.",
-                spec.request_model
-            );
-        }
-        anyhow::bail!(
-            "managed LiteRT backend does not have a qualified artifact mapping for {}",
-            spec.request_model
-        );
-    }
-    if context_tokens != validated_context_tokens {
-        anyhow::bail!(
-            "managed LiteRT backend for {} is fixed at {} tokens, but CTOX requested {}. Build or select a matching LiteRT artifact for that context size.",
-            spec.request_model,
-            validated_context_tokens,
-            context_tokens
-        );
-    }
-    Ok(ManagedLiteRtLaunchConfig {
-        bridge_binary_path: runtime_env::env_or_config(root, "CTOX_LITERT_BRIDGE_BINARY"),
-        cli_path: runtime_env::env_or_config(root, "CTOX_LITERT_CLI"),
-        log_path: runtime_env::env_or_config(root, "CTOX_LITERT_BRIDGE_LOG"),
-        backend,
-        context_tokens,
-        validated_context_tokens,
-        model_reference: spec.request_model.clone(),
-        model_file,
-        huggingface_repo,
-        huggingface_token,
-        speculative_decoding: runtime_env::env_or_config(root, "CTOX_LITERT_SPECULATIVE_DECODING")
-            .filter(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "auto" | "true" | "false"
-                )
-            })
-            .unwrap_or_else(|| "auto".to_string()),
-        verbose: runtime_env::env_or_config(root, "CTOX_LITERT_VERBOSE")
-            .map(|value| {
-                matches!(
-                    value.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false),
-    })
-}
-
-fn default_litert_artifact_for_model(model: &str) -> Option<LiteRtArtifactSpec> {
-    match model.trim() {
-        "google/gemma-4-E4B-it" => Some(LiteRtArtifactSpec {
-            huggingface_repo: "metricspace/gemma4-E4B-it-litert-128k-mtp",
-            model_file: "model.litertlm",
-            validated_context_tokens: 131_072,
-        }),
-        _ => None,
-    }
-}
-
 fn is_qwen35_vision_request_model(model: &str) -> bool {
     model.starts_with("Qwen/Qwen3.5-") || model.starts_with("Qwen/Qwen3.6-")
 }
@@ -1778,29 +1553,6 @@ fn resolve_managed_engine_binary(
             .as_deref()
             .is_some_and(|value| value.eq_ignore_ascii_case("cpu")),
     )?;
-    Ok(binary)
-}
-
-fn resolve_managed_litert_bridge_binary(
-    _root: &Path,
-    launch_spec: &ManagedBackendLaunchSpec,
-) -> Result<PathBuf> {
-    let Some(config) = launch_spec.litert_config.as_ref() else {
-        anyhow::bail!("missing litert launch config for managed LiteRT backend");
-    };
-    let binary = config
-        .bridge_binary_path
-        .as_deref()
-        .map(PathBuf::from)
-        .filter(|path| path.is_file())
-        .or_else(|| std::env::current_exe().ok().filter(|path| path.is_file()))
-        .context("managed LiteRT backend could not resolve the ctox bridge binary")?;
-    if !binary.is_file() {
-        anyhow::bail!(
-            "configured LiteRT bridge binary is missing: {}",
-            binary.display()
-        );
-    }
     Ok(binary)
 }
 
@@ -1898,32 +1650,6 @@ fn spawn_managed_engine_backend(
     })
 }
 
-fn spawn_managed_litert_backend(
-    root: &Path,
-    spec: &ManagedBackendSpec,
-    launch_spec: &ManagedBackendLaunchSpec,
-    stdout: Stdio,
-    stderr: Stdio,
-) -> Result<Child> {
-    let bridge_binary = resolve_managed_litert_bridge_binary(root, launch_spec)?;
-    let config_path = persist_managed_litert_runtime_config(root, spec, launch_spec)?;
-    let mut command = Command::new(&bridge_binary);
-    command
-        .arg("serve-litert-bridge")
-        .arg("--config")
-        .arg(config_path);
-    command.current_dir(root);
-    command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
-    apply_clean_child_env(&mut command);
-    configure_managed_child_process(&mut command);
-    command.spawn().with_context(|| {
-        format!(
-            "failed to spawn LiteRT bridge for managed backend {}",
-            launch_spec.display_model
-        )
-    })
-}
-
 fn spawn_managed_backend(
     root: &Path,
     spec: &ManagedBackendSpec,
@@ -1934,9 +1660,6 @@ fn spawn_managed_backend(
     match spec.launcher_kind {
         ManagedLauncherKind::Engine => {
             spawn_managed_engine_backend(root, spec, launch_spec, stdout, stderr)
-        }
-        ManagedLauncherKind::LiteRt => {
-            spawn_managed_litert_backend(root, spec, launch_spec, stdout, stderr)
         }
     }
 }
@@ -2716,10 +2439,6 @@ fn backend_process_matches_launch_spec(
         let expected = managed_engine_runtime_config_path(root, spec);
         return Ok(command.contains(expected.display().to_string().as_str()));
     }
-    if managed_litert_process_command(&command) {
-        let expected = managed_litert_runtime_config_path(root, spec);
-        return Ok(command.contains(expected.display().to_string().as_str()));
-    }
     let expected_short_port = format!("-p {}", spec.port);
     let expected_long_port = format!("--port {}", spec.port);
     if !command.contains(&expected_short_port) && !command.contains(&expected_long_port) {
@@ -2753,10 +2472,6 @@ fn socket_backed_process_matches_spec(
     }
     if command.contains(MANAGED_ENGINE_FROM_CONFIG_COMMAND) {
         let expected = managed_engine_runtime_config_path(root, spec);
-        return Ok(command.contains(expected.display().to_string().as_str()));
-    }
-    if managed_litert_process_command(&command) {
-        let expected = managed_litert_runtime_config_path(root, spec);
         return Ok(command.contains(expected.display().to_string().as_str()));
     }
     if !command.contains(transport_endpoint) {
@@ -3514,7 +3229,6 @@ fn workspace_managed_runtime_processes(root: &Path) -> Result<Vec<(u32, u32)>> {
         }
         if command_is_managed_runtime_launcher(command)
             || managed_engine_process_command(command)
-            || managed_litert_process_command(command)
         {
             processes.push((pid, group_id));
         }
@@ -3983,69 +3697,6 @@ mod tests {
         assert_eq!(launch_spec.visible_devices.as_deref(), Some("0,1"));
         assert_eq!(launch_spec.engine_config.max_seq_len, Some(131_072));
         assert_eq!(launch_spec.engine_config.isq.as_deref(), Some("Q4K"));
-        assert!(launch_spec.litert_config.is_none());
-    }
-
-    #[test]
-    fn managed_litert_launch_spec_rejects_unqualified_128k_artifacts() {
-        let root = temp_root("launch-spec-litert");
-        runtime_state::persist_runtime_state(
-            &root,
-            &runtime_state::InferenceRuntimeState {
-                version: 7,
-                source: runtime_state::InferenceSource::Local,
-                local_runtime: runtime_state::LocalRuntimeKind::LiteRt,
-                base_model: Some("google/gemma-4-E4B-it".to_string()),
-                requested_model: Some("google/gemma-4-E4B-it".to_string()),
-                active_model: Some("google/gemma-4-E4B-it".to_string()),
-                engine_model: Some("google/gemma-4-E4B-it".to_string()),
-                engine_port: Some(1235),
-                configured_context_tokens: Some(131_072),
-                realized_context_tokens: Some(131_072),
-                upstream_base_url: "http://127.0.0.1:1235".to_string(),
-                local_preset: None,
-                boost: runtime_state::BoostRuntimeState::default(),
-                adapter_tuning: runtime_state::AdapterRuntimeTuning::default(),
-                embedding: runtime_state::AuxiliaryRuntimeState::default(),
-                transcription: runtime_state::AuxiliaryRuntimeState::default(),
-                speech: runtime_state::AuxiliaryRuntimeState::default(),
-                vision: runtime_state::AuxiliaryRuntimeState::default(),
-            },
-        )
-        .unwrap();
-        let spec = ManagedBackendSpec {
-            display_model: "google/gemma-4-E4B-it".to_string(),
-            request_model: "google/gemma-4-E4B-it".to_string(),
-            port: 1235,
-            transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
-            health_path: "/health",
-            launcher_kind: ManagedLauncherKind::LiteRt,
-            compute_target: Some(engine::ComputeTarget::Cpu),
-        };
-        let launch_spec = build_managed_backend_launch_spec(
-            &root,
-            ManagedBackendRole::Chat,
-            &spec,
-            &runtime_gpu_manager::GpuAdmission::default(),
-        )
-        .expect_err("current LiteRT Gemma4 artifacts are not qualified for 128k");
-        assert!(
-            launch_spec
-                .to_string()
-                .contains("only validated to 131072 tokens"),
-            "unexpected error: {launch_spec:#}"
-        );
-    }
-
-    #[test]
-    fn e2b_default_litert_artifact_mapping_is_disabled_until_rebuilt() {
-        assert!(default_litert_artifact_for_model("google/gemma-4-E2B-it").is_none());
-        let artifact = default_litert_artifact_for_model("google/gemma-4-E4B-it")
-            .expect("e4b mapping should remain active");
-        assert_eq!(
-            artifact.huggingface_repo,
-            "metricspace/gemma4-E4B-it-litert-128k-mtp"
-        );
     }
 
     #[test]
@@ -4074,7 +3725,6 @@ mod tests {
                 device_layers: Some("0:20;1:16".to_string()),
                 ..Default::default()
             },
-            litert_config: None,
         };
 
         let rendered = render_managed_engine_runtime_config(&launch_spec);
@@ -4121,7 +3771,6 @@ mod tests {
                 max_seq_len: Some(32_000),
                 ..Default::default()
             },
-            litert_config: None,
         };
 
         let rendered = render_managed_engine_runtime_config(&launch_spec);
@@ -4161,7 +3810,6 @@ mod tests {
                 binary_path: Some(engine_binary.display().to_string()),
                 ..Default::default()
             },
-            litert_config: None,
         };
 
         with_host_acceleration_override("cuda", || {
@@ -4209,7 +3857,6 @@ mod tests {
                 isq_cpu_threads: Some(4),
                 ..Default::default()
             },
-            litert_config: None,
         };
 
         with_host_acceleration_override("cuda", || {

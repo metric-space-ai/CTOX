@@ -289,9 +289,9 @@ tui_select_model() {
     model_descs+=("${C_BOLD}Qwen 3.5 9B${C_RESET}         ${C_GREY}Multilingual via Candle${C_RESET}")
   fi
 
-  # Gemma4-E4B: always available, served via LiteRT (optimized for all platforms incl. CPU)
+  # Gemma4-E4B: always available, served via Candle (works on CPU and GPU).
   models+=("$DEFAULT_MODEL")
-  model_descs+=("${C_BOLD}Gemma4 E4B${C_RESET}          ${C_GREY}LiteRT-optimiert, läuft überall inkl. CPU (Standard)${C_RESET}")
+  model_descs+=("${C_BOLD}Gemma4 E4B${C_RESET}          ${C_GREY}Candle-Engine, läuft auf CPU und GPU (Standard)${C_RESET}")
 
   # If only one option or flag provided, skip selection
   if [[ -n "$MODEL_FLAG" ]]; then
@@ -938,8 +938,7 @@ ensure_runtime_state_layout() {
 write_wrapper_script() {
   local wrapper_root="$1"
   mkdir -p "$BIN_DIR"
-  local install_root_export=""
-  [[ -n "$INSTALL_ROOT" ]] && install_root_export="export CTOX_INSTALL_ROOT=\"$INSTALL_ROOT\""
+  local launcher_binary="$BIN_DIR/ctox-real"
 
   # CRITICAL: remove any existing $BIN_DIR/ctox *before* writing. If
   # setup_managed_install left a symlink here pointing at the real Rust
@@ -953,16 +952,35 @@ write_wrapper_script() {
   cat > "$BIN_DIR/ctox" <<WRAPEOF
 #!/usr/bin/env bash
 set -euo pipefail
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH
 export CTOX_ROOT="$wrapper_root"
 export CTOX_STATE_ROOT="$STATE_ROOT"
-$install_root_export
-exec "$wrapper_root/bin/ctox" "\$@"
+export CTOX_INSTALL_ROOT="$INSTALL_ROOT"
+exec "$launcher_binary" "\$@"
 WRAPEOF
   chmod +x "$BIN_DIR/ctox"
 
   # Do not publish helper runtimes as public binaries. The supported install
   # surface is `ctox`; `ctox-desktop-host` is an optional remote-access helper,
   # and the GUI desktop app ships as a separate package.
+}
+
+write_managed_launch_wrapper() {
+  local destination="$1"
+  local wrapper_root="$2"
+  local launcher_binary="$3"
+  mkdir -p "$(dirname "$destination")"
+  rm -f "$destination"
+  cat > "$destination" <<WRAPEOF
+#!/usr/bin/env bash
+set -euo pipefail
+unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+export CTOX_ROOT="$wrapper_root"
+export CTOX_STATE_ROOT="$STATE_ROOT"
+export CTOX_INSTALL_ROOT="$INSTALL_ROOT"
+exec "$launcher_binary" "\$@"
+WRAPEOF
+  chmod +x "$destination"
 }
 
 # ── Rust toolchain ───────────────────────────────────────────────────────────
@@ -1187,21 +1205,48 @@ build_ctox() {
 }
 
 # Prefer the built binary's embedded version, then git tags, then Cargo.toml.
+resolve_ctox_binary_path() {
+  local source_root="$1"
+  local candidate
+  for candidate in \
+    "$source_root/target/release/ctox" \
+    "$source_root/target/debug/ctox" \
+    "$source_root/bin/ctox"
+  do
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
+resolve_ctox_desktop_host_binary_path() {
+  local source_root="$1"
+  local candidate
+  for candidate in \
+    "$source_root/desktop/target/release/ctox-desktop-host" \
+    "$source_root/desktop/target/debug/ctox-desktop-host" \
+    "$source_root/bin/ctox-desktop-host"
+  do
+    [[ -x "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+  done
+  return 1
+}
+
 resolve_source_version() {
   local source_root="$1"
-  local binary="$source_root/bin/ctox"
-
-  if [[ -x "$binary" ]]; then
-    local embedded
-    embedded="$("$binary" version 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-    [[ -n "$embedded" ]] && { printf '%s\n' "$embedded"; return 0; }
-  fi
 
   if command -v git >/dev/null 2>&1; then
     local described
     described="$(git -C "$source_root" describe --tags --dirty --match 'v[0-9]*' 2>/dev/null || true)"
     described="${described#v}"
     [[ -n "$described" ]] && { printf '%s\n' "$described"; return 0; }
+  fi
+
+  local binary
+  binary="$(resolve_ctox_binary_path "$source_root" 2>/dev/null || true)"
+  if [[ -n "$binary" && -x "$binary" ]]; then
+    local embedded
+    embedded="$("$binary" version 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+    [[ -n "$embedded" ]] && { printf '%s\n' "$embedded"; return 0; }
   fi
 
   grep '^version' "$source_root/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/'
@@ -1222,14 +1267,21 @@ setup_managed_install() {
   rsync -a --exclude='target' --exclude='runtime' --exclude='.git' "$source_root/" "$release_dir/"
 
   mkdir -p "$release_dir/bin"
-  cp "$source_root/bin/ctox" "$release_dir/bin/" 2>/dev/null || true
-  cp "$source_root/bin/ctox-desktop-host" "$release_dir/bin/" 2>/dev/null || true
+  local ctox_binary=""
+  ctox_binary="$(resolve_ctox_binary_path "$source_root" 2>/dev/null || true)"
+  [[ -n "$ctox_binary" ]] && cp "$ctox_binary" "$release_dir/bin/ctox-real" 2>/dev/null || true
+  local ctox_desktop_host_binary=""
+  ctox_desktop_host_binary="$(resolve_ctox_desktop_host_binary_path "$source_root" 2>/dev/null || true)"
+  [[ -n "$ctox_desktop_host_binary" ]] && cp "$ctox_desktop_host_binary" "$release_dir/bin/ctox-desktop-host" 2>/dev/null || true
+  mkdir -p "$INSTALL_ROOT/bin"
+  if [[ -x "$release_dir/bin/ctox-real" ]]; then
+    cp "$release_dir/bin/ctox-real" "$BIN_DIR/ctox-real" 2>/dev/null || true
+    write_managed_launch_wrapper "$release_dir/bin/ctox" "$release_dir" "$BIN_DIR/ctox-real"
+    write_managed_launch_wrapper "$INSTALL_ROOT/bin/ctox" "$release_dir" "$BIN_DIR/ctox-real"
+  fi
+  [[ -x "$release_dir/bin/ctox-desktop-host" ]] && cp "$release_dir/bin/ctox-desktop-host" "$INSTALL_ROOT/bin/ctox-desktop-host" 2>/dev/null || true
   ln -sfn "$release_dir" "$INSTALL_ROOT/current"
   [[ ! -e "$release_dir/runtime" ]] && ln -sfn "$STATE_ROOT" "$release_dir/runtime"
-  ln -sf "$INSTALL_ROOT/current/bin/ctox" "$BIN_DIR/ctox"
-  if [[ -x "$INSTALL_ROOT/current/bin/ctox-desktop-host" ]]; then
-    ln -sf "$INSTALL_ROOT/current/bin/ctox-desktop-host" "$BIN_DIR/ctox-desktop-host"
-  fi
 
   cat > "$INSTALL_ROOT/install_manifest.json" <<MANIFEST
 {
@@ -1623,7 +1675,7 @@ main() {
   CUDA_HOME_RESOLVED="$(detect_cuda_home || true)"
   configure_cuda_env
 
-  local backend_desc="CPU-only (LiteRT)"
+  local backend_desc="CPU-only (Candle)"
   local has_gpu="no"
   if [[ "$ENGINE_FEATURES" == *cuda* ]]; then
     local cv; cv="$(detect_cuda_version "$CUDA_HOME_RESOLVED" || true)"
@@ -1641,14 +1693,10 @@ main() {
 
   tui_select_model "$has_gpu"
 
-  local model_serving=""
-  if [[ "$SELECTED_MODEL" == "$DEFAULT_MODEL" || "$SELECTED_MODEL" == *gemma-4-E4B* || "$SELECTED_MODEL" == *gemma-4-E2B* ]]; then
-    model_serving="LiteRT"
-  elif [[ "$has_gpu" == "yes" ]]; then
-    model_serving="Candle"
-  else
+  # All local inference now runs through the integrated Candle engine.
+  local model_serving="Candle"
+  if [[ "$has_gpu" != "yes" && "$SELECTED_MODEL" != *gemma-4-E4B* && "$SELECTED_MODEL" != *gemma-4-E2B* ]]; then
     SELECTED_MODEL="$DEFAULT_MODEL"
-    model_serving="LiteRT"
   fi
 
   local model_short; model_short="$(basename "$SELECTED_MODEL")"

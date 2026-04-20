@@ -2,7 +2,6 @@
 // License: Apache-2.0
 
 pub mod engine;
-pub mod litert_bridge;
 pub mod local_transport;
 pub mod model_adapters;
 pub mod model_manifest;

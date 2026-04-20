@@ -768,14 +768,6 @@ fn runtime_process_matches_local_backend(
     if command.is_empty() || !command.contains(&root.display().to_string()) {
         return false;
     }
-    if state.local_runtime == runtime_state::LocalRuntimeKind::LiteRt {
-        if !command.contains("serve-litert-bridge") {
-            return false;
-        }
-        return expected_local_litert_config_path(root, state)
-            .map(|expected| command.contains(expected.display().to_string().as_str()))
-            .unwrap_or(false);
-    }
     if !command.contains("ctox-engine") {
         return false;
     }
@@ -813,34 +805,6 @@ fn expected_local_engine_config_path(
             .join("managed_engine_configs")
             .join(format!(
                 "engine_{}_{}_{}.toml",
-                port,
-                socket_component,
-                &model_digest[..12]
-            )),
-    )
-}
-
-fn expected_local_litert_config_path(
-    root: &Path,
-    state: &runtime_state::InferenceRuntimeState,
-) -> Option<PathBuf> {
-    let port = state.engine_port?;
-    let active_model = state.active_or_selected_model()?.trim();
-    if active_model.is_empty() {
-        return None;
-    }
-    let socket_component = runtime_kernel::managed_runtime_transport(
-        root,
-        runtime_kernel::InferenceWorkloadRole::PrimaryGeneration,
-    )
-    .endpoint_string();
-    let socket_component = sanitize_managed_engine_config_path_component(&socket_component);
-    let model_digest = format!("{:x}", sha2::Sha256::digest(active_model.as_bytes()));
-    Some(
-        root.join("runtime")
-            .join("managed_litert_configs")
-            .join(format!(
-                "litert_{}_{}_{}.json",
                 port,
                 socket_component,
                 &model_digest[..12]
@@ -1123,12 +1087,11 @@ fn overlay_process_runtime_selection_env(env_map: &mut BTreeMap<String, String>)
 fn explicit_local_runtime_override(
     env_map: &BTreeMap<String, String>,
 ) -> Option<runtime_state::LocalRuntimeKind> {
-    env_map.get("CTOX_LOCAL_RUNTIME").map(
-        |value| match runtime_state::normalize_local_runtime_kind(value) {
-            "litert" => runtime_state::LocalRuntimeKind::LiteRt,
-            _ => runtime_state::LocalRuntimeKind::Candle,
-        },
-    )
+    // Only Candle is supported as the local runtime. The env override is
+    // preserved for backward compatibility but always normalizes to Candle.
+    env_map
+        .get("CTOX_LOCAL_RUNTIME")
+        .map(|_| runtime_state::LocalRuntimeKind::Candle)
 }
 
 fn build_selected_runtime_state(
@@ -1181,12 +1144,7 @@ fn build_selected_runtime_state(
                 .unwrap_or_else(runtime_state::default_local_engine_port);
             next_state.engine_model = Some(requested_model.to_string());
             next_state.engine_port = Some(engine_port);
-            next_state.realized_context_tokens =
-                if next_state.local_runtime == runtime_state::LocalRuntimeKind::LiteRt {
-                    Some(configured_context_tokens)
-                } else {
-                    None
-                };
+            next_state.realized_context_tokens = None;
             next_state.upstream_base_url = runtime_state::local_upstream_base_url(engine_port);
         }
     }
@@ -1231,50 +1189,21 @@ fn apply_selection_runtime_projection(
         }
         runtime_state::InferenceSource::Local => {
             seed_requested_local_runtime_env(env_map, next_state);
-            if next_state.local_runtime == runtime_state::LocalRuntimeKind::LiteRt {
-                let request_model = next_state
-                    .requested_model
-                    .as_deref()
-                    .or(next_state.active_model.as_deref())
-                    .or(next_state.base_model.as_deref())
-                    .context("LiteRT runtime selection missing requested model")?;
-                let validated_context =
-                    runtime_state::validated_litert_context_cap_for_model(request_model)
-                        .context("LiteRT runtime selection missing a qualified artifact mapping")?;
-                let requested_context = next_state
-                    .configured_context_tokens
-                    .unwrap_or(validated_context);
-                if requested_context != validated_context {
-                    anyhow::bail!(
-                        "LiteRT artifact for {} is fixed at {} tokens, but CTOX requested {}. Build or select a matching LiteRT artifact for that context size.",
-                        request_model,
-                        validated_context,
-                        requested_context
-                    );
-                }
+            let selected_plan = if let Some(plan) = previous_plan {
                 runtime_plan::clear_chat_plan_env(env_map);
-                runtime_plan::store_persisted_chat_runtime_plan(root, None)?;
-                runtime_plan::store_persisted_runtime_fleet_plan(root, None)?;
-                next_state.local_preset = None;
-                next_state.configured_context_tokens = Some(validated_context);
-                next_state.realized_context_tokens = Some(validated_context);
+                runtime_plan::apply_chat_runtime_plan_env(root, plan, env_map)?;
+                runtime_plan::store_persisted_chat_runtime_plan(root, Some(plan))?;
+                plan.clone()
             } else {
-                let selected_plan = if let Some(plan) = previous_plan {
-                    runtime_plan::clear_chat_plan_env(env_map);
-                    runtime_plan::apply_chat_runtime_plan_env(root, plan, env_map)?;
-                    runtime_plan::store_persisted_chat_runtime_plan(root, Some(plan))?;
-                    plan.clone()
-                } else {
-                    clear_stale_persisted_plan_for_selection(root, next_state)?;
-                    runtime_plan::apply_chat_runtime_plan(root, env_map)?
-                        .context("failed to resolve local runtime plan for requested model")?
-                };
-                apply_local_runtime_plan(next_state, &selected_plan);
-                let fleet_plan =
-                    runtime_plan::resolve_runtime_fleet_plan(root, env_map, Some(&selected_plan))?;
-                apply_runtime_fleet_plan(next_state, &fleet_plan);
-                runtime_plan::store_persisted_runtime_fleet_plan(root, Some(&fleet_plan))?;
-            }
+                clear_stale_persisted_plan_for_selection(root, next_state)?;
+                runtime_plan::apply_chat_runtime_plan(root, env_map)?
+                    .context("failed to resolve local runtime plan for requested model")?
+            };
+            apply_local_runtime_plan(next_state, &selected_plan);
+            let fleet_plan =
+                runtime_plan::resolve_runtime_fleet_plan(root, env_map, Some(&selected_plan))?;
+            apply_runtime_fleet_plan(next_state, &fleet_plan);
+            runtime_plan::store_persisted_runtime_fleet_plan(root, Some(&fleet_plan))?;
             runtime_state::apply_runtime_state_to_env_map(env_map, next_state);
         }
     }
