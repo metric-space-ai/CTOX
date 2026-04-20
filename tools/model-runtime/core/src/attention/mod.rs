@@ -122,8 +122,22 @@ impl Sdpa {
         let (_, _, _, k_head_dim) = k.dims4()?;
         let (_, _, _, v_head_dim) = v.dims4()?;
 
-        let can_use_flash = q.device().is_cpu()
-            || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32;
+        // Flash-Attention v2 (and the CUDA PagedAttention kernels below it)
+        // only accept head_size ∈ {64, 80, 96, 112, 128, 192, 256}.
+        // Models with hybrid geometries (e.g. Gemma 4 E-variants: sliding
+        // head_dim=256 + full head_dim=512) must NOT take the flash path
+        // for the 512-dim layers or the kernel errors out with
+        // "head_size must be one of ...". Gate on head_dim so the supported
+        // layers still get the flash speed-up and the unsupported ones fall
+        // back to the noflash SDPA path automatically.
+        const FLASH_SUPPORTED_HEAD_DIMS: &[usize] = &[64, 80, 96, 112, 128, 192, 256];
+        let head_dims_flash_ok = FLASH_SUPPORTED_HEAD_DIMS.contains(&head_dim)
+            && FLASH_SUPPORTED_HEAD_DIMS.contains(&k_head_dim)
+            && FLASH_SUPPORTED_HEAD_DIMS.contains(&v_head_dim);
+
+        let can_use_flash = (q.device().is_cpu()
+            || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32)
+            && head_dims_flash_ok;
 
         if can_use_flash {
             // flash-attn expects (b_sz, seq_len, nheads, head_dim)
