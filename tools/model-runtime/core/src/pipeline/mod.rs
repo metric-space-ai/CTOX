@@ -1,6 +1,7 @@
 mod amoe;
 mod auto;
 pub mod chat_template;
+pub(crate) mod dflash;
 mod diffusion;
 mod embedding;
 mod ggml;

@@ -1,0 +1,328 @@
+//! DFlash block-diffusion speculative decoding pipeline.
+//!
+//! Port of `dflash/src/qwen3_dflash_graph.cpp` + `qwen35_target_graph.cpp`
+//! from <https://github.com/Luce-Org/lucebox-hub> into the CTOX engine,
+//! reusing the candle-backed hybrid Qwen3.5 text model as the target
+//! and a freshly-loaded `z-lab/Qwen3.5-27B-DFlash` as the draft.
+//!
+//! This file lands the pipeline struct, its Pipeline trait
+//! implementation, and the delegation methods to the target
+//! (PreProcessingMixin / IsqPipelineMixin / CacheManagerMixin /
+//! MetadataMixin). The actual `step()` body that drives the
+//! DFlash chain-verify loop lives in a follow-up commit — this
+//! one only ships a compile-ready skeleton so the next commit's
+//! diff is tightly scoped to the accept-loop logic.
+//!
+//! See `models/dflash_draft/` for the building blocks:
+//!   - `DFlashDraftModel`        — the 5-layer block-diffusion draft
+//!   - `TargetFeatureRing`       — sliding feature cache between steps
+//!   - `DFlashChainStepper`      — chain-verify accept loop
+//!   - `DFlashTargetForward`     — target abstraction
+//!   - `Qwen35DFlashTarget`      — concrete Qwen3.5 impl
+
+use std::{
+    any::Any,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use candle_core::{Device, Result, Tensor};
+use engine_quant::IsqType;
+use rand_isaac::Isaac64Rng;
+use tokenizers::Tokenizer;
+
+use crate::{
+    device_map::DeviceMapper,
+    get_mut_arcmutex,
+    kv_cache::{CacheManager, HybridCacheManager, NormalCacheManager},
+    models::dflash_draft::{
+        DFlashChainStepper, DFlashDraftConfig, DFlashDraftModel, Qwen35DFlashTarget,
+        TargetFeatureRing, DEFAULT_RING_CAP,
+    },
+    prefix_cacher::PrefixCacheManagerV2,
+    sequence::Sequence,
+    Pipeline,
+};
+
+use super::{
+    chat_template::ChatTemplate, AnyMoePipelineMixin, CacheBackendMetadata, CacheInstruction,
+    CacheManagerMixin, EitherCache, ForwardInputsResult, GeneralMetadata, IsqPipelineMixin,
+    MetadataMixin, ModelCategory, PreProcessingMixin,
+};
+
+/// DFlash speculative decoding pipeline.
+///
+/// Wraps a target pipeline (Qwen3.5-27B hybrid dense+GDN; loaded via
+/// the regular vision/qwen3_5 loader) and a standalone draft
+/// (`DFlashDraftModel` loaded from safetensors) behind the engine's
+/// `Pipeline` trait. Per-step state — last-committed token, feature
+/// ring — lives in `state`.
+///
+/// Concurrency: the current implementation supports a single
+/// sequence at a time. Multi-seq support would require one ring +
+/// last-committed-token slot per seq; falling back to single-seq
+/// keeps the initial port small and matches the reference
+/// (`max_seqs = 1` in all of `bench_llm.py`'s invocations). The
+/// Pipeline trait's `step` method splits batches of size > 1 into
+/// serial calls so the engine-side scheduler is not restricted,
+/// only the internal accept-loop.
+pub struct DFlashPipeline {
+    target: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+    target_cache: EitherCache,
+
+    /// Draft model, held as an Arc so the stepper can borrow it
+    /// across concurrent step calls without re-loading 3.46 GB from
+    /// safetensors every time.
+    draft: Arc<DFlashDraftModel>,
+
+    /// Chain-verify driver. Owns the feature ring internally.
+    stepper: Arc<DFlashChainStepper>,
+
+    metadata: Arc<GeneralMetadata>,
+    category: ModelCategory,
+
+    /// DFlash draft config, kept for quick access to block_size /
+    /// target_layer_ids in `step`.
+    draft_cfg: DFlashDraftConfig,
+
+    /// Per-sequence bookkeeping. Keyed by `Sequence::id()`.
+    /// `None` = no step has run yet for this seq (first-call prefill
+    /// still needed). `Some(tok)` = `tok` is the most recently
+    /// committed token id for that seq; the next step will condition
+    /// on it.
+    last_committed: Mutex<std::collections::HashMap<usize, Option<u32>>>,
+}
+
+impl DFlashPipeline {
+    pub fn new(
+        target: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        draft: Arc<DFlashDraftModel>,
+    ) -> Result<Self> {
+        let metadata = get_mut_arcmutex!(target).get_metadata().clone();
+        let category = get_mut_arcmutex!(target).category();
+        let target_cache = get_mut_arcmutex!(target).cache().clone();
+        let draft_cfg = draft.config().clone();
+
+        // The ring lives on the same device as the target — the
+        // captured features come from target forward and the draft
+        // reads them as cross-attention KV, so they need to be co-
+        // resident. The target's device is what the GeneralMetadata
+        // records.
+        let target_device = get_mut_arcmutex!(target).device();
+        let fused_feature_dim = draft_cfg.fused_target_feature_dim();
+        let ring = TargetFeatureRing::new(
+            &target_device,
+            DEFAULT_RING_CAP,
+            fused_feature_dim,
+            draft.dtype(),
+        )?;
+        let stepper = Arc::new(DFlashChainStepper::new(ring, draft_cfg.clone()));
+
+        Ok(Self {
+            target,
+            target_cache,
+            draft,
+            stepper,
+            metadata,
+            category,
+            draft_cfg,
+            last_committed: Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Attempt to wrap the inner target pipeline as a
+    /// [`Qwen35DFlashTarget`]. Fails if the target is not a hybrid
+    /// Qwen3.5 (the only architecture the reference DFlash draft
+    /// was trained for). Called at the top of `step` so the error
+    /// fires early and clearly.
+    fn wrap_target(&self) -> Result<Qwen35DFlashTarget> {
+        // Future-proof: once we support multiple target architectures
+        // (e.g., the Qwen3.6 MoE variant) this will dispatch on
+        // `target.get_metadata().model_id()` or similar. For now just
+        // a TODO marker — the scheduler wiring that actually reaches
+        // a live target lands in the next commit.
+        candle_core::bail!(
+            "DFlashPipeline::wrap_target is not yet wired — the next commit plumbs \
+             the concrete Qwen3.5 text model through from the loader."
+        )
+    }
+}
+
+impl PreProcessingMixin for DFlashPipeline {
+    fn get_chat_template(&self) -> Option<Arc<ChatTemplate>> {
+        get_mut_arcmutex!(self.target).get_chat_template()
+    }
+    fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
+        get_mut_arcmutex!(self.target).get_input_processor_config()
+    }
+    fn get_processor(&self) -> Arc<dyn super::Processor> {
+        get_mut_arcmutex!(self.target).get_processor()
+    }
+}
+
+impl IsqPipelineMixin for DFlashPipeline {
+    fn re_isq_model(&mut self, dtype: IsqType) -> anyhow::Result<()> {
+        // ISQ on the draft is unsupported — the 3.46 GB BF16 draft
+        // stays unquantised. Just forward to target.
+        get_mut_arcmutex!(self.target).re_isq_model(dtype)
+    }
+}
+
+impl CacheManagerMixin for DFlashPipeline {
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) {
+        // Draft is stateless between steps (no KV cache, feature ring
+        // is external state). Only the target's cache is sequence-
+        // owned and needs clone-in / clone-out.
+        let target = get_mut_arcmutex!(self.target);
+        if matches!(target.cache(), EitherCache::Hybrid(_)) {
+            HybridCacheManager.clone_in_cache(&*target, seqs, false);
+        } else {
+            NormalCacheManager.clone_in_cache(&*target, seqs, false);
+        }
+    }
+    fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
+        let target = get_mut_arcmutex!(self.target);
+        if matches!(target.cache(), EitherCache::Hybrid(_)) {
+            HybridCacheManager.clone_out_cache(&*target, seqs, false);
+        } else {
+            NormalCacheManager.clone_out_cache(&*target, seqs, false);
+        }
+    }
+    fn set_none_cache(
+        &self,
+        seqs: &mut [&mut Sequence],
+        reset_non_granular: bool,
+        modify_draft_cache: bool,
+        load_preallocated_cache: bool,
+    ) {
+        let _ = modify_draft_cache;
+        let target = get_mut_arcmutex!(self.target);
+        if matches!(target.cache(), EitherCache::Hybrid(_)) {
+            HybridCacheManager.set_none_cache(&*target, seqs, false, load_preallocated_cache);
+        } else {
+            NormalCacheManager.set_none_cache(&*target, seqs, false, load_preallocated_cache);
+        }
+        if reset_non_granular {
+            self.reset_non_granular_state();
+        }
+        // Drop per-seq DFlash bookkeeping for finished sequences so
+        // the hashmap doesn't grow unboundedly across long-running
+        // engines. Conservative: clear every tracked seq on reset,
+        // because the DFlash feature ring does not survive a cache
+        // reset anyway.
+        self.last_committed.lock().unwrap().clear();
+    }
+    fn cache(&self) -> &EitherCache {
+        &self.target_cache
+    }
+    fn do_preallocated_cache(&self) -> bool {
+        // We allocate the feature ring ourselves in `new`, and the
+        // target's preallocated cache is handled by the target's own
+        // flag. Return false so the engine doesn't try to double-
+        // preallocate anything through this pipeline.
+        false
+    }
+}
+
+impl MetadataMixin for DFlashPipeline {
+    fn device(&self) -> Device {
+        get_mut_arcmutex!(self.target).device()
+    }
+    fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
+        get_mut_arcmutex!(self.target).tokenizer()
+    }
+    fn name(&self) -> String {
+        format!(
+            "DFlash: tgt = `{}`, draft_block_size = {}",
+            get_mut_arcmutex!(self.target).name(),
+            self.draft_cfg.block_size,
+        )
+    }
+    fn reset_non_granular_state(&self) {
+        get_mut_arcmutex!(self.target).reset_non_granular_state();
+    }
+    fn get_metadata(&self) -> Arc<GeneralMetadata> {
+        self.metadata.clone()
+    }
+    fn device_mapper(&self) -> Option<&dyn DeviceMapper> {
+        None
+    }
+}
+
+#[async_trait::async_trait]
+impl Pipeline for DFlashPipeline {
+    fn forward_inputs(
+        &mut self,
+        _inputs: Box<dyn Any>,
+        _return_raw_logits: bool,
+    ) -> Result<ForwardInputsResult> {
+        unreachable!()
+    }
+
+    async fn sample_causal_gen(
+        &self,
+        _seqs: &mut [&mut Sequence],
+        _logits: Vec<Tensor>,
+        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _disable_eos_stop: bool,
+        _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+    ) -> Result<()> {
+        unreachable!()
+    }
+
+    async fn step(
+        &mut self,
+        input_seqs: &mut [&mut Sequence],
+        _is_prompt: bool,
+        _return_raw_logits: bool,
+        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _disable_eos_stop: bool,
+        _rng: Arc<Mutex<Isaac64Rng>>,
+        backend_metadata: CacheBackendMetadata,
+    ) -> Result<Duration> {
+        // Pre-op cache handling — mirror the SpeculativePipeline
+        // behaviour so the engine scheduler's pre/post hooks still
+        // match up with our delegation above.
+        let _post_op = match backend_metadata {
+            CacheBackendMetadata::DefaultInstructions { pre_op, post_op } => {
+                match pre_op {
+                    CacheInstruction::In => self.clone_in_cache(input_seqs),
+                    CacheInstruction::Nothing => (),
+                    CacheInstruction::Reset {
+                        reset_non_granular,
+                        load_preallocated_cache,
+                    } => self.set_none_cache(
+                        input_seqs,
+                        reset_non_granular,
+                        true,
+                        load_preallocated_cache,
+                    ),
+                    _ => unreachable!("Unreachable PRE cache op."),
+                }
+                Some(post_op)
+            }
+            CacheBackendMetadata::PagedAttention { .. } => {
+                self.clone_in_cache(input_seqs);
+                None
+            }
+        };
+
+        // Actual chain-verify step is landed in the next commit —
+        // lands a ~300-line `step` body that orchestrates the ring
+        // seed, draft forward, target verify, and accept loop.
+        let _stepper = Arc::clone(&self.stepper);
+        let _draft = Arc::clone(&self.draft);
+        let _target = self.wrap_target()?;
+        candle_core::bail!(
+            "DFlashPipeline::step body is wired for commit 11 — the loader / CLI / \
+             scheduler plumbing that actually reaches this path lands first so the \
+             step implementation can run against a live target."
+        )
+    }
+
+    fn category(&self) -> ModelCategory {
+        self.category.clone()
+    }
+}
+
+impl AnyMoePipelineMixin for DFlashPipeline {}
