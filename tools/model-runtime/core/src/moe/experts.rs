@@ -18,6 +18,25 @@ use crate::layers::Activation;
 use crate::moe::cache::{CacheConfig, ExpertTriple, MoEExpertCache, Topology};
 use crate::moe::shard;
 
+/// Map an `IsqType` (CTOX-level ISQ target) to its underlying candle
+/// `GgmlDType`. Only the variants candle's `qmatmul_indexed_moe_forward`
+/// CUDA kernel supports are returned — others map to `None` so callers
+/// fall back to the per-expert Cached loop.
+fn isqtype_to_gguf(ty: engine_quant::IsqType) -> Option<candle_core::quantized::GgmlDType> {
+    use candle_core::quantized::GgmlDType;
+    use engine_quant::IsqType;
+    Some(match ty {
+        IsqType::Q4K => GgmlDType::Q4K,
+        IsqType::Q5K => GgmlDType::Q5K,
+        IsqType::Q6K => GgmlDType::Q6K,
+        IsqType::Q8_0 => GgmlDType::Q8_0,
+        IsqType::Q2K => GgmlDType::Q2K,
+        IsqType::Q3K => GgmlDType::Q3K,
+        IsqType::Q5_1 => GgmlDType::Q5_1,
+        _ => return None,
+    })
+}
+
 fn qmethod_matmul_autocast(xs: &Tensor, layer: &dyn QuantMethod) -> candle_core::Result<Tensor> {
     let original_dtype = xs.dtype();
     let mut xs = xs.clone();
@@ -285,11 +304,17 @@ struct SlowExpertsWeights {
 /// loaded via the Cached backend's per-expert ISQ path so we don't peak
 /// at 60 GiB of BF16 weights during load.
 struct CachedExpertsWeights {
-    cache: Arc<MoEExpertCache>,
-    /// All-resident grouped-GEMM fast path. `Some(_)` iff the cache holds
-    /// every expert resident and the per-expert QuantMethods were stackable
-    /// into a single rank-3 `(num_experts, out, in)` QTensor.
+    /// `None` iff the fused grouped-GEMM path took over (capacity >=
+    /// num_experts on CUDA with ISQ). In that case no tiering is ever
+    /// needed, so allocating the cache (even in no-pool mode) would just
+    /// waste VRAM on per-expert Arcs the forward never reads.
+    cache: Option<Arc<MoEExpertCache>>,
+    /// All-resident grouped-GEMM fast path: a single rank-3
+    /// `(num_experts, out, in)` QTensor per projection, wrapped in
+    /// `FastExpertsWeights`. The forward dispatches through the same
+    /// gather-kernel path as the native `Fast` backend.
     fused: Option<FastExpertsWeights>,
+    num_experts: usize,
 }
 
 /// MoE experts layer without gate
@@ -704,6 +729,67 @@ impl MoEExperts {
         let isq_ty_opt = requested_isq.or_else(|| {
             engine_quant::get_immediate_isq().and_then(|p| p.ty)
         });
+
+        // All-resident grouped-GEMM fast path — the real fix for the
+        // Slow-loop dispatch ceiling. At `capacity >= num_experts` the
+        // cache always hits, so the Cached-loop dispatch is pure
+        // overhead: 8 top-k matmuls × 40 layers = 320 kernel launches
+        // per token on top of per-expert `index_select`/`Tensor::new`
+        // host syncs.
+        //
+        // This path:
+        //   1. takes the still-BF16 per-expert `UnquantLinear` arcs
+        //      from PackedExperts::new (before the per-expert ISQ loop),
+        //   2. stacks them via `Tensor::stack` into rank-3 BF16 tensors
+        //      on CPU,
+        //   3. quantizes each stack directly onto the target CUDA device
+        //      via `QTensor::quantize_onto` — candle's supported path,
+        //      no byte-surgery, no alignment hazards,
+        //   4. wraps the 3D Q-tensors in a single `GgufMatMul` per
+        //      projection and returns `FastExpertsWeights`. The forward
+        //      then dispatches through candle's
+        //      `qmatmul_indexed_moe_forward` CUDA kernel (one launch
+        //      for all top-k experts) — same kernel the native `Fast`
+        //      backend uses.
+        //
+        // Memory-wise: we allocate a 3D BF16 stack per projection
+        // (~512 MiB for Qwen3.6) on top of the per-expert arcs, but
+        // drop the per-expert clones and the stack immediately after
+        // `quantize_onto` succeeds, so peak is bounded to ~1 GiB per
+        // projection per rayon worker.
+        let fused_opt_in = std::env::var("ENGINE_MOE_FUSED_ALL_RESIDENT")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        if fused_opt_in && capacity >= cfg.num_experts && layer_device.is_cuda() {
+            if let Some(isq_ty) = isq_ty_opt {
+                if let Some(ggml_dtype) = isqtype_to_gguf(isq_ty) {
+                    match Self::build_fused_all_resident(&triples, ggml_dtype, &layer_device) {
+                        Ok(fast) => {
+                            let num_experts = triples.len();
+                            drop(triples);
+                            tracing::info!(
+                                "Cached MoE: built fused grouped-GEMM for {} experts \
+                                 (dtype={:?}) — forward via single gather kernel",
+                                num_experts,
+                                ggml_dtype,
+                            );
+                            return Ok(CachedExpertsWeights {
+                                cache: None,
+                                fused: Some(fast),
+                                num_experts,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Cached MoE: fused all-resident build failed ({e}); \
+                                 falling back to per-expert Cached dispatch",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         if let Some(isq_ty) = isq_ty_opt {
             {
                 let guard = engine_quant::QuantizeOntoGuard::new();
@@ -752,71 +838,7 @@ impl MoEExperts {
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(0);
-        // All-resident grouped-GEMM fast path. When every expert stays
-        // resident anyway, we'd pay the Cached-loop dispatch overhead for
-        // no reason — 8 top-k matmuls per layer per token, each its own
-        // kernel launch, for a ~100 tok/s ceiling on A6000. Build a
-        // single `(num_experts, out, in)` stacked `GgufMatMul` per
-        // projection and route the forward through candle's
-        // `qmatmul_indexed_moe_forward` kernel (one launch for all top-k
-        // experts). Stacking is done via raw Q-block byte concatenation,
-        // so no accuracy loss and no re-quantization.
-        //
-        // Only meaningful on CUDA with a Q-dtype the MoE kernel supports
-        // (Q4K/Q5K/Q6K/Q8_0). On other backends the stacked build is
-        // skipped and the forward falls through to the per-expert loop.
-        // Fused grouped-GEMM path is gated off by default: byte-concat
-        // stacking of per-expert Q4K QTensors hit a libcuda segfault
-        // (address 0x...020, offset +f82000 in libcuda.so.580.105.08)
-        // during load on our A6000 — almost certainly Q4K block
-        // alignment vs. Vec<u8>'s 1-byte alignment. The safe default is
-        // the no-pool Cached path below, which already saves the 15 GiB
-        // of host RAM that the pool would hold at all-resident; the
-        // decode-tps ceiling from the Slow-loop dispatch remains a
-        // follow-up. Opt back in via `ENGINE_MOE_FUSED_ALL_RESIDENT=1`
-        // after stacking is hardened (see [`stack_gguf_experts`] in
-        // engine_quant).
-        let fused_opt_in = std::env::var("ENGINE_MOE_FUSED_ALL_RESIDENT")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let fused = if fused_opt_in
-            && capacity >= cfg.num_experts
-            && layer_device.is_cuda()
-            && triples.first().map(|t| t.gate.name() == "gguf").unwrap_or(false)
-        {
-            let t_fuse = std::time::Instant::now();
-            let gate_arcs: Vec<_> = triples.iter().map(|t| t.gate.clone()).collect();
-            let up_arcs: Vec<_> = triples.iter().map(|t| t.up.clone()).collect();
-            let down_arcs: Vec<_> = triples.iter().map(|t| t.down.clone()).collect();
-            match (
-                engine_quant::stack_gguf_experts(&gate_arcs, &layer_device),
-                engine_quant::stack_gguf_experts(&up_arcs, &layer_device),
-                engine_quant::stack_gguf_experts(&down_arcs, &layer_device),
-            ) {
-                (Ok(g), Ok(u), Ok(d)) => {
-                    tracing::info!(
-                        "Cached MoE: built fused grouped-GEMM tensors for {} experts in {}ms \
-                         — forward will dispatch via single gather kernel",
-                        triples.len(),
-                        t_fuse.elapsed().as_millis(),
-                    );
-                    Some(FastExpertsWeights {
-                        fused_gate_proj: g,
-                        fused_up_proj: u,
-                        fused_down_proj: d,
-                    })
-                }
-                _ => {
-                    tracing::warn!(
-                        "Cached MoE: grouped-GEMM stacking failed — falling back to per-expert loop"
-                    );
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
+        let num_experts = triples.len();
         let cache = MoEExpertCache::new(
             triples,
             CacheConfig {
@@ -831,8 +853,91 @@ impl MoEExperts {
         )?;
 
         Ok(CachedExpertsWeights {
-            cache: Arc::new(cache),
-            fused,
+            cache: Some(Arc::new(cache)),
+            fused: None,
+            num_experts,
+        })
+    }
+
+    /// Stack the still-BF16 per-expert `UnquantLinear` arcs into rank-3
+    /// `(num_experts, out, in)` tensors, quantize each onto the target
+    /// CUDA device with `QTensor::quantize_onto`, and wrap the result in
+    /// a single `GgufMatMul` per projection. The produced weights are
+    /// dispatchable by candle's `qmatmul_indexed_moe_forward` kernel
+    /// which handles all top-k experts in a single launch.
+    ///
+    /// Invoked only on the all-resident CUDA path in `load_cached`;
+    /// expects `triples` to hold BF16 `UnquantLinear` arcs (i.e. the
+    /// per-expert ISQ loop hasn't run yet).
+    fn build_fused_all_resident(
+        triples: &[ExpertTriple],
+        dtype: candle_core::quantized::GgmlDType,
+        target_device: &Device,
+    ) -> Result<FastExpertsWeights> {
+        use candle_core::quantized::QTensor;
+        fn extract_weight(
+            m: &Arc<dyn QuantMethod>,
+            role: &str,
+            i: usize,
+        ) -> Result<Tensor> {
+            m.unquant_weight_bias()
+                .map(|(w, _)| w)
+                .ok_or_else(|| {
+                    candle_core::Error::msg(format!(
+                        "build_fused_all_resident: expert[{i}].{role} is not UnquantLinear \
+                         (already-ISQ'd arc?); cannot extract raw BF16 weight",
+                    ))
+                })
+        }
+        fn stack_and_quant(
+            triples: &[ExpertTriple],
+            role: &'static str,
+            dtype: candle_core::quantized::GgmlDType,
+            target_device: &Device,
+        ) -> Result<Arc<dyn QuantMethod>> {
+            let mut ws: Vec<Tensor> = Vec::with_capacity(triples.len());
+            for (i, t) in triples.iter().enumerate() {
+                let arc = match role {
+                    "gate" => &t.gate,
+                    "up" => &t.up,
+                    "down" => &t.down,
+                    _ => unreachable!(),
+                };
+                ws.push(extract_weight(arc, role, i)?);
+            }
+            // CPU stack: the UnquantLinear weights are on CPU (the Cached
+            // backend forced experts_vb to Device::Cpu at the top of
+            // new_with_backend), so this is a pure host-RAM allocation of
+            // num_experts × out × in BF16 bytes.
+            let stacked = Tensor::stack(&ws, 0)?;
+            drop(ws);
+            // Re-quantize onto the target CUDA device. The raw BF16 stack
+            // is consumed by quantize_onto (it flattens and pipes through
+            // candle's own block quantizer), so we can drop it immediately.
+            let qt = QTensor::quantize_onto(&stacked, dtype, target_device)?;
+            drop(stacked);
+            Ok(Arc::new(engine_quant::GgufMatMul::new(
+                engine_quant::QuantMethodConfig::Gguf {
+                    q_weight: Arc::new(qt),
+                    b: None,
+                },
+            )?))
+        }
+        let t_fuse = std::time::Instant::now();
+        let fused_gate_proj = stack_and_quant(triples, "gate", dtype, target_device)?;
+        let fused_up_proj = stack_and_quant(triples, "up", dtype, target_device)?;
+        let fused_down_proj = stack_and_quant(triples, "down", dtype, target_device)?;
+        tracing::info!(
+            "build_fused_all_resident: stacked + quantized {} experts to {:?} on {:?} in {}ms",
+            triples.len(),
+            dtype,
+            target_device.location(),
+            t_fuse.elapsed().as_millis(),
+        );
+        Ok(FastExpertsWeights {
+            fused_gate_proj,
+            fused_up_proj,
+            fused_down_proj,
         })
     }
 
@@ -1220,7 +1325,12 @@ impl MoEExperts {
 
         let routing_weights = topk_weights.to_dtype(DType::F32)?.to_vec2::<f32>()?;
         let experts_per_tok = topk_ids.to_vec2::<u32>()?;
-        let num_experts = weights.cache.num_experts();
+        let cache = weights.cache.as_ref().ok_or_else(|| {
+            candle_core::Error::msg(
+                "forward_cached: cache missing and fused path wasn't taken — invariant broken",
+            )
+        })?;
+        let num_experts = weights.num_experts;
 
         let mut top_x = vec![vec![]; num_experts];
         let mut selected_experts = vec![vec![]; num_experts];
@@ -1249,7 +1359,7 @@ impl MoEExperts {
             .filter(|(_, v)| !v.is_empty())
             .map(|(i, _)| i)
             .collect();
-        weights.cache.prefetch_many(&active);
+        cache.prefetch_many(&active);
 
         let mut ys = xs.zeros_like()?;
         for expert_idx in 0..num_experts {
@@ -1261,7 +1371,7 @@ impl MoEExperts {
             // Pull this expert into VRAM (may evict LFU victim + materialize
             // from warm/cold tier). `triple` holds cheap Arc clones that
             // survive even if the slot is later demoted again.
-            let triple = weights.cache.ensure_resident(expert_idx)?;
+            let triple = cache.ensure_resident(expert_idx)?;
 
             let top_x_tensor = Tensor::new(top_x_expert.as_slice(), xs.device())?;
             let selected_experts_tensor =

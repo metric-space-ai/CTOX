@@ -686,7 +686,8 @@ pub fn stack_gguf_experts(
         let bytes = e.serialize().map_err(|err| {
             candle_core::Error::msg(format!("stack_gguf_experts: serialize[{i}] failed: {err}"))
         })?;
-        let mut cur = std::io::Cursor::new(bytes.as_ref());
+        let bytes_slice: &[u8] = bytes.as_ref();
+        let mut cur = std::io::Cursor::new(bytes_slice);
         // version (u32) + type (u8) + w_len (u32) + has_bias (u8)
         // + dtype (u32) + shape_len (u32) + dims (u32 each) + w bytes
         let _version = cur.read_u32::<LittleEndian>()?;

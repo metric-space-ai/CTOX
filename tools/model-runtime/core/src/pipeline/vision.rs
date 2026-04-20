@@ -944,7 +944,13 @@ impl Loader for VisionLoader {
         };
         let eos = calculate_eos_tokens(&chat_template, gen_conf, &tokenizer);
         let sliding_window = model.config().sliding_window;
-        let model_metadata = Arc::new(model.config().clone());
+        // Use `model_config_like()` so models that override it (e.g. Gemma 4
+        // with hybrid sliding/full attention and variable per-layer
+        // head_dim / num_kv_heads) propagate their real per-layer geometry
+        // into GeneralMetadata. Falling back to `model.config().clone()`
+        // erases per-layer overrides and causes preallocated-cache shape
+        // mismatches during `KvCache::append`.
+        let model_metadata = model.model_config_like();
         Ok(Arc::new(Mutex::new(VisionPipeline {
             model,
             tokenizer: tokenizer.into(),

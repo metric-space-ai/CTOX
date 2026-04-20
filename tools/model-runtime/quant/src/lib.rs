@@ -222,7 +222,15 @@ pub fn immediate_isq_match(vb: &ShardedVarBuilder) -> Option<ImmediateIsqMatch> 
     let immediate_isq = get_immediate_isq()?;
     // Add a .weight to match the ISQ regexes!
     let prefix = format!("{}.weight", vb.prefix());
-    resolve_immediate_isq(&immediate_isq, &prefix)
+    let m = resolve_immediate_isq(&immediate_isq, &prefix);
+    if std::env::var_os("ENGINE_LOG_IMMEDIATE_ISQ_PROBES").is_some() {
+        eprintln!(
+            "[isq-probe] prefix=`{}` matched={}",
+            prefix,
+            m.is_some()
+        );
+    }
+    m
 }
 
 fn resolve_immediate_isq(params: &ImmediateIsqParams, prefix: &str) -> Option<ImmediateIsqMatch> {
