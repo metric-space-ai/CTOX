@@ -347,6 +347,29 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
+        // When the configured cache `capacity` is >= `num_experts` every
+        // expert would live resident on the device anyway. The LFU tiering,
+        // the RAM/SSD pool, the per-miss `deserialize`+`memcpy`, and the
+        // `RwLock<CacheInner>` on the hot path are all pure overhead in that
+        // regime; worse, the Cached backend runs the Slow loop internally
+        // (one kernel launch per top-k expert per layer), so a 35B-A3B
+        // decode on A6000 hits a ~100 tok/s launch-overhead ceiling. Redirect
+        // to the Fast backend so the forward pass goes through the native
+        // grouped-GEMM kernels. The loader will stage on CPU when ISQ is
+        // pending, so this doesn't OOM on discrete CUDA.
+        let backend = if backend == MoEExpertsBackend::Cached
+            && policy.cache_capacity.unwrap_or(0) >= cfg.num_experts
+        {
+            tracing::info!(
+                "MoE experts: capacity={:?} >= num_experts={} — redirecting \
+                 Cached -> Fast (zero caching overhead when all-resident).",
+                policy.cache_capacity,
+                cfg.num_experts,
+            );
+            MoEExpertsBackend::Fast
+        } else {
+            backend
+        };
         if !MoEExpertsBackend::backend_allowed_on_device(layer_device.is_cuda(), backend, policy) {
             candle_core::bail!(
                 "refusing slow MoE backend on CUDA without explicit slow-backend allowance"
@@ -357,9 +380,28 @@ impl MoEExperts {
         } else {
             vb.pp("experts")
         };
+        // The target load device:
+        // - Slow / Cached always stage on CPU (Cached rematerializes resident
+        //   experts onto CUDA later; Slow stays on CPU or whatever the vb
+        //   root device already is).
+        // - Fused/Fast normally load straight onto `layer_device` — except
+        //   when immediate ISQ is pending and `layer_device` is discrete
+        //   CUDA. Without this exception the Fused-path peaks at ~60 GiB of
+        //   stacked BF16 tensors on the device and OOMs a 48 GiB card before
+        //   the ISQ pass can shrink them. Loading on CPU keeps peak device
+        //   usage low; the framework's ISQ pass moves each quantized result
+        //   to the target device per-tensor.
+        let isq_pending_on_discrete_cuda = policy.cache_requested_isq.is_some()
+            && layer_device.is_cuda()
+            && !crate::utils::normal::is_integrated_gpu(&layer_device);
+        let fast_load_device = if isq_pending_on_discrete_cuda {
+            Device::Cpu
+        } else {
+            layer_device.clone()
+        };
         let experts_vb = match backend {
             MoEExpertsBackend::Fused | MoEExpertsBackend::Fast => {
-                experts_root.clone().set_device(layer_device.clone())
+                experts_root.clone().set_device(fast_load_device.clone())
             }
             MoEExpertsBackend::Slow => experts_root.clone(),
             // Cached backend MUST load experts on CPU: all 256 experts would
@@ -387,17 +429,26 @@ impl MoEExperts {
                 }
             }
             MoEExpertsBackend::Fast => {
+                // Pass the device-corrected experts_vb (root with CPU device
+                // when immediate ISQ is pending) so loading doesn't OOM; the
+                // `layer_device` argument remains the post-ISQ target for
+                // `FusedExperts::new`.
+                let fast_vb = if isq_pending_on_discrete_cuda {
+                    experts_root.clone().set_device(Device::Cpu)
+                } else {
+                    experts_root.clone()
+                };
                 if is_stacked {
                     MoEExpertsBackendImpl::Fast(Self::load_fast_stacked(
                         cfg,
-                        experts_root,
+                        fast_vb,
                         &layer_device,
                         quantization_config,
                     )?)
                 } else {
                     MoEExpertsBackendImpl::Fast(Self::load_fast_standard(
                         cfg,
-                        experts_root,
+                        fast_vb,
                         &layer_device,
                         quantization_config,
                     )?)
