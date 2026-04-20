@@ -538,11 +538,24 @@ impl Pipeline for SpeculativePipeline {
         );
 
         let initial_draft_cache_len = if draft_is_hybrid {
-            get_mut_arcmutex!(self.draft)
+            let raw = get_mut_arcmutex!(self.draft)
                 .cache()
                 .hybrid()
                 .get_past_kv_len()
-                .unwrap_or(0)
+                .unwrap_or(0);
+            // In paged+hybrid mode, the in-memory `KvCache` inside
+            // `HybridLayerCache::Attention` is never appended — paged
+            // writes bypass it — so `get_past_kv_len` always reads 0.
+            // Recover the real past-KV length from the sequence invariant:
+            // at end-of-step, paged blocks are trimmed to
+            // `seq.get_toks().len()`, so the last accepted token occupies
+            // the tail slot and serves as the bootstrap for the next
+            // verify. Committed KV length = `base_seq_len - 1`.
+            if using_paged_attn && raw == 0 && !is_prompt && base_seq_len > 0 {
+                base_seq_len - 1
+            } else {
+                raw
+            }
         } else {
             0
         };
@@ -642,13 +655,26 @@ impl Pipeline for SpeculativePipeline {
 
         // ======================= Run the model with all draft tokens. ============================
 
-        let initial_cache_len = match get_mut_arcmutex!(self.target).cache() {
-            EitherCache::Full(full) => full.lock()[0]
-                .as_ref()
-                .map(|(k, _)| k.dims()[2])
-                .unwrap_or(0),
-            EitherCache::Normal(normal) => normal.lock().unwrap().0[0].current_seq_len(),
-            EitherCache::Hybrid(hybrid) => hybrid.lock().unwrap().get_past_kv_len().unwrap_or(0),
+        let initial_cache_len = {
+            let raw = match get_mut_arcmutex!(self.target).cache() {
+                EitherCache::Full(full) => full.lock()[0]
+                    .as_ref()
+                    .map(|(k, _)| k.dims()[2])
+                    .unwrap_or(0),
+                EitherCache::Normal(normal) => normal.lock().unwrap().0[0].current_seq_len(),
+                EitherCache::Hybrid(hybrid) => {
+                    hybrid.lock().unwrap().get_past_kv_len().unwrap_or(0)
+                }
+            };
+            // Same derivation as `initial_draft_cache_len` above: for
+            // paged+hybrid, the Attention layer's in-memory KvCache stays
+            // at 0 because paged paths bypass it. Derive past-KV length
+            // from sequence state.
+            if target_is_hybrid && using_paged_attn && raw == 0 && !is_prompt && base_seq_len > 0 {
+                base_seq_len - 1
+            } else {
+                raw
+            }
         };
 
         // Snapshot target recurrent state before target forward
@@ -673,6 +699,17 @@ impl Pipeline for SpeculativePipeline {
         let is_xlora = get_mut_arcmutex!(self.target).get_metadata().is_xlora;
         let device = get_mut_arcmutex!(self.target).device();
         let no_kv_cache = get_mut_arcmutex!(self.target).get_metadata().no_kv_cache;
+        // Paged-attention slot mapping in `make_prompt_chunk` uses
+        // `seq.token_offset()` as the base for slot_start / position_ids /
+        // seqlens_k. For spec-decoding verify we are feeding `gamma` prefill
+        // tokens whose absolute positions start at `initial_cache_len`, not
+        // at 0. Without this shift, target KV would be written to slots
+        // `[0..gamma)`, overwriting the prior context and corrupting output
+        // on every step after the first (the well-known "covering covering
+        // covering..." degeneration). Reset to 0 immediately after the
+        // forward so normal scheduling assumptions are not perturbed.
+        let prior_target_token_offset = seq.token_offset();
+        seq.set_token_offset(initial_cache_len);
         let inputs = self
             .get_processor()
             .inputs_processor()
@@ -683,7 +720,7 @@ impl Pipeline for SpeculativePipeline {
                 is_xlora,
                 &device,
                 no_kv_cache,
-                Some((gamma, initial_cache_len)), // Get the last gamma, see above
+                Some((gamma, 0)), // token_offset already carries initial_cache_len
                 false,
                 self.get_input_processor_config(),
                 paged_attn_metadata.clone(),
@@ -693,6 +730,7 @@ impl Pipeline for SpeculativePipeline {
             .inputs;
 
         let logits = get_mut_arcmutex!(self.target).forward_inputs(inputs, false)?;
+        seq.set_token_offset(prior_target_token_offset);
         #[allow(irrefutable_let_patterns)]
         let ForwardInputsResult::CausalGeneration { logits } = logits
         else {
@@ -752,6 +790,10 @@ impl Pipeline for SpeculativePipeline {
                     let is_xlora = get_mut_arcmutex!(self.draft).get_metadata().is_xlora;
                     let device = get_mut_arcmutex!(self.draft).device();
                     let no_kv_cache = get_mut_arcmutex!(self.draft).get_metadata().no_kv_cache;
+                    // Same paged-slot offset fix as the target verify forward
+                    // above — see comment there for details.
+                    let prior_draft_token_offset = seq.token_offset();
+                    seq.set_token_offset(initial_draft_cache_len);
                     let inputs = self
                         .get_processor()
                         .inputs_processor()
@@ -762,7 +804,7 @@ impl Pipeline for SpeculativePipeline {
                             is_xlora,
                             &device,
                             no_kv_cache,
-                            Some((n_replay, initial_draft_cache_len)),
+                            Some((n_replay, 0)),
                             false,
                             self.get_input_processor_config(),
                             paged_attn_metadata.clone(),
@@ -771,6 +813,7 @@ impl Pipeline for SpeculativePipeline {
                         .unwrap()
                         .inputs;
                     let _ = get_mut_arcmutex!(self.draft).forward_inputs(inputs, false)?;
+                    seq.set_token_offset(prior_draft_token_offset);
                     seq.reset_prefill_toks();
                 }
             }
@@ -834,6 +877,10 @@ impl Pipeline for SpeculativePipeline {
                     let is_xlora = get_mut_arcmutex!(self.target).get_metadata().is_xlora;
                     let device = get_mut_arcmutex!(self.target).device();
                     let no_kv_cache = get_mut_arcmutex!(self.target).get_metadata().no_kv_cache;
+                    // Same paged-slot offset fix as the target verify forward
+                    // above — see comment there for details.
+                    let prior_replay_token_offset = seq.token_offset();
+                    seq.set_token_offset(initial_cache_len);
                     let inputs = self
                         .get_processor()
                         .inputs_processor()
@@ -844,7 +891,7 @@ impl Pipeline for SpeculativePipeline {
                             is_xlora,
                             &device,
                             no_kv_cache,
-                            Some((n_replay, initial_cache_len)),
+                            Some((n_replay, 0)),
                             false,
                             self.get_input_processor_config(),
                             paged_attn_metadata.clone(),
@@ -853,6 +900,7 @@ impl Pipeline for SpeculativePipeline {
                         .unwrap()
                         .inputs;
                     let _ = get_mut_arcmutex!(self.target).forward_inputs(inputs, false)?;
+                    seq.set_token_offset(prior_replay_token_offset);
                     seq.reset_prefill_toks();
                 }
             }

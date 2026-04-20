@@ -708,6 +708,15 @@ impl Sequence {
         self.token_offset
     }
 
+    /// Override the token offset, which shifts paged-attention slot mapping and
+    /// RoPE positions for `is_prompt=true` forwards. Used by speculative
+    /// decoding to feed `gamma` verify tokens at absolute position
+    /// `initial_cache_len` without corrupting slots `[0..initial_cache_len)`.
+    /// Always paired with a reset back to the prior value after the forward.
+    pub fn set_token_offset(&mut self, offset: usize) {
+        self.token_offset = offset;
+    }
+
     /// Get the number of prefix tokens that are cached (KV already computed).
     /// These tokens should be skipped during prefill.
     pub fn prefix_cache_len(&self) -> usize {
