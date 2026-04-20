@@ -477,12 +477,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for NormalCa
         _modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) {
-        let any_none = seqs.iter().any(|seq| seq.preallocated_cache().is_none());
-        eprintln!(
-            "[gemma4-trace] set_none_cache: any_seq_none_preallocated={any_none} load_preallocated_cache={load_preallocated_cache} n_seqs={}",
-            seqs.len()
-        );
-        if any_none {
+        if seqs.iter().any(|seq| seq.preallocated_cache().is_none()) {
             for layer in pipeline.cache().normal().0.iter_mut() {
                 layer.reset();
             }

@@ -757,10 +757,16 @@ impl MoEExperts {
         // drop the per-expert clones and the stack immediately after
         // `quantize_onto` succeeds, so peak is bounded to ~1 GiB per
         // projection per rayon worker.
-        let fused_opt_in = std::env::var("ENGINE_MOE_FUSED_ALL_RESIDENT")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
+        // Fused grouped-GEMM is the default at all-resident on CUDA — it
+        // dispatches all top-k experts in one kernel launch, eliminating
+        // the ~37 % decode-tok/s overhead the per-expert Slow loop would
+        // pay for the identical 100%-hit-rate workload. Set
+        // `ENGINE_MOE_FUSED_ALL_RESIDENT=0` to force the old loop path
+        // for debugging.
+        let fused_disabled = std::env::var("ENGINE_MOE_FUSED_ALL_RESIDENT")
+            .map(|v| matches!(v.as_str(), "0" | "false" | "no" | "off"))
             .unwrap_or(false);
-        if fused_opt_in && capacity >= cfg.num_experts && layer_device.is_cuda() {
+        if !fused_disabled && capacity >= cfg.num_experts && layer_device.is_cuda() {
             if let Some(isq_ty) = isq_ty_opt {
                 if let Some(ggml_dtype) = isqtype_to_gguf(isq_ty) {
                     match Self::build_fused_all_resident(&triples, ggml_dtype, &layer_device) {

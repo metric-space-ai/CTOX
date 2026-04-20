@@ -214,6 +214,15 @@ pub fn clear_immediate_isq() {
     });
 }
 
+/// Install a pre-built `ImmediateIsqParams` snapshot onto the current thread's
+/// thread-local. Used to propagate ISQ state from the main loading thread onto
+/// rayon worker threads that build decoder layers in parallel.
+pub fn install_immediate_isq(params: Option<ImmediateIsqParams>) {
+    ENGINE_IMMEDIATE_ISQ.with(|cell| {
+        *cell.borrow_mut() = params;
+    });
+}
+
 pub fn should_apply_immediate_isq(vb: &ShardedVarBuilder) -> bool {
     immediate_isq_match(vb).is_some()
 }
@@ -222,15 +231,7 @@ pub fn immediate_isq_match(vb: &ShardedVarBuilder) -> Option<ImmediateIsqMatch> 
     let immediate_isq = get_immediate_isq()?;
     // Add a .weight to match the ISQ regexes!
     let prefix = format!("{}.weight", vb.prefix());
-    let m = resolve_immediate_isq(&immediate_isq, &prefix);
-    if std::env::var_os("ENGINE_LOG_IMMEDIATE_ISQ_PROBES").is_some() {
-        eprintln!(
-            "[isq-probe] prefix=`{}` matched={}",
-            prefix,
-            m.is_some()
-        );
-    }
-    m
+    resolve_immediate_isq(&immediate_isq, &prefix)
 }
 
 fn resolve_immediate_isq(params: &ImmediateIsqParams, prefix: &str) -> Option<ImmediateIsqMatch> {

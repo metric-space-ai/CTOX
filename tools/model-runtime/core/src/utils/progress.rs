@@ -1,4 +1,4 @@
-use engine_quant::get_immediate_isq;
+use engine_quant::{get_immediate_isq, install_immediate_isq};
 use indicatif::{
     MultiProgress, ProgressBar, ProgressBarIter, ProgressDrawTarget, ProgressIterator,
     ProgressStyle,
@@ -231,7 +231,23 @@ where
         // regardless of hints. For a 40-layer MoE model that meant >1 h of
         // cold-start on a 20-core host.
         if is_parallel {
-            self.into_par_iter().map(f).collect()
+            // Snapshot the main thread's immediate-ISQ state so that rayon
+            // worker threads (which have their own thread-local ENGINE_IMMEDIATE_ISQ
+            // initialized to None) see the same ISQ predicates / params when
+            // building decoder layers in parallel. Without this, models that
+            // load their transformer layers via `par_iter_if_isq` silently
+            // skip ISQ entirely and run unquantized.
+            let snapshot = get_immediate_isq();
+            self.into_par_iter()
+                .map(move |item| {
+                    if get_immediate_isq().is_none() {
+                        if let Some(ref snap) = snapshot {
+                            install_immediate_isq(Some(snap.clone()));
+                        }
+                    }
+                    f(item)
+                })
+                .collect()
         } else {
             self.into_iter().map(f).collect()
         }
