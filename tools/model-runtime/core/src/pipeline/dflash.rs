@@ -41,9 +41,10 @@ use crate::{
         DFlashChainStepper, DFlashDraftConfig, DFlashDraftModel, TargetFeatureRing,
         DEFAULT_RING_CAP,
     },
+    pipeline::sampling::finish_or_add_toks_to_seq,
     prefix_cacher::PrefixCacheManagerV2,
     sampler::Logprobs,
-    sequence::{Sequence, SequenceState, StopReason},
+    sequence::{Sequence, SequenceState},
     DeviceMapSetting, Loader, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline, TokenSource,
     TryIntoDType,
 };
@@ -272,8 +273,8 @@ impl Pipeline for DFlashPipeline {
         input_seqs: &mut [&mut Sequence],
         is_prompt: bool,
         _return_raw_logits: bool,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
-        _disable_eos_stop: bool,
+        prefix_cacher: &mut PrefixCacheManagerV2,
+        disable_eos_stop: bool,
         _rng: Arc<Mutex<Isaac64Rng>>,
         backend_metadata: CacheBackendMetadata,
     ) -> Result<Duration> {
@@ -320,146 +321,160 @@ impl Pipeline for DFlashPipeline {
 
         let t_start = std::time::Instant::now();
 
-        // Reach the concrete Qwen3.5 text model behind the target
-        // pipeline. The Pipeline trait's `dflash_text_model` hook
-        // returns `Some(&Qwen3_5TextModel)` only when the inner
-        // model is the hybrid Qwen3.5 the DFlash draft was trained
-        // for; everything else errors out clearly.
-        let target_guard = self.target.lock().await;
-        let target_text = target_guard.dflash_text_model().ok_or_else(|| {
-            candle_core::Error::msg(
-                "DFlashPipeline::step: target is not a Qwen3.5 vision pipeline. \
-                 DFlash requires the hybrid-Qwen3.5 target the reference draft \
-                 was trained for (e.g. Qwen/Qwen3.5-27B).",
-            )
-        })?;
-        let draft = self.draft.as_ref();
-        let stepper = self.stepper.as_ref();
-        let seq = &mut input_seqs[0];
+        // Decide up-front which input_seqs[0].id() we're operating on.
+        // We run the target forward under `target_guard`, release the
+        // guard, then fold accepted tokens into the sequence via
+        // `finish_or_add_toks_to_seq`. The guard must be dropped before
+        // that call — `finish_or_add_toks_to_seq` goes through
+        // `this.get_metadata()`, which on DFlashPipeline re-locks
+        // `self.target` and would deadlock against a held guard.
         let opts = StepperOpts::default();
 
-        if is_prompt {
-            // Prefill path: the sequence carries the prompt tokens;
-            // feed them through the target with capture, seed the
-            // ring, greedy-sample the first new token, commit it to
-            // the sequence. We also record this as the
-            // `last_committed` token and initialise the
-            // target-KV-length tracker for subsequent decode steps.
-            let prompt_toks: Vec<u32> = seq.get_toks().to_vec();
-            let prompt_len = prompt_toks.len();
-            if prompt_len == 0 {
-                candle_core::bail!("DFlashPipeline::step: is_prompt=true but seq has no tokens");
-            }
-            let device = target_text.device().clone();
-            let input_ids = Tensor::from_vec(prompt_toks, (1, prompt_len), &device)?;
+        // ── Phase 1: run the target forward under the guard ───────────
+        // Returns:
+        //   * `outcome_opt`  — decode_step result (None on prefill path)
+        //   * `eos_owned`    — the target's EOS tokens (pulled from
+        //                      metadata before we drop the guard so the
+        //                      Phase 2 accept loop can run an EOS check
+        //                      without re-locking).
+        //   * `first_tok`    — on prefill, the greedy-sampled first
+        //                      output token (to be committed via
+        //                      `finish_or_add_toks_to_seq` after the
+        //                      guard is released). None on decode.
+        let (outcome_opt, eos_owned, first_tok_on_prefill) = {
+            let target_guard = self.target.lock().await;
+            let target_text = target_guard.dflash_text_model().ok_or_else(|| {
+                candle_core::Error::msg(
+                    "DFlashPipeline::step: target is not a Qwen3.5 vision pipeline. \
+                     DFlash requires the hybrid-Qwen3.5 target the reference draft \
+                     was trained for (e.g. Qwen/Qwen3.5-27B).",
+                )
+            })?;
+            let draft = self.draft.as_ref();
+            let stepper = self.stepper.as_ref();
+            let seq = &mut input_seqs[0];
+            let eos_owned = target_guard.get_metadata().eos_tok.clone();
 
-            let (first_tok, kv_after_prefill) = {
-                let mut ring = stepper.ring().lock().unwrap();
-                prefill(target_text, &mut ring, stepper.config(), &input_ids)?
+            if is_prompt {
+                // Prefill path: feed prompt tokens through the target
+                // with capture, seed the ring, greedy-sample the first
+                // new token, stash it as last_committed + init
+                // past_kv_len. We do NOT feed that first token into the
+                // sequence here — the next decode-phase call will pick
+                // it up through `last_committed` and re-feed it as the
+                // leading token of the B+1 chain-verify batch. The
+                // engine scheduler drives prompt→decode transitions.
+                let prompt_toks: Vec<u32> = seq.get_toks().to_vec();
+                let prompt_len = prompt_toks.len();
+                if prompt_len == 0 {
+                    candle_core::bail!("DFlashPipeline::step: is_prompt=true but seq has no tokens");
+                }
+                let device = target_text.device().clone();
+                let input_ids = Tensor::from_vec(prompt_toks, (1, prompt_len), &device)?;
+
+                let (first_tok, kv_after_prefill) = {
+                    let mut ring = stepper.ring().lock().unwrap();
+                    prefill(target_text, &mut ring, stepper.config(), &input_ids)?
+                };
+                self.last_committed
+                    .lock()
+                    .unwrap()
+                    .insert(*seq.id(), Some(first_tok));
+                self.past_kv_len
+                    .lock()
+                    .unwrap()
+                    .insert(*seq.id(), kv_after_prefill);
+                (None, eos_owned, Some(first_tok))
+            } else {
+                let last_committed_token = {
+                    let map = self.last_committed.lock().unwrap();
+                    match map.get(seq.id()).copied().flatten() {
+                        Some(t) => t,
+                        None => candle_core::bail!(
+                            "DFlashPipeline::step: decode without prior prefill for seq {}",
+                            seq.id()
+                        ),
+                    }
+                };
+                let past_kv_len = {
+                    let map = self.past_kv_len.lock().unwrap();
+                    *map.get(seq.id()).ok_or_else(|| {
+                        candle_core::Error::msg(format!(
+                            "DFlashPipeline::step: no past_kv_len for seq {} — prefill missing?",
+                            seq.id()
+                        ))
+                    })?
+                };
+                let outcome = decode_step(
+                    target_text,
+                    draft,
+                    stepper,
+                    last_committed_token,
+                    past_kv_len,
+                    &opts,
+                )?;
+                (Some(outcome), eos_owned, None)
+            }
+        }; // target_guard released here
+
+        // ── Phase 2a: on prefill, commit the greedy-sampled first token
+        // so the client's output stream includes it. Without this step
+        // the first output token is silently dropped — the decode
+        // chain-verify feeds `last_committed` as the *anchor* of the
+        // B+1 batch, not as a new output, so only target_choices[0..]
+        // would otherwise reach the sequence.
+        let seq = &mut input_seqs[0];
+        let eos_tok_slice = if disable_eos_stop || eos_owned.is_empty() {
+            None
+        } else {
+            Some(eos_owned.as_slice())
+        };
+        if let Some(first_tok) = first_tok_on_prefill {
+            let lp = Logprobs {
+                token: first_tok,
+                logprob: 0.0,
+                bytes: None,
+                top_logprobs: None,
             };
-            self.last_committed
-                .lock()
-                .unwrap()
-                .insert(*seq.id(), Some(first_tok));
-            self.past_kv_len
-                .lock()
-                .unwrap()
-                .insert(*seq.id(), kv_after_prefill);
+            finish_or_add_toks_to_seq(self, prefix_cacher, seq, lp, eos_tok_slice, true).await?;
             return Ok(t_start.elapsed());
         }
 
-        // Decode path: one chain-verify round. Pull the last
-        // committed token we stashed at prefill time.
-        let last_committed_token = {
-            let map = self.last_committed.lock().unwrap();
-            match map.get(seq.id()).copied().flatten() {
-                Some(t) => t,
-                None => candle_core::bail!(
-                    "DFlashPipeline::step: decode without prior prefill for seq {}",
-                    seq.id()
-                ),
-            }
-        };
-        // Target's hybrid KV cache grows by the FULL feed length per
-        // forward (B+1 per step), not by accepted count — rejected
-        // draft-token KV entries stay in the cache for this first
-        // chain-verify port. Track the target-side length separately
-        // from `seq.len()`.
-        let past_kv_len = {
-            let map = self.past_kv_len.lock().unwrap();
-            *map.get(seq.id()).ok_or_else(|| {
-                candle_core::Error::msg(format!(
-                    "DFlashPipeline::step: no past_kv_len for seq {} — prefill missing?",
-                    seq.id()
-                ))
-            })?
-        };
+        let outcome = outcome_opt.expect("decode path sets outcome");
 
-        let outcome = decode_step(
-            target_text,
-            draft,
-            stepper,
-            last_committed_token,
-            past_kv_len,
-            &opts,
-        )?;
-
-        // Commit accepted tokens. This mirrors speculative.rs's
-        // accept loop shape but skips `finish_or_add_toks_to_seq`
-        // (async, re-locks the target via get_metadata() and would
-        // deadlock against the target_guard we already hold). We
-        // replicate the essential parts inline:
-        //   * decode the token via the target's `tok_env` trie into
-        //     bytes so `seq.completion_bytes` gets populated — without
-        //     this the scheduler sees no output and streams nothing,
-        //   * check `seq.is_done` against eos + stop toks + max_len
-        //     BEFORE each `add_token` so we don't over-commit past
-        //     the stop boundary,
-        //   * commit via `seq.add_token`, which is the real API the
-        //     scheduler expects (unlike `add_tmp_tok` which the old
-        //     first-smoke code used and never removed — leaving seq
-        //     state wedged).
+        // ── Phase 2b: commit accepted decode tokens ──────────────────
+        // `finish_or_add_toks_to_seq` decodes each token to bytes via
+        // the pipeline's tok_env, runs the EOS / stop-tok / max-len
+        // check, writes `seq.completion_bytes`, and — on `is_done` —
+        // flips `SequenceState::Done(reason)` AND dispatches a
+        // `Response::Done(...)` through the seq's responder channel.
+        // That responder side is the bit that was missing from the
+        // first-smoke path: without it, the streamer sits on an empty
+        // rx after `response.created` and the client never sees
+        // `response.completed`.
         //
-        // Greedy (no sampling) ⇒ logprob is unknown here; we emit
-        // 0.0 as a placeholder. The chain-verify draft path is
-        // argmax-only so there's no distribution to report anyway.
-        // When DDTree verify lands we can wire real logprobs
-        // through `DraftStepOutput.top_k_logprobs` if clients ask
-        // for them.
-        let (eos_tok_ids, max_model_len, tok_env) = {
-            let md = target_guard.get_metadata();
-            (md.eos_tok.clone(), md.max_seq_len, md.tok_env())
+        // Greedy argmax verify ⇒ logprob is unknown; we emit 0.0 as a
+        // placeholder. DDTree verify (follow-up) can wire real
+        // logprobs through `DraftStepOutput.top_k_logprobs`.
+        let mut new_last = {
+            let map = self.last_committed.lock().unwrap();
+            map.get(seq.id()).copied().flatten().unwrap_or(0)
         };
-        let eos_tok_slice = if eos_tok_ids.is_empty() {
-            None
-        } else {
-            Some(eos_tok_ids.as_slice())
-        };
-
-        let mut new_last = last_committed_token;
         let n_accepted = outcome.accepted.len();
-        let mut stop_reason: Option<StopReason> = None;
         for tok in outcome.accepted.iter().copied() {
-            let is_done = seq.is_done(tok, eos_tok_slice, max_model_len);
-            let completion_bytes = match tok_env.as_ref() {
-                Some(env) => env.tok_trie().decode_ext(&[tok], false),
-                None => Vec::new(),
-            };
             let lp = Logprobs {
                 token: tok,
                 logprob: 0.0,
                 bytes: None,
                 top_logprobs: None,
             };
-            seq.add_token(lp, completion_bytes, &is_done);
+            finish_or_add_toks_to_seq(self, prefix_cacher, seq, lp, eos_tok_slice, true).await?;
             new_last = tok;
-            if let Some(reason) = is_done {
-                stop_reason = Some(reason);
+            // Stop as soon as finish_or_add flipped the seq to Done —
+            // no point over-committing rejected-after-stop draft tokens.
+            if matches!(seq.getstate(), SequenceState::Done(_)) {
                 break;
             }
-        }
-        if let Some(reason) = stop_reason {
-            seq.set_state(SequenceState::Done(reason));
         }
 
         self.last_committed
