@@ -937,6 +937,104 @@ impl Qwen3_5TextModel {
         )
     }
 
+    /// Like [`Self::forward_with_dflash_capture`] but accepts an
+    /// explicit additive attention mask, bypassing the causal-mask
+    /// builder. Used by DDTree tree verify where the mask is
+    /// ancestor-only over a tree-flattened token sequence rather than
+    /// triangular over a linear sequence.
+    ///
+    /// `attention_mask` must have shape `[1, 1, seq_len, past_kv_len +
+    /// seq_len]` and dtype matching `self.dtype` (BF16/F16), with `0.0`
+    /// at allowed positions and `−inf` elsewhere. Building the mask
+    /// from a [`crate::models::dflash_draft::DDTree`] is the caller's
+    /// job — see
+    /// [`crate::models::dflash_draft::build_tree_mask`] for the
+    /// canonical source. Passing an improperly shaped mask will error
+    /// inside the attention path, not here.
+    ///
+    /// All other inputs match `forward_with_dflash_capture`:
+    /// * `input_ids` `[1, seq_len]`.
+    /// * `past_kv_len` — KV-cache offset for positions + FlashParams.
+    /// * `capture` — optional FeatureCapture sink.
+    pub fn forward_with_dflash_capture_explicit_mask(
+        &self,
+        input_ids: &Tensor,
+        past_kv_len: usize,
+        attention_mask: &Tensor,
+        capture: Option<&mut crate::models::dflash_draft::FeatureCapture>,
+    ) -> Result<Tensor> {
+        let (batch, seq_len) = input_ids.dims2()?;
+        if batch != 1 {
+            candle_core::bail!(
+                "forward_with_dflash_capture_explicit_mask: only batch=1 supported (got {batch})"
+            );
+        }
+        let total_k = past_kv_len + seq_len;
+        let mask_dims = attention_mask.dims();
+        if mask_dims.len() != 4
+            || mask_dims[0] != 1
+            || mask_dims[1] != 1
+            || mask_dims[2] != seq_len
+            || mask_dims[3] != total_k
+        {
+            candle_core::bail!(
+                "forward_with_dflash_capture_explicit_mask: mask shape {:?}, expected [1, 1, {seq_len}, {total_k}]",
+                mask_dims
+            );
+        }
+        let device = self.device.clone();
+
+        let xs = self.embed_tokens.forward(input_ids)?;
+
+        let positions = Tensor::arange(
+            past_kv_len as u32,
+            (past_kv_len + seq_len) as u32,
+            &device,
+        )?
+        .reshape((1, 1, seq_len))?
+        .to_dtype(candle_core::DType::I64)?;
+        let position_ids = positions.repeat((3, 1, 1))?;
+
+        let flash_attn = crate::using_flash_attn();
+        let flash_params = if flash_attn {
+            use std::collections::HashMap;
+            let cu_q = Tensor::from_vec(vec![0u32, seq_len as u32], (2,), &device)?;
+            let cu_k = Tensor::from_vec(vec![0u32, total_k as u32], (2,), &device)?;
+            let mut cu_q_map: HashMap<DeviceLocation, Tensor> = HashMap::new();
+            let mut cu_k_map: HashMap<DeviceLocation, Tensor> = HashMap::new();
+            cu_q_map.insert(device.location(), cu_q);
+            cu_k_map.insert(device.location(), cu_k);
+            FlashParams {
+                max_q: seq_len as u32,
+                max_k: total_k as u32,
+                cumulative_seqlens_q: cu_q_map,
+                cumulative_seqlens_k: cu_k_map,
+                // causal=false — the tree mask encodes visibility
+                // directly; flash-attn's own causal short-circuit
+                // would drop non-ancestor attention logits we need.
+                causal: false,
+            }
+        } else {
+            FlashParams::empty(false)
+        };
+
+        let context_lens = vec![(0usize, seq_len)];
+        let seqlen_offsets: Vec<usize> = vec![past_kv_len];
+
+        self.forward_embeds_with_capture(
+            xs,
+            Some(attention_mask),
+            &position_ids,
+            &seqlen_offsets,
+            context_lens,
+            None,
+            &flash_params,
+            None,
+            None,
+            capture,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn forward_embeds(
         &self,
