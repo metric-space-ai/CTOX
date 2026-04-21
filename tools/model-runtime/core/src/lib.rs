@@ -67,7 +67,10 @@ pub mod matformer;
 mod mla;
 mod models;
 #[cfg(feature = "cuda")]
-pub use models::dflash_draft::run_greedy_megakernel;
+pub use models::dflash_draft::{
+    run_greedy, run_greedy_megakernel, DFlashChainStepper, DFlashDraftConfig, DFlashDraftModel,
+    GreedyRunOutcome, StepperOpts, TargetFeatureRing, DEFAULT_RING_CAP,
+};
 #[cfg(feature = "cuda")]
 pub use models::megakernel_drafter;
 mod paged_attention;
