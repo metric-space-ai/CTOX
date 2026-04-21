@@ -24,6 +24,12 @@ path = "src/bin/megakernel_drafter_bench.rs"
 required-features = ["cuda"]
 doc = false
 
+[[bin]]
+name = "megakernel-spec-27b-bench"
+path = "src/bin/megakernel_spec_27b_bench.rs"
+required-features = ["cuda"]
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }

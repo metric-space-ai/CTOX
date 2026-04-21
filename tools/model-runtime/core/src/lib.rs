@@ -67,6 +67,8 @@ pub mod matformer;
 mod mla;
 mod models;
 #[cfg(feature = "cuda")]
+pub use models::dflash_draft::run_greedy_megakernel;
+#[cfg(feature = "cuda")]
 pub use models::megakernel_drafter;
 mod paged_attention;
 mod pipeline;
