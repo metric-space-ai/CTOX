@@ -283,20 +283,36 @@ impl DFlashChainStepper {
             (cap, t_commit_start.elapsed().as_secs_f64() * 1000.0)
         };
 
-        // ── 6. Append feature rows for newly-committed tokens to the
-        //    ring. Commit capture rows are:
-        //      row 0  — last_tok (already in ring from prev step; skip)
-        //      row i  (1..=draft_accepted) — target_choices[i-1]
-        //    So we append `draft_accepted` rows starting at row 1.
+        // ── 6. Append feature rows for the commit replay to the ring.
         //
-        //    The committed boundary / bonus (`target_choices[draft_accepted]`
-        //    or `target_choices[block]` on full-accept) has no capture
-        //    row — it gets featurised on the NEXT step when it's re-fed
-        //    as `last_tok`.
+        //    Commit capture rows map to feed positions:
+        //      row 0                  — last_tok
+        //      row i (1..=K)          — target_choices[i-1]   (K = draft_accepted)
+        //
+        //    We append ALL K+1 rows. The subtle point: `last_tok` is
+        //    the PREVIOUS step's committed boundary/bonus, which never
+        //    got a feature during its own step (no feed position for
+        //    a boundary in that step's commit). This step's commit
+        //    replay IS the first forward where that token's features
+        //    are captured, so we need to ring it here. Without this
+        //    append, on runs dominated by `draft_accepted=0` steps the
+        //    ring never grows past prefill → draft never sees fresh
+        //    context → every new step has a stale ring → draft
+        //    predictions stay random → chain verify collapses to
+        //    pure autoregressive (K=0 every step). Feedback loop.
+        //
+        //    The only committed token whose feature we never write is
+        //    the run's FINAL boundary — one row shy of the committed
+        //    sequence length at any moment. The ring is always exactly
+        //    one token behind the committed tail; the draft conditions
+        //    on "everything but the anchor", which is the correct
+        //    semantics for the cross-attention (see the draft's
+        //    runner — it feeds `last_tok` separately and uses the
+        //    ring for the rest of the history).
         let n_accepted = accepted.len();
-        let n_ring_rows = draft_accepted; // rows 1..=draft_accepted of commit_capture
+        let n_ring_rows = draft_accepted + 1; // rows 0..=draft_accepted of commit_capture
         if n_ring_rows > 0 {
-            let captured = fuse_captured_features(&commit_capture, 1, n_ring_rows)?;
+            let captured = fuse_captured_features(&commit_capture, 0, n_ring_rows)?;
             let mut ring = self.ring.lock().unwrap();
             ring.append(&captured)?;
         }
