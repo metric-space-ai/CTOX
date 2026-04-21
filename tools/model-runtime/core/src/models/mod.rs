@@ -2,6 +2,8 @@ pub(crate) mod deepseek2;
 pub(crate) mod deepseek3;
 pub(crate) mod dflash_draft;
 pub(crate) mod gdn;
+#[cfg(feature = "cuda")]
+pub(crate) mod megakernel_drafter;
 pub(crate) mod gemma;
 pub(crate) mod gemma2;
 pub(crate) mod glm4;
