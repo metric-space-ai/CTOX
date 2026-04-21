@@ -76,8 +76,16 @@ pub fn load_megakernel_weights(vb: VarBuilder, device: Device) -> Result<Megaker
 
     let embed = vb.get((VOCAB_SIZE, HIDDEN_SIZE), "embed_tokens.weight")?;
     let final_norm = vb.get((HIDDEN_SIZE,), "norm.weight")?;
-    // lm_head is stored separately in Qwen3.5 checkpoints.
-    let lm_head = vb.get((VOCAB_SIZE, HIDDEN_SIZE), "lm_head.weight")?;
+    // Qwen3.5 ties lm_head.weight ↔ embed_tokens.weight. Most HF
+    // exports omit the explicit `lm_head.weight` tensor; the model
+    // card's `tie_word_embeddings=true` tells `transformers` to reuse
+    // the embedding matrix. Try the separate tensor first, fall back
+    // to a clone of the embedding if absent.
+    let lm_head = if vb.contains_tensor("lm_head.weight") {
+        vb.get((VOCAB_SIZE, HIDDEN_SIZE), "lm_head.weight")?
+    } else {
+        embed.clone()
+    };
 
     let mut layers = Vec::with_capacity(NUM_LAYERS);
     for i in 0..NUM_LAYERS {

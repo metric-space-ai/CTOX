@@ -87,22 +87,15 @@ fn main() -> Result<()> {
         VarBuilder::from_mmaped_safetensors(&shards, DType::BF16, &device)
             .context("open safetensors via VarBuilder")?
     };
-    // Qwen3.5 safetensors nest the LM under `model.` — VarBuilder
-    // returns the top-level; the loader positions itself.
-    let vb_model = vb.pp("model");
-
+    // Qwen3.5 multimodal safetensors nest everything under
+    // `model.language_model.` — this is where the 24-layer hybrid
+    // transformer lives. The `model.vision_tower.*` branch plus a
+    // separate `mtp.*` multi-token-prediction head share the same
+    // checkpoint but aren't used by the drafter.
     eprintln!("loading megakernel weights …");
     let t0 = Instant::now();
-    let weights = load_megakernel_weights(vb_model, device.clone())
+    let weights = load_megakernel_weights(vb.pp("model").pp("language_model"), device.clone())
         .context("load_megakernel_weights")?;
-    // lm_head sits at the top level, not under `model.` — re-load.
-    let _ = weights; // TODO: if lm_head path is wrong, re-derive. For smoke we trust the loader.
-    // Build a fresh loader read from the root vb for lm_head.
-    // Simplification: re-use the `model`-rooted vb since Qwen3.5
-    // often ties lm_head to embed_tokens; if the checkpoint has an
-    // explicit `lm_head.weight` at the root this call will fail and
-    // the user can pivot to a tied-weights flag later.
-    let weights = load_megakernel_weights(vb.pp("model"), device.clone())?;
     eprintln!("  weights loaded in {:.3}s", t0.elapsed().as_secs_f64());
 
     let mut drafter = MegakernelDrafter::new(weights, args.max_prefill)
