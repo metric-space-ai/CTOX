@@ -66,12 +66,14 @@ impl<'a> DFlashTargetForward for Qwen35DFlashTarget<'a> {
         input_ids: &Tensor,
         past_kv_len: usize,
         attention_mask: &Tensor,
+        absolute_positions: Option<&Tensor>,
         capture: &mut FeatureCapture,
     ) -> Result<Tensor> {
         self.text.forward_with_dflash_capture_explicit_mask(
             input_ids,
             past_kv_len,
             attention_mask,
+            absolute_positions,
             Some(capture),
         )
     }

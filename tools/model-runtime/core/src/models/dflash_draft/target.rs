@@ -53,31 +53,37 @@ pub trait DFlashTargetForward: Send + Sync {
     ) -> Result<Tensor>;
 
     /// Like [`Self::forward_with_capture`], but with an explicit
-    /// attention mask instead of an implicit causal one. Used by
-    /// DDTree tree verify where `input_ids` is a DFS-flattened tree
-    /// of speculated tokens and the mask encodes ancestor-only
-    /// visibility per tree node.
+    /// attention mask and optional absolute positions instead of an
+    /// implicit causal mask + linear positions. Used by DDTree tree
+    /// verify where `input_ids` is a DFS-flattened tree of speculated
+    /// tokens — each tree node's RoPE position should encode its
+    /// depth, not its DFS index, and its attention visibility is
+    /// ancestor-only, not past-plus-prefix.
     ///
-    /// `attention_mask` must have shape `[1, 1, seq_len, past_kv_len +
-    /// seq_len]` and the target's dtype, with `0.0` on allowed
-    /// positions and `-inf` elsewhere. See
-    /// [`crate::models::dflash_draft::build_tree_mask`] for the mask
-    /// builder that matches this contract.
+    /// `attention_mask` shape: `[1, 1, seq_len, past_kv_len + seq_len]`
+    /// in the target's dtype, `0.0` on allowed positions and `-inf`
+    /// elsewhere (see [`crate::models::dflash_draft::build_tree_mask`]).
+    ///
+    /// `absolute_positions`: optional `[1, seq_len]` `I64` tensor of
+    /// per-token absolute positions (`past_kv_len` is included —
+    /// caller does the arithmetic). When `None`, positions are built
+    /// linearly, matching `forward_with_capture`. When `Some`, the
+    /// target broadcasts those positions to all three MRoPE axes.
     ///
     /// Default implementation falls back to
-    /// [`Self::forward_with_capture`] so chain-mode targets (tests,
-    /// mock targets) stay functional without having to reimplement
-    /// the masked path. Concrete targets that need DDTree must
-    /// override this.
+    /// [`Self::forward_with_capture`] so chain-mode targets stay
+    /// functional without reimplementing the masked path; concrete
+    /// targets needing DDTree override this.
     fn forward_with_capture_masked(
         &self,
         input_ids: &Tensor,
         past_kv_len: usize,
         _attention_mask: &Tensor,
+        _absolute_positions: Option<&Tensor>,
         capture: &mut FeatureCapture,
     ) -> Result<Tensor> {
-        // Fallback: ignore the mask. Fine for chain-only callers; the
-        // real Qwen35 target overrides this.
+        // Fallback: ignore the mask + positions. Fine for chain-only
+        // callers; the real Qwen35 target overrides this.
         self.forward_with_capture(input_ids, past_kv_len, capture)
     }
 

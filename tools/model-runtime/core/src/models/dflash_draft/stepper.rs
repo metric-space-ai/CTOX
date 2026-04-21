@@ -376,16 +376,12 @@ impl DFlashChainStepper {
     /// the reference reports AL ≈ 8.3 vs ~3 for chain, which is the
     /// headline speedup DFlash+DDTree reports (~3.5× over AR baseline).
     ///
-    /// V1 limitation — RoPE position_ids for the tree nodes are built
-    /// linearly (`past_kv_len + i` for slot i) rather than by tree
-    /// depth (`past_kv_len + tree.depths[i - 1]`). That is numerically
-    /// incorrect relative to the reference (the target sees the depth
-    /// as the position, not the DFS index), and a follow-up commit
-    /// switches to depth-based positions once the target-forward
-    /// helper grows a `position_ids: Option<&Tensor>` override. The
-    /// chain-seed path still produces non-garbage output because the
-    /// spine of the tree (ranks=0 at every depth) matches the linear
-    /// order; branches will look drunk until the RoPE fix lands.
+    /// RoPE positions: depth-based per reference
+    /// (`past_kv_len + tree.depths[i - 1]` for slot i, `past_kv_len`
+    /// for the root). Tree branches that diverge from the top-1
+    /// spine therefore get correct RoPE encoding; without this the
+    /// target's attention on non-spine nodes is numerically garbage
+    /// and tree verify regresses below chain AL.
     pub fn step_tree<T: DFlashTargetForward>(
         &self,
         target: &T,
@@ -494,6 +490,22 @@ impl DFlashChainStepper {
         let mask = Tensor::from_vec(mask_f32, (1, 1, q_len, kv_len), device)?
             .to_dtype(model_dtype)?;
 
+        // ── 5b. Build depth-based absolute positions for RoPE.
+        //       Slot 0 (root) is at depth 0 → position `past_kv_len`.
+        //       Slot i (1..=n_nodes) is at depth `tree.depths[i - 1]` →
+        //       position `past_kv_len + tree.depths[i - 1]`. This
+        //       matches the reference `test_dflash.cpp` line 1195
+        //       (`p = committed + (i == 0 ? 0 : tree.depths[i - 1])`);
+        //       without it, tree branches diverging from the top-1
+        //       spine see wrong RoPE and the target's attention on
+        //       them is numerically garbage.
+        let mut positions_vec = Vec::with_capacity(n);
+        positions_vec.push(past_kv_len as i64);
+        for i in 0..tree.n_nodes {
+            positions_vec.push(past_kv_len as i64 + tree.depths[i] as i64);
+        }
+        let positions = Tensor::from_vec(positions_vec, (1, n), device)?;
+
         // ── 6. Snapshot recurrent state + verify forward (masked).
         let t_verify_start = std::time::Instant::now();
         let recurrent_snapshot = target.snapshot_recurrent_state()?;
@@ -503,6 +515,7 @@ impl DFlashChainStepper {
             &verify_ids,
             past_kv_len,
             &mask,
+            Some(&positions),
             &mut verify_capture,
         )?;
         verify_capture.validate().map_err(candle_core::Error::msg)?;

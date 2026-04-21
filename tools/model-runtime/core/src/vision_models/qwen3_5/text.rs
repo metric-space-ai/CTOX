@@ -952,15 +952,27 @@ impl Qwen3_5TextModel {
     /// canonical source. Passing an improperly shaped mask will error
     /// inside the attention path, not here.
     ///
+    /// `absolute_positions` is an optional per-token absolute position
+    /// tensor of shape `[1, seq_len]` with dtype `I64`. When `Some`,
+    /// those positions are broadcast to all three MRoPE axes and used
+    /// as-is (the caller owns the arithmetic). When `None`, positions
+    /// are built linearly as `[past_kv_len .. past_kv_len + seq_len]`.
+    /// Tree verify passes the per-node absolute positions
+    /// `past_kv_len + tree.depths[i - 1]` (and `past_kv_len + 0` for
+    /// the root slot) so RoPE encodes tree depth, not DFS index — the
+    /// reference's `test_dflash.cpp` does the same under `pos4[0 * N
+    /// + i] = committed + depth_of_slot_i`.
+    ///
     /// All other inputs match `forward_with_dflash_capture`:
     /// * `input_ids` `[1, seq_len]`.
-    /// * `past_kv_len` — KV-cache offset for positions + FlashParams.
+    /// * `past_kv_len` — KV-cache offset for the FlashParams cu_seqlens.
     /// * `capture` — optional FeatureCapture sink.
     pub fn forward_with_dflash_capture_explicit_mask(
         &self,
         input_ids: &Tensor,
         past_kv_len: usize,
         attention_mask: &Tensor,
+        absolute_positions: Option<&Tensor>,
         capture: Option<&mut crate::models::dflash_draft::FeatureCapture>,
     ) -> Result<Tensor> {
         let (batch, seq_len) = input_ids.dims2()?;
@@ -986,14 +998,31 @@ impl Qwen3_5TextModel {
 
         let xs = self.embed_tokens.forward(input_ids)?;
 
-        let positions = Tensor::arange(
-            past_kv_len as u32,
-            (past_kv_len + seq_len) as u32,
-            &device,
-        )?
-        .reshape((1, 1, seq_len))?
-        .to_dtype(candle_core::DType::I64)?;
-        let position_ids = positions.repeat((3, 1, 1))?;
+        // Position_ids: either the caller-supplied absolute positions
+        // or the linear fallback. MRoPE expects shape `[3, 1, seq_len]`
+        // with all three axes identical for pure-text inputs.
+        let position_ids = if let Some(abs) = absolute_positions {
+            let abs_dims = abs.dims();
+            if abs_dims.len() != 2 || abs_dims[0] != 1 || abs_dims[1] != seq_len {
+                candle_core::bail!(
+                    "forward_with_dflash_capture_explicit_mask: absolute_positions shape {:?}, expected [1, {seq_len}]",
+                    abs_dims
+                );
+            }
+            let abs_i64 = abs.to_dtype(candle_core::DType::I64)?;
+            abs_i64
+                .reshape((1, 1, seq_len))?
+                .repeat((3, 1, 1))?
+        } else {
+            let positions = Tensor::arange(
+                past_kv_len as u32,
+                (past_kv_len + seq_len) as u32,
+                &device,
+            )?
+            .reshape((1, 1, seq_len))?
+            .to_dtype(candle_core::DType::I64)?;
+            positions.repeat((3, 1, 1))?
+        };
 
         let flash_attn = crate::using_flash_attn();
         let flash_params = if flash_attn {
