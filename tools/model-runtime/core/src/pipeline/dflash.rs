@@ -94,6 +94,14 @@ pub struct DFlashPipeline {
     /// committed token id for that seq; the next step will condition
     /// on it.
     last_committed: Mutex<std::collections::HashMap<usize, Option<u32>>>,
+
+    /// Tracked separately from `seq.len()` because the target's
+    /// hybrid KV cache grows by the full feed length per forward
+    /// (block+1 per decode step, not just the accepted tokens — the
+    /// first chain-verify port doesn't truncate the rejected tail).
+    /// Keyed by `Sequence::id()`; set at prefill, incremented per
+    /// decode step.
+    past_kv_len: Mutex<std::collections::HashMap<usize, usize>>,
 }
 
 impl DFlashPipeline {
@@ -130,6 +138,7 @@ impl DFlashPipeline {
             category,
             draft_cfg,
             last_committed: Mutex::new(std::collections::HashMap::new()),
+            past_kv_len: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -333,7 +342,8 @@ impl Pipeline for DFlashPipeline {
             // feed them through the target with capture, seed the
             // ring, greedy-sample the first new token, commit it to
             // the sequence. We also record this as the
-            // `last_committed` token for subsequent decode steps.
+            // `last_committed` token and initialise the
+            // target-KV-length tracker for subsequent decode steps.
             let prompt_toks: Vec<u32> = seq.get_toks().to_vec();
             let prompt_len = prompt_toks.len();
             if prompt_len == 0 {
@@ -342,7 +352,7 @@ impl Pipeline for DFlashPipeline {
             let device = target_text.device().clone();
             let input_ids = Tensor::from_vec(prompt_toks, (1, prompt_len), &device)?;
 
-            let (first_tok, _past_kv_len) = {
+            let (first_tok, kv_after_prefill) = {
                 let mut ring = stepper.ring().lock().unwrap();
                 prefill(target_text, &mut ring, stepper.config(), &input_ids)?
             };
@@ -350,6 +360,10 @@ impl Pipeline for DFlashPipeline {
                 .lock()
                 .unwrap()
                 .insert(*seq.id(), Some(first_tok));
+            self.past_kv_len
+                .lock()
+                .unwrap()
+                .insert(*seq.id(), kv_after_prefill);
             return Ok(t_start.elapsed());
         }
 
@@ -365,13 +379,20 @@ impl Pipeline for DFlashPipeline {
                 ),
             }
         };
-        // After prefill the target's hybrid KV cache holds one entry
-        // per committed prompt token — `past_kv_len == seq.len()`.
-        // The next forward feeds B+1 tokens starting at absolute
-        // position `past_kv_len`; the first entry is the previously
-        // committed bootstrap token so its KV gets re-written at the
-        // tail slot rather than extending the past.
-        let past_kv_len = seq.get_toks().len();
+        // Target's hybrid KV cache grows by the FULL feed length per
+        // forward (B+1 per step), not by accepted count — rejected
+        // draft-token KV entries stay in the cache for this first
+        // chain-verify port. Track the target-side length separately
+        // from `seq.len()`.
+        let past_kv_len = {
+            let map = self.past_kv_len.lock().unwrap();
+            *map.get(seq.id()).ok_or_else(|| {
+                candle_core::Error::msg(format!(
+                    "DFlashPipeline::step: no past_kv_len for seq {} — prefill missing?",
+                    seq.id()
+                ))
+            })?
+        };
 
         let outcome = decode_step(
             target_text,
@@ -404,6 +425,18 @@ impl Pipeline for DFlashPipeline {
             .lock()
             .unwrap()
             .insert(*seq.id(), Some(new_last));
+
+        // Advance the target KV tracker by the full feed length
+        // (block + 1) — this matches how Qwen3.5's hybrid cache
+        // actually grows per forward, regardless of how many of
+        // those positions the verify accepted.
+        let feed_len = self.draft_cfg.block_size + 1;
+        self.past_kv_len
+            .lock()
+            .unwrap()
+            .entry(*seq.id())
+            .and_modify(|v| *v += feed_len)
+            .or_insert(feed_len);
 
         // Telemetry: rolling accept-rate + per-step tok/s, same
         // format as `SpeculativePipeline`'s so `grep accept-rate`
