@@ -18,6 +18,12 @@ name = "ctox-engine"
 path = "src/main.rs"
 doc = false
 
+[[bin]]
+name = "megakernel-drafter-bench"
+path = "src/bin/megakernel_drafter_bench.rs"
+required-features = ["cuda"]
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }

@@ -66,6 +66,8 @@ mod layers_utils;
 pub mod matformer;
 mod mla;
 mod models;
+#[cfg(feature = "cuda")]
+pub use models::megakernel_drafter;
 mod paged_attention;
 mod pipeline;
 mod prefix_cacher;
