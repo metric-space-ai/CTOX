@@ -58,6 +58,23 @@ struct Args {
     /// CUDA device ordinal.
     #[arg(long, default_value_t = 0)]
     device: usize,
+
+    /// Simulate spec-decode rollback cost: after warming up N tokens
+    /// of pure decode, measure drafter under the spec pattern
+    /// `snapshot → step × K → restore → step × accepted` per round
+    /// for `spec_rounds` rounds, then report the per-round wall time.
+    /// `accepted` simulates a target acceptance length of K * accept_ratio.
+    #[arg(long, default_value_t = 0)]
+    spec_rounds: usize,
+
+    /// K — draft tokens per spec round.
+    #[arg(long, default_value_t = 6)]
+    spec_k: usize,
+
+    /// Acceptance ratio (fraction of K that the target would accept).
+    /// 0.5 means half-reject; 1.0 means full accept.
+    #[arg(long, default_value_t = 0.5)]
+    spec_accept: f32,
 }
 
 fn main() -> Result<()> {
@@ -155,6 +172,57 @@ fn main() -> Result<()> {
         }
     }
     eprintln!();
+
+    // ── Optional: simulate the spec-decode drafter pattern to
+    //    measure snapshot/restore + replay overhead isolated from
+    //    the target forward.
+    if args.spec_rounds > 0 {
+        let k = args.spec_k.max(1);
+        let accepted = ((k as f32) * args.spec_accept).round() as usize;
+        let accepted = accepted.clamp(0, k);
+        eprintln!(
+            "\nspec-decode simulation: {} rounds of K={} drafter steps, accept={} (ratio {:.2})",
+            args.spec_rounds, k, accepted, args.spec_accept
+        );
+        let mut spec_tok = *generated.last().unwrap_or(&1);
+        let mut total_accepted: usize = 0;
+        let t_spec = Instant::now();
+        for _ in 0..args.spec_rounds {
+            // snapshot
+            let snap = drafter.snapshot_state().context("snapshot")?;
+            // draft K tokens
+            let mut draft_ids: Vec<i32> = Vec::with_capacity(k);
+            let mut last = spec_tok;
+            for _ in 0..k {
+                last = drafter.step(last).context("spec step (draft)")?;
+                draft_ids.push(last);
+            }
+            // restore to pre-draft, replay only accepted prefix
+            drafter.restore_state(&snap).context("restore")?;
+            let mut replay_last = spec_tok;
+            for i in 0..accepted {
+                replay_last = drafter.step(draft_ids[i]).context("spec step (replay)")?;
+            }
+            // advance to the "post-accepted" spec token for the next round
+            spec_tok = if accepted > 0 {
+                replay_last
+            } else {
+                spec_tok
+            };
+            total_accepted += accepted;
+        }
+        let dt_spec = t_spec.elapsed();
+        let spec_ms_per_round = dt_spec.as_secs_f64() * 1000.0 / args.spec_rounds as f64;
+        let effective_tps = total_accepted as f64 / dt_spec.as_secs_f64();
+        eprintln!(
+            "  spec loop: {:.2} ms / round  →  effective {:.0} accepted tok/s (drafter-only, no target cost)",
+            spec_ms_per_round, effective_tps
+        );
+        eprintln!(
+            "  (each round = {} drafter steps + {} replay steps + 1 snapshot + 1 restore; target verify cost not included)",
+            k, accepted
+        );
+    }
 
     Ok(())
 }
