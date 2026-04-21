@@ -79,7 +79,49 @@ pub fn decode_step(
     opts: &StepperOpts,
 ) -> Result<StepOutcome> {
     let target = Qwen35DFlashTarget::new(target_text);
+    // EXPERIMENTAL: dev switch to route through DDTree tree verify
+    // instead of chain verify. Default (unset) keeps the shipped
+    // chain-verify behaviour so production deployments don't drift
+    // until tree verify is fully validated on hardware. Set
+    // `DFLASH_USE_TREE_VERIFY=1` (or `true` / `yes`) to opt in;
+    // `DFLASH_DDTREE_BUDGET` (default 22) and
+    // `DFLASH_DDTREE_TOP_K` (default 8) tune the tree.
+    if dflash_use_tree_verify() {
+        use super::ddtree::DEFAULT_DDTREE_BUDGET;
+        use super::stepper::TreeStepperOpts;
+        let tree_opts = TreeStepperOpts {
+            budget: std::env::var("DFLASH_DDTREE_BUDGET")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_DDTREE_BUDGET),
+            top_k: std::env::var("DFLASH_DDTREE_TOP_K")
+                .ok()
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(8),
+            temperature: std::env::var("DFLASH_DDTREE_TEMP")
+                .ok()
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0),
+            chain_seed: !matches!(
+                std::env::var("DFLASH_DDTREE_NO_CHAIN_SEED")
+                    .ok()
+                    .as_deref(),
+                Some("1") | Some("true") | Some("yes")
+            ),
+            ctx_len: opts.ctx_len,
+        };
+        return stepper
+            .step_tree(&target, draft, last_committed_token, past_kv_len, &tree_opts)
+            .map(|(outcome, _)| outcome);
+    }
     stepper.step(&target, draft, last_committed_token, past_kv_len, opts)
+}
+
+fn dflash_use_tree_verify() -> bool {
+    matches!(
+        std::env::var("DFLASH_USE_TREE_VERIFY").ok().as_deref(),
+        Some("1") | Some("true") | Some("yes")
+    )
 }
 
 /// Summary of a single greedy run.
