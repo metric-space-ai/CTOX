@@ -809,6 +809,22 @@ impl Qwen3_5TextModel {
         self.cache.hybrid().reset();
     }
 
+    /// Populate the hybrid cache's recurrent-state slot indices. The
+    /// engine's scheduler normally sets this once per forward-batch
+    /// via `hybrid_cache.set_state_indices(...)` in `pipeline/mod.rs`
+    /// — but standalone DFlash + megakernel-spec benches bypass the
+    /// scheduler and need to seed it directly.
+    ///
+    /// Single-sequence callers pass `Some(vec![0])` to pin all
+    /// linear-attention layers onto slot 0 of the recurrent-state
+    /// pool.
+    pub fn dflash_set_state_indices(&self, slots: &[u32]) -> Result<()> {
+        use candle_core::Tensor;
+        let tensor = Tensor::from_vec(slots.to_vec(), (slots.len(),), &self.device)?;
+        self.cache.hybrid().set_state_indices(Some(tensor));
+        Ok(())
+    }
+
     /// Standalone forward for DFlash speculative decoding.
     ///
     /// Wraps [`Self::forward_embeds_with_capture`] with all the

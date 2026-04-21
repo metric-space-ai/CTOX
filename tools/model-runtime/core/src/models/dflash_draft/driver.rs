@@ -264,6 +264,13 @@ pub fn run_greedy_megakernel(
         candle_core::bail!("run_greedy_megakernel: empty prompt");
     }
 
+    // Seed the hybrid cache's recurrent state indices — the engine's
+    // scheduler normally does this per batch; our standalone bench
+    // has to. Single-seq → slot 0.
+    target_text.dflash_set_state_indices(&[0])?;
+    target_text.dflash_reset_cache();
+    target_text.dflash_set_state_indices(&[0])?;
+
     // ── 1. Target prefill (no feature capture — megakernel drafter
     //    doesn't consume target hidden states; pass an empty capture
     //    list to keep the shared forward_with_dflash_capture signature
