@@ -43,6 +43,7 @@
 
 pub mod capture;
 pub mod config;
+pub mod ddtree;
 pub mod driver;
 pub mod model;
 pub mod qwen35_target;
@@ -53,6 +54,10 @@ pub mod target;
 
 pub use capture::FeatureCapture;
 pub use config::DFlashDraftConfig;
+pub use ddtree::{
+    build_ddtree, build_tree_mask, extract_draft_topk, follow_verified_tree, DDTree,
+    DEFAULT_DDTREE_BUDGET,
+};
 pub use driver::{decode_step, prefill, run_greedy, GreedyRunOutcome};
 pub use model::DFlashDraftModel;
 pub use qwen35_target::Qwen35DFlashTarget;
