@@ -42,7 +42,8 @@ use crate::{
         DEFAULT_RING_CAP,
     },
     prefix_cacher::PrefixCacheManagerV2,
-    sequence::Sequence,
+    sampler::Logprobs,
+    sequence::{Sequence, SequenceState, StopReason},
     DeviceMapSetting, Loader, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline, TokenSource,
     TryIntoDType,
 };
@@ -403,23 +404,63 @@ impl Pipeline for DFlashPipeline {
             &opts,
         )?;
 
+        // Commit accepted tokens. This mirrors speculative.rs's
+        // accept loop shape but skips `finish_or_add_toks_to_seq`
+        // (async, re-locks the target via get_metadata() and would
+        // deadlock against the target_guard we already hold). We
+        // replicate the essential parts inline:
+        //   * decode the token via the target's `tok_env` trie into
+        //     bytes so `seq.completion_bytes` gets populated — without
+        //     this the scheduler sees no output and streams nothing,
+        //   * check `seq.is_done` against eos + stop toks + max_len
+        //     BEFORE each `add_token` so we don't over-commit past
+        //     the stop boundary,
+        //   * commit via `seq.add_token`, which is the real API the
+        //     scheduler expects (unlike `add_tmp_tok` which the old
+        //     first-smoke code used and never removed — leaving seq
+        //     state wedged).
+        //
+        // Greedy (no sampling) ⇒ logprob is unknown here; we emit
+        // 0.0 as a placeholder. The chain-verify draft path is
+        // argmax-only so there's no distribution to report anyway.
+        // When DDTree verify lands we can wire real logprobs
+        // through `DraftStepOutput.top_k_logprobs` if clients ask
+        // for them.
+        let (eos_tok_ids, max_model_len, tok_env) = {
+            let md = target_guard.get_metadata();
+            (md.eos_tok.clone(), md.max_seq_len, md.tok_env())
+        };
+        let eos_tok_slice = if eos_tok_ids.is_empty() {
+            None
+        } else {
+            Some(eos_tok_ids.as_slice())
+        };
+
         let mut new_last = last_committed_token;
         let n_accepted = outcome.accepted.len();
+        let mut stop_reason: Option<StopReason> = None;
         for tok in outcome.accepted.iter().copied() {
-            // Append via the tentative-append + commit idiom.
-            // `finish_or_add_toks_to_seq` (speculative.rs's path)
-            // needs Logprobs + prefix-cache hookup that we don't
-            // have here without sampling; for the first smoke test
-            // `add_tmp_tok` + `remove_tmp_tok(0)` gets the tokens
-            // into `seq.tokens` and clears the tmp flag so the
-            // scheduler sees them as committed. Streaming
-            // `completion_bytes` is not updated — the first on-host
-            // run will confirm the decode runs, measure tok/s, and
-            // a follow-up commit adds the proper logprob path.
-            seq.add_tmp_tok(tok);
+            let is_done = seq.is_done(tok, eos_tok_slice, max_model_len);
+            let completion_bytes = match tok_env.as_ref() {
+                Some(env) => env.tok_trie().decode_ext(&[tok], false),
+                None => Vec::new(),
+            };
+            let lp = Logprobs {
+                token: tok,
+                logprob: 0.0,
+                bytes: None,
+                top_logprobs: None,
+            };
+            seq.add_token(lp, completion_bytes, &is_done);
             new_last = tok;
+            if let Some(reason) = is_done {
+                stop_reason = Some(reason);
+                break;
+            }
         }
-        seq.remove_tmp_tok(0);
+        if let Some(reason) = stop_reason {
+            seq.set_state(SequenceState::Done(reason));
+        }
 
         self.last_committed
             .lock()
