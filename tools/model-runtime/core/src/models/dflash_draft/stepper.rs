@@ -201,23 +201,42 @@ impl DFlashChainStepper {
             runner.step(last_committed_token, &ring, &ropts, |h| target.apply_lm_head(h))?
         };
 
-        // ── 2. Build verify input: [last_tok, cand_0, cand_1, ..., cand_{B-1}]
+        // ── 2. Build verify input following reference test_dflash.cpp.
         //
-        //    B+1 tokens in, B+1 logit rows out. target_choices[i] is
-        //    the target's greedy pick for the token right after
-        //    feed[i]:
-        //      target_choices[0]      ←→  candidates[0]
-        //      ...
-        //      target_choices[B-1]    ←→  candidates[B-1]
-        //      target_choices[B]      = "free bonus" if all B candidates matched.
+        //    DFlash draft outputs at block position 0 are an "identity"
+        //    slot — input there is the real last_tok, not MASK, so the
+        //    denoised output is ~last_tok itself (model's best-guess
+        //    for an unmasked slot). Candidates[0] is therefore NOT a
+        //    speculative token — the K=block-1 spec candidates are
+        //    candidates[1..block].
+        //
+        //    The reference overrides `draft_tok[0] = last_tok` and
+        //    feeds draft_tok (length block) directly into target. We
+        //    do the same here: feed[0] = last_tok, feed[i>=1] =
+        //    candidates[i]. Feed length = block (NOT block + 1).
+        //
+        //    Chain accept: `candidates[i+1] == target_choices[i]` for
+        //    i in 0..block-1. accept_n draft tokens matched → commit
+        //    accept_n accepted tokens + bonus (target_choices[accept_n-1]).
+        //
+        //    Previous off-by-one (feed of length block+1 with duplicate
+        //    last_tok) broke acceptance — AL collapsed to 0.08 vs the
+        //    reference's 5.95 on identical weights + prompt.
         let block = self.cfg.block_size;
         let candidates = &draft_out.candidates;
-        let mut feed_verify = Vec::with_capacity(block + 1);
+        if candidates.len() != block {
+            candle_core::bail!(
+                "draft produced {} candidates but block_size is {block}",
+                candidates.len()
+            );
+        }
+        let mut feed_verify = Vec::with_capacity(block);
         feed_verify.push(last_committed_token);
-        for c in candidates.iter() {
-            feed_verify.push(*c);
+        for i in 1..block {
+            feed_verify.push(candidates[i]);
         }
         let feed_len = feed_verify.len();
+        debug_assert_eq!(feed_len, block);
         let device = target.embed_tokens().embeddings().device();
         let verify_ids = Tensor::from_vec(feed_verify.clone(), (1, feed_len), device)?;
 
@@ -260,21 +279,33 @@ impl DFlashChainStepper {
             );
         }
 
-        let mut accepted: Vec<u32> = Vec::with_capacity(block + 1);
+        // Chain accept per reference: compare candidates[i+1] ←→ target_choices[i]
+        // for i in 0..block-1. accept_n is the count of matching draft
+        // candidates (0..=block-1). accepted stores the commit tokens:
+        //   - On partial accept (first mismatch at i=k): accept k
+        //     tokens (candidates[1..=k]) + bonus = target_choices[k].
+        //   - On full accept (all block-1 draft tokens matched):
+        //     accept block-1 tokens + bonus = target_choices[block-1].
+        let mut accepted: Vec<u32> = Vec::with_capacity(block);
         let mut draft_accepted = 0usize;
-        let n_compare = candidates.len().min(target_choices.len().saturating_sub(1));
-        for i in 0..n_compare {
-            let t = target_choices[i];
-            accepted.push(t);
-            if t == candidates[i] {
+        let mut matched_all = true;
+        let max_compare = (block - 1).min(target_choices.len().saturating_sub(1));
+        for i in 0..max_compare {
+            if candidates[i + 1] == target_choices[i] {
+                accepted.push(candidates[i + 1]);
                 draft_accepted += 1;
             } else {
+                // First mismatch → bonus is target's correction.
+                accepted.push(target_choices[i]);
+                matched_all = false;
                 break;
             }
         }
-        if draft_accepted == candidates.len() {
-            if let Some(bonus) = target_choices.get(candidates.len()) {
-                accepted.push(*bonus);
+        if matched_all {
+            // All K=block-1 draft candidates matched. Bonus = target's
+            // argmax at the final verify position (block-1).
+            if let Some(&bonus) = target_choices.get(block - 1) {
+                accepted.push(bonus);
             }
         }
 
@@ -297,18 +328,22 @@ impl DFlashChainStepper {
         //    picks up its KV via feed[0] of that step's verify.
         let t_commit_start = std::time::Instant::now();
         let commit_len = draft_accepted + 1;
-        let full_accept = draft_accepted == candidates.len();
+        // Full accept = all K=block-1 draft candidates matched. In the
+        // new comparison layout, that's `draft_accepted == block - 1`.
+        let full_accept = draft_accepted == block - 1;
         let (commit_capture, commit_ms) = if full_accept {
-            // Verify cache state == committed state; no replay needed.
-            // We reuse the verify capture for the ring append below.
+            // Verify cache state already holds KV for exactly
+            // [last_tok, candidates[1..=block-1]] = the accepted path.
+            // No replay needed.
             (verify_capture, 0.0)
         } else {
             target.truncate_attention_to(past_kv_len)?;
             target.restore_recurrent_state(&recurrent_snapshot)?;
             let mut commit_ids = Vec::with_capacity(commit_len);
             commit_ids.push(last_committed_token);
+            // Accepted draft candidates are candidates[1..=draft_accepted].
             for i in 0..draft_accepted {
-                commit_ids.push(candidates[i]); // == target_choices[i] since matched
+                commit_ids.push(candidates[i + 1]); // == target_choices[i] since matched
             }
             let commit_input = Tensor::from_vec(commit_ids, (1, commit_len), device)?;
             let mut cap = FeatureCapture::new(self.cfg.dflash.target_layer_ids.clone());
