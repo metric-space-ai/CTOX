@@ -1,0 +1,47 @@
+[package]
+name = "ctox-engine-cuda"
+version.workspace = true
+edition.workspace = true
+description = "Bare-metal CUDA primitives + kernel registry for the CTOX engine (post-candle replacement)."
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ctox_engine_cuda"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+half = { workspace = true }
+bytemuck = { workspace = true }
+
+# cudarc provides typed wrappers over CUDA runtime / driver / cuBLAS +
+# raw CudaSlice<T> for owning device buffers. We use it as the thin
+# foundation layer only — NOT as an abstraction — so every kernel
+# launch and memcpy is explicit.
+cudarc = { version = "0.17", default-features = false, features = [
+    "cuda-12060",
+    "driver",
+    "cublas",
+    "nvrtc",
+    "f16",
+], optional = true }
+
+[build-dependencies]
+# No build-time CUDA compilation yet. The first few kernels will be
+# authored as .cu files, compiled to PTX at build time, and embedded
+# via include_bytes!(). That pipeline gets added when the first real
+# kernel lands (rmsnorm_rope_qkv_fused).
+
+[features]
+default = []
+# Gates every CUDA-touching code path. When off the crate compiles to
+# an empty stub so the workspace build on non-CUDA hosts (the Mac
+# dev box, CI shapes without nvcc) still succeeds.
+cuda = ["dep:cudarc"]
