@@ -65,5 +65,5 @@ pub use model::DFlashDraftModel;
 pub use qwen35_target::Qwen35DFlashTarget;
 pub use ring::{TargetFeatureRing, DEFAULT_RING_CAP};
 pub use runner::{DFlashDraftRunner, DraftStepOpts, DraftStepOutput};
-pub use stepper::{DFlashChainStepper, StepOutcome, StepperOpts};
+pub use stepper::{fuse_captured_features, DFlashChainStepper, StepOutcome, StepperOpts};
 pub use target::DFlashTargetForward;

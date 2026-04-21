@@ -68,8 +68,9 @@ mod mla;
 mod models;
 #[cfg(feature = "cuda")]
 pub use models::dflash_draft::{
-    run_greedy, run_greedy_megakernel, DFlashChainStepper, DFlashDraftConfig, DFlashDraftModel,
-    GreedyRunOutcome, StepperOpts, TargetFeatureRing, DEFAULT_RING_CAP,
+    fuse_captured_features, run_greedy, run_greedy_megakernel, DFlashChainStepper,
+    DFlashDraftConfig, DFlashDraftModel, FeatureCapture, GreedyRunOutcome, StepperOpts,
+    TargetFeatureRing, DEFAULT_RING_CAP,
 };
 #[cfg(feature = "cuda")]
 pub use models::megakernel_drafter;

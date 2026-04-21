@@ -210,6 +210,59 @@ async fn main() -> Result<()> {
         prompt_len, args.n_tokens, args.ctx_len, args.draft_top_k, use_tree
     );
 
+    // ── DEBUG: one pre-run prefill + draft-step to inspect signal flow.
+    //    If this dumps captured features of reasonable magnitudes AND
+    //    draft argmax matches target argmax at position 0, the pipeline
+    //    is plumbed right and any remaining AL deficit is algorithmic
+    //    (Q4K drift, tree verify, etc.). If one of those is broken
+    //    we catch it here with specific numbers.
+    {
+        use engine_core::{fuse_captured_features, FeatureCapture};
+        eprintln!("\n--- DEBUG: single prefill+draft-step trace ---");
+        text_model.dflash_reset_cache();
+        text_model.dflash_set_state_indices(&[0])?;
+        let mut cap = FeatureCapture::new(draft_cfg.dflash.target_layer_ids.clone());
+        let logits = text_model
+            .forward_with_dflash_capture(&prompt_tensor, 0, Some(&mut cap))
+            .context("debug: forward_with_dflash_capture")?;
+        cap.validate().map_err(|e| anyhow!(e))?;
+        // Dump per-layer L2 norm + min/max
+        for (k, t) in cap.captured.iter().enumerate() {
+            let flat: Vec<f32> = t.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1()?;
+            let n = flat.len() as f32;
+            let mean = flat.iter().sum::<f32>() / n;
+            let var = flat.iter().map(|v| (v - mean).powi(2)).sum::<f32>() / n;
+            let std = var.sqrt();
+            let min = flat.iter().cloned().fold(f32::INFINITY, f32::min);
+            let max = flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let abs_mean = flat.iter().map(|v| v.abs()).sum::<f32>() / n;
+            eprintln!(
+                "  capture[{k}] layer={:>2} shape={:?}  mean={mean:.4e} std={std:.4e} |mean|={abs_mean:.4e} min={min:.4e} max={max:.4e}",
+                cap.layer_ids[k], t.dims()
+            );
+        }
+        // Seed ring with captured features for draft consumption.
+        let fused = fuse_captured_features(&cap, 0, prompt_len)
+            .map_err(|e| anyhow!(e))?;
+        eprintln!("  fused feature tensor shape={:?}", fused.dims());
+
+        // Also dump first_tok (target sampled) for reference
+        let last_logits = logits.i((0, prompt_len - 1))?;
+        let last_v: Vec<f32> = last_logits.to_dtype(candle_core::DType::F32)?.to_vec1()?;
+        let (max_idx, max_val) =
+            last_v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &v)| {
+                if v > bv { (i, v) } else { (bi, bv) }
+            });
+        eprintln!(
+            "  target last-position argmax id={} logit={:.4}",
+            max_idx, max_val
+        );
+        // Reset cache again before the real run (prefill will fire fresh).
+        text_model.dflash_reset_cache();
+        text_model.dflash_set_state_indices(&[0])?;
+        eprintln!("--- END DEBUG ---\n");
+    }
+
     // ── Run.
     let t_gen = Instant::now();
     let outcome = run_greedy(
