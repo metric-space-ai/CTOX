@@ -1,0 +1,21 @@
+[package]
+name = "ctox-dflash-ffi"
+version.workspace = true
+edition.workspace = true
+description = "Safe Rust FFI wrapper for the DFlash reference speculative-decoding library (libdflash_run_lib.so)."
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "ctox_dflash_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+libloading = "0.8"
+thiserror = { workspace = true }
+tracing = { workspace = true }

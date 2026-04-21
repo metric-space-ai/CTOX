@@ -1139,6 +1139,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctox-dflash-ffi"
+version = "0.7.1-alpha.1"
+dependencies = [
+ "anyhow",
+ "libloading 0.8.9",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "ctox-engine-audio"
 version = "0.7.1-alpha.1"
 dependencies = [
@@ -1155,10 +1165,12 @@ dependencies = [
  "anyhow",
  "axum",
  "candle-core",
+ "candle-nn",
  "chrono",
  "clap",
  "clap_complete",
  "comfy-table",
+ "ctox-dflash-ffi",
  "ctox-engine-core",
  "ctox-engine-sdk",
  "ctox-engine-server",
@@ -1170,6 +1182,7 @@ dependencies = [
  "image",
  "include_dir",
  "indexmap 2.13.0",
+ "libloading 0.8.9",
  "mime_guess",
  "regex",
  "rustyline",

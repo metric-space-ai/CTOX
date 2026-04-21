@@ -52,10 +52,16 @@ name = "dflash-ref-inproc-bench"
 path = "src/bin/dflash_ref_inproc_bench.rs"
 doc = false
 
+[[bin]]
+name = "dflash-persistent-bench"
+path = "src/bin/dflash_persistent_bench.rs"
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
 engine = { workspace = true }
+ctox-dflash-ffi = { path = "../dflash-ffi" }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 
