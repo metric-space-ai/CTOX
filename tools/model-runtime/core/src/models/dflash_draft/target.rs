@@ -52,6 +52,35 @@ pub trait DFlashTargetForward: Send + Sync {
         capture: &mut FeatureCapture,
     ) -> Result<Tensor>;
 
+    /// Like [`Self::forward_with_capture`], but with an explicit
+    /// attention mask instead of an implicit causal one. Used by
+    /// DDTree tree verify where `input_ids` is a DFS-flattened tree
+    /// of speculated tokens and the mask encodes ancestor-only
+    /// visibility per tree node.
+    ///
+    /// `attention_mask` must have shape `[1, 1, seq_len, past_kv_len +
+    /// seq_len]` and the target's dtype, with `0.0` on allowed
+    /// positions and `-inf` elsewhere. See
+    /// [`crate::models::dflash_draft::build_tree_mask`] for the mask
+    /// builder that matches this contract.
+    ///
+    /// Default implementation falls back to
+    /// [`Self::forward_with_capture`] so chain-mode targets (tests,
+    /// mock targets) stay functional without having to reimplement
+    /// the masked path. Concrete targets that need DDTree must
+    /// override this.
+    fn forward_with_capture_masked(
+        &self,
+        input_ids: &Tensor,
+        past_kv_len: usize,
+        _attention_mask: &Tensor,
+        capture: &mut FeatureCapture,
+    ) -> Result<Tensor> {
+        // Fallback: ignore the mask. Fine for chain-only callers; the
+        // real Qwen35 target overrides this.
+        self.forward_with_capture(input_ids, past_kv_len, capture)
+    }
+
     /// Return a reference to the target's token embedding layer.
     /// Shared with the draft for input embedding (the draft has no
     /// embedding of its own).

@@ -61,6 +61,21 @@ impl<'a> DFlashTargetForward for Qwen35DFlashTarget<'a> {
             .forward_with_dflash_capture(input_ids, past_kv_len, Some(capture))
     }
 
+    fn forward_with_capture_masked(
+        &self,
+        input_ids: &Tensor,
+        past_kv_len: usize,
+        attention_mask: &Tensor,
+        capture: &mut FeatureCapture,
+    ) -> Result<Tensor> {
+        self.text.forward_with_dflash_capture_explicit_mask(
+            input_ids,
+            past_kv_len,
+            attention_mask,
+            Some(capture),
+        )
+    }
+
     fn embed_tokens(&self) -> &Embedding {
         self.text.embed_tokens_layer()
     }
