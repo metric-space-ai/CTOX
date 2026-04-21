@@ -327,6 +327,17 @@ impl DFlashDraftModel {
             );
         }
 
+        // All activations flow in the DRAFT's loaded dtype (F32 for
+        // correctness-matched-to-reference config; BF16 if the
+        // caller chose the memory-saving variant and accepts ~0.3
+        // max-abs accumulated drift per the draft-diff-bench A/B).
+        // Reference (ggml) runs activations F32 end-to-end with
+        // bf16 weights auto-cast inside mul_mat — we achieve the
+        // same by loading the draft via an F32 VarBuilder.
+        let orig_dtype = noise_embeds.dtype();
+        let noise_embeds = &noise_embeds.to_dtype(self.dtype)?;
+        let target_hidden_cat = &target_hidden_cat.to_dtype(self.dtype)?;
+
         // ── Feature fusion: fc then hidden_norm. Result is the
         //    per-token "target feature" that attention uses as KV.
         let target_feat = target_hidden_cat
@@ -340,12 +351,16 @@ impl DFlashDraftModel {
         let cos_k = self.cos.narrow(0, 0, total_k)?;
         let sin_k = self.sin.narrow(0, 0, total_k)?;
 
-        // ── Decoder stack.
+        // ── Decoder stack (all-F32).
         let mut h = noise_embeds.contiguous()?;
         for layer in &self.layers {
             h = layer.forward(&h, &target_feat, &cos_q, &sin_q, &cos_k, &sin_k, &self.cfg)?;
         }
-        h.apply(&self.final_norm)
+        let h = h.apply(&self.final_norm)?;
+        // Cast back to caller's dtype (BF16 in production) at the
+        // output boundary so the downstream lm_head and ring ops
+        // see what they expect.
+        h.to_dtype(orig_dtype)
     }
 
     /// Convenience wrapper: build the input embeddings from `input_ids`

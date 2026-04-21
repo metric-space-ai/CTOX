@@ -149,8 +149,11 @@ async fn main() -> Result<()> {
     if draft_shards.is_empty() {
         return Err(anyhow!("no safetensors under {:?}", args.draft_path));
     }
+    // Load draft in F32 to match reference's F32 activation flow.
+    // BF16 load accumulates ~0.3 max-abs drift over 5 layers which
+    // collapses chain-verify AL from 5.95 → 1.8 (measured).
     let draft_vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&draft_shards, DType::BF16, &device)
+        VarBuilder::from_mmaped_safetensors(&draft_shards, DType::F32, &device)
             .context("mmap draft safetensors")?
     };
     let draft = Arc::new(

@@ -115,11 +115,9 @@ fn main() -> Result<()> {
     // formats store row-major in the same memory layout (q_len outer,
     // hidden inner) the raw f32 bytes are interchangeable; we just
     // reshape to candle's (1, q_len, hidden) math convention.
-    let noise_t = Tensor::from_vec(noise_data.clone(), (1, q_len, hidden), &device)?
-        .to_dtype(DType::BF16)?;
-    let target_t =
-        Tensor::from_vec(target_data.clone(), (1, ctx_len, fc_in), &device)?
-            .to_dtype(DType::BF16)?;
+    // Keep inputs F32 to match reference's F32 activation flow.
+    let noise_t = Tensor::from_vec(noise_data.clone(), (1, q_len, hidden), &device)?;
+    let target_t = Tensor::from_vec(target_data.clone(), (1, ctx_len, fc_in), &device)?;
 
     eprintln!(
         "noise_t shape={:?}, target_t shape={:?}",
@@ -137,8 +135,11 @@ fn main() -> Result<()> {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("safetensors"))
         .collect();
+    // Load draft as F32 for reference-parity activation flow.
+    // 3.46 GB BF16 safetensors → 6.92 GB F32 in VRAM. Candle's
+    // VarBuilder auto-upcasts on load.
     let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&draft_shards, DType::BF16, &device)?
+        VarBuilder::from_mmaped_safetensors(&draft_shards, DType::F32, &device)?
     };
     let draft = DFlashDraftModel::load(vb, draft_cfg.clone())?;
     eprintln!("draft loaded");
