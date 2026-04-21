@@ -42,6 +42,11 @@ path = "src/bin/draft_diff_bench.rs"
 required-features = ["cuda"]
 doc = false
 
+[[bin]]
+name = "dflash-ref-bench"
+path = "src/bin/dflash_ref_bench.rs"
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
