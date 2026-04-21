@@ -32,7 +32,7 @@
 #![cfg(feature = "cuda")]
 
 use anyhow::{anyhow, Context, Result};
-use candle_core::{DType, Device, Tensor};
+use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use clap::Parser;
 use engine_core::{
