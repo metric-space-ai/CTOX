@@ -25,6 +25,7 @@ use candle_nn::Embedding;
 
 use super::capture::FeatureCapture;
 use super::target::DFlashTargetForward;
+use crate::kv_cache::hybrid_cache::RecurrentStateSnapshot;
 use crate::vision_models::qwen3_5::Qwen3_5TextModel;
 
 /// Borrowed handle to the Qwen3.5 text model.
@@ -66,5 +67,18 @@ impl<'a> DFlashTargetForward for Qwen35DFlashTarget<'a> {
 
     fn apply_lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
         self.text.apply_lm_head(hidden)
+    }
+
+    fn snapshot_recurrent_state(&self) -> Result<Vec<RecurrentStateSnapshot>> {
+        // Single-seq pipeline ⇒ slot 0.
+        self.text.dflash_snapshot_recurrent_state(0)
+    }
+
+    fn restore_recurrent_state(&self, snapshots: &[RecurrentStateSnapshot]) -> Result<()> {
+        self.text.dflash_restore_recurrent_state(0, snapshots)
+    }
+
+    fn truncate_attention_to(&self, len: usize) -> Result<()> {
+        self.text.dflash_truncate_attention_to(len)
     }
 }

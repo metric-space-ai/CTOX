@@ -746,6 +746,57 @@ impl Qwen3_5TextModel {
         engine_quant::MatMul.qmethod_matmul(&xs, &*self.lm_head)
     }
 
+    /// Snapshot the hybrid cache's recurrent-layer state for DFlash
+    /// speculative rollback.
+    ///
+    /// The DFlash stepper runs a "verify" target forward over a
+    /// draft's candidates (B+1 feed tokens: last_tok + B cands), then
+    /// — after the accept loop figures out which candidates match —
+    /// it rolls the hybrid cache back to the pre-verify position and
+    /// does a second "commit" forward over only the accepted tokens.
+    /// That second forward is what actually advances the cache to the
+    /// post-commit state.
+    ///
+    /// The full-attention layers use [`Self::dflash_truncate_attention_to`]
+    /// for rollback — O(1) pointer arithmetic. The linear-attention
+    /// (Gated DeltaNet) layers carry a running recurrent state that
+    /// can't be rewound in place; we snapshot before the verify
+    /// forward and restore here to undo the state advance.
+    ///
+    /// `slot_idx` is always 0 in the single-seq DFlash pipeline — the
+    /// hybrid cache is allocated with one slot. Multi-seq support
+    /// (one ring / last-token / snapshot per seq) is a follow-up.
+    pub fn dflash_snapshot_recurrent_state(
+        &self,
+        slot_idx: usize,
+    ) -> Result<Vec<crate::kv_cache::hybrid_cache::RecurrentStateSnapshot>> {
+        self.cache.hybrid().snapshot_recurrent_state(slot_idx)
+    }
+
+    /// Restore a previously-taken recurrent-state snapshot. See
+    /// [`Self::dflash_snapshot_recurrent_state`].
+    pub fn dflash_restore_recurrent_state(
+        &self,
+        slot_idx: usize,
+        snapshots: &[crate::kv_cache::hybrid_cache::RecurrentStateSnapshot],
+    ) -> Result<()> {
+        self.cache
+            .hybrid()
+            .restore_recurrent_state(slot_idx, snapshots)
+    }
+
+    /// Truncate every full-attention layer's KV cache to `len`. Used
+    /// for DFlash verify rollback — drops the `B+1 - (accepted+1)`
+    /// rejected-draft KVs that the verify forward wrote past the
+    /// commit boundary, so the next commit forward's new KVs land at
+    /// the right position instead of after a gap of garbage.
+    ///
+    /// Linear-attention layers are untouched — their recurrent state
+    /// is handled by snapshot/restore.
+    pub fn dflash_truncate_attention_to(&self, len: usize) -> Result<()> {
+        self.cache.hybrid().truncate_attention_to(len)
+    }
+
     /// Standalone forward for DFlash speculative decoding.
     ///
     /// Wraps [`Self::forward_embeds_with_capture`] with all the

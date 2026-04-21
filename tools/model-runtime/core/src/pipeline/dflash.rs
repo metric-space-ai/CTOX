@@ -482,17 +482,20 @@ impl Pipeline for DFlashPipeline {
             .unwrap()
             .insert(*seq.id(), Some(new_last));
 
-        // Advance the target KV tracker by the full feed length
-        // (block + 1) — this matches how Qwen3.5's hybrid cache
-        // actually grows per forward, regardless of how many of
-        // those positions the verify accepted.
-        let feed_len = self.draft_cfg.block_size + 1;
+        // Advance the target KV tracker by `draft_accepted + 1` — the
+        // number of feed positions the commit replay actually wrote
+        // into the cache (last_tok + draft_accepted matched drafts).
+        // The committed boundary / bonus token (target_choices[K] on
+        // partial, target_choices[B] on full) has no KV entry yet;
+        // it picks up its KV next step as feed[0] of that step's
+        // verify forward. See the stepper's commit-replay comment.
+        let commit_len = outcome.draft_accepted + 1;
         self.past_kv_len
             .lock()
             .unwrap()
             .entry(*seq.id())
-            .and_modify(|v| *v += feed_len)
-            .or_insert(feed_len);
+            .and_modify(|v| *v += commit_len)
+            .or_insert(commit_len);
 
         // Telemetry: rolling accept-rate + per-step tok/s, same
         // format as `SpeculativePipeline`'s so `grep accept-rate`

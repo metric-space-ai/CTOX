@@ -22,6 +22,7 @@ use candle_core::{Result, Tensor};
 use candle_nn::Embedding;
 
 use super::capture::FeatureCapture;
+use crate::kv_cache::hybrid_cache::RecurrentStateSnapshot;
 
 /// Trait the DFlash stepper consumes. Implementations must be
 /// `Send + Sync` for integration into the async pipeline loop; our
@@ -64,4 +65,27 @@ pub trait DFlashTargetForward: Send + Sync {
     /// a borrow that works for both. Input shape `[..., hidden_size]`,
     /// output `[..., vocab_size]`.
     fn apply_lm_head(&self, hidden: &Tensor) -> Result<Tensor>;
+
+    /// Snapshot the target's hybrid recurrent state for rollback.
+    ///
+    /// The stepper calls this *before* the verify forward so that, once
+    /// the accept loop picks the committed-tokens prefix, it can undo
+    /// the Gated-DeltaNet state advance the verify forward caused and
+    /// replay only the accepted tokens through a second "commit"
+    /// forward. Without this rollback, rejected-draft KV/recurrent
+    /// state pollutes the cache and the next step conditions on
+    /// garbage — producing incoherent output in practice.
+    ///
+    /// See the reference graph's comment for the same invariant:
+    /// > "Restore SSM state. Replay the accepted tokens through
+    /// >  target (batched cleanly advanced only by what was committed)."
+    fn snapshot_recurrent_state(&self) -> Result<Vec<RecurrentStateSnapshot>>;
+
+    /// Restore a previously-taken recurrent-state snapshot.
+    fn restore_recurrent_state(&self, snapshots: &[RecurrentStateSnapshot]) -> Result<()>;
+
+    /// Truncate every full-attention layer's KV cache to `len`. Paired
+    /// with [`Self::restore_recurrent_state`] in the stepper's verify
+    /// rollback.
+    fn truncate_attention_to(&self, len: usize) -> Result<()>;
 }

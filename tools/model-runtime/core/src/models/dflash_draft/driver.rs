@@ -165,7 +165,13 @@ pub fn run_greedy(
         if let Some(&last) = outcome.accepted.last() {
             last_tok = last;
         }
-        past_kv_len += n_accepted;
+        // past_kv_len grows by draft_accepted + 1 — the commit-replay
+        // feed length (see stepper's rollback comment). On full accept
+        // this equals n_accepted (B+1); on partial it's one less than
+        // n_accepted because the committed boundary has no KV yet and
+        // is re-fed as next step's leading token.
+        past_kv_len += outcome.draft_accepted + 1;
+        let _ = n_accepted;
     }
 
     Ok(finalize(

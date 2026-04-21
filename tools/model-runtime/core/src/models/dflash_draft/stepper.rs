@@ -52,6 +52,18 @@ impl Default for StepperOpts {
     }
 }
 
+/// Per-step wall-time breakdown in milliseconds. Separates kernel
+/// cost of the verify forward from the commit-replay forward so
+/// telemetry can show how much of a step is the rollback overhead.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StepTimings {
+    /// Verify forward (B+1 tokens) + batched argmax.
+    pub verify_ms: f64,
+    /// Commit replay forward (draft_accepted+1 tokens). Zero on the
+    /// full-accept fast path where the verify cache state is reused.
+    pub commit_ms: f64,
+}
+
 /// One step's result — how many tokens were committed, which ids,
 /// and whether the target produced its own token at the boundary.
 #[derive(Debug, Clone)]
@@ -120,6 +132,21 @@ impl DFlashChainStepper {
         past_kv_len: usize,
         opts: &StepperOpts,
     ) -> Result<StepOutcome> {
+        self.step_with_diag(target, draft, last_committed_token, past_kv_len, opts)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// Same as [`Self::step`] but also returns the `(verify_ms, commit_ms)`
+    /// timings. The pipeline's telemetry log uses this to separate kernel
+    /// cost from accept-loop cost without breaking the public step API.
+    pub fn step_with_diag<T: DFlashTargetForward>(
+        &self,
+        target: &T,
+        draft: &DFlashDraftModel,
+        last_committed_token: u32,
+        past_kv_len: usize,
+        opts: &StepperOpts,
+    ) -> Result<(StepOutcome, StepTimings)> {
         // ── 1. Ask the draft for candidates. `apply_lm_head` is a
         //    closure over the target's `apply_lm_head` method so the
         //    runner doesn't need to know whether the projection is a
@@ -140,65 +167,58 @@ impl DFlashChainStepper {
             runner.step(last_committed_token, &ring, &ropts, |h| target.apply_lm_head(h))?
         };
 
-        // ── 2. Build target input: [last_tok, cand_0, cand_1, ..., cand_{B-1}]
+        // ── 2. Build verify input: [last_tok, cand_0, cand_1, ..., cand_{B-1}]
         //
         //    B+1 tokens in, B+1 logit rows out. target_choices[i] is
         //    the target's greedy pick for the token right after
         //    feed[i]:
-        //
-        //      target_choices[0]      ←→  candidates[0]   (both for pos+1)
-        //      target_choices[1]      ←→  candidates[1]   (both for pos+2)
+        //      target_choices[0]      ←→  candidates[0]
         //      ...
         //      target_choices[B-1]    ←→  candidates[B-1]
-        //      target_choices[B]      = "free bonus"  — if all B candidates
-        //                               matched, this is a committable extra
-        //                               token (target agreed with the whole
-        //                               draft block AND gave us its greedy
-        //                               pick for the position after).
-        //
-        //    That's the same accept-loop shape as speculative.rs uses:
-        //    on full agreement we commit B+1 tokens for one target
-        //    forward, which is what drives acceptance length = draft
-        //    block size when the draft is well-trained.
+        //      target_choices[B]      = "free bonus" if all B candidates matched.
         let block = self.cfg.block_size;
         let candidates = &draft_out.candidates;
-        let mut feed = Vec::with_capacity(block + 1);
-        feed.push(last_committed_token);
+        let mut feed_verify = Vec::with_capacity(block + 1);
+        feed_verify.push(last_committed_token);
         for c in candidates.iter() {
-            feed.push(*c);
+            feed_verify.push(*c);
         }
-        let feed_len = feed.len();
+        let feed_len = feed_verify.len();
         let device = target.embed_tokens().embeddings().device();
-        let input_ids = Tensor::from_vec(feed, (1, feed_len), device)?;
+        let verify_ids = Tensor::from_vec(feed_verify.clone(), (1, feed_len), device)?;
 
-        // ── 3. Run target forward with feature capture.
-        let mut capture = FeatureCapture::new(self.cfg.dflash.target_layer_ids.clone());
-        let logits = target.forward_with_capture(&input_ids, past_kv_len, &mut capture)?;
-        capture.validate().map_err(candle_core::Error::msg)?;
-
-        // ── 4. Chain verify. At position i, the target's argmax is
-        //    the id it would have produced as the (i+1)-th token.
-        //    Accept `cand_i` iff it matches, else stop. The boundary
-        //    token committed to the output is always the target's
-        //    argmax at the first mismatching position (or the last
-        //    position if all draft tokens match).
+        // ── 3. Snapshot recurrent state + run verify forward.
+        //    The rollback below needs the pre-verify Gated-DeltaNet
+        //    state to recover after discarding the verify-forward's
+        //    advance across B+1 feed positions (only draft_accepted+1
+        //    of which end up committed). Attention cache is rewound
+        //    via `truncate_attention_to`; recurrent state needs
+        //    snapshot/restore because GDN advance isn't invertible
+        //    (gating < 1 destroys information).
         //
-        //    Batched argmax: a single GPU kernel + one 17-element
-        //    D→H copy instead of 17 per-row syncs — the per-row
-        //    path cost ~200ms/step on A6000 because each
-        //    `to_vec1` stalls on device→host transfer.
-        let seq_len = logits.dim(1)?;
+        //    See the reference's qwen3_dflash_graph for the same
+        //    pattern — `// Restore SSM state. Replay the accepted
+        //    tokens through target.`
+        let t_verify_start = std::time::Instant::now();
+        let recurrent_snapshot = target.snapshot_recurrent_state()?;
+        let mut verify_capture =
+            FeatureCapture::new(self.cfg.dflash.target_layer_ids.clone());
+        let verify_logits =
+            target.forward_with_capture(&verify_ids, past_kv_len, &mut verify_capture)?;
+        verify_capture.validate().map_err(candle_core::Error::msg)?;
+
+        // ── 4. Chain verify on the GPU: one batched argmax + one tiny
+        //    D→H copy instead of B+1 per-row `to_vec1` calls.
         let target_choices: Vec<u32> = {
-            let row_argmax = logits.i(0)?.argmax(D::Minus1)?;
-            let ids: Vec<u32> = match row_argmax.dtype() {
+            let row_argmax = verify_logits.i(0)?.argmax(D::Minus1)?;
+            match row_argmax.dtype() {
                 DType::U32 => row_argmax.to_vec1()?,
                 _ => row_argmax
                     .to_dtype(DType::U32)?
                     .to_vec1::<u32>()?,
-            };
-            ids
+            }
         };
-
+        let verify_ms = t_verify_start.elapsed().as_secs_f64() * 1000.0;
         if target_choices.is_empty() {
             candle_core::bail!(
                 "DFlashChainStepper::step: target produced no logits — \
@@ -219,43 +239,80 @@ impl DFlashChainStepper {
             }
         }
         if draft_accepted == candidates.len() {
-            // Whole draft block verified. Commit the free bonus token
-            // from target_choices[block] — target's own prediction
-            // for the position right after the last accepted draft
-            // token.
             if let Some(bonus) = target_choices.get(candidates.len()) {
                 accepted.push(*bonus);
             }
         }
 
-        // ── 5. Append the captured features for the NEWLY committed
-        //    rows to the ring.
+        // ── 5. Rollback + commit replay.
         //
-        //    feed = [last_tok, cand_0, ..., cand_{B-1}] = B+1 tokens,
-        //    so capture[layer][0..=B] holds B+1 hidden rows. Row 0 is
-        //    `last_tok`, already ringed in the previous step — skip.
-        //    Rows 1..=B correspond to the B candidates; at most B
-        //    fresh ring entries come from this step.
+        //    full-accept fast path (draft_accepted == block): every
+        //    verify-feed position was also a committed-output
+        //    predecessor, so the verify forward already produced the
+        //    correct KV/recurrent state we need for the next step.
+        //    Skip the replay, reuse the verify capture — saves one
+        //    target forward per full-accept step.
         //
-        //    Edge case: if the WHOLE draft block verified and the
-        //    bonus token was committed, accepted.len() == B+1 but
-        //    the target never forwarded at the position *after* the
-        //    bonus — the bonus's feature row will land in the NEXT
-        //    step when that token is re-fed as the new last_tok.
-        //    Clamp accordingly.
+        //    partial-accept: rollback (truncate attention + restore
+        //    recurrent) then replay just the accepted-feed prefix
+        //    [last_tok, target_choices[0..draft_accepted-1]]. Its
+        //    length is `draft_accepted + 1` — the number of tokens
+        //    whose KVs we want in the cache going forward. The
+        //    committed boundary `target_choices[draft_accepted]` has
+        //    no KV yet; it becomes the next step's `last_tok` and
+        //    picks up its KV via feed[0] of that step's verify.
+        let t_commit_start = std::time::Instant::now();
+        let commit_len = draft_accepted + 1;
+        let full_accept = draft_accepted == candidates.len();
+        let (commit_capture, commit_ms) = if full_accept {
+            // Verify cache state == committed state; no replay needed.
+            // We reuse the verify capture for the ring append below.
+            (verify_capture, 0.0)
+        } else {
+            target.truncate_attention_to(past_kv_len)?;
+            target.restore_recurrent_state(&recurrent_snapshot)?;
+            let mut commit_ids = Vec::with_capacity(commit_len);
+            commit_ids.push(last_committed_token);
+            for i in 0..draft_accepted {
+                commit_ids.push(candidates[i]); // == target_choices[i] since matched
+            }
+            let commit_input = Tensor::from_vec(commit_ids, (1, commit_len), device)?;
+            let mut cap = FeatureCapture::new(self.cfg.dflash.target_layer_ids.clone());
+            let _ = target.forward_with_capture(&commit_input, past_kv_len, &mut cap)?;
+            cap.validate().map_err(candle_core::Error::msg)?;
+            (cap, t_commit_start.elapsed().as_secs_f64() * 1000.0)
+        };
+
+        // ── 6. Append feature rows for newly-committed tokens to the
+        //    ring. Commit capture rows are:
+        //      row 0  — last_tok (already in ring from prev step; skip)
+        //      row i  (1..=draft_accepted) — target_choices[i-1]
+        //    So we append `draft_accepted` rows starting at row 1.
+        //
+        //    The committed boundary / bonus (`target_choices[draft_accepted]`
+        //    or `target_choices[block]` on full-accept) has no capture
+        //    row — it gets featurised on the NEXT step when it's re-fed
+        //    as `last_tok`.
         let n_accepted = accepted.len();
-        let ring_rows_available = feed_len.saturating_sub(1); // = block_size for chain verify
-        let n_ring_rows = n_accepted.min(ring_rows_available);
+        let n_ring_rows = draft_accepted; // rows 1..=draft_accepted of commit_capture
         if n_ring_rows > 0 {
-            let captured = fuse_captured_features(&capture, 1, n_ring_rows)?;
+            let captured = fuse_captured_features(&commit_capture, 1, n_ring_rows)?;
             let mut ring = self.ring.lock().unwrap();
             ring.append(&captured)?;
         }
 
-        Ok(StepOutcome {
-            accepted,
-            draft_accepted,
-        })
+        let _ = n_accepted; // retained for readability of the accept block above
+
+        Ok((
+            StepOutcome {
+                accepted,
+                draft_accepted,
+            },
+            StepTimings {
+                verify_ms,
+                commit_ms,
+            },
+        ))
     }
 }
 
