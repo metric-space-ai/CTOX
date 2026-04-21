@@ -47,6 +47,11 @@ name = "dflash-ref-bench"
 path = "src/bin/dflash_ref_bench.rs"
 doc = false
 
+[[bin]]
+name = "dflash-ref-inproc-bench"
+path = "src/bin/dflash_ref_inproc_bench.rs"
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
@@ -77,6 +82,7 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 futures-util = { workspace = true }
 image = { workspace = true }
+libloading = "0.8"
 comfy-table = "7"
 dirs = { workspace = true }
 walkdir = { workspace = true }
