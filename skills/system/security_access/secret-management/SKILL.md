@@ -15,15 +15,9 @@ Do not use it as the full deployment skill. Pair it with `service-deployment` or
 Treat this skill as:
 
 1. credential classification
-2. local secret material generation or reference capture
+2. secret generation or owner-supplied intake
 3. secret metadata classification
-4. durable secret reference output
-
-Preferred helper script under `scripts/`:
-
-- `secret_material.py`
-
-The helper is inspectable. Read or patch it when the secret shape is unusual.
+4. durable SQLite secret-store reference output
 
 ## Classification Rules
 
@@ -48,18 +42,45 @@ Never default to `owner_supplied` when CTOX can safely generate a local admin se
 1. Name the exact credential requirement.
 2. Decide whether it is local or external.
 3. Generate a local secret when safe.
-4. Store the secret material in a local secret file reference.
+4. Store the secret material in the encrypted CTOX SQLite secret store.
 5. Store secret metadata that says:
    - kind
    - status
    - accepted reply path such as `tui_only` or `email_safe`
    - service or deployment bindings
-6. Return the secret reference path and keys, not vague prose.
+6. Return the secret handle (`scope/name`) and the relevant metadata, not vague prose.
+
+## Primary Commands
+
+Store a secret that did not already leak into active memory:
+
+```sh
+ctox secret put --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>'
+```
+
+Store a secret and immediately rewrite the leaked literal from active runtime memory:
+
+```sh
+ctox secret intake --scope "<scope>" --name "<name>" --value "<secret>" --description "<text>" --metadata-json '<json>' --db "<path-to-ctox.sqlite3>" --conversation-id "<id>" --match-text "<secret>" [--label "<human label>"]
+```
+
+Inspect metadata without exposing the value:
+
+```sh
+ctox secret list [--scope "<scope>"]
+ctox secret show --scope "<scope>" --name "<name>"
+```
+
+Retrieve the raw value only for the bounded local step that truly needs it:
+
+```sh
+ctox secret get --scope "<scope>" --name "<name>"
+```
 
 ## Guardrails
 
 - Do not print live secret material into owner-facing reports unless explicitly required for handoff.
-- Do not forget generated admin credentials. Persist a local reference before reporting success.
+- Do not forget generated admin credentials. Persist them in the encrypted SQLite secret store before reporting success.
 - Do not ask the owner for a secret unless the value truly cannot be generated or discovered locally.
 - Secret-bearing inbound mail must move to TUI; do not normalize it as regular email work.
 

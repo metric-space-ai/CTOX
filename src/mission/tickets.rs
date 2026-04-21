@@ -4548,6 +4548,9 @@ fn default_skill_for_self_work_kind(kind: &str) -> Option<String> {
         "access-request" => Some("ticket-access-and-secrets".to_string()),
         "system-onboarding" => Some("system-onboarding".to_string()),
         "secret-hygiene" => Some("secret-hygiene".to_string()),
+        "mission-follow-up" | "timeout-continuation" | "review-rework" => {
+            Some("follow-up-orchestrator".to_string())
+        }
         _ => None,
     }
 }
@@ -6143,17 +6146,18 @@ fn open_ticket_db(root: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open ticket db {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
         .context("failed to configure SQLite busy_timeout for tickets")?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
 
 fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    let busy_timeout_ms = crate::persistence::sqlite_busy_timeout_millis();
+    conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+        PRAGMA busy_timeout={busy_timeout_ms};
 
         CREATE TABLE IF NOT EXISTS ticket_items (
             ticket_key TEXT PRIMARY KEY,
@@ -6521,7 +6525,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_ticket_audit_ticket_time
             ON ticket_audit_log(ticket_key, created_at DESC);
         "#,
-    )?;
+    ))?;
     ensure_ticket_event_routing_rows(conn)?;
     Ok(())
 }

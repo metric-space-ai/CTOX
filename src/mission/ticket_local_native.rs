@@ -454,17 +454,18 @@ fn open_local_db(root: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open local ticket db {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
         .context("failed to configure SQLite busy_timeout for local ticket db")?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
 
 fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    let busy_timeout_ms = crate::persistence::sqlite_busy_timeout_millis();
+    conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+        PRAGMA busy_timeout={busy_timeout_ms};
 
         CREATE TABLE IF NOT EXISTS local_tickets (
             ticket_id TEXT PRIMARY KEY,
@@ -491,7 +492,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_local_ticket_events_ticket_time
             ON local_ticket_events(ticket_id, created_at ASC);
         "#,
-    )?;
+    ))?;
     Ok(())
 }
 

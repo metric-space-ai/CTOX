@@ -3227,9 +3227,7 @@ fn workspace_managed_runtime_processes(root: &Path) -> Result<Vec<(u32, u32)>> {
         if !command.contains(&root_display) && !process_current_dir_matches_root(pid, root) {
             continue;
         }
-        if command_is_managed_runtime_launcher(command)
-            || managed_engine_process_command(command)
-        {
+        if command_is_managed_runtime_launcher(command) || managed_engine_process_command(command) {
             processes.push((pid, group_id));
         }
     }

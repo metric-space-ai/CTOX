@@ -282,7 +282,8 @@ mod tests {
         let root = tmp.path();
         fs::create_dir_all(paths::runtime_dir(root)).unwrap();
         let conn = Connection::open(paths::core_db(root)).unwrap();
-        conn.execute_batch("CREATE TABLE marker (id INTEGER);").unwrap();
+        conn.execute_batch("CREATE TABLE marker (id INTEGER);")
+            .unwrap();
         conn.execute("INSERT INTO marker VALUES (42)", []).unwrap();
         drop(conn);
 

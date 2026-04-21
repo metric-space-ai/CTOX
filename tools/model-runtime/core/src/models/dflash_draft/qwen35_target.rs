@@ -25,7 +25,7 @@ use candle_nn::Embedding;
 
 use super::capture::FeatureCapture;
 use super::target::DFlashTargetForward;
-use crate::kv_cache::hybrid_cache::RecurrentStateSnapshot;
+use crate::kv_cache::RecurrentStateSnapshot;
 use crate::vision_models::qwen3_5::Qwen3_5TextModel;
 
 /// Borrowed handle to the Qwen3.5 text model.

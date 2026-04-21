@@ -17,6 +17,12 @@
 use std::path::{Path, PathBuf};
 
 pub fn runtime_dir(root: &Path) -> PathBuf {
+    if let Some(state_root) = std::env::var_os("CTOX_STATE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return state_root;
+    }
     root.join("runtime")
 }
 

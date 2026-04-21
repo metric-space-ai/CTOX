@@ -129,7 +129,16 @@ pub fn upsert_skill_bundle_from_dir(root: &Path, dir: &Path) -> Result<Option<Sk
         .clone()
         .unwrap_or_else(|| infer_cluster_from_disk_path(root, dir));
 
-    upsert_bundle_records(root, &skill_name, &class, &state, &description, source_path.as_deref(), &cluster, &files)
+    upsert_bundle_records(
+        root,
+        &skill_name,
+        &class,
+        &state,
+        &description,
+        source_path.as_deref(),
+        &cluster,
+        &files,
+    )
 }
 
 /// Shared upsert path used by both filesystem and embedded importers.
@@ -284,7 +293,11 @@ fn upsert_embedded_skill(root: &Path, skill_dir: &Dir<'_>, path_in_system: &str)
     Ok(())
 }
 
-fn collect_embedded_files(dir: &Dir<'_>, root_path_len: usize, out: &mut BTreeMap<String, Vec<u8>>) {
+fn collect_embedded_files(
+    dir: &Dir<'_>,
+    root_path_len: usize,
+    out: &mut BTreeMap<String, Vec<u8>>,
+) {
     for entry in dir.entries() {
         match entry {
             include_dir::DirEntry::File(file) => {

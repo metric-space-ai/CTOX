@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine;
+use regex::Regex;
 use ring::aead;
 use ring::rand::{SecureRandom, SystemRandom};
 use rusqlite::params;
@@ -39,6 +40,12 @@ pub struct SecretRecordView {
 struct SecretIntakeView {
     pub secret: SecretRecordView,
     pub rewrite: Option<lcm::SecretRewriteResult>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PromptSecretSanitization {
+    pub sanitized_prompt: String,
+    pub auto_ingested_secrets: usize,
 }
 
 pub fn handle_secret_command(root: &Path, args: &[String]) -> Result<()> {
@@ -166,6 +173,60 @@ pub fn write_secret_record(
 }
 
 #[derive(Debug, Clone)]
+struct DetectedPromptSecret {
+    scope: String,
+    name: String,
+    literal: String,
+    stored_value: String,
+    label: Option<String>,
+}
+
+pub fn auto_intake_prompt_secrets(root: &Path, prompt: &str) -> Result<PromptSecretSanitization> {
+    let mut sanitized_prompt = prompt.to_string();
+    let mut detections = detect_prompt_secrets(prompt);
+    detections.sort_by(|left, right| right.literal.len().cmp(&left.literal.len()));
+
+    let mut seen_literals = std::collections::BTreeSet::new();
+    let mut auto_ingested_secrets = 0usize;
+
+    for detection in detections {
+        if detection.literal.trim().is_empty()
+            || detection.stored_value.trim().is_empty()
+            || !seen_literals.insert(detection.literal.clone())
+        {
+            continue;
+        }
+        put_secret(
+            root,
+            &detection.scope,
+            &detection.name,
+            &detection.stored_value,
+            Some(format!(
+                "Auto-ingested from user-submitted prompt as {}",
+                detection.name
+            )),
+            json!({
+                "source": "prompt_auto_intake",
+                "detected_name": detection.name,
+                "detected_scope": detection.scope,
+            }),
+        )?;
+        let replacement = secret_reference_text(
+            &detection.scope,
+            &detection.name,
+            detection.label.as_deref(),
+        );
+        sanitized_prompt = sanitized_prompt.replace(&detection.literal, &replacement);
+        auto_ingested_secrets += 1;
+    }
+
+    Ok(PromptSecretSanitization {
+        sanitized_prompt,
+        auto_ingested_secrets,
+    })
+}
+
+#[derive(Debug, Clone)]
 struct IntakeRewriteRequest {
     db_path: PathBuf,
     conversation_id: i64,
@@ -234,6 +295,418 @@ fn intake_secret(
         secret: record,
         rewrite: rewrite_result,
     })
+}
+
+fn detect_prompt_secrets(prompt: &str) -> Vec<DetectedPromptSecret> {
+    let mut detections = Vec::new();
+    let same_line_re = Regex::new(
+        r"(?im)^\s*(?:[-*]\s*)?(?P<label>[\p{L}][\p{L}\p{N} _./()%-]{0,80}?)\s*:\s*(?P<value>\S[^\r\n]*)\s*$",
+    )
+    .expect("static labeled secret regex");
+    let heading_re =
+        Regex::new(r"(?im)^\s*(?:[-*]\s*)?(?P<label>[\p{L}][\p{L}\p{N} _./()%-]{0,80}?)\s*:\s*$")
+            .expect("static heading regex");
+    let env_re =
+        Regex::new(r#"(?im)^\s*(?P<label>[A-Z][A-Z0-9_]{2,})\s*=\s*(?P<value>\S[^\r\n]*)\s*$"#)
+            .expect("static env assignment regex");
+
+    let lines: Vec<&str> = prompt.lines().collect();
+    let mut active_heading: Option<String> = None;
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if looks_like_database_url(trimmed) {
+            continue;
+        }
+        if let Some(caps) = env_re.captures(line) {
+            if let Some(secret) = classify_prompt_secret(
+                caps.name("label").map(|m| m.as_str()).unwrap_or_default(),
+                caps.name("value").map(|m| m.as_str()).unwrap_or_default(),
+                active_heading.as_deref(),
+            ) {
+                detections.push(secret);
+            }
+            continue;
+        }
+        if let Some(caps) = same_line_re.captures(line) {
+            if let Some(secret) = classify_prompt_secret(
+                caps.name("label").map(|m| m.as_str()).unwrap_or_default(),
+                caps.name("value").map(|m| m.as_str()).unwrap_or_default(),
+                active_heading.as_deref(),
+            ) {
+                detections.push(secret);
+            }
+            continue;
+        }
+        if let Some(caps) = heading_re.captures(line) {
+            let heading = caps
+                .name("label")
+                .map(|m| m.as_str().trim().to_string())
+                .unwrap_or_default();
+            active_heading = Some(heading.clone());
+            if let Some(next_value) = next_unlabeled_value_line(&lines, index + 1) {
+                if let Some(secret) =
+                    classify_prompt_secret(&heading, next_value, Some(heading.as_str()))
+                {
+                    detections.push(secret);
+                }
+            }
+            if heading.to_ascii_lowercase().contains("vercel login") {
+                if let Some(email_value) = next_unlabeled_value_line(&lines, index + 1) {
+                    let email_trimmed = email_value.trim();
+                    if looks_like_email(email_trimmed) {
+                        detections.push(DetectedPromptSecret {
+                            scope: "captured-input".to_string(),
+                            name: "VERCEL_LOGIN_EMAIL".to_string(),
+                            literal: email_trimmed.to_string(),
+                            stored_value: email_trimmed.to_string(),
+                            label: Some("Vercel login email".to_string()),
+                        });
+                        if let Some(password_value) =
+                            next_unlabeled_value_line_after(&lines, index + 1, email_trimmed)
+                        {
+                            let password_trimmed = password_value.trim();
+                            if !password_trimmed.is_empty()
+                                && !looks_like_email(password_trimmed)
+                                && !line_looks_labeled(password_trimmed)
+                            {
+                                detections.push(DetectedPromptSecret {
+                                    scope: "captured-input".to_string(),
+                                    name: "VERCEL_LOGIN_PASSWORD".to_string(),
+                                    literal: password_trimmed.to_string(),
+                                    stored_value: password_trimmed.to_string(),
+                                    label: Some("Vercel login password".to_string()),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let standalone_patterns = [
+        (
+            "credentials",
+            "OPENROUTER_API_KEY",
+            r"\bsk-or-v1-[A-Za-z0-9]{20,}\b",
+        ),
+        (
+            "credentials",
+            "MINIMAX_API_KEY",
+            r"\bsk-api-[A-Za-z0-9_-]{20,}\b",
+        ),
+        (
+            "credentials",
+            "OPENAI_API_KEY",
+            r"\bsk-(?:proj|live|test)-[A-Za-z0-9_-]{20,}\b",
+        ),
+        (
+            "credentials",
+            "DATABASE_URL",
+            r#"\bpostgres(?:ql)?://[^\s<>"]+"#,
+        ),
+    ];
+    for (scope, name, pattern) in standalone_patterns {
+        let regex = Regex::new(pattern).expect("static standalone secret regex");
+        for matched in regex.find_iter(prompt) {
+            let literal = matched.as_str().trim();
+            if literal.contains("[secret-ref:") {
+                continue;
+            }
+            detections.push(DetectedPromptSecret {
+                scope: scope.to_string(),
+                name: name.to_string(),
+                literal: literal.to_string(),
+                stored_value: literal.to_string(),
+                label: Some(name.replace('_', " ")),
+            });
+        }
+    }
+
+    detections
+}
+
+fn classify_prompt_secret(
+    label: &str,
+    raw_value: &str,
+    context_heading: Option<&str>,
+) -> Option<DetectedPromptSecret> {
+    let stored_value = normalize_secret_value(raw_value)?;
+    let label_lower = label.trim().to_ascii_lowercase();
+    let heading_lower = context_heading
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    let combined = format!("{heading_lower} {label_lower}");
+
+    if combined.contains("openai") && combined.contains("api key")
+        || looks_like_openai_key(&stored_value)
+    {
+        return Some(named_prompt_secret(
+            "credentials",
+            "OPENAI_API_KEY",
+            raw_value,
+            &stored_value,
+            "OpenAI API key",
+        ));
+    }
+    if combined.contains("openrouter") && combined.contains("api key")
+        || looks_like_openrouter_key(&stored_value)
+    {
+        return Some(named_prompt_secret(
+            "credentials",
+            "OPENROUTER_API_KEY",
+            raw_value,
+            &stored_value,
+            "OpenRouter API key",
+        ));
+    }
+    if combined.contains("minimax") && combined.contains("api key")
+        || looks_like_minimax_key(&stored_value)
+    {
+        return Some(named_prompt_secret(
+            "credentials",
+            "MINIMAX_API_KEY",
+            raw_value,
+            &stored_value,
+            "MiniMax API key",
+        ));
+    }
+    if combined.contains("database url")
+        || combined.contains("neon postgres")
+        || combined.contains("postgres zugriff")
+        || looks_like_database_url(&stored_value)
+    {
+        return Some(named_prompt_secret(
+            "credentials",
+            "DATABASE_URL",
+            raw_value,
+            &stored_value,
+            "database url",
+        ));
+    }
+    if heading_lower.contains("bootstrap mailbox")
+        && (label_lower == "password" || label_lower.contains("mailbox password"))
+    {
+        return Some(named_prompt_secret(
+            "credentials",
+            "CTO_EMAIL_PASSWORD",
+            raw_value,
+            &stored_value,
+            "bootstrap mailbox password",
+        ));
+    }
+    if heading_lower.contains("host of the cto1 installation") && label_lower.contains("password") {
+        return Some(named_prompt_secret(
+            "captured-input",
+            "VPS_LOGIN_PASSWORD",
+            raw_value,
+            &stored_value,
+            "VPS login password",
+        ));
+    }
+    if heading_lower.contains("host of the cto1 installation")
+        && (label_lower.contains("username") || label_lower.contains("benutzername"))
+    {
+        return Some(named_prompt_secret(
+            "captured-input",
+            "VPS_LOGIN_USERNAME",
+            raw_value,
+            &stored_value,
+            "VPS login username",
+        ));
+    }
+    if combined.contains("vercel") && combined.contains("password") {
+        return Some(named_prompt_secret(
+            "captured-input",
+            "VERCEL_LOGIN_PASSWORD",
+            raw_value,
+            &stored_value,
+            "Vercel login password",
+        ));
+    }
+    if combined.contains("vercel") && combined.contains("email") && looks_like_email(&stored_value)
+    {
+        return Some(named_prompt_secret(
+            "captured-input",
+            "VERCEL_LOGIN_EMAIL",
+            raw_value,
+            &stored_value,
+            "Vercel login email",
+        ));
+    }
+
+    if looks_like_secretish_value(&stored_value) {
+        let generic_name = normalize_secret_name(label, context_heading);
+        if !generic_name.is_empty() {
+            return Some(named_prompt_secret(
+                "captured-input",
+                &generic_name,
+                raw_value,
+                &stored_value,
+                label.trim(),
+            ));
+        }
+    }
+
+    None
+}
+
+fn named_prompt_secret(
+    scope: &str,
+    name: &str,
+    raw_value: &str,
+    stored_value: &str,
+    label: &str,
+) -> DetectedPromptSecret {
+    DetectedPromptSecret {
+        scope: scope.to_string(),
+        name: name.to_string(),
+        literal: raw_value.trim().to_string(),
+        stored_value: stored_value.to_string(),
+        label: Some(label.to_string()),
+    }
+}
+
+fn next_unlabeled_value_line<'a>(lines: &'a [&str], start: usize) -> Option<&'a str> {
+    lines
+        .iter()
+        .skip(start)
+        .map(|line| line.trim())
+        .find(|line| !line.is_empty() && !line_looks_labeled(line))
+}
+
+fn next_unlabeled_value_line_after<'a>(
+    lines: &'a [&str],
+    start: usize,
+    skip_value: &str,
+) -> Option<&'a str> {
+    let mut skipped = false;
+    for line in lines.iter().skip(start) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || line_looks_labeled(trimmed) {
+            continue;
+        }
+        if !skipped && trimmed == skip_value {
+            skipped = true;
+            continue;
+        }
+        if skipped {
+            return Some(trimmed);
+        }
+    }
+    None
+}
+
+fn line_looks_labeled(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.contains("://") {
+        return false;
+    }
+    let stripped = trimmed
+        .strip_prefix("- ")
+        .or_else(|| trimmed.strip_prefix("* "))
+        .unwrap_or(trimmed);
+    let Some((label, _)) = stripped.split_once(':') else {
+        return false;
+    };
+    let label = label.trim();
+    !label.is_empty()
+        && label.chars().next().is_some_and(|ch| ch.is_alphabetic())
+        && label.len() <= 80
+}
+
+fn normalize_secret_value(raw_value: &str) -> Option<String> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() || trimmed.contains("[secret-ref:") {
+        return None;
+    }
+    Some(
+        trimmed
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim_matches('`')
+            .trim()
+            .to_string(),
+    )
+}
+
+fn normalize_secret_name(label: &str, context_heading: Option<&str>) -> String {
+    let mut combined = String::new();
+    let label_trimmed = label.trim();
+    let label_is_generic = matches!(
+        label_trimmed.to_ascii_lowercase().as_str(),
+        "password" | "username" | "user" | "email" | "mailbox"
+    );
+    if label_is_generic {
+        if let Some(heading) = context_heading {
+            combined.push_str(heading.trim());
+            combined.push(' ');
+        }
+    }
+    combined.push_str(label_trimmed);
+
+    let mut normalized = String::new();
+    let mut previous_was_underscore = false;
+    for ch in combined.chars() {
+        if ch.is_ascii_alphanumeric() {
+            normalized.push(ch.to_ascii_uppercase());
+            previous_was_underscore = false;
+        } else if !previous_was_underscore {
+            normalized.push('_');
+            previous_was_underscore = true;
+        }
+    }
+    normalized.trim_matches('_').to_string()
+}
+
+fn looks_like_openai_key(value: &str) -> bool {
+    value.starts_with("sk-proj-") || value.starts_with("sk-live-") || value.starts_with("sk-test-")
+}
+
+fn looks_like_openrouter_key(value: &str) -> bool {
+    value.starts_with("sk-or-v1-")
+}
+
+fn looks_like_minimax_key(value: &str) -> bool {
+    value.starts_with("sk-api-")
+}
+
+fn looks_like_database_url(value: &str) -> bool {
+    value.starts_with("postgres://") || value.starts_with("postgresql://")
+}
+
+fn looks_like_email(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.contains('@')
+        && !trimmed.contains(' ')
+        && trimmed
+            .split('@')
+            .nth(1)
+            .is_some_and(|domain| domain.contains('.'))
+}
+
+fn looks_like_secretish_value(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    if looks_like_email(value) || lowered.starts_with("http://") || lowered.starts_with("https://")
+    {
+        return false;
+    }
+    if looks_like_database_url(value)
+        || looks_like_openai_key(value)
+        || looks_like_openrouter_key(value)
+        || looks_like_minimax_key(value)
+    {
+        return true;
+    }
+    value.len() >= 12
+        && !value.contains(' ')
+        && value.chars().any(|ch| ch.is_ascii_digit())
+        && value
+            .chars()
+            .any(|ch| matches!(ch, '-' | '_' | ':' | '/' | '?' | '=' | '&'))
 }
 
 pub fn secret_exists(root: &Path, scope: &str, name: &str) -> Result<bool> {
@@ -544,6 +1017,7 @@ const SECRET_KEYS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENROUTER_API_KEY",
     "MINIMAX_API_KEY",
+    "DATABASE_URL",
     "CTO_EMAIL_PASSWORD",
     "CTOX_WEBRTC_PASSWORD",
     "HF_TOKEN",
@@ -680,6 +1154,63 @@ mod tests {
         assert!(!snapshot.messages[0]
             .content
             .contains("sk-live-super-secret"));
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn auto_intake_prompt_secrets_stores_and_rewrites_high_confidence_literals() -> Result<()> {
+        let root = temp_root("prompt-auto-intake");
+        fs::create_dir_all(&root)?;
+        let prompt = "\
+openAI API key:
+sk-proj-super-secret-key-1234567890
+
+Neon Postgres zugriff:
+postgresql://user:pw@example.neon.tech/db?sslmode=require
+
+Vercel login über:
+metricspace.ai@gmail.com
+vercel-password-123
+";
+
+        let result = auto_intake_prompt_secrets(&root, prompt)?;
+
+        assert!(result.auto_ingested_secrets >= 4);
+        assert!(!result
+            .sanitized_prompt
+            .contains("sk-proj-super-secret-key-1234567890"));
+        assert!(!result
+            .sanitized_prompt
+            .contains("postgresql://user:pw@example.neon.tech/db?sslmode=require"));
+        assert!(!result.sanitized_prompt.contains("vercel-password-123"));
+        assert!(result
+            .sanitized_prompt
+            .contains("[secret-ref:credentials/OPENAI_API_KEY"));
+        assert!(result
+            .sanitized_prompt
+            .contains("[secret-ref:credentials/DATABASE_URL"));
+        assert!(result
+            .sanitized_prompt
+            .contains("[secret-ref:captured-input/VERCEL_LOGIN_PASSWORD"));
+
+        assert_eq!(
+            get_secret_value(&root, "credentials", "OPENAI_API_KEY")?,
+            "sk-proj-super-secret-key-1234567890"
+        );
+        assert_eq!(
+            get_secret_value(&root, "credentials", "DATABASE_URL")?,
+            "postgresql://user:pw@example.neon.tech/db?sslmode=require"
+        );
+        assert_eq!(
+            get_secret_value(&root, "captured-input", "VERCEL_LOGIN_EMAIL")?,
+            "metricspace.ai@gmail.com"
+        );
+        assert_eq!(
+            get_secret_value(&root, "captured-input", "VERCEL_LOGIN_PASSWORD")?,
+            "vercel-password-123"
+        );
 
         let _ = fs::remove_dir_all(&root);
         Ok(())

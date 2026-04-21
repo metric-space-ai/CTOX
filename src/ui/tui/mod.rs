@@ -555,10 +555,6 @@ impl RuntimeHealthState {
         }
         parts
     }
-
-    fn is_degraded(&self) -> bool {
-        !self.degraded_components().is_empty()
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1477,6 +1473,8 @@ impl App {
         } else {
             prompt.push_str(&raw);
         }
+        let prepared_prompt = service::prepare_chat_prompt(&self.root, &prompt)?;
+        prompt = prepared_prompt.prompt;
 
         let attachment_count = self.pending_images.len();
 
@@ -6522,7 +6520,6 @@ mod tests {
             .unwrap();
         assert_eq!(skill_preset_pos, preset_pos + 1);
     }
-
 
     #[test]
     fn configured_runtime_models_skip_remote_chat_model_for_api_source() {

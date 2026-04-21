@@ -22,7 +22,7 @@ use candle_core::{Result, Tensor};
 use candle_nn::Embedding;
 
 use super::capture::FeatureCapture;
-use crate::kv_cache::hybrid_cache::RecurrentStateSnapshot;
+use crate::kv_cache::RecurrentStateSnapshot;
 
 /// Trait the DFlash stepper consumes. Implementations must be
 /// `Send + Sync` for integration into the async pipeline loop; our

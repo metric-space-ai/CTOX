@@ -475,7 +475,11 @@ mod tests {
             focus_excerpt: "Active task: deploy v2.3".to_string(),
             anchors_excerpt: "Repo: /opt/api".to_string(),
         };
-        let rendered = build_review_prompt(&request, "Smoke test passed.", &["closure_claim".to_string()]);
+        let rendered = build_review_prompt(
+            &request,
+            "Smoke test passed.",
+            &["closure_claim".to_string()],
+        );
         assert!(rendered.contains("==REVIEWER ROLE=="));
         assert!(rendered.contains("==SCOPE"));
         assert!(rendered.contains("Explicit done_gate"));

@@ -284,14 +284,14 @@ fn resolve_primary_generation(
         runtime_state::LocalRuntimeKind::Candle => RuntimeLauncherKind::Engine,
     };
     let visible_devices = match state.local_runtime {
-        runtime_state::LocalRuntimeKind::Candle => runtime_plan::load_persisted_chat_runtime_plan(
-            root,
-        )
-        .ok()
-        .flatten()
-        .map(|plan| plan.cuda_visible_devices)
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| runtime_env::env_or_config(root, "CTOX_ENGINE_CUDA_VISIBLE_DEVICES")),
+        runtime_state::LocalRuntimeKind::Candle => {
+            runtime_plan::load_persisted_chat_runtime_plan(root)
+                .ok()
+                .flatten()
+                .map(|plan| plan.cuda_visible_devices)
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| runtime_env::env_or_config(root, "CTOX_ENGINE_CUDA_VISIBLE_DEVICES"))
+        }
     };
     let transport = managed_runtime_transport(root, InferenceWorkloadRole::PrimaryGeneration);
     let transport_endpoint = Some(transport.endpoint_string());

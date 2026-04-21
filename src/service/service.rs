@@ -20,6 +20,7 @@ use libc::SIGPIPE;
 use libc::SIG_IGN;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -74,10 +75,11 @@ use crate::mission::communication_adapters;
 use crate::mission::plan;
 use crate::mission::tickets;
 use crate::review;
-use crate::verification;
 use crate::schedule;
 use crate::scrape;
+use crate::secrets;
 use crate::state_invariants;
+use crate::verification;
 
 #[cfg(not(unix))]
 const DEFAULT_SERVICE_HOST: &str = "127.0.0.1";
@@ -221,6 +223,13 @@ struct AcceptedResponse {
     status: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PreparedChatPrompt {
+    pub prompt: String,
+    pub auto_ingested_secrets: usize,
+    pub suggested_skill: Option<String>,
+}
+
 #[cfg(unix)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -294,6 +303,20 @@ struct QueuedPrompt {
     leased_ticket_event_keys: Vec<String>,
     thread_key: Option<String>,
     workspace_root: Option<String>,
+    ticket_self_work_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct DurableSelfWorkQueueRequest {
+    kind: String,
+    title: String,
+    prompt: String,
+    thread_key: String,
+    workspace_root: Option<String>,
+    priority: String,
+    suggested_skill: Option<String>,
+    parent_message_key: Option<String>,
+    metadata: Value,
 }
 
 struct ServiceExitGuard {
@@ -1077,17 +1100,28 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
     submit_chat_prompt_with_thread_key(root, prompt, None)
 }
 
+pub fn prepare_chat_prompt(root: &Path, prompt: &str) -> Result<PreparedChatPrompt> {
+    let sanitized = secrets::auto_intake_prompt_secrets(root, prompt)?;
+    Ok(PreparedChatPrompt {
+        prompt: sanitized.sanitized_prompt,
+        auto_ingested_secrets: sanitized.auto_ingested_secrets,
+        suggested_skill: (sanitized.auto_ingested_secrets > 0)
+            .then(|| "secret-hygiene".to_string()),
+    })
+}
+
 pub fn submit_chat_prompt_with_thread_key(
     root: &Path,
     prompt: &str,
     thread_key: Option<&str>,
 ) -> Result<()> {
+    let prepared = prepare_chat_prompt(root, prompt)?;
     #[cfg(unix)]
     {
         match send_service_ipc_request(
             root,
             ServiceIpcRequest::ChatSubmit {
-                prompt: prompt.to_string(),
+                prompt: prepared.prompt,
                 thread_key: thread_key.map(str::to_owned),
             },
         )? {
@@ -1100,7 +1134,7 @@ pub fn submit_chat_prompt_with_thread_key(
     {
         let url = format!("{}/ctox/service/chat", service_base_url(root));
         let payload = serde_json::to_string(&ChatSubmitRequest {
-            prompt: prompt.to_string(),
+            prompt: prepared.prompt,
             thread_key: thread_key.map(str::to_owned),
         })?;
         let response = ureq::post(&url)
@@ -1231,6 +1265,9 @@ fn handle_service_ipc_request(
             root, &state,
         )?)),
         ServiceIpcRequest::ChatSubmit { prompt, thread_key } => {
+            let prepared = prepare_chat_prompt(root, &prompt)?;
+            let prompt = prepared.prompt;
+            let suggested_skill = prepared.suggested_skill.clone();
             let workspace_root = channels::legacy_workspace_root_from_prompt(&prompt);
             let queued = {
                 let mut shared = lock_shared_state(&state);
@@ -1240,11 +1277,12 @@ fn handle_service_ipc_request(
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
                         prompt: prompt.clone(),
-                        suggested_skill: None,
+                        suggested_skill: suggested_skill.clone(),
                         leased_message_keys: Vec::new(),
                         leased_ticket_event_keys: Vec::new(),
                         thread_key: thread_key.clone(),
                         workspace_root: workspace_root.clone(),
+                        ticket_self_work_id: None,
                     });
                     ensure_queue_guard_locked(root, &mut shared);
                     let pending = shared.pending_prompts.len();
@@ -1253,7 +1291,10 @@ fn handle_service_ipc_request(
                         .unwrap_or_else(|| "service busy".to_string());
                     push_event_locked(
                         &mut shared,
-                        format!("Queued follow-up prompt #{pending} ({reason})"),
+                        decorate_service_event_with_skill(
+                            &format!("Queued follow-up prompt #{pending} ({reason})"),
+                            suggested_skill.as_deref(),
+                        ),
                     );
                     true
                 } else {
@@ -1262,7 +1303,22 @@ fn handle_service_ipc_request(
                     shared.active_source_label = Some("tui".to_string());
                     shared.last_error = None;
                     shared.last_reply_chars = None;
-                    push_event_locked(&mut shared, "Started prompt".to_string());
+                    push_event_locked(
+                        &mut shared,
+                        decorate_service_event_with_skill(
+                            "Started prompt",
+                            suggested_skill.as_deref(),
+                        ),
+                    );
+                    if prepared.auto_ingested_secrets > 0 {
+                        push_event_locked(
+                            &mut shared,
+                            format!(
+                                "Auto-ingested {} prompt secret(s) into the secret store",
+                                prepared.auto_ingested_secrets
+                            ),
+                        );
+                    }
                     false
                 }
             };
@@ -1275,11 +1331,12 @@ fn handle_service_ipc_request(
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
                         prompt,
-                        suggested_skill: None,
+                        suggested_skill,
                         leased_message_keys: Vec::new(),
                         leased_ticket_event_keys: Vec::new(),
                         thread_key,
                         workspace_root,
+                        ticket_self_work_id: None,
                     },
                 );
             }
@@ -1333,20 +1390,24 @@ fn handle_request(
                 .context("failed to read chat request body")?;
             let payload: ChatSubmitRequest =
                 serde_json::from_str(&body).context("failed to parse chat request json")?;
-            let workspace_root = channels::legacy_workspace_root_from_prompt(&payload.prompt);
+            let prepared = prepare_chat_prompt(root, &payload.prompt)?;
+            let prompt = prepared.prompt;
+            let suggested_skill = prepared.suggested_skill.clone();
+            let workspace_root = channels::legacy_workspace_root_from_prompt(&prompt);
             let queued = {
                 let mut shared = lock_shared_state(&state);
                 if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
                     shared.pending_prompts.push_back(QueuedPrompt {
-                        preview: preview_text(&payload.prompt),
+                        preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
-                        goal: payload.prompt.clone(),
-                        prompt: payload.prompt.clone(),
-                        suggested_skill: None,
+                        goal: prompt.clone(),
+                        prompt: prompt.clone(),
+                        suggested_skill: suggested_skill.clone(),
                         leased_message_keys: Vec::new(),
                         leased_ticket_event_keys: Vec::new(),
                         thread_key: payload.thread_key.clone(),
                         workspace_root: workspace_root.clone(),
+                        ticket_self_work_id: None,
                     });
                     ensure_queue_guard_locked(root, &mut shared);
                     let pending = shared.pending_prompts.len();
@@ -1355,16 +1416,34 @@ fn handle_request(
                         .unwrap_or_else(|| "service busy".to_string());
                     push_event_locked(
                         &mut shared,
-                        format!("Queued follow-up prompt #{pending} ({reason})"),
+                        decorate_service_event_with_skill(
+                            &format!("Queued follow-up prompt #{pending} ({reason})"),
+                            suggested_skill.as_deref(),
+                        ),
                     );
                     true
                 } else {
                     shared.busy = true;
-                    shared.current_goal_preview = Some(preview_text(&payload.prompt));
+                    shared.current_goal_preview = Some(preview_text(&prompt));
                     shared.active_source_label = Some("tui".to_string());
                     shared.last_error = None;
                     shared.last_reply_chars = None;
-                    push_event_locked(&mut shared, "Started prompt".to_string());
+                    push_event_locked(
+                        &mut shared,
+                        decorate_service_event_with_skill(
+                            "Started prompt",
+                            suggested_skill.as_deref(),
+                        ),
+                    );
+                    if prepared.auto_ingested_secrets > 0 {
+                        push_event_locked(
+                            &mut shared,
+                            format!(
+                                "Auto-ingested {} prompt secret(s) into the secret store",
+                                prepared.auto_ingested_secrets
+                            ),
+                        );
+                    }
                     false
                 }
             };
@@ -1373,15 +1452,16 @@ fn handle_request(
                     root.to_path_buf(),
                     state.clone(),
                     QueuedPrompt {
-                        preview: preview_text(&payload.prompt),
+                        preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
-                        goal: payload.prompt.clone(),
-                        prompt: payload.prompt,
-                        suggested_skill: None,
+                        goal: prompt.clone(),
+                        prompt,
+                        suggested_skill,
                         leased_message_keys: Vec::new(),
                         leased_ticket_event_keys: Vec::new(),
                         thread_key: payload.thread_key,
                         workspace_root,
+                        ticket_self_work_id: None,
                     },
                 );
             }
@@ -2088,6 +2168,13 @@ fn start_prompt_worker(
                         }
                         shared.last_error = None;
                         shared.last_reply_chars = Some(reply.chars().count());
+                        if let Some(work_id) = job.ticket_self_work_id.as_deref() {
+                            let note = format!(
+                                "Execution slice completed successfully. Reply summary: {}",
+                                clip_text(&reply, 220)
+                            );
+                            close_ticket_self_work_item(&root, work_id, &note);
+                        }
                         push_event_locked(
                             &mut shared,
                             format!(
@@ -2117,6 +2204,18 @@ fn start_prompt_worker(
                         shared.last_reply_chars =
                             failure_reply.as_ref().map(|reply| reply.chars().count());
                         shared.last_error = Some(compact_error.clone());
+                        if let Some(work_id) = job.ticket_self_work_id.as_deref() {
+                            if let Some(title) = &timeout_follow_up_outcome {
+                                let note = format!(
+                                    "Execution slice hit the turn time budget. Durable continuation: {}",
+                                    title
+                                );
+                                close_ticket_self_work_item(&root, work_id, &note);
+                            } else {
+                                let note = format!("Execution slice failed: {}", compact_error);
+                                block_ticket_self_work_item(&root, work_id, &note);
+                            }
+                        }
                         push_event_locked(
                             &mut shared,
                             format!("{} prompt failed: {compact_error}", job.source_label),
@@ -2194,6 +2293,13 @@ fn start_prompt_worker(
                     &job.leased_message_keys,
                     &job.leased_ticket_event_keys,
                 );
+                if let Some(work_id) = job.ticket_self_work_id.as_deref() {
+                    block_ticket_self_work_item(
+                        &root,
+                        work_id,
+                        "Execution worker panicked before the slice could finish. Inspect the service log.",
+                    );
+                }
                 push_event_locked(
                     &mut shared,
                     format!("{} prompt panicked before cleanup", job.source_label),
@@ -2327,10 +2433,9 @@ fn run_completion_review(
         && !matches!(outcome.verdict, review::ReviewVerdict::Unavailable);
     if actionable_rejection {
         match enqueue_review_rework(root, job, &outcome) {
-            Ok(rework_title) => push_event(
-                state,
-                format!("Review rework enqueued: {rework_title}"),
-            ),
+            Ok(rework_title) => {
+                push_event(state, format!("Review rework enqueued: {rework_title}"))
+            }
             Err(err) => push_event(
                 state,
                 format!(
@@ -2351,9 +2456,7 @@ fn derive_owner_visible_for_review(source_label: &str) -> bool {
     if lowered == QUEUE_GUARD_SOURCE_LABEL {
         return false;
     }
-    !(lowered.contains("watchdog")
-        || lowered.contains("timeout")
-        || lowered.starts_with("cron"))
+    !(lowered.contains("watchdog") || lowered.contains("timeout") || lowered.starts_with("cron"))
 }
 
 /// Truncate a multi-line string to `max_chars` characters without collapsing
@@ -2417,16 +2520,29 @@ objection is incorrect with concrete evidence.",
         .clone()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or_else(|| format!("review-rework:{}", job.source_label));
-    let view = channels::create_queue_task(
+    let view = create_self_work_backed_queue_task(
         root,
-        channels::QueueTaskCreateRequest {
+        DurableSelfWorkQueueRequest {
+            kind: "review-rework".to_string(),
             title,
             prompt,
             thread_key,
             workspace_root: job.workspace_root.clone(),
             priority: "high".to_string(),
-            suggested_skill: job.suggested_skill.clone(),
+            suggested_skill: job
+                .suggested_skill
+                .clone()
+                .or_else(|| Some("follow-up-orchestrator".to_string())),
             parent_message_key: job.leased_message_keys.first().cloned(),
+            metadata: serde_json::json!({
+                "dedupe_key": format!(
+                    "review-rework:{}:{}:{}",
+                    job.thread_key.as_deref().unwrap_or(job.source_label.as_str()),
+                    outcome.verdict.as_gate_label(),
+                    clip_text(&summary_line, 80),
+                ),
+                "origin_source_label": job.source_label,
+            }),
         },
     )?;
     Ok(view.title)
@@ -2542,12 +2658,18 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
 
     let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
-    let mission = engine.sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)?;
-    // Normally we skip when the mission state says closed or allow_idle,
-    // but if there is still an active plan with pending steps we keep
-    // triggering — the mission state has drifted away from reality.
     let active_plan_has_work = plan::has_active_goal_with_pending_step(root).unwrap_or(false);
-    if (!mission.is_open || mission.allow_idle) && !active_plan_has_work {
+    let chat_mission =
+        engine.sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)?;
+    let mut missions = engine.list_mission_states(true)?;
+    if (chat_mission.is_open || active_plan_has_work)
+        && !missions
+            .iter()
+            .any(|mission| mission.conversation_id == chat_mission.conversation_id)
+    {
+        missions.push(chat_mission.clone());
+    }
+    if missions.is_empty() && !active_plan_has_work {
         return Ok(());
     }
 
@@ -2559,30 +2681,43 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
             }
         }
     }
-    if idle_secs < mission_idle_tolerance_secs(&mission) {
+    let candidate = missions.into_iter().find(|mission| {
+        let plan_keeps_open =
+            mission.conversation_id == turn_loop::CHAT_CONVERSATION_ID && active_plan_has_work;
+        if (!mission.is_open || mission.allow_idle) && !plan_keeps_open {
+            return false;
+        }
+        if idle_secs < mission_idle_tolerance_secs(mission) {
+            return false;
+        }
+        let thread_key = mission_thread_key(mission.conversation_id);
+        !runnable_thread_task_exists(root, &thread_key).unwrap_or(true)
+    });
+    let Some(mission) = candidate else {
         return Ok(());
-    }
-
-    let thread_key = mission_thread_key(mission.conversation_id);
-    if runnable_thread_task_exists(root, &thread_key)? {
-        return Ok(());
-    }
+    };
 
     let title = if mission.mission.trim().is_empty() {
         format!("Continue mission {}", mission.conversation_id)
     } else {
         format!("Continue mission {}", clip_text(&mission.mission, 48))
     };
-    let created = channels::create_queue_task(
+    let thread_key = mission_thread_key(mission.conversation_id);
+    let created = create_self_work_backed_queue_task(
         root,
-        channels::QueueTaskCreateRequest {
+        DurableSelfWorkQueueRequest {
+            kind: "mission-follow-up".to_string(),
             title,
             prompt: render_mission_continuation_prompt(&mission, idle_secs),
             thread_key,
-            priority: mission_task_priority(&mission).to_string(),
             workspace_root: None,
+            priority: mission_task_priority(&mission).to_string(),
             suggested_skill: Some("follow-up-orchestrator".to_string()),
             parent_message_key: None,
+            metadata: serde_json::json!({
+                "conversation_id": mission.conversation_id,
+                "dedupe_key": format!("mission-watchdog:{}", mission.conversation_id),
+            }),
         },
     )?;
     let triggered_at = now_iso_string();
@@ -2595,7 +2730,7 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
             conversation_id: Some(mission.conversation_id),
             severity: "warning",
             reason: "open mission stayed idle beyond the tolerated window",
-            action_taken: "queued a mission continuation slice",
+            action_taken: "queued a ticket-backed mission continuation slice",
             details: serde_json::json!({
                 "conversation_id": mission.conversation_id,
                 "idle_secs": idle_secs,
@@ -2747,6 +2882,7 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: Some(message.thread_key.clone()),
                 workspace_root: message.workspace_root.clone(),
+                ticket_self_work_id: ticket_self_work_id_from_metadata(&message.metadata),
             },
             format!(
                 "Queued {} inbound from {}",
@@ -2778,55 +2914,18 @@ fn route_assigned_ticket_self_work(root: &Path, state: &Arc<Mutex<SharedState>>)
         if item.assigned_to.as_deref() != Some("self") {
             continue;
         }
-        // system-onboarding self-work items are now routed normally
-        // so the model can execute onboarding steps autonomously.
-        let thread_key = format!("ticket-self-work:{}", item.work_id);
-        if runnable_thread_task_exists(root, &thread_key)? {
-            continue;
-        }
-        let mut prompt_lines = vec![
-            format!(
-                "Bearbeite das veroeffentlichte CTOX-Self-Work fuer {}.",
-                item.source_system
-            ),
-            format!("Titel: {}", item.title.trim()),
-            format!("Art: {}", item.kind.trim()),
-            format!("Work-ID: {}", item.work_id.trim()),
-            String::new(),
-            item.body_text.trim().to_string(),
-        ];
-        if let Some(locator) = item
-            .remote_locator
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            prompt_lines.push(String::new());
-            prompt_lines.push(format!("Remote-Ticket: {}", locator));
-        }
-        let prompt = prompt_lines.join("\n");
-        let created = channels::create_queue_task(
-            root,
-            channels::QueueTaskCreateRequest {
-                title: item.title.trim().to_string(),
-                prompt,
-                thread_key: thread_key.clone(),
-                workspace_root: None,
-                priority: "high".to_string(),
-                suggested_skill: item.suggested_skill.clone(),
-                parent_message_key: None,
-            },
-        )?;
-        push_event(
-            state,
-            decorate_service_event_with_skill(
-                &format!(
-                    "Queued self-work {} for active handling [{}]",
-                    item.work_id, item.kind
+        if let Some(created) = queue_ticket_self_work_item(root, &item)? {
+            push_event(
+                state,
+                decorate_service_event_with_skill(
+                    &format!(
+                        "Queued self-work {} for active handling [{}]",
+                        item.work_id, item.kind
+                    ),
+                    created.suggested_skill.as_deref(),
                 ),
-                created.suggested_skill.as_deref(),
-            ),
-        );
+            );
+        }
     }
     Ok(())
 }
@@ -2904,6 +3003,7 @@ fn route_ticket_events(root: &Path, state: &Arc<Mutex<SharedState>>) -> Result<(
                 leased_ticket_event_keys: vec![prepared.event_key.clone()],
                 thread_key: Some(prepared.thread_key.clone()),
                 workspace_root: None,
+                ticket_self_work_id: None,
             },
             format!(
                 "Queued ticket {} event {} for dry-run-controlled handling",
@@ -3042,6 +3142,181 @@ fn suggested_skill_from_message(message: &channels::RoutedInboundMessage) -> Opt
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn ticket_self_work_id_from_metadata(metadata: &Value) -> Option<String> {
+    metadata_string(metadata, "ticket_self_work_id")
+}
+
+fn ticket_self_work_thread_key(item: &tickets::TicketSelfWorkItemView) -> String {
+    metadata_string(&item.metadata, "thread_key")
+        .unwrap_or_else(|| format!("ticket-self-work:{}", item.work_id))
+}
+
+fn ticket_self_work_workspace_root(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "workspace_root")
+}
+
+fn ticket_self_work_priority(item: &tickets::TicketSelfWorkItemView) -> String {
+    metadata_string(&item.metadata, "priority").unwrap_or_else(|| "high".to_string())
+}
+
+fn ticket_self_work_parent_message_key(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "parent_message_key")
+}
+
+fn merge_metadata_value(target: &mut Value, extra: Value) {
+    let Some(target_map) = target.as_object_mut() else {
+        return;
+    };
+    let Some(extra_map) = extra.as_object() else {
+        return;
+    };
+    for (key, value) in extra_map {
+        target_map.insert(key.clone(), value.clone());
+    }
+}
+
+fn render_ticket_self_work_prompt(item: &tickets::TicketSelfWorkItemView) -> String {
+    let mut prompt_lines = vec![
+        format!(
+            "Bearbeite das veroeffentlichte CTOX-Self-Work fuer {}.",
+            item.source_system
+        ),
+        format!("Titel: {}", item.title.trim()),
+        format!("Art: {}", item.kind.trim()),
+        format!("Work-ID: {}", item.work_id.trim()),
+        String::new(),
+        item.body_text.trim().to_string(),
+    ];
+    if let Some(locator) = item
+        .remote_locator
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        prompt_lines.push(String::new());
+        prompt_lines.push(format!("Remote-Ticket: {}", locator));
+    }
+    prompt_lines.join("\n")
+}
+
+fn queue_ticket_self_work_item(
+    root: &Path,
+    item: &tickets::TicketSelfWorkItemView,
+) -> Result<Option<channels::QueueTaskView>> {
+    let thread_key = ticket_self_work_thread_key(item);
+    if runnable_thread_task_exists(root, &thread_key)? {
+        return Ok(None);
+    }
+    let queue_task = channels::create_queue_task_with_metadata(
+        root,
+        channels::QueueTaskCreateRequest {
+            title: item.title.trim().to_string(),
+            prompt: render_ticket_self_work_prompt(item),
+            thread_key: thread_key.clone(),
+            workspace_root: ticket_self_work_workspace_root(item),
+            priority: ticket_self_work_priority(item),
+            suggested_skill: item.suggested_skill.clone(),
+            parent_message_key: ticket_self_work_parent_message_key(item),
+            extra_metadata: Some(serde_json::json!({
+                "ticket_self_work_id": item.work_id.clone(),
+                "ticket_self_work_kind": item.kind.clone(),
+                "ticket_self_work_source_system": item.source_system.clone(),
+            })),
+        },
+    )?;
+    let note = format!(
+        "Queued for active execution on thread `{}` as queue task `{}`.",
+        thread_key, queue_task.title
+    );
+    let _ = tickets::transition_ticket_self_work_item(
+        root,
+        &item.work_id,
+        "queued",
+        "ctox-service",
+        Some(&note),
+        "internal",
+    );
+    Ok(Some(queue_task))
+}
+
+fn create_self_work_backed_queue_task(
+    root: &Path,
+    request: DurableSelfWorkQueueRequest,
+) -> Result<channels::QueueTaskView> {
+    let DurableSelfWorkQueueRequest {
+        kind,
+        title,
+        prompt,
+        thread_key,
+        workspace_root,
+        priority,
+        suggested_skill,
+        parent_message_key,
+        metadata,
+    } = request;
+    let mut self_work_metadata = serde_json::json!({
+        "thread_key": thread_key,
+        "workspace_root": workspace_root,
+        "priority": priority,
+        "skill": suggested_skill,
+        "parent_message_key": parent_message_key,
+    });
+    merge_metadata_value(&mut self_work_metadata, metadata);
+    let item = tickets::put_ticket_self_work_item(
+        root,
+        tickets::TicketSelfWorkUpsertInput {
+            source_system: "local".to_string(),
+            kind,
+            title,
+            body_text: prompt,
+            state: "open".to_string(),
+            metadata: self_work_metadata,
+        },
+        true,
+    )?;
+    if item.assigned_to.as_deref() != Some("self") {
+        let _ = tickets::assign_ticket_self_work_item(
+            root,
+            &item.work_id,
+            "self",
+            "ctox-service",
+            Some("durable complex follow-up for CTOX"),
+        );
+    }
+    queue_ticket_self_work_item(root, &item)?.context("failed to queue durable self-work follow-up")
+}
+
+fn close_ticket_self_work_item(root: &Path, work_id: &str, note: &str) {
+    let _ = tickets::transition_ticket_self_work_item(
+        root,
+        work_id,
+        "closed",
+        "ctox-service",
+        Some(note),
+        "internal",
+    );
+}
+
+fn block_ticket_self_work_item(root: &Path, work_id: &str, note: &str) {
+    let _ = tickets::transition_ticket_self_work_item(
+        root,
+        work_id,
+        "blocked",
+        "ctox-service",
+        Some(note),
+        "internal",
+    );
 }
 
 fn normalize_token(value: &str) -> String {
@@ -3447,6 +3722,7 @@ fn ensure_queue_guard_locked(root: &Path, shared: &mut SharedState) {
         leased_ticket_event_keys: Vec::new(),
         thread_key: None,
         workspace_root: None,
+        ticket_self_work_id: None,
     });
     if let Err(err) = governance::record_event(
         root,
@@ -3520,9 +3796,10 @@ fn maybe_enqueue_timeout_continuation(
             "existing continuation reused: {existing_title}"
         )));
     }
-    let created = channels::create_queue_task(
+    let created = create_self_work_backed_queue_task(
         root,
-        channels::QueueTaskCreateRequest {
+        DurableSelfWorkQueueRequest {
+            kind: "timeout-continuation".to_string(),
             title: title.clone(),
             prompt: render_timeout_continue_prompt(
                 &job.goal,
@@ -3534,6 +3811,14 @@ fn maybe_enqueue_timeout_continuation(
             priority: "high".to_string(),
             suggested_skill: job.suggested_skill.clone(),
             parent_message_key: job.leased_message_keys.first().cloned(),
+            metadata: serde_json::json!({
+                "dedupe_key": format!(
+                    "timeout:{}:{}",
+                    job.thread_key.as_deref().unwrap_or(job.goal.as_str()),
+                    clip_text(&title, 80),
+                ),
+                "origin_source_label": job.source_label,
+            }),
         },
     )?;
     let _ = governance::record_event(
@@ -4023,6 +4308,7 @@ mod tests {
     use super::*;
     use crate::lcm::{ContinuityKind, LcmConfig, LcmEngine};
     use crate::plan;
+    use crate::secrets;
     use serde_json::json;
 
     fn temp_root(prefix: &str) -> std::path::PathBuf {
@@ -4052,6 +4338,7 @@ mod tests {
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: None,
                 workspace_root: None,
+                ticket_self_work_id: None,
             })
             .collect();
 
@@ -4586,6 +4873,7 @@ mod tests {
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: None,
                 workspace_root: None,
+                ticket_self_work_id: None,
             },
             QueuedPrompt {
                 prompt: "b".to_string(),
@@ -4597,6 +4885,7 @@ mod tests {
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: None,
                 workspace_root: None,
+                ticket_self_work_id: None,
             },
         ]);
 
@@ -4733,6 +5022,7 @@ mod tests {
                 priority: "high".to_string(),
                 suggested_skill: Some("system-onboarding".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )
         .expect("failed to create queue task");
@@ -4816,6 +5106,7 @@ mod tests {
             leased_ticket_event_keys: Vec::new(),
             thread_key: None,
             workspace_root: None,
+            ticket_self_work_id: None,
         });
 
         let next = maybe_start_next_queued_prompt_locked(&mut shared)
@@ -5005,11 +5296,21 @@ mod tests {
             .front()
             .expect("queued prompt missing");
         assert_eq!(prompt.suggested_skill.as_deref(), Some("system-onboarding"));
+        assert_eq!(
+            prompt.ticket_self_work_id.as_deref(),
+            Some(item.work_id.as_str())
+        );
         let expected_thread_key = format!("ticket-self-work:{}", item.work_id);
         assert_eq!(
             prompt.thread_key.as_deref(),
             Some(expected_thread_key.as_str())
         );
+        drop(shared);
+        let routed = tickets::load_ticket_self_work_item(&root, &item.work_id)
+            .expect("failed to reload self-work")
+            .expect("self-work missing after routing");
+        assert_eq!(routed.state, "queued");
+        let shared = state.lock().expect("state poisoned");
         assert!(shared
             .recent_events
             .iter()
@@ -5160,6 +5461,67 @@ mod tests {
             shared.pending_prompts[0].thread_key.as_deref(),
             Some("smoke/cpp-thread")
         );
+    }
+
+    #[test]
+    fn chat_submit_auto_ingests_prompt_secrets_before_queueing() {
+        let root = temp_root("chat-submit-secrets");
+        let mut shared = SharedState::default();
+        shared.busy = true;
+        let state = Arc::new(Mutex::new(shared));
+
+        let response = handle_service_ipc_request(
+            ServiceIpcRequest::ChatSubmit {
+                prompt: "openAI API key:\nsk-proj-service-secret-1234567890".to_string(),
+                thread_key: None,
+            },
+            &root,
+            state.clone(),
+        )
+        .expect("chat submit should be accepted");
+
+        match response {
+            ServiceIpcResponse::Accepted(response) => {
+                assert!(response.accepted);
+                assert_eq!(response.status, "queued");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+
+        let shared = lock_shared_state(&state);
+        assert_eq!(shared.pending_prompts.len(), 1);
+        assert!(!shared.pending_prompts[0]
+            .prompt
+            .contains("sk-proj-service-secret-1234567890"));
+        assert!(shared.pending_prompts[0]
+            .prompt
+            .contains("[secret-ref:credentials/OPENAI_API_KEY"));
+        assert_eq!(
+            shared.pending_prompts[0].suggested_skill.as_deref(),
+            Some("secret-hygiene")
+        );
+        drop(shared);
+
+        assert_eq!(
+            secrets::read_secret_value(&root, "credentials", "OPENAI_API_KEY")
+                .expect("secret should be readable"),
+            "sk-proj-service-secret-1234567890"
+        );
+    }
+
+    #[test]
+    fn prepare_chat_prompt_suggests_secret_hygiene_when_auto_intake_runs() {
+        let root = temp_root("prepare-chat-secret-skill");
+
+        let prepared =
+            prepare_chat_prompt(&root, "openAI API key:\nsk-proj-service-secret-1234567890")
+                .expect("prompt preparation should succeed");
+
+        assert_eq!(prepared.suggested_skill.as_deref(), Some("secret-hygiene"));
+        assert!(prepared.auto_ingested_secrets >= 1);
+        assert!(prepared
+            .prompt
+            .contains("[secret-ref:credentials/OPENAI_API_KEY"));
     }
 
     #[test]
@@ -5549,6 +5911,7 @@ mod tests {
                 priority: "high".to_string(),
                 suggested_skill: Some("queue-orchestrator".to_string()),
                 parent_message_key: Some("queue-key-1".to_string()),
+                extra_metadata: None,
             },
         )
         .expect("failed to seed follow-up");
@@ -5564,6 +5927,7 @@ mod tests {
             leased_ticket_event_keys: Vec::new(),
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
+            ticket_self_work_id: None,
         };
 
         let created =
@@ -5602,6 +5966,7 @@ mod tests {
                 priority: "high".to_string(),
                 suggested_skill: Some("queue-orchestrator".to_string()),
                 parent_message_key: Some("queue-key-1".to_string()),
+                extra_metadata: None,
             },
         )
         .expect("failed to seed workspace follow-up");
@@ -5615,6 +5980,7 @@ mod tests {
             leased_ticket_event_keys: Vec::new(),
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
+            ticket_self_work_id: None,
         };
 
         let created =
@@ -5654,6 +6020,7 @@ mod tests {
             leased_ticket_event_keys: Vec::new(),
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
+            ticket_self_work_id: None,
         };
 
         let created =
@@ -5671,6 +6038,11 @@ mod tests {
         );
         assert!(tasks[0].title.contains("after timeout"));
         assert!(tasks[0].prompt.contains("Continue the interrupted task"));
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work items");
+        assert_eq!(self_work.len(), 1);
+        assert_eq!(self_work[0].kind, "timeout-continuation");
+        assert_eq!(self_work[0].state, "queued");
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
         assert!(events
@@ -5714,11 +6086,62 @@ mod tests {
             mission_thread_key(turn_loop::CHAT_CONVERSATION_ID)
         );
         assert!(tasks[0].prompt.contains("Mission continuity watchdog"));
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list mission self-work");
+        assert_eq!(self_work.len(), 1);
+        assert_eq!(self_work[0].kind, "mission-follow-up");
+        assert_eq!(self_work[0].state, "queued");
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
         assert!(events
             .iter()
             .any(|event| event.mechanism_id == "mission_idle_watchdog"));
+    }
+
+    #[test]
+    fn mission_watcher_retriggers_non_chat_open_mission() {
+        let root = temp_root("ctox-mission-watcher-secondary-open");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+        let secondary_conversation_id = 4242;
+        let _ = engine
+            .continuity_init_documents(secondary_conversation_id)
+            .expect("failed to init secondary continuity");
+        engine
+            .continuity_apply_diff(
+                secondary_conversation_id,
+                lcm::ContinuityKind::Focus,
+                "## Status\n+ Mission: Repair review-rework continuity.\n+ Mission state: active\n+ Continuation mode: continuous\n+ Trigger intensity: hot\n## Blocker\n+ Current blocker: none\n## Next\n+ Next slice: finish the readiness rework\n## Done / Gate\n+ Done gate: close only after the readiness evidence is repaired\n+ Closure confidence: low\n",
+            )
+            .expect("failed to update secondary focus");
+        engine
+            .sync_mission_state_from_continuity(secondary_conversation_id)
+            .expect("failed to sync secondary mission");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("service state poisoned");
+            shared.last_progress_epoch_secs = current_epoch_secs().saturating_sub(90);
+        }
+
+        monitor_mission_continuity(&root, &state).expect("mission watcher should succeed");
+
+        let tasks = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
+            .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].thread_key,
+            mission_thread_key(secondary_conversation_id)
+        );
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list mission self-work");
+        assert_eq!(self_work.len(), 1);
+        assert_eq!(self_work[0].kind, "mission-follow-up");
+        assert_eq!(self_work[0].state, "queued");
     }
 
     #[test]
@@ -5828,6 +6251,7 @@ mod tests {
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: Some("queue/mission-1".to_string()),
                 workspace_root: None,
+                ticket_self_work_id: None,
             },
             "Queued queue inbound from CTOX queue".to_string(),
         );

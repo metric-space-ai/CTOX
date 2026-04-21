@@ -844,6 +844,7 @@ fn handle_chat(root: &Path, args: &[String]) -> anyhow::Result<()> {
     }
     let raw_prompt = prompt_parts.join(" ");
     let prompt = build_chat_prompt(raw_prompt.trim(), workspace.as_deref())?;
+    let prompt = service::prepare_chat_prompt(root, &prompt)?.prompt;
 
     let status = service::service_status_snapshot(root)?;
     if !status.running {

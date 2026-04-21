@@ -60,6 +60,7 @@ pub struct QueueTaskCreateRequest {
     pub priority: String,
     pub suggested_skill: Option<String>,
     pub parent_message_key: Option<String>,
+    pub extra_metadata: Option<Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -683,6 +684,13 @@ pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -
 }
 
 pub fn create_queue_task(root: &Path, request: QueueTaskCreateRequest) -> Result<QueueTaskView> {
+    create_queue_task_with_metadata(root, request)
+}
+
+pub fn create_queue_task_with_metadata(
+    root: &Path,
+    request: QueueTaskCreateRequest,
+) -> Result<QueueTaskView> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
@@ -706,7 +714,7 @@ pub fn create_queue_task(root: &Path, request: QueueTaskCreateRequest) -> Result
     ));
     let message_key = format!("{QUEUE_ACCOUNT_KEY}::{digest}");
     let remote_id = format!("queue-{digest}");
-    let metadata = json!({
+    let mut metadata = json!({
         "source": "ctox-queue",
         "priority": priority,
         "skill": request.suggested_skill.as_deref(),
@@ -716,6 +724,9 @@ pub fn create_queue_task(root: &Path, request: QueueTaskCreateRequest) -> Result
         "created_at": now,
         "sort_at": sort_at,
     });
+    if let Some(extra) = request.extra_metadata {
+        merge_object_metadata(&mut metadata, extra);
+    }
     upsert_communication_message(
         &mut conn,
         UpsertMessage {
@@ -748,6 +759,18 @@ pub fn create_queue_task(root: &Path, request: QueueTaskCreateRequest) -> Result
     refresh_thread(&mut conn, request.thread_key.trim())?;
     ensure_routing_rows_for_inbound(&conn)?;
     load_queue_task_from_conn(&conn, &message_key)?.context("failed to load created queue task")
+}
+
+fn merge_object_metadata(target: &mut Value, extra: Value) {
+    let Some(target_map) = target.as_object_mut() else {
+        return;
+    };
+    let Some(extra_map) = extra.as_object() else {
+        return;
+    };
+    for (key, value) in extra_map {
+        target_map.insert(key.clone(), value.clone());
+    }
 }
 
 pub fn list_queue_tasks(
@@ -1664,17 +1687,18 @@ pub(crate) fn open_channel_db(path: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(path)
         .with_context(|| format!("failed to open channel db {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
         .context("failed to configure SQLite busy_timeout for channels")?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
 
 fn ensure_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    let busy_timeout_ms = crate::persistence::sqlite_busy_timeout_millis();
+    conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode=WAL;
-        PRAGMA busy_timeout=5000;
+        PRAGMA busy_timeout={busy_timeout_ms};
 
         CREATE TABLE IF NOT EXISTS communication_accounts (
             account_key TEXT PRIMARY KEY,
@@ -1769,7 +1793,7 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
             updated_at TEXT NOT NULL
         );
         "#,
-    )
+    ))
     .context("failed to ensure channel schema")?;
     ensure_routing_rows_for_inbound(conn)?;
     Ok(())
@@ -3603,6 +3627,7 @@ mod tests {
                 priority: "high".to_string(),
                 suggested_skill: Some("queue-orchestrator".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )
         .expect("failed to create queue task");
@@ -3663,6 +3688,7 @@ mod tests {
                 priority: "normal".to_string(),
                 suggested_skill: None,
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )
         .expect("failed to create explicit workspace task");
@@ -3681,6 +3707,7 @@ mod tests {
                 priority: "normal".to_string(),
                 suggested_skill: None,
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )
         .expect("failed to create legacy workspace task");

@@ -424,12 +424,13 @@ fn open_governance_db(root: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open governance db {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
         .context("failed to configure SQLite busy_timeout for governance")?;
-    conn.execute_batch(
+    let busy_timeout_ms = crate::persistence::sqlite_busy_timeout_millis();
+    conn.execute_batch(&format!(
         r#"
         PRAGMA journal_mode = WAL;
-        PRAGMA busy_timeout = 5000;
+        PRAGMA busy_timeout = {busy_timeout_ms};
 
         CREATE TABLE IF NOT EXISTS governance_mechanisms (
             mechanism_id TEXT PRIMARY KEY,
@@ -458,7 +459,7 @@ fn open_governance_db(root: &Path) -> Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_governance_events_recent
             ON governance_events(created_at DESC, mechanism_id);
         "#,
-    )?;
+    ))?;
     Ok(conn)
 }
 

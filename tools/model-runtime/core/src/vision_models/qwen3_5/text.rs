@@ -769,7 +769,7 @@ impl Qwen3_5TextModel {
     pub fn dflash_snapshot_recurrent_state(
         &self,
         slot_idx: usize,
-    ) -> Result<Vec<crate::kv_cache::hybrid_cache::RecurrentStateSnapshot>> {
+    ) -> Result<Vec<crate::kv_cache::RecurrentStateSnapshot>> {
         self.cache.hybrid().snapshot_recurrent_state(slot_idx)
     }
 
@@ -778,7 +778,7 @@ impl Qwen3_5TextModel {
     pub fn dflash_restore_recurrent_state(
         &self,
         slot_idx: usize,
-        snapshots: &[crate::kv_cache::hybrid_cache::RecurrentStateSnapshot],
+        snapshots: &[crate::kv_cache::RecurrentStateSnapshot],
     ) -> Result<()> {
         self.cache
             .hybrid()

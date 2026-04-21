@@ -810,6 +810,7 @@ fn execute_scrape(root: &Path, args: &[String]) -> Result<()> {
                 priority: priority.to_string(),
                 suggested_skill: Some(DEFAULT_REPAIR_SKILL.to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )?)
     } else {

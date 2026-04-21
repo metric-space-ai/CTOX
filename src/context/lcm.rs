@@ -619,7 +619,7 @@ impl LcmEngine {
     pub fn open(path: &Path, config: LcmConfig) -> Result<Self> {
         let conn = Connection::open(path)
             .with_context(|| format!("failed to open SQLite database {}", path.display()))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
+        conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
             .context("failed to configure SQLite busy_timeout for LCM")?;
         let engine = Self {
             conn,
@@ -634,7 +634,7 @@ impl LcmEngine {
                         path.display()
                     )
                 })?;
-                conn.busy_timeout(std::time::Duration::from_secs(5))
+                conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())
                     .context("failed to configure SQLite busy_timeout for LCM fallback")?;
                 let fallback = Self {
                     conn,
@@ -1471,6 +1471,10 @@ impl LcmEngine {
 
     pub fn stored_mission_state(&self, conversation_id: i64) -> Result<Option<MissionStateRecord>> {
         load_mission_state_with(&self.conn, conversation_id)
+    }
+
+    pub fn list_mission_states(&self, open_only: bool) -> Result<Vec<MissionStateRecord>> {
+        load_mission_states_with(&self.conn, open_only)
     }
 
     pub fn preview_mission_state_from_continuity(
@@ -3475,6 +3479,39 @@ fn load_mission_state_with(
     )
     .optional()
     .context("failed to load mission state")
+}
+
+fn load_mission_states_with(conn: &Connection, open_only: bool) -> Result<Vec<MissionStateRecord>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT conversation_id, mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count
+             FROM mission_states
+             WHERE (?1 = 0 OR is_open = 1)
+             ORDER BY is_open DESC, last_synced_at DESC, conversation_id ASC",
+        )
+        .context("failed to prepare mission state listing query")?;
+    let rows = stmt.query_map(params![if open_only { 1 } else { 0 }], |row| {
+        Ok(MissionStateRecord {
+            conversation_id: row.get(0)?,
+            mission: row.get(1)?,
+            mission_status: row.get(2)?,
+            continuation_mode: row.get(3)?,
+            trigger_intensity: row.get(4)?,
+            blocker: row.get(5)?,
+            next_slice: row.get(6)?,
+            done_gate: row.get(7)?,
+            closure_confidence: row.get(8)?,
+            is_open: row.get::<_, i64>(9)? != 0,
+            allow_idle: row.get::<_, i64>(10)? != 0,
+            focus_head_commit_id: row.get(11)?,
+            last_synced_at: row.get(12)?,
+            watcher_last_triggered_at: row.get(13)?,
+            watcher_trigger_count: row.get(14)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)
+        .context("failed to load mission states")
 }
 
 fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) -> Result<()> {

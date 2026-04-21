@@ -708,6 +708,7 @@ fn adopt_installation(
     }
     let current_link = install_root.join("current");
     switch_current_release(&current_link, &release_root)?;
+    sync_managed_launch_binaries(install_root, &current_link, state_root)?;
     write_managed_wrapper(install_root, state_root)?;
     refresh_service_unit(&current_link, state_root, Some(install_root))?;
     let manifest = InstallManifest {
@@ -838,8 +839,11 @@ fn apply_update(
         )?;
         return Err(err);
     }
+    sync_managed_launch_binaries(&install_root, &current_link, &layout.state_root)?;
+    write_managed_wrapper(&install_root, &layout.state_root)?;
     if let Err(err) = refresh_service_unit(&current_link, &layout.state_root, Some(&install_root)) {
         rollback_to_previous_release(
+            &install_root,
             &current_link,
             previous_release_root.as_deref(),
             &layout.state_root,
@@ -858,6 +862,7 @@ fn apply_update(
             .and_then(|_| service::service_status_snapshot(&current_link).map(|_| ()))
         {
             rollback_to_previous_release(
+                &install_root,
                 &current_link,
                 previous_release_root.as_deref(),
                 &layout.state_root,
@@ -927,6 +932,8 @@ fn rollback_update(root: &Path) -> Result<RollbackResult> {
         restore_state_backup(&backup_path, &layout.state_root)?;
     }
     switch_current_release(&current_link, &previous_release_root)?;
+    sync_managed_launch_binaries(&install_root, &current_link, &layout.state_root)?;
+    write_managed_wrapper(&install_root, &layout.state_root)?;
     refresh_service_unit(&current_link, &layout.state_root, Some(&install_root))?;
     if should_restart {
         let _ = service::start_background(&current_link);
@@ -983,6 +990,7 @@ fn persist_update_phase(path: &Path, phase: &str, error: Option<&str>) -> Result
 }
 
 fn rollback_to_previous_release(
+    install_root: &Path,
     current_link: &Path,
     previous_release_root: Option<&Path>,
     state_root: &Path,
@@ -993,6 +1001,7 @@ fn rollback_to_previous_release(
     restore_state_backup(backup_path, state_root)?;
     if let Some(previous_release_root) = previous_release_root {
         switch_current_release(current_link, previous_release_root)?;
+        sync_managed_launch_binaries(install_root, current_link, state_root)?;
         if should_restart {
             let _ = service::start_background(current_link);
         }
@@ -1019,6 +1028,12 @@ fn resolve_active_root(root: &Path) -> PathBuf {
 }
 
 fn resolve_install_root(root: &Path) -> Option<PathBuf> {
+    if let Some(install_root) = std::env::var_os("CTOX_INSTALL_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Some(install_root);
+    }
     if let Some(install_root) = runtime_env::env_or_config(root, "CTOX_INSTALL_ROOT")
         .filter(|value| !value.trim().is_empty())
     {
@@ -1035,6 +1050,12 @@ fn resolve_install_root(root: &Path) -> Option<PathBuf> {
 }
 
 fn resolve_state_root(root: &Path) -> Result<PathBuf> {
+    if let Some(state_root) = std::env::var_os("CTOX_STATE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Ok(state_root);
+    }
     if let Some(state_root) =
         runtime_env::env_or_config(root, "CTOX_STATE_ROOT").filter(|value| !value.trim().is_empty())
     {
@@ -1048,6 +1069,12 @@ fn resolve_state_root(root: &Path) -> Result<PathBuf> {
 }
 
 fn resolve_cache_root(root: &Path) -> Result<PathBuf> {
+    if let Some(cache_root) = std::env::var_os("CTOX_CACHE_ROOT")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        return Ok(cache_root);
+    }
     if let Some(cache_root) =
         runtime_env::env_or_config(root, "CTOX_CACHE_ROOT").filter(|value| !value.trim().is_empty())
     {
@@ -1701,23 +1728,122 @@ fn write_managed_wrapper(install_root: &Path, state_root: &Path) -> Result<()> {
         ensure_dir(parent)?;
     }
     let current_root = install_root.join("current");
+    let launcher_binary = wrapper_path.with_file_name("ctox-real");
+    write_launch_wrapper(
+        &wrapper_path,
+        install_root,
+        &current_root,
+        state_root,
+        &launcher_binary,
+    )
+}
+
+fn sync_managed_launch_binaries(
+    install_root: &Path,
+    current_root: &Path,
+    state_root: &Path,
+) -> Result<()> {
+    let bin_dir = install_root.join("bin");
+    ensure_dir(&bin_dir)?;
+    let public_launcher = wrapper_path()?.with_file_name("ctox-real");
+    if let Some(current_binary) = select_launch_binary(current_root)? {
+        if current_binary != public_launcher {
+            copy_launch_binary(&current_binary, &public_launcher)?;
+        }
+    } else if !public_launcher.is_file() {
+        anyhow::bail!(
+            "no real CTOX launch binary found below {} and {} does not exist",
+            current_root.display(),
+            public_launcher.display()
+        );
+    }
+    write_launch_wrapper(
+        &bin_dir.join("ctox"),
+        install_root,
+        current_root,
+        state_root,
+        &public_launcher,
+    )?;
+    write_launch_wrapper(
+        &current_root.join("bin/ctox"),
+        install_root,
+        current_root,
+        state_root,
+        &public_launcher,
+    )?;
+    let current_desktop_host = current_root.join("bin/ctox-desktop-host");
+    if current_desktop_host.is_file() {
+        copy_launch_binary(&current_desktop_host, &bin_dir.join("ctox-desktop-host"))?;
+    }
+    Ok(())
+}
+
+fn select_launch_binary(current_root: &Path) -> Result<Option<PathBuf>> {
+    for candidate in [
+        current_root.join("bin/ctox-real"),
+        current_root.join("bin/ctox"),
+    ] {
+        if candidate.is_file() && !is_shell_wrapper(&candidate)? {
+            return Ok(Some(candidate));
+        }
+    }
+    Ok(None)
+}
+
+fn is_shell_wrapper(path: &Path) -> Result<bool> {
+    let mut file =
+        fs::File::open(path).with_context(|| format!("failed to inspect {}", path.display()))?;
+    let mut marker = [0_u8; 2];
+    let read = std::io::Read::read(&mut file, &mut marker)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(read == 2 && marker == *b"#!")
+}
+
+fn write_launch_wrapper(
+    destination: &Path,
+    install_root: &Path,
+    current_root: &Path,
+    state_root: &Path,
+    launcher_binary: &Path,
+) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        ensure_dir(parent)?;
+    }
     let script = format!(
-        "#!/usr/bin/env bash\nset -euo pipefail\nexport CTOX_ROOT=\"{}\"\nexport CTOX_STATE_ROOT=\"{}\"\nexport CTOX_INSTALL_ROOT=\"{}\"\nexec \"{}/bin/ctox\" \"$@\"\n",
+        "#!/usr/bin/env bash\nset -euo pipefail\nunset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH\nexport CTOX_ROOT=\"{}\"\nexport CTOX_STATE_ROOT=\"{}\"\nexport CTOX_INSTALL_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
         current_root.display(),
         state_root.display(),
         install_root.display(),
-        current_root.display()
+        launcher_binary.display()
     );
-    let mut file = fs::File::create(&wrapper_path)
-        .with_context(|| format!("failed to write {}", wrapper_path.display()))?;
+    let mut file = fs::File::create(destination)
+        .with_context(|| format!("failed to write {}", destination.display()))?;
     file.write_all(script.as_bytes())
-        .with_context(|| format!("failed to populate {}", wrapper_path.display()))?;
+        .with_context(|| format!("failed to populate {}", destination.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mut permissions = file.metadata()?.permissions();
         permissions.set_mode(0o755);
-        fs::set_permissions(&wrapper_path, permissions)?;
+        fs::set_permissions(destination, permissions)?;
+    }
+    Ok(())
+}
+
+fn copy_launch_binary(source: &Path, destination: &Path) -> Result<()> {
+    fs::copy(source, destination).with_context(|| {
+        format!(
+            "failed to copy launch binary {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(destination)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(destination, permissions)?;
     }
     Ok(())
 }

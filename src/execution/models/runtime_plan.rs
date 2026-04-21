@@ -301,7 +301,11 @@ pub fn resolve_moe_arch_info(canonical_model: &str) -> Option<MoeArchInfo> {
 /// depends on block boundaries, scale/zero-point overhead etc. — but
 /// accurate to ~10% which is enough to decide fits-or-not.
 fn quant_bits_per_param(isq_label: Option<&str>) -> u32 {
-    match isq_label.unwrap_or("unquantized").to_ascii_uppercase().as_str() {
+    match isq_label
+        .unwrap_or("unquantized")
+        .to_ascii_uppercase()
+        .as_str()
+    {
         "Q4K" | "Q4_K_M" | "Q4_K_S" => 4,
         "Q5K" | "Q5_K_M" | "Q5_K_S" => 5,
         "Q6K" | "Q6_K" => 6,
@@ -320,8 +324,7 @@ pub fn estimate_moe_weights_bytes(arch: &MoeArchInfo, isq_label: Option<&str>) -
     // Per expert: 3 matrices (gate, up, down). Two are hidden×moe, one is
     // moe×hidden. Total params per expert = 3 * hidden * moe.
     let routed_params_per_expert = 3 * arch.hidden_size * arch.moe_intermediate_size;
-    let routed_params_total =
-        routed_params_per_expert * arch.num_experts * arch.num_hidden_layers;
+    let routed_params_total = routed_params_per_expert * arch.num_experts * arch.num_hidden_layers;
     // Shared expert runs on every MoE layer — 3 matrices too.
     let shared_params_per_layer = 3 * arch.hidden_size * arch.shared_expert_intermediate_size;
     let shared_params_total = shared_params_per_layer * arch.num_hidden_layers;
@@ -629,9 +632,7 @@ pub fn plan_moe_cache_allocation_with_arch(
         .get("CTOX_MOE_CACHE_COLD_PATH")
         .filter(|v| !v.trim().is_empty())
         .map(|v| v.trim().to_string())
-        .or_else(|| {
-            root.map(|r| r.join("runtime").join("moe_cache").display().to_string())
-        });
+        .or_else(|| root.map(|r| r.join("runtime").join("moe_cache").display().to_string()));
 
     let cold_tier_min_mbps: u32 = env_map
         .get("CTOX_MOE_CACHE_COLD_MIN_MBPS")
@@ -648,8 +649,7 @@ pub fn plan_moe_cache_allocation_with_arch(
     ));
     if topology_label == "unified" {
         rationale.push(
-            "unified memory: warm tier disabled (would alias VRAM); cold tier only"
-                .to_string(),
+            "unified memory: warm tier disabled (would alias VRAM); cold tier only".to_string(),
         );
     } else if warm_tier_mb > 0 {
         rationale.push(format!(
@@ -8927,8 +8927,7 @@ mod tests {
         // Heuristic fallback (no observed_available): 32 GiB × 70 % = 22.4
         // GiB - 5 GiB KV = 17.4 GiB. Non-MoE reserve = 61/6 ≈ 10 GiB.
         // moe_budget = 7.4 GiB. K = 7.4 / 0.24 (per-expert) ≈ 31.
-        let capacity =
-            auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024, None);
+        let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024, None);
         let k = capacity.expect("BF16 Qwen3.6 must require cache on 32 GiB M5");
         assert!(k >= 16, "K={} below floor 2×top_k=16", k);
         assert!(k <= 256, "K={} above num_experts=256", k);
@@ -9042,9 +9041,20 @@ mod tests {
         };
         let pairs: std::collections::BTreeMap<_, _> =
             alloc.to_engine_env_pairs().into_iter().collect();
-        assert_eq!(pairs.get("ENGINE_MOE_CACHE_CAPACITY").map(String::as_str), Some("16"));
-        assert_eq!(pairs.get("ENGINE_MOE_CACHE_WARM_MB").map(String::as_str), Some("0"));
-        assert_eq!(pairs.get("ENGINE_MOE_CACHE_COLD_MIN_MBPS").map(String::as_str), Some("1500"));
+        assert_eq!(
+            pairs.get("ENGINE_MOE_CACHE_CAPACITY").map(String::as_str),
+            Some("16")
+        );
+        assert_eq!(
+            pairs.get("ENGINE_MOE_CACHE_WARM_MB").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(
+            pairs
+                .get("ENGINE_MOE_CACHE_COLD_MIN_MBPS")
+                .map(String::as_str),
+            Some("1500")
+        );
         assert_eq!(
             pairs.get("ENGINE_MOE_CACHE_COLD_PATH").map(String::as_str),
             Some("/var/ctox/moe_cache")

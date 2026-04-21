@@ -400,7 +400,7 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
     let info = if app.update_view.info_json.is_empty() {
         "(press [r] to load status)".to_string()
     } else {
-        app.update_view.info_json.clone()
+        update_install_summary_text(&app.update_view.info_json)
     };
     frame.render_widget(
         Paragraph::new(info)
@@ -417,10 +417,10 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
     );
 
     let check_body = if app.update_view.check_json.is_empty() {
-        "No remote check / action run yet in this session.\n\nHotkeys:\n  [c] run `ctox update check`\n  [u] run `ctox upgrade`         (binary update, service restart)\n  [e] run `ctox engine rebuild`  (GPU/CUDA/metal engine, minutes)\n  [d] run `ctox doctor`          (health + update-available hints)\n  [r] refresh the install/version pane\n\nDefault release channel: metric-space-ai/ctox\nFor a fork, override once with:\n  ctox update channel set-github --repo <owner/repo>"
+        "No update check or action has run in this TUI session.\n\nActions:\n  [c] Check for a newer CTOX release\n  [u] Upgrade CTOX and restart the service\n  [e] Rebuild the local model engine only\n  [d] Run doctor diagnostics\n  [r] Refresh installed version information\n\nRelease channel:\n  metric-space-ai/ctox\n\nFork override:\n  ctox update channel set-github --repo <owner/repo>"
             .to_string()
     } else {
-        app.update_view.check_json.clone()
+        update_remote_summary_text(&app.update_view.check_json)
     };
     frame.render_widget(
         Paragraph::new(check_body)
@@ -445,6 +445,87 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
         Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
         split[3],
     );
+}
+
+fn update_install_summary_text(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    let version = json_str(&value, "version").unwrap_or("unknown");
+    let install_mode = json_str(&value, "install_mode").unwrap_or("unknown");
+    let workspace_root = json_str(&value, "workspace_root").unwrap_or("—");
+    let active_root = json_str(&value, "active_root").unwrap_or("—");
+    let state_root = json_str(&value, "state_root").unwrap_or("—");
+    let cache_root = json_str(&value, "cache_root").unwrap_or("—");
+    let current_release = json_str(&value, "current_release").unwrap_or("—");
+    let previous_release = json_str(&value, "previous_release").unwrap_or("—");
+    let release_kind = value
+        .get("release_channel")
+        .and_then(|channel| channel.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("—");
+    let release_repo = value
+        .get("release_channel")
+        .and_then(|channel| channel.get("repo"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("—");
+
+    [
+        format!("version         {version}"),
+        format!("install mode    {install_mode}"),
+        format!("current release {current_release}"),
+        format!("previous        {previous_release}"),
+        String::new(),
+        format!("channel         {release_kind}"),
+        format!("repo            {release_repo}"),
+        String::new(),
+        format!("workspace root  {workspace_root}"),
+        format!("active root     {active_root}"),
+        format!("state root      {state_root}"),
+        format!("cache root      {cache_root}"),
+    ]
+    .join("\n")
+}
+
+fn update_remote_summary_text(raw: &str) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return raw.to_string();
+    };
+    let action = json_str(&value, "action").unwrap_or("remote check");
+    let update_available = value
+        .get("update_available")
+        .and_then(serde_json::Value::as_bool);
+    let current_version = json_str(&value, "current_version")
+        .or_else(|| json_str(&value, "version"))
+        .unwrap_or("unknown");
+    let latest_version = json_str(&value, "latest_version")
+        .or_else(|| json_str(&value, "remote_version"))
+        .unwrap_or("unknown");
+    let reason = json_str(&value, "reason").unwrap_or("—");
+
+    let status = match update_available {
+        Some(true) => "update available",
+        Some(false) => "up to date",
+        None => "status unknown",
+    };
+
+    let mut lines = vec![
+        format!("action          {action}"),
+        format!("status          {status}"),
+        format!("current         {current_version}"),
+        format!("latest          {latest_version}"),
+        format!("reason          {reason}"),
+    ];
+    if let Some(output) = json_str(&value, "output").filter(|text| !text.trim().is_empty()) {
+        lines.push(String::new());
+        lines.push("output".to_string());
+        lines.push(output.to_string());
+    }
+    lines.join("\n")
+}
+
+fn json_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(serde_json::Value::as_str)
 }
 
 fn render_skills_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
@@ -934,10 +1015,10 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
         ));
     }
     lines.push(Line::from(header_spans));
-    lines.push(Line::from(format!(
-        "path {}",
-        truncate_line(&entry.skill_path.to_string_lossy(), width.saturating_sub(5))
-    )));
+    lines.push(section_title("path", Color::LightBlue, width));
+    for chunk in wrap_text_lines(&entry.skill_path.to_string_lossy(), width) {
+        lines.push(Line::from(chunk));
+    }
     lines.push(Line::from(format!("state {}", entry.state.label())));
     lines.push(Line::from(String::new()));
     lines.push(section_title("summary", Color::LightGreen, width));
@@ -968,7 +1049,9 @@ fn skill_details_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stat
         }
     }
     lines.push(Line::from(String::new()));
-    lines.push(Line::from("Up/Down select  R reload  Tab next page"));
+    lines.push(Line::from(
+        "Up/Down select  E edit in $EDITOR/nano  R reload  Tab next page",
+    ));
     if lines.len() > height {
         lines.truncate(height);
     }
@@ -991,14 +1074,17 @@ fn activity_lines(
     channel_limit: usize,
     include_queue: bool,
 ) -> Vec<String> {
-    let mut lines = if app.activity_log.is_empty() {
+    let visible_activity = app
+        .activity_log
+        .iter()
+        .filter(|line| service_event_visible_in_tui(line))
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>();
+    let mut lines = if visible_activity.is_empty() {
         vec!["• Waiting for the next CTOX event.".to_string()]
     } else {
-        app.activity_log
-            .iter()
-            .rev()
-            .take(4)
-            .collect::<Vec<_>>()
+        visible_activity
             .into_iter()
             .rev()
             .map(|line| format!("• {}", truncate_line(line, width)))
@@ -1208,13 +1294,9 @@ fn active_lines(app: &App, width: usize) -> Vec<String> {
         .recent_events
         .iter()
         .rev()
-        .find(|event| event.starts_with("phase "))
+        .find(|event| service_event_visible_in_tui(event))
     {
-        let phase = event.trim_start_matches("phase ");
-        lines.push(format!(
-            "phase {}",
-            truncate_line(phase, width.saturating_sub(6))
-        ));
+        lines.push(truncate_line(event, width));
     }
     if let Some(goal) = app.service_status.current_goal_preview.as_deref() {
         lines.push(format!(
@@ -1380,7 +1462,7 @@ fn turn_summary_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
     let mut lines = Vec::new();
     let (status_text, status_color) = if !app.service_status.running {
         ("loop stopped", Color::Red)
-    } else if app.runtime_health.is_degraded() {
+    } else if runtime_health_is_degraded_for_display(app) {
         ("loop degraded", Color::Yellow)
     } else if app.service_status.busy {
         ("loop working", Color::Yellow)
@@ -1434,36 +1516,30 @@ fn turn_summary_lines(app: &App, width: usize, height: usize) -> Vec<Line<'stati
             truncate_line(completed, width.saturating_sub(10))
         )));
     }
-    let phase_events = app
+    let visible_events = app
         .service_status
         .recent_events
         .iter()
-        .filter(|event| event.starts_with("phase "))
+        .filter(|event| service_event_visible_in_tui(event))
         .rev()
-        .take(4)
+        .take(3)
         .cloned()
         .collect::<Vec<_>>();
-    if !phase_events.is_empty() {
-        lines.push(Line::from("steps"));
-        for event in phase_events.into_iter().rev() {
-            let phase = event.trim_start_matches("phase ");
-            lines.push(Line::from(format!(
-                "• {}",
-                truncate_line(phase, width.saturating_sub(2))
-            )));
-        }
-    }
-    for event in app.service_status.recent_events.iter().rev().take(3).rev() {
-        if event.starts_with("phase ") {
-            continue;
-        }
+    for event in visible_events.into_iter().rev() {
         lines.push(Line::from(format!(
             "• {}",
-            truncate_line(event, width.saturating_sub(2))
+            truncate_line(&event, width.saturating_sub(2))
         )));
     }
     lines.truncate(height);
     lines
+}
+
+fn service_event_visible_in_tui(event: &str) -> bool {
+    !(event.starts_with("phase ")
+        || event.starts_with("Completion review ")
+        || event.starts_with("Context health ")
+        || event.contains("refresh-budget"))
 }
 
 fn wrap_text_lines(value: &str, max_chars: usize) -> Vec<String> {
@@ -1524,6 +1600,12 @@ fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
     let Some(item) = app.current_setting() else {
         return String::new();
     };
+    if !app
+        .visible_setting_indices()
+        .contains(&app.settings_selected)
+    {
+        return "No settings are available in this view.".to_string();
+    }
     let mut lines = vec![
         format!(
             "item     {}",
@@ -1560,10 +1642,7 @@ fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
         "CTOX_API_PROVIDER" | "OPENAI_API_KEY" | "OPENROUTER_API_KEY" => {
             append_provider_details(&mut lines, app, width);
         }
-        "CTOX_CHAT_MODEL"
-        | "CTOX_CHAT_LOCAL_PRESET"
-        | "CTOX_CHAT_SKILL_PRESET"
-        | "CTOX_CHAT_MODEL_BOOST" => {
+        "CTOX_CHAT_MODEL" | "CTOX_CHAT_LOCAL_PRESET" | "CTOX_CHAT_SKILL_PRESET" => {
             append_chat_runtime_details(&mut lines, app, item.key, width);
         }
         "CTOX_EMBEDDING_MODEL" | "CTOX_STT_MODEL" | "CTOX_TTS_MODEL" => {
@@ -1643,11 +1722,11 @@ fn secret_details_text(app: &App, width: usize, height: usize) -> String {
         push_wrapped_lines(&mut lines, description, width);
         lines.push(String::new());
     }
-    lines.push("stored value".to_string());
-    push_wrapped_lines(&mut lines, &item.saved_value, width);
+    lines.push("stored value (masked)".to_string());
+    push_wrapped_lines(&mut lines, &mask_secret(&item.saved_value), width);
     lines.push(String::new());
-    lines.push("draft value".to_string());
-    push_wrapped_lines(&mut lines, &item.value, width);
+    lines.push("draft value (masked)".to_string());
+    push_wrapped_lines(&mut lines, &mask_secret(&item.value), width);
     if !item.metadata.is_null() && item.metadata != serde_json::json!({}) {
         lines.push(String::new());
         lines.push("metadata".to_string());
@@ -1823,117 +1902,115 @@ fn append_chat_runtime_details(lines: &mut Vec<String>, app: &App, item_key: &st
         }
     }
 
-    if item_key != "CTOX_CHAT_MODEL_BOOST" {
-        if let Some(bundle) = &app.chat_preset_bundle {
-            lines.push(String::new());
-            lines.push("runtime".to_string());
-            lines.push(format!("preset   {}", bundle.selected_plan.preset.label()));
+    if let Some(bundle) = &app.chat_preset_bundle {
+        lines.push(String::new());
+        lines.push("runtime".to_string());
+        lines.push(format!("preset   {}", bundle.selected_plan.preset.label()));
+        lines.push(format!(
+            "weights  {}",
+            truncate_line(&bundle.selected_plan.quantization, width.saturating_sub(9))
+        ));
+        lines.push(format!(
+            "runtime  {}",
+            truncate_line(
+                bundle
+                    .selected_plan
+                    .runtime_isq
+                    .as_deref()
+                    .unwrap_or("native"),
+                width.saturating_sub(9)
+            )
+        ));
+        lines.push(format!(
+            "kv cache {}",
+            truncate_line(
+                bundle.selected_plan.effective_cache_label(),
+                width.saturating_sub(9)
+            )
+        ));
+        lines.push(format!(
+            "paged    {}",
+            truncate_line(&bundle.selected_plan.paged_attn, width.saturating_sub(9))
+        ));
+        lines.push(format!(
+            "batch    {}   seqs {}",
+            bundle.selected_plan.max_batch_size, bundle.selected_plan.max_seqs
+        ));
+        lines.push(format!(
+            "backend  {}",
+            if bundle.selected_plan.disable_nccl {
+                "device-layers"
+            } else {
+                "nccl"
+            }
+        ));
+        {
+            let mut feature_tags = Vec::new();
+            if !bundle.selected_plan.disable_flash_attn {
+                feature_tags.push("flash-attn");
+            }
+            if !bundle.selected_plan.disable_nccl {
+                feature_tags.push("nccl");
+            }
+            if bundle.selected_plan.isq_singlethread {
+                feature_tags.push("isq-serial");
+            }
+            if bundle.selected_plan.force_no_mmap {
+                feature_tags.push("no-mmap");
+            }
+            if let Some(ref moe) = bundle.selected_plan.moe_experts_backend {
+                feature_tags.push(if moe == "fast" { "moe-fast" } else { "moe" });
+            }
             lines.push(format!(
-                "weights  {}",
-                truncate_line(&bundle.selected_plan.quantization, width.saturating_sub(9))
-            ));
-            lines.push(format!(
-                "runtime  {}",
-                truncate_line(
-                    bundle
-                        .selected_plan
-                        .runtime_isq
-                        .as_deref()
-                        .unwrap_or("native"),
-                    width.saturating_sub(9)
-                )
-            ));
-            lines.push(format!(
-                "kv cache {}",
-                truncate_line(
-                    bundle.selected_plan.effective_cache_label(),
-                    width.saturating_sub(9)
-                )
-            ));
-            lines.push(format!(
-                "paged    {}",
-                truncate_line(&bundle.selected_plan.paged_attn, width.saturating_sub(9))
-            ));
-            lines.push(format!(
-                "batch    {}   seqs {}",
-                bundle.selected_plan.max_batch_size, bundle.selected_plan.max_seqs
-            ));
-            lines.push(format!(
-                "backend  {}",
-                if bundle.selected_plan.disable_nccl {
-                    "device-layers"
+                "engine   {}",
+                if feature_tags.is_empty() {
+                    "default".to_string()
                 } else {
-                    "nccl"
+                    feature_tags.join(" ")
                 }
             ));
-            {
-                let mut feature_tags = Vec::new();
-                if !bundle.selected_plan.disable_flash_attn {
-                    feature_tags.push("flash-attn");
-                }
-                if !bundle.selected_plan.disable_nccl {
-                    feature_tags.push("nccl");
-                }
-                if bundle.selected_plan.isq_singlethread {
-                    feature_tags.push("isq-serial");
-                }
-                if bundle.selected_plan.force_no_mmap {
-                    feature_tags.push("no-mmap");
-                }
-                if let Some(ref moe) = bundle.selected_plan.moe_experts_backend {
-                    feature_tags.push(if moe == "fast" { "moe-fast" } else { "moe" });
-                }
-                lines.push(format!(
-                    "engine   {}",
-                    if feature_tags.is_empty() {
-                        "default".to_string()
-                    } else {
-                        feature_tags.join(" ")
-                    }
-                ));
-            }
+        }
+        lines.push(format!(
+            "gpus     {}",
+            truncate_line(
+                &bundle.selected_plan.cuda_visible_devices,
+                width.saturating_sub(9)
+            )
+        ));
+        if let Some(device_layers) = &bundle.selected_plan.device_layers {
             lines.push(format!(
-                "gpus     {}",
-                truncate_line(
-                    &bundle.selected_plan.cuda_visible_devices,
-                    width.saturating_sub(9)
-                )
+                "layers   {}",
+                truncate_line(device_layers, width.saturating_sub(9))
             ));
-            if let Some(device_layers) = &bundle.selected_plan.device_layers {
-                lines.push(format!(
-                    "layers   {}",
-                    truncate_line(device_layers, width.saturating_sub(9))
-                ));
-            }
+        }
+        lines.push(format!(
+            "speed    {:.0} tok/s",
+            bundle.selected_plan.expected_tok_s
+        ));
+
+        lines.push(String::new());
+        lines.push("presets".to_string());
+        for plan in &bundle.plans {
             lines.push(format!(
-                "speed    {:.0} tok/s",
-                bundle.selected_plan.expected_tok_s
+                "• {} {}k {} kv:{} {:.0} tok/s",
+                plan.preset.label(),
+                plan.max_seq_len / 1024,
+                plan.quantization,
+                plan.effective_cache_label(),
+                plan.expected_tok_s
             ));
+        }
 
-            lines.push(String::new());
-            lines.push("presets".to_string());
-            for plan in &bundle.plans {
-                lines.push(format!(
-                    "• {} {}k {} kv:{} {:.0} tok/s",
-                    plan.preset.label(),
-                    plan.max_seq_len / 1024,
-                    plan.quantization,
-                    plan.effective_cache_label(),
-                    plan.expected_tok_s
-                ));
-            }
-
-            lines.push(String::new());
-            lines.push("gpu budget".to_string());
-            for allocation in bundle.selected_plan.gpu_allocations.iter().take(4) {
-                lines.push(format!(
-                    "• GPU{} wt {}G kv {}G free {}G",
-                    allocation.gpu_index,
-                    allocation.weight_mb / 1024,
-                    allocation.kv_cache_mb / 1024,
-                    allocation.free_headroom_mb / 1024
-                ));
-            }
+        lines.push(String::new());
+        lines.push("gpu budget".to_string());
+        for allocation in bundle.selected_plan.gpu_allocations.iter().take(4) {
+            lines.push(format!(
+                "• GPU{} wt {}G kv {}G free {}G",
+                allocation.gpu_index,
+                allocation.weight_mb / 1024,
+                allocation.kv_cache_mb / 1024,
+                allocation.free_headroom_mb / 1024
+            ));
         }
     }
 }
@@ -2009,30 +2086,34 @@ fn append_general_setting_details(lines: &mut Vec<String>, app: &App, width: usi
     lines.push("runtime".to_string());
     lines.push(format!("loop     {}", loop_status_label(app)));
     lines.push(format!("source   {}", app.header.chat_source));
-    lines.push(format!(
-        "base     {}",
-        truncate_line(
-            &compact_model_name(&app.header.base_model, width),
-            width.saturating_sub(9)
-        )
-    ));
-    lines.push(format!(
-        "active   {}",
-        truncate_line(
-            &compact_model_name(&app.header.model, width),
-            width.saturating_sub(9)
-        )
-    ));
-    lines.push(format!(
-        "boost    {}",
-        truncate_line(
-            &app.header
-                .boost_model
-                .clone()
-                .unwrap_or_else(|| "idle".to_string()),
-            width.saturating_sub(9)
-        )
-    ));
+    if app
+        .header
+        .model
+        .eq_ignore_ascii_case(&app.header.base_model)
+    {
+        lines.push(format!(
+            "model    {}",
+            truncate_line(
+                &compact_model_name(&app.header.model, width),
+                width.saturating_sub(9)
+            )
+        ));
+    } else {
+        lines.push(format!(
+            "base     {}",
+            truncate_line(
+                &compact_model_name(&app.header.base_model, width),
+                width.saturating_sub(9)
+            )
+        ));
+        lines.push(format!(
+            "active   {}",
+            truncate_line(
+                &compact_model_name(&app.header.model, width),
+                width.saturating_sub(9)
+            )
+        ));
+    }
 
     lines.push(String::new());
     lines.push("inference".to_string());
@@ -2053,22 +2134,16 @@ fn append_general_setting_details(lines: &mut Vec<String>, app: &App, width: usi
         ));
     }
     lines.push(snapshot_line(
-        "aux config",
+        "aux",
         if configured_aux_count(app) > 0 {
-            "enabled"
+            "configured"
         } else {
             "off"
         },
     ));
-    lines.push(snapshot_line(
-        if app.header.estimate_mode {
-            "local est"
-        } else {
-            "local load"
-        },
-        "",
-    ));
-    lines.extend(local_gpu_snapshot_lines(app, width));
+    if !chat_source_is_api(app) || app.header.estimate_mode {
+        lines.extend(local_gpu_snapshot_lines(app, width));
+    }
 
     if let Some(bundle) = &app.chat_preset_bundle {
         lines.push(String::new());
@@ -2095,7 +2170,7 @@ fn chat_source_is_api(app: &App) -> bool {
 }
 
 fn snapshot_line(label: &str, value: &str) -> String {
-    format!("{label:<9}{value}")
+    format!("{label:<10}{value}")
 }
 
 fn loop_status_label(app: &App) -> &'static str {
@@ -2305,10 +2380,14 @@ fn model_mode_line(app: &App, width: usize) -> Line<'static> {
         .as_deref()
         .map(|value| compact_model_name(value, name_width))
         .filter(|value| !value.is_empty());
-    let mut text = format!(
-        "source {}  base {base_model}  active {active_model}",
-        app.header.chat_source
-    );
+    let mut text = if active_model.eq_ignore_ascii_case(&base_model) {
+        format!("source {}  model {active_model}", app.header.chat_source)
+    } else {
+        format!(
+            "source {}  base {base_model}  active {active_model}",
+            app.header.chat_source
+        )
+    };
     if app.header.boost_active {
         if let Some(boost_model) = boost_model {
             text.push_str(&format!("  boost {boost_model}"));
@@ -2624,10 +2703,7 @@ fn context_label_line(app: &App, width: usize) -> Line<'static> {
 /// output-refresh budget is currently used. Returns an empty string when
 /// there is nothing to show (fresh conversation, budget disabled).
 fn refresh_budget_suffix(app: &App) -> String {
-    let pct = app
-        .value_for_setting("CTOX_REFRESH_OUTPUT_BUDGET_PCT")
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(15);
+    let pct = 15;
     if pct == 0 {
         return String::new();
     }
@@ -3460,6 +3536,25 @@ mod tests {
     }
 
     #[test]
+    fn chat_header_collapses_identical_base_and_active_models() {
+        let backend = TestBackend::new(140, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = test_app();
+        app.header.chat_source = "api".to_string();
+        app.header.model = "gpt-5.4-mini".to_string();
+        app.header.base_model = "gpt-5.4-mini".to_string();
+
+        terminal.draw(|frame| draw(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+
+        assert!(text.contains("source api model gpt-5.4-mini"), "{text}");
+        assert!(
+            !text.contains("base gpt-5.4-mini  active gpt-5.4-mini"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn settings_view_renders_model_and_communication_tabs() {
         let backend = TestBackend::new(140, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -3844,5 +3939,97 @@ mod tests {
         assert!(text.contains("skill-20"), "{text}");
         assert!(!text.contains("skill-00"), "{text}");
         assert!(!text.contains("skill-29"), "{text}");
+    }
+
+    #[test]
+    fn secret_details_text_masks_stored_and_draft_values() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.settings_view = SettingsView::Secrets;
+        app.secret_items = vec![super::super::SecretItem {
+            scope: "credentials".to_string(),
+            name: "OPENAI_API_KEY".to_string(),
+            description: Some("test secret".to_string()),
+            metadata: serde_json::json!({}),
+            created_at: "2026-04-19T12:00:00Z".to_string(),
+            updated_at: "2026-04-19T12:00:01Z".to_string(),
+            value: "sk-draft-secret".to_string(),
+            saved_value: "sk-stored-secret".to_string(),
+        }];
+
+        let text = secret_details_text(&app, 80, 30);
+
+        assert!(text.contains("stored value (masked)"), "{text}");
+        assert!(text.contains("draft value (masked)"), "{text}");
+        assert!(!text.contains("sk-stored-secret"), "{text}");
+        assert!(!text.contains("sk-draft-secret"), "{text}");
+    }
+
+    #[test]
+    fn settings_snapshot_reports_empty_view_for_hidden_selection() {
+        let mut app = test_app();
+        app.page = Page::Settings;
+        app.settings_view = SettingsView::Paths;
+        app.settings_selected = app
+            .settings_items
+            .iter()
+            .position(|item| item.key == "CTO_JAMI_PROFILE_NAME")
+            .unwrap();
+
+        let text = settings_snapshot_text(&app, 80, 20);
+
+        assert_eq!(text, "No settings are available in this view.");
+    }
+
+    #[test]
+    fn update_install_summary_text_formats_version_info_human_readably() {
+        let raw = serde_json::json!({
+            "version": "0.3.6-11-g965770b-dirty",
+            "install_mode": "managed",
+            "workspace_root": "/Users/test/.local/lib/ctox/current",
+            "active_root": "/Users/test/.local/lib/ctox/current",
+            "state_root": "/Users/test/.local/state/ctox",
+            "cache_root": "/Users/test/.cache/ctox",
+            "current_release": "v0.3.6-11-g965770b-dirty",
+            "previous_release": "v0.3.6-10-g22560b0-dirty",
+            "release_channel": {
+                "kind": "github",
+                "repo": "metric-space-ai/ctox"
+            }
+        })
+        .to_string();
+
+        let text = update_install_summary_text(&raw);
+
+        assert!(
+            text.contains("version         0.3.6-11-g965770b-dirty"),
+            "{text}"
+        );
+        assert!(text.contains("install mode    managed"), "{text}");
+        assert!(
+            text.contains("repo            metric-space-ai/ctox"),
+            "{text}"
+        );
+        assert!(!text.contains("\"version\""), "{text}");
+    }
+
+    #[test]
+    fn update_remote_summary_text_formats_remote_check_human_readably() {
+        let raw = serde_json::json!({
+            "action": "update check",
+            "update_available": true,
+            "current_version": "0.3.6",
+            "latest_version": "0.3.7",
+            "reason": "new release available"
+        })
+        .to_string();
+
+        let text = update_remote_summary_text(&raw);
+
+        assert!(text.contains("action          update check"), "{text}");
+        assert!(text.contains("status          update available"), "{text}");
+        assert!(text.contains("current         0.3.6"), "{text}");
+        assert!(text.contains("latest          0.3.7"), "{text}");
+        assert!(!text.contains("\"latest_version\""), "{text}");
     }
 }

@@ -36,9 +36,11 @@ ctox follow-up evaluate --goal "<goal>" --result "<latest result>" [--step-title
 4. If the problem is now blocked, pass `--blocker`.
 5. If the requirements shifted during execution, pass `--requirements-changed`.
 6. If the owner should probably be informed, pass `--owner-visible`.
-7. If the result is `needs_followup`, explicitly create or edit the next queue task with `ctox queue add` or `ctox queue edit`.
-8. If the work is high-impact, externally visible, or owner-facing, do not merely promise a "next step". Create the explicit follow-up or review task before you end the turn.
-9. If execution started but did not reach a safe verified end state, record a review or recovery slice in the queue immediately.
+7. If the result is `needs_followup`, choose the durable runtime primitive before you end the turn:
+   - queue-only for tiny atomic follow-up
+   - ticket self-work plus queue or plan for multi-turn, review, approval, blocker, or recovery work
+8. If the work is high-impact, externally visible, owner-facing, or likely to span multiple turns, do not merely promise a "next step". Create the explicit self-work or review task before you end the turn.
+9. If execution started but did not reach a safe verified end state, record a review or recovery slice immediately. Prefer ticket self-work over queue-only when the recovery may need tracking, approval, or repeated follow-up.
 10. If the blocker depends on owner input, enumerate the exact missing values, credentials, approvals, or decisions in the owner-facing status. Do not send vague blocker summaries.
 11. For owner-visible blocked work, prefer a durable review schedule over waiting in the active turn.
 12. Do not create repeat owner-facing blocker communication unless there is a material delta since the last owner update. If nothing changed, keep the next review internal and durable.
@@ -51,6 +53,7 @@ ctox follow-up evaluate --goal "<goal>" --result "<latest result>" [--step-title
 - It does not reorder the queue for you.
 - After the evaluation, you may:
   - create the next explicit queue task with `ctox queue add`
+  - create ticket-backed durable follow-up with `ctox ticket self-work-put ... --publish` and `ctox ticket self-work-assign ...`
   - reprioritize or update existing queued work with `ctox queue edit` or `ctox queue reprioritize`
   - send an owner update with the communication tools
   - draft a new plan with `ctox plan draft`
@@ -62,7 +65,7 @@ ctox follow-up evaluate --goal "<goal>" --result "<latest result>" [--step-title
 - Do not invent speculative future work just because more work could exist in theory.
 - Do not use it to bypass owner approval.
 - Do not persist evaluation reasoning beyond the compact structured result.
-- Do not tell the owner that CTOX is actively doing a next step unless the corresponding durable queue or plan state exists.
+- Do not tell the owner that CTOX is actively doing a next step unless the corresponding durable self-work, queue, or plan state exists.
 
 ## Contracts
 

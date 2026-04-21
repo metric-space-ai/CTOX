@@ -81,6 +81,7 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
                     suggested_skill: find_flag_value(args, "--skill").map(ToOwned::to_owned),
                     parent_message_key: find_flag_value(args, "--parent-message-key")
                         .map(ToOwned::to_owned),
+                    extra_metadata: None,
                 },
             )?;
             print_json(&json!({"ok": true, "task": task}))
@@ -511,6 +512,7 @@ fn ensure_spill_restore_follow_up(
                 priority: "high".to_string(),
                 suggested_skill: task.suggested_skill.clone(),
                 parent_message_key: Some(task.message_key.clone()),
+                extra_metadata: None,
             },
         )?
     };
@@ -593,7 +595,7 @@ fn open_queue_bridge_db(root: &Path) -> Result<Connection> {
     }
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open queue bridge db {}", path.display()))?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())?;
     ensure_queue_bridge_schema(&conn)?;
     Ok(conn)
 }
@@ -953,6 +955,7 @@ mod tests {
                 priority: "high".to_string(),
                 suggested_skill: Some("reliability-ops".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )?;
 
@@ -1031,6 +1034,7 @@ mod tests {
                 priority: "low".to_string(),
                 suggested_skill: Some("audit-review".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )?;
         let _ = channels::update_queue_task(
@@ -1053,6 +1057,7 @@ mod tests {
                 priority: "urgent".to_string(),
                 suggested_skill: Some("incident-response".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )?;
 
@@ -1091,6 +1096,7 @@ mod tests {
                 priority: "normal".to_string(),
                 suggested_skill: Some("docs-review".to_string()),
                 parent_message_key: None,
+                extra_metadata: None,
             },
         )?;
         let bridge = spill_queue_task_to_ticket(

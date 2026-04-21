@@ -1660,6 +1660,7 @@ dependencies = [
  "ctox-utils-absolute-path",
  "ctox-web-stack",
  "git2",
+ "include_dir",
  "libc",
  "mailparse",
  "native-tls",
@@ -1673,6 +1674,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tiny_http",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
@@ -1979,7 +1981,6 @@ dependencies = [
  "ctox-secrets",
  "ctox-shell-command",
  "ctox-shell-escalation",
- "ctox-skills",
  "ctox-state",
  "ctox-utils-absolute-path",
  "ctox-utils-cache",
@@ -1999,6 +2000,7 @@ dependencies = [
  "http 1.4.0",
  "iana-time-zone",
  "image",
+ "include_dir",
  "indexmap 2.13.0",
  "keyring",
  "landlock",
@@ -2360,15 +2362,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "ctox-skills"
-version = "0.0.0"
-dependencies = [
- "ctox-utils-absolute-path",
- "include_dir",
- "thiserror 2.0.18",
 ]
 
 [[package]]
