@@ -58,6 +58,8 @@ pub use ddtree::{
     build_ddtree, build_tree_mask, extract_draft_topk, follow_verified_tree, DDTree,
     DEFAULT_DDTREE_BUDGET,
 };
+#[cfg(feature = "cuda")]
+pub use driver::run_greedy_megakernel;
 pub use driver::{decode_step, prefill, run_greedy, GreedyRunOutcome};
 pub use model::DFlashDraftModel;
 pub use qwen35_target::Qwen35DFlashTarget;
