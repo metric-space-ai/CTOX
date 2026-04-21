@@ -28,7 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use candle_core::{DType, Device};
 use candle_nn::VarBuilder;
 use clap::Parser;
-use engine_core::models::megakernel_drafter::{load_megakernel_weights, MegakernelDrafter};
+use engine_core::megakernel_drafter::{load_megakernel_weights, MegakernelDrafter};
 use std::path::PathBuf;
 use std::time::Instant;
 

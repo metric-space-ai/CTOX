@@ -29,6 +29,7 @@ engine-core = { workspace = true }
 engine-server-core = { workspace = true }
 engine = { workspace = true }
 candle-core = { workspace = true }
+candle-nn = { workspace = true }
 
 clap = { workspace = true }
 clap_complete = "4.5"
