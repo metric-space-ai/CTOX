@@ -1397,6 +1397,9 @@ pub fn prepare_chat_prompt(root: &Path, prompt: &str) -> Result<PreparedChatProm
 
 fn infer_suggested_skill_from_prompt(prompt: &str) -> Option<String> {
     let lowered = prompt.to_ascii_lowercase();
+    if looks_like_product_mission_correction_prompt(&lowered) {
+        return Some("follow-up-orchestrator".to_string());
+    }
     if looks_like_public_launch_or_deploy_prompt(&lowered) {
         return Some("service-deployment".to_string());
     }
@@ -1437,6 +1440,50 @@ fn looks_like_public_launch_or_deploy_prompt(lowered_prompt: &str) -> bool {
     .iter()
     .any(|needle| lowered_prompt.contains(needle));
     has_public_surface && has_delivery_action
+}
+
+fn looks_like_product_mission_correction_prompt(lowered_prompt: &str) -> bool {
+    let has_product_surface = [
+        "landing rewrite",
+        "landing page",
+        "homepage",
+        "home page",
+        "application chat",
+        "candidate chat",
+        "interview chat",
+        "stripe hire flow",
+        "monthly pricing",
+        "role cards",
+        "capability profiles",
+        "competitor research",
+        "founder feedback",
+        "current code",
+        "ticket-backed",
+        "ticket backed",
+        "ignore stale closure",
+        "review-rework",
+        "watchdog wrappers",
+        "hireable ai employees",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    let has_execution_action = [
+        "rewrite",
+        "redesign",
+        "implement",
+        "build",
+        "inspect",
+        "start",
+        "update",
+        "create",
+        "derive",
+        "research",
+        "verify",
+        "ticket",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    has_product_surface && has_execution_action
 }
 
 fn looks_like_founder_or_stakeholder_communication_prompt(lowered_prompt: &str) -> bool {
@@ -6448,6 +6495,38 @@ mod tests {
         assert_eq!(
             prepared.suggested_skill.as_deref(),
             Some("service-deployment")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_prompt_suggests_follow_up_orchestrator_for_product_correction() {
+        let root = temp_root("prepare-chat-product-correction-skill");
+
+        let prepared = prepare_chat_prompt(
+            &root,
+            "Kunstmen correction. Ignore stale closure, review-rework, and watchdog wrappers unless they block the product path. First bounded slice only: inspect the live homepage and current code, create or update ticket-backed work for landing rewrite, application chat plus Stripe hire flow, bounded competitor research if missing, and founder feedback. Then start the landing rewrite in code.",
+        )
+        .expect("prompt preparation should succeed");
+
+        assert_eq!(
+            prepared.suggested_skill.as_deref(),
+            Some("follow-up-orchestrator")
+        );
+    }
+
+    #[test]
+    fn prepare_chat_prompt_keeps_owner_communication_for_pure_founder_outreach() {
+        let root = temp_root("prepare-chat-owner-communication-skill");
+
+        let prepared = prepare_chat_prompt(
+            &root,
+            "Please email Michael, Olaf, and Marco with the live link and ask for feedback on the public launch.",
+        )
+        .expect("prompt preparation should succeed");
+
+        assert_eq!(
+            prepared.suggested_skill.as_deref(),
+            Some("owner-communication")
         );
     }
 
