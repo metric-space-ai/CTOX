@@ -209,6 +209,165 @@ fn detect_durable_state_transition(
     Ok(false)
 }
 
+fn continuity_refresh_recommended(engine: &lcm::LcmEngine, conversation_id: i64) -> Result<bool> {
+    let mission_state = engine.stored_mission_state(conversation_id)?;
+    let Some(mission_state) = mission_state else {
+        return Ok(false);
+    };
+    if !mission_state.is_open || mission_state.allow_idle {
+        return Ok(false);
+    }
+    let message_count = engine.message_item_count(conversation_id)?;
+    if message_count < 4 {
+        return Ok(false);
+    }
+    let coverage = engine.continuity_coverage_status(conversation_id)?;
+    Ok(coverage.document_is_sparse || coverage.summary_backing_missing)
+}
+
+fn clip_plaintext(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut clipped = normalized.chars().take(max_chars).collect::<String>();
+    if normalized.chars().count() > max_chars {
+        clipped.push_str("...");
+    }
+    clipped
+}
+
+fn first_prompt_line(prompt: &str, fallback: &str, max_chars: usize) -> String {
+    prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| clip_plaintext(line, max_chars))
+        .filter(|line| !line.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn bootstrap_conversation_goal(prompt: &str) -> String {
+    first_prompt_line(prompt, "Continue the active mission slice.", 140)
+}
+
+fn bootstrap_next_slice(prompt: &str, mission: &str) -> String {
+    first_prompt_line(prompt, mission, 180)
+}
+
+fn bootstrap_done_gate(prompt: &str) -> String {
+    let lowered = prompt.to_ascii_lowercase();
+    if lowered.contains("verdict: fail") || lowered.contains("review") {
+        "Resolve the active review objections with verified changes or rebut them with fresh evidence."
+            .to_string()
+    } else if lowered.contains("continue mission") || lowered.contains("follow-up") {
+        "Complete the next concrete slice and verify the result before closing the thread."
+            .to_string()
+    } else {
+        "Finish the requested slice and leave the conversation in a verified state.".to_string()
+    }
+}
+
+fn bootstrap_trigger_intensity(prompt: &str, suggested_skill: Option<&str>) -> String {
+    let lowered = prompt.to_ascii_lowercase();
+    if lowered.contains("review")
+        || lowered.contains("fail")
+        || lowered.contains("founder")
+        || lowered.contains("owner")
+        || matches!(
+            suggested_skill,
+            Some("owner-communication" | "follow-up-orchestrator" | "service-deployment")
+        )
+    {
+        "hot".to_string()
+    } else {
+        "warm".to_string()
+    }
+}
+
+fn seed_narrative_content(prompt: &str, observed_at: &str) -> String {
+    let summary = clip_plaintext(
+        "Conversation opened with a new task prompt and must be treated as active runtime work until it is resolved or superseded.",
+        220,
+    );
+    let goal = clip_plaintext(prompt, 240);
+    format!(
+        "# CONTINUITY NARRATIVE\n\n## Situation\nsummary: {summary}\nstate: active\n\n## Entries\n- entry_id: bootstrap-open\n- event_type: intake\n- summary: Received the initial task prompt: {goal}\n- consequence: Keep this conversation attached to the active mission until the requested slice is verified.\n- source_class: user_prompt\n- source_ref: user#1\n- observed_at: {observed_at}\n"
+    )
+}
+
+fn seed_anchors_content(prompt: &str, observed_at: &str) -> String {
+    let goal = clip_plaintext(prompt, 240);
+    format!(
+        "# CONTINUITY ANCHORS\n\n## Entries\n- anchor_id: bootstrap-goal\n- anchor_type: task_prompt\n- statement: Initial task prompt requires: {goal}\n- source_class: user_prompt\n- source_ref: user#1\n- observed_at: {observed_at}\n- confidence: medium\n- supersedes:\n- expires_at:\n"
+    )
+}
+
+fn bootstrap_sparse_conversation_state(
+    engine: &lcm::LcmEngine,
+    conversation_id: i64,
+    prompt: &str,
+    suggested_skill: Option<&str>,
+) -> Result<bool> {
+    let continuity = engine.continuity_show_all(conversation_id)?;
+    let mission_state = engine.stored_mission_state(conversation_id)?;
+    let has_real_focus = !continuity.focus.head_commit_id.starts_with("contbase_");
+    let has_real_narrative = !continuity.narrative.head_commit_id.starts_with("contbase_");
+    let has_real_anchors = !continuity.anchors.head_commit_id.starts_with("contbase_");
+    let mission_is_sparse = mission_state.as_ref().is_none_or(|record| {
+        record.mission.trim().is_empty()
+            && record.next_slice.trim().is_empty()
+            && record.done_gate.trim().is_empty()
+    });
+
+    if has_real_focus && has_real_narrative && has_real_anchors && !mission_is_sparse {
+        return Ok(false);
+    }
+
+    let observed_at = current_rfc3339_timestamp();
+    if !has_real_narrative {
+        engine.continuity_full_replace_document(
+            conversation_id,
+            lcm::ContinuityKind::Narrative,
+            &seed_narrative_content(prompt, &observed_at),
+        )?;
+    }
+    if !has_real_anchors {
+        engine.continuity_full_replace_document(
+            conversation_id,
+            lcm::ContinuityKind::Anchors,
+            &seed_anchors_content(prompt, &observed_at),
+        )?;
+    }
+
+    if !has_real_focus || mission_is_sparse {
+        let refreshed = engine.continuity_show_all(conversation_id)?;
+        let mission = bootstrap_conversation_goal(prompt);
+        let next_slice = bootstrap_next_slice(prompt, &mission);
+        let record = lcm::MissionStateRecord {
+            conversation_id,
+            mission: mission.clone(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: bootstrap_trigger_intensity(prompt, suggested_skill),
+            blocker: "none".to_string(),
+            next_slice,
+            done_gate: bootstrap_done_gate(prompt),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: refreshed.focus.head_commit_id,
+            last_synced_at: observed_at,
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+        };
+        engine.rewrite_focus_continuity_from_mission_state(
+            conversation_id,
+            &record,
+            "Bootstrapped sparse mission continuity from the first task prompt before the initial turn.",
+        )?;
+    }
+
+    Ok(true)
+}
+
 use crate::context_health;
 use crate::governance;
 use crate::inference::engine;
@@ -411,6 +570,9 @@ where
     emit("persist-user-turn");
     lcm::run_add_message(db_path, conversation_id, "user", prompt)
         .context("failed to persist user message into LCM")?;
+    if bootstrap_sparse_conversation_state(&engine, conversation_id, prompt, suggested_skill)? {
+        emit("bootstrap-continuity");
+    }
     emit("snapshot-context");
     let snapshot = engine.snapshot(conversation_id)?;
     let continuity = engine.continuity_show_all(conversation_id)?;
@@ -469,6 +631,18 @@ where
     };
     emit("persist-assistant-turn");
     lcm::run_add_message(db_path, conversation_id, "assistant", &reply)?;
+    let engine = lcm::LcmEngine::open(db_path, lcm::LcmConfig::default())?;
+    let seeded_summary = match engine.ensure_summary_coverage(conversation_id) {
+        Ok(Some(summary_id)) => {
+            emit(&format!("summary-coverage-seeded {summary_id}"));
+            true
+        }
+        Ok(None) => false,
+        Err(err) => {
+            emit(&format!("summary-coverage-skipped {err}"));
+            false
+        }
+    };
     // Detect durable state transitions triggered by the agent's tool calls
     // during this turn (self-work closed, knowledge entry added, focus
     // document replaced). These count as task boundaries and force a
@@ -476,8 +650,9 @@ where
     let state_transition_detected =
         detect_durable_state_transition(root, db_path, conversation_id, &turn_start_ts)
             .unwrap_or(false);
+    let continuity_reinforcement_needed =
+        seeded_summary || continuity_refresh_recommended(&engine, conversation_id).unwrap_or(false);
     let effective_force_refresh = force_continuity_refresh || state_transition_detected;
-    let engine = lcm::LcmEngine::open(db_path, lcm::LcmConfig::default())?;
     // New adaptive model: refresh only on durable state transition
     // (force_continuity_refresh) or when cumulative output tokens exceed
     // the configured percentage of the context window. Legacy interval
@@ -497,12 +672,16 @@ where
         output_budget_pct,
         refresh_every_n,
         effective_force_refresh,
-    );
+    ) || continuity_reinforcement_needed;
     let continuity_stats = if refresh_now {
         let reason = if force_continuity_refresh {
             "state-transition-plan"
         } else if state_transition_detected {
             "state-transition-tickets"
+        } else if seeded_summary {
+            "summary-coverage"
+        } else if continuity_reinforcement_needed {
+            "continuity-reinforcement"
         } else if refresh_every_n > 0 {
             "output-budget-or-interval"
         } else {
@@ -575,6 +754,88 @@ where
 #[cfg(test)]
 #[path = "turn_loop_boundary_tests.rs"]
 mod boundary_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-turn-loop-bootstrap-{label}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("failed to create temp root");
+        root.join("ctox.sqlite3")
+    }
+
+    #[test]
+    fn bootstrap_sparse_conversation_state_seeds_real_continuity_and_mission_state() {
+        let db_path = temp_db_path("seed");
+        let engine =
+            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).expect("failed to open lcm");
+        let conversation_id = 424242;
+        engine
+            .continuity_init_documents(conversation_id)
+            .expect("failed to init continuity");
+        lcm::run_add_message(
+            &db_path,
+            conversation_id,
+            "user",
+            "Mission review for kunstmen.com public launch state. VERDICT: FAIL. Remove internal admin links from the public navigation.",
+        )
+        .expect("failed to add message");
+
+        let changed = bootstrap_sparse_conversation_state(
+            &engine,
+            conversation_id,
+            "Mission review for kunstmen.com public launch state. VERDICT: FAIL. Remove internal admin links from the public navigation.",
+            Some("follow-up-orchestrator"),
+        )
+        .expect("bootstrap should succeed");
+
+        assert!(changed);
+        let continuity = engine
+            .continuity_show_all(conversation_id)
+            .expect("failed to load continuity");
+        assert!(!continuity.focus.head_commit_id.starts_with("contbase_"));
+        assert!(!continuity.narrative.head_commit_id.starts_with("contbase_"));
+        assert!(!continuity.anchors.head_commit_id.starts_with("contbase_"));
+        assert!(continuity
+            .focus
+            .content
+            .contains("Mission review for kunstmen.com public launch state."));
+        assert!(continuity
+            .anchors
+            .content
+            .contains("Initial task prompt requires:"));
+        assert!(continuity.narrative.content.contains("bootstrap-open"));
+
+        let mission = engine
+            .stored_mission_state(conversation_id)
+            .expect("failed to read mission state")
+            .expect("mission state should exist after bootstrap");
+        assert_eq!(mission.mission_status, "active");
+        assert!(mission.is_open);
+        assert_eq!(mission.trigger_intensity, "hot");
+        assert!(mission
+            .mission
+            .contains("Mission review for kunstmen.com public launch state."));
+        assert!(mission
+            .done_gate
+            .contains("Resolve the active review objections"));
+    }
+
+    #[test]
+    fn bootstrap_done_gate_uses_review_specific_gate_for_fail_prompts() {
+        let gate = bootstrap_done_gate(
+            "Mission review for kunstmen.com public launch state. VERDICT: FAIL.",
+        );
+        assert!(gate.contains("review objections"));
+    }
+}
 
 /// Tool-based continuity refresh. Sends the model a prompt describing the
 /// `ctox continuity-update` CLI (three modes: full / replace / diff) and

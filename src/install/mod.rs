@@ -2052,3 +2052,55 @@ fn create_symlink(target: &Path, link_path: &Path) -> Result<()> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::validate_release_source;
+    use anyhow::Result;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn validate_release_source_accepts_current_integrated_layout() -> Result<()> {
+        let root = TempDir::new()?;
+        fs::create_dir_all(root.path().join("contracts"))?;
+        fs::create_dir_all(root.path().join("src/inference"))?;
+        fs::create_dir_all(root.path().join("tools/model-runtime"))?;
+        fs::write(
+            root.path().join("contracts/source_origins_manifest.json"),
+            r#"{
+  "version": 1,
+  "goal": "CTOX source tree layout for build and update orchestration",
+  "sourceTrees": [
+    {
+      "name": "agent-runtime",
+      "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
+      "integrationMode": "hard_fork",
+      "requiredPaths": ["src/inference/Cargo.toml"],
+      "targetDir": "src/inference",
+      "purpose": "Codex execution engine for bounded agent turns"
+    },
+    {
+      "name": "model-runtime",
+      "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
+      "integrationMode": "hard_fork",
+      "requiredPaths": ["tools/model-runtime/Cargo.toml"],
+      "targetDir": "tools/model-runtime",
+      "purpose": "Candle-based local inference runtime"
+    }
+  ]
+}"#,
+        )?;
+        fs::write(
+            root.path().join("src/inference/Cargo.toml"),
+            "[workspace]\n",
+        )?;
+        fs::write(
+            root.path().join("tools/model-runtime/Cargo.toml"),
+            "[package]\nname = \"ctox-engine-cli\"\nversion = \"0.1.0\"\n",
+        )?;
+
+        validate_release_source(root.path())?;
+        Ok(())
+    }
+}

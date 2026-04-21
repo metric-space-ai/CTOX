@@ -15,9 +15,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+    ensure_account, ensure_routing_rows_for_inbound, mark_account_transport_health, now_iso_string,
+    open_channel_db, preview_text, record_communication_sync_run, refresh_thread, stable_digest,
+    upsert_communication_message, CommunicationSyncRun, UpsertMessage,
 };
 use crate::mission::communication_adapters::{
     AdapterSyncCommandRequest, EmailSendCommandRequest, EmailTestCommandRequest,
@@ -437,6 +437,19 @@ fn execute_test(options: &EmailOptions) -> Result<Value> {
         }
         other => bail!("Unsupported email provider: {other}"),
     }
+
+    let provider_connectivity_ok = match options.provider.as_str() {
+        "imap" => (true, true),
+        "graph" | "ews" | "owa" | "activesync" => (true, true),
+        _ => (false, false),
+    };
+    mark_account_transport_health(
+        &mut conn,
+        &account_key,
+        provider_connectivity_ok.0,
+        provider_connectivity_ok.1,
+        None,
+    )?;
 
     Ok(json!({
         "ok": true,

@@ -35,6 +35,7 @@ use ctox_utils_absolute_path::AbsolutePathBuf;
 
 use crate::context::compact::{CompactDecision, CompactMode, CompactPolicy};
 use crate::inference::runtime_kernel;
+use crate::lcm::CompactionResult;
 
 // ---------------------------------------------------------------------------
 // PersistentSession — lives across turns within a mission-turn-loop iteration
@@ -52,6 +53,7 @@ pub(crate) struct PersistentSession {
     seq: RequestIdSeq,
     cwd: PathBuf,
     policy: CompactPolicy,
+    configured_context_window: Option<i64>,
     ctx_log: ContextLogger,
     root: PathBuf,
 }
@@ -66,7 +68,7 @@ impl PersistentSession {
             .build()
             .context("failed to start tokio runtime")?;
 
-        let (client, thread_id, cwd, seq) =
+        let (client, thread_id, cwd, seq, configured_context_window) =
             rt.block_on(async { Self::start_client_and_thread(root, settings).await })?;
 
         let policy = CompactPolicy::from_settings(
@@ -99,6 +101,7 @@ impl PersistentSession {
             seq,
             cwd,
             policy,
+            configured_context_window,
             ctx_log,
             root: root.to_path_buf(),
         })
@@ -112,13 +115,12 @@ impl PersistentSession {
         timeout: Option<Duration>,
         _base_instructions: Option<&str>,
         _include_apply_patch_tool: Option<bool>,
-        _conversation_id: i64,
+        conversation_id: i64,
     ) -> Result<String> {
         let client = self
             .client
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("session already shut down"))?;
-        let thread_id = self.thread_id.clone();
         let cwd = self.cwd.clone();
         let prompt = prompt.to_string();
         let root = self.root.clone();
@@ -131,14 +133,16 @@ impl PersistentSession {
         let result = self.runtime.block_on(async {
             Self::run_turn_async(
                 client,
-                &thread_id,
+                &mut self.thread_id,
                 &cwd,
                 &root,
                 &prompt,
                 timeout,
                 &mut self.seq,
                 &mut self.policy,
+                self.configured_context_window,
                 &mut self.ctx_log,
+                conversation_id,
             )
             .await
         });
@@ -165,7 +169,13 @@ impl PersistentSession {
     async fn start_client_and_thread(
         root: &Path,
         settings: &BTreeMap<String, String>,
-    ) -> Result<(InProcessAppServerClient, String, PathBuf, RequestIdSeq)> {
+    ) -> Result<(
+        InProcessAppServerClient,
+        String,
+        PathBuf,
+        RequestIdSeq,
+        Option<i64>,
+    )> {
         let model = settings
             .get("CTOX_CHAT_MODEL")
             .or_else(|| settings.get("CODEX_MODEL"))
@@ -234,8 +244,13 @@ impl PersistentSession {
                     .as_ref()
                     .map(|provider| provider.provider_id.to_string())
             });
+        let configured_context_window = settings
+            .get("CTOX_CHAT_MODEL_MAX_CONTEXT")
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .filter(|value| *value > 0);
         let overrides = ConfigOverrides {
             model: Some(model.clone()),
+            model_context_window: configured_context_window,
             model_provider: selected_provider_id,
             cwd: Some(cwd.clone()),
             approval_policy: Some(AskForApproval::Never),
@@ -249,6 +264,12 @@ impl PersistentSession {
         // from CTOX's perspective; any provider-specific wire adaptation
         // happens only at the outer edge.
         let mut cli_overrides: Vec<(String, toml::Value)> = vec![];
+        if let Some(context_window) = configured_context_window {
+            cli_overrides.push((
+                "model_context_window".to_string(),
+                toml::Value::Integer(context_window),
+            ));
+        }
         if let Some(ref provider) = local_provider {
             cli_overrides.extend(provider.ctox_core_cli_overrides());
             eprintln!(
@@ -295,63 +316,71 @@ impl PersistentSession {
         eprintln!("[ctox direct-session] client started");
 
         let mut seq = RequestIdSeq::new();
+        let thread_id = Self::start_thread(
+            &client,
+            &mut seq,
+            &cwd,
+            Some(model.as_str()),
+            configured_context_window,
+        )
+        .await?;
+        eprintln!("[ctox direct-session] thread started: {}", thread_id);
+
+        Ok((client, thread_id, cwd, seq, configured_context_window))
+    }
+
+    async fn start_thread(
+        client: &InProcessAppServerClient,
+        seq: &mut RequestIdSeq,
+        cwd: &Path,
+        model: Option<&str>,
+        configured_context_window: Option<i64>,
+    ) -> Result<String> {
+        let config = configured_context_window.map(|context_window| {
+            let mut values = std::collections::HashMap::new();
+            values.insert(
+                "model_context_window".to_string(),
+                serde_json::Value::from(context_window),
+            );
+            values
+        });
         let thread_resp: ThreadStartResponse = client
             .request_typed(ClientRequest::ThreadStart {
                 request_id: seq.next(),
                 params: ThreadStartParams {
-                    model: Some(model),
+                    model: model.map(str::to_string),
                     cwd: Some(cwd.to_string_lossy().to_string()),
                     approval_policy: Some(AskForApproval::Never.into()),
                     sandbox: Some(ctox_app_server_protocol::SandboxMode::DangerFullAccess),
+                    config,
                     ephemeral: Some(true),
                     ..ThreadStartParams::default()
                 },
             })
             .await
             .map_err(|err| anyhow::anyhow!("thread/start: {err}"))?;
-
-        let thread_id = thread_resp.thread.id.clone();
-        eprintln!("[ctox direct-session] thread started: {}", thread_id);
-
-        Ok((client, thread_id, cwd, seq))
+        Ok(thread_resp.thread.id)
     }
 
     async fn run_turn_async(
         client: &mut InProcessAppServerClient,
-        _old_thread_id: &str,
+        thread_id: &mut String,
         cwd: &Path,
         root: &Path,
         prompt: &str,
         timeout: Option<Duration>,
         seq: &mut RequestIdSeq,
         policy: &mut CompactPolicy,
+        configured_context_window: Option<i64>,
         ctx_log: &mut ContextLogger,
+        conversation_id: i64,
     ) -> Result<String> {
-        // Create a fresh thread per turn — reuse the same CLIENT but not
-        // the same thread. After TurnComplete, the thread may not accept
-        // new TurnStart requests in all ctox-core versions.
-        let thread_resp: ThreadStartResponse = client
-            .request_typed(ClientRequest::ThreadStart {
-                request_id: seq.next(),
-                params: ThreadStartParams {
-                    cwd: Some(cwd.to_string_lossy().to_string()),
-                    approval_policy: Some(AskForApproval::Never.into()),
-                    sandbox: Some(ctox_app_server_protocol::SandboxMode::DangerFullAccess),
-                    ephemeral: Some(true),
-                    ..ThreadStartParams::default()
-                },
-            })
-            .await
-            .map_err(|err| anyhow::anyhow!("thread/start: {err}"))?;
-        let thread_id = thread_resp.thread.id;
-        eprintln!("[ctox direct-session] new thread for turn: {}", thread_id);
-
-        // TurnStart
-        let turn_resp: TurnStartResponse = client
+        let mut current_thread_id = thread_id.clone();
+        let turn_resp: TurnStartResponse = match client
             .request_typed(ClientRequest::TurnStart {
                 request_id: seq.next(),
                 params: TurnStartParams {
-                    thread_id: thread_id.to_string(),
+                    thread_id: current_thread_id.clone(),
                     input: vec![UserInput::Text {
                         text: prompt.to_string(),
                         text_elements: Vec::new(),
@@ -371,7 +400,47 @@ impl PersistentSession {
                 },
             })
             .await
-            .map_err(|err| anyhow::anyhow!("turn/start: {err}"))?;
+        {
+            Ok(response) => response,
+            Err(err) => {
+                eprintln!(
+                    "[ctox direct-session] turn/start failed on thread {}: {}. starting a fresh thread",
+                    current_thread_id, err
+                );
+                current_thread_id =
+                    Self::start_thread(client, seq, cwd, None, configured_context_window).await?;
+                *thread_id = current_thread_id.clone();
+                client
+                    .request_typed(ClientRequest::TurnStart {
+                        request_id: seq.next(),
+                        params: TurnStartParams {
+                            thread_id: current_thread_id.clone(),
+                            input: vec![UserInput::Text {
+                                text: prompt.to_string(),
+                                text_elements: Vec::new(),
+                            }
+                            .into()],
+                            cwd: Some(cwd.to_path_buf()),
+                            approval_policy: Some(AskForApproval::Never.into()),
+                            approvals_reviewer: None,
+                            sandbox_policy: Some(SandboxPolicy::DangerFullAccess.into()),
+                            model: None,
+                            service_tier: None,
+                            effort: None,
+                            summary: None,
+                            personality: None,
+                            output_schema: None,
+                            collaboration_mode: None,
+                        },
+                    })
+                    .await
+                    .map_err(|retry_err| anyhow::anyhow!("turn/start retry: {retry_err}"))?
+            }
+        };
+        eprintln!(
+            "[ctox direct-session] active thread for turn: {}",
+            current_thread_id
+        );
         let turn_id = turn_resp.turn.id;
 
         // Event loop
@@ -384,6 +453,25 @@ impl PersistentSession {
                 Some(d) => tokio::select! {
                     ev = client.next_event() => ev,
                     _ = tokio::time::sleep_until(d) => {
+                        ctx_log.log(
+                            "turn_timeout",
+                            &format!(
+                                "\"turn_id\":\"{}\",\"thread_id\":\"{}\"",
+                                turn_id, current_thread_id
+                            ),
+                        );
+                        let _ = client.request_typed::<ThreadUnsubscribeResponse>(ClientRequest::ThreadUnsubscribe {
+                            request_id: seq.next(),
+                            params: ThreadUnsubscribeParams {
+                                thread_id: current_thread_id.clone(),
+                            },
+                        }).await;
+                        if let Ok(replacement_thread_id) =
+                            Self::start_thread(client, seq, cwd, None, configured_context_window)
+                                .await
+                        {
+                            *thread_id = replacement_thread_id;
+                        }
                         anyhow::bail!("direct session timeout after {:?}", timeout.unwrap());
                     }
                 },
@@ -395,7 +483,9 @@ impl PersistentSession {
                 InProcessServerEvent::ServerNotification(_) => {}
                 InProcessServerEvent::LegacyNotification(notif) => {
                     if let Some(msg) = try_extract_event_msg(&notif) {
-                        ctx_log.observe(&msg);
+                        if !matches!(&msg, EventMsg::TurnComplete(tc) if tc.turn_id != turn_id) {
+                            ctx_log.observe(&msg);
+                        }
 
                         if let CompactDecision::Compact { reason } = policy.evaluate(&msg) {
                             eprintln!(
@@ -409,7 +499,7 @@ impl PersistentSession {
                                     let compact_req = ClientRequest::ThreadCompactStart {
                                         request_id: seq.next(),
                                         params: ThreadCompactStartParams {
-                                            thread_id: thread_id.to_string(),
+                                            thread_id: current_thread_id.clone(),
                                         },
                                     };
                                     match client
@@ -436,12 +526,53 @@ impl PersistentSession {
                                             policy.note_compacted();
                                         }
                                     }
+                                    let durable_compaction = log_durable_lcm_compaction(
+                                        root,
+                                        conversation_id,
+                                        policy.context_window,
+                                        ctx_log,
+                                    );
+                                    if should_abort_for_compaction_followup(
+                                        policy.mode,
+                                        &reason,
+                                        durable_compaction.as_ref(),
+                                    ) {
+                                        ctx_log.log_compact_decision(
+                                            "forced_followup",
+                                            &reason,
+                                            policy,
+                                        );
+                                        let unsub_req = ClientRequest::ThreadUnsubscribe {
+                                            request_id: seq.next(),
+                                            params: ThreadUnsubscribeParams {
+                                                thread_id: current_thread_id.clone(),
+                                            },
+                                        };
+                                        let _ = client
+                                            .request_typed::<ThreadUnsubscribeResponse>(unsub_req)
+                                            .await;
+                                        if let Ok(replacement_thread_id) = Self::start_thread(
+                                            client,
+                                            seq,
+                                            cwd,
+                                            None,
+                                            configured_context_window,
+                                        )
+                                        .await
+                                        {
+                                            *thread_id = replacement_thread_id;
+                                        }
+                                        anyhow::bail!(
+                                            "runtime time budget guard: compaction follow-up required after {}",
+                                            reason.log_summary()
+                                        );
+                                    }
                                 }
                                 CompactMode::ForcedFollowup => {
                                     let unsub_req = ClientRequest::ThreadUnsubscribe {
                                         request_id: seq.next(),
                                         params: ThreadUnsubscribeParams {
-                                            thread_id: thread_id.to_string(),
+                                            thread_id: current_thread_id.clone(),
                                         },
                                     };
                                     let _ = client
@@ -464,6 +595,12 @@ impl PersistentSession {
                                         );
                                     }
                                     policy.note_compacted();
+                                    log_durable_lcm_compaction(
+                                        root,
+                                        conversation_id,
+                                        policy.context_window,
+                                        ctx_log,
+                                    );
                                     forced_followup_fired = true;
                                     break;
                                 }
@@ -523,6 +660,84 @@ impl PersistentSession {
             Ok(final_message.unwrap_or_default())
         } else {
             final_message.ok_or_else(|| anyhow::anyhow!("turn completed without assistant message"))
+        }
+    }
+}
+
+fn log_durable_lcm_compaction(
+    root: &Path,
+    conversation_id: i64,
+    token_budget: i64,
+    ctx_log: &mut ContextLogger,
+) -> Option<CompactionResult> {
+    if conversation_id <= 0 {
+        return None;
+    }
+    match crate::lcm::LcmEngine::open(
+        &crate::persistence::sqlite_path(root),
+        crate::lcm::LcmConfig::default(),
+    ) {
+        Ok(engine) => match engine.compact(
+            conversation_id,
+            token_budget.max(1),
+            &crate::lcm::HeuristicSummarizer,
+            true,
+        ) {
+            Ok(result) => {
+                ctx_log.log(
+                    "compact_persist_ok",
+                    &format!(
+                        "\"conversation_id\":{},\"action_taken\":{},\"rounds\":{},\"created\":{},\"tokens_before\":{},\"tokens_after\":{}",
+                        conversation_id,
+                        result.action_taken,
+                        result.rounds,
+                        result.created_summary_ids.len(),
+                        result.tokens_before,
+                        result.tokens_after
+                    ),
+                );
+                Some(result)
+            }
+            Err(err) => {
+                ctx_log.log(
+                    "compact_persist_fail",
+                    &format!(
+                        "\"conversation_id\":{},\"message\":\"{}\"",
+                        conversation_id,
+                        err.to_string().replace('"', "'")
+                    ),
+                );
+                None
+            }
+        },
+        Err(err) => {
+            ctx_log.log(
+                "compact_persist_fail",
+                &format!(
+                    "\"conversation_id\":{},\"message\":\"{}\"",
+                    conversation_id,
+                    err.to_string().replace('"', "'")
+                ),
+            );
+            None
+        }
+    }
+}
+
+fn should_abort_for_compaction_followup(
+    mode: CompactMode,
+    reason: &crate::context::compact::CompactReason,
+    durable_result: Option<&CompactionResult>,
+) -> bool {
+    match mode {
+        CompactMode::ForcedFollowup => true,
+        CompactMode::MidTask => {
+            matches!(
+                reason,
+                crate::context::compact::CompactReason::Emergency { .. }
+            ) && durable_result.is_none_or(|result| {
+                !result.action_taken || result.tokens_after >= result.tokens_before
+            })
         }
     }
 }
@@ -688,5 +903,69 @@ impl ContextLogger {
                 policy.mode
             ),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_abort_for_compaction_followup;
+    use crate::context::compact::{CompactMode, CompactReason};
+    use crate::lcm::CompactionResult;
+
+    #[test]
+    fn forced_followup_mode_always_aborts_after_compaction() {
+        let reason = CompactReason::SelfOutputRatio {
+            output_tokens: 1200,
+            total_context_tokens: 4000,
+            actual_pct: 30,
+            threshold_pct: 15,
+        };
+        assert!(should_abort_for_compaction_followup(
+            CompactMode::ForcedFollowup,
+            &reason,
+            None,
+        ));
+    }
+
+    #[test]
+    fn emergency_midtask_aborts_when_durable_compaction_makes_no_progress() {
+        let reason = CompactReason::Emergency {
+            input_tokens: 99_959,
+            context_window: 131_072,
+            fill_ratio: 0.763,
+        };
+        let result = CompactionResult {
+            action_taken: false,
+            tokens_before: 1467,
+            tokens_after: 1467,
+            created_summary_ids: Vec::new(),
+            rounds: 2,
+        };
+        assert!(should_abort_for_compaction_followup(
+            CompactMode::MidTask,
+            &reason,
+            Some(&result),
+        ));
+    }
+
+    #[test]
+    fn emergency_midtask_continues_when_durable_compaction_reduces_context() {
+        let reason = CompactReason::Emergency {
+            input_tokens: 99_959,
+            context_window: 131_072,
+            fill_ratio: 0.763,
+        };
+        let result = CompactionResult {
+            action_taken: true,
+            tokens_before: 1800,
+            tokens_after: 900,
+            created_summary_ids: vec!["sum_local".to_string()],
+            rounds: 1,
+        };
+        assert!(!should_abort_for_compaction_followup(
+            CompactMode::MidTask,
+            &reason,
+            Some(&result),
+        ));
     }
 }

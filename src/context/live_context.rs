@@ -726,7 +726,10 @@ pub(crate) fn select_rendered_context(
                 }
             }
             lcm::ContextItemType::Summary => {
-                if mission_start_seq.is_some() {
+                if mission_start_seq
+                    .map(|start_seq| item.seq < start_seq)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 if let Some(summary_id) = item.summary_id.as_deref() {
@@ -814,7 +817,7 @@ fn derive_prompt_runtime_blocks(
         continuity_block("Narrative", &continuity.narrative.content)
     };
     let verified_evidence = render_verified_evidence_block(mission_assurance, override_continuity);
-    let workflow_state = render_workflow_state_block(root, &mission_context)?;
+    let workflow_state = render_workflow_state_block(root, &mission_context, mission_state)?;
 
     Ok(PromptRuntimeBlocks {
         focus,
@@ -1291,7 +1294,11 @@ fn render_verified_evidence_block(
     lines.join("\n")
 }
 
-fn render_workflow_state_block(root: &Path, context: &MissionContext) -> Result<String> {
+fn render_workflow_state_block(
+    root: &Path,
+    context: &MissionContext,
+    mission_state: &lcm::MissionStateRecord,
+) -> Result<String> {
     let mut lines = vec!["Open CTOX work that counts right now:".to_string()];
     lines.push(
         "Read this first: queue items count as open work only when their status is pending or leased. Plan items count until they are done. Blocked or failed queue rows are shown separately for context only."
@@ -1473,7 +1480,118 @@ fn render_workflow_state_block(root: &Path, context: &MissionContext) -> Result<
             }
         }
     }
+    let related_memory = render_related_mission_memory_lines(root, context, mission_state)?;
+    if related_memory.is_empty() {
+        lines.push("Related mission memory from nearby conversations: []".to_string());
+    } else {
+        lines.push("Related mission memory from nearby conversations:".to_string());
+        lines.extend(related_memory);
+    }
     Ok(lines.join("\n"))
+}
+
+fn render_related_mission_memory_lines(
+    root: &Path,
+    context: &MissionContext,
+    mission_state: &lcm::MissionStateRecord,
+) -> Result<Vec<String>> {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
+    let mut search_terms = mission_search_terms(context);
+    search_terms.extend(mission_text_terms(&mission_state.mission));
+    search_terms.extend(mission_text_terms(&mission_state.next_slice));
+    search_terms.extend(mission_text_terms(&mission_state.done_gate));
+    search_terms.sort();
+    search_terms.dedup();
+    let generic_current = mission_text_is_wrapper(&mission_state.mission)
+        || mission_text_is_wrapper(&mission_state.next_slice);
+
+    let mut candidates = Vec::new();
+    for sibling in engine.list_mission_states(false)? {
+        if sibling.conversation_id == mission_state.conversation_id {
+            continue;
+        }
+        let snapshot = engine.snapshot(sibling.conversation_id)?;
+        let Some(summary) = snapshot.summaries.last() else {
+            continue;
+        };
+        let sibling_generic = mission_text_is_wrapper(&sibling.mission)
+            && mission_text_is_wrapper(&sibling.next_slice);
+        if generic_current && sibling_generic {
+            continue;
+        }
+        let searchable = format!(
+            "{} {} {}",
+            sibling.mission.to_ascii_lowercase(),
+            sibling.next_slice.to_ascii_lowercase(),
+            sibling.done_gate.to_ascii_lowercase()
+        );
+        let overlap = search_terms
+            .iter()
+            .filter(|term| !term.is_empty() && searchable.contains(term.as_str()))
+            .count();
+        if !generic_current && overlap == 0 {
+            continue;
+        }
+        let score = (overlap as i64 * 10)
+            + i64::from(sibling.is_open) * 3
+            + i64::from(!sibling.allow_idle) * 2
+            + snapshot.messages.len() as i64;
+        candidates.push((score, sibling, summary.content.clone()));
+    }
+    candidates.sort_by(|left, right| right.0.cmp(&left.0));
+
+    let mut lines = Vec::new();
+    for (_, sibling, summary) in candidates.into_iter().take(2) {
+        lines.push(format!("- conversation_id: {}", sibling.conversation_id));
+        lines.push(format!(
+            "  mission: {}",
+            clip_prompt_text(&collapse_spaces(sibling.mission.trim()), 120)
+        ));
+        lines.push(format!(
+            "  status: {}",
+            collapse_spaces(sibling.mission_status.trim())
+        ));
+        lines.push(format!(
+            "  summary: {}",
+            clip_prompt_text(&collapse_spaces(summary.trim()), 220)
+        ));
+    }
+    Ok(lines)
+}
+
+fn mission_text_is_wrapper(value: &str) -> bool {
+    let normalized = collapse_spaces(value.trim()).to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized.starts_with("bearbeite das veroeffentlichte ctox-self-work")
+        || normalized.starts_with("review rework:")
+        || normalized.starts_with("continue mission")
+        || normalized.starts_with("continue working")
+}
+
+fn mission_text_terms(value: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "bearbeite",
+        "veroeffentlichte",
+        "self",
+        "work",
+        "review",
+        "rework",
+        "continue",
+        "mission",
+        "local",
+        "active",
+        "none",
+    ];
+    value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| part.len() >= 5)
+        .map(|part| part.to_ascii_lowercase())
+        .filter(|part| !STOP_WORDS.iter().any(|stop| stop == part))
+        .collect()
 }
 
 fn mission_search_terms(context: &MissionContext) -> Vec<String> {
@@ -1837,12 +1955,105 @@ mod tests {
             verification_gap: None,
         };
 
-        let workflow =
-            render_workflow_state_block(&root, &context).expect("workflow render failed");
-        assert!(workflow.contains("current_ticket_case_id:"));
+        let workflow = render_workflow_state_block(
+            &root,
+            &context,
+            &lcm::MissionStateRecord {
+                conversation_id: 0,
+                mission: "vpn support".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "warm".to_string(),
+                blocker: "none".to_string(),
+                next_slice: "triage the support queue".to_string(),
+                done_gate: "ticket bundle selected".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-0".to_string(),
+                last_synced_at: "2026-04-21T00:00:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            },
+        )
+        .expect("workflow render failed");
+        assert!(workflow.contains("Current ticket case id:"));
         assert!(workflow.contains("ticket_cases:"));
         assert!(workflow.contains("support/vpn"));
         assert!(workflow.contains(&format!("local:{}", remote.ticket_id)));
+    }
+
+    #[test]
+    fn workflow_state_surfaces_related_summary_memory_for_wrapper_turns() {
+        let root = temp_root("related-summary-memory");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let engine =
+            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).expect("failed to open lcm");
+
+        engine
+            .continuity_init_documents(2429960041906776199)
+            .expect("failed to init continuity");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 2429960041906776199,
+                mission: "Re-check kunstmen.com public launch runtime state".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "warm".to_string(),
+                blocker: "none".to_string(),
+                next_slice:
+                    "Fix the homepage review findings and keep the launch narrative honest."
+                        .to_string(),
+                done_gate: "Homepage review findings are reflected in the next bounded slice."
+                    .to_string(),
+                closure_confidence: "medium".to_string(),
+                is_open: false,
+                allow_idle: true,
+                focus_head_commit_id: "focus-242996".to_string(),
+                last_synced_at: "2026-04-21T00:00:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed primary mission");
+        for idx in 0..11 {
+            engine
+                .add_message(
+                    2429960041906776199,
+                    if idx % 2 == 0 { "user" } else { "assistant" },
+                    &format!("kunstmen launch message {idx}"),
+                )
+                .expect("failed to add primary mission message");
+        }
+        engine
+            .ensure_summary_coverage(2429960041906776199)
+            .expect("failed to seed summary");
+
+        let workflow = render_workflow_state_block(
+            &root,
+            &MissionContext::default(),
+            &lcm::MissionStateRecord {
+                conversation_id: 3503872999736408464,
+                mission: "Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: "none".to_string(),
+                next_slice: "Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.".to_string(),
+                done_gate: "Keep the review rework moving.".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-3503".to_string(),
+                last_synced_at: "2026-04-21T00:05:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            },
+        )
+        .expect("workflow render failed");
+        assert!(workflow.contains("Related mission memory from nearby conversations:"));
+        assert!(workflow.contains("Re-check kunstmen.com public launch runtime state"));
+        assert!(workflow.contains("kunstmen launch message"));
     }
 
     #[test]
@@ -1877,5 +2088,84 @@ mod tests {
 
         assert!(prompt.contains("Suggested skill dispatch:"));
         assert!(prompt.contains("preferred_skill: system-onboarding"));
+    }
+
+    #[test]
+    fn select_rendered_context_keeps_mission_summary_when_it_belongs_to_active_slice() {
+        let snapshot = lcm::LcmSnapshot {
+            conversation_id: 7,
+            messages: vec![lcm::MessageRecord {
+                message_id: 11,
+                conversation_id: 7,
+                seq: 3,
+                role: "user".to_string(),
+                content: "continue the active mission".to_string(),
+                token_count: 5,
+                created_at: "2026-04-21T09:00:00Z".to_string(),
+            }],
+            summaries: vec![lcm::SummaryRecord {
+                summary_id: "sum-1".to_string(),
+                conversation_id: 7,
+                kind: lcm::SummaryKind::Leaf,
+                depth: 1,
+                content: "mission summary for the active slice".to_string(),
+                token_count: 12,
+                descendant_count: 1,
+                descendant_token_count: 12,
+                source_message_token_count: 12,
+                created_at: "2026-04-21T09:01:00Z".to_string(),
+            }],
+            context_items: vec![lcm::ContextItemSnapshot {
+                ordinal: 1,
+                item_type: lcm::ContextItemType::Summary,
+                message_id: None,
+                summary_id: Some("sum-1".to_string()),
+                seq: 3,
+                depth: 1,
+                token_count: 12,
+            }],
+            summary_edges: Vec::new(),
+            summary_messages: Vec::new(),
+        };
+
+        let rendered = select_rendered_context(&snapshot, None, Some(2));
+        assert!(rendered
+            .entries
+            .iter()
+            .any(|entry| entry.contains("mission summary for the active slice")));
+    }
+
+    #[test]
+    fn select_rendered_context_skips_summary_from_before_mission_start() {
+        let snapshot = lcm::LcmSnapshot {
+            conversation_id: 7,
+            messages: Vec::new(),
+            summaries: vec![lcm::SummaryRecord {
+                summary_id: "sum-1".to_string(),
+                conversation_id: 7,
+                kind: lcm::SummaryKind::Leaf,
+                depth: 1,
+                content: "stale pre-mission summary".to_string(),
+                token_count: 12,
+                descendant_count: 1,
+                descendant_token_count: 12,
+                source_message_token_count: 12,
+                created_at: "2026-04-21T09:01:00Z".to_string(),
+            }],
+            context_items: vec![lcm::ContextItemSnapshot {
+                ordinal: 1,
+                item_type: lcm::ContextItemType::Summary,
+                message_id: None,
+                summary_id: Some("sum-1".to_string()),
+                seq: 1,
+                depth: 1,
+                token_count: 12,
+            }],
+            summary_edges: Vec::new(),
+            summary_messages: Vec::new(),
+        };
+
+        let rendered = select_rendered_context(&snapshot, None, Some(2));
+        assert!(rendered.entries.is_empty());
     }
 }

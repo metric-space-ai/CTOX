@@ -4548,6 +4548,7 @@ fn default_skill_for_self_work_kind(kind: &str) -> Option<String> {
         "access-request" => Some("ticket-access-and-secrets".to_string()),
         "system-onboarding" => Some("system-onboarding".to_string()),
         "secret-hygiene" => Some("secret-hygiene".to_string()),
+        "owner-confirmation" | "founder-feedback" => Some("owner-communication".to_string()),
         "mission-follow-up" | "timeout-continuation" | "review-rework" => {
             Some("follow-up-orchestrator".to_string())
         }

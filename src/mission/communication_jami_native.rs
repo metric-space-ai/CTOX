@@ -10,9 +10,9 @@ use std::time::Duration;
 use zbus::blocking::{Connection, Proxy};
 
 use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+    ensure_account, ensure_routing_rows_for_inbound, mark_account_transport_health, now_iso_string,
+    open_channel_db, preview_text, record_communication_sync_run, refresh_thread, stable_digest,
+    upsert_communication_message, CommunicationSyncRun, UpsertMessage,
 };
 use crate::mission::communication_adapters::{
     AdapterSyncCommandRequest, JamiResolveAccountCommandRequest, JamiSendCommandRequest,
@@ -344,6 +344,9 @@ fn execute_test(options: &JamiOptions) -> Result<Value> {
             &options.provider,
             build_profile_json(&options),
         )?;
+        if resolved.is_some() {
+            mark_account_transport_health(&mut conn, &account_key, true, true, None)?;
+        }
     }
 
     let dbus_probe = if load_jami_dbus_environment(&mut options).is_ok()

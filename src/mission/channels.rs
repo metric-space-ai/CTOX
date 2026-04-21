@@ -2926,7 +2926,7 @@ pub(crate) fn upsert_communication_message(
 }
 
 fn upsert_communication_message_tx(tx: &Transaction<'_>, message: UpsertMessage<'_>) -> Result<()> {
-    tx.execute(
+    let changed_rows = tx.execute(
         r#"
         INSERT INTO communication_messages (
             message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
@@ -2960,9 +2960,55 @@ fn upsert_communication_message_tx(tx: &Transaction<'_>, message: UpsertMessage<
             status=excluded.status,
             seen=excluded.seen,
             has_attachments=excluded.has_attachments,
-            external_created_at=excluded.external_created_at,
-            observed_at=excluded.observed_at,
+            external_created_at=CASE
+                WHEN communication_messages.external_created_at = '' THEN excluded.external_created_at
+                WHEN excluded.external_created_at = '' THEN communication_messages.external_created_at
+                WHEN excluded.external_created_at < communication_messages.external_created_at THEN excluded.external_created_at
+                ELSE communication_messages.external_created_at
+            END,
+            observed_at=CASE
+                WHEN communication_messages.observed_at = '' THEN excluded.observed_at
+                WHEN excluded.observed_at = '' THEN communication_messages.observed_at
+                WHEN excluded.observed_at < communication_messages.observed_at THEN excluded.observed_at
+                ELSE communication_messages.observed_at
+            END,
             metadata_json=excluded.metadata_json
+        WHERE
+            excluded.channel <> communication_messages.channel OR
+            excluded.account_key <> communication_messages.account_key OR
+            excluded.thread_key <> communication_messages.thread_key OR
+            excluded.remote_id <> communication_messages.remote_id OR
+            excluded.direction <> communication_messages.direction OR
+            excluded.folder_hint <> communication_messages.folder_hint OR
+            excluded.sender_display <> communication_messages.sender_display OR
+            excluded.sender_address <> communication_messages.sender_address OR
+            excluded.recipient_addresses_json <> communication_messages.recipient_addresses_json OR
+            excluded.cc_addresses_json <> communication_messages.cc_addresses_json OR
+            excluded.bcc_addresses_json <> communication_messages.bcc_addresses_json OR
+            excluded.subject <> communication_messages.subject OR
+            excluded.preview <> communication_messages.preview OR
+            excluded.body_text <> communication_messages.body_text OR
+            excluded.body_html <> communication_messages.body_html OR
+            excluded.raw_payload_ref <> communication_messages.raw_payload_ref OR
+            excluded.trust_level <> communication_messages.trust_level OR
+            excluded.status <> communication_messages.status OR
+            excluded.seen <> communication_messages.seen OR
+            excluded.has_attachments <> communication_messages.has_attachments OR
+            excluded.metadata_json <> communication_messages.metadata_json OR
+            (
+                excluded.external_created_at <> ''
+                AND (
+                    communication_messages.external_created_at = ''
+                    OR excluded.external_created_at < communication_messages.external_created_at
+                )
+            ) OR
+            (
+                excluded.observed_at <> ''
+                AND (
+                    communication_messages.observed_at = ''
+                    OR excluded.observed_at < communication_messages.observed_at
+                )
+            )
         "#,
         params![
             message.message_key,
@@ -2991,6 +3037,17 @@ fn upsert_communication_message_tx(tx: &Transaction<'_>, message: UpsertMessage<
             message.metadata_json,
         ],
     )?;
+    let status = message.status.trim().to_ascii_lowercase();
+    let transport_ok = !matches!(status.as_str(), "failed" | "error" | "rejected");
+    if transport_ok && changed_rows > 0 {
+        mark_account_transport_health_tx(
+            tx,
+            message.account_key,
+            message.direction.eq_ignore_ascii_case("inbound"),
+            message.direction.eq_ignore_ascii_case("outbound"),
+            Some(message.observed_at),
+        )?;
+    }
     Ok(())
 }
 
@@ -3261,6 +3318,56 @@ pub(crate) fn record_communication_sync_run(
             run.stored_count,
             run.error_text,
             run.metadata_json,
+        ],
+    )?;
+    if run.ok {
+        mark_account_transport_health(conn, run.account_key, true, false, Some(run.finished_at))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn mark_account_transport_health(
+    conn: &mut Connection,
+    account_key: &str,
+    inbound_ok: bool,
+    outbound_ok: bool,
+    observed_at: Option<&str>,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    mark_account_transport_health_tx(&tx, account_key, inbound_ok, outbound_ok, observed_at)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn mark_account_transport_health_tx(
+    tx: &Transaction<'_>,
+    account_key: &str,
+    inbound_ok: bool,
+    outbound_ok: bool,
+    observed_at: Option<&str>,
+) -> Result<()> {
+    if !inbound_ok && !outbound_ok {
+        return Ok(());
+    }
+    let observed_at = observed_at
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(now_iso_string);
+    tx.execute(
+        r#"
+        UPDATE communication_accounts
+        SET
+            updated_at = ?2,
+            last_inbound_ok_at = CASE WHEN ?3 = 1 THEN ?2 ELSE last_inbound_ok_at END,
+            last_outbound_ok_at = CASE WHEN ?4 = 1 THEN ?2 ELSE last_outbound_ok_at END
+        WHERE account_key = ?1
+        "#,
+        params![
+            account_key,
+            observed_at,
+            if inbound_ok { 1 } else { 0 },
+            if outbound_ok { 1 } else { 0 },
         ],
     )?;
     Ok(())
@@ -3665,6 +3772,186 @@ mod tests {
         assert_eq!(listed[0].message_key, created.message_key);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn upsert_message_updates_account_transport_health() {
+        let db_path = unique_test_db_path("ctox-channel-account-health");
+        let mut conn = open_channel_db(&db_path).expect("failed to open channel db");
+        ensure_account(
+            &mut conn,
+            "email:cto1@example.com",
+            "email",
+            "cto1@example.com",
+            "imap",
+            json!({}),
+        )
+        .expect("failed to ensure account");
+
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "msg-1",
+                channel: "email",
+                account_key: "email:cto1@example.com",
+                thread_key: "email/thread-1",
+                remote_id: "remote-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Michael",
+                sender_address: "michael@example.com",
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Inbound",
+                preview: "Inbound",
+                body_text: "Inbound body",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "owner_verified",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-21T10:00:00Z",
+                observed_at: "2026-04-21T10:00:00Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("failed to store inbound message");
+
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "msg-2",
+                channel: "email",
+                account_key: "email:cto1@example.com",
+                thread_key: "email/thread-1",
+                remote_id: "remote-2",
+                direction: "outbound",
+                folder_hint: "SENT",
+                sender_display: "CTOX",
+                sender_address: "cto1@example.com",
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Outbound",
+                preview: "Outbound",
+                body_text: "Outbound body",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "owner_verified",
+                status: "confirmed",
+                seen: true,
+                has_attachments: false,
+                external_created_at: "2026-04-21T10:01:00Z",
+                observed_at: "2026-04-21T10:01:00Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("failed to store outbound message");
+
+        let (inbound, outbound): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT last_inbound_ok_at, last_outbound_ok_at FROM communication_accounts WHERE account_key = ?1",
+                params!["email:cto1@example.com"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("failed to read account health");
+        assert_eq!(inbound.as_deref(), Some("2026-04-21T10:00:00Z"));
+        assert_eq!(outbound.as_deref(), Some("2026-04-21T10:01:00Z"));
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn upsert_message_preserves_first_observed_timestamp_for_identical_reingest() {
+        let db_path = unique_test_db_path("ctox-channel-observed-stability");
+        let mut conn = open_channel_db(&db_path).expect("failed to open channel db");
+        ensure_account(
+            &mut conn,
+            "email:cto1@example.com",
+            "email",
+            "cto1@example.com",
+            "imap",
+            json!({}),
+        )
+        .expect("failed to ensure account");
+
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "msg-stable",
+                channel: "email",
+                account_key: "email:cto1@example.com",
+                thread_key: "email/thread-stable",
+                remote_id: "remote-stable",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Michael",
+                sender_address: "michael@example.com",
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Stable inbound",
+                preview: "Stable inbound",
+                body_text: "Same body",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "owner_verified",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-21T10:00:00Z",
+                observed_at: "2026-04-21T10:00:00Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("failed to insert initial row");
+
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "msg-stable",
+                channel: "email",
+                account_key: "email:cto1@example.com",
+                thread_key: "email/thread-stable",
+                remote_id: "remote-stable",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Michael",
+                sender_address: "michael@example.com",
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Stable inbound",
+                preview: "Stable inbound",
+                body_text: "Same body",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "owner_verified",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                observed_at: "2026-04-21T10:05:00Z",
+                external_created_at: "2026-04-21T10:00:00Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("failed to reingest identical row");
+
+        let (observed_at, inbound_ok): (String, Option<String>) = conn
+            .query_row(
+                "SELECT observed_at, last_inbound_ok_at FROM communication_messages
+                 JOIN communication_accounts USING(account_key)
+                 WHERE message_key = ?1",
+                params!["msg-stable"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("failed to reload stored row");
+        assert_eq!(observed_at, "2026-04-21T10:00:00Z");
+        assert_eq!(inbound_ok.as_deref(), Some("2026-04-21T10:00:00Z"));
+
+        let _ = fs::remove_file(&db_path);
     }
 
     #[test]

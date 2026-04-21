@@ -9,6 +9,7 @@ cluster: communication
 # Owner Communication
 
 Use this skill whenever CTOX needs to interpret, continue, or initiate communication with the owner.
+When mission-local docs identify founders or business stakeholders who should receive proactive product or launch updates, use the same discipline here instead of writing ad hoc stakeholder outreach.
 
 ## Scope
 
@@ -93,12 +94,28 @@ Use this skill whenever CTOX needs to interpret, continue, or initiate communica
 - Treat email `accepted` as weaker than email `confirmed`.
 - Treat Jami `queued` as not yet delivered.
 - Do not leak secrets, passwords, root auth material, or BIOS-protected state into outbound channels unless the owner explicitly requests it and the channel choice is justified.
+- If the outreach concerns a newly live public milestone, keep the follow-up ticket-backed until the stakeholder feedback loop is actually started and tracked.
+- If the outreach concerns a newly live public milestone, contact the owner first with the exact live link and an explicit confirmation request before broad stakeholder outreach.
+- Tailor proactive stakeholder asks by role:
+  - CEO: current launch state, top risk, next decision
+  - Sales: messaging clarity, objections, buyer readiness
+  - Partner / investor stakeholder: channel fit, partnership leverage, external credibility gaps
+- Do not send founder or stakeholder outreach from memory alone. If the current context health is weak or the latest communication state is still ambiguous after lookup, stop and leave a durable blocker instead.
 
 ## Communication Shapes
 
 - `tui`: direct answer, immediate clarification, local setup guidance
 - `jami`: concise update, quick question, acknowledgement, short coordination
 - `email`: durable summary, structured proposal, longer decision memo, explicit approval request
+
+For a just-restored or newly live public website, the first owner email should contain:
+
+- the exact canonical URL that is live now
+- one sentence on what changed
+- one sentence on the highest remaining risk or known limitation
+- a direct ask for confirmation or requested corrections
+
+Do not replace that owner confirmation with a generic "feedback welcome" note.
 
 ## Setup And Health
 

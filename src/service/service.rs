@@ -36,6 +36,8 @@ use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -86,6 +88,7 @@ const DEFAULT_SERVICE_HOST: &str = "127.0.0.1";
 #[cfg(not(unix))]
 const DEFAULT_SERVICE_PORT: &str = "12435";
 const SERVICE_PID_RELATIVE_PATH: &str = "runtime/ctox_service.pid";
+const SERVICE_LOCK_RELATIVE_PATH: &str = "runtime/ctox_service.lock";
 const SERVICE_LOG_RELATIVE_PATH: &str = "runtime/ctox_service.log";
 const SERVICE_SOCKET_RELATIVE_PATH: &str = "runtime/ctox_service.sock";
 const SYSTEMD_USER_UNIT_NAME: &str = "ctox.service";
@@ -329,10 +332,28 @@ impl Drop for ServiceExitGuard {
     }
 }
 
+#[cfg(unix)]
+struct ServiceInstanceLock {
+    file: std::fs::File,
+}
+
+#[cfg(unix)]
+impl Drop for ServiceInstanceLock {
+    fn drop(&mut self) {
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ServiceInstanceLock;
+
 pub fn run_foreground(root: &Path) -> Result<()> {
     let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(&runtime_dir)
         .with_context(|| format!("failed to create runtime dir {}", runtime_dir.display()))?;
+    let _instance_lock = acquire_service_instance_lock(root)?;
     install_service_panic_hook();
     #[cfg(unix)]
     unsafe {
@@ -429,7 +450,66 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     }
 }
 
+#[cfg(unix)]
+fn acquire_service_instance_lock(root: &Path) -> Result<ServiceInstanceLock> {
+    let lock_path = service_lock_path(root);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open service lock {}", lock_path.display()))?;
+    let lock_rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if lock_rc != 0 {
+        let err = std::io::Error::last_os_error();
+        let holders = matching_service_processes(root, None).unwrap_or_default();
+        if holders.is_empty() {
+            anyhow::bail!(
+                "another CTOX service instance is already active for root {} (lock {}): {}",
+                root.display(),
+                lock_path.display(),
+                err
+            );
+        }
+        anyhow::bail!(
+            "another CTOX service instance is already active for root {} (pids {:?}, lock {}): {}",
+            root.display(),
+            holders,
+            lock_path.display(),
+            err
+        );
+    }
+    file.set_len(0)
+        .with_context(|| format!("failed to truncate service lock {}", lock_path.display()))?;
+    writeln!(file, "{}", std::process::id())
+        .with_context(|| format!("failed to write service lock {}", lock_path.display()))?;
+    file.flush()
+        .with_context(|| format!("failed to flush service lock {}", lock_path.display()))?;
+    Ok(ServiceInstanceLock { file })
+}
+
+#[cfg(not(unix))]
+fn acquire_service_instance_lock(root: &Path) -> Result<ServiceInstanceLock> {
+    let lock_path = service_lock_path(root);
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to create service lock {}", lock_path.display()))?;
+    writeln!(file, "{}", std::process::id())
+        .with_context(|| format!("failed to write service lock {}", lock_path.display()))?;
+    Ok(ServiceInstanceLock)
+}
+
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
+    if let Ok(seeded) = repair_active_mission_summary_coverage(root) {
+        if !seeded.is_empty() {
+            push_event(
+                state,
+                format!("Summary coverage seeded {}", seeded.join(", ")),
+            );
+        }
+    }
     match state_invariants::evaluate_runtime_state_invariants(root, turn_loop::CHAT_CONVERSATION_ID)
     {
         Ok(report) => {
@@ -725,6 +805,22 @@ fn run_turn_end_state_invariant_check(
     state: &Arc<Mutex<SharedState>>,
     conversation_id: i64,
 ) -> Option<lcm::MissionStateRecord> {
+    if let Ok(seeded) = repair_active_mission_summary_coverage(root) {
+        if !seeded.is_empty() {
+            push_event(
+                state,
+                format!("Summary coverage seeded {}", seeded.join(", ")),
+            );
+        }
+    }
+    if let Ok(cleaned) = repair_open_mission_state_hygiene(root) {
+        if !cleaned.is_empty() {
+            push_event(
+                state,
+                format!("Mission-state hygiene cleaned {}", cleaned.join(", ")),
+            );
+        }
+    }
     match state_invariants::evaluate_runtime_state_invariants(root, conversation_id) {
         Ok(report) => {
             let violation_codes = report
@@ -881,6 +977,193 @@ fn normalize_state_token(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn mission_state_is_wrapper(record: &lcm::MissionStateRecord) -> bool {
+    let mission = record.mission.trim().to_ascii_lowercase();
+    mission.starts_with("continue mission ")
+        || mission.starts_with("review rework:")
+        || mission.starts_with("review rework ")
+}
+
+fn mission_state_is_review_wrapper(record: &lcm::MissionStateRecord) -> bool {
+    let mission = record.mission.trim().to_ascii_lowercase();
+    mission.starts_with("review rework:") || mission.starts_with("review rework ")
+}
+
+fn unwrap_wrapper_mission_text(value: &str) -> String {
+    let mut source = value.trim().to_string();
+    loop {
+        let trimmed = source.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(stripped) = lower
+            .strip_prefix("continue mission ")
+            .and_then(|_| trimmed.get("continue mission ".len()..))
+        {
+            source = stripped.trim().to_string();
+            continue;
+        }
+        if let Some(stripped) = lower
+            .strip_prefix("review rework:")
+            .and_then(|_| trimmed.get("review rework:".len()..))
+        {
+            source = stripped.trim().to_string();
+            continue;
+        }
+        if let Some(stripped) = lower
+            .strip_prefix("review rework ")
+            .and_then(|_| trimmed.get("review rework ".len()..))
+        {
+            source = stripped.trim().to_string();
+            continue;
+        }
+        break;
+    }
+    source.trim().to_string()
+}
+
+fn canonical_mission_identity(record: &lcm::MissionStateRecord) -> String {
+    let mission_identity = normalize_state_token(&unwrap_wrapper_mission_text(&record.mission));
+    let next_slice_identity =
+        normalize_state_token(&unwrap_wrapper_mission_text(&record.next_slice));
+    if mission_identity.is_empty() {
+        return next_slice_identity;
+    }
+    if next_slice_identity.is_empty() {
+        return mission_identity;
+    }
+    if mission_state_is_review_wrapper(record)
+        && (mission_identity == next_slice_identity
+            || mission_identity.contains(&next_slice_identity)
+            || next_slice_identity.len() < mission_identity.len())
+    {
+        return next_slice_identity;
+    }
+    if mission_identity.contains(&next_slice_identity) {
+        return next_slice_identity;
+    }
+    if next_slice_identity.contains(&mission_identity) {
+        return mission_identity;
+    }
+    mission_identity
+}
+
+fn mission_state_is_sparse(record: &lcm::MissionStateRecord) -> bool {
+    record.mission.trim().is_empty()
+        && record.next_slice.trim().is_empty()
+        && record.done_gate.trim().is_empty()
+        && record.blocker.trim().is_empty()
+}
+
+fn close_stale_mission_state(
+    engine: &lcm::LcmEngine,
+    record: &lcm::MissionStateRecord,
+    reason: &str,
+) -> Result<()> {
+    let mut updated = record.clone();
+    updated.is_open = false;
+    updated.allow_idle = true;
+    updated.mission_status = "closed".to_string();
+    updated.continuation_mode = "closed".to_string();
+    if updated.blocker.trim().is_empty() {
+        updated.blocker = reason.to_string();
+    } else if !updated
+        .blocker
+        .to_ascii_lowercase()
+        .contains(&reason.to_ascii_lowercase())
+    {
+        updated.blocker = format!("{} | {}", updated.blocker.trim(), reason);
+    }
+    updated.last_synced_at = now_iso_string();
+    if engine.rewrite_focus_continuity_from_mission_state(
+        record.conversation_id,
+        &updated,
+        &format!("Mission-state hygiene closed stale wrapper state: {reason}"),
+    )? {
+        return Ok(());
+    }
+    engine.overwrite_mission_state(&updated)
+}
+
+fn repair_open_mission_state_hygiene(root: &Path) -> Result<Vec<String>> {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
+    let active_plan_has_work = plan::has_active_goal_with_pending_step(root).unwrap_or(false);
+    let mut missions = engine.list_mission_states(true)?;
+    missions.sort_by(|left, right| {
+        let left_wrapper = mission_state_is_wrapper(left);
+        let right_wrapper = mission_state_is_wrapper(right);
+        left_wrapper
+            .cmp(&right_wrapper)
+            .then_with(|| right.last_synced_at.cmp(&left.last_synced_at))
+            .then_with(|| left.conversation_id.cmp(&right.conversation_id))
+    });
+
+    let mut primary_by_identity = BTreeMap::<String, i64>::new();
+    let mut cleaned = Vec::new();
+    for mission in missions {
+        let plan_keeps_open =
+            mission.conversation_id == turn_loop::CHAT_CONVERSATION_ID && active_plan_has_work;
+        let has_runnable_work =
+            runnable_thread_task_exists(root, &mission_thread_key(mission.conversation_id))
+                .unwrap_or(false);
+        if mission_state_is_sparse(&mission) && !has_runnable_work && !plan_keeps_open {
+            close_stale_mission_state(
+                &engine,
+                &mission,
+                "stale sparse mission state without runnable work",
+            )?;
+            cleaned.push(format!(
+                "closed sparse mission state {}",
+                mission.conversation_id
+            ));
+            continue;
+        }
+
+        let identity = canonical_mission_identity(&mission);
+        if identity.is_empty() {
+            continue;
+        }
+        if let Some(primary_conversation_id) = primary_by_identity.get(&identity) {
+            if *primary_conversation_id != mission.conversation_id
+                && !has_runnable_work
+                && !plan_keeps_open
+            {
+                close_stale_mission_state(
+                    &engine,
+                    &mission,
+                    &format!(
+                        "superseded by canonical mission conversation {}",
+                        primary_conversation_id
+                    ),
+                )?;
+                cleaned.push(format!(
+                    "closed duplicate mission state {} -> {}",
+                    mission.conversation_id, primary_conversation_id
+                ));
+                continue;
+            }
+        } else {
+            primary_by_identity.insert(identity, mission.conversation_id);
+        }
+    }
+    Ok(cleaned)
+}
+
+fn repair_active_mission_summary_coverage(root: &Path) -> Result<Vec<String>> {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
+    let mut seeded = Vec::new();
+    let mut seen = HashSet::new();
+    for mission in engine.list_mission_states(false)? {
+        if !seen.insert(mission.conversation_id) {
+            continue;
+        }
+        if let Some(summary_id) = engine.ensure_summary_coverage(mission.conversation_id)? {
+            seeded.push(format!("{} ({summary_id})", mission.conversation_id));
+        }
+    }
+    Ok(seeded)
 }
 
 pub fn start_background(root: &Path) -> Result<String> {
@@ -1102,12 +1385,80 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
 
 pub fn prepare_chat_prompt(root: &Path, prompt: &str) -> Result<PreparedChatPrompt> {
     let sanitized = secrets::auto_intake_prompt_secrets(root, prompt)?;
+    let inferred_skill = infer_suggested_skill_from_prompt(&sanitized.sanitized_prompt);
     Ok(PreparedChatPrompt {
         prompt: sanitized.sanitized_prompt,
         auto_ingested_secrets: sanitized.auto_ingested_secrets,
         suggested_skill: (sanitized.auto_ingested_secrets > 0)
-            .then(|| "secret-hygiene".to_string()),
+            .then(|| "secret-hygiene".to_string())
+            .or(inferred_skill),
     })
+}
+
+fn infer_suggested_skill_from_prompt(prompt: &str) -> Option<String> {
+    let lowered = prompt.to_ascii_lowercase();
+    if looks_like_public_launch_or_deploy_prompt(&lowered) {
+        return Some("service-deployment".to_string());
+    }
+    if looks_like_founder_or_stakeholder_communication_prompt(&lowered) {
+        return Some("owner-communication".to_string());
+    }
+    None
+}
+
+fn looks_like_public_launch_or_deploy_prompt(lowered_prompt: &str) -> bool {
+    let has_public_surface = [
+        "landing page",
+        "public landing",
+        "homepage",
+        "home page",
+        "public site",
+        "public website",
+        "kunstmen.com",
+        "vercel",
+        "production domain",
+        "deployment_not_found",
+        "deployment not found",
+        "landing visibility",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    let has_delivery_action = [
+        "deploy",
+        "ship",
+        "publish",
+        "restore",
+        "bring online",
+        "go live",
+        "launch",
+        "rollout",
+        "put online",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    has_public_surface && has_delivery_action
+}
+
+fn looks_like_founder_or_stakeholder_communication_prompt(lowered_prompt: &str) -> bool {
+    let has_people = [
+        "michael.welsch",
+        "olaf",
+        "marco",
+        "founder",
+        "stakeholder",
+        "sales officer",
+        "partner manager",
+        "business angel",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    let has_communication_action = [
+        "feedback", "email", "mail", "jami", "inform", "contact", "reply", "write to", "send",
+        "outreach",
+    ]
+    .iter()
+    .any(|needle| lowered_prompt.contains(needle));
+    has_people && has_communication_action
 }
 
 pub fn submit_chat_prompt_with_thread_key(
@@ -1736,6 +2087,10 @@ fn service_socket_path(root: &Path) -> std::path::PathBuf {
     canonical
 }
 
+fn service_lock_path(root: &Path) -> std::path::PathBuf {
+    root.join(SERVICE_LOCK_RELATIVE_PATH)
+}
+
 fn service_listen_addr(root: &Path) -> String {
     #[cfg(unix)]
     {
@@ -2326,14 +2681,15 @@ fn start_prompt_worker(
     });
 }
 
-/// Hand the just-completed slice to a separate completion-reviewer agent.
+/// Hand the just-completed slice to a separate mission-state reviewer agent.
 ///
 /// The reviewer runs in a fresh `PersistentSession` (its own clean codex-core
-/// thread, no executor turn history) with a skeptical, scope-bound system
-/// prompt. It either ratifies the slice (PASS) or surfaces concrete
-/// objections (FAIL/PARTIAL). On rejection the reviewer's report is enqueued
-/// as a high-priority rework slice on the same thread — the original ack
-/// path is unchanged so the user still sees the executor's reply.
+/// thread, no executor turn history) with a skeptical system prompt. It does
+/// not judge the slice in isolation; it judges whether the current mission
+/// state after that slice is now coherent and honestly ready for the claimed
+/// advancement or closure. On rejection the reviewer's report is enqueued as
+/// a high-priority rework slice on the same thread — the original ack path is
+/// unchanged so the user still sees the executor's reply.
 ///
 /// Failures inside the review path (LCM open errors, gateway timeouts) are
 /// swallowed and surfaced as events: the slice falls through unjudged rather
@@ -2347,15 +2703,46 @@ fn run_completion_review(
     mission_state: Option<&lcm::MissionStateRecord>,
 ) {
     let db_path = root.join("runtime/ctox.sqlite3");
-    let (mission_line, done_gate, focus_excerpt, anchors_excerpt) = {
+    let (
+        mission_line,
+        done_gate,
+        mission_state_excerpt,
+        focus_excerpt,
+        anchors_excerpt,
+        narrative_excerpt,
+        open_mission_states_excerpt,
+        assurance_excerpt,
+        recent_verification_excerpt,
+        communication_excerpt,
+    ) = {
+        let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).ok();
         let mission_record = mission_state.cloned().or_else(|| {
-            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
-                .and_then(|engine| engine.mission_state(conversation_id))
-                .ok()
+            engine
+                .as_ref()
+                .and_then(|inner| inner.mission_state(conversation_id).ok())
         });
-        let continuity = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
-            .and_then(|engine| engine.continuity_show_all(conversation_id))
-            .ok();
+        let continuity = engine
+            .as_ref()
+            .and_then(|inner| inner.continuity_show_all(conversation_id).ok());
+        let open_mission_states = engine
+            .as_ref()
+            .and_then(|inner| inner.list_mission_states(true).ok())
+            .unwrap_or_default();
+        let assurance = engine
+            .as_ref()
+            .and_then(|inner| inner.mission_assurance_snapshot(conversation_id).ok());
+        let recent_verification_runs = engine
+            .as_ref()
+            .and_then(|inner| inner.list_verification_runs(conversation_id, 4).ok())
+            .unwrap_or_default();
+        let communication_excerpt = job
+            .thread_key
+            .as_deref()
+            .and_then(|thread_key| {
+                channels::load_thread_communication_feed(root, thread_key, 8).ok()
+            })
+            .map(|items| format_review_communication_feed(&items))
+            .unwrap_or_default();
         (
             mission_record
                 .as_ref()
@@ -2365,6 +2752,10 @@ fn run_completion_review(
                 .as_ref()
                 .map(|m| m.done_gate.clone())
                 .unwrap_or_default(),
+            mission_record
+                .as_ref()
+                .map(format_review_mission_state)
+                .unwrap_or_default(),
             continuity
                 .as_ref()
                 .map(|c| clip_multiline(&c.focus.content, 1200))
@@ -2373,6 +2764,24 @@ fn run_completion_review(
                 .as_ref()
                 .map(|c| clip_multiline(&c.anchors.content, 1200))
                 .unwrap_or_default(),
+            continuity
+                .as_ref()
+                .map(|c| clip_multiline(&c.narrative.content, 1200))
+                .unwrap_or_default(),
+            format_related_open_mission_states(
+                &open_mission_states,
+                conversation_id,
+                mission_record
+                    .as_ref()
+                    .map(|record| record.mission.as_str())
+                    .unwrap_or(""),
+            ),
+            assurance
+                .as_ref()
+                .map(format_review_assurance_snapshot)
+                .unwrap_or_default(),
+            format_review_verification_runs(&recent_verification_runs),
+            communication_excerpt,
         )
     };
     let owner_visible = derive_owner_visible_for_review(&job.source_label);
@@ -2384,8 +2793,14 @@ fn run_completion_review(
         owner_visible,
         mission: mission_line,
         done_gate,
+        mission_state_excerpt,
         focus_excerpt,
         anchors_excerpt,
+        narrative_excerpt,
+        open_mission_states_excerpt,
+        assurance_excerpt,
+        recent_verification_excerpt,
+        communication_excerpt,
     };
     let outcome = review::review_completion_if_needed(root, &review_request, reply_text);
     if !outcome.required {
@@ -2444,7 +2859,427 @@ fn run_completion_review(
                 ),
             ),
         }
+    } else if matches!(outcome.verdict, review::ReviewVerdict::Pass) {
+        match maybe_enqueue_owner_launch_confirmation_follow_up(
+            root,
+            job,
+            reply_text,
+            mission_state,
+        ) {
+            Ok(Some(title)) => push_event(
+                state,
+                format!("Owner confirmation follow-up enqueued: {title}"),
+            ),
+            Ok(None) => {}
+            Err(err) => push_event(
+                state,
+                format!(
+                    "Owner confirmation follow-up enqueue failed for {}: {}",
+                    job.source_label, err
+                ),
+            ),
+        }
+        match maybe_enqueue_founder_feedback_follow_up(root, job, reply_text, mission_state) {
+            Ok(Some(title)) => push_event(
+                state,
+                format!("Founder feedback follow-up enqueued: {title}"),
+            ),
+            Ok(None) => {}
+            Err(err) => push_event(
+                state,
+                format!(
+                    "Founder feedback follow-up enqueue failed for {}: {}",
+                    job.source_label, err
+                ),
+            ),
+        }
     }
+}
+
+fn format_review_mission_state(record: &lcm::MissionStateRecord) -> String {
+    [
+        format!("conversation_id: {}", record.conversation_id),
+        format!("mission: {}", fallback_text(&record.mission, "(empty)")),
+        format!(
+            "mission_status: {}",
+            fallback_text(&record.mission_status, "(empty)")
+        ),
+        format!(
+            "continuation_mode: {}",
+            fallback_text(&record.continuation_mode, "(empty)")
+        ),
+        format!(
+            "trigger_intensity: {}",
+            fallback_text(&record.trigger_intensity, "(empty)")
+        ),
+        format!("blocker: {}", fallback_text(&record.blocker, "none")),
+        format!(
+            "next_slice: {}",
+            fallback_text(&record.next_slice, "(empty)")
+        ),
+        format!("done_gate: {}", fallback_text(&record.done_gate, "(empty)")),
+        format!(
+            "closure_confidence: {}",
+            fallback_text(&record.closure_confidence, "(empty)")
+        ),
+        format!("is_open: {}", record.is_open),
+        format!("allow_idle: {}", record.allow_idle),
+        format!("watcher_trigger_count: {}", record.watcher_trigger_count),
+        format!(
+            "last_synced_at: {}",
+            fallback_text(&record.last_synced_at, "(empty)")
+        ),
+    ]
+    .join("\n")
+}
+
+fn format_related_open_mission_states(
+    records: &[lcm::MissionStateRecord],
+    conversation_id: i64,
+    mission_label: &str,
+) -> String {
+    let normalized_mission = mission_label.trim();
+    let mut relevant = records
+        .iter()
+        .filter(|record| record.conversation_id != conversation_id)
+        .filter(|record| {
+            if normalized_mission.is_empty() {
+                true
+            } else {
+                record.mission.trim() == normalized_mission
+            }
+        })
+        .take(6)
+        .map(|record| {
+            format!(
+                "- conv={} mission={} status={} blocker={} next={} done_gate={}",
+                record.conversation_id,
+                fallback_text(&record.mission, "(empty)"),
+                fallback_text(&record.mission_status, "(empty)"),
+                fallback_text(&record.blocker, "none"),
+                fallback_text(&record.next_slice, "(empty)"),
+                fallback_text(&record.done_gate, "(empty)")
+            )
+        })
+        .collect::<Vec<_>>();
+    if relevant.is_empty() && normalized_mission.is_empty() {
+        relevant = records
+            .iter()
+            .filter(|record| record.conversation_id != conversation_id)
+            .take(6)
+            .map(|record| {
+                format!(
+                    "- conv={} mission={} status={} blocker={} next={}",
+                    record.conversation_id,
+                    fallback_text(&record.mission, "(empty)"),
+                    fallback_text(&record.mission_status, "(empty)"),
+                    fallback_text(&record.blocker, "none"),
+                    fallback_text(&record.next_slice, "(empty)")
+                )
+            })
+            .collect::<Vec<_>>();
+    }
+    relevant.join("\n")
+}
+
+fn format_review_assurance_snapshot(snapshot: &lcm::MissionAssuranceSnapshot) -> String {
+    let latest_run = snapshot
+        .latest_run
+        .as_ref()
+        .map(|run| {
+            format!(
+                "latest_run: {} verdict={} summary={} open_claims={} closure_blockers={}",
+                fallback_text(&run.run_id, "(empty)"),
+                fallback_text(&run.review_verdict, "(empty)"),
+                fallback_text(&run.review_summary, "(empty)"),
+                run.open_claim_count,
+                run.closure_blocking_claim_count
+            )
+        })
+        .unwrap_or_else(|| "latest_run: none".to_string());
+    let open_claims = if snapshot.open_claims.is_empty() {
+        "open_claims:\n- none".to_string()
+    } else {
+        let mut lines = Vec::with_capacity(snapshot.open_claims.len() + 1);
+        lines.push("open_claims:".to_string());
+        lines.extend(snapshot.open_claims.iter().take(8).map(|claim| {
+            format!(
+                "- {} status={} blocks_closure={} subject={} summary={}",
+                fallback_text(&claim.claim_key, "(empty)"),
+                fallback_text(&claim.claim_status, "(empty)"),
+                claim.blocks_closure,
+                fallback_text(&claim.subject, "(empty)"),
+                fallback_text(&claim.summary, "(empty)")
+            )
+        }));
+        lines.join("\n")
+    };
+    format!("{latest_run}\n{open_claims}")
+}
+
+fn format_review_verification_runs(runs: &[lcm::VerificationRunRecord]) -> String {
+    if runs.is_empty() {
+        return String::new();
+    }
+    runs.iter()
+        .take(4)
+        .map(|run| {
+            format!(
+                "- {} source={} verdict={} score={} summary={}",
+                fallback_text(&run.run_id, "(empty)"),
+                fallback_text(&run.source_label, "(empty)"),
+                fallback_text(&run.review_verdict, "(empty)"),
+                run.review_score,
+                fallback_text(&run.review_summary, "(empty)")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_review_communication_feed(items: &[channels::CommunicationFeedItem]) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
+    items
+        .iter()
+        .take(8)
+        .map(|item| {
+            format!(
+                "- {} {} from {} <{}> subject={} route={} preview={}",
+                fallback_text(&item.external_created_at, "(time unknown)"),
+                fallback_text(&item.direction, "(direction unknown)"),
+                fallback_text(&item.sender_display, "(unknown sender)"),
+                fallback_text(&item.sender_address, "(unknown address)"),
+                fallback_text(&item.subject, "(no subject)"),
+                fallback_text(&item.route_status, "(no route status)"),
+                fallback_text(&item.preview, "(no preview)")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn maybe_enqueue_owner_launch_confirmation_follow_up(
+    root: &Path,
+    job: &QueuedPrompt,
+    reply_text: &str,
+    mission_state: Option<&lcm::MissionStateRecord>,
+) -> Result<Option<String>> {
+    if !should_create_owner_launch_confirmation_follow_up(job, reply_text, mission_state) {
+        return Ok(None);
+    }
+    let mission_slug = clip_text(
+        mission_state
+            .map(|state| state.mission.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| job.goal.trim()),
+        80,
+    )
+    .replace(' ', "-");
+    let title = "Owner confirmation after public Kunstmen launch slice".to_string();
+    let prompt = format!(
+        "A public-facing Kunstmen deployment appears to be live and verified.\n\n\
+This is now an owner-confirmation slice.\n\n\
+Required actions:\n\
+- verify the canonical public URL again before writing anything (`kunstmen.com`, `www.kunstmen.com`, or the verified canonical domain)\n\
+- reconstruct the owner communication state in the same turn using `ctox channel context`, `ctox channel history`, `ctox channel search`, and `ctox lcm-grep`\n\
+- continue the existing owner email thread if one exists; do not create a context-blind fresh thread when a live launch thread already exists\n\
+- send the owner the exact live link and ask for explicit confirmation that the public landing state is acceptable\n\
+- include the highest remaining risk or known limitation instead of implying the launch is perfectly finished\n\
+- keep this follow-up ticket-backed until the owner reply is sent and tracked\n\n\
+Guardrails:\n\
+- do not send a generic status mail without the exact live URL\n\
+- do not skip the owner confirmation and jump straight to broader founder outreach\n\
+- if context health is critical or the communication state remains ambiguous after lookup, do not send; leave the blocker durably instead\n\
+- proactive owner outreach should be reviewable and should not bypass a skeptical communication review when the message is strategically sensitive\n\n\
+Latest verified execution summary:\n{}\n",
+        clip_multiline(reply_text, 900)
+    );
+    let created = create_self_work_backed_queue_task(
+        root,
+        DurableSelfWorkQueueRequest {
+            kind: "owner-confirmation".to_string(),
+            title,
+            prompt,
+            thread_key: job
+                .thread_key
+                .clone()
+                .unwrap_or_else(|| format!("owner-confirmation:{mission_slug}")),
+            workspace_root: job.workspace_root.clone(),
+            priority: "high".to_string(),
+            suggested_skill: Some("owner-communication".to_string()),
+            parent_message_key: job.leased_message_keys.first().cloned(),
+            metadata: serde_json::json!({
+                "dedupe_key": format!("owner-confirmation:{mission_slug}"),
+                "origin_source_label": job.source_label,
+                "milestone_kind": "public-landing",
+            }),
+        },
+    )?;
+    Ok(Some(created.title))
+}
+
+fn maybe_enqueue_founder_feedback_follow_up(
+    root: &Path,
+    job: &QueuedPrompt,
+    reply_text: &str,
+    mission_state: Option<&lcm::MissionStateRecord>,
+) -> Result<Option<String>> {
+    if !should_create_founder_feedback_follow_up(job, reply_text, mission_state) {
+        return Ok(None);
+    }
+    let mission_slug = clip_text(
+        mission_state
+            .map(|state| state.mission.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| job.goal.trim()),
+        80,
+    )
+    .replace(' ', "-");
+    let title = "Founder feedback after public Kunstmen landing slice".to_string();
+    let prompt = format!(
+        "Public-facing Kunstmen landing visibility appears to be live and verified.\n\n\
+This is now a founder-feedback slice, not another implementation slice.\n\n\
+Required actions:\n\
+- first verify the public surface again (`kunstmen.com` / the canonical landing URL) so the outreach reflects the newest live state\n\
+- reconstruct the relevant communication state in the same turn before writing anything: use `ctox channel context`, `ctox channel history`, `ctox channel search`, and `ctox lcm-grep` when prior promises or owner dialogue may matter\n\
+- create or continue the durable founder communication threads instead of sending context-blind one-off notes\n\
+- ask for role-specific feedback rather than a generic \"thoughts?\"\n\n\
+Role-specific asks:\n\
+- Michael Welsch (CEO): what is live now, what remains missing for launch credibility, and what decision or priority shift he wants next\n\
+- Olaf Schaefers (Sales Officer): clarity of the commercial message, customer objections, and what is still missing for first customer conversations\n\
+- Marco Pucciarelli (Partner Manager / Business Angel): partner-channel fit, positioning for partner introductions, and what would block investor or partner confidence\n\n\
+Guardrails:\n\
+- do not send founder communication from memory or only from the newest inbound line\n\
+- if context health is critical or communication state remains ambiguous after lookup, do not send; record the blocker durably instead\n\
+- proactive founder mail or Jami outreach should be reviewable and should not bypass a skeptical communication review\n\
+- if this follow-up spans multiple turns, keep it ticket-backed until all founder asks are sent and tracked\n\n\
+Latest verified execution summary:\n{}\n",
+        clip_multiline(reply_text, 900)
+    );
+    let created = create_self_work_backed_queue_task(
+        root,
+        DurableSelfWorkQueueRequest {
+            kind: "founder-feedback".to_string(),
+            title,
+            prompt,
+            thread_key: job
+                .thread_key
+                .clone()
+                .unwrap_or_else(|| format!("founder-feedback:{mission_slug}")),
+            workspace_root: job.workspace_root.clone(),
+            priority: "high".to_string(),
+            suggested_skill: Some("owner-communication".to_string()),
+            parent_message_key: job.leased_message_keys.first().cloned(),
+            metadata: serde_json::json!({
+                "dedupe_key": format!("founder-feedback:{mission_slug}"),
+                "origin_source_label": job.source_label,
+                "milestone_kind": "public-landing",
+            }),
+        },
+    )?;
+    Ok(Some(created.title))
+}
+
+fn should_create_owner_launch_confirmation_follow_up(
+    job: &QueuedPrompt,
+    reply_text: &str,
+    mission_state: Option<&lcm::MissionStateRecord>,
+) -> bool {
+    let mission_line = mission_state
+        .map(|state| state.mission.as_str())
+        .unwrap_or_default();
+    let combined = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        mission_line, job.goal, job.prompt, job.preview, reply_text
+    )
+    .to_ascii_lowercase();
+    let has_public_marker = [
+        "landing page",
+        "public landing",
+        "homepage",
+        "public site",
+        "kunstmen.com",
+        "www.kunstmen.com",
+        "vercel",
+        "landing visibility",
+        "public route",
+        "canonical landing",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+    let has_success_marker = [
+        " live",
+        " online",
+        " deployed",
+        " restored",
+        " verified",
+        " http 200",
+        " 200 ok",
+        " production build passed",
+        " aliased",
+        " complete",
+        " done",
+        " finished",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+    has_public_marker && has_success_marker
+}
+
+fn should_create_founder_feedback_follow_up(
+    job: &QueuedPrompt,
+    reply_text: &str,
+    mission_state: Option<&lcm::MissionStateRecord>,
+) -> bool {
+    let mission_line = mission_state
+        .map(|state| state.mission.as_str())
+        .unwrap_or_default();
+    let combined = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        mission_line, job.goal, job.prompt, job.preview, reply_text
+    )
+    .to_ascii_lowercase();
+    let has_public_marker = [
+        "landing page",
+        "public landing",
+        "homepage",
+        "public site",
+        "kunstmen.com",
+        "vercel",
+        "landing visibility",
+        "public route",
+        "canonical landing",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+    let has_success_marker = [
+        " live",
+        " online",
+        " deployed",
+        " restored",
+        " verified",
+        " http 200",
+        " 200 ok",
+        " production build passed",
+        " complete",
+        " done",
+        " finished",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+    let references_founders = [
+        "olaf",
+        "marco",
+        "sales officer",
+        "partner manager",
+        "business angel",
+        "founder team",
+    ]
+    .iter()
+    .any(|needle| combined.contains(needle));
+    has_public_marker && has_success_marker && references_founders
 }
 
 /// Background-driven slices (watchdog, timeout continuation, queue-pressure
@@ -2644,6 +3479,13 @@ fn auto_close_pending_approval_gates(root: &Path) -> Result<usize> {
 fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> Result<()> {
     if mission_watcher_disabled(root) {
         return Ok(());
+    }
+    let cleaned = repair_open_mission_state_hygiene(root)?;
+    if !cleaned.is_empty() {
+        push_event(
+            state,
+            format!("Mission-state hygiene cleaned {}", cleaned.join(", ")),
+        );
     }
     let (last_progress_epoch_secs, last_error) = {
         let shared = lock_shared_state(state);
@@ -3116,8 +3958,40 @@ fn decorate_service_event_with_skill(event: &str, suggested_skill: Option<&str>)
     format!("{event} [skill {skill}]")
 }
 
+fn queued_prompt_priority_rank(prompt: &QueuedPrompt) -> i32 {
+    let source = prompt.source_label.to_ascii_lowercase();
+    let skill = prompt
+        .suggested_skill
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if skill == "owner-communication" || skill == "founder-communication" {
+        return 400;
+    }
+    if source == "tui" {
+        return 300;
+    }
+    if source.starts_with("email") || source == "email" {
+        return 250;
+    }
+    if source.starts_with("ticket:") {
+        return 200;
+    }
+    if source == "queue" {
+        return 100;
+    }
+    150
+}
+
 fn maybe_start_next_queued_prompt_locked(shared: &mut SharedState) -> Option<QueuedPrompt> {
-    let queued = shared.pending_prompts.pop_front()?;
+    let best_index = shared
+        .pending_prompts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, prompt)| queued_prompt_priority_rank(prompt))
+        .map(|(index, _)| index)?;
+    let queued = shared.pending_prompts.remove(best_index)?;
     shared.busy = true;
     shared.current_goal_preview = Some(queued.preview.clone());
     shared.active_source_label = Some(queued.source_label.clone());
@@ -5121,6 +5995,43 @@ mod tests {
     }
 
     #[test]
+    fn starting_queued_prompt_prioritizes_tui_over_queue_rework() {
+        let mut shared = SharedState::default();
+        shared.pending_prompts.push_back(QueuedPrompt {
+            preview: "review rework".to_string(),
+            source_label: "queue".to_string(),
+            goal: "continue review rework".to_string(),
+            prompt: "review prompt".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: None,
+            workspace_root: None,
+            ticket_self_work_id: None,
+        });
+        shared.pending_prompts.push_back(QueuedPrompt {
+            preview: "operator correction".to_string(),
+            source_label: "tui".to_string(),
+            goal: "operator correction".to_string(),
+            prompt: "operator prompt".to_string(),
+            suggested_skill: None,
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("tui/main".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+        });
+
+        let next = maybe_start_next_queued_prompt_locked(&mut shared)
+            .expect("queued prompt should be started");
+
+        assert_eq!(next.source_label, "tui");
+        assert_eq!(shared.active_source_label.as_deref(), Some("tui"));
+        assert_eq!(shared.pending_prompts.len(), 1);
+        assert_eq!(shared.pending_prompts[0].source_label, "queue");
+    }
+
+    #[test]
     fn published_self_work_tickets_preserve_skill_hint_when_routed() {
         let root = temp_root("ticket-self-work-skill");
         let item = tickets::put_ticket_self_work_item(
@@ -5522,6 +6433,97 @@ mod tests {
         assert!(prepared
             .prompt
             .contains("[secret-ref:credentials/OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn prepare_chat_prompt_suggests_service_deployment_for_public_landing_recovery() {
+        let root = temp_root("prepare-chat-landing-skill");
+
+        let prepared = prepare_chat_prompt(
+            &root,
+            "Restore the kunstmen.com landing page on Vercel and bring the public site back online.",
+        )
+        .expect("prompt preparation should succeed");
+
+        assert_eq!(
+            prepared.suggested_skill.as_deref(),
+            Some("service-deployment")
+        );
+    }
+
+    #[test]
+    fn public_landing_pass_enqueues_owner_confirmation_self_work() {
+        let root = temp_root("owner-confirmation-follow-up");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let job = QueuedPrompt {
+            prompt: "Restore the kunstmen.com landing page on Vercel and verify the public site."
+                .to_string(),
+            goal: "Bring the public Kunstmen landing page online.".to_string(),
+            preview: "Restore public landing visibility".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("service-deployment".to_string()),
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("queue/kunstmen-launch".to_string()),
+            workspace_root: Some("/tmp/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        let created = maybe_enqueue_owner_launch_confirmation_follow_up(
+            &root,
+            &job,
+            "Done. kunstmen.com is live, aliased, and verified with HTTP 200.",
+            None,
+        )
+        .expect("owner confirmation follow-up should succeed");
+
+        assert!(created.is_some());
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work items");
+        assert_eq!(self_work.len(), 1);
+        assert_eq!(self_work[0].kind, "owner-confirmation");
+        assert_eq!(self_work[0].state, "queued");
+        assert_eq!(
+            self_work[0].suggested_skill.as_deref(),
+            Some("owner-communication")
+        );
+    }
+
+    #[test]
+    fn public_landing_pass_enqueues_founder_feedback_self_work() {
+        let root = temp_root("founder-feedback-follow-up");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let job = QueuedPrompt {
+            prompt: "Restore the kunstmen.com landing page on Vercel, verify the public site, then gather founder feedback from Michael, Olaf, and Marco.".to_string(),
+            goal: "Bring the public Kunstmen landing page online.".to_string(),
+            preview: "Restore public landing visibility".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("service-deployment".to_string()),
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("queue/kunstmen-launch".to_string()),
+            workspace_root: Some("/tmp/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        let created = maybe_enqueue_founder_feedback_follow_up(
+            &root,
+            &job,
+            "Done. The public kunstmen.com landing page is live on Vercel and verified with HTTP 200.",
+            None,
+        )
+        .expect("founder feedback follow-up should succeed");
+
+        assert!(created.is_some());
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work items");
+        assert_eq!(self_work.len(), 1);
+        assert_eq!(self_work[0].kind, "founder-feedback");
+        assert_eq!(self_work[0].state, "queued");
+        assert_eq!(
+            self_work[0].suggested_skill.as_deref(),
+            Some("owner-communication")
+        );
     }
 
     #[test]
@@ -6142,6 +7144,320 @@ mod tests {
         assert_eq!(self_work.len(), 1);
         assert_eq!(self_work[0].kind, "mission-follow-up");
         assert_eq!(self_work[0].state, "queued");
+    }
+
+    #[test]
+    fn mission_state_hygiene_closes_sparse_open_state_without_work() {
+        let root = temp_root("mission-state-hygiene-sparse");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+        let conversation_id = 8181;
+        engine
+            .continuity_init_documents(conversation_id)
+            .expect("failed to init continuity");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id,
+                mission: String::new(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: String::new(),
+                next_slice: String::new(),
+                done_gate: String::new(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-empty".to_string(),
+                last_synced_at: "2026-04-21T10:00:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed sparse mission");
+
+        let cleaned = repair_open_mission_state_hygiene(&root).expect("hygiene should succeed");
+        assert_eq!(cleaned.len(), 1);
+
+        let stored = engine
+            .stored_mission_state(conversation_id)
+            .expect("failed to reload mission")
+            .expect("mission missing after hygiene");
+        assert!(!stored.is_open);
+        assert_eq!(stored.continuation_mode, "closed");
+    }
+
+    #[test]
+    fn mission_state_hygiene_closes_duplicate_wrapper_state() {
+        let root = temp_root("mission-state-hygiene-duplicate");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+
+        engine
+            .continuity_init_documents(9001)
+            .expect("failed to init primary continuity");
+        engine
+            .continuity_init_documents(9002)
+            .expect("failed to init wrapper continuity");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9001,
+                mission: "Kunstmen Vercel access recovery".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: "missing deployment access".to_string(),
+                next_slice: "restore project access".to_string(),
+                done_gate: "project access restored".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-9001".to_string(),
+                last_synced_at: "2026-04-21T10:02:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed primary mission");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9002,
+                mission: "Continue mission Kunstmen Vercel access recovery".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: "resume recovery".to_string(),
+                next_slice: "restore project access".to_string(),
+                done_gate: "project access restored".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-9002".to_string(),
+                last_synced_at: "2026-04-21T10:01:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed wrapper mission");
+
+        let cleaned = repair_open_mission_state_hygiene(&root).expect("hygiene should succeed");
+        assert_eq!(cleaned.len(), 1);
+
+        let primary = engine
+            .stored_mission_state(9001)
+            .expect("failed to reload primary")
+            .expect("primary missing");
+        let wrapper = engine
+            .stored_mission_state(9002)
+            .expect("failed to reload wrapper")
+            .expect("wrapper missing");
+        assert!(primary.is_open);
+        assert!(!wrapper.is_open);
+        assert!(wrapper.blocker.contains("superseded"));
+
+        let resynced_wrapper = engine
+            .sync_mission_state_from_continuity(9002)
+            .expect("failed to resync wrapper continuity");
+        assert!(!resynced_wrapper.is_open);
+        assert!(matches!(
+            normalize_state_token(&resynced_wrapper.mission_status).as_str(),
+            "closed" | "done"
+        ));
+    }
+
+    #[test]
+    fn canonical_mission_identity_prefers_wrapper_next_slice_when_it_is_more_concrete() {
+        let wrapper = lcm::MissionStateRecord {
+            conversation_id: 9101,
+            mission: "Review rework: [E-Mail eingegangen] Sender: cto1@metric-space.ai".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker: "re-check runtime state".to_string(),
+            next_slice: "Kunstmen Vercel access recovery".to_string(),
+            done_gate: "project access restored".to_string(),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-9101".to_string(),
+            last_synced_at: "2026-04-21T10:03:00Z".to_string(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 1,
+        };
+
+        assert_eq!(
+            canonical_mission_identity(&wrapper),
+            "kunstmen vercel access recovery"
+        );
+    }
+
+    #[test]
+    fn mission_state_hygiene_closes_review_wrapper_that_points_at_primary_next_slice() {
+        let root = temp_root("mission-state-hygiene-wrapper-next-slice");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+
+        for conversation_id in [9201, 9202] {
+            engine
+                .continuity_init_documents(conversation_id)
+                .expect("failed to init continuity");
+        }
+
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9201,
+                mission: "Kunstmen Vercel access recovery".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: "restore project access".to_string(),
+                next_slice: "restore project access".to_string(),
+                done_gate: "project access restored".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-9201".to_string(),
+                last_synced_at: "2026-04-21T10:04:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed primary mission");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9202,
+                mission: "Review rework: [E-Mail eingegangen] Sender: cto1@metric-space.ai"
+                    .to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "hot".to_string(),
+                blocker: "re-check runtime".to_string(),
+                next_slice: "Kunstmen Vercel access recovery".to_string(),
+                done_gate: "project access restored".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-9202".to_string(),
+                last_synced_at: "2026-04-21T10:03:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 1,
+            })
+            .expect("failed to seed wrapper mission");
+
+        let cleaned = repair_open_mission_state_hygiene(&root).expect("hygiene should succeed");
+        assert_eq!(cleaned.len(), 1);
+
+        let wrapper = engine
+            .stored_mission_state(9202)
+            .expect("failed to reload wrapper")
+            .expect("wrapper missing");
+        assert!(!wrapper.is_open);
+        assert!(wrapper.blocker.contains("superseded"));
+
+        let resynced_wrapper = engine
+            .sync_mission_state_from_continuity(9202)
+            .expect("failed to resync wrapper continuity");
+        assert!(!resynced_wrapper.is_open);
+    }
+
+    #[test]
+    fn repair_active_mission_summary_coverage_seeds_open_mission_without_summary() {
+        let root = temp_root("summary-coverage-open-mission");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let engine =
+            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).expect("failed to open lcm");
+
+        engine
+            .continuity_init_documents(9301)
+            .expect("failed to init continuity");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9301,
+                mission: "Open mission without summary coverage".to_string(),
+                mission_status: "active".to_string(),
+                continuation_mode: "continuous".to_string(),
+                trigger_intensity: "warm".to_string(),
+                blocker: "none".to_string(),
+                next_slice: "continue runtime recheck".to_string(),
+                done_gate: "leave durable summary backing".to_string(),
+                closure_confidence: "low".to_string(),
+                is_open: true,
+                allow_idle: false,
+                focus_head_commit_id: "focus-9301".to_string(),
+                last_synced_at: "2026-04-21T10:05:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed mission");
+        for idx in 0..10 {
+            engine
+                .add_message(
+                    9301,
+                    if idx % 2 == 0 { "user" } else { "assistant" },
+                    &format!("message {idx} for open mission summary coverage"),
+                )
+                .expect("failed to add message");
+        }
+
+        let seeded =
+            repair_active_mission_summary_coverage(&root).expect("summary coverage should succeed");
+        assert_eq!(seeded.len(), 1);
+        assert!(engine.summary_item_count(9301).expect("count should work") > 0);
+    }
+
+    #[test]
+    fn repair_active_mission_summary_coverage_seeds_closed_idle_mission_with_real_history() {
+        let root = temp_root("summary-coverage-closed-idle");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let engine =
+            lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()).expect("failed to open lcm");
+
+        engine
+            .continuity_init_documents(9302)
+            .expect("failed to init continuity");
+        engine
+            .overwrite_mission_state(&lcm::MissionStateRecord {
+                conversation_id: 9302,
+                mission: "Closed mission with enough history to summarize".to_string(),
+                mission_status: "done".to_string(),
+                continuation_mode: "closed".to_string(),
+                trigger_intensity: "warm".to_string(),
+                blocker: "none".to_string(),
+                next_slice: "none".to_string(),
+                done_gate: "preserve summary backing".to_string(),
+                closure_confidence: "high".to_string(),
+                is_open: false,
+                allow_idle: true,
+                focus_head_commit_id: "focus-9302".to_string(),
+                last_synced_at: "2026-04-21T10:15:00Z".to_string(),
+                watcher_last_triggered_at: None,
+                watcher_trigger_count: 0,
+            })
+            .expect("failed to seed mission");
+        for idx in 0..11 {
+            engine
+                .add_message(
+                    9302,
+                    if idx % 2 == 0 { "user" } else { "assistant" },
+                    &format!("message {idx} for closed mission summary coverage"),
+                )
+                .expect("failed to add message");
+        }
+
+        let seeded =
+            repair_active_mission_summary_coverage(&root).expect("summary coverage should succeed");
+        assert_eq!(seeded.len(), 1);
+        assert!(engine.summary_item_count(9302).expect("count should work") > 0);
     }
 
     #[test]

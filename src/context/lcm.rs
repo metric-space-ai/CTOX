@@ -365,6 +365,12 @@ pub struct ContinuityPromptPayload {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContinuityCoverageStatus {
+    pub document_is_sparse: bool,
+    pub summary_backing_missing: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ExplicitAnchorLiteral {
     literal: String,
@@ -1837,6 +1843,7 @@ impl LcmEngine {
     ) -> Result<ContinuityPromptPayload> {
         let document = self.ensure_continuity_document(conversation_id, kind)?;
         let snapshot = self.snapshot(conversation_id)?;
+        let document_is_sparse = continuity_document_is_sparse(kind, &document.content);
         let explicit_anchor_literals = if kind == ContinuityKind::Anchors {
             collect_explicit_anchor_literals(&snapshot.messages)
         } else {
@@ -1853,7 +1860,7 @@ impl LcmEngine {
             .messages
             .iter()
             .rev()
-            .take(8)
+            .take(if document_is_sparse { 14 } else { 8 })
             .map(|message| {
                 format!(
                     "[{} #{}] {}",
@@ -1862,11 +1869,19 @@ impl LcmEngine {
                     sentence_fragment(
                         &message.content,
                         if kind == ContinuityKind::Anchors {
-                            420
+                            if document_is_sparse {
+                                560
+                            } else {
+                                420
+                            }
                         } else if kind == ContinuityKind::Focus {
                             520
                         } else {
-                            220
+                            if document_is_sparse {
+                                320
+                            } else {
+                                220
+                            }
                         },
                     )
                 )
@@ -1876,7 +1891,7 @@ impl LcmEngine {
             .summaries
             .iter()
             .rev()
-            .take(4)
+            .take(if document_is_sparse { 6 } else { 4 })
             .map(|summary| {
                 format!(
                     "[{} depth={}] {}",
@@ -1894,6 +1909,7 @@ impl LcmEngine {
             &recent_summaries,
             &forgotten,
             &explicit_anchor_literals,
+            document_is_sparse,
         );
 
         Ok(ContinuityPromptPayload {
@@ -1905,6 +1921,53 @@ impl LcmEngine {
             forgotten_lines: forgotten,
             prompt,
         })
+    }
+
+    pub fn summary_item_count(&self, conversation_id: i64) -> Result<usize> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM context_items WHERE conversation_id = ?1 AND item_type = ?2",
+            params![conversation_id, ContextItemType::Summary.as_str()],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
+    }
+
+    pub fn message_item_count(&self, conversation_id: i64) -> Result<usize> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM context_items WHERE conversation_id = ?1 AND item_type = ?2",
+            params![conversation_id, ContextItemType::Message.as_str()],
+            |row| row.get::<_, i64>(0),
+        )? as usize)
+    }
+
+    pub fn continuity_coverage_status(
+        &self,
+        conversation_id: i64,
+    ) -> Result<ContinuityCoverageStatus> {
+        let anchors = self.ensure_continuity_document(conversation_id, ContinuityKind::Anchors)?;
+        let narrative =
+            self.ensure_continuity_document(conversation_id, ContinuityKind::Narrative)?;
+        Ok(ContinuityCoverageStatus {
+            document_is_sparse: continuity_document_is_sparse(
+                ContinuityKind::Anchors,
+                &anchors.content,
+            ) || continuity_document_is_sparse(
+                ContinuityKind::Narrative,
+                &narrative.content,
+            ),
+            summary_backing_missing: self.summary_item_count(conversation_id)? == 0,
+        })
+    }
+
+    pub fn ensure_summary_coverage(&self, conversation_id: i64) -> Result<Option<String>> {
+        if self.summary_item_count(conversation_id)? > 0 {
+            return Ok(None);
+        }
+        let message_count = self.message_item_count(conversation_id)?;
+        let pre_tail_messages = message_count.saturating_sub(self.config.fresh_tail_count);
+        if pre_tail_messages < 2 {
+            return Ok(None);
+        }
+        self.compact_leaf_pass(conversation_id, &HeuristicSummarizer, true)
     }
 
     pub fn continuity_preserve_recent_anchor_literals(
@@ -4717,6 +4780,7 @@ fn build_continuity_prompt_text(
     recent_summaries: &[String],
     forgotten_lines: &[String],
     explicit_anchor_literals: &[ExplicitAnchorLiteral],
+    document_is_sparse: bool,
 ) -> String {
     let kind_label = match kind {
         ContinuityKind::Narrative => "CONTINUITY NARRATIVE",
@@ -4785,6 +4849,12 @@ fn build_continuity_prompt_text(
             "- Do not keep stale closed fields (`Mission state: done`, `Continuation mode: closed`) when the mission is still open.".to_string(),
         );
     }
+    if document_is_sparse {
+        prompt.push(
+            "- The current document is sparse or placeholder-heavy. Prefer MODE A full replacement and write concrete values from the latest runtime evidence instead of keeping empty template keys."
+                .to_string(),
+        );
+    }
     prompt.push(String::new());
     prompt.push(
         "If no update is needed, make no CLI call and reply with the single word `noop`."
@@ -4851,6 +4921,47 @@ fn build_continuity_prompt_text(
             .to_string(),
     );
     prompt.join("\n")
+}
+
+fn continuity_document_is_sparse(kind: ContinuityKind, content: &str) -> bool {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let non_empty_lines = trimmed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if non_empty_lines.len() <= 6 {
+        return true;
+    }
+    let placeholder_like = non_empty_lines
+        .iter()
+        .filter(|line| {
+            let normalized = line
+                .trim_start_matches(['-', '*', '+', ' '])
+                .trim()
+                .to_ascii_lowercase();
+            normalized.ends_with(':')
+                || normalized.ends_with(": none")
+                || normalized.ends_with(": null")
+                || normalized.ends_with(": n/a")
+                || normalized == "summary:"
+                || normalized == "state:"
+                || normalized == "entry_id:"
+                || normalized == "event_type:"
+                || normalized == "consequence:"
+                || normalized == "source_class:"
+                || normalized == "source_ref:"
+                || normalized == "observed_at:"
+        })
+        .count();
+    match kind {
+        ContinuityKind::Narrative => trimmed.len() < 220 || placeholder_like >= 4,
+        ContinuityKind::Anchors => trimmed.len() < 220 || placeholder_like >= 3,
+        ContinuityKind::Focus => trimmed.len() < 260 || placeholder_like >= 3,
+    }
 }
 
 fn collect_explicit_anchor_literals(messages: &[MessageRecord]) -> Vec<ExplicitAnchorLiteral> {
@@ -5115,6 +5226,50 @@ mod tests {
 
         let expanded = engine.expand(&result.created_summary_ids[0], 1, true, 10_000)?;
         assert!(!expanded.messages.is_empty());
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_summary_coverage_seeds_summary_for_message_only_conversation() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+
+        for idx in 0..12 {
+            engine.add_message(
+                11,
+                if idx % 2 == 0 { "user" } else { "assistant" },
+                &format!("message {idx} about a long-running launch recovery and review rework"),
+            )?;
+        }
+
+        assert_eq!(engine.summary_item_count(11)?, 0);
+        let seeded = engine.ensure_summary_coverage(11)?;
+        assert!(seeded.is_some());
+        assert!(engine.summary_item_count(11)? >= 1);
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_summary_coverage_seeds_once_two_messages_fall_before_fresh_tail() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+
+        for idx in 0..(DEFAULT_FRESH_TAIL_COUNT + 2) {
+            engine.add_message(
+                77,
+                if idx % 2 == 0 { "user" } else { "assistant" },
+                &format!("message {idx} about active public launch rework"),
+            )?;
+        }
+
+        assert_eq!(engine.summary_item_count(77)?, 0);
+        let seeded = engine.ensure_summary_coverage(77)?;
+        assert!(seeded.is_some());
+        assert!(engine.summary_item_count(77)? >= 1);
 
         let _ = std::fs::remove_file(db_path);
         Ok(())

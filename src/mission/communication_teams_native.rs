@@ -5,9 +5,9 @@ use std::path::Path;
 use url::Url;
 
 use crate::mission::channels::{
-    ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
-    record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
-    CommunicationSyncRun, UpsertMessage,
+    ensure_account, ensure_routing_rows_for_inbound, mark_account_transport_health, now_iso_string,
+    open_channel_db, preview_text, record_communication_sync_run, refresh_thread, stable_digest,
+    upsert_communication_message, CommunicationSyncRun, UpsertMessage,
 };
 use crate::mission::communication_adapters::{
     AdapterSyncCommandRequest, TeamsSendCommandRequest, TeamsTestCommandRequest,
@@ -847,6 +847,17 @@ fn execute_test(options: &TeamsOptions) -> Result<Value> {
     };
     match client.get_app_info() {
         Ok(org_info) => {
+            let mut conn = open_channel_db(&options.db_path)?;
+            let account_key = account_key_for_teams(options);
+            ensure_account(
+                &mut conn,
+                &account_key,
+                "teams",
+                &options.bot_id,
+                "microsoft-graph",
+                build_profile_json(options),
+            )?;
+            mark_account_transport_health(&mut conn, &account_key, true, true, None)?;
             let org_name = org_info
                 .get("value")
                 .and_then(Value::as_array)

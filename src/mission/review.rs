@@ -8,17 +8,18 @@ use crate::inference::runtime_env;
 
 const REVIEW_TIMEOUT_SECS: u64 = 90;
 
-const REVIEW_SYSTEM_PROMPT: &str = r#"You are CTOX's completion reviewer.
+const REVIEW_SYSTEM_PROMPT: &str = r#"You are CTOX's mission-state reviewer.
 
-Your job is to stop CTOX from treating an under-verified execution slice as complete.
+Your job is to stop CTOX from treating an under-verified slice as proof that the current mission state is complete, coherent, or ready to close.
 
 You are a SEPARATE AGENT from the executor that produced the slice. You did not write the work. You have no attachment to it. Your bias is skepticism, not endorsement.
 
-Strict scope rule:
-- You review ONLY the slice described in the user message under SCOPE and WHAT EXECUTOR DID.
-- Do not invent new acceptance criteria beyond the explicit done_gate.
-- Do not review unrelated mission work, prior turns, or hypothetical issues.
-- If the slice's scope is ambiguous, return PARTIAL with a one-line clarification request rather than guessing.
+Mission-context rule:
+- Review the CURRENT MISSION STATE AFTER THIS SLICE.
+- The slice is evidence, not the scope boundary.
+- Treat contradictions in mission state, continuity, open claims, recent verification, or relevant communication as in-scope when they affect whether CTOX can honestly treat the mission as done, advanced, or ready for stakeholder communication.
+- Do not invent arbitrary new aspirations beyond the explicit mission contract, done_gate, active blocker/next-step state, and communication obligations already visible in the provided context.
+- If the mission state is ambiguous or under-specified, return PARTIAL with a one-line clarification request rather than guessing.
 
 Verification discipline (strict read-only review mode):
 - Do not modify project files.
@@ -27,9 +28,14 @@ Verification discipline (strict read-only review mode):
 - Prefer direct checks against the current repo, runtime, processes, logs, and tests over prose-only reasoning.
 - If a claim can be verified with a command, run the command instead of restating the claim.
 
+Communication discipline:
+- If the slice drafts, sends, or claims to have sent email, Jami, or other stakeholder communication, verify that the latest relevant communication state was reconstructed first.
+- Do not PASS a founder or stakeholder communication slice when the evidence shows only the newest message, a wrapper, or memory-based drafting.
+- When proactive milestone outreach is involved, look for role-appropriate asks and fresh communication-state evidence rather than generic "thoughts?" messaging.
+
 Done-gate-first discipline:
 - If an explicit done_gate is provided in SCOPE, test that done_gate FIRST. If unmet, FAIL — regardless of other evidence.
-- If no explicit done_gate is provided, derive the narrowest checkable claim from the slice prompt and test that.
+- If no explicit done_gate is provided, derive the narrowest mission-critical claim from the slice prompt plus the active mission state and test that.
 
 When the slice claims an install, rollout, migration, repair, or service readiness, inspect the live surface.
 When the slice claims a code or config change is complete, inspect current workspace state and run the narrowest relevant checks.
@@ -58,12 +64,24 @@ pub struct CompletionReviewRequest {
     /// instructed to test this FIRST before any other criterion.
     /// Empty if no done-gate has been set.
     pub done_gate: String,
+    /// Compact rendering of the active mission state record.
+    pub mission_state_excerpt: String,
     /// Focus continuity excerpt (current task focus / next slice / blocker).
     /// Already-clipped text; passed through verbatim into the review brief.
     pub focus_excerpt: String,
     /// Anchors continuity excerpt (key facts discovered during the mission).
     /// Already-clipped text; passed through verbatim into the review brief.
     pub anchors_excerpt: String,
+    /// Narrative continuity excerpt (compressed recent turn history).
+    pub narrative_excerpt: String,
+    /// Other currently-open mission states relevant to closure/advancement.
+    pub open_mission_states_excerpt: String,
+    /// Current mission assurance state: latest verification + open claims.
+    pub assurance_excerpt: String,
+    /// Recent verification history for this conversation.
+    pub recent_verification_excerpt: String,
+    /// Relevant communication state for the active thread.
+    pub communication_excerpt: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +269,35 @@ fn assess_review_requirement(
         push_unique_reason(&mut reasons, "owner_visible_claim");
     }
 
+    let founder_or_stakeholder_communication = contains_any(
+        &lowered,
+        &[
+            "ctox channel send",
+            "reply by email",
+            "reply by jami",
+            "send an email",
+            "send email",
+            "send a jami",
+            "jami message",
+            "founder",
+            "stakeholder",
+            "michael.welsch",
+            "olaf",
+            "marco",
+            "feedback",
+            "sales officer",
+            "partner manager",
+            "business angel",
+        ],
+    );
+    if founder_or_stakeholder_communication {
+        score = score.saturating_add(2);
+        push_unique_reason(&mut reasons, "founder_or_stakeholder_communication");
+        if request.owner_visible {
+            score = score.saturating_add(1);
+        }
+    }
+
     (score >= 3, score, reasons)
 }
 
@@ -285,6 +332,36 @@ fn build_review_prompt(
     } else {
         request.anchors_excerpt.trim().to_string()
     };
+    let mission_state_block = if request.mission_state_excerpt.trim().is_empty() {
+        "(no mission-state record available)".to_string()
+    } else {
+        request.mission_state_excerpt.trim().to_string()
+    };
+    let narrative_block = if request.narrative_excerpt.trim().is_empty() {
+        "(no narrative continuity recorded)".to_string()
+    } else {
+        request.narrative_excerpt.trim().to_string()
+    };
+    let open_mission_states_block = if request.open_mission_states_excerpt.trim().is_empty() {
+        "(no other open mission states recorded)".to_string()
+    } else {
+        request.open_mission_states_excerpt.trim().to_string()
+    };
+    let assurance_block = if request.assurance_excerpt.trim().is_empty() {
+        "(no mission assurance snapshot recorded)".to_string()
+    } else {
+        request.assurance_excerpt.trim().to_string()
+    };
+    let recent_verification_block = if request.recent_verification_excerpt.trim().is_empty() {
+        "(no recent verification history recorded)".to_string()
+    } else {
+        request.recent_verification_excerpt.trim().to_string()
+    };
+    let communication_block = if request.communication_excerpt.trim().is_empty() {
+        "(no relevant communication context recorded)".to_string()
+    } else {
+        request.communication_excerpt.trim().to_string()
+    };
     let source = request.source_label.as_str();
     let owner_visible = if request.owner_visible { "yes" } else { "no" };
     let goal = request.goal.trim();
@@ -293,9 +370,9 @@ fn build_review_prompt(
 
     format!(
         "==REVIEWER ROLE==\n\
-You are a separate, skeptical CTOX completion reviewer. You did not produce the work below — you are reviewing it cold. Your bias is skepticism, not endorsement. Operate strictly read-only: do not modify files, do not run git write operations, do not install or restart services. Use shell/read tools only to verify claims.\n\
+You are a separate, skeptical CTOX mission-state reviewer. You did not produce the work below — you are reviewing it cold. Your bias is skepticism, not endorsement. Operate strictly read-only: do not modify files, do not run git write operations, do not install or restart services. Use shell/read tools only to verify claims.\n\
 \n\
-==SCOPE (review ONLY what is below — do not invent new criteria)==\n\
+==MISSION REVIEW SCOPE==\n\
 Mission: {mission_line}\n\
 Source label: {source}\n\
 Owner visible: {owner_visible}\n\
@@ -304,12 +381,30 @@ Trigger reasons: {reason_block}\n\
 Explicit done_gate (test this FIRST):\n\
 {done_gate_block}\n\
 \n\
-==CONTEXT (read-only, for grounding only — do not extend scope from this)==\n\
+Current mission-state record:\n\
+{mission_state_block}\n\
+\n\
+==MISSION CONTEXT (read-only evidence, not optional background)==\n\
 Focus snapshot:\n\
 {focus_block}\n\
 \n\
 Anchors snapshot:\n\
 {anchors_block}\n\
+\n\
+Narrative snapshot:\n\
+{narrative_block}\n\
+\n\
+Open mission states:\n\
+{open_mission_states_block}\n\
+\n\
+Mission assurance snapshot:\n\
+{assurance_block}\n\
+\n\
+Recent verification history:\n\
+{recent_verification_block}\n\
+\n\
+Relevant communication state:\n\
+{communication_block}\n\
 \n\
 ==WHAT THE EXECUTOR DID==\n\
 Slice goal:\n\
@@ -323,15 +418,15 @@ Latest reported result from the executor:\n\
 \n\
 ==REVIEW INSTRUCTIONS==\n\
 1. Test the done_gate first if one is provided. If unmet, return FAIL.\n\
-2. If the done_gate is missing or unclear, derive the narrowest checkable claim from the slice prompt and test that.\n\
-3. Use direct evidence (shell/read tools) instead of prose-only reasoning.\n\
-4. If the scope of the slice is ambiguous or under-specified, return PARTIAL with a one-line clarification request — do not guess.\n\
-5. Do not review unrelated mission work or prior turns. Stay inside the slice.\n\
-6. If you cannot complete a check (timeout, missing artifact, permission), return PARTIAL — never PASS by default.\n\
+2. Judge whether the CURRENT MISSION STATE AFTER THIS SLICE is now truthful, coherent, and ready for the claimed advancement or closure.\n\
+3. Use the slice as evidence, not as the scope boundary. Material contradictions in mission state, continuity, open claims, recent failed verification, broken public surfaces, or fresh communication context are in scope when they affect readiness.\n\
+4. Use direct evidence (shell/read tools) instead of prose-only reasoning.\n\
+5. Do not invent arbitrary new ambitions beyond the mission contract and active mission state. But do not ignore visible contradictions just because the executor did not mention them.\n\
+6. If the mission state is ambiguous, under-specified, or you cannot complete a check (timeout, missing artifact, permission), return PARTIAL — never PASS by default.\n\
 \n\
 Respond in exactly this shape:\n\
 VERDICT: PASS|FAIL|PARTIAL\n\
-SUMMARY: <one sentence — must reference the specific done_gate or claim being judged>\n\
+SUMMARY: <one sentence — must reference the done_gate or the current mission-state claim being judged>\n\
 OPEN_ITEMS:\n\
 - <item>\n\
 EVIDENCE:\n\
@@ -463,6 +558,29 @@ mod tests {
     }
 
     #[test]
+    fn requires_review_for_founder_feedback_communication_slice() {
+        let request = CompletionReviewRequest {
+            goal: "Inform Olaf and Marco about the live landing page and request feedback."
+                .to_string(),
+            prompt: "Use ctox channel send to contact Olaf and Marco after the kunstmen.com landing page goes live."
+                .to_string(),
+            preview: "Founder feedback outreach".to_string(),
+            source_label: "queue".to_string(),
+            owner_visible: true,
+            ..CompletionReviewRequest::default()
+        };
+        let (required, score, reasons) = assess_review_requirement(
+            &request,
+            "Sent email feedback requests to Olaf and Marco after the kunstmen.com landing page went live.",
+        );
+        assert!(required);
+        assert!(score >= 3);
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "founder_or_stakeholder_communication"));
+    }
+
+    #[test]
     fn build_review_prompt_includes_role_scope_and_done_gate_blocks() {
         let request = CompletionReviewRequest {
             goal: "Roll out v2.3".to_string(),
@@ -472,8 +590,14 @@ mod tests {
             owner_visible: true,
             mission: "Stabilize staging deploys".to_string(),
             done_gate: "curl -f https://staging/health returns 200".to_string(),
+            mission_state_excerpt: "mission_status: active".to_string(),
             focus_excerpt: "Active task: deploy v2.3".to_string(),
             anchors_excerpt: "Repo: /opt/api".to_string(),
+            narrative_excerpt: "Turn 4: deployed candidate build".to_string(),
+            open_mission_states_excerpt: "none".to_string(),
+            assurance_excerpt: "latest verification: fail".to_string(),
+            recent_verification_excerpt: "run-123 fail".to_string(),
+            communication_excerpt: "no stakeholder communication".to_string(),
         };
         let rendered = build_review_prompt(
             &request,
@@ -481,10 +605,13 @@ mod tests {
             &["closure_claim".to_string()],
         );
         assert!(rendered.contains("==REVIEWER ROLE=="));
-        assert!(rendered.contains("==SCOPE"));
+        assert!(rendered.contains("==MISSION REVIEW SCOPE=="));
         assert!(rendered.contains("Explicit done_gate"));
         assert!(rendered.contains("curl -f https://staging/health"));
         assert!(rendered.contains("Stabilize staging deploys"));
+        assert!(rendered.contains("Current mission-state record"));
+        assert!(rendered.contains("Mission assurance snapshot"));
+        assert!(rendered.contains("Relevant communication state"));
         assert!(rendered.contains("==WHAT THE EXECUTOR DID=="));
         assert!(rendered.contains("Smoke test passed."));
     }
