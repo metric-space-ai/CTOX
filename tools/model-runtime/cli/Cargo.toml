@@ -57,11 +57,20 @@ name = "dflash-persistent-bench"
 path = "src/bin/dflash_persistent_bench.rs"
 doc = false
 
+[[bin]]
+name = "qwen35-parity-bench"
+path = "src/bin/qwen35_parity_bench.rs"
+required-features = ["cuda"]
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
 engine = { workspace = true }
 ctox-dflash-ffi = { path = "../dflash-ffi" }
+ctox-qwen35-27b = { path = "../models/qwen35_27b", optional = true }
+ctox-cuda-primitives = { path = "../cuda-primitives", optional = true }
+half = { workspace = true }
 candle-core = { workspace = true }
 candle-nn = { workspace = true }
 
@@ -106,7 +115,15 @@ default = []
 # Users on V100/T4/RTX-20xx should disable it at runtime with
 # `ENGINE_DISABLE_FLASH_ATTN=1` — the engine falls back to the reference
 # attention path (see `using_flash_attn()` in engine-core/src/utils/mod.rs).
-cuda = ["engine-core/cuda", "engine-server-core/cuda", "flash-attn"]
+cuda = [
+    "engine-core/cuda",
+    "engine-server-core/cuda",
+    "flash-attn",
+    "dep:ctox-qwen35-27b",
+    "ctox-qwen35-27b/cuda",
+    "dep:ctox-cuda-primitives",
+    "ctox-cuda-primitives/cuda",
+]
 nccl = ["engine-core/nccl", "engine-server-core/nccl"]
 cudnn = ["engine-core/cudnn", "engine-server-core/cudnn"]
 flash-attn = ["engine-core/cuda", "engine-server-core/cuda", "engine-core/flash-attn", "engine-server-core/flash-attn"]
