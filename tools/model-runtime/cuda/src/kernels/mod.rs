@@ -22,6 +22,7 @@ include!(concat!(env!("OUT_DIR"), "/ptx_registry.rs"));
 pub mod cast;
 pub mod embedding;
 pub mod gated_delta_net;
+pub mod l2_norm;
 pub mod matmul_bf16;
 pub mod mmq_q4k;
 pub mod residual;
@@ -29,6 +30,7 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod silu_mul;
 pub mod softmax;
+pub mod ssm_conv1d;
 
 pub use cast::{
     launch_cast_bf16_to_f32, launch_cast_f16_to_f32, launch_cast_f32_to_bf16,
@@ -39,6 +41,7 @@ pub use gated_delta_net::{
     launch_gated_delta_net_f32, GdnGateKind, GdnInterDtype, GdnLaunchInputs, GdnPersistInter,
     GdnRecurrence, GdnShape, GDN_TREE_ROOT_PARENT,
 };
+pub use l2_norm::launch_l2_norm_bf16;
 pub use matmul_bf16::{launch_matmul_bf16_bf16, launch_matmul_bf16_f32};
 pub use mmq_q4k::{launch_mmvq_q4k_f16, launch_mmvq_q4k_f32};
 pub use residual::{launch_residual_add_bf16, launch_residual_add_f32};
@@ -46,3 +49,4 @@ pub use rmsnorm::launch_rmsnorm_f32;
 pub use rope::launch_rope_mrope_bf16;
 pub use silu_mul::{launch_silu_mul_bf16, launch_silu_mul_f32};
 pub use softmax::launch_softmax_f32;
+pub use ssm_conv1d::launch_ssm_conv1d_bf16;
