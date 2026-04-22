@@ -7,6 +7,7 @@ use crate::execution::agent::direct_session::PersistentSession;
 use crate::inference::runtime_env;
 
 const REVIEW_TIMEOUT_SECS: u64 = 300;
+const REVIEW_MAX_LEGS: usize = 3;
 
 const REVIEW_SYSTEM_PROMPT: &str = r#"You are CTOX Review.
 
@@ -115,7 +116,7 @@ impl ReviewOutcome {
     }
 
     pub fn requires_follow_up(&self) -> bool {
-        self.required && self.verdict != ReviewVerdict::Pass
+        self.required && matches!(self.verdict, ReviewVerdict::Fail)
     }
 }
 
@@ -130,24 +131,7 @@ pub fn review_completion_if_needed(
     }
 
     let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
-    let review_prompt = build_review_prompt(request, &reasons);
-    let report = (|| -> anyhow::Result<String> {
-        let mut session = PersistentSession::start_with_instructions(
-            root,
-            &settings,
-            Some(REVIEW_SYSTEM_PROMPT),
-            true,
-        )?;
-        let result = session.run_turn(
-            &review_prompt,
-            Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
-            None,
-            Some(false),
-            0,
-        );
-        session.shutdown();
-        result
-    })();
+    let report = run_external_review_legs(root, request, &settings, &reasons);
     match report {
         Ok(report) => parse_review_report(score, reasons, &report),
         Err(err) => ReviewOutcome {
@@ -162,6 +146,50 @@ pub fn review_completion_if_needed(
             reasons,
         },
     }
+}
+
+fn run_external_review_legs(
+    root: &Path,
+    request: &CompletionReviewRequest,
+    settings: &std::collections::BTreeMap<String, String>,
+    reasons: &[String],
+) -> anyhow::Result<String> {
+    let mut prompt = build_review_prompt(request, reasons);
+    let mut last_report = String::new();
+
+    for leg in 0..REVIEW_MAX_LEGS {
+        let mut session = PersistentSession::start_with_instructions(
+            root,
+            settings,
+            Some(REVIEW_SYSTEM_PROMPT),
+            true,
+        )?;
+        let report = session.run_turn(
+            &prompt,
+            Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
+            None,
+            Some(false),
+            0,
+        )?;
+        session.shutdown();
+
+        let verdict = parse_verdict(&report);
+        let handoff = parse_handoff_block(&report);
+        last_report = report;
+
+        if !matches!(verdict, Some(ReviewVerdict::Partial)) {
+            break;
+        }
+        let Some(handoff) = handoff else {
+            break;
+        };
+        if leg + 1 >= REVIEW_MAX_LEGS {
+            break;
+        }
+        prompt = build_review_handoff_prompt(request, &handoff);
+    }
+
+    Ok(last_report)
 }
 
 fn assess_review_requirement(
@@ -335,6 +363,48 @@ HANDOFF:\n\
     )
 }
 
+fn build_review_handoff_prompt(request: &CompletionReviewRequest, handoff: &str) -> String {
+    let thread_key = if request.thread_key.trim().is_empty() {
+        "(none recorded)"
+    } else {
+        request.thread_key.trim()
+    };
+    let workspace_root = if request.workspace_root.trim().is_empty() {
+        "(none recorded)"
+    } else {
+        request.workspace_root.trim()
+    };
+    let runtime_db_path = if request.runtime_db_path.trim().is_empty() {
+        "(none recorded)"
+    } else {
+        request.runtime_db_path.trim()
+    };
+    let review_skill_path = if request.review_skill_path.trim().is_empty() {
+        "(none recorded)"
+    } else {
+        request.review_skill_path.trim()
+    };
+
+    format!(
+        "== REVIEW CONTINUATION ==\n\
+\n\
+Conversation id: {}\n\
+Thread key: {thread_key}\n\
+Workspace root: {workspace_root}\n\
+Runtime DB: {runtime_db_path}\n\
+Review skill: {review_skill_path}\n\
+\n\
+Open the review skill first and continue from this review handoff.\n\
+\n\
+Prior handoff:\n\
+{}\n\
+\n\
+Continue the remaining verification work and return the standard review format.\n",
+        request.conversation_id,
+        handoff.trim()
+    )
+}
+
 fn parse_review_report(score: u8, reasons: Vec<String>, report: &str) -> ReviewOutcome {
     let parsed_verdict = parse_verdict(report);
     let verdict = parsed_verdict.clone().unwrap_or(ReviewVerdict::Partial);
@@ -390,6 +460,46 @@ fn parse_prefixed_line(report: &str, prefix: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn parse_handoff_block(report: &str) -> Option<String> {
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in report.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("HANDOFF:") {
+            collecting = true;
+            let remainder = rest.trim();
+            if !remainder.is_empty() {
+                lines.push(remainder.to_string());
+            }
+            continue;
+        }
+        if collecting {
+            if trimmed.starts_with("VERDICT:")
+                || trimmed.starts_with("MISSION_STATE:")
+                || trimmed.starts_with("SUMMARY:")
+                || trimmed.starts_with("FAILED_GATES:")
+                || trimmed.starts_with("OPEN_ITEMS:")
+                || trimmed.starts_with("EVIDENCE:")
+            {
+                break;
+            }
+            if !trimmed.is_empty() {
+                lines.push(trimmed.to_string());
+            }
+        }
+    }
+    let joined = lines.join("\n");
+    let normalized = joined.trim();
+    if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("none")
+        || normalized.eq_ignore_ascii_case("- none")
+    {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
 }
 
 fn contains_any(haystack: &str, needles: &[&str]) -> bool {
@@ -491,5 +601,13 @@ mod tests {
         let outcome = parse_review_report(3, vec![], "SUMMARY: Looked okay overall.");
         assert_eq!(outcome.verdict, ReviewVerdict::Partial);
         assert!(outcome.summary.contains("stays open"));
+    }
+
+    #[test]
+    fn parse_handoff_block_extracts_multiline_body() {
+        let report = "VERDICT: PARTIAL\nMISSION_STATE: UNCLEAR\nSUMMARY: Need more checks.\nHANDOFF:\n- Verified public URL returns 200\n- Still need /api/state and buyer path\n";
+        let handoff = parse_handoff_block(report).expect("handoff missing");
+        assert!(handoff.contains("Verified public URL returns 200"));
+        assert!(handoff.contains("Still need /api/state"));
     }
 }
