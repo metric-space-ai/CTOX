@@ -25,6 +25,7 @@ pub mod gated_delta_net;
 pub mod l2_norm;
 pub mod matmul_bf16;
 pub mod mmq_q4k;
+pub mod mmq_q5k;
 pub mod residual;
 pub mod rmsnorm;
 pub mod rope;
@@ -44,6 +45,7 @@ pub use gated_delta_net::{
 pub use l2_norm::launch_l2_norm_bf16;
 pub use matmul_bf16::{launch_matmul_bf16_bf16, launch_matmul_bf16_f32};
 pub use mmq_q4k::{launch_mmvq_q4k_f16, launch_mmvq_q4k_f32};
+pub use mmq_q5k::{launch_mmvq_q5k_f16, launch_mmvq_q5k_f32};
 pub use residual::{launch_residual_add_bf16, launch_residual_add_f32};
 pub use rmsnorm::launch_rmsnorm_f32;
 pub use rope::launch_rope_mrope_bf16;
