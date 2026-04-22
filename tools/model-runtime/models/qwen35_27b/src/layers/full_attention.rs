@@ -544,23 +544,15 @@ impl Qwen35FullAttention {
 /// into a fresh tensor with the right shape metadata. This is one
 /// extra device-to-device memcpy per projection per forward; a fused
 /// `reshape_into(&mut self, shape)` on `CudaTensor` would remove it.
+/// Logical 3-D reshape of a bf16 activation buffer — no device work.
+///
+/// Uses `CudaTensor::reshape` to relabel the shape on the existing
+/// backing buffer. Earlier revisions allocated a fresh tensor and
+/// ran a `memcpy_dtod` for what is a pure label swap on row-major
+/// contiguous storage. That's three per-forward allocations + three
+/// D2D memcpys gone (one per Q/K/V projection × FA layer).
 fn reshape_3d(src: CudaTensor<bf16>, d0: usize, d1: usize, d2: usize) -> Result<CudaTensor<bf16>> {
-    let dev = src.device().clone();
-    if src.numel() != d0 * d1 * d2 {
-        return Err(anyhow!(
-            "reshape_3d: numel {} != {}*{}*{}",
-            src.numel(),
-            d0,
-            d1,
-            d2
-        ));
-    }
-    let mut dst = CudaTensor::<bf16>::zeros(dev.clone(), vec![d0, d1, d2])?;
-    let stream = dev.raw().default_stream();
-    stream
-        .memcpy_dtod(src.buf(), dst.buf_mut())
-        .map_err(|e| anyhow!("reshape_3d memcpy_dtod: {:?}", e))?;
-    Ok(dst)
+    src.reshape(vec![d0, d1, d2])
 }
 
 /// Extract head `h` from a `[n_tokens, n_heads, head_dim]` bf16
@@ -699,32 +691,24 @@ fn per_head_rmsnorm_bf16(
 
     let rows = n_tokens * n_heads;
 
-    // bf16 → f32 on the [n_tokens, n_heads*head_dim] layout.
-    let mut xf32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, n_heads * head_dim])?;
-    kernels::launch_cast_bf16_to_f32(device, x, &mut xf32)?;
-
-    // Reshape xf32 into [rows, head_dim] via D2D memcpy. Same pattern
-    // the bf16 path uses at RoPE time.
-    let mut xf32_2d = CudaTensor::<f32>::zeros(device.clone(), vec![rows, head_dim])?;
-    {
-        let stream = device.raw().default_stream();
-        stream
-            .memcpy_dtod(xf32.buf(), xf32_2d.buf_mut())
-            .map_err(|e| anyhow!("per_head_rmsnorm_bf16: reshape-to-2d memcpy_dtod: {:?}", e))?;
-    }
+    // bf16 → f32 on the [n_tokens, n_heads*head_dim] layout. The
+    // rmsnorm kernel expects a 2-D [rows, head_dim] f32, so we relabel
+    // the shape on the same backing buffer (logical reshape; row-major
+    // contiguous storage makes this a no-op). Same trick is applied to
+    // the output on the way back. Replaces two D2D memcpys that were
+    // shuffling the same bytes through a second allocation.
+    let xf32_flat =
+        CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, n_heads * head_dim])?;
+    let mut xf32_flat = xf32_flat;
+    kernels::launch_cast_bf16_to_f32(device, x, &mut xf32_flat)?;
+    let xf32_2d = xf32_flat.reshape(vec![rows, head_dim])?;
 
     // RMSNorm in f32, per-row over head_dim.
     let mut yf32_2d = CudaTensor::<f32>::zeros(device.clone(), vec![rows, head_dim])?;
     kernels::launch_rmsnorm_f32(device, &xf32_2d, weight, &mut yf32_2d, eps)?;
 
-    // Reshape back to [n_tokens, n_heads*head_dim] f32.
-    let mut yf32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, n_heads * head_dim])?;
-    {
-        let stream = device.raw().default_stream();
-        stream
-            .memcpy_dtod(yf32_2d.buf(), yf32.buf_mut())
-            .map_err(|e| anyhow!("per_head_rmsnorm_bf16: reshape-from-2d memcpy_dtod: {:?}", e))?;
-    }
+    // Relabel back to [n_tokens, n_heads*head_dim] for the cast.
+    let yf32 = yf32_2d.reshape(vec![n_tokens, n_heads * head_dim])?;
 
     // f32 → bf16 into x (in-place output of caller).
     kernels::launch_cast_f32_to_bf16(device, &yf32, x)?;

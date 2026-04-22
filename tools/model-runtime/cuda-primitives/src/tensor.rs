@@ -123,6 +123,36 @@ impl<T: TensorElem> CudaTensor<T> {
             .map_err(|e| anyhow!("memcpy_dtov {} elems: {:?}", self.numel(), e))?;
         Ok(v)
     }
+
+    /// Logical reshape — hand the same backing buffer back with a new
+    /// shape. No device work, no memcpy. The only constraint is that
+    /// the new shape's element count matches the old one (we're
+    /// row-major contiguous, so this is just a label swap).
+    ///
+    /// Consumes `self` to make it type-system-obvious that the old
+    /// handle is gone; the returned tensor owns the same underlying
+    /// `CudaSlice` and is safe to use exactly like a fresh
+    /// allocation.
+    pub fn reshape(self, new_shape: Shape) -> Result<Self> {
+        let new_numel: usize = new_shape.iter().product();
+        if new_numel != self.numel() {
+            return Err(anyhow!(
+                "CudaTensor::reshape: numel mismatch old {:?} ({}) -> new {:?} ({})",
+                self.shape,
+                self.numel(),
+                new_shape,
+                new_numel
+            ));
+        }
+        let new_stride = default_stride(&new_shape);
+        Ok(Self {
+            buf: self.buf,
+            shape: new_shape,
+            stride: new_stride,
+            device: self.device,
+            _marker: PhantomData,
+        })
+    }
 }
 
 impl<T: TensorElem> std::fmt::Debug for CudaTensor<T> {
