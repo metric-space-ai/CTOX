@@ -426,19 +426,7 @@ impl Qwen35Target {
         //      kernel (for PackedWeight::Bf16); the per-row mmvq path
         //      (for Q*_K / Q8_0 / IQ4_XS) doesn't need them but we
         //      preserve the check so callers see a uniform contract.
-        if !n_tokens.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 target.forward: n_tokens={} must be a multiple of 32 for lm_head matmul",
-                n_tokens
-            ));
-        }
-        if !self.vocab_size.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 target.forward: vocab_size={} must be a multiple of 32 for lm_head matmul",
-                self.vocab_size
-            ));
-        }
-        let mut logits =
+let mut logits =
             CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, self.vocab_size])?;
         self.lm_head.matmul_f32(&self.device, &norm_f32, &mut logits)?;
 

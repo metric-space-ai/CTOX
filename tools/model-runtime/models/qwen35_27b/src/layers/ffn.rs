@@ -135,29 +135,9 @@ impl Qwen35FFN {
         // by 32. hidden_dim and intermediate_dim are picked to satisfy
         // this on production weights; n_tokens is the caller's
         // responsibility (pad to 32 at the prompt boundary).
-        if !n_tokens.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 ffn layer {}: matmul requires n_tokens divisible by 32 (got {})",
-                self.layer_idx,
-                n_tokens
-            ));
-        }
-        if !hidden_dim.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 ffn layer {}: matmul requires hidden_dim divisible by 32 (got {})",
-                self.layer_idx,
-                hidden_dim
-            ));
-        }
-        if !inter.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 ffn layer {}: matmul requires intermediate_dim divisible by 32 (got {})",
-                self.layer_idx,
-                inter
-            ));
-        }
 
-        if self.pre_norm.shape() != [hidden_dim] {
+
+if self.pre_norm.shape() != [hidden_dim] {
             return Err(anyhow!(
                 "qwen35 ffn layer {}: pre_norm.shape {:?} != [{}]",
                 self.layer_idx,

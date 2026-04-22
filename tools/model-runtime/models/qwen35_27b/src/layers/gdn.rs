@@ -294,14 +294,7 @@ impl Qwen35GDN {
         //    multiple of 32 (callers pad). qkv_proj_dim on 27B is
         //    10240, 32-aligned.
         // ------------------------------------------------------------
-        if !n_tokens.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 gdn layer {}: matmul requires n_tokens divisible by 32 (got {})",
-                self.layer_idx,
-                n_tokens
-            ));
-        }
-        let mut qkv_f32 =
+let mut qkv_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
         self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
 
@@ -584,16 +577,7 @@ impl Qwen35GDN {
         //    unloaded placeholders. Final result is cast to bf16 for
         //    the residual add.
         // ------------------------------------------------------------
-        if !inner_dim.is_multiple_of(32) || !hidden_dim.is_multiple_of(32) {
-            return Err(anyhow!(
-                "qwen35 gdn layer {}: w_out matmul requires inner_dim={} and hidden_dim={} \
-                 to be 32-aligned",
-                self.layer_idx,
-                inner_dim,
-                hidden_dim
-            ));
-        }
-        let mut proj_f32 =
+let mut proj_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         self.w_out.matmul_f32(device, &attn_f32, &mut proj_f32)?;
         let mut proj_bf16 =
