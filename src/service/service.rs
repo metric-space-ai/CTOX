@@ -2129,6 +2129,26 @@ fn start_prompt_worker(
     job: QueuedPrompt,
 ) {
     thread::spawn(move || {
+        match maybe_skip_superseded_self_work_prompt(&root, &state, &job) {
+            Ok(true) => {
+                eprintln!(
+                    "ctox prompt worker skip source={} preview={}",
+                    job.source_label,
+                    clip_text(&job.preview, 120)
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                push_event(
+                    &state,
+                    format!(
+                        "Failed to evaluate self-work supersession for {}: {}",
+                        job.source_label, err
+                    ),
+                );
+            }
+        }
         eprintln!(
             "ctox prompt worker start source={} preview={}",
             job.source_label,
@@ -3446,14 +3466,11 @@ fn route_assigned_ticket_self_work(root: &Path, state: &Arc<Mutex<SharedState>>)
         if item.assigned_to.as_deref() != Some("self") {
             continue;
         }
-        if let Some(reason) = suppress_published_self_work_reason(root, &item)? {
-            let _ = tickets::transition_ticket_self_work_item(
+        if let Some(reason) = suppress_self_work_reason(root, &item)? {
+            close_ticket_self_work_item(
                 root,
                 &item.work_id,
-                "blocked",
-                "ctox-service",
-                Some(&reason),
-                "internal",
+                &format!("Closed without routing because the work was superseded: {reason}"),
             );
             push_event(
                 state,
@@ -3824,7 +3841,7 @@ fn self_work_has_explicit_supersession(item: &tickets::TicketSelfWorkItemView) -
         || haystack.contains("superseded by clean probe")
 }
 
-fn suppress_published_self_work_reason(
+fn suppress_self_work_reason(
     root: &Path,
     item: &tickets::TicketSelfWorkItemView,
 ) -> Result<Option<String>> {
@@ -3860,6 +3877,65 @@ fn suppress_published_self_work_reason(
         }
     }
     Ok(None)
+}
+
+fn maybe_skip_superseded_self_work_prompt(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+    job: &QueuedPrompt,
+) -> Result<bool> {
+    let Some(work_id) = job.ticket_self_work_id.as_deref() else {
+        return Ok(false);
+    };
+    let Some(item) = tickets::load_ticket_self_work_item(root, work_id)? else {
+        return Ok(false);
+    };
+    let Some(reason) = suppress_self_work_reason(root, &item)? else {
+        return Ok(false);
+    };
+
+    if !job.leased_message_keys.is_empty() {
+        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
+    }
+    if !job.leased_ticket_event_keys.is_empty() {
+        let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
+    }
+    close_ticket_self_work_item(
+        root,
+        work_id,
+        &format!("Closed without execution because the work was superseded: {reason}"),
+    );
+
+    let mut next_prompt = None;
+    {
+        let mut shared = lock_shared_state(state);
+        shared.busy = false;
+        shared.current_goal_preview = None;
+        shared.active_source_label = None;
+        shared.last_completed_at = Some(now_iso_string());
+        shared.last_progress_epoch_secs = current_epoch_secs();
+        shared.last_reply_chars = None;
+        shared.last_error = None;
+        release_leased_keys_locked(
+            &mut shared,
+            &job.leased_message_keys,
+            &job.leased_ticket_event_keys,
+        );
+        push_event_locked(
+            &mut shared,
+            format!(
+                "Skipped superseded self-work {} [{}]: {}",
+                work_id, item.kind, reason
+            ),
+        );
+        if runtime_blocker_backoff_remaining_secs(&shared).is_none() {
+            next_prompt = maybe_start_next_queued_prompt_locked(&mut shared);
+        }
+    }
+    if let Some(queued) = next_prompt {
+        start_prompt_worker(root.to_path_buf(), state.clone(), queued);
+    }
+    Ok(true)
 }
 
 fn queue_ticket_self_work_item(
@@ -7006,10 +7082,85 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Kunstmen platform homepage reset");
 
-        let blocked =
-            tickets::list_ticket_self_work_items(&root, Some("local"), Some("blocked"), 10)
-                .expect("failed to list blocked self-work");
-        assert!(blocked.iter().any(|entry| entry.work_id == item.work_id));
+        let closed = tickets::list_ticket_self_work_items(&root, Some("local"), Some("closed"), 10)
+            .expect("failed to list closed self-work");
+        assert!(closed.iter().any(|entry| entry.work_id == item.work_id));
+    }
+
+    #[test]
+    fn active_superseded_review_rework_is_skipped_before_turn_execution() {
+        let root = temp_root("ctox-review-rework-active-suppressed");
+        channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Direct corrective work for the Kunstmen homepage.".to_string(),
+                thread_key: "kunstmen-operator".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("service-deployment".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed direct corrective task");
+
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: "review-rework".to_string(),
+                title: "Review rework: Kunstmen homepage".to_string(),
+                body_text: "Repair the failed homepage review.".to_string(),
+                state: "queued".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "kunstmen-operator",
+                    "workspace_root": "/home/ubuntu/workspace/kunstmen",
+                    "priority": "high",
+                    "skill": "follow-up-orchestrator",
+                    "dedupe_key": "review-rework:kunstmen-operator:fail:test",
+                }),
+            },
+            true,
+        )
+        .expect("failed to create review rework");
+        tickets::assign_ticket_self_work_item(&root, &item.work_id, "self", "ctox", None)
+            .expect("failed to assign self-work");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("service state poisoned");
+            shared.busy = true;
+            shared.current_goal_preview = Some("Review rework".to_string());
+            shared.active_source_label = Some("queue".to_string());
+            track_leased_keys_locked(&mut shared, &["queue-key-1".to_string()], &[]);
+        }
+        let job = QueuedPrompt {
+            prompt: "Repair the failed homepage review.".to_string(),
+            goal: "Repair the Kunstmen homepage".to_string(),
+            preview: "Review rework".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: vec!["queue-key-1".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-operator".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: Some(item.work_id.clone()),
+        };
+
+        let skipped = maybe_skip_superseded_self_work_prompt(&root, &state, &job)
+            .expect("skip check should succeed");
+        assert!(skipped);
+
+        let closed = tickets::list_ticket_self_work_items(&root, Some("local"), Some("closed"), 10)
+            .expect("failed to list closed self-work");
+        assert!(closed.iter().any(|entry| entry.work_id == item.work_id));
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Kunstmen platform homepage reset");
     }
 
     #[test]
