@@ -19,12 +19,17 @@
 // PTX_BLOBS: &[PtxBlob]. One entry per kernels/*.cu compiled.
 include!(concat!(env!("OUT_DIR"), "/ptx_registry.rs"));
 
+pub mod gated_delta_net;
 pub mod mmq_q4k;
 pub mod rmsnorm;
 pub mod rope;
 pub mod silu_mul;
 pub mod softmax;
 
+pub use gated_delta_net::{
+    launch_gated_delta_net_f32, GdnGateKind, GdnInterDtype, GdnLaunchInputs, GdnPersistInter,
+    GdnRecurrence, GdnShape, GDN_TREE_ROOT_PARENT,
+};
 pub use mmq_q4k::{launch_mmvq_q4k_f16, launch_mmvq_q4k_f32};
 pub use rmsnorm::launch_rmsnorm_f32;
 pub use rope::launch_rope_mrope_bf16;
