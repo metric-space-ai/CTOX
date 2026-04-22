@@ -15,14 +15,25 @@
 //!     through a `CudaTensor<i8>` of the raw block bytes.
 //!
 //! Supported dtypes:
-//!   * F32  (ggml_type 0)
-//!   * F16  (ggml_type 1)
-//!   * Q4_K (ggml_type 12 — 144 B / 256 elems)
-//!   * I8   (ggml_type 24)
-//!   * I32  (ggml_type 26)
-//!   * BF16 (ggml_type 30)
+//!   * F32     (ggml_type 0)
+//!   * F16     (ggml_type 1)
+//!   * Q8_0    (ggml_type 8  — 34 B / 32 elems, CPU-dequant to bf16)
+//!   * Q4_K    (ggml_type 12 — 144 B / 256 elems, native packed)
+//!   * Q5_K    (ggml_type 13 — 176 B / 256 elems, CPU-dequant to bf16)
+//!   * Q6_K    (ggml_type 14 — 210 B / 256 elems, CPU-dequant to bf16)
+//!   * IQ4_XS  (ggml_type 23 — 136 B / 256 elems, CPU-dequant to bf16)
+//!   * I8      (ggml_type 24)
+//!   * I32     (ggml_type 26)
+//!   * BF16    (ggml_type 30)
 //!
 //! Any other ggml dtype returns an `unsupported ggml dtype` error.
+//!
+//! The Q5_K / Q6_K / Q8_0 / IQ4_XS paths dequantize on the CPU into a
+//! `Vec<bf16>` before upload. That's slower than a native mmvq kernel
+//! but correct first — ~15 GB of weights and a tens-of-seconds startup
+//! penalty is acceptable for bring-up. The original ggml format is
+//! preserved in the `GgufTensor.dtype` tag so callers can still print a
+//! per-format tensor breakdown.
 //!
 //! Performance note: the data region for a 27B Q4_K_M model is ~15 GB,
 //! so we mmap the file rather than slurping it into a `Vec<u8>`. Each
@@ -571,6 +582,58 @@ fn load_gguf_impl(device: &Arc<DeviceContext>, path: &Path, strict: bool) -> Res
                     buf: GgufBuf::Q4K(t),
                 }
             }
+            GgmlType::Q5K => {
+                load_dequant_tensor(
+                    device,
+                    data_region,
+                    offset,
+                    &name,
+                    &shape_row_major,
+                    n_elems,
+                    DType::Q5K,
+                    256,
+                    dequant_q5_k_to_bf16,
+                )?
+            }
+            GgmlType::Q6K => {
+                load_dequant_tensor(
+                    device,
+                    data_region,
+                    offset,
+                    &name,
+                    &shape_row_major,
+                    n_elems,
+                    DType::Q6K,
+                    256,
+                    dequant_q6_k_to_bf16,
+                )?
+            }
+            GgmlType::Q8_0 => {
+                load_dequant_tensor(
+                    device,
+                    data_region,
+                    offset,
+                    &name,
+                    &shape_row_major,
+                    n_elems,
+                    DType::Q8_0,
+                    32,
+                    dequant_q8_0_to_bf16,
+                )?
+            }
+            GgmlType::IQ4XS => {
+                load_dequant_tensor(
+                    device,
+                    data_region,
+                    offset,
+                    &name,
+                    &shape_row_major,
+                    n_elems,
+                    DType::IQ4XS,
+                    256,
+                    dequant_iq4_xs_to_bf16,
+                )?
+            }
             unsupported_ty => {
                 if strict {
                     return Err(anyhow!(
@@ -659,6 +722,361 @@ fn byte_slice_as_i8(data: &[u8], offset: usize, byte_len: usize) -> Result<&[i8]
     Ok(bytemuck::cast_slice::<u8, i8>(&data[offset..end]))
 }
 
+/// Shared plumbing for the four CPU-dequant load paths (Q5_K, Q6_K,
+/// Q8_0, IQ4_XS). Slices `block_bytes` worth of raw block bytes out of
+/// the mmap'd data region, runs the given `dequant` function to produce
+/// a `Vec<bf16>` of length `n_elems`, and uploads it as a bf16 tensor.
+///
+/// `ggml_block_size` is the element count per ggml block (32 for Q8_0,
+/// 256 for the K-quants and IQ4_XS). The tensor's last dim must be a
+/// multiple of it.
+#[allow(clippy::too_many_arguments)]
+fn load_dequant_tensor(
+    device: &Arc<DeviceContext>,
+    data_region: &[u8],
+    offset: usize,
+    name: &str,
+    shape_row_major: &[usize],
+    n_elems: usize,
+    dtype_tag: DType,
+    ggml_block_size: usize,
+    dequant: fn(&[u8], usize) -> Result<Vec<bf16>>,
+) -> Result<GgufTensor> {
+    let last = *shape_row_major
+        .last()
+        .ok_or_else(|| anyhow!("{:?} tensor {} has zero dimensions", dtype_tag, name))?;
+    if last % ggml_block_size != 0 {
+        return Err(anyhow!(
+            "{:?} tensor {} last-dim {} not a multiple of {}",
+            dtype_tag,
+            name,
+            last,
+            ggml_block_size
+        ));
+    }
+    let byte_len = dtype_tag.block_bytes_for_elements(n_elems);
+    let end = offset
+        .checked_add(byte_len)
+        .ok_or_else(|| anyhow!("offset+len overflow: {} + {}", offset, byte_len))?;
+    if end > data_region.len() {
+        return Err(anyhow!(
+            "{:?} slice out of bounds for {}: [{}, {}) vs data len {}",
+            dtype_tag,
+            name,
+            offset,
+            end,
+            data_region.len()
+        ));
+    }
+    let bytes = &data_region[offset..end];
+    let host = dequant(bytes, n_elems)
+        .with_context(|| format!("dequantize {:?} tensor {}", dtype_tag, name))?;
+    if host.len() != n_elems {
+        return Err(anyhow!(
+            "dequant {:?} tensor {} produced {} elems, expected {}",
+            dtype_tag,
+            name,
+            host.len(),
+            n_elems
+        ));
+    }
+    let t = CudaTensor::from_host(device.clone(), shape_row_major.to_vec(), &host)
+        .with_context(|| format!("upload dequantized {:?} tensor {}", dtype_tag, name))?;
+    Ok(GgufTensor {
+        name: name.to_string(),
+        dtype: dtype_tag,
+        shape: shape_row_major.to_vec(),
+        buf: GgufBuf::Bf16(t),
+    })
+}
+
+// ---- CPU-side dequant to bf16 -----------------------------------------
+//
+// Each routine ports the reference `dequantize_row_*` from llama.cpp's
+// `ggml/src/ggml-quants.c` literally, operating on flat block bytes.
+// Input is `n_elems / ggml_block_size` blocks packed back-to-back. We
+// read `ggml_half` (fp16) super-scales as little-endian `u16` and
+// widen to `f32` via `half::f16::to_f32` — that avoids pulling in any
+// extra alignment assumptions on the mmap'd byte slice.
+//
+// Block sizes (QK_K = 256 throughout except Q8_0):
+//   Q5_K:   176 B / 256 elems   { d, dmin, scales[12], qh[32], qs[128] }
+//   Q6_K:   210 B / 256 elems   { ql[128], qh[64], scales[16 i8], d }
+//   Q8_0:    34 B /  32 elems   { d, qs[32 i8] }
+//   IQ4_XS: 136 B / 256 elems   { d, scales_h u16, scales_l[4], qs[128] }
+//
+// The IQ4_XS codebook is `kvalues_iq4nl` — a fixed 16-entry i8 table
+// copied verbatim from `ggml-common.h`.
+
+const IQ4_NL_KVALUES: [i8; 16] = [
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+];
+
+/// Read a ggml_half (fp16) from a 2-byte little-endian slice and widen
+/// to f32. Centralized so all four dequant paths use the same widening.
+#[inline]
+fn read_ggml_half(bytes: &[u8]) -> f32 {
+    debug_assert!(bytes.len() >= 2);
+    let bits = u16::from_le_bytes([bytes[0], bytes[1]]);
+    f16::from_bits(bits).to_f32()
+}
+
+/// Reference helper from `ggml-quants.c`:
+/// ```text
+/// static inline void get_scale_min_k4(int j, const uint8_t * q,
+///                                     uint8_t * d, uint8_t * m) {
+///     if (j < 4) {
+///         *d = q[j] & 63;       *m = q[j+4] & 63;
+///     } else {
+///         *d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4);
+///         *m = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4);
+///     }
+/// }
+/// ```
+/// `scales` is the 12-byte K_SCALE_SIZE array shared by Q4_K and Q5_K.
+#[inline]
+fn get_scale_min_k4(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (scales[j] & 63, scales[j + 4] & 63)
+    } else {
+        let d = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
+        let m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+        (d, m)
+    }
+}
+
+/// Dequantize a Q5_K tensor (176 bytes / 256 elems per block) to bf16.
+///
+/// Ports `dequantize_row_q5_K` from llama.cpp's `ggml-quants.c`. The
+/// `qh` (high-bit) nibbles and `qs` (low-4-bit) nibbles are combined
+/// per element; per-subblock scales and mins come from the 12-byte
+/// packed `scales` field via `get_scale_min_k4`.
+fn dequant_q5_k_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
+    const BLOCK: usize = 256;
+    const BLOCK_BYTES: usize = 176;
+    if !n_elems.is_multiple_of(BLOCK) {
+        return Err(anyhow!(
+            "Q5_K dequant: n_elems {} not a multiple of {}",
+            n_elems,
+            BLOCK
+        ));
+    }
+    let nb = n_elems / BLOCK;
+    if bytes.len() != nb * BLOCK_BYTES {
+        return Err(anyhow!(
+            "Q5_K dequant: got {} bytes, expected {} ({} blocks)",
+            bytes.len(),
+            nb * BLOCK_BYTES,
+            nb
+        ));
+    }
+    let mut out: Vec<bf16> = Vec::with_capacity(n_elems);
+    // Per block: d(2) dmin(2) scales[12] qh[32] qs[128]
+    for i in 0..nb {
+        let b = &bytes[i * BLOCK_BYTES..(i + 1) * BLOCK_BYTES];
+        let d = read_ggml_half(&b[0..2]);
+        let min = read_ggml_half(&b[2..4]);
+        let scales = &b[4..16];
+        let qh = &b[16..48];
+        let mut ql_off = 48usize; // qs starts at byte 48
+
+        let mut is = 0usize;
+        let mut u1: u8 = 1;
+        let mut u2: u8 = 2;
+        // Emit 256 elements in groups of 64 (two sub-blocks of 32).
+        for _ in (0..BLOCK).step_by(64) {
+            let (sc0, m0) = get_scale_min_k4(is, scales);
+            let d1 = d * sc0 as f32;
+            let m1 = min * m0 as f32;
+            let (sc1, m1s) = get_scale_min_k4(is + 1, scales);
+            let d2 = d * sc1 as f32;
+            let m2 = min * m1s as f32;
+
+            // low nibble + u1 bit from qh
+            for l in 0..32 {
+                let q = (b[ql_off + l] & 0x0F) as i32
+                    + if (qh[l] & u1) != 0 { 16 } else { 0 };
+                let v = d1 * (q as f32) - m1;
+                out.push(bf16::from_f32(v));
+            }
+            // high nibble + u2 bit from qh
+            for l in 0..32 {
+                let q = ((b[ql_off + l] >> 4) & 0x0F) as i32
+                    + if (qh[l] & u2) != 0 { 16 } else { 0 };
+                let v = d2 * (q as f32) - m2;
+                out.push(bf16::from_f32(v));
+            }
+
+            ql_off += 32;
+            is += 2;
+            u1 = u1.wrapping_shl(2);
+            u2 = u2.wrapping_shl(2);
+        }
+    }
+    Ok(out)
+}
+
+/// Dequantize a Q6_K tensor (210 bytes / 256 elems per block) to bf16.
+///
+/// Ports `dequantize_row_q6_K`. Each 6-bit quant is reconstructed as
+/// `(ql & 0xF) | ((qh >> s) & 3) << 4` and re-centered around zero
+/// (`- 32`). Sixteen signed i8 sub-block scales × the super-scale `d`.
+fn dequant_q6_k_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
+    const BLOCK: usize = 256;
+    const BLOCK_BYTES: usize = 210;
+    if !n_elems.is_multiple_of(BLOCK) {
+        return Err(anyhow!(
+            "Q6_K dequant: n_elems {} not a multiple of {}",
+            n_elems,
+            BLOCK
+        ));
+    }
+    let nb = n_elems / BLOCK;
+    if bytes.len() != nb * BLOCK_BYTES {
+        return Err(anyhow!(
+            "Q6_K dequant: got {} bytes, expected {} ({} blocks)",
+            bytes.len(),
+            nb * BLOCK_BYTES,
+            nb
+        ));
+    }
+    let mut out: Vec<bf16> = Vec::with_capacity(n_elems);
+    for i in 0..nb {
+        let b = &bytes[i * BLOCK_BYTES..(i + 1) * BLOCK_BYTES];
+        // Layout: ql[128] qh[64] scales[16 i8] d(2)
+        let ql = &b[0..128];
+        let qh = &b[128..192];
+        let sc = &b[192..208]; // i8 via reinterpret below
+        let d = read_ggml_half(&b[208..210]);
+
+        // Produce 256 outputs in two passes of 128, matching the
+        // reference's outer `for (int n = 0; n < QK_K; n += 128)`.
+        // The reference writes `y[l+0/32/64/96]` non-contiguously; we
+        // stage one sub-block into a 128-f32 scratch buffer, then copy
+        // it out in order as bf16.
+        for n in (0..BLOCK).step_by(128) {
+            let ql_n = &ql[(n / 2)..(n / 2 + 64)];
+            let qh_n = &qh[(n / 4)..(n / 4 + 32)];
+            let sc_n = &sc[(n / 16)..(n / 16 + 8)];
+            let mut scratch = [0f32; 128];
+            for l in 0..32 {
+                let is = l / 16;
+                // Reference uses `(qh_n[l] >> 0) & 3`; we drop the
+                // no-op shift to keep clippy quiet while preserving
+                // the shift offsets 0/2/4/6 across the four quants.
+                let q1 = ((ql_n[l] & 0x0F) | ((qh_n[l] & 3) << 4)) as i32 - 32;
+                let q2 = ((ql_n[l + 32] & 0x0F) | (((qh_n[l] >> 2) & 3) << 4)) as i32 - 32;
+                let q3 = ((ql_n[l] >> 4) | (((qh_n[l] >> 4) & 3) << 4)) as i32 - 32;
+                let q4 = ((ql_n[l + 32] >> 4) | (((qh_n[l] >> 6) & 3) << 4)) as i32 - 32;
+                // `sc` is int8_t in the reference — reinterpret via `as i8`.
+                let s0 = sc_n[is] as i8 as f32;
+                let s2 = sc_n[is + 2] as i8 as f32;
+                let s4 = sc_n[is + 4] as i8 as f32;
+                let s6 = sc_n[is + 6] as i8 as f32;
+                scratch[l] = d * s0 * (q1 as f32);
+                scratch[l + 32] = d * s2 * (q2 as f32);
+                scratch[l + 64] = d * s4 * (q3 as f32);
+                scratch[l + 96] = d * s6 * (q4 as f32);
+            }
+            for v in scratch.iter() {
+                out.push(bf16::from_f32(*v));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Dequantize a Q8_0 tensor (34 bytes / 32 elems per block) to bf16.
+///
+/// Ports `dequantize_row_q8_0`. Simplest of the four: per-block scale
+/// `d` (fp16) × 32 signed i8 quants.
+fn dequant_q8_0_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
+    const BLOCK: usize = 32;
+    const BLOCK_BYTES: usize = 34;
+    if !n_elems.is_multiple_of(BLOCK) {
+        return Err(anyhow!(
+            "Q8_0 dequant: n_elems {} not a multiple of {}",
+            n_elems,
+            BLOCK
+        ));
+    }
+    let nb = n_elems / BLOCK;
+    if bytes.len() != nb * BLOCK_BYTES {
+        return Err(anyhow!(
+            "Q8_0 dequant: got {} bytes, expected {} ({} blocks)",
+            bytes.len(),
+            nb * BLOCK_BYTES,
+            nb
+        ));
+    }
+    let mut out: Vec<bf16> = Vec::with_capacity(n_elems);
+    for i in 0..nb {
+        let b = &bytes[i * BLOCK_BYTES..(i + 1) * BLOCK_BYTES];
+        let d = read_ggml_half(&b[0..2]);
+        for j in 0..BLOCK {
+            // i8 quants: sign-extended reinterpret of the raw byte.
+            let q = b[2 + j] as i8 as f32;
+            out.push(bf16::from_f32(q * d));
+        }
+    }
+    Ok(out)
+}
+
+/// Dequantize an IQ4_XS tensor (136 bytes / 256 elems per block) to bf16.
+///
+/// Ports `dequantize_row_iq4_xs`. Each 4-bit quant indexes into the
+/// fixed 16-entry `kvalues_iq4nl` codebook; the 6-bit per-sub-block
+/// scale is reconstructed from `scales_l` (low 4) and `scales_h`
+/// (high 2), then re-centered with `- 32` and scaled by `d`.
+fn dequant_iq4_xs_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
+    const BLOCK: usize = 256;
+    const BLOCK_BYTES: usize = 136;
+    if !n_elems.is_multiple_of(BLOCK) {
+        return Err(anyhow!(
+            "IQ4_XS dequant: n_elems {} not a multiple of {}",
+            n_elems,
+            BLOCK
+        ));
+    }
+    let nb = n_elems / BLOCK;
+    if bytes.len() != nb * BLOCK_BYTES {
+        return Err(anyhow!(
+            "IQ4_XS dequant: got {} bytes, expected {} ({} blocks)",
+            bytes.len(),
+            nb * BLOCK_BYTES,
+            nb
+        ));
+    }
+    let mut out: Vec<bf16> = Vec::with_capacity(n_elems);
+    for i in 0..nb {
+        let b = &bytes[i * BLOCK_BYTES..(i + 1) * BLOCK_BYTES];
+        // Layout: d(2) scales_h u16(2) scales_l[4] qs[128]
+        let d = read_ggml_half(&b[0..2]);
+        let scales_h = u16::from_le_bytes([b[2], b[3]]);
+        let scales_l = &b[4..8];
+        let qs = &b[8..136];
+        for ib in 0..(BLOCK / 32) {
+            let ls_low = (scales_l[ib / 2] >> (4 * (ib % 2))) & 0x0F;
+            let ls_high = ((scales_h >> (2 * ib)) & 0x03) as u8;
+            let ls = (ls_low | (ls_high << 4)) as i32;
+            let dl = d * ((ls - 32) as f32);
+            // 16 low nibbles then 16 high nibbles, using the codebook.
+            let qs_ib = &qs[ib * 16..(ib + 1) * 16];
+            let mut scratch = [0f32; 32];
+            for j in 0..16 {
+                let lo = (qs_ib[j] & 0x0F) as usize;
+                let hi = ((qs_ib[j] >> 4) & 0x0F) as usize;
+                scratch[j] = dl * (IQ4_NL_KVALUES[lo] as f32);
+                scratch[j + 16] = dl * (IQ4_NL_KVALUES[hi] as f32);
+            }
+            for v in scratch.iter() {
+                out.push(bf16::from_f32(*v));
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,20 +1095,149 @@ mod tests {
     fn ggml_type_roundtrip_known_codes() {
         assert_eq!(GgmlType::from_u32(0), GgmlType::F32);
         assert_eq!(GgmlType::from_u32(1), GgmlType::F16);
+        assert_eq!(GgmlType::from_u32(8), GgmlType::Q8_0);
         assert_eq!(GgmlType::from_u32(12), GgmlType::Q4K);
+        assert_eq!(GgmlType::from_u32(13), GgmlType::Q5K);
+        assert_eq!(GgmlType::from_u32(14), GgmlType::Q6K);
+        assert_eq!(GgmlType::from_u32(23), GgmlType::IQ4XS);
         assert_eq!(GgmlType::from_u32(24), GgmlType::I8);
         assert_eq!(GgmlType::from_u32(26), GgmlType::I32);
         assert_eq!(GgmlType::from_u32(30), GgmlType::BF16);
         matches!(GgmlType::from_u32(9999), GgmlType::Unknown(9999));
     }
 
+    /// Q8_0 dequant is the simplest of the four: for each 34-byte
+    /// block, y[i] = d * qs[i] where `d` is the fp16 super-scale. We
+    /// synthesize a single block with known `d` and a linear ramp of
+    /// int8 quants, then check the bf16 output matches `d * q`.
+    #[test]
+    fn dequant_q8_0_single_block_matches_reference() {
+        // Pick a clean fp16-representable d = 0.125 (= 2^-3).
+        let d = f16::from_f32(0.125f32);
+        let mut block = Vec::with_capacity(34);
+        block.extend_from_slice(&d.to_bits().to_le_bytes());
+        // q = -16..16 ramp, as i8 bytes.
+        for i in 0..32i32 {
+            let q = (i - 16) as i8;
+            block.push(q as u8);
+        }
+        let out = dequant_q8_0_to_bf16(&block, 32).expect("q8_0 dequant");
+        assert_eq!(out.len(), 32);
+        for i in 0..32 {
+            let q = (i as i32) - 16;
+            let expected = bf16::from_f32(0.125f32 * q as f32);
+            assert_eq!(
+                out[i].to_bits(),
+                expected.to_bits(),
+                "mismatch at i={}: got {}, expected {}",
+                i,
+                out[i].to_f32(),
+                expected.to_f32()
+            );
+        }
+    }
+
+    /// Length and shape invariants for each dequant path on a trivial
+    /// all-zero block. A zero block should produce all-zero outputs
+    /// regardless of format-specific scale bits (since every `d` and
+    /// every `sc` ends up multiplied into zero quants).
+    #[test]
+    fn dequant_all_zero_blocks_produce_all_zero_bf16() {
+        // Q5_K: 176 B / 256 elems.
+        let zeros = vec![0u8; 176];
+        let out = dequant_q5_k_to_bf16(&zeros, 256).expect("q5_k dequant");
+        assert_eq!(out.len(), 256);
+        assert!(out.iter().all(|v| v.to_f32() == 0.0));
+
+        // Q6_K: 210 B / 256 elems.
+        let zeros = vec![0u8; 210];
+        let out = dequant_q6_k_to_bf16(&zeros, 256).expect("q6_k dequant");
+        assert_eq!(out.len(), 256);
+        assert!(out.iter().all(|v| v.to_f32() == 0.0));
+
+        // Q8_0: 34 B / 32 elems.
+        let zeros = vec![0u8; 34];
+        let out = dequant_q8_0_to_bf16(&zeros, 32).expect("q8_0 dequant");
+        assert_eq!(out.len(), 32);
+        assert!(out.iter().all(|v| v.to_f32() == 0.0));
+
+        // IQ4_XS: 136 B / 256 elems.
+        let zeros = vec![0u8; 136];
+        let out = dequant_iq4_xs_to_bf16(&zeros, 256).expect("iq4_xs dequant");
+        assert_eq!(out.len(), 256);
+        // Note: iq4_xs uses `(ls - 32)` as the effective subblock
+        // scale, so an all-zero block gives dl = d * -32 * codebook[0]
+        // — but d=0 since `d` is the 2-byte fp16 super-scale that is
+        // zero. So outputs are still all zero.
+        assert!(out.iter().all(|v| v.to_f32() == 0.0));
+    }
+
+    /// Block-size / length validation: pass mismatched byte lengths
+    /// and make sure each dequant path returns an error instead of
+    /// silently truncating.
+    #[test]
+    fn dequant_rejects_mismatched_lengths() {
+        assert!(dequant_q5_k_to_bf16(&vec![0u8; 100], 256).is_err());
+        assert!(dequant_q5_k_to_bf16(&vec![0u8; 176], 257).is_err()); // not div 256
+        assert!(dequant_q6_k_to_bf16(&vec![0u8; 100], 256).is_err());
+        assert!(dequant_q6_k_to_bf16(&vec![0u8; 210], 200).is_err());
+        assert!(dequant_q8_0_to_bf16(&vec![0u8; 30], 32).is_err());
+        assert!(dequant_q8_0_to_bf16(&vec![0u8; 34], 31).is_err()); // not div 32
+        assert!(dequant_iq4_xs_to_bf16(&vec![0u8; 100], 256).is_err());
+        assert!(dequant_iq4_xs_to_bf16(&vec![0u8; 136], 128).is_err());
+    }
+
+    /// `get_scale_min_k4` is the 12-byte packed-scale decoder shared
+    /// by Q4_K and Q5_K. Ported verbatim from `ggml-quants.c`; verify
+    /// the branch structure on a crafted scales array with bits set
+    /// in positions that exercise both the `j < 4` (low) branch and
+    /// the `j >= 4` (high, cross-referenced) branch.
+    #[test]
+    fn get_scale_min_k4_low_and_high_branches() {
+        // Build a `scales[12]` array where:
+        //   q[0] = 0b00_100011  (lower 6 = 35, upper 2 = 0)
+        //   q[4] = 0b00_000111  (lower 6 =  7, upper 2 = 0)
+        // Expectation for j=0: d = 0x23 & 63 = 35, m = q[4] & 63 = 7.
+        // For j=4 (high branch):
+        //   d = (q[8] & 0xF) | ((q[0] >> 6) << 4) = (q[8] & 0xF) | 0
+        //   m = (q[8] >> 4)   | ((q[4] >> 6) << 4) = (q[8] >> 4) | 0
+        let mut q = [0u8; 12];
+        q[0] = 0b0010_0011;
+        q[4] = 0b0000_0111;
+        q[8] = 0b1010_1100;
+        let (d, m) = get_scale_min_k4(0, &q);
+        assert_eq!(d, 35);
+        assert_eq!(m, 7);
+        let (d4, m4) = get_scale_min_k4(4, &q);
+        assert_eq!(d4, q[8] & 0x0F);
+        assert_eq!(m4, q[8] >> 4);
+
+        // Add non-zero top-2 bits in q[0] and q[4] to cover the
+        // cross-reference path:
+        //   q[0] = 0b11_100011  (top-2 = 3)
+        //   q[4] = 0b01_000111  (top-2 = 1)
+        q[0] = 0b1110_0011;
+        q[4] = 0b0100_0111;
+        let (d4, m4) = get_scale_min_k4(4, &q);
+        assert_eq!(d4, (q[8] & 0x0F) | ((q[0] >> 6) << 4));
+        assert_eq!(m4, (q[8] >> 4) | ((q[4] >> 6) << 4));
+    }
+
+    /// IQ4_XS codebook sanity: verify the first and last kvalues
+    /// entries match the reference table in `ggml-common.h`.
+    #[test]
+    fn iq4_nl_codebook_matches_reference() {
+        assert_eq!(IQ4_NL_KVALUES[0], -127);
+        assert_eq!(IQ4_NL_KVALUES[8], 1);
+        assert_eq!(IQ4_NL_KVALUES[15], 113);
+    }
+
     /// Integration test: parses the 27B Q4_K_M GGUF on the A6000 host
     /// and checks tensor count, a known tensor's shape, and the
-    /// byte-length invariant for a Q4_K block-packed weight.
-    ///
-    /// Uses the lenient loader because the "Q4_K_M" variant produced
-    /// by llama.cpp mixes in a handful of Q6_K weights (notably the
-    /// output head) which this loader intentionally doesn't support.
+    /// byte-length invariant for a Q4_K block-packed weight. Also
+    /// spot-checks the CPU-dequant paths for Q5_K / Q6_K / Q8_0 /
+    /// IQ4_XS: counts per dtype must be positive and the raw bf16
+    /// values can't all be zero.
     ///
     /// Ignored by default — requires the file to exist and a working
     /// CUDA device.
@@ -718,6 +1265,18 @@ mod tests {
             load.tensors.len() + load.unsupported.len(),
             load.total_descriptors,
             "tensors + unsupported should sum to total"
+        );
+        assert_eq!(
+            load.unsupported.len(),
+            0,
+            "expected 0 unsupported tensors once Q5K/Q6K/Q8_0/IQ4_XS \
+             dequant is in; got {}",
+            load.unsupported.len()
+        );
+        assert_eq!(
+            load.tensors.len(),
+            851,
+            "expected all 851 tensors to be loaded"
         );
 
         // Spot check 1: token embedding shape. The Qwen3.5-27B model
@@ -748,27 +1307,55 @@ mod tests {
             "token_embd.weight vocab dim must be positive"
         );
 
-        // Spot check 2: pick any Q4K tensor and verify the packed
-        // byte-count invariant: n_blocks * 144 B where n_blocks is
-        // n_elems / 256. The task description pointed at
-        // `blk.0.attn_q.weight`, but this specific Qwen3.5-27B fuses
-        // attention into `blk.*.attn_qkv.weight` (which is Q5_K —
-        // unsupported). We fall back to scanning for any Q4K tensor.
-        let q4k_samples: Vec<(&String, &GgufTensor)> = load
+        // Spot check 2: per-dtype tensor counts. The Qwen3.5-27B
+        // Q4_K_M mixture uses Q4_K as the bulk format plus Q5_K /
+        // Q6_K / Q8_0 / IQ4_XS for select weights; each count must be
+        // positive.
+        let mut counts: std::collections::HashMap<DType, usize> =
+            std::collections::HashMap::new();
+        for t in load.tensors.values() {
+            *counts.entry(t.dtype).or_insert(0) += 1;
+        }
+        let mut kv: Vec<(DType, usize)> = counts.iter().map(|(k, v)| (*k, *v)).collect();
+        kv.sort_by_key(|(d, _)| format!("{:?}", d));
+        eprintln!("dtype breakdown:");
+        for (d, c) in &kv {
+            eprintln!("  {:?}: {}", d, c);
+        }
+        // Q4K / Q5K / Q6K / Q8_0 must be present in this model's
+        // Q4_K_M mixture. IQ4_XS is NOT present in this particular
+        // 27B build — llama.cpp only emits IQ4_XS for smaller/denser
+        // mixtures. We still test the IQ4_XS dequant code in unit
+        // tests; here we just assert count >= 0 and log it.
+        for (dt, label) in [
+            (DType::Q4K, "Q4K"),
+            (DType::Q5K, "Q5K"),
+            (DType::Q6K, "Q6K"),
+            (DType::Q8_0, "Q8_0"),
+        ] {
+            let n = counts.get(&dt).copied().unwrap_or(0);
+            assert!(
+                n > 0,
+                "expected at least one {} tensor in the 27B Q4_K_M file",
+                label
+            );
+        }
+        let iq4_xs_count = counts.get(&DType::IQ4XS).copied().unwrap_or(0);
+        eprintln!(
+            "IQ4_XS tensors: {} (informational — this model variant may not use them)",
+            iq4_xs_count
+        );
+
+        // Spot check 3: Q4K byte-count invariant on a deterministic
+        // sample (sort by name so the output is stable across hashmap
+        // iteration).
+        let mut q4k_samples: Vec<(&String, &GgufTensor)> = load
             .tensors
             .iter()
             .filter(|(_, t)| t.dtype == DType::Q4K)
             .collect();
-        assert!(
-            !q4k_samples.is_empty(),
-            "expected at least one Q4K tensor in the 27B Q4_K_M file"
-        );
-        eprintln!("found {} Q4K tensors", q4k_samples.len());
-        // Check the first one deterministically (by sorted name) so
-        // the test output is stable across HashMap iteration orders.
-        let mut sorted: Vec<_> = q4k_samples;
-        sorted.sort_by_key(|(n, _)| (*n).clone());
-        let (q_name, q) = sorted[0];
+        q4k_samples.sort_by_key(|(n, _)| (*n).clone());
+        let (q_name, q) = q4k_samples[0];
         eprintln!("spot-check Q4K tensor {}: shape={:?}", q_name, q.shape);
         let n_elems: usize = q.shape.iter().product();
         assert!(
@@ -788,6 +1375,80 @@ mod tests {
                 );
             }
             _ => panic!("{} marked Q4K but buf variant is wrong", q_name),
+        }
+
+        // Spot check 4: `output.weight` — Qwen3.5-27B's output head is
+        // Q6_K in the Q4_K_M mixture. It should now be loaded as bf16
+        // (dtype tag = Q6K) and should not be all zeros.
+        let output = load
+            .tensors
+            .get("output.weight")
+            .expect("output.weight not found");
+        eprintln!(
+            "output.weight: dtype={:?} shape={:?}",
+            output.dtype, output.shape
+        );
+        assert_eq!(
+            output.dtype,
+            DType::Q6K,
+            "output.weight expected Q6K, got {:?}",
+            output.dtype
+        );
+        match output.buf {
+            GgufBuf::Bf16(ref t) => {
+                // Download the first 1024 elements to check non-zero.
+                let host = t.to_host().expect("download output.weight");
+                let head: Vec<f32> = host.iter().take(1024).map(|v| v.to_f32()).collect();
+                let nonzero = head.iter().filter(|v| **v != 0.0).count();
+                let max_abs = head.iter().fold(0f32, |a, v| a.max(v.abs()));
+                eprintln!(
+                    "output.weight head: nonzero={}/1024 max_abs={}",
+                    nonzero, max_abs
+                );
+                assert!(
+                    nonzero > 0,
+                    "output.weight first 1024 elems are all zero \
+                     — Q6K dequant likely broken"
+                );
+                assert!(
+                    max_abs > 0.0,
+                    "output.weight first 1024 elems have zero max_abs"
+                );
+            }
+            _ => panic!("output.weight marked Q6K but buf variant is not Bf16"),
+        }
+
+        // Spot check 5: find a Q8_0 tensor and confirm it dequantized
+        // to bf16 with non-zero values. ssm_alpha-style weights in
+        // this Qwen variant are commonly stored as Q8_0; fall back to
+        // any Q8_0 tensor if the specific name isn't present.
+        let mut q8_0_samples: Vec<(&String, &GgufTensor)> = load
+            .tensors
+            .iter()
+            .filter(|(_, t)| t.dtype == DType::Q8_0)
+            .collect();
+        q8_0_samples.sort_by_key(|(n, _)| (*n).clone());
+        let (q8_name, q8) = q8_0_samples[0];
+        eprintln!("spot-check Q8_0 tensor {}: shape={:?}", q8_name, q8.shape);
+        match q8.buf {
+            GgufBuf::Bf16(ref t) => {
+                let host = t.to_host().expect("download q8_0 sample");
+                let take = host.len().min(512);
+                let head: Vec<f32> = host.iter().take(take).map(|v| v.to_f32()).collect();
+                let nonzero = head.iter().filter(|v| **v != 0.0).count();
+                let max_abs = head.iter().fold(0f32, |a, v| a.max(v.abs()));
+                eprintln!(
+                    "q8_0 {} head: nonzero={}/{} max_abs={}",
+                    q8_name, nonzero, take, max_abs
+                );
+                assert!(
+                    nonzero > 0,
+                    "Q8_0 tensor {} first {} elems all zero — dequant broken",
+                    q8_name,
+                    take
+                );
+            }
+            _ => panic!("{} marked Q8_0 but buf variant is not Bf16", q8_name),
         }
     }
 }
