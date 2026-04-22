@@ -866,6 +866,19 @@ mod tests {
     /// vectors, runs forward on the 9-token HumanEval prompt (padded
     /// to 32), and asserts logits shape + finite.
     ///
+    /// **VRAM requirement (post-Phase-5)**: the GGUF loader now
+    /// dequantizes Q5K/Q6K/Q8_0/IQ4_XS to bf16 at upload time. That
+    /// roughly doubles the per-tensor VRAM footprint for the 235
+    /// tensors in those formats in the shipping Q4_K_M file. Total
+    /// resident-weight footprint is ~30 GB; with per-layer zero
+    /// placeholders and KV cache overhead this overflows a 48 GB
+    /// A6000 on a cold run. Phase 6 replaces the bf16-dequant path
+    /// with native mmvq_q{5,6,8}_k kernels that keep the data
+    /// packed on device — at that point this test fits comfortably.
+    /// For now, run on a 64-GB-class card, or use the reduced-layer
+    /// variant below (`qwen35_target_gguf_smoke_v2`) once it's been
+    /// trimmed.
+    ///
     /// Run with:
     ///   cargo test -p ctox-engine-cuda --features cuda --release -- \
     ///     --ignored --nocapture qwen35_target_gguf_smoke
