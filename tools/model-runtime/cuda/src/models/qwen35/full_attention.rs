@@ -50,8 +50,19 @@
 //! * Causal mask is built on the host and uploaded once per forward.
 //!   A fused masked-softmax kernel is a follow-up optimization.
 //! * The reference dflash model adds per-head Q/K RMSNorm and packs a
-//!   sigmoid gate into the Q projection. This port omits both; adding
-//!   them is a straightforward extension inside `forward` once needed.
+//!   sigmoid gate into the Q projection. **Both land in this port**:
+//!   `attn_q_norm` / `attn_k_norm` run after the Q/K reshape-to-per-head
+//!   and before RoPE; `w_q_gate` is the second half of the GGUF's
+//!   packed `attn_q.weight` and enters as `attn_out *= sigmoid(x @
+//!   w_q_gate)` after the attention output and before the `w_o`
+//!   projection. See the dflash reference's `build_full_attn_block`
+//!   at `dflash/src/qwen35_target_graph.cpp` for the exact ordering.
+//! * The layer's `post_attn_norm` slot is held here so the weight
+//!   loader has somewhere to put `post_attention_norm.weight`, but
+//!   the actual pre-FFN norm happens **in the FFN block** (Agent O's
+//!   territory), not inside this layer's forward. Keeping the field
+//!   on this struct just means the GGUF's layer-level weight set
+//!   fits without a second per-layer struct for norms.
 //! * Matmul tile alignment: inputs must be multiples of `TILE=32`
 //!   along every axis. This means `n_tokens`, `kv_n_filled`, and all
 //!   projection widths must be 32-aligned. `hidden_dim`, `q_dim`,
@@ -79,9 +90,28 @@ use super::config::Qwen35Config;
 pub struct Qwen35FullAttention {
     /// RMSNorm weight applied pre-projection. `[hidden_dim]` f32.
     pub attn_norm: CudaTensor<f32>,
-    /// Q projection weight. `[hidden_dim, n_q_heads * head_dim]` bf16,
+    /// Per-head RMSNorm applied to Q after the Q projection + reshape
+    /// to `[n_tokens, n_q_heads, head_dim]` and before RoPE.
+    /// `[head_dim]` f32. Loaded from `blk.L.attn_q_norm.weight`.
+    pub attn_q_norm: CudaTensor<f32>,
+    /// Per-head RMSNorm applied to K. `[head_dim]` f32. Loaded from
+    /// `blk.L.attn_k_norm.weight`.
+    pub attn_k_norm: CudaTensor<f32>,
+    /// Pre-FFN RMSNorm weight — `[hidden_dim]` f32 — loaded from
+    /// `blk.L.post_attention_norm.weight`. Applied **in the FFN
+    /// block** (Agent O), not here. This struct holds the slot so the
+    /// GGUF loader has somewhere to deposit it; the FA forward does
+    /// not reference it.
+    pub post_attn_norm: CudaTensor<f32>,
+    /// Q projection weight (first half of the GGUF's packed
+    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]` bf16,
     /// row-major with K=hidden_dim and N=q_dim.
     pub w_q: CudaTensor<bf16>,
+    /// Q-side gate weight (second half of the GGUF's packed
+    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]` bf16.
+    /// Consumed by the sigmoid-gate branch after attention: `attn ←
+    /// attn * sigmoid(norm @ w_q_gate)`.
+    pub w_q_gate: CudaTensor<bf16>,
     /// K projection weight. `[hidden_dim, n_kv_heads * head_dim]` bf16.
     pub w_k: CudaTensor<bf16>,
     /// V projection weight. `[hidden_dim, n_kv_heads * head_dim]` bf16.
@@ -135,6 +165,35 @@ impl Qwen35FullAttention {
                 "qwen35 full_attn: attn_norm shape {:?} != [{}]",
                 self.attn_norm.shape(),
                 cfg.hidden_dim
+            ));
+        }
+        if self.attn_q_norm.shape() != [cfg.head_dim] {
+            return Err(anyhow!(
+                "qwen35 full_attn: attn_q_norm shape {:?} != [{}]",
+                self.attn_q_norm.shape(),
+                cfg.head_dim
+            ));
+        }
+        if self.attn_k_norm.shape() != [cfg.head_dim] {
+            return Err(anyhow!(
+                "qwen35 full_attn: attn_k_norm shape {:?} != [{}]",
+                self.attn_k_norm.shape(),
+                cfg.head_dim
+            ));
+        }
+        if self.post_attn_norm.shape() != [cfg.hidden_dim] {
+            return Err(anyhow!(
+                "qwen35 full_attn: post_attn_norm shape {:?} != [{}]",
+                self.post_attn_norm.shape(),
+                cfg.hidden_dim
+            ));
+        }
+        if self.w_q_gate.shape() != [cfg.hidden_dim, cfg.q_dim()] {
+            return Err(anyhow!(
+                "qwen35 full_attn: w_q_gate shape {:?} != [{}, {}]",
+                self.w_q_gate.shape(),
+                cfg.hidden_dim,
+                cfg.q_dim()
             ));
         }
         if self.w_q.shape() != [cfg.hidden_dim, cfg.q_dim()] {
@@ -224,6 +283,57 @@ impl Qwen35FullAttention {
         kernels::launch_matmul_bf16_bf16(device, &norm, &self.w_k, &mut k_flat, n_tokens, hidden_dim, kv_dim)?;
         let mut v_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
         kernels::launch_matmul_bf16_bf16(device, &norm, &self.w_v, &mut v_flat, n_tokens, hidden_dim, kv_dim)?;
+
+        // ── 3b. Compute the sigmoid-gate tensor for the post-attention
+        //    elementwise multiply. The gate projection is `norm @ w_q_gate`
+        //    → `[n_tokens, q_dim]` bf16. We apply `sigmoid` on the host
+        //    (no kernel yet) and keep it around until after attention.
+        //
+        //    Why host-sigmoid: the rest of the pipeline only needs
+        //    elementwise-mul which we can do via `launch_residual_add`
+        //    composed after a host scale, or via a round-trip — same
+        //    cost-class as the causal mask's host build above and far
+        //    simpler than adding a third kernel for ~kloc of new code.
+        //    A fused sigmoid-mul kernel is a Phase-5 optimization.
+        let mut q_gate = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, q_dim])?;
+        kernels::launch_matmul_bf16_bf16(
+            device,
+            &norm,
+            &self.w_q_gate,
+            &mut q_gate,
+            n_tokens,
+            hidden_dim,
+            q_dim,
+        )?;
+        let q_gate_sig = sigmoid_host_bf16(&q_gate)?;
+
+        // ── 3c. Per-head RMSNorm on Q and K (in place on the flat
+        //    tensors). dflash applies these after the per-head reshape
+        //    and before RoPE; because the flat layout is row-major
+        //    `[n_tokens, n_heads * head_dim]`, it's equivalent to
+        //    rmsnorm'ing over the last axis of `[n_tokens * n_heads,
+        //    head_dim]` — exactly what `launch_rmsnorm_f32` does.
+        //
+        //    The rmsnorm kernel is f32-only, so we stage through f32
+        //    buffers. This matches the pre-projection norm at step 2.
+        per_head_rmsnorm_bf16(
+            device,
+            &mut q_flat,
+            &self.attn_q_norm,
+            n_tokens,
+            cfg.n_q_heads,
+            cfg.head_dim,
+            cfg.rms_eps,
+        )?;
+        per_head_rmsnorm_bf16(
+            device,
+            &mut k_flat,
+            &self.attn_k_norm,
+            n_tokens,
+            cfg.n_kv_heads,
+            cfg.head_dim,
+            cfg.rms_eps,
+        )?;
 
         // ── 4. Reshape Q, K into the per-head layout RoPE expects.
         //    `_flat` tensors are `[n_tokens, N]` row-major; the per-head
@@ -360,6 +470,15 @@ impl Qwen35FullAttention {
                 q_head,
             )?;
         }
+
+        // ── 7g. Sigmoid gate elementwise-mul. dflash's
+        //    `build_full_attn_block` applies `attn = attn * sigmoid(gate)`
+        //    after the attention output is re-flattened into `[q_dim,
+        //    n_tokens]`. Here `attn_out` is already `[n_tokens, q_dim]`
+        //    row-major and `q_gate_sig` is the same shape — so the mul
+        //    is fully elementwise. We do it on the host alongside the
+        //    sigmoid computation at step 3b to avoid a dedicated kernel.
+        elementwise_mul_host_bf16(&mut attn_out, &q_gate_sig)?;
 
         // ── 8. Output projection.
         let mut proj = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
@@ -599,6 +718,110 @@ fn host_scale_add(
     Ok(())
 }
 
+/// In-place per-head RMSNorm on a `[n_tokens, n_heads * head_dim]` bf16
+/// tensor with weight `[head_dim]` f32.
+///
+/// The row-major `[n_tokens, n_heads * head_dim]` layout is bit-equal
+/// to `[n_tokens * n_heads, head_dim]` row-major; the kernel normalizes
+/// per row (per head-per-token). We stage through f32 buffers since
+/// the current RMSNorm kernel is f32-only.
+///
+/// Cost: one cast (bf16 → f32), two D2D memcpys to reshape into + back
+/// out of a 2-D f32 tensor of shape `[n_tokens*n_heads, head_dim]`, the
+/// rmsnorm itself, and one cast (f32 → bf16). Identical cost-class to
+/// the existing `reshape_3d` helper used at RoPE time; a fused bf16
+/// rmsnorm kernel would collapse this down to a single launch but is
+/// phase-5 material.
+fn per_head_rmsnorm_bf16(
+    device: &Arc<DeviceContext>,
+    x: &mut CudaTensor<bf16>,
+    weight: &CudaTensor<f32>,
+    n_tokens: usize,
+    n_heads: usize,
+    head_dim: usize,
+    eps: f32,
+) -> Result<()> {
+    debug_assert_eq!(x.shape(), [n_tokens, n_heads * head_dim]);
+    debug_assert_eq!(weight.shape(), [head_dim]);
+
+    let rows = n_tokens * n_heads;
+
+    // bf16 → f32 on the [n_tokens, n_heads*head_dim] layout.
+    let mut xf32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, n_heads * head_dim])?;
+    kernels::launch_cast_bf16_to_f32(device, x, &mut xf32)?;
+
+    // Reshape xf32 into [rows, head_dim] via D2D memcpy. Same pattern
+    // the bf16 path uses at RoPE time.
+    let mut xf32_2d = CudaTensor::<f32>::zeros(device.clone(), vec![rows, head_dim])?;
+    {
+        let stream = device.raw().default_stream();
+        stream
+            .memcpy_dtod(xf32.buf(), xf32_2d.buf_mut())
+            .map_err(|e| anyhow!("per_head_rmsnorm_bf16: reshape-to-2d memcpy_dtod: {:?}", e))?;
+    }
+
+    // RMSNorm in f32, per-row over head_dim.
+    let mut yf32_2d = CudaTensor::<f32>::zeros(device.clone(), vec![rows, head_dim])?;
+    kernels::launch_rmsnorm_f32(device, &xf32_2d, weight, &mut yf32_2d, eps)?;
+
+    // Reshape back to [n_tokens, n_heads*head_dim] f32.
+    let mut yf32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, n_heads * head_dim])?;
+    {
+        let stream = device.raw().default_stream();
+        stream
+            .memcpy_dtod(yf32_2d.buf(), yf32.buf_mut())
+            .map_err(|e| anyhow!("per_head_rmsnorm_bf16: reshape-from-2d memcpy_dtod: {:?}", e))?;
+    }
+
+    // f32 → bf16 into x (in-place output of caller).
+    kernels::launch_cast_f32_to_bf16(device, &yf32, x)?;
+    Ok(())
+}
+
+/// Compute `sigmoid` of a bf16 tensor on the host and return the result
+/// as a fresh device tensor of matching shape.
+///
+/// We have no sigmoid kernel yet; the gate path runs once per forward
+/// on `n_tokens * q_dim` bf16 elements, i.e. ~200 KiB at 32×6144 — fine
+/// for a host round-trip. A fused sigmoid-mul kernel folds both this
+/// and `elementwise_mul_host_bf16` into one launch; tracked as a
+/// phase-5 optimization.
+fn sigmoid_host_bf16(x: &CudaTensor<bf16>) -> Result<CudaTensor<bf16>> {
+    let host = x.to_host()?;
+    let out_host: Vec<bf16> = host
+        .iter()
+        .map(|v| {
+            let f = v.to_f32();
+            bf16::from_f32(1.0 / (1.0 + (-f).exp()))
+        })
+        .collect();
+    CudaTensor::<bf16>::from_host(x.device().clone(), x.shape().to_vec(), &out_host)
+}
+
+/// In-place `x ← x * y` elementwise for bf16 tensors of identical
+/// shape, on the host. Paired with [`sigmoid_host_bf16`] for the
+/// attention gate mul.
+fn elementwise_mul_host_bf16(x: &mut CudaTensor<bf16>, y: &CudaTensor<bf16>) -> Result<()> {
+    if x.shape() != y.shape() {
+        return Err(anyhow!(
+            "elementwise_mul_host_bf16: shape {:?} != {:?}",
+            x.shape(),
+            y.shape()
+        ));
+    }
+    let xh = x.to_host()?;
+    let yh = y.to_host()?;
+    let out: Vec<bf16> = xh
+        .iter()
+        .zip(yh.iter())
+        .map(|(a, b)| bf16::from_f32(a.to_f32() * b.to_f32()))
+        .collect();
+    let dev = x.device().clone();
+    let shape = x.shape().to_vec();
+    *x = CudaTensor::<bf16>::from_host(dev, shape, &out)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,9 +907,48 @@ mod tests {
         )
         .expect("upload w_o");
 
+        // Per-head Q/K norms (shape `[head_dim]`) and post-attn norm
+        // (shape `[hidden_dim]`). All three were added in Phase 4 along
+        // with `w_q_gate`. Synthesize small-amplitude positive weights
+        // the same way `attn_norm` is built — RMSNorm blows up on
+        // negative weights feeding into bf16, and the smoke path just
+        // needs "forward doesn't NaN/Inf".
+        let attn_q_norm_host: Vec<f32> = (0..cfg.head_dim)
+            .map(|_| lcg_iter(&mut seed).abs() * 0.5 + 0.5)
+            .collect();
+        let attn_q_norm =
+            CudaTensor::<f32>::from_host(dev.clone(), vec![cfg.head_dim], &attn_q_norm_host)
+                .expect("upload attn_q_norm");
+
+        let attn_k_norm_host: Vec<f32> = (0..cfg.head_dim)
+            .map(|_| lcg_iter(&mut seed).abs() * 0.5 + 0.5)
+            .collect();
+        let attn_k_norm =
+            CudaTensor::<f32>::from_host(dev.clone(), vec![cfg.head_dim], &attn_k_norm_host)
+                .expect("upload attn_k_norm");
+
+        let post_attn_norm_host: Vec<f32> = (0..cfg.hidden_dim)
+            .map(|_| lcg_iter(&mut seed).abs() * 0.5 + 0.5)
+            .collect();
+        let post_attn_norm =
+            CudaTensor::<f32>::from_host(dev.clone(), vec![cfg.hidden_dim], &post_attn_norm_host)
+                .expect("upload post_attn_norm");
+
+        let w_q_gate_host = random_bf16(cfg.hidden_dim * cfg.q_dim(), &mut seed, 0.02);
+        let w_q_gate = CudaTensor::<bf16>::from_host(
+            dev.clone(),
+            vec![cfg.hidden_dim, cfg.q_dim()],
+            &w_q_gate_host,
+        )
+        .expect("upload w_q_gate");
+
         let layer = Qwen35FullAttention {
             attn_norm,
+            attn_q_norm,
+            attn_k_norm,
+            post_attn_norm,
             w_q,
+            w_q_gate,
             w_k,
             w_v,
             w_o,

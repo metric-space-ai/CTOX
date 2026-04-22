@@ -277,6 +277,16 @@ impl<'a> Cursor<'a> {
         Ok(u64::from_le_bytes(b))
     }
 
+    fn read_f32(&mut self) -> Result<f32> {
+        if self.pos + 4 > self.buf.len() {
+            return Err(anyhow!("read_f32 past end"));
+        }
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
+        self.pos += 4;
+        Ok(f32::from_le_bytes(b))
+    }
+
     fn read_string(&mut self) -> Result<String> {
         let len = self.read_u64()? as usize;
         if self.pos + len > self.buf.len() {
@@ -1075,6 +1085,219 @@ fn dequant_iq4_xs_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
         }
     }
     Ok(out)
+}
+
+#[allow(dead_code)]
+const _QWEN35_METADATA_SEPARATOR: () = ();
+
+// ────────────────────────────────────────────────────────────────────
+// Qwen3.5 metadata parser.
+//
+// Walks only the header + metadata KV section (never touches tensor
+// descriptors or data), extracting the handful of numeric keys we need
+// to build a `Qwen35Config` without patching it by hand. The canonical
+// Qwen3.5 GGUF keys match llama.cpp's naming convention: prefixed with
+// `qwen35.` rather than `qwen3.` — the hybrid-SSM variant was merged
+// under its own arch label upstream.
+// ────────────────────────────────────────────────────────────────────
+
+/// Parsed numeric metadata from a Qwen3.5 GGUF header.
+///
+/// Populated from the file's `qwen35.*` keys (falling back to sentinel
+/// values the caller can assert against when a key is absent). These
+/// are the seven values [`crate::models::qwen35::Qwen35Config::from_metadata`]
+/// needs to drive the whole model — head counts, embedding/ffn widths,
+/// the RoPE base, the RMSNorm epsilon, and the maximum context length.
+#[derive(Debug, Clone, Copy)]
+pub struct Qwen35Metadata {
+    /// `qwen35.block_count` — number of decoder layers (64 on 27B).
+    pub block_count: usize,
+    /// `qwen35.embedding_length` — hidden_dim (5120 on 27B).
+    pub embedding_length: usize,
+    /// `qwen35.attention.head_count` — n_q_heads (24 on 27B).
+    pub head_count: usize,
+    /// `qwen35.attention.head_count_kv` — n_kv_heads (4 on 27B).
+    pub head_count_kv: usize,
+    /// `qwen35.rope.freq_base` — RoPE base theta (10_000_000 on 27B).
+    pub rope_theta: f32,
+    /// `qwen35.attention.layer_norm_rms_epsilon` — RMSNorm eps (1e-6).
+    pub rms_eps: f32,
+    /// `qwen35.context_length` — max positions.
+    pub context_length: usize,
+    /// `qwen35.feed_forward_length` — FFN intermediate width (17408 on 27B).
+    pub feed_forward_length: usize,
+    /// `qwen35.attention.key_length` — per-head K feature width (256 on 27B).
+    /// Equal to `qwen35.attention.value_length` in all shipping Qwen3.5
+    /// variants, and equals `head_dim` in the typed config.
+    pub key_length: usize,
+    /// `qwen35.attention.value_length` — per-head V feature width (256 on 27B).
+    pub value_length: usize,
+}
+
+/// Read-only GGUF header walker: opens the file, parses header +
+/// metadata section, and captures the Qwen3.5 scalar keys. Does not
+/// touch the tensor section or allocate device memory.
+///
+/// Returns `Err` if:
+///   * the file isn't a GGUF v3 container,
+///   * a required Qwen3.5 key is missing (`embedding_length`,
+///     `block_count`, `attention.head_count`, `attention.head_count_kv`,
+///     `attention.key_length`),
+///   * a captured value has an unexpected GGUF scalar type (e.g.
+///     `head_count` stored as f32).
+///
+/// Soft-fallback keys (`rope.freq_base`, `layer_norm_rms_epsilon`,
+/// `context_length`, `feed_forward_length`, `attention.value_length`)
+/// default to sensible 27B values when absent so the caller can still
+/// construct a config for older builds.
+pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> {
+    let path = path.as_ref();
+    let file = File::open(path).with_context(|| format!("open gguf file {}", path.display()))?;
+    // SAFETY: read-only mmap; we don't hold the mapping past this fn.
+    let mmap = unsafe { Mmap::map(&file) }
+        .with_context(|| format!("mmap gguf file {}", path.display()))?;
+    let mut cur = Cursor::new(&mmap);
+
+    // Header: magic, version, tensor_count, metadata_kv_count. Same
+    // layout as `load_gguf_impl`; we re-parse rather than share because
+    // the tensor loader is pass-through over a `DeviceContext` we don't
+    // want to require for a metadata-only read.
+    let magic = cur.read_u32()?;
+    if magic != GGUF_MAGIC {
+        return Err(anyhow!(
+            "not a gguf file: magic=0x{:08x} (expected 0x{:08x})",
+            magic,
+            GGUF_MAGIC
+        ));
+    }
+    let version = cur.read_u32()?;
+    if version != GGUF_VERSION {
+        return Err(anyhow!(
+            "unsupported gguf version {} (expected {})",
+            version,
+            GGUF_VERSION
+        ));
+    }
+    let _tensor_count = cur.read_u64()?;
+    let metadata_kv_count = cur.read_u64()? as usize;
+
+    // Key buckets. Using `Option` so we can distinguish "absent → apply
+    // fallback" from "present but wrong type → hard error".
+    let mut block_count: Option<usize> = None;
+    let mut embedding_length: Option<usize> = None;
+    let mut head_count: Option<usize> = None;
+    let mut head_count_kv: Option<usize> = None;
+    let mut rope_theta: Option<f32> = None;
+    let mut rms_eps: Option<f32> = None;
+    let mut context_length: Option<usize> = None;
+    let mut feed_forward_length: Option<usize> = None;
+    let mut key_length: Option<usize> = None;
+    let mut value_length: Option<usize> = None;
+
+    for _ in 0..metadata_kv_count {
+        let key = cur.read_string()?;
+        let ty = GgufValueType::from_u32(cur.read_u32()?)?;
+        match key.as_str() {
+            "qwen35.block_count" => {
+                block_count = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.embedding_length" => {
+                embedding_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.attention.head_count" => {
+                head_count = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.attention.head_count_kv" => {
+                head_count_kv = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.context_length" => {
+                context_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.feed_forward_length" => {
+                feed_forward_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.attention.key_length" => {
+                key_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.attention.value_length" => {
+                value_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.rope.freq_base" => {
+                rope_theta = Some(expect_f32_key(&mut cur, &key, ty)?);
+            }
+            "qwen35.attention.layer_norm_rms_epsilon" => {
+                rms_eps = Some(expect_f32_key(&mut cur, &key, ty)?);
+            }
+            _ => cur.skip_value(ty)?,
+        }
+    }
+
+    // Required keys — a missing one means this isn't a Qwen3.5 GGUF (or
+    // an upstream format skew we should flag rather than paper over).
+    let embedding_length = embedding_length
+        .ok_or_else(|| anyhow!("qwen35 metadata: missing qwen35.embedding_length"))?;
+    let block_count =
+        block_count.ok_or_else(|| anyhow!("qwen35 metadata: missing qwen35.block_count"))?;
+    let head_count = head_count
+        .ok_or_else(|| anyhow!("qwen35 metadata: missing qwen35.attention.head_count"))?;
+    let head_count_kv = head_count_kv
+        .ok_or_else(|| anyhow!("qwen35 metadata: missing qwen35.attention.head_count_kv"))?;
+    let key_length = key_length
+        .ok_or_else(|| anyhow!("qwen35 metadata: missing qwen35.attention.key_length"))?;
+
+    // Soft-fallback keys. Defaults come from the reference 27B build
+    // (dflash's qwen35_target_graph.cpp constants).
+    let rope_theta = rope_theta.unwrap_or(10_000_000.0);
+    let rms_eps = rms_eps.unwrap_or(1e-6);
+    let context_length = context_length.unwrap_or(131_072);
+    let feed_forward_length = feed_forward_length.unwrap_or(17_408);
+    let value_length = value_length.unwrap_or(key_length);
+
+    Ok(Qwen35Metadata {
+        block_count,
+        embedding_length,
+        head_count,
+        head_count_kv,
+        rope_theta,
+        rms_eps,
+        context_length,
+        feed_forward_length,
+        key_length,
+        value_length,
+    })
+}
+
+/// Helper: read a metadata value we expect to be u32. Any other ggml
+/// scalar kind is rejected with the key name attached so the error is
+/// debuggable (some builds store counts as i32; we don't auto-coerce).
+fn expect_u32_key(cur: &mut Cursor<'_>, key: &str, ty: GgufValueType) -> Result<u32> {
+    match ty {
+        GgufValueType::U32 => cur.read_u32(),
+        other => {
+            cur.skip_value(other)?;
+            Err(anyhow!(
+                "qwen35 metadata: key {} has type {:?}, expected U32",
+                key,
+                other
+            ))
+        }
+    }
+}
+
+/// Helper: read a metadata value we expect to be f32. Strict variant of
+/// `read_value_maybe_u32`, scoped to this metadata parser.
+fn expect_f32_key(cur: &mut Cursor<'_>, key: &str, ty: GgufValueType) -> Result<f32> {
+    match ty {
+        GgufValueType::F32 => cur.read_f32(),
+        other => {
+            cur.skip_value(other)?;
+            Err(anyhow!(
+                "qwen35 metadata: key {} has type {:?}, expected F32",
+                key,
+                other
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

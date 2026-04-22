@@ -446,21 +446,51 @@ fn build_full_attention_layer(
 ) -> Qwen35FullAttention {
     let cfg = *config;
     let name_attn_norm = format!("blk.{}.attn_norm.weight", layer_idx);
+    let name_post_norm = format!("blk.{}.post_attention_norm.weight", layer_idx);
+    let name_q_norm = format!("blk.{}.attn_q_norm.weight", layer_idx);
+    let name_k_norm = format!("blk.{}.attn_k_norm.weight", layer_idx);
     let name_q = format!("blk.{}.attn_q.weight", layer_idx);
     let name_k = format!("blk.{}.attn_k.weight", layer_idx);
     let name_v = format!("blk.{}.attn_v.weight", layer_idx);
     let name_o = format!("blk.{}.attn_output.weight", layer_idx);
 
     let attn_norm = load_f32_placeholder(device, tensors, &name_attn_norm, vec![cfg.hidden_dim]);
+    let post_attn_norm =
+        load_f32_placeholder(device, tensors, &name_post_norm, vec![cfg.hidden_dim]);
+    // Per-head Q/K norms have shape `[head_dim]` — the RMSNorm is applied
+    // over the per-head axis, not over hidden.
+    let attn_q_norm = load_f32_placeholder(device, tensors, &name_q_norm, vec![cfg.head_dim]);
+    let attn_k_norm = load_f32_placeholder(device, tensors, &name_k_norm, vec![cfg.head_dim]);
 
-    // dflash pre-packs `attn_q` as `[hidden, 2*q_dim]` (Q + gate); we
-    // expect `[hidden, q_dim]` here because our FA layer doesn't
-    // consume the gate. When only packed Q-gate is available, the
-    // loader below will see a shape mismatch and fall through to the
-    // zero placeholder — ack'd in the phase-5 TODO.
-    //
-    // TODO(phase-5): slice off the gate half of attn_q when loading.
-    let w_q = load_bf16_placeholder(device, tensors, &name_q, vec![cfg.hidden_dim, cfg.q_dim()]);
+    // dflash pre-packs `attn_q` as `[hidden, 2*q_dim]` — first half is
+    // Q, second half is the sigmoid gate. Slice on the host and upload
+    // two distinct bf16 tensors. When the GGUF dtype is unsupported
+    // (Q4_K_M ships `attn_q` as Q4_K which we don't dequant yet) the
+    // `load_bf16_placeholder` fallback path still needs a Q-side and a
+    // gate-side tensor, so we fall back twice with zero-filled halves.
+    let (w_q, w_q_gate) = match load_packed_bf16_halves(
+        tensors,
+        &name_q,
+        cfg.hidden_dim,
+        cfg.q_dim(),
+    ) {
+        Ok(pair) => pair,
+        Err(reason) => {
+            tracing::warn!(
+                key = %name_q,
+                q_dim = cfg.q_dim(),
+                %reason,
+                "qwen35_target: attn_q weight unavailable or packed-shape mismatch; \
+                 using zero placeholders for both Q and Q-gate halves"
+            );
+            let zeros = || {
+                CudaTensor::<bf16>::zeros(device.clone(), vec![cfg.hidden_dim, cfg.q_dim()])
+                    .expect("alloc bf16 zero Q/Q-gate placeholder")
+            };
+            (zeros(), zeros())
+        }
+    };
+
     let w_k = load_bf16_placeholder(device, tensors, &name_k, vec![cfg.hidden_dim, cfg.kv_dim()]);
     let w_v = load_bf16_placeholder(device, tensors, &name_v, vec![cfg.hidden_dim, cfg.kv_dim()]);
     let w_o = load_bf16_placeholder(device, tensors, &name_o, vec![cfg.q_dim(), cfg.hidden_dim]);
@@ -471,13 +501,77 @@ fn build_full_attention_layer(
     // running FA count — NOT the model's layer index.
     Qwen35FullAttention {
         attn_norm,
+        attn_q_norm,
+        attn_k_norm,
+        post_attn_norm,
         w_q,
+        w_q_gate,
         w_k,
         w_v,
         w_o,
         config: cfg,
         layer_idx: fa_kv_slot,
     }
+}
+
+/// Slice the packed `attn_q.weight` into its Q and Q-gate halves.
+///
+/// GGUF stores the packed Q/gate tensor as `[hidden, 2*q_dim]`
+/// row-major; dflash splits on the last axis so that element
+/// `[i, j]` for `j in 0..q_dim` is the Q component and
+/// `j in q_dim..2*q_dim` is the gate component.
+///
+/// Returns a pair `(w_q, w_q_gate)`, both `[hidden, q_dim]` bf16. When
+/// the GGUF tensor is missing, non-bf16, or has the wrong shape, this
+/// returns `Err` so the caller can fall through to a zero placeholder
+/// (same lenient-loader contract the other `attn_*` weights follow).
+///
+/// Host CPU does the split because the GGUF loader hands us a single
+/// `CudaTensor<bf16>`; slicing on device would require another strided-
+/// copy kernel we don't have yet. The one-time cost is fine — this
+/// runs once at load, not at forward.
+fn load_packed_bf16_halves(
+    tensors: &HashMap<String, GgufTensor>,
+    key: &str,
+    hidden: usize,
+    q_dim: usize,
+) -> std::result::Result<(CudaTensor<bf16>, CudaTensor<bf16>), String> {
+    let Some(t) = tensors.get(key) else {
+        return Err(format!("{} not present", key));
+    };
+    let expected = [hidden, 2 * q_dim];
+    if t.shape != expected {
+        return Err(format!(
+            "{}: shape {:?} != expected packed {:?}",
+            key, t.shape, expected
+        ));
+    }
+    let GgufBuf::Bf16(src) = &t.buf else {
+        return Err(format!(
+            "{}: dtype is not BF16 (packed-halves loader only handles BF16 inputs)",
+            key
+        ));
+    };
+    let host = src
+        .to_host()
+        .map_err(|e| format!("{}: download: {:?}", key, e))?;
+    // Split row by row: each row has 2*q_dim elements, Q in the first
+    // half, gate in the second. Allocate two contiguous row-major
+    // halves and copy element-wise — simpler than a chunked reshape
+    // dance and the cost is amortized over model load.
+    let mut q_half: Vec<bf16> = Vec::with_capacity(hidden * q_dim);
+    let mut g_half: Vec<bf16> = Vec::with_capacity(hidden * q_dim);
+    for row in 0..hidden {
+        let base = row * 2 * q_dim;
+        q_half.extend_from_slice(&host[base..base + q_dim]);
+        g_half.extend_from_slice(&host[base + q_dim..base + 2 * q_dim]);
+    }
+    let dev = src.device().clone();
+    let w_q = CudaTensor::<bf16>::from_host(dev.clone(), vec![hidden, q_dim], &q_half)
+        .map_err(|e| format!("{}: upload Q half: {:?}", key, e))?;
+    let w_q_gate = CudaTensor::<bf16>::from_host(dev, vec![hidden, q_dim], &g_half)
+        .map_err(|e| format!("{}: upload gate half: {:?}", key, e))?;
+    Ok((w_q, w_q_gate))
 }
 
 fn build_gdn_layer(
@@ -883,6 +977,167 @@ mod tests {
         }
         eprintln!(
             "qwen35_target_gguf_smoke: logits shape={:?} nan={} inf={} max_abs={:.4e}",
+            logits.shape(),
+            n_nan,
+            n_inf,
+            max_abs
+        );
+        assert_eq!(n_nan, 0, "logits contain {} NaN", n_nan);
+        assert_eq!(n_inf, 0, "logits contain {} Inf", n_inf);
+    }
+
+    /// Phase-4 v2 smoke: same intent as the original, but pulls the
+    /// config from the GGUF's `qwen35.*` metadata instead of the
+    /// baked-in constant and asserts the head counts the metadata
+    /// reports (24/4) rather than the (wrong) 40/8 the const used to
+    /// carry.
+    ///
+    /// Doesn't assert on logit values — Phase 4 still skips Q5_K/Q6_K/
+    /// Q8_0/IQ4_XS tensors, so most weights are zero placeholders and
+    /// the logits end up dominated by whatever tensors did load. Once
+    /// Agent N lands the missing dtype kernels, the logit magnitudes
+    /// will stop being zero on their own.
+    ///
+    /// Run with:
+    ///   cargo test -p ctox-engine-cuda --features cuda --release -- \
+    ///     --ignored --nocapture qwen35_target_gguf_smoke_v2
+    #[test]
+    #[ignore]
+    fn qwen35_target_gguf_smoke_v2() {
+        let dev = Arc::new(DeviceContext::new(0).expect("cuda init"));
+
+        // 1. Parse metadata from the GGUF header — no device uploads yet.
+        let meta = crate::gguf::parse_qwen35_metadata(QWEN35_27B_GGUF)
+            .expect("parse_qwen35_metadata");
+        eprintln!(
+            "qwen35 metadata: block_count={} embedding_length={} head_count={} head_count_kv={} \
+             rope_theta={} rms_eps={} context_length={} feed_forward_length={} \
+             key_length={} value_length={}",
+            meta.block_count,
+            meta.embedding_length,
+            meta.head_count,
+            meta.head_count_kv,
+            meta.rope_theta,
+            meta.rms_eps,
+            meta.context_length,
+            meta.feed_forward_length,
+            meta.key_length,
+            meta.value_length,
+        );
+
+        // 2. Build config from metadata. Shape-critical assertions: the
+        //    GGUF reports the real head counts (24/4), which is exactly
+        //    the mismatch this agent's workstream fixes.
+        //
+        //    gdn_ssm_dim isn't in the attention metadata block — it
+        //    comes from `qwen35.ssm.state_size` on the reference target
+        //    (128 for 27B). We pass that through by hand here since
+        //    this test doesn't model the full SSM metadata.
+        let gdn_ssm_dim = 128;
+        let cfg = Qwen35Config::from_metadata(&meta, gdn_ssm_dim);
+        assert_eq!(cfg.n_q_heads, 24, "metadata head_count should be 24 on 27B");
+        assert_eq!(cfg.n_kv_heads, 4, "metadata head_count_kv should be 4 on 27B");
+        assert_eq!(cfg.hidden_dim, 5120);
+        assert_eq!(cfg.head_dim, 256);
+
+        // 3. Load the full target using the metadata-derived config.
+        eprintln!("qwen35_target_gguf_smoke_v2: loading {}", QWEN35_27B_GGUF);
+        let target = Qwen35Target::load_from_gguf(dev.clone(), cfg, QWEN35_27B_GGUF)
+            .expect("load_from_gguf");
+        eprintln!(
+            "loaded: vocab={} n_full_attn={} n_gdn={} layers={}",
+            target.vocab_size,
+            target.n_full_attn,
+            target.n_gdn,
+            target.layers.len()
+        );
+
+        assert!(
+            target.vocab_size >= MIN_VOCAB,
+            "vocab_size {} suspiciously small",
+            target.vocab_size
+        );
+        assert_eq!(target.n_full_attn, 16, "27B should have 16 FA layers");
+        assert_eq!(target.n_gdn, 48, "27B should have 48 GDN layers");
+        assert_eq!(target.layers.len(), 64, "27B should have 64 layers total");
+
+        // 4. Run forward on the HumanEval 9-token prompt (padded to 32).
+        let prompt: [i32; 9] = [7734, 264, 6185, 36974, 883, 13094, 6326, 61369, 25];
+        let n_real = prompt.len();
+        let n_tokens = 32usize;
+        let mut tokens_host = vec![0i32; n_tokens];
+        tokens_host[..n_real].copy_from_slice(&prompt);
+        let tokens = CudaTensor::<i32>::from_host(dev.clone(), vec![n_tokens], &tokens_host)
+            .expect("upload tokens");
+
+        let mut positions_host = vec![0i32; 4 * n_tokens];
+        for t in 0..n_tokens {
+            positions_host[t] = t as i32;
+        }
+        let positions =
+            CudaTensor::<i32>::from_host(dev.clone(), vec![4, n_tokens], &positions_host)
+                .expect("upload positions");
+
+        let max_ctx = 4096usize.max(n_tokens);
+        let mut kv_cache = KvCache::new(
+            dev.clone(),
+            target.n_full_attn,
+            max_ctx,
+            cfg.n_kv_heads,
+            cfg.head_dim,
+        )
+        .expect("alloc kv cache");
+
+        let s_v = cfg.gdn_ssm_dim;
+        let h = cfg.n_q_heads;
+        let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
+        let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
+        for _ in 0..target.n_gdn {
+            gdn_states.push(
+                CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1])
+                    .expect("alloc gdn state"),
+            );
+            gdn_inter.push(
+                CudaTensor::<f16>::zeros(dev.clone(), vec![s_v, s_v, h, n_tokens])
+                    .expect("alloc gdn inter"),
+            );
+        }
+
+        eprintln!("qwen35_target_gguf_smoke_v2: running forward");
+        let logits = target
+            .forward(
+                &tokens,
+                &positions,
+                &mut kv_cache,
+                &mut gdn_states,
+                &mut gdn_inter,
+            )
+            .expect("forward");
+        dev.synchronize().expect("synchronize");
+
+        // 5. Shape + finiteness only — no value assertions (see the
+        //    doc comment about Phase 4 placeholders).
+        assert_eq!(
+            logits.shape(),
+            [n_tokens, target.vocab_size],
+            "logits shape mismatch"
+        );
+
+        let host = logits.to_host().expect("download logits");
+        let mut n_nan = 0usize;
+        let mut n_inf = 0usize;
+        let mut max_abs = 0.0f32;
+        for &v in &host {
+            if v.is_nan() {
+                n_nan += 1;
+            } else if v.is_infinite() {
+                n_inf += 1;
+            } else if v.abs() > max_abs {
+                max_abs = v.abs();
+            }
+        }
+        eprintln!(
+            "qwen35_target_gguf_smoke_v2: logits shape={:?} nan={} inf={} max_abs={:.4e}",
             logits.shape(),
             n_nan,
             n_inf,

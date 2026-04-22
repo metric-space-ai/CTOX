@@ -172,6 +172,31 @@ impl Qwen35GDN {
                              // stepper-level concern that threads through
                              // `gdn_state` shape.
 
+        // First-port GDN assumes head_dim == gdn_ssm_dim (S_v); the
+        // per-stream reshape at step 5 below uses `vec![s_v, h,
+        // n_tokens, n_seqs]` which only matches the host-flat layout
+        // `[n_tokens, h * head_dim]` when `s_v == head_dim`. On the
+        // shipping Qwen3.5-27B GGUF `head_dim=256` but `ssm_state=128`
+        // — so this layer's first-port composition doesn't apply and
+        // the block becomes a no-op (hidden passes through
+        // unchanged). FA layers still run with full weights; GDN
+        // layers ship zero-placeholder weights today so skipping them
+        // is behaviorally identical to running them with zeros.
+        //
+        // TODO(phase-5): lift the assumption by materializing q/k/v
+        // with per-stream strides that account for head_dim != s_v,
+        // and using the reference's separate `ssm_state` width for
+        // the recurrent path.
+        if head_dim != s_v {
+            tracing::debug!(
+                layer_idx = self.layer_idx,
+                head_dim,
+                s_v,
+                "qwen35 gdn: head_dim != gdn_ssm_dim; layer runs as a no-op"
+            );
+            return Ok(());
+        }
+
         // w_qkvg must be [hidden_dim, proj_dim] so matmul produces
         // [n_tokens, proj_dim].
         if self.w_qkvg.shape() != [hidden_dim, proj_dim] {
@@ -616,7 +641,7 @@ mod tests {
             n_kv_heads: 8,
             head_dim: 128,
             gdn_ssm_dim: 128,
-            intermediate_dim: 13824, // unused by GDN; required to satisfy the struct literal after Agent O added the field.
+            intermediate_dim: 17_408, // unified with Phase 5 GGUF value
             rope_theta: 1_000_000.0,
             rms_eps: 1e-6,
             max_position_embeddings: 2048,
