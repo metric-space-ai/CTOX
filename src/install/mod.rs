@@ -7,7 +7,8 @@ use serde_json::json;
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{copy, Write};
+use std::fs::OpenOptions;
+use std::io::{copy, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,6 +78,10 @@ impl InstallLayout {
 
     pub fn update_state_path(&self) -> PathBuf {
         self.state_root.join(UPDATE_STATE_FILE_NAME)
+    }
+
+    pub fn update_lock_path(&self) -> PathBuf {
+        self.state_root.join("update.lock")
     }
 }
 
@@ -239,6 +244,17 @@ struct RollbackResult {
     current_release: String,
     previous_release: Option<String>,
     current_root: PathBuf,
+}
+
+#[derive(Debug)]
+struct UpdateOperationLease {
+    path: PathBuf,
+}
+
+impl Drop for UpdateOperationLease {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -411,6 +427,16 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             .iter()
             .all(|arg| matches!(arg.as_str(), "--stable" | "--dev"));
     if args.is_empty() || top_flags_only {
+        let layout = InstallLayout::resolve(root)?;
+        let _lease = acquire_update_operation_lease(
+            &layout,
+            if args.iter().any(|arg| arg == "--dev") {
+                "upgrade-dev"
+            } else {
+                "upgrade-stable"
+            },
+            None,
+        )?;
         let use_dev = args.iter().any(|arg| arg == "--dev");
         let request = if use_dev {
             RemoteReleaseRequest::Branch("main".to_string())
@@ -452,6 +478,7 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
         }
         Some("channel") => handle_update_channel_command(root, &args[1..]),
         Some("adopt") => {
+            let layout = InstallLayout::resolve(root)?;
             let install_root = find_flag_value(args, "--install-root")
                 .map(PathBuf::from)
                 .unwrap_or_else(default_install_root);
@@ -463,6 +490,7 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
                 .unwrap_or_else(default_release_name);
             let force = has_flag(args, "--force");
             let skip_build = has_flag(args, "--skip-build");
+            let _lease = acquire_update_operation_lease(&layout, "adopt", Some(&release))?;
             let result = adopt_installation(
                 root,
                 &install_root,
@@ -475,6 +503,7 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("apply") => {
+            let layout = InstallLayout::resolve(root)?;
             let source = find_flag_value(args, "--source").map(PathBuf::from);
             let requested_release = find_flag_value(args, "--release").map(ToOwned::to_owned);
             let requested_version = find_flag_value(args, "--version").map(ToOwned::to_owned);
@@ -482,6 +511,11 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             let force = has_flag(args, "--force");
             let keep_failed_release = has_flag(args, "--keep-failed-release");
             let from_source = has_flag(args, "--from-source");
+            let lock_release = requested_release
+                .clone()
+                .or_else(|| requested_version.clone())
+                .or_else(|| source.as_deref().and_then(release_name_for_source));
+            let _lease = acquire_update_operation_lease(&layout, "apply", lock_release.as_deref())?;
             let result = if let Some(source) = source {
                 // Local --source always means a source-tree rebuild; binary-mode only
                 // applies to remote releases that ship a pre-built bundle.
@@ -514,6 +548,8 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("rollback") => {
+            let layout = InstallLayout::resolve(root)?;
+            let _lease = acquire_update_operation_lease(&layout, "rollback", None)?;
             let result = rollback_update(root)?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
@@ -985,8 +1021,112 @@ fn persist_update_phase(path: &Path, phase: &str, error: Option<&str>) -> Result
     state.last_error = error.map(ToOwned::to_owned);
     if matches!(phase, "completed" | "failed" | "rolled_back") {
         state.finished_at = Some(now_rfc3339());
+    } else {
+        state.finished_at = None;
     }
     persist_update_state(path, &state)
+}
+
+fn acquire_update_operation_lease(
+    layout: &InstallLayout,
+    operation: &str,
+    target_release: Option<&str>,
+) -> Result<UpdateOperationLease> {
+    let path = layout.update_lock_path();
+    if let Some(parent) = path.parent() {
+        ensure_dir(parent)?;
+    }
+    for _ in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut handle) => {
+                writeln!(handle, "pid={}", std::process::id())?;
+                writeln!(handle, "operation={operation}")?;
+                if let Some(target_release) = target_release {
+                    writeln!(handle, "target_release={target_release}")?;
+                }
+                writeln!(handle, "started_at={}", now_rfc3339())?;
+                return Ok(UpdateOperationLease { path });
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                if update_lock_is_stale(&path) {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                let holder = describe_update_lock_holder(&path);
+                anyhow::bail!("another update operation is already active{holder}");
+            }
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to create update lock {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!(
+        "failed to acquire update lock {} after removing a stale holder",
+        path.display()
+    )
+}
+
+fn describe_update_lock_holder(path: &Path) -> String {
+    let mut details = Vec::new();
+    if let Some(pid) = lock_field(path, "pid") {
+        details.push(format!("pid={pid}"));
+    }
+    if let Some(operation) = lock_field(path, "operation") {
+        details.push(format!("operation={operation}"));
+    }
+    if let Some(target_release) = lock_field(path, "target_release") {
+        details.push(format!("target_release={target_release}"));
+    }
+    if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    }
+}
+
+fn update_lock_is_stale(path: &Path) -> bool {
+    let Some(pid) = lock_field(path, "pid").and_then(|value| value.parse::<u32>().ok()) else {
+        return true;
+    };
+    if pid == std::process::id() {
+        return false;
+    }
+    !process_is_alive(pid)
+}
+
+fn lock_field(path: &Path, key: &str) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    raw.lines().find_map(|line| {
+        line.strip_prefix(&format!("{key}="))
+            .map(|value| value.trim().to_string())
+    })
+}
+
+#[cfg(unix)]
+fn process_is_alive(pid: u32) -> bool {
+    let pid = pid as libc::pid_t;
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    let filter = format!("PID eq {pid}");
+    let output = Command::new("tasklist")
+        .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+        .output();
+    let Ok(output) = output else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    !stdout.trim().is_empty() && !stdout.contains("No tasks are running")
 }
 
 fn rollback_to_previous_release(
@@ -2105,5 +2245,87 @@ fn create_symlink(target: &Path, link_path: &Path) -> Result<()> {
             )
         })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn update_lock_blocks_second_active_holder() {
+        let temp = tempdir().unwrap();
+        let layout = InstallLayout {
+            workspace_root: temp.path().join("workspace"),
+            active_root: temp.path().join("workspace"),
+            install_root: Some(temp.path().join("install")),
+            state_root: temp.path().join("state"),
+            cache_root: temp.path().join("cache"),
+        };
+        ensure_dir(&layout.state_root).unwrap();
+
+        let _lease = acquire_update_operation_lease(&layout, "upgrade-dev", Some("branch-main"))
+            .expect("first holder should acquire lock");
+        let err = acquire_update_operation_lease(&layout, "apply", Some("branch-main-next"))
+            .expect_err("second holder should be rejected");
+        let text = err.to_string();
+        assert!(text.contains("another update operation is already active"));
+        assert!(text.contains("operation=upgrade-dev"));
+        assert!(text.contains("target_release=branch-main"));
+    }
+
+    #[test]
+    fn stale_update_lock_is_replaced() {
+        let temp = tempdir().unwrap();
+        let layout = InstallLayout {
+            workspace_root: temp.path().join("workspace"),
+            active_root: temp.path().join("workspace"),
+            install_root: Some(temp.path().join("install")),
+            state_root: temp.path().join("state"),
+            cache_root: temp.path().join("cache"),
+        };
+        ensure_dir(&layout.state_root).unwrap();
+        let lock_path = layout.update_lock_path();
+        fs::write(
+            &lock_path,
+            "pid=99999999\noperation=upgrade-dev\ntarget_release=branch-main-old\n",
+        )
+        .unwrap();
+
+        let _lease = acquire_update_operation_lease(&layout, "apply", Some("branch-main-new"))
+            .expect("stale lock should be replaced");
+        let contents = fs::read_to_string(&lock_path).unwrap();
+        assert!(contents.contains("operation=apply"));
+        assert!(contents.contains("target_release=branch-main-new"));
+    }
+
+    #[test]
+    fn non_terminal_update_phase_clears_finished_at() {
+        let temp = tempdir().unwrap();
+        let state_path = temp.path().join("update_state.json");
+        persist_update_state(
+            &state_path,
+            &UpdateState {
+                schema_version: 1,
+                phase: "failed".to_string(),
+                current_version: "test".to_string(),
+                current_release: Some("branch-main-old".to_string()),
+                target_release: Some("branch-main-bad".to_string()),
+                previous_release: None,
+                source: None,
+                state_backup_path: None,
+                started_at: Some(now_rfc3339()),
+                finished_at: Some(now_rfc3339()),
+                last_error: Some("boom".to_string()),
+            },
+        )
+        .unwrap();
+
+        persist_update_phase(&state_path, "building", None).unwrap();
+        let state = load_update_state(&state_path).unwrap().unwrap();
+        assert_eq!(state.phase, "building");
+        assert!(state.finished_at.is_none());
+        assert!(state.last_error.is_none());
     }
 }
