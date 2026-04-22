@@ -168,37 +168,33 @@ impl Qwen35GDN {
 
         let h = self.config.n_q_heads;
         let s_v = self.config.gdn_ssm_dim;
-        let head_dim = self.config.head_dim;
-        let proj_dim = h * 4 * head_dim; // q, k, v, g fused width
-        let kv_dim = h * head_dim; // per-tensor width after split
+        // TODO(phase-5): the reference (dflash-ref
+        // qwen35_target_graph.cpp::build_delta_net_block) uses an
+        // independent head-count set for GDN — `num_k_heads=16 /
+        // num_v_heads=48 / head_k_dim=head_v_dim=128` — rather than
+        // the FullAttention `n_q_heads / n_kv_heads / head_dim`
+        // constants. This first port keeps `H = n_q_heads` but derives
+        // ALL per-head widths from `gdn_ssm_dim` (not `head_dim`) so
+        // the composition works when `head_dim != gdn_ssm_dim` — which
+        // is exactly the shipping Qwen3.5-27B GGUF case
+        // (`head_dim=256`, `gdn_ssm_dim=128`).
+        //
+        // Historical note: this forward used to early-return when
+        // `head_dim != gdn_ssm_dim`, making 48 of 64 decoder layers
+        // silent no-ops on the shipping 27B and turning the tok/s
+        // benchmark into a lie. The early-return is gone; the layer
+        // now runs its kernel-composition even when its synthetic-
+        // weight loader falls back to `PackedWeight::Zero` (real GDN
+        // GGUF tensors have a different shape than this first port
+        // expects and get zero-filled by the loader — but at least
+        // the infrastructure cost is honest).
+        let proj_dim = h * 4 * s_v; // q, k, v, g fused width
+        let kv_dim = h * s_v; // per-tensor width after split (H * S_v)
+        let head_width = s_v; // per-head width for Q / K / V / G — decoupled
+                              // from FA's `head_dim` on purpose.
         let n_seqs = 1usize; // first port: batch=1. Multi-seq is a
                              // stepper-level concern that threads through
                              // `gdn_state` shape.
-
-        // First-port GDN assumes head_dim == gdn_ssm_dim (S_v); the
-        // per-stream reshape at step 5 below uses `vec![s_v, h,
-        // n_tokens, n_seqs]` which only matches the host-flat layout
-        // `[n_tokens, h * head_dim]` when `s_v == head_dim`. On the
-        // shipping Qwen3.5-27B GGUF `head_dim=256` but `ssm_state=128`
-        // — so this layer's first-port composition doesn't apply and
-        // the block becomes a no-op (hidden passes through
-        // unchanged). FA layers still run with full weights; GDN
-        // layers ship zero-placeholder weights today so skipping them
-        // is behaviorally identical to running them with zeros.
-        //
-        // TODO(phase-5): lift the assumption by materializing q/k/v
-        // with per-stream strides that account for head_dim != s_v,
-        // and using the reference's separate `ssm_state` width for
-        // the recurrent path.
-        if head_dim != s_v {
-            tracing::debug!(
-                layer_idx = self.layer_idx,
-                head_dim,
-                s_v,
-                "qwen35 gdn: head_dim != gdn_ssm_dim; layer runs as a no-op"
-            );
-            return Ok(());
-        }
 
         // w_qkvg must be [hidden_dim, proj_dim] so matmul produces
         // [n_tokens, proj_dim].
@@ -330,11 +326,11 @@ impl Qwen35GDN {
         // the layer ships.
         let qkvg_host = qkvg_f32.to_host()?;
 
-        let stream_stride = kv_dim; // H * head_dim per stream
+        let stream_stride = kv_dim; // H * head_width per stream
         let per_stream_elems = n_tokens * kv_dim;
 
-        // Indexing helper — flat offset in qkvg_host for (t, stream, h*head_dim + s).
-        // qkvg_host row-major is [t, stream_idx * kv_dim + h * head_dim + s]
+        // Indexing helper — flat offset in qkvg_host for (t, stream, h*head_width + s).
+        // qkvg_host row-major is [t, stream_idx * kv_dim + h * head_width + s]
         // where stream_idx ∈ {0..3} for (q, k, v, g).
         let build_stream = |stream_idx: usize| -> Vec<f32> {
             let mut out = vec![0.0f32; per_stream_elems];
@@ -377,7 +373,7 @@ impl Qwen35GDN {
         )?;
 
         // GDA gate collapse: the `g` in the GDN kernel is per-head
-        // scalar, not per-element. Collapse the width-`head_dim` g
+        // scalar, not per-element. Collapse the width-`head_width` g
         // stream to a scalar per (token, head) by averaging. This is
         // NOT what the reference does (it runs a softplus(alpha) *
         // ssm_a formula driven by a separate `ssm_alpha` projection)
@@ -385,17 +381,17 @@ impl Qwen35GDN {
         // meaningful gate signal. Production path swaps this for the
         // reference's `softplus(alpha) * ssm_a` once the kernels land.
         //
-        // TODO(gdn-ref): replace mean-over-head-dim with the reference
+        // TODO(gdn-ref): replace mean-over-head-width with the reference
         // softplus(alpha + dt_bias) * ssm_a pipeline.
         let mut g_host = vec![0.0f32; h * n_tokens * n_seqs];
         for t in 0..n_tokens {
             for hi in 0..h {
-                let base = t * stream_stride + hi * head_dim;
+                let base = t * stream_stride + hi * head_width;
                 let mut acc = 0.0f32;
-                for s in 0..head_dim {
+                for s in 0..head_width {
                     acc += g_stream_host[base + s];
                 }
-                g_host[hi + t * h] = acc / head_dim as f32; // clamp below
+                g_host[hi + t * h] = acc / head_width as f32; // clamp below
             }
         }
         // Clamp to the kernel's viable range — the kernel does
@@ -590,55 +586,28 @@ mod tests {
         ((*seed >> 16) as f32 / 32768.0) - 1.0
     }
 
-    /// `qwen35_gdn_smoke` — ignored, A6000-only.
-    ///
-    /// Builds a `Qwen35GDN` with synthetic random bf16 weights, runs
-    /// `forward` twice on the same sequence with the state carried
-    /// between calls, and asserts:
-    ///   * output shape matches input shape
-    ///   * no NaN / Inf in the output
-    ///   * `gdn_state` differs between the two calls (i.e. the SSM
-    ///     recurrence actually wrote new state)
-    ///
-    /// Exact numerical comparison against the dflash reference is
-    /// Phase 4 — this smoke test validates kernel composition only.
-    ///
-    /// Run:
-    ///   cargo test -p ctox-qwen35-27b --features cuda --release -- \
-    ///       --ignored --nocapture qwen35_gdn_smoke
-    #[test]
-    #[ignore]
-    fn qwen35_gdn_smoke() {
-        // Smaller-than-production config so the smoke test runs in
-        // seconds. Dimensions are all 32-aligned so the matmul kernel
-        // can tile cleanly.
-        //
-        // We keep head_dim = 128 because that's the only S_v the GDN
-        // kernel has a chain-mode entry point instantiated for in
-        // production use (plus 16/32/64 for smaller shapes — 128 is
-        // the most-production-relevant of the available options).
-        let config = Qwen35Config {
-            hidden_dim: 5120,
-            n_q_heads: 8, // H — 8 heads for a fast test
-            n_kv_heads: 8,
-            head_dim: 128,
-            gdn_ssm_dim: 128,
-            intermediate_dim: 17_408, // unified with Phase 5 GGUF value
-            rope_theta: 1_000_000.0,
-            rms_eps: 1e-6,
-            max_position_embeddings: 2048,
-        };
-        let n_tokens = 32; // 32-aligned for the matmul kernel
-        let max_verify_tokens = 64;
-
+    /// Build a layer + state + input tensors and drive two calls
+    /// through `forward`, returning the per-call (nan, inf,
+    /// state_diff). Extracted so the smoke test can cover multiple
+    /// `(head_dim, gdn_ssm_dim)` shape combinations without copying
+    /// the ~100 lines of setup twice.
+    fn run_gdn_smoke_two_calls(
+        config: Qwen35Config,
+        n_tokens: usize,
+        max_verify_tokens: usize,
+        label: &str,
+    ) {
         let dev = Arc::new(DeviceContext::new(0).expect("cuda init"));
 
         let h = config.n_q_heads;
         let s_v = config.gdn_ssm_dim;
-        let head_dim = config.head_dim;
         let hidden_dim = config.hidden_dim;
-        let proj_dim = h * 4 * head_dim;
-        let kv_dim = h * head_dim;
+        // GDN's internal Q/K/V/G widths are all `s_v` (not
+        // `head_dim`) — this is the key shape assumption under test.
+        // The fused `w_qkvg` weight is therefore [hidden, H*4*S_v],
+        // and `w_out` is [H*S_v, hidden].
+        let proj_dim = h * 4 * s_v;
+        let kv_dim = h * s_v;
 
         // Deterministic weights. Scale small so the matmul products
         // stay within bf16 range at hidden_dim=5120 fan-in.
@@ -719,7 +688,8 @@ mod tests {
         let state_before = gdn_state.to_host().expect("download state before");
         assert!(
             state_before.iter().all(|v| *v == 0.0),
-            "initial state not zeroed"
+            "[{}] initial state not zeroed",
+            label,
         );
 
         // ------------------------------------------------------------
@@ -746,12 +716,13 @@ mod tests {
         assert_eq!(
             out_shape_1,
             vec![n_tokens, hidden_dim],
-            "call 1 output shape"
+            "[{}] call 1 output shape",
+            label,
         );
         // NaN / Inf check.
         let (nan_1, inf_1) = count_bad(&out_host_1);
-        assert_eq!(nan_1, 0, "call 1 output has {} NaN", nan_1);
-        assert_eq!(inf_1, 0, "call 1 output has {} Inf", inf_1);
+        assert_eq!(nan_1, 0, "[{}] call 1 output has {} NaN", label, nan_1);
+        assert_eq!(inf_1, 0, "[{}] call 1 output has {} Inf", label, inf_1);
         // State must have changed (all-zeros → something).
         let state_diff_1: f32 = state_before
             .iter()
@@ -760,13 +731,14 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(
             state_diff_1 > 0.0,
-            "call 1 did not update gdn_state (max_abs diff = {})",
+            "[{}] call 1 did not update gdn_state (max_abs diff = {})",
+            label,
             state_diff_1
         );
 
         eprintln!(
-            "qwen35_gdn_smoke call 1: shape={:?} nan={} inf={} state_diff={:.3e}",
-            out_shape_1, nan_1, inf_1, state_diff_1
+            "qwen35_gdn_smoke[{}] call 1: shape={:?} nan={} inf={} state_diff={:.3e}",
+            label, out_shape_1, nan_1, inf_1, state_diff_1
         );
 
         // ------------------------------------------------------------
@@ -793,11 +765,12 @@ mod tests {
         assert_eq!(
             out_shape_2,
             vec![n_tokens, hidden_dim],
-            "call 2 output shape"
+            "[{}] call 2 output shape",
+            label,
         );
         let (nan_2, inf_2) = count_bad(&out_host_2);
-        assert_eq!(nan_2, 0, "call 2 output has {} NaN", nan_2);
-        assert_eq!(inf_2, 0, "call 2 output has {} Inf", inf_2);
+        assert_eq!(nan_2, 0, "[{}] call 2 output has {} NaN", label, nan_2);
+        assert_eq!(inf_2, 0, "[{}] call 2 output has {} Inf", label, inf_2);
         let state_diff_2: f32 = state_after_1
             .iter()
             .zip(state_after_2.iter())
@@ -805,13 +778,92 @@ mod tests {
             .fold(0.0, f32::max);
         assert!(
             state_diff_2 > 0.0,
-            "call 2 did not advance gdn_state relative to call 1 (max_abs diff = {})",
+            "[{}] call 2 did not advance gdn_state relative to call 1 (max_abs diff = {})",
+            label,
             state_diff_2
         );
 
         eprintln!(
-            "qwen35_gdn_smoke call 2: shape={:?} nan={} inf={} state_diff_from_call1={:.3e}",
-            out_shape_2, nan_2, inf_2, state_diff_2
+            "qwen35_gdn_smoke[{}] call 2: shape={:?} nan={} inf={} state_diff_from_call1={:.3e}",
+            label, out_shape_2, nan_2, inf_2, state_diff_2
+        );
+    }
+
+    /// `qwen35_gdn_smoke` — ignored, A6000-only.
+    ///
+    /// Builds a `Qwen35GDN` with synthetic random bf16 weights, runs
+    /// `forward` twice on the same sequence with the state carried
+    /// between calls, and asserts:
+    ///   * output shape matches input shape
+    ///   * no NaN / Inf in the output
+    ///   * `gdn_state` differs between the two calls (i.e. the SSM
+    ///     recurrence actually wrote new state)
+    ///
+    /// Covers TWO sub-configs:
+    ///   1. `head_dim == gdn_ssm_dim == 128` — the original fast-path
+    ///      where the FA head width happens to match the SSM state
+    ///      width. Exercises the simple case.
+    ///   2. `head_dim == 256`, `gdn_ssm_dim == 128` — the shipping
+    ///      Qwen3.5-27B production shape. This previously hit an
+    ///      early-return that turned 48 of 64 layers into silent
+    ///      no-ops; now the layer actually runs its kernel.
+    ///
+    /// Exact numerical comparison against the dflash reference is
+    /// Phase 4 — this smoke test validates kernel composition only.
+    ///
+    /// Run:
+    ///   cargo test -p ctox-qwen35-27b --features cuda --release -- \
+    ///       --ignored --nocapture qwen35_gdn_smoke
+    #[test]
+    #[ignore]
+    fn qwen35_gdn_smoke() {
+        let n_tokens = 32; // 32-aligned for the matmul kernel
+        let max_verify_tokens = 64;
+
+        // Sub-config 1 — head_dim == gdn_ssm_dim (original
+        // fast-path). S_v = 128 is the only chain-mode kernel
+        // instantiation we use in production (plus 16/32/64 for the
+        // smaller test combos).
+        let config_fastpath = Qwen35Config {
+            hidden_dim: 5120,
+            n_q_heads: 8, // H — 8 heads for a fast test
+            n_kv_heads: 8,
+            head_dim: 128,
+            gdn_ssm_dim: 128,
+            intermediate_dim: 17_408,
+            rope_theta: 1_000_000.0,
+            rms_eps: 1e-6,
+            max_position_embeddings: 2048,
+        };
+        run_gdn_smoke_two_calls(
+            config_fastpath,
+            n_tokens,
+            max_verify_tokens,
+            "head_dim==s_v==128",
+        );
+
+        // Sub-config 2 — shipping 27B production shape: head_dim !=
+        // gdn_ssm_dim. The pre-fix early-return would trigger here;
+        // post-fix the layer must actually run its kernel and produce
+        // finite output with a state-advancing recurrence.
+        let config_prod = Qwen35Config {
+            hidden_dim: 5120,
+            n_q_heads: 8, // keep H small so the test still runs fast;
+                          // production 27B has 24, but the code path is
+                          // the same — what matters is head_dim != s_v.
+            n_kv_heads: 8,
+            head_dim: 256,
+            gdn_ssm_dim: 128,
+            intermediate_dim: 17_408,
+            rope_theta: 10_000_000.0,
+            rms_eps: 1e-6,
+            max_position_embeddings: 131_072,
+        };
+        run_gdn_smoke_two_calls(
+            config_prod,
+            n_tokens,
+            max_verify_tokens,
+            "head_dim=256,s_v=128",
         );
     }
 

@@ -631,14 +631,21 @@ fn build_gdn_layer(
     let pre_norm = load_f32_placeholder(device, tensors, &name_attn_norm, vec![cfg.hidden_dim]);
 
     let h = cfg.n_q_heads;
-    let head_dim = cfg.head_dim;
-    let proj_dim = h * 4 * head_dim;
-    let kv_dim = h * head_dim;
+    // GDN's internal Q/K/V/G head widths come from `gdn_ssm_dim`, NOT
+    // from FA's `head_dim`. Keeping these decoupled is what lets the
+    // forward run on the shipping 27B where `head_dim=256` but
+    // `gdn_ssm_dim=128` (see layers::gdn docs). Real GGUF GDN tensors
+    // have a completely different shape (`attn_qkv.weight` is Q5_K
+    // `[hidden, 10240]` from a separate num_k_heads=16/num_v_heads=48
+    // layout) and won't match either our old `h*4*head_dim` or this
+    // new `h*4*gdn_ssm_dim` — the loader falls back to
+    // `PackedWeight::Zero` in both cases. The difference is that the
+    // layer now actually runs instead of early-returning; the Zero
+    // matmul is a memset + the kernel then runs on zero inputs.
+    let gdn_head_width = cfg.gdn_ssm_dim;
+    let proj_dim = h * 4 * gdn_head_width;
+    let kv_dim = h * gdn_head_width;
 
-    // `attn_qkv.weight` in the real 27B is Q5_K shape [hidden, 10240].
-    // Our per-layer kernel expects [hidden, h*4*head_dim] bf16 — same
-    // intent (q/k/v/g fused), different byte layout, and the GGUF
-    // dtype isn't loadable at all yet. Placeholder.
     let w_qkvg = load_packed_weight(device, tensors, &name_qkvg, cfg.hidden_dim, proj_dim);
     let w_out = load_packed_weight(device, tensors, &name_out, kv_dim, cfg.hidden_dim);
 
