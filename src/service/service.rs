@@ -4178,6 +4178,12 @@ fn maybe_redirect_platform_work_to_expertise_passes(
     let Some(next_pass) = next_missing_platform_expertise_pass(&items) else {
         return Ok(false);
     };
+    if !job.leased_message_keys.is_empty() {
+        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
+    }
+    if !job.leased_ticket_event_keys.is_empty() {
+        let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
+    }
     let created = queue_platform_expertise_pass(
         root,
         &thread_key,
@@ -4188,12 +4194,6 @@ fn maybe_redirect_platform_work_to_expertise_passes(
         &job.preview,
         job.suggested_skill.as_deref(),
     )?;
-    if !job.leased_message_keys.is_empty() {
-        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
-    }
-    if !job.leased_ticket_event_keys.is_empty() {
-        let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
-    }
     if let Some(work_id) = job.ticket_self_work_id.as_deref() {
         close_ticket_self_work_item(
             root,
@@ -7975,13 +7975,31 @@ mod tests {
     #[test]
     fn owner_visible_platform_reset_is_redirected_into_first_expertise_pass() {
         let root = temp_root("ctox-platform-pass-reroute");
+        let queue_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Reset kunstmen.com so it behaves like a platform.".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("follow-up-orchestrator".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed active queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
         {
             let mut shared = lock_shared_state(&state);
             shared.busy = true;
             shared.current_goal_preview = Some("Kunstmen platform homepage reset".to_string());
             shared.active_source_label = Some("queue".to_string());
-            track_leased_keys_locked(&mut shared, &["queue-key-1".to_string()], &[]);
+            track_leased_keys_locked(
+                &mut shared,
+                std::slice::from_ref(&queue_task.message_key),
+                &[],
+            );
         }
         let job = QueuedPrompt {
             prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
@@ -7990,7 +8008,7 @@ mod tests {
             preview: "Kunstmen platform homepage reset".to_string(),
             source_label: "queue".to_string(),
             suggested_skill: Some("follow-up-orchestrator".to_string()),
-            leased_message_keys: vec!["queue-key-1".to_string()],
+            leased_message_keys: vec![queue_task.message_key.clone()],
             leased_ticket_event_keys: Vec::new(),
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
