@@ -7,55 +7,72 @@
 //! ```text
 //!   residual ← hidden
 //!   hidden   ← rmsnorm(hidden)
-//!   qkvg     ← matmul(hidden, w_qkvg)
-//!   (q,k,v,g) = qkvg.split4()
+//!   qkv      ← matmul(hidden, w_qkvg)          [n_tokens, 10240]
+//!   (q,k,v)  = qkv.split_by_offset(0, 2048, 4096)
 //!   gdn_out  ← launch_gated_delta_net(q, k, v, g, beta, state, inter)
 //!   proj     ← matmul(gdn_out, w_out)
 //!   hidden   ← residual + proj
 //! ```
 //!
-//! # Scope of the first port
+//! # Fused `w_qkvg` layout (matches shipping 27B GGUF)
 //!
-//! The dflash reference
-//! (`/home/metricspace/dflash-ref/dflash/src/qwen35_target_graph.cpp::build_delta_net_block`)
-//! is more elaborate than this first port — it includes:
+//! `attn_qkv.weight` is `[hidden, 10240]` Q5_K. The 10240 column axis
+//! decomposes as (dflash
+//! `qwen35_target_graph.cpp::build_delta_net_block` + `q35::`
+//! constants):
 //!
-//!   * A 1D convolution + silu on the pre-split qkv stream (the
-//!     `ssm_conv1d` weight).
+//! ```text
+//!   CONV_CHANNELS = SSM_D_INNER + 2 * SSM_N_GROUP * SSM_D_STATE
+//!                 = 6144 + 2 * 16 * 128
+//!                 = 6144 + 4096
+//!                 = 10240
+//!
+//!   Q at offset 0,                width num_k_heads * head_k_dim = 2048
+//!   K at offset 2048,             width num_k_heads * head_k_dim = 2048
+//!   V at offset 4096,             width num_v_heads * head_v_dim = 6144
+//! ```
+//!
+//! with `num_k_heads = 16`, `num_v_heads = 48`, `head_k_dim =
+//! head_v_dim = gdn_ssm_dim = 128`. The kernel's built-in `neqk1 /
+//! rq3` broadcast (`iq1 = h_idx % neqk1` with `neqk1 = H_k`) handles
+//! the GQA expansion from 16 K heads to 48 V heads; we feed Q/K with
+//! their native 16-head layout rather than pre-expanding to 48.
+//!
+//! # Scope of this port
+//!
+//! The dflash reference is still more elaborate than what this layer
+//! runs today:
+//!
+//!   * A 1D convolution + silu on the fused qkv stream (the
+//!     `ssm_conv1d` weight) — here it's omitted; the matmul output
+//!     feeds Q/K/V directly.
 //!   * L2 normalization on Q and K (`ggml_l2_norm`).
-//!   * A GQA-style repeat from `num_k_heads=16` up to
-//!     `num_v_heads=48` for Q/K before handing them to the GDN
-//!     kernel (the kernel's built-in `neqk1 / rq3` broadcast
-//!     handles this natively, but the reference still reshapes for
-//!     clarity).
-//!   * A sigmoid applied to the beta scalar and a
-//!     `softplus(alpha + dt_bias) * ssm_a` gate computation fed as
-//!     `g`.
-//!   * A separate multiplicative gate `z` (post-GDN, pre-output-
-//!     projection).
+//!   * `sigmoid(ssm_beta @ hidden)` for beta — we still use a
+//!     constant 0.5 stub.
+//!   * `softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a` for the
+//!     gate — we still use a mean-over-V-head-width stand-in.
+//!   * A separate multiplicative gate `z = wqkv_gate @ hidden`
+//!     (post-GDN, pre-output-projection).
 //!
 //! Those pieces need kernels we haven't ported yet
-//! (`ssm_conv1d`, `l2_norm`, `sigmoid`, `softplus`). This first port
-//! targets the **kernel-composition mechanics** — it wires what we
-//! have into a shape-correct, state-threading pass so the stepper
-//! above can call `forward` and see (a) non-exploding outputs,
-//! (b) SSM state that actually advances across calls. Exact-vs-
-//! reference numerics are Phase 4.
+//! (`ssm_conv1d`, `l2_norm`, `sigmoid`, `softplus`) and additional
+//! projections (`attn_gate`, `ssm_alpha`, `ssm_beta`, `ssm_a`,
+//! `ssm_norm`). This port wires the **real** Q/K/V weights and the
+//! real `ssm_out` projection into the kernel-composition mechanics
+//! so 48 of 64 layers do genuine weight×activation work instead of
+//! running on zero-placeholder matmuls. Exact-vs-reference numerics
+//! land when the remaining kernels do.
 //!
 //! Open TODOs (tracked inline too):
 //!   * `ssm_conv1d` kernel + pre-conv state management.
 //!   * `l2_norm` kernel for Q/K.
 //!   * `sigmoid` / `softplus` elementwise kernels.
-//!   * Fused `sigmoid_scalar_broadcast` for the beta path, or just
-//!     composed via the above.
+//!   * Fused `sigmoid_scalar_broadcast` for the beta path.
 //!   * `TREE` recurrence — this layer currently always runs
 //!     `GdnRecurrence::Chain`. DDTree verify passes `parent_ids`
 //!     through the stepper, which needs to reach the kernel; plumb
 //!     that when the stepper lands.
-//!   * Q4-quantized weight variant (use `launch_mmvq_q4k_*` in place
-//!     of `launch_matmul_bf16_bf16`). Field-for-field the same
-//!     struct shape; a `QuantizedQwen35GDN` follows once Q4 math is
-//!     wired end-to-end.
+//!   * z-gate (`wqkv_gate @ hidden`) applied post-GDN.
 
 use std::sync::Arc;
 
@@ -87,21 +104,29 @@ pub struct Qwen35GDN {
     /// per-token.
     pub pre_norm: CudaTensor<f32>,
 
-    /// Fused Q/K/V/G input projection. `[hidden_dim, n_q_heads * 4 *
-    /// head_dim]` row-major. Carrier dtype is whatever the GGUF
-    /// shipped; dispatch happens inside [`PackedWeight::matmul_f32`].
-    /// Split into four equal slices along the last axis to produce
-    /// q, k, v, g (in that order).
+    /// Fused Q/K/V input projection — matches the shipping GGUF's
+    /// `attn_qkv.weight`. Shape `[hidden_dim,
+    /// 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim]`
+    /// (`[5120, 10240]` on 27B) row-major. Carrier dtype is whatever
+    /// the GGUF shipped (Q5_K on the production 27B weights);
+    /// dispatch happens inside [`PackedWeight::matmul_f32`].
     ///
-    /// First port deliberately ignores the reference's separate
-    /// `wqkv` + `wqkv_gate` + `ssm_beta` + `ssm_alpha` layout.
-    /// Equivalent in expressivity (same total parameter count if
-    /// you concatenate the weights), just not byte-compatible with
-    /// the reference's GGUF. Byte compatibility is Phase 4.
+    /// The column axis is laid out as Q||K||V (no fused gate, despite
+    /// the historical `w_qkvg` name — Qwen3.5's gate is a separate
+    /// `attn_gate.weight` projection the reference calls `wqkv_gate`,
+    /// not yet wired in this port). Offsets:
+    ///
+    /// * Q: offset `0`, width `num_k_heads * head_k_dim` = 2048 on 27B
+    /// * K: offset `num_k_heads * head_k_dim`, same width
+    /// * V: offset `2 * num_k_heads * head_k_dim`, width
+    ///   `num_v_heads * head_v_dim` = 6144 on 27B
     pub w_qkvg: PackedWeight,
 
-    /// Output projection back to the residual stream. `[n_q_heads *
-    /// head_dim, hidden_dim]`.
+    /// Output projection back to the residual stream. On 27B this is
+    /// `ssm_out.weight` Q5_K `[num_v_heads * head_v_dim, hidden_dim]`
+    /// = `[6144, 5120]` in `[k, n]` convention (carrier is the
+    /// packed Q5_K byte buffer; `PackedWeight::matmul_f32` dispatches
+    /// via `launch_mmvq_q5k_f32`).
     pub w_out: PackedWeight,
 
     /// Architecture constants — see [`Qwen35Config`].
@@ -126,9 +151,10 @@ impl Qwen35GDN {
     /// SSM recurrence carries positional information through the
     /// state, so there is no positional-encoding step.
     ///
-    /// `gdn_state` is `[S_v, S_v, H, n_seqs]` with `H = n_q_heads`
-    /// and `S_v = gdn_ssm_dim`, updated in place. Zero the tensor
-    /// before the first call of a sequence.
+    /// `gdn_state` is `[S_v, S_v, H, n_seqs]` with `H =
+    /// gdn_num_v_heads` (48 on 27B — the GDN kernel's template `H`,
+    /// *not* FA's `n_q_heads`) and `S_v = gdn_ssm_dim`, updated in
+    /// place. Zero the tensor before the first call of a sequence.
     ///
     /// `gdn_inter` is the per-token state snapshot the dflash fast-
     /// rollback path reads from. Shape `[S_v, S_v, H,
@@ -166,55 +192,41 @@ impl Qwen35GDN {
             ));
         }
 
-        let h = self.config.n_q_heads;
+        // GDN's own head-count set — distinct from FullAttention's
+        // (`n_q_heads / n_kv_heads / head_dim`). The fused qkv matmul
+        // produces a width of `qkv_proj_dim = 2*num_k_heads*s_v +
+        // num_v_heads*s_v` (= 10240 on 27B) which the GGUF stores as
+        // `attn_qkv.weight`.
         let s_v = self.config.gdn_ssm_dim;
-        // TODO(phase-5): the reference (dflash-ref
-        // qwen35_target_graph.cpp::build_delta_net_block) uses an
-        // independent head-count set for GDN — `num_k_heads=16 /
-        // num_v_heads=48 / head_k_dim=head_v_dim=128` — rather than
-        // the FullAttention `n_q_heads / n_kv_heads / head_dim`
-        // constants. This first port keeps `H = n_q_heads` but derives
-        // ALL per-head widths from `gdn_ssm_dim` (not `head_dim`) so
-        // the composition works when `head_dim != gdn_ssm_dim` — which
-        // is exactly the shipping Qwen3.5-27B GGUF case
-        // (`head_dim=256`, `gdn_ssm_dim=128`).
-        //
-        // Historical note: this forward used to early-return when
-        // `head_dim != gdn_ssm_dim`, making 48 of 64 decoder layers
-        // silent no-ops on the shipping 27B and turning the tok/s
-        // benchmark into a lie. The early-return is gone; the layer
-        // now runs its kernel-composition even when its synthetic-
-        // weight loader falls back to `PackedWeight::Zero` (real GDN
-        // GGUF tensors have a different shape than this first port
-        // expects and get zero-filled by the loader — but at least
-        // the infrastructure cost is honest).
-        let proj_dim = h * 4 * s_v; // q, k, v, g fused width
-        let kv_dim = h * s_v; // per-tensor width after split (H * S_v)
-        let head_width = s_v; // per-head width for Q / K / V / G — decoupled
-                              // from FA's `head_dim` on purpose.
-        let n_seqs = 1usize; // first port: batch=1. Multi-seq is a
-                             // stepper-level concern that threads through
-                             // `gdn_state` shape.
+        let h_k = self.config.gdn_num_k_heads;
+        let h_v = self.config.gdn_num_v_heads;
+        let q_width = h_k * s_v;
+        let k_width = h_k * s_v;
+        let v_width = h_v * s_v;
+        let qkv_proj_dim = q_width + k_width + v_width;
+        let inner_dim = v_width; // ssm_out K dim — 6144 on 27B.
+        let n_seqs = 1usize; // batch=1; multi-seq threads through the
+                             // stepper, not through this forward.
 
-        // w_qkvg must be [hidden_dim, proj_dim] so matmul produces
-        // [n_tokens, proj_dim].
-        if self.w_qkvg.dims() != (hidden_dim, proj_dim) {
+        // w_qkvg must be [hidden_dim, qkv_proj_dim] so matmul produces
+        // [n_tokens, qkv_proj_dim].
+        if self.w_qkvg.dims() != (hidden_dim, qkv_proj_dim) {
             return Err(anyhow!(
                 "qwen35 gdn layer {}: w_qkvg dims {:?} != ({}, {})",
                 self.layer_idx,
                 self.w_qkvg.dims(),
                 hidden_dim,
-                proj_dim
+                qkv_proj_dim
             ));
         }
-        // w_out must be [kv_dim, hidden_dim] so matmul produces
+        // w_out must be [inner_dim, hidden_dim] so matmul produces
         // [n_tokens, hidden_dim] matching the residual stream.
-        if self.w_out.dims() != (kv_dim, hidden_dim) {
+        if self.w_out.dims() != (inner_dim, hidden_dim) {
             return Err(anyhow!(
                 "qwen35 gdn layer {}: w_out dims {:?} != ({}, {})",
                 self.layer_idx,
                 self.w_out.dims(),
-                kv_dim,
+                inner_dim,
                 hidden_dim
             ));
         }
@@ -226,8 +238,8 @@ impl Qwen35GDN {
                 hidden_dim
             ));
         }
-        // gdn_state: [S_v, S_v, H, n_seqs].
-        let expected_state = [s_v, s_v, h, n_seqs];
+        // gdn_state: [S_v, S_v, H_v, n_seqs].
+        let expected_state = [s_v, s_v, h_v, n_seqs];
         if gdn_state.shape() != expected_state {
             return Err(anyhow!(
                 "qwen35 gdn layer {}: gdn_state.shape {:?} != {:?}",
@@ -236,12 +248,11 @@ impl Qwen35GDN {
                 expected_state
             ));
         }
-        // gdn_inter: [S_v, S_v, H, max_verify_tokens]. We only require
-        // max_verify_tokens >= n_tokens.
+        // gdn_inter: [S_v, S_v, H_v, max_verify_tokens].
         if gdn_inter.shape().len() != 4
             || gdn_inter.shape()[0] != s_v
             || gdn_inter.shape()[1] != s_v
-            || gdn_inter.shape()[2] != h
+            || gdn_inter.shape()[2] != h_v
             || gdn_inter.shape()[3] < n_tokens
         {
             return Err(anyhow!(
@@ -251,7 +262,7 @@ impl Qwen35GDN {
                 gdn_inter.shape(),
                 s_v,
                 s_v,
-                h,
+                h_v,
                 n_tokens
             ));
         }
@@ -274,13 +285,13 @@ impl Qwen35GDN {
         launch_rmsnorm_f32(device, &hidden_f32, &self.pre_norm, &mut norm_f32, self.config.rms_eps)?;
 
         // ------------------------------------------------------------
-        // 4. Fused QKVG projection — f32·packed → f32, dispatched on
+        // 4. Fused QKV projection — f32·packed → f32, dispatched on
         //    the `w_qkvg` carrier variant. `PackedWeight::matmul_f32`
         //    routes to the bf16 cuBLAS gemm, mmvq row-loop, or a zero
         //    memset depending on what the GGUF loader produced.
         //    Matmul tiles in multiples of 32, so n_tokens must be a
-        //    multiple of 32 (callers pad). proj_dim = H*4*head_dim =
-        //    48*4*128 = 24576 for 27B, which is 32-aligned.
+        //    multiple of 32 (callers pad). qkv_proj_dim on 27B is
+        //    10240, 32-aligned.
         // ------------------------------------------------------------
         if !n_tokens.is_multiple_of(32) {
             return Err(anyhow!(
@@ -289,135 +300,123 @@ impl Qwen35GDN {
                 n_tokens
             ));
         }
-        let mut qkvg_f32 =
-            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, proj_dim])?;
-        self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkvg_f32)?;
+        let mut qkv_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
+        self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
 
         // ------------------------------------------------------------
-        //    The matmul result is row-major [n_tokens, H*4*head_dim]:
-        //      row t column c   ↔   qkvg_f32[t * 4*H*head_dim + c]
-        //    For the kernel we need: [head_dim, H, n_tokens, n_seqs],
-        //    where the flat linear index for (s, h, t, 0) is
-        //      t * (H * head_dim) + h * head_dim + s
-        //    which is *exactly* the layout of the slice
-        //      qkvg_f32[:, stream_offset .. stream_offset + H*head_dim]
-        //    iff we slice each stream's full H*head_dim contiguously.
+        //    The matmul result is row-major [n_tokens, qkv_proj_dim].
+        //    Within each row the layout is Q | K | V at offsets
+        //      q: 0                                  width q_width
+        //      k: q_width                            width k_width
+        //      v: q_width + k_width                  width v_width
         //
-        //    That requires the matmul to produce streams ordered as
-        //    (q | k | v | g) with each stream laid out
-        //    [n_tokens, H, head_dim] row-major — i.e. the projection
-        //    weight columns must be ordered
-        //      stream-major, then head-major, then element-major.
-        //    This is the convention this port adopts; the GGUF
-        //    loader permutes to match.
+        //    The GDN kernel consumes:
+        //      q: [S_k=s_v, H_k=h_k, n_tokens, n_seqs]
+        //      k: [S_k=s_v, H_k=h_k, n_tokens, n_seqs]
+        //      v: [S_v=s_v, H  =h_v, n_tokens, n_seqs]
+        //    with GQA broadcast from h_k to h_v handled natively via
+        //    `neqk1 = h_k` (kernel does `iq1 = h_idx % neqk1`).
+        //
+        //    Flat layout of each stream for the kernel: for stream S
+        //    with per-token width W (= H * head_width), the linear
+        //    index of (col=s, head=hd, token=t, seq=0) is
+        //      t * W + hd * head_width + s
+        //    Since our matmul output rows are already laid out as
+        //    [t, stream_idx-within-row * stream_stride + ...], each
+        //    stream slice is already contiguous along (head, col) per
+        //    token. Gathering (t, stream) across tokens into a flat
+        //    per-stream buffer reduces to a row-by-row copy.
+        //
+        //    Host round-trip (D→H then H→D x3) is kept from the
+        //    pre-real-weight port; a fused on-device split+repack
+        //    kernel is the obvious next perf lift.
+        //
+        //    TODO(gdn-perf): replace the D→H + H→D×3 shuffle with a
+        //    device-side split.
         // ------------------------------------------------------------
+        let qkv_host = qkv_f32.to_host()?;
 
-        // Download the f32 QKVG buffer to host so we can split / prepare
-        // the four input tensors plus beta/g-scalar without writing
-        // four new CUDA kernels in this port. This is SLOW on the hot
-        // path (one D→H + four H→D for every GDN layer) and MUST be
-        // replaced with a fused split + scalar-gate kernel before this
-        // composition leaves the smoke-test stage. Tracking:
-        //   TODO(gdn-perf): on-device split / reshape kernel to avoid
-        //   the host round-trip in forward().
-        //
-        // The smoke test intentionally exercises this path to validate
-        // state-threading; production wiring will swap it out before
-        // the layer ships.
-        let qkvg_host = qkvg_f32.to_host()?;
+        let q_offset = 0;
+        let k_offset = q_width;
+        let v_offset = q_width + k_width;
 
-        let stream_stride = kv_dim; // H * head_width per stream
-        let per_stream_elems = n_tokens * kv_dim;
+        let per_q_elems = n_tokens * q_width;
+        let per_k_elems = n_tokens * k_width;
+        let per_v_elems = n_tokens * v_width;
 
-        // Indexing helper — flat offset in qkvg_host for (t, stream, h*head_width + s).
-        // qkvg_host row-major is [t, stream_idx * kv_dim + h * head_width + s]
-        // where stream_idx ∈ {0..3} for (q, k, v, g).
-        let build_stream = |stream_idx: usize| -> Vec<f32> {
-            let mut out = vec![0.0f32; per_stream_elems];
+        let build_stream = |offset: usize, width: usize, total: usize| -> Vec<f32> {
+            let mut out = vec![0.0f32; total];
             for t in 0..n_tokens {
-                let src_row = t * proj_dim + stream_idx * stream_stride;
-                let dst_row = t * stream_stride;
-                out[dst_row..dst_row + stream_stride]
-                    .copy_from_slice(&qkvg_host[src_row..src_row + stream_stride]);
+                let src_row = t * qkv_proj_dim + offset;
+                let dst_row = t * width;
+                out[dst_row..dst_row + width]
+                    .copy_from_slice(&qkv_host[src_row..src_row + width]);
             }
             out
         };
 
-        let q_host = build_stream(0);
-        let k_host = build_stream(1);
-        let v_host = build_stream(2);
-        let g_stream_host = build_stream(3);
+        let q_host = build_stream(q_offset, q_width, per_q_elems);
+        let k_host = build_stream(k_offset, k_width, per_k_elems);
+        let v_host = build_stream(v_offset, v_width, per_v_elems);
 
-        // The GDN kernel expects:
-        //   q, k: [S_k, H_k, n_tokens, n_seqs] f32
-        //   v:    [S_v, H,   n_tokens, n_seqs] f32
-        //   g:    [1,   H,   n_tokens, n_seqs] f32   (GDA)
-        //   beta: [1,   H,   n_tokens, n_seqs] f32
-        //
-        // First port: H_k == H (no GQA broadcast), S_k == S_v. The
-        // `n_kv_heads` config knob is ignored in this path.
         let q = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![s_v, h, n_tokens, n_seqs],
+            vec![s_v, h_k, n_tokens, n_seqs],
             &q_host,
         )?;
         let k = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![s_v, h, n_tokens, n_seqs],
+            vec![s_v, h_k, n_tokens, n_seqs],
             &k_host,
         )?;
         let v = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![s_v, h, n_tokens, n_seqs],
+            vec![s_v, h_v, n_tokens, n_seqs],
             &v_host,
         )?;
 
-        // GDA gate collapse: the `g` in the GDN kernel is per-head
-        // scalar, not per-element. Collapse the width-`head_width` g
-        // stream to a scalar per (token, head) by averaging. This is
-        // NOT what the reference does (it runs a softplus(alpha) *
-        // ssm_a formula driven by a separate `ssm_alpha` projection)
-        // — we're using this as a stand-in so the smoke test has a
-        // meaningful gate signal. Production path swaps this for the
-        // reference's `softplus(alpha) * ssm_a` once the kernels land.
+        // GDA gate stand-in: average V over the head-width to get a
+        // per-(token, v-head) scalar, clamped to [-10, 0] so the
+        // kernel's internal `exp(g)` stays bounded. This is NOT the
+        // reference's `softplus(ssm_alpha @ hidden + dt_bias) * ssm_a`
+        // pipeline — that needs the `ssm_alpha` / `ssm_a` weights and
+        // softplus/mul kernels we haven't wired yet. Using V-derived
+        // signal instead of a constant keeps the SSM recurrence
+        // data-dependent for spec-decode sanity.
         //
-        // TODO(gdn-ref): replace mean-over-head-width with the reference
-        // softplus(alpha + dt_bias) * ssm_a pipeline.
-        let mut g_host = vec![0.0f32; h * n_tokens * n_seqs];
+        // TODO(gdn-ref): replace mean-over-v-head-width with the
+        // reference softplus(alpha + dt_bias) * ssm_a pipeline once
+        // the ssm_alpha/ssm_a/ssm_dt_bias weights + kernels land.
+        let mut g_host = vec![0.0f32; h_v * n_tokens * n_seqs];
         for t in 0..n_tokens {
-            for hi in 0..h {
-                let base = t * stream_stride + hi * head_width;
+            for hi in 0..h_v {
+                let base = t * v_width + hi * s_v;
                 let mut acc = 0.0f32;
-                for s in 0..head_width {
-                    acc += g_stream_host[base + s];
+                for s in 0..s_v {
+                    acc += v_host[base + s];
                 }
-                g_host[hi + t * h] = acc / head_width as f32; // clamp below
+                g_host[hi + t * h_v] = acc / s_v as f32;
             }
         }
-        // Clamp to the kernel's viable range — the kernel does
-        // `g_val = exp(g)` internally, so values > ~20 blow up. Clamp
-        // at [-10, 0] to keep the recurrence stable; "0" means full
-        // state retention (exp(0)=1), negative values decay.
         for g in g_host.iter_mut() {
             *g = g.clamp(-10.0, 0.0);
         }
         let g = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![1, h, n_tokens, n_seqs],
+            vec![1, h_v, n_tokens, n_seqs],
             &g_host,
         )?;
 
-        // Beta: first port uses a constant 0.5 per (token, head). The
-        // reference runs a separate `ssm_beta` projection + sigmoid;
-        // 0.5 is the sigmoid output at pre-activation 0, which is
-        // where a randomly-initialized beta projection sits at t=0.
+        // Beta: constant 0.5 per (token, v-head) — sigmoid(0) stand-in
+        // for the reference's `sigmoid(ssm_beta @ hidden)`.
         //
-        // TODO(gdn-ref): replace constant-0.5 beta with the reference's
-        // sigmoid(ssm_beta @ hidden) pipeline.
-        let beta_host = vec![0.5f32; h * n_tokens * n_seqs];
+        // TODO(gdn-ref): replace with sigmoid(ssm_beta @ hidden) once
+        // the ssm_beta weight + sigmoid kernel land.
+        let beta_host = vec![0.5f32; h_v * n_tokens * n_seqs];
         let beta = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![1, h, n_tokens, n_seqs],
+            vec![1, h_v, n_tokens, n_seqs],
             &beta_host,
         )?;
 
@@ -425,29 +424,31 @@ impl Qwen35GDN {
         // 6. Launch the GDN kernel.
         //    dst packed: [attn | final_state] — we provide an external
         //    persist-inter buffer (gdn_inter) so the embedded-inter
-        //    region is omitted.
+        //    region is omitted. Kernel `H` is `h_v`; `neqk1 = h_k` so
+        //    the kernel's `iq1 = h_idx % h_k` broadcasts Q/K across
+        //    the `h_v / h_k = 3` GQA group on 27B.
         // ------------------------------------------------------------
-        let attn_elems = s_v * h * n_tokens * n_seqs;
-        let state_elems = s_v * s_v * h * n_seqs;
+        let attn_elems = s_v * h_v * n_tokens * n_seqs;
+        let state_elems = s_v * s_v * h_v * n_seqs;
         let dst_total = attn_elems + state_elems;
         let mut dst = CudaTensor::<f32>::zeros(device.clone(), vec![dst_total])?;
 
         let shape = GdnShape {
             s_v: s_v as i64,
-            h: h as i64,
+            h: h_v as i64,
             n_tokens: n_tokens as i64,
             n_seqs: n_seqs as i64,
-            neqk1: h as i64, // H_k == H in this port
-            rq3: 1,          // no GQA broadcast along n_seqs axis
+            neqk1: h_k as i64, // H_k = num_k_heads — enables GQA bcast
+            rq3: 1,            // no broadcast along n_seqs axis
             sq1: s_v as i64,
-            sq2: (s_v * h) as i64,
-            sq3: (s_v * h * n_tokens) as i64,
+            sq2: (s_v * h_k) as i64,
+            sq3: (s_v * h_k * n_tokens) as i64,
             sv1: s_v as i64,
-            sv2: (s_v * h) as i64,
-            sv3: (s_v * h * n_tokens) as i64,
+            sv2: (s_v * h_v) as i64,
+            sv3: (s_v * h_v * n_tokens) as i64,
             sb1: 1,
-            sb2: h as i64,
-            sb3: (h * n_tokens) as i64,
+            sb2: h_v as i64,
+            sb3: (h_v * n_tokens) as i64,
         };
 
         // curr_state is the recurrent SSM state we keep across tokens.
@@ -498,47 +499,50 @@ impl Qwen35GDN {
         let state_host_f32 = &dst_host[attn_elems..attn_elems + state_elems];
 
         // Write the new state back into gdn_state. Layout is identical
-        // (same [S_v, S_v, H, n_seqs] shape, same stride), so a flat
+        // (same [S_v, S_v, H_v, n_seqs] shape, same stride), so a flat
         // memcpy suffices.
         *gdn_state = CudaTensor::<f32>::from_host(
             device.clone(),
-            vec![s_v, s_v, h, n_seqs],
+            vec![s_v, s_v, h_v, n_seqs],
             state_host_f32,
         )?;
 
         // attn layout in dst (per the reference kernel's writes) is
-        // [S_v, H, n_tokens, n_seqs] row-major. Flatten to the
-        // [n_tokens, H*S_v] layout the output projection expects by
-        // permuting (t, h, s) → (t, h*S_v + s).
-        let mut attn_flat = vec![0.0f32; n_tokens * kv_dim];
+        // [S_v, H_v, n_tokens, n_seqs] row-major. Flatten to the
+        // [n_tokens, H_v*S_v = inner_dim] layout the output
+        // projection expects by permuting (t, h, s) → (t, h*S_v + s).
+        let mut attn_flat = vec![0.0f32; n_tokens * inner_dim];
         for t in 0..n_tokens {
             // The kernel writes linear index
-            //   ((seq * n_tokens + t) * h + hi) * s_v + col
+            //   ((seq * n_tokens + t) * h_v + hi) * s_v + col
             // For n_seqs = 1 this reduces to
-            //   (t * h + hi) * s_v + col
+            //   (t * h_v + hi) * s_v + col
             // which is already contiguous on (hi, col) inside a token.
-            let src = t * h * s_v;
-            let dst_off = t * kv_dim;
-            attn_flat[dst_off..dst_off + kv_dim]
-                .copy_from_slice(&attn_host_f32[src..src + kv_dim]);
+            let src = t * h_v * s_v;
+            let dst_off = t * inner_dim;
+            attn_flat[dst_off..dst_off + inner_dim]
+                .copy_from_slice(&attn_host_f32[src..src + inner_dim]);
         }
-        let attn_f32 =
-            CudaTensor::<f32>::from_host(device.clone(), vec![n_tokens, kv_dim], &attn_flat)?;
+        let attn_f32 = CudaTensor::<f32>::from_host(
+            device.clone(),
+            vec![n_tokens, inner_dim],
+            &attn_flat,
+        )?;
 
         // ------------------------------------------------------------
-        // 8. Output projection. [n_tokens, kv_dim] · [kv_dim,
+        // 8. Output projection. [n_tokens, inner_dim] · [inner_dim,
         //    hidden_dim] → [n_tokens, hidden_dim]. Dispatches through
         //    `PackedWeight::matmul_f32` — bf16 cuBLAS gemm for dense,
         //    per-row mmvq for Q*_K / Q8_0, or a zero memset for
         //    unloaded placeholders. Final result is cast to bf16 for
         //    the residual add.
         // ------------------------------------------------------------
-        if !kv_dim.is_multiple_of(32) || !hidden_dim.is_multiple_of(32) {
+        if !inner_dim.is_multiple_of(32) || !hidden_dim.is_multiple_of(32) {
             return Err(anyhow!(
-                "qwen35 gdn layer {}: w_out matmul requires kv_dim={} and hidden_dim={} \
+                "qwen35 gdn layer {}: w_out matmul requires inner_dim={} and hidden_dim={} \
                  to be 32-aligned",
                 self.layer_idx,
-                kv_dim,
+                inner_dim,
                 hidden_dim
             ));
         }
@@ -589,8 +593,7 @@ mod tests {
     /// Build a layer + state + input tensors and drive two calls
     /// through `forward`, returning the per-call (nan, inf,
     /// state_diff). Extracted so the smoke test can cover multiple
-    /// `(head_dim, gdn_ssm_dim)` shape combinations without copying
-    /// the ~100 lines of setup twice.
+    /// config shapes without copying the ~100 lines of setup twice.
     fn run_gdn_smoke_two_calls(
         config: Qwen35Config,
         n_tokens: usize,
@@ -599,25 +602,26 @@ mod tests {
     ) {
         let dev = Arc::new(DeviceContext::new(0).expect("cuda init"));
 
-        let h = config.n_q_heads;
+        let h_v = config.gdn_num_v_heads;
+        let h_k = config.gdn_num_k_heads;
         let s_v = config.gdn_ssm_dim;
         let hidden_dim = config.hidden_dim;
-        // GDN's internal Q/K/V/G widths are all `s_v` (not
-        // `head_dim`) — this is the key shape assumption under test.
-        // The fused `w_qkvg` weight is therefore [hidden, H*4*S_v],
-        // and `w_out` is [H*S_v, hidden].
-        let proj_dim = h * 4 * s_v;
-        let kv_dim = h * s_v;
+        // GDN's Q/K/V head-widths are all `s_v`; the fused
+        // `attn_qkv` weight shape is `[hidden,
+        // 2*h_k*s_v + h_v*s_v]` (Q||K||V). `ssm_out` is
+        // `[h_v*s_v, hidden]`.
+        let qkv_proj_dim = config.gdn_qkv_proj_dim();
+        let inner_dim = config.gdn_inner_dim();
 
         // Deterministic weights. Scale small so the matmul products
         // stay within bf16 range at hidden_dim=5120 fan-in.
         let mut seed: u32 = 0xC0FFEE;
         let scale = 0.02f32; // empirically keeps outputs bounded
         let pre_norm_host: Vec<f32> = (0..hidden_dim).map(|_| 1.0 + 0.1 * lcg_iter(&mut seed)).collect();
-        let w_qkvg_host: Vec<bf16> = (0..hidden_dim * proj_dim)
+        let w_qkvg_host: Vec<bf16> = (0..hidden_dim * qkv_proj_dim)
             .map(|_| bf16::from_f32(lcg_iter(&mut seed) * scale))
             .collect();
-        let w_out_host: Vec<bf16> = (0..kv_dim * hidden_dim)
+        let w_out_host: Vec<bf16> = (0..inner_dim * hidden_dim)
             .map(|_| bf16::from_f32(lcg_iter(&mut seed) * scale))
             .collect();
 
@@ -632,24 +636,24 @@ mod tests {
         // dispatch routes to cuBLAS bf16→f32 gemm.
         let w_qkvg_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
-            vec![hidden_dim, proj_dim],
+            vec![hidden_dim, qkv_proj_dim],
             &w_qkvg_host,
         )
         .expect("upload w_qkvg");
         let w_qkvg = PackedWeight::Bf16 {
             t: w_qkvg_t,
             k: hidden_dim,
-            n: proj_dim,
+            n: qkv_proj_dim,
         };
         let w_out_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
-            vec![kv_dim, hidden_dim],
+            vec![inner_dim, hidden_dim],
             &w_out_host,
         )
         .expect("upload w_out");
         let w_out = PackedWeight::Bf16 {
             t: w_out_t,
-            k: kv_dim,
+            k: inner_dim,
             n: hidden_dim,
         };
 
@@ -675,12 +679,13 @@ mod tests {
         )
         .expect("upload positions");
 
-        // Zero state buffers.
+        // Zero state buffers — kernel H is num_v_heads.
+        let _ = h_k; // used only through config, retained for docs
         let mut gdn_state =
-            CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1]).expect("alloc state");
+            CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h_v, 1]).expect("alloc state");
         let mut gdn_inter = CudaTensor::<f16>::zeros(
             dev.clone(),
-            vec![s_v, s_v, h, max_verify_tokens],
+            vec![s_v, s_v, h_v, max_verify_tokens],
         )
         .expect("alloc inter");
 
@@ -791,25 +796,30 @@ mod tests {
 
     /// `qwen35_gdn_smoke` — ignored, A6000-only.
     ///
-    /// Builds a `Qwen35GDN` with synthetic random bf16 weights, runs
-    /// `forward` twice on the same sequence with the state carried
-    /// between calls, and asserts:
+    /// Builds a `Qwen35GDN` with synthetic random bf16 weights (in
+    /// the real `[hidden, 2*h_k*s_v + h_v*s_v]` / `[h_v*s_v, hidden]`
+    /// shapes, not the old `h*4*s_v` fusion), runs `forward` twice on
+    /// the same sequence with the state carried between calls, and
+    /// asserts:
     ///   * output shape matches input shape
     ///   * no NaN / Inf in the output
-    ///   * `gdn_state` differs between the two calls (i.e. the SSM
-    ///     recurrence actually wrote new state)
+    ///   * `gdn_state` differs between the two calls (SSM recurrence
+    ///     actually wrote new state)
     ///
     /// Covers TWO sub-configs:
-    ///   1. `head_dim == gdn_ssm_dim == 128` — the original fast-path
-    ///      where the FA head width happens to match the SSM state
-    ///      width. Exercises the simple case.
-    ///   2. `head_dim == 256`, `gdn_ssm_dim == 128` — the shipping
-    ///      Qwen3.5-27B production shape. This previously hit an
-    ///      early-return that turned 48 of 64 layers into silent
-    ///      no-ops; now the layer actually runs its kernel.
+    ///   1. Small GQA shape (`h_v=6, h_k=2, s_v=64`) — keeps the
+    ///      weight allocation tiny and verifies the `iq1 = h_idx %
+    ///      h_k` broadcast path works when `h_k < h_v`.
+    ///   2. Production 27B shape (`h_v=48, h_k=16, s_v=128`) — same
+    ///      head counts the shipping GGUF's `attn_qkv.weight` /
+    ///      `ssm_out.weight` were built for, just with synthetic bf16
+    ///      weights instead of Q5_K bytes (dispatch through the same
+    ///      `PackedWeight::matmul_f32` entry point; the Q5_K path is
+    ///      exercised by the `qwen35_target_gguf_smoke_v2` test).
     ///
-    /// Exact numerical comparison against the dflash reference is
-    /// Phase 4 — this smoke test validates kernel composition only.
+    /// Exact numerical comparison against the dflash reference is a
+    /// later phase — this smoke validates kernel composition and
+    /// shape plumbing only.
     ///
     /// Run:
     ///   cargo test -p ctox-qwen35-27b --features cuda --release -- \
@@ -820,50 +830,40 @@ mod tests {
         let n_tokens = 32; // 32-aligned for the matmul kernel
         let max_verify_tokens = 64;
 
-        // Sub-config 1 — head_dim == gdn_ssm_dim (original
-        // fast-path). S_v = 128 is the only chain-mode kernel
-        // instantiation we use in production (plus 16/32/64 for the
-        // smaller test combos).
-        let config_fastpath = Qwen35Config {
+        // Sub-config 1 — small GQA (h_v=6, h_k=2, group=3). Same
+        // GQA shape as production (h_v/h_k = 3) but total head count
+        // is 4× smaller to keep the scratch allocations cheap.
+        let config_small = Qwen35Config {
             hidden_dim: 5120,
-            n_q_heads: 8, // H — 8 heads for a fast test
-            n_kv_heads: 8,
-            head_dim: 128,
-            gdn_ssm_dim: 128,
+            n_q_heads: 24,
+            n_kv_heads: 4,
+            head_dim: 256,
+            gdn_ssm_dim: 64,
+            gdn_num_v_heads: 6,
+            gdn_num_k_heads: 2,
             intermediate_dim: 17_408,
             rope_theta: 1_000_000.0,
             rms_eps: 1e-6,
             max_position_embeddings: 2048,
         };
         run_gdn_smoke_two_calls(
-            config_fastpath,
+            config_small,
             n_tokens,
             max_verify_tokens,
-            "head_dim==s_v==128",
+            "small h_v=6 h_k=2 s_v=64",
         );
 
-        // Sub-config 2 — shipping 27B production shape: head_dim !=
-        // gdn_ssm_dim. The pre-fix early-return would trigger here;
-        // post-fix the layer must actually run its kernel and produce
-        // finite output with a state-advancing recurrence.
-        let config_prod = Qwen35Config {
-            hidden_dim: 5120,
-            n_q_heads: 8, // keep H small so the test still runs fast;
-                          // production 27B has 24, but the code path is
-                          // the same — what matters is head_dim != s_v.
-            n_kv_heads: 8,
-            head_dim: 256,
-            gdn_ssm_dim: 128,
-            intermediate_dim: 17_408,
-            rope_theta: 10_000_000.0,
-            rms_eps: 1e-6,
-            max_position_embeddings: 131_072,
-        };
+        // Sub-config 2 — shipping 27B production shape. Exercises
+        // the exact head counts and fused-QKV width the real
+        // `attn_qkv.weight` / `ssm_out.weight` weights were packed
+        // for (`proj_dim=10240`, `inner_dim=6144`). Weights are
+        // synthetic bf16 here; the Q5_K-on-real-GGUF path is covered
+        // by `qwen35_target_gguf_smoke_v2`.
         run_gdn_smoke_two_calls(
-            config_prod,
+            Qwen35Config::QWEN35_27B,
             n_tokens,
             max_verify_tokens,
-            "head_dim=256,s_v=128",
+            "prod 27B h_v=48 h_k=16 s_v=128",
         );
     }
 

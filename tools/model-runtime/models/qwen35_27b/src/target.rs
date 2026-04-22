@@ -45,7 +45,7 @@
 //! ```text
 //!   attn_norm.weight               [hidden]             F32
 //!   post_attention_norm.weight     [hidden]             F32
-//!   attn_qkv.weight                [hidden, 10240]      Q5_K  (q/k/v/beta fused)
+//!   attn_qkv.weight                [hidden, 10240]      Q5_K  (q||k||v fused)
 //!   attn_gate.weight               [hidden, 6144]       Q5_K
 //!   ssm_conv1d.weight              [inner, 4]           F32
 //!   ssm_a                          [dt_rank=48]         F32
@@ -811,24 +811,23 @@ fn build_gdn_layer(
 
     let pre_norm = load_f32_placeholder(device, tensors, &name_attn_norm, vec![cfg.hidden_dim]);
 
-    let h = cfg.n_q_heads;
-    // GDN's internal Q/K/V/G head widths come from `gdn_ssm_dim`, NOT
-    // from FA's `head_dim`. Keeping these decoupled is what lets the
-    // forward run on the shipping 27B where `head_dim=256` but
-    // `gdn_ssm_dim=128` (see layers::gdn docs). Real GGUF GDN tensors
-    // have a completely different shape (`attn_qkv.weight` is Q5_K
-    // `[hidden, 10240]` from a separate num_k_heads=16/num_v_heads=48
-    // layout) and won't match either our old `h*4*head_dim` or this
-    // new `h*4*gdn_ssm_dim` — the loader falls back to
-    // `PackedWeight::Zero` in both cases. The difference is that the
-    // layer now actually runs instead of early-returning; the Zero
-    // matmul is a memset + the kernel then runs on zero inputs.
-    let gdn_head_width = cfg.gdn_ssm_dim;
-    let proj_dim = h * 4 * gdn_head_width;
-    let kv_dim = h * gdn_head_width;
+    // Real 27B layout (from dflash qwen35_target_graph.cpp):
+    //   attn_qkv.weight = Q5_K [hidden, qkv_proj_dim]
+    //     qkv_proj_dim = 2 * num_k_heads * head_k_dim  (Q||K)
+    //                  +     num_v_heads * head_v_dim  (V)
+    //                  = 2*16*128 + 48*128 = 10240
+    //   ssm_out.weight = Q5_K [num_v_heads*head_v_dim, hidden]
+    //                  = [6144, 5120]
+    // With `head_k_dim == head_v_dim == gdn_ssm_dim`, both of these
+    // are derived from the typed config via helper accessors. The
+    // previous h*4*gdn_ssm_dim assumption was from the pre-real-
+    // weights port and mismatched the GGUF, causing 48 of 64 layers
+    // to fall through to PackedWeight::Zero.
+    let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
+    let inner_dim = cfg.gdn_inner_dim();
 
-    let w_qkvg = load_packed_weight(device, tensors, &name_qkvg, cfg.hidden_dim, proj_dim);
-    let w_out = load_packed_weight(device, tensors, &name_out, kv_dim, cfg.hidden_dim);
+    let w_qkvg = load_packed_weight(device, tensors, &name_qkvg, cfg.hidden_dim, qkv_proj_dim);
+    let w_out = load_packed_weight(device, tensors, &name_out, inner_dim, cfg.hidden_dim);
 
     Qwen35GDN {
         pre_norm,
@@ -1536,9 +1535,11 @@ mod tests {
         )
         .expect("alloc kv cache");
 
-        // GDN state + inter, one per GDN layer.
+        // GDN state + inter, one per GDN layer. H is the GDN value-
+        // head count (48 on 27B), NOT FA's n_q_heads — the two head
+        // schemes are decoupled.
         let s_v = cfg.gdn_ssm_dim;
-        let h = cfg.n_q_heads;
+        let h = cfg.gdn_num_v_heads;
         let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
         let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
         for _ in 0..target.n_gdn {
@@ -1716,7 +1717,7 @@ mod tests {
         .expect("alloc kv cache");
 
         let s_v = cfg.gdn_ssm_dim;
-        let h = cfg.n_q_heads;
+        let h = cfg.gdn_num_v_heads;
         let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
         let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
         for _ in 0..target.n_gdn {
@@ -1852,7 +1853,7 @@ mod tests {
             )
             .expect("alloc kv cache");
             let s_v = cfg.gdn_ssm_dim;
-            let h = cfg.n_q_heads;
+            let h = cfg.gdn_num_v_heads;
             let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
             let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
             for _ in 0..target.n_gdn {

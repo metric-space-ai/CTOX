@@ -1307,6 +1307,14 @@ pub struct Qwen35Metadata {
     pub key_length: usize,
     /// `qwen35.attention.value_length` — per-head V feature width (256 on 27B).
     pub value_length: usize,
+    /// `qwen35.ssm.time_step_rank` — GDN value-head count
+    /// (`SSM_DT_RANK` / `num_v_heads` in the dflash reference). 48 on
+    /// 27B. Defaults to 48 when absent (older GGUF builds).
+    pub ssm_time_step_rank: usize,
+    /// `qwen35.ssm.group_count` — GDN key-head count
+    /// (`SSM_N_GROUP` / `num_k_heads` in the dflash reference). 16 on
+    /// 27B. Defaults to 16 when absent.
+    pub ssm_group_count: usize,
 }
 
 /// Read-only GGUF header walker: opens the file, parses header +
@@ -1368,6 +1376,8 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
     let mut feed_forward_length: Option<usize> = None;
     let mut key_length: Option<usize> = None;
     let mut value_length: Option<usize> = None;
+    let mut ssm_time_step_rank: Option<usize> = None;
+    let mut ssm_group_count: Option<usize> = None;
 
     for _ in 0..metadata_kv_count {
         let key = cur.read_string()?;
@@ -1396,6 +1406,16 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
             }
             "qwen35.attention.value_length" => {
                 value_length = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            // GDN SSM keys — dflash reads these same names
+            // (`gguf_target_loader.cpp`). `time_step_rank = num_v_heads`,
+            // `group_count = num_k_heads`. Soft-fallback to shipping-27B
+            // values (48 / 16) when absent so older GGUFs still parse.
+            "qwen35.ssm.time_step_rank" => {
+                ssm_time_step_rank = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            "qwen35.ssm.group_count" => {
+                ssm_group_count = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
             }
             "qwen35.rope.freq_base" => {
                 rope_theta = Some(expect_f32_key(&mut cur, &key, ty)?);
@@ -1427,6 +1447,11 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
     let context_length = context_length.unwrap_or(131_072);
     let feed_forward_length = feed_forward_length.unwrap_or(17_408);
     let value_length = value_length.unwrap_or(key_length);
+    // Shipping 27B constants from dflash's `qwen35_target_graph.cpp`
+    // (`SSM_DT_RANK=48`, `SSM_N_GROUP=16`). Any older GGUF missing
+    // these keys is assumed to match the 27B layout.
+    let ssm_time_step_rank = ssm_time_step_rank.unwrap_or(48);
+    let ssm_group_count = ssm_group_count.unwrap_or(16);
 
     Ok(Qwen35Metadata {
         block_count,
@@ -1439,6 +1464,8 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
         feed_forward_length,
         key_length,
         value_length,
+        ssm_time_step_rank,
+        ssm_group_count,
     })
 }
 
