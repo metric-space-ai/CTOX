@@ -304,6 +304,30 @@ impl Qwen35GDN {
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
         self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
 
+        // DIAG(agent-gdn): print Q/K/V magnitude stats for the first
+        // GDN layer (idx 0) to help pin down where the NaN chain
+        // originates when 48 layers compound. Guarded on an env var
+        // so the hot path is untouched in production.
+        if std::env::var("QWEN35_GDN_DIAG").ok().as_deref() == Some("1")
+            && (self.layer_idx == 0 || self.layer_idx == 1)
+        {
+            let host = qkv_f32.to_host()?;
+            let (mut maxa, mut nan, mut inf) = (0.0f32, 0usize, 0usize);
+            for &v in &host {
+                if v.is_nan() {
+                    nan += 1;
+                } else if v.is_infinite() {
+                    inf += 1;
+                } else if v.abs() > maxa {
+                    maxa = v.abs();
+                }
+            }
+            eprintln!(
+                "GDN[{}] qkv_f32 stats: nan={} inf={} max_abs={:.3e}",
+                self.layer_idx, nan, inf, maxa
+            );
+        }
+
         // ------------------------------------------------------------
         //    The matmul result is row-major [n_tokens, qkv_proj_dim].
         //    Within each row the layout is Q | K | V at offsets
@@ -404,15 +428,18 @@ impl Qwen35GDN {
                 for s in 0..s_v {
                     acc += v_host[base + s];
                 }
-                // Mean of V chunk, pulled into the stable [-5, -0.5]
-                // band by negating the magnitude and subtracting a
-                // fixed bias.
+                // Mean of V chunk, pulled into the stable
+                // `[-g_max, g_min]` band (strictly negative) by
+                // negating the magnitude and subtracting a fixed
+                // bias. Strong decay (`g <= -1`) is needed to keep
+                // the recurrence stable across 48 GDN layers on real
+                // Q5_K weights.
                 let mean = acc / s_v as f32;
-                g_host[hi + t * h_v] = -mean.abs() - 0.5;
+                g_host[hi + t * h_v] = -mean.abs() - 1.0;
             }
         }
         for g in g_host.iter_mut() {
-            *g = g.clamp(-5.0, -0.5);
+            *g = g.clamp(-5.0, -1.0);
         }
         let g = CudaTensor::<f32>::from_host(
             device.clone(),
@@ -420,12 +447,16 @@ impl Qwen35GDN {
             &g_host,
         )?;
 
-        // Beta: constant 0.5 per (token, v-head) — sigmoid(0) stand-in
-        // for the reference's `sigmoid(ssm_beta @ hidden)`.
+        // Beta: constant small positive per (token, v-head) stand-in
+        // for the reference's `sigmoid(ssm_beta @ hidden)`. 0.1 keeps
+        // the amount of new signal mixed in per token small enough
+        // that 48 stacked GDN layers on real Q5_K weights don't
+        // saturate the residual stream. (sigmoid(0)=0.5 was too
+        // aggressive — the residual grew ~10x per layer.)
         //
         // TODO(gdn-ref): replace with sigmoid(ssm_beta @ hidden) once
         // the ssm_beta weight + sigmoid kernel land.
-        let beta_host = vec![0.5f32; h_v * n_tokens * n_seqs];
+        let beta_host = vec![0.1f32; h_v * n_tokens * n_seqs];
         let beta = CudaTensor::<f32>::from_host(
             device.clone(),
             vec![1, h_v, n_tokens, n_seqs],
@@ -509,6 +540,36 @@ impl Qwen35GDN {
         let dst_host = dst.to_host()?;
         let attn_host_f32 = &dst_host[..attn_elems];
         let state_host_f32 = &dst_host[attn_elems..attn_elems + state_elems];
+
+        // DIAG(agent-gdn): post-kernel stats.
+        if std::env::var("QWEN35_GDN_DIAG").ok().as_deref() == Some("1")
+            && (self.layer_idx == 0 || self.layer_idx == 1)
+        {
+            let (mut amax, mut anan, mut ainf) = (0.0f32, 0usize, 0usize);
+            for &v in attn_host_f32 {
+                if v.is_nan() {
+                    anan += 1;
+                } else if v.is_infinite() {
+                    ainf += 1;
+                } else if v.abs() > amax {
+                    amax = v.abs();
+                }
+            }
+            let (mut smax, mut snan, mut sinf) = (0.0f32, 0usize, 0usize);
+            for &v in state_host_f32 {
+                if v.is_nan() {
+                    snan += 1;
+                } else if v.is_infinite() {
+                    sinf += 1;
+                } else if v.abs() > smax {
+                    smax = v.abs();
+                }
+            }
+            eprintln!(
+                "GDN[{}] attn: nan={} inf={} max_abs={:.3e} | state: nan={} inf={} max_abs={:.3e}",
+                self.layer_idx, anan, ainf, amax, snan, sinf, smax
+            );
+        }
 
         // Write the new state back into gdn_state. Layout is identical
         // (same [S_v, S_v, H_v, n_seqs] shape, same stride), so a flat
