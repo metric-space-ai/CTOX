@@ -235,6 +235,11 @@ impl Qwen35Target {
             config.hidden_dim,
             vocab_size,
         );
+        tracing::info!(
+            variant = packed_variant_name(&lm_head),
+            dims = ?lm_head.dims(),
+            "qwen35_target: lm_head loaded"
+        );
 
         // ------------------------------------------------------------
         // Per-layer construction.
@@ -704,6 +709,31 @@ fn load_embed_as_bf16(
             let host_bf16: Vec<bf16> = host_f32.iter().map(|v| bf16::from_f32(*v)).collect();
             CudaTensor::<bf16>::from_host(device.clone(), vec![vocab, hidden_dim], &host_bf16)
         }
+        GgufBuf::Q4K(src) => {
+            // Embedding kernels consume a bf16 `[vocab, hidden]` matrix
+            // directly — no mmvq wiring into embedding_lookup — so we
+            // host-dequant Q4_K blocks once at load. ~2.5 GB for the 27B
+            // `[248320, 5120]` embed; one-time, off the hot path.
+            let raw = match src.to_host() {
+                Ok(h) => h,
+                Err(e) => {
+                    tracing::warn!(key, error = %e, "qwen35_target: download Q4K embed failed; zero placeholder");
+                    return CudaTensor::<bf16>::zeros(device.clone(), vec![vocab, hidden_dim]);
+                }
+            };
+            // Reinterpret `&[i8]` as `&[u8]` for the Q4_K block parser.
+            let bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(raw.as_ptr() as *const u8, raw.len())
+            };
+            let host_bf16 = match dequant_q4_k_to_bf16(bytes, vocab * hidden_dim) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(key, error = %e, "qwen35_target: Q4K dequant failed; zero placeholder");
+                    return CudaTensor::<bf16>::zeros(device.clone(), vec![vocab, hidden_dim]);
+                }
+            };
+            CudaTensor::<bf16>::from_host(device.clone(), vec![vocab, hidden_dim], &host_bf16)
+        }
         other => {
             tracing::warn!(
                 key,
@@ -712,6 +742,93 @@ fn load_embed_as_bf16(
             );
             CudaTensor::<bf16>::zeros(device.clone(), vec![vocab, hidden_dim])
         }
+    }
+}
+
+/// Host-side dequantize Q4_K blocks to bf16. Ports the reference
+/// `dequantize_row_q4_K` from llama.cpp's `ggml-quants.c`. Per-block
+/// layout is `{ d: f16, dmin: f16, scales: [u8; 12], qs: [u8; 128] }`
+/// = 144 bytes / 256 elements.
+///
+/// Two sub-blocks of 32 elements share a scale/min pair via
+/// `get_scale_min_k4` (the 12-byte packed-scales decoder that
+/// Q4_K and Q5_K both use). We duplicate the decoder here rather than
+/// depend on the private `gguf_loader` helper since that helper isn't
+/// part of the crate's public surface.
+///
+/// This only fires on the token embedding path (the loader keeps
+/// Q4_K weights packed for the mmvq kernels in all other cases). ~1s
+/// at 27B load time, so a `for` loop in Rust is fine.
+fn dequant_q4_k_to_bf16(bytes: &[u8], n_elems: usize) -> Result<Vec<bf16>> {
+    const BLOCK: usize = 256;
+    const BLOCK_BYTES: usize = 144;
+    if !n_elems.is_multiple_of(BLOCK) {
+        return Err(anyhow!(
+            "Q4_K dequant: n_elems {} not a multiple of {}",
+            n_elems,
+            BLOCK
+        ));
+    }
+    let nb = n_elems / BLOCK;
+    if bytes.len() != nb * BLOCK_BYTES {
+        return Err(anyhow!(
+            "Q4_K dequant: got {} bytes, expected {} ({} blocks)",
+            bytes.len(),
+            nb * BLOCK_BYTES,
+            nb
+        ));
+    }
+    let mut out: Vec<bf16> = Vec::with_capacity(n_elems);
+    // Per block: d(2) dmin(2) scales[12] qs[128].
+    for i in 0..nb {
+        let b = &bytes[i * BLOCK_BYTES..(i + 1) * BLOCK_BYTES];
+        let d_bits = u16::from_le_bytes([b[0], b[1]]);
+        let dmin_bits = u16::from_le_bytes([b[2], b[3]]);
+        let d = f16::from_bits(d_bits).to_f32();
+        let min = f16::from_bits(dmin_bits).to_f32();
+        let scales = &b[4..16];
+        let qs = &b[16..144];
+
+        let mut is = 0usize;
+        let mut ql_off = 0usize;
+        for _ in (0..BLOCK).step_by(64) {
+            let (sc0, m0) = q4k_get_scale_min(is, scales);
+            let d1 = d * sc0 as f32;
+            let m1 = min * m0 as f32;
+            let (sc1, m1s) = q4k_get_scale_min(is + 1, scales);
+            let d2 = d * sc1 as f32;
+            let m2 = min * m1s as f32;
+
+            // low nibble for 32 elements (sub-block 2j)
+            for l in 0..32 {
+                let q = (qs[ql_off + l] & 0x0F) as i32;
+                let v = d1 * (q as f32) - m1;
+                out.push(bf16::from_f32(v));
+            }
+            // high nibble for 32 elements (sub-block 2j+1)
+            for l in 0..32 {
+                let q = ((qs[ql_off + l] >> 4) & 0x0F) as i32;
+                let v = d2 * (q as f32) - m2;
+                out.push(bf16::from_f32(v));
+            }
+
+            ql_off += 32;
+            is += 2;
+        }
+    }
+    Ok(out)
+}
+
+/// llama.cpp's `get_scale_min_k4` — decode a 6-bit scale + 6-bit min
+/// from the 12-byte packed `scales` array shared by Q4_K / Q5_K blocks.
+#[inline]
+fn q4k_get_scale_min(j: usize, scales: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (scales[j] & 63, scales[j + 4] & 63)
+    } else {
+        let d = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
+        let m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+        (d, m)
     }
 }
 
@@ -890,6 +1007,21 @@ fn load_bf16_placeholder(
 /// Shape metadata is advisory for packed variants — the mmvq kernels
 /// consume the byte buffer plus the explicit `(k, n)` scalars and
 /// don't re-read the GgufTensor shape.
+/// Human-readable name for a [`PackedWeight`] variant, for loader-time
+/// tracing. Runs once per weight at load and never in the forward hot
+/// path.
+fn packed_variant_name(w: &PackedWeight) -> &'static str {
+    match w {
+        PackedWeight::Bf16 { .. } => "Bf16",
+        PackedWeight::Q4K { .. } => "Q4K",
+        PackedWeight::Q5K { .. } => "Q5K",
+        PackedWeight::Q6K { .. } => "Q6K",
+        PackedWeight::Q8_0 { .. } => "Q8_0",
+        PackedWeight::IQ4XS { .. } => "IQ4XS",
+        PackedWeight::Zero { .. } => "Zero",
+    }
+}
+
 fn load_packed_weight(
     device: &Arc<DeviceContext>,
     tensors: &HashMap<String, GgufTensor>,
