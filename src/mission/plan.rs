@@ -29,6 +29,7 @@ const STEP_STATUS_FAILED: &str = "failed";
 const GOAL_STATUS_ACTIVE: &str = "active";
 const GOAL_STATUS_COMPLETED: &str = "completed";
 const GOAL_STATUS_BLOCKED: &str = "blocked";
+const GOAL_STATUS_FAILED: &str = "failed";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PlannedGoalView {
@@ -462,7 +463,7 @@ pub fn list_goals(root: &Path) -> Result<Vec<PlannedGoalView>> {
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -470,7 +471,7 @@ pub fn list_goals(root: &Path) -> Result<Vec<PlannedGoalView>> {
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -935,10 +936,10 @@ fn collapse_ws(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Whether any active plan still has pending steps, ignoring auto_advance.
-/// Used by the mission idle watchdog so that it keeps triggering as long as
-/// real plan work is open, even when the mission state record has drifted to
-/// allow_idle or is_open=false.
+/// Whether any active plan still has runnable steps, ignoring auto_advance.
+/// Used by the mission idle watchdog so that it keeps triggering only while
+/// real plan work remains executable. Blocked/failed steps do not count as
+/// runnable work and should not reactivate stale loops.
 pub fn has_active_goal_with_pending_step(root: &Path) -> Result<bool> {
     let conn = open_plan_db(root)?;
     let now = now_iso_string();
@@ -949,7 +950,7 @@ pub fn has_active_goal_with_pending_step(root: &Path) -> Result<bool> {
             FROM planned_goals g
             JOIN planned_steps s ON s.goal_id = g.goal_id
             WHERE g.status = 'active'
-              AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+              AND s.status IN ('pending', 'queued')
               AND (
                     s.defer_until IS NULL
                     OR s.defer_until = ''
@@ -1001,7 +1002,7 @@ fn load_goal(conn: &Connection, goal_id: &str) -> Result<Option<PlannedGoalView>
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -1009,7 +1010,7 @@ fn load_goal(conn: &Connection, goal_id: &str) -> Result<Option<PlannedGoalView>
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -1043,7 +1044,7 @@ fn load_goal_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<PlannedGoa
                 SELECT s.step_id
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_id,
@@ -1051,7 +1052,7 @@ fn load_goal_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<Option<PlannedGoa
                 SELECT s.title
                 FROM planned_steps s
                 WHERE s.goal_id = g.goal_id
-                  AND s.status IN ('pending', 'queued', 'blocked', 'failed')
+                  AND s.status IN ('pending', 'queued', 'blocked')
                 ORDER BY s.step_order ASC
                 LIMIT 1
             ) AS next_step_title,
@@ -1212,10 +1213,24 @@ fn refresh_goal_status_tx(tx: &Transaction<'_>, goal_id: &str) -> Result<()> {
         params![goal_id],
         |row| row.get(0),
     )?;
+    let failed: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status = 'failed'",
+        params![goal_id],
+        |row| row.get(0),
+    )?;
+    let pending_or_queued: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM planned_steps WHERE goal_id = ?1 AND status IN ('pending', 'queued')",
+        params![goal_id],
+        |row| row.get(0),
+    )?;
     let status = if total > 0 && completed == total {
         GOAL_STATUS_COMPLETED
+    } else if total > 0 && failed + completed == total && failed > 0 {
+        GOAL_STATUS_FAILED
     } else if blocked > 0 {
         GOAL_STATUS_BLOCKED
+    } else if pending_or_queued == 0 && failed > 0 {
+        GOAL_STATUS_FAILED
     } else {
         GOAL_STATUS_ACTIVE
     };
@@ -1492,6 +1507,39 @@ mod tests {
         assert!(!view.goal.auto_advance);
         assert_eq!(view.goal.status, GOAL_STATUS_BLOCKED);
         assert_eq!(view.steps[0].status, STEP_STATUS_BLOCKED);
+
+        let summary = emit_due_steps(&root)?;
+        assert_eq!(summary.emitted_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn fully_failed_plan_is_not_treated_as_active_runnable_work() -> Result<()> {
+        let root = temp_plan_root("failed-plan");
+        let created = ingest_goal(
+            &root,
+            PlanIngestRequest {
+                title: "Stale approval monitor".to_string(),
+                prompt: "Monitor inbound approval. Keep the deployment blocked until approval is confirmed. After confirmation, deploy production and verify live HTML.".to_string(),
+                thread_key: Some("review-probe".to_string()),
+                skill: Some("follow-up-orchestrator".to_string()),
+                auto_advance: true,
+                emit_now: false,
+            },
+        )?;
+        let step_ids = created
+            .steps
+            .iter()
+            .map(|step| step.step_id.clone())
+            .collect::<Vec<_>>();
+        for step_id in step_ids {
+            mark_step_failed(&root, &step_id, "superseded by clean probe")?;
+        }
+
+        let view = load_goal_with_steps(&root, &created.goal.goal_id)?
+            .expect("goal should reload after failing all steps");
+        assert_eq!(view.goal.status, GOAL_STATUS_FAILED);
+        assert!(!has_active_goal_with_pending_step(&root)?);
 
         let summary = emit_due_steps(&root)?;
         assert_eq!(summary.emitted_count, 0);
