@@ -832,13 +832,16 @@ mod tests {
 
         // Sub-config 1 — small GQA (h_v=6, h_k=2, group=3). Same
         // GQA shape as production (h_v/h_k = 3) but total head count
-        // is 4× smaller to keep the scratch allocations cheap.
+        // is 8× smaller to keep the scratch allocations cheap. s_v
+        // stays at 128 because the F16 persist-inter kernel template
+        // is only instantiated for S_v=128 (see
+        // `kernels/gated_delta_net.rs::kernel_name`).
         let config_small = Qwen35Config {
             hidden_dim: 5120,
             n_q_heads: 24,
             n_kv_heads: 4,
             head_dim: 256,
-            gdn_ssm_dim: 64,
+            gdn_ssm_dim: 128,
             gdn_num_v_heads: 6,
             gdn_num_k_heads: 2,
             intermediate_dim: 17_408,
@@ -850,7 +853,7 @@ mod tests {
             config_small,
             n_tokens,
             max_verify_tokens,
-            "small h_v=6 h_k=2 s_v=64",
+            "small h_v=6 h_k=2 s_v=128",
         );
 
         // Sub-config 2 — shipping 27B production shape. Exercises
