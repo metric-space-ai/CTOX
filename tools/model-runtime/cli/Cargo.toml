@@ -63,6 +63,12 @@ path = "src/bin/qwen35_parity_bench.rs"
 required-features = ["cuda"]
 doc = false
 
+[[bin]]
+name = "qwen35-spec-bench"
+path = "src/bin/qwen35_spec_bench.rs"
+required-features = ["cuda"]
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
