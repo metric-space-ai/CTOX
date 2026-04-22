@@ -366,6 +366,7 @@ impl Qwen35Target {
         kv_cache: &mut KvCache,
         gdn_states: &mut [CudaTensor<f32>],
         gdn_inter: &mut [CudaTensor<f16>],
+        gdn_conv_states: &mut [CudaTensor<f32>],
     ) -> Result<CudaTensor<f32>> {
         // ── 0. Shape validation.
         if tokens.shape().len() != 1 {
@@ -398,6 +399,13 @@ impl Qwen35Target {
             return Err(anyhow!(
                 "qwen35 target.forward: gdn_inter.len()={} < n_gdn={}",
                 gdn_inter.len(),
+                self.n_gdn
+            ));
+        }
+        if gdn_conv_states.len() < self.n_gdn {
+            return Err(anyhow!(
+                "qwen35 target.forward: gdn_conv_states.len()={} < n_gdn={}",
+                gdn_conv_states.len(),
                 self.n_gdn
             ));
         }
@@ -445,6 +453,7 @@ impl Qwen35Target {
                         positions,
                         &mut gdn_states[gdn_idx],
                         &mut gdn_inter[gdn_idx],
+                        &mut gdn_conv_states[gdn_idx],
                     )?;
                     gdn_idx += 1;
                 }
@@ -507,6 +516,7 @@ let mut logits =
         kv_cache: &mut KvCache,
         gdn_states: &mut [CudaTensor<f32>],
         gdn_inter: &mut [CudaTensor<f16>],
+        gdn_conv_states: &mut [CudaTensor<f32>],
         kv_start: usize,
     ) -> Result<CudaTensor<f32>> {
         // ── 0. Shape validation. Same checks as `forward`.
@@ -541,6 +551,13 @@ let mut logits =
             return Err(anyhow!(
                 "qwen35 target.forward_with_capture: gdn_inter.len()={} < n_gdn={}",
                 gdn_inter.len(),
+                self.n_gdn
+            ));
+        }
+        if gdn_conv_states.len() < self.n_gdn {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: gdn_conv_states.len()={} < n_gdn={}",
+                gdn_conv_states.len(),
                 self.n_gdn
             ));
         }
@@ -615,6 +632,7 @@ let mut logits =
                         positions,
                         &mut gdn_states[gdn_idx],
                         &mut gdn_inter[gdn_idx],
+                        &mut gdn_conv_states[gdn_idx],
                     )?;
                     gdn_idx += 1;
                 }
@@ -783,6 +801,7 @@ let mut logits =
         prompt_tokens: &CudaTensor<i32>,
         kv_cache: &mut KvCache,
         gdn_states: &mut [CudaTensor<f32>],
+        gdn_conv_states: &mut [CudaTensor<f32>],
     ) -> Result<CudaTensor<f32>> {
         if prompt_tokens.shape().len() != 1 {
             return Err(anyhow!(
@@ -798,6 +817,13 @@ let mut logits =
             return Err(anyhow!(
                 "qwen35 target.prefill: gdn_states.len()={} < n_gdn={}",
                 gdn_states.len(),
+                self.n_gdn
+            ));
+        }
+        if gdn_conv_states.len() < self.n_gdn {
+            return Err(anyhow!(
+                "qwen35 target.prefill: gdn_conv_states.len()={} < n_gdn={}",
+                gdn_conv_states.len(),
                 self.n_gdn
             ));
         }
@@ -869,7 +895,7 @@ let mut logits =
             .map_err(|e| anyhow!("qwen35 target.prefill: upload chunk positions: {:?}", e))?;
 
             let logits = self
-                .forward(&tk, &pos, kv_cache, gdn_states, &mut gdn_inter)
+                .forward(&tk, &pos, kv_cache, gdn_states, &mut gdn_inter, gdn_conv_states)
                 .map_err(|e| {
                     anyhow!(
                         "qwen35 target.prefill: chunk forward start={} chunk_n={}: {:?}",
@@ -1292,6 +1318,13 @@ fn build_gdn_layer(
     let name_attn_norm = format!("blk.{}.attn_norm.weight", layer_idx);
     let name_qkvg = format!("blk.{}.attn_qkv.weight", layer_idx);
     let name_out = format!("blk.{}.ssm_out.weight", layer_idx);
+    let name_ssm_alpha = format!("blk.{}.ssm_alpha.weight", layer_idx);
+    let name_ssm_beta = format!("blk.{}.ssm_beta.weight", layer_idx);
+    let name_ssm_a = format!("blk.{}.ssm_a", layer_idx);
+    let name_ssm_dt_bias = format!("blk.{}.ssm_dt.bias", layer_idx);
+    let name_ssm_conv1d = format!("blk.{}.ssm_conv1d.weight", layer_idx);
+    let name_attn_gate = format!("blk.{}.attn_gate.weight", layer_idx);
+    let name_ssm_norm = format!("blk.{}.ssm_norm.weight", layer_idx);
 
     let pre_norm = load_f32_placeholder(device, tensors, &name_attn_norm, vec![cfg.hidden_dim]);
 
@@ -1309,16 +1342,266 @@ fn build_gdn_layer(
     // to fall through to PackedWeight::Zero.
     let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
     let inner_dim = cfg.gdn_inner_dim();
+    let dt_rank = cfg.gdn_num_v_heads;
+    let conv_kernel_size = 4usize;
 
     let w_qkvg = load_packed_weight(device, tensors, &name_qkvg, cfg.hidden_dim, qkv_proj_dim);
     let w_out = load_packed_weight(device, tensors, &name_out, inner_dim, cfg.hidden_dim);
+
+    // ssm_alpha / ssm_beta: logical [dt_rank, hidden], stored
+    // [hidden, dt_rank] in GGUF ne-order. `load_packed_weight` takes
+    // (k=in, n=out) matching the logical matmul `[n_tokens, hidden] @
+    // [hidden, dt_rank]`. F32 weights are cast to bf16 on load via the
+    // PackedWeight::Bf16 variant.
+    let ssm_alpha = load_packed_weight(device, tensors, &name_ssm_alpha, cfg.hidden_dim, dt_rank);
+    let ssm_beta = load_packed_weight(device, tensors, &name_ssm_beta, cfg.hidden_dim, dt_rank);
+
+    // ssm_a: [dt_rank] f32 per-head scale (negative values — stored
+    // as -exp(A_log) in the shipping checkpoint). Fallback to zeros
+    // not ones here: ones would collapse softplus(alpha)*1 into the
+    // stand-in regime and silently corrupt 48 layers. Zeros at least
+    // produce g=0 which is a well-defined (no-decay) recurrence.
+    let ssm_a = load_f32_vector_zero_fallback(device, tensors, &name_ssm_a, dt_rank);
+    let ssm_dt_bias =
+        load_f32_vector_zero_fallback(device, tensors, &name_ssm_dt_bias, dt_rank);
+
+    // ssm_conv1d.weight: logical shape [conv_channels, kernel_size],
+    // stored in GGUF with ne = [kernel_size, conv_channels] (kernel
+    // axis fast). Our CUDA kernel consumes `w[k * n_channels + c]`,
+    // i.e. `[K, n_channels]` row-major with `k` slow — the transpose
+    // of the GGUF layout. Load + transpose once at load time so the
+    // per-forward kernel gets coalesced reads on the channel axis.
+    let ssm_conv1d_weight = load_conv1d_weight_transposed(
+        device,
+        tensors,
+        &name_ssm_conv1d,
+        conv_kernel_size,
+        qkv_proj_dim,
+    );
+
+    // attn_gate.weight: [hidden, inner_dim] (Q4_K on production 27B).
+    let attn_gate = load_packed_weight(device, tensors, &name_attn_gate, cfg.hidden_dim, inner_dim);
+
+    // ssm_norm.weight: [head_v_dim=s_v] f32. Use ones as fallback —
+    // that's the RMSNorm identity.
+    let ssm_norm = load_f32_placeholder(
+        device,
+        tensors,
+        &name_ssm_norm,
+        vec![cfg.gdn_ssm_dim],
+    );
 
     Qwen35GDN {
         pre_norm,
         w_qkvg,
         w_out,
+        ssm_alpha,
+        ssm_beta,
+        ssm_a,
+        ssm_dt_bias,
+        ssm_conv1d_weight,
+        attn_gate,
+        ssm_norm,
         config: cfg,
         layer_idx,
+    }
+}
+
+/// Read a `[n]` f32 vector (e.g. ssm_a / ssm_dt.bias). Falls back to a
+/// zero-filled tensor with a tracing warning on any mismatch or dtype
+/// other than F32. Zero fallback is chosen deliberately (vs ones) so
+/// the GDN forward produces a well-defined (no-decay / zero-bias)
+/// recurrence instead of silently applying wrong multipliers.
+fn load_f32_vector_zero_fallback(
+    device: &Arc<DeviceContext>,
+    tensors: &HashMap<String, GgufTensor>,
+    key: &str,
+    expected_len: usize,
+) -> CudaTensor<f32> {
+    let placeholder = || {
+        CudaTensor::<f32>::zeros(device.clone(), vec![expected_len])
+            .expect("alloc f32 vec zero placeholder")
+    };
+    let Some(t) = tensors.get(key) else {
+        tracing::warn!(
+            key,
+            expected_len,
+            "qwen35_target: {} missing; using zero placeholder",
+            key
+        );
+        return placeholder();
+    };
+    let numel: usize = t.shape.iter().product();
+    if numel != expected_len {
+        tracing::warn!(
+            key,
+            shape = ?t.shape,
+            expected_len,
+            "qwen35_target: f32 vector numel mismatch; zero placeholder"
+        );
+        return placeholder();
+    }
+    match &t.buf {
+        GgufBuf::F32(src) => match src.to_host() {
+            Ok(host) => CudaTensor::<f32>::from_host(device.clone(), vec![expected_len], &host)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(key, error = %e, "qwen35_target: upload f32 vector failed");
+                    placeholder()
+                }),
+            Err(e) => {
+                tracing::warn!(key, error = %e, "qwen35_target: download f32 vector failed");
+                placeholder()
+            }
+        },
+        _ => {
+            tracing::warn!(
+                key,
+                shape = ?t.shape,
+                "qwen35_target: f32 vector dtype not F32; zero placeholder"
+            );
+            placeholder()
+        }
+    }
+}
+
+/// Load `ssm_conv1d.weight` and transpose from the GGUF's
+/// `[kernel_size, n_channels]` (kernel-axis-fast) layout to the
+/// `[kernel_size, n_channels]` (channel-axis-fast) layout the
+/// ssm_conv1d kernel consumes. Outer shape is the same, but the
+/// element order along the fast axis differs — GGUF stores `(k fast,
+/// c slow)` and our kernel reads `buf[k * n_channels + c]` which
+/// requires `(c fast, k slow)`.
+///
+/// Implemented as a download → host transpose → upload, since this
+/// runs once at load time (~48 layers × 4 × 10240 f32 = 8 MB total).
+fn load_conv1d_weight_transposed(
+    device: &Arc<DeviceContext>,
+    tensors: &HashMap<String, GgufTensor>,
+    key: &str,
+    kernel_size: usize,
+    n_channels: usize,
+) -> CudaTensor<f32> {
+    let expected_numel = kernel_size * n_channels;
+    let placeholder = || {
+        CudaTensor::<f32>::zeros(device.clone(), vec![kernel_size, n_channels])
+            .expect("alloc ssm_conv1d_weight zero placeholder")
+    };
+    let Some(t) = tensors.get(key) else {
+        tracing::warn!(
+            key,
+            kernel_size,
+            n_channels,
+            "qwen35_target: {} missing; using zero placeholder",
+            key
+        );
+        return placeholder();
+    };
+    let numel: usize = t.shape.iter().product();
+    if numel != expected_numel {
+        tracing::warn!(
+            key,
+            shape = ?t.shape,
+            kernel_size,
+            n_channels,
+            "qwen35_target: ssm_conv1d.weight numel mismatch; zero placeholder"
+        );
+        return placeholder();
+    }
+    let raw = match &t.buf {
+        GgufBuf::F32(src) => match src.to_host() {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::warn!(key, error = %e, "qwen35_target: download ssm_conv1d.weight failed");
+                return placeholder();
+            }
+        },
+        _ => {
+            tracing::warn!(
+                key,
+                shape = ?t.shape,
+                "qwen35_target: ssm_conv1d.weight dtype not F32; zero placeholder"
+            );
+            return placeholder();
+        }
+    };
+    // Transpose + kernel-axis flip. GGUF raw stores `raw[c*K + k_ggml]`
+    // where `k_ggml = 0` is the oldest tap (matching ggml_ssm_conv's
+    // shift-register convention `sumf += x[(i+j) % K] * w[j]`). Our
+    // CUDA conv kernel walks `k_gpu = 0..K-1` with `k_gpu=0` pairing
+    // with the NEWEST tap (`src_idx = t + K-1 - k_gpu`). To reconcile,
+    // flip the kernel axis at load: `w_gpu[k_gpu] = w_ggml[K-1-k_gpu]`.
+    // Done once at load, not on the hot path.
+    let mut host = vec![0f32; expected_numel];
+    for k_gpu in 0..kernel_size {
+        let k_ggml = kernel_size - 1 - k_gpu;
+        for c in 0..n_channels {
+            host[k_gpu * n_channels + c] = raw[c * kernel_size + k_ggml];
+        }
+    }
+    CudaTensor::<f32>::from_host(device.clone(), vec![kernel_size, n_channels], &host)
+        .unwrap_or_else(|e| {
+            tracing::warn!(key, error = %e, "qwen35_target: upload transposed ssm_conv1d.weight failed");
+            placeholder()
+        })
+}
+
+/// Read a `[rows, cols]` f32 matrix. Falls back to zeros on any
+/// mismatch or non-F32 dtype. Used for the small f32 weights
+/// (`ssm_conv1d.weight`) that stay in f32 at forward time.
+#[allow(dead_code)]
+fn load_f32_matrix_zero_fallback(
+    device: &Arc<DeviceContext>,
+    tensors: &HashMap<String, GgufTensor>,
+    key: &str,
+    rows: usize,
+    cols: usize,
+) -> CudaTensor<f32> {
+    let expected_numel = rows * cols;
+    let placeholder = || {
+        CudaTensor::<f32>::zeros(device.clone(), vec![rows, cols])
+            .expect("alloc f32 matrix zero placeholder")
+    };
+    let Some(t) = tensors.get(key) else {
+        tracing::warn!(
+            key,
+            rows,
+            cols,
+            "qwen35_target: {} missing; using zero placeholder",
+            key
+        );
+        return placeholder();
+    };
+    let numel: usize = t.shape.iter().product();
+    if numel != expected_numel {
+        tracing::warn!(
+            key,
+            shape = ?t.shape,
+            rows,
+            cols,
+            "qwen35_target: f32 matrix numel mismatch; zero placeholder"
+        );
+        return placeholder();
+    }
+    match &t.buf {
+        GgufBuf::F32(src) => match src.to_host() {
+            Ok(host) => CudaTensor::<f32>::from_host(device.clone(), vec![rows, cols], &host)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(key, error = %e, "qwen35_target: upload f32 matrix failed");
+                    placeholder()
+                }),
+            Err(e) => {
+                tracing::warn!(key, error = %e, "qwen35_target: download f32 matrix failed");
+                placeholder()
+            }
+        },
+        _ => {
+            tracing::warn!(
+                key,
+                shape = ?t.shape,
+                "qwen35_target: f32 matrix dtype not F32; zero placeholder"
+            );
+            placeholder()
+        }
     }
 }
 
@@ -2024,8 +2307,11 @@ mod tests {
         // schemes are decoupled.
         let s_v = cfg.gdn_ssm_dim;
         let h = cfg.gdn_num_v_heads;
+        let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
         let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
         let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
+        let mut gdn_conv_states: Vec<CudaTensor<f32>> =
+            Vec::with_capacity(target.n_gdn);
         for _ in 0..target.n_gdn {
             gdn_states.push(
                 CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1])
@@ -2034,6 +2320,10 @@ mod tests {
             gdn_inter.push(
                 CudaTensor::<f16>::zeros(dev.clone(), vec![s_v, s_v, h, n_tokens])
                     .expect("alloc gdn inter"),
+            );
+            gdn_conv_states.push(
+                CudaTensor::<f32>::zeros(dev.clone(), vec![3, qkv_proj_dim])
+                    .expect("alloc gdn conv state"),
             );
         }
 
@@ -2045,6 +2335,7 @@ mod tests {
                 &mut kv_cache,
                 &mut gdn_states,
                 &mut gdn_inter,
+                &mut gdn_conv_states,
             )
             .expect("forward");
         dev.synchronize().expect("synchronize");
@@ -2202,8 +2493,11 @@ mod tests {
 
         let s_v = cfg.gdn_ssm_dim;
         let h = cfg.gdn_num_v_heads;
+        let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
         let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
         let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
+        let mut gdn_conv_states: Vec<CudaTensor<f32>> =
+            Vec::with_capacity(target.n_gdn);
         for _ in 0..target.n_gdn {
             gdn_states.push(
                 CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1])
@@ -2212,6 +2506,10 @@ mod tests {
             gdn_inter.push(
                 CudaTensor::<f16>::zeros(dev.clone(), vec![s_v, s_v, h, n_tokens])
                     .expect("alloc gdn inter"),
+            );
+            gdn_conv_states.push(
+                CudaTensor::<f32>::zeros(dev.clone(), vec![3, qkv_proj_dim])
+                    .expect("alloc gdn conv state"),
             );
         }
 
@@ -2223,6 +2521,7 @@ mod tests {
                 &mut kv_cache,
                 &mut gdn_states,
                 &mut gdn_inter,
+                &mut gdn_conv_states,
             )
             .expect("forward");
         dev.synchronize().expect("synchronize");
@@ -2327,7 +2626,12 @@ mod tests {
                            target: &Qwen35Target,
                            max_ctx: usize,
                            n_inter: usize|
-         -> (KvCache, Vec<CudaTensor<f32>>, Vec<CudaTensor<f16>>) {
+         -> (
+            KvCache,
+            Vec<CudaTensor<f32>>,
+            Vec<CudaTensor<f16>>,
+            Vec<CudaTensor<f32>>,
+        ) {
             let kv_cache = KvCache::new(
                 dev.clone(),
                 target.n_full_attn,
@@ -2338,8 +2642,11 @@ mod tests {
             .expect("alloc kv cache");
             let s_v = cfg.gdn_ssm_dim;
             let h = cfg.gdn_num_v_heads;
+            let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
             let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
             let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
+            let mut gdn_conv_states: Vec<CudaTensor<f32>> =
+                Vec::with_capacity(target.n_gdn);
             for _ in 0..target.n_gdn {
                 gdn_states.push(
                     CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1])
@@ -2349,8 +2656,12 @@ mod tests {
                     CudaTensor::<f16>::zeros(dev.clone(), vec![s_v, s_v, h, n_inter])
                         .expect("alloc gdn inter"),
                 );
+                gdn_conv_states.push(
+                    CudaTensor::<f32>::zeros(dev.clone(), vec![3, qkv_proj_dim])
+                        .expect("alloc gdn conv state"),
+                );
             }
-            (kv_cache, gdn_states, gdn_inter)
+            (kv_cache, gdn_states, gdn_inter, gdn_conv_states)
         };
 
         // Build tokens + positions for `n_tokens` starting at position
@@ -2383,7 +2694,8 @@ mod tests {
         // ── Warmup: 3× 32-token forwards on a throwaway state ─────
         eprintln!("bench: warmup...");
         {
-            let (mut kv, mut gs, mut gi) = setup_state(&dev, &cfg, &target, max_ctx, 32);
+            let (mut kv, mut gs, mut gi, mut gcs) =
+                setup_state(&dev, &cfg, &target, max_ctx, 32);
             let (tk, pos) = build_input(&prefill_tokens, 0, 32, &dev);
             for _ in 0..3 {
                 kv.reset();
@@ -2391,7 +2703,7 @@ mod tests {
                     // Zero reset via zeros realloc
                 }
                 let _ = target
-                    .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                    .forward(&tk, &pos, &mut kv, &mut gs, &mut gi, &mut gcs)
                     .expect("warmup forward");
                 dev.synchronize().ok();
             }
@@ -2401,13 +2713,13 @@ mod tests {
         eprintln!("bench: prefill (5× 128 tokens)...");
         let mut prefill_ms_samples: Vec<f64> = Vec::new();
         for _ in 0..5 {
-            let (mut kv, mut gs, mut gi) =
+            let (mut kv, mut gs, mut gi, mut gcs) =
                 setup_state(&dev, &cfg, &target, max_ctx, prefill_len);
             let (tk, pos) = build_input(&prefill_tokens, 0, prefill_len, &dev);
             dev.synchronize().ok();
             let t0 = Instant::now();
             let _ = target
-                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi, &mut gcs)
                 .expect("prefill forward");
             dev.synchronize().ok();
             prefill_ms_samples.push(t0.elapsed().as_secs_f64() * 1000.0);
@@ -2431,7 +2743,7 @@ mod tests {
         // GDN shape guard trip on the prefill call. (This only started
         // mattering once the GDN early-return was removed; previously
         // the layer no-op'd and never inspected `gdn_inter.shape`.)
-        let (mut kv, mut gs, mut gi) =
+        let (mut kv, mut gs, mut gi, mut gcs) =
             setup_state(&dev, &cfg, &target, max_ctx, prefill_len);
         let (tk_prefill, pos_prefill) = build_input(&prefill_tokens, 0, prefill_len, &dev);
         let _ = target
@@ -2441,6 +2753,7 @@ mod tests {
                 &mut kv,
                 &mut gs,
                 &mut gi,
+                &mut gcs,
             )
             .expect("prefill for decode");
         dev.synchronize().ok();
@@ -2455,7 +2768,7 @@ mod tests {
             dev.synchronize().ok();
             let t0 = Instant::now();
             let _ = target
-                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi, &mut gcs)
                 .expect("decode forward");
             dev.synchronize().ok();
             decode_ms_samples.push(t0.elapsed().as_secs_f64() * 1000.0);

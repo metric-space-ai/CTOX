@@ -132,6 +132,79 @@ extern "C" __global__ void fill_const_f32(
     y[i] = value;
 }
 
+// Softplus, f32: y[i] = log(1 + exp(x[i])).
+//
+// Numerically safe across the whole f32 range:
+//   * x very large (> 20) → exp(x) overflows, but log1p(exp(x)) ≈ x.
+//     We branch to `y = x` in that regime to avoid inf propagation.
+//   * x very negative (< -20) → exp(x) ≈ 0, log1p(0) = 0 but returns
+//     +denormal; log1pf clamps to 0 cleanly. We still fall through to
+//     log1pf(expf(x)) which is representable (expf(-20) ≈ 2e-9).
+// Matches the numerical recipe llama.cpp's ggml_softplus uses.
+extern "C" __global__ void softplus_f32(
+    const float * __restrict__ x,
+    float * __restrict__ y,
+    int numel
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    const float v = x[i];
+    // Linear-regime fall-through: for large x, softplus(x) ≈ x with
+    // error < 2e-9 at x=20 (float ULP-wise indistinguishable).
+    y[i] = (v > 20.0f) ? v : log1pf(expf(v));
+}
+
+// Sigmoid, f32: y[i] = 1 / (1 + exp(-x[i])).
+//
+// Used by the GDN beta projection (sigmoid(ssm_beta @ hidden)).
+extern "C" __global__ void sigmoid_f32(
+    const float * __restrict__ x,
+    float * __restrict__ y,
+    int numel
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    y[i] = 1.0f / (1.0f + expf(-x[i]));
+}
+
+// Broadcast-add a per-channel bias to a [n_tokens, n_channels] matrix:
+//   y[t, c] = x[t, c] + bias[c]
+//
+// Used by the GDN alpha projection: alpha += ssm_dt_bias[dt_rank] with
+// alpha shaped [n_tokens, dt_rank].
+extern "C" __global__ void broadcast_add_bias_f32(
+    const float * __restrict__ x,       // [n_tokens, n_channels]
+    const float * __restrict__ bias,    // [n_channels]
+    float * __restrict__ y,             // [n_tokens, n_channels] (may alias x)
+    int n_tokens,
+    int n_channels
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = n_tokens * n_channels;
+    if (idx >= total) return;
+    const int c = idx % n_channels;
+    y[idx] = x[idx] + bias[c];
+}
+
+// Broadcast-multiply a per-channel scale into a [n_tokens, n_channels]
+// matrix: y[t, c] = x[t, c] * scale[c].
+//
+// Used by the GDN alpha/g projection: g = alpha * ssm_a[dt_rank] with
+// alpha shaped [n_tokens, dt_rank].
+extern "C" __global__ void broadcast_mul_scale_f32(
+    const float * __restrict__ x,       // [n_tokens, n_channels]
+    const float * __restrict__ scale,   // [n_channels]
+    float * __restrict__ y,             // [n_tokens, n_channels] (may alias x)
+    int n_tokens,
+    int n_channels
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = n_tokens * n_channels;
+    if (idx >= total) return;
+    const int c = idx % n_channels;
+    y[idx] = x[idx] * scale[c];
+}
+
 // GDN gate stand-in: for each (token, v-head) computes
 //
 //   g[hi + t * H_v] = clamp(-|mean(v[t, hi, :])| - 1.0, -5.0, -1.0)

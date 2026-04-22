@@ -42,6 +42,10 @@ static SCALE_ADD_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SCALE_ADD_WITH_BIAS_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SIGMOID_MUL_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SIGMOID_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
+static SIGMOID_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static SOFTPLUS_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static BROADCAST_ADD_BIAS_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static BROADCAST_MUL_SCALE_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 static TRANSPOSE_2D_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 static ROW_SLICE_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 static FILL_CONST_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
@@ -235,6 +239,198 @@ pub fn launch_sigmoid_bf16(
 
     unsafe { launcher.launch(launch_cfg(numel)) }
         .map_err(|e| anyhow!("sigmoid_bf16 launch (numel={}): {:?}", numel, e))?;
+    Ok(())
+}
+
+/// `y[i] = 1 / (1 + exp(-x[i]))` element-wise, f32.
+///
+/// Used by the GDN beta projection: `beta = sigmoid(ssm_beta @ hidden)`.
+pub fn launch_sigmoid_f32(
+    device: &Arc<DeviceContext>,
+    x: &CudaTensor<f32>,
+    y: &mut CudaTensor<f32>,
+) -> Result<()> {
+    if x.numel() != y.numel() {
+        return Err(anyhow!(
+            "sigmoid_f32: x numel {} != y numel {}",
+            x.numel(),
+            y.numel()
+        ));
+    }
+    let numel = x.numel();
+    if numel == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(device, &SIGMOID_F32_FN, "sigmoid_f32")?;
+    let stream = device.raw().default_stream();
+    let numel_i32 = numel as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher.arg(x.buf()).arg(y.buf_mut()).arg(&numel_i32);
+
+    unsafe { launcher.launch(launch_cfg(numel)) }
+        .map_err(|e| anyhow!("sigmoid_f32 launch (numel={}): {:?}", numel, e))?;
+    Ok(())
+}
+
+/// `y[i] = log1p(exp(x[i]))` element-wise (softplus), f32.
+///
+/// Used by the GDN alpha path:
+/// `alpha = softplus(ssm_alpha @ hidden + ssm_dt_bias)`.
+///
+/// Numerically safe: kernel falls through to the linear approximation
+/// `y = x` once `x > 20` (where `exp(x)` saturates f32). Matches the
+/// reference `ggml_softplus` numerics. Below the cutoff we call
+/// `log1pf(expf(x))` directly, which is representable down to
+/// `x ≈ -87` (where `expf(x) < f32_min` and log1p clamps to 0).
+pub fn launch_softplus_f32(
+    device: &Arc<DeviceContext>,
+    x: &CudaTensor<f32>,
+    y: &mut CudaTensor<f32>,
+) -> Result<()> {
+    if x.numel() != y.numel() {
+        return Err(anyhow!(
+            "softplus_f32: x numel {} != y numel {}",
+            x.numel(),
+            y.numel()
+        ));
+    }
+    let numel = x.numel();
+    if numel == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(device, &SOFTPLUS_F32_FN, "softplus_f32")?;
+    let stream = device.raw().default_stream();
+    let numel_i32 = numel as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher.arg(x.buf()).arg(y.buf_mut()).arg(&numel_i32);
+
+    unsafe { launcher.launch(launch_cfg(numel)) }
+        .map_err(|e| anyhow!("softplus_f32 launch (numel={}): {:?}", numel, e))?;
+    Ok(())
+}
+
+/// `y[t, c] = x[t, c] + bias[c]` — broadcast-add a per-channel bias
+/// along the fast axis.
+///
+/// Used by the GDN alpha path:
+/// `alpha = ssm_alpha @ hidden + ssm_dt_bias` where `ssm_dt_bias` is
+/// shape `[dt_rank]` and `alpha` is `[n_tokens, dt_rank]`.
+///
+/// `y` may alias `x` (kernel reads `x[idx]` then writes `y[idx]`).
+pub fn launch_broadcast_add_bias_f32(
+    device: &Arc<DeviceContext>,
+    x: &CudaTensor<f32>,
+    bias: &CudaTensor<f32>,
+    y: &mut CudaTensor<f32>,
+    n_tokens: usize,
+    n_channels: usize,
+) -> Result<()> {
+    let expected = n_tokens * n_channels;
+    if x.numel() != expected || y.numel() != expected {
+        return Err(anyhow!(
+            "broadcast_add_bias_f32: expected numel {}*{}={} (x={}, y={})",
+            n_tokens,
+            n_channels,
+            expected,
+            x.numel(),
+            y.numel()
+        ));
+    }
+    if bias.numel() != n_channels {
+        return Err(anyhow!(
+            "broadcast_add_bias_f32: bias numel {} != n_channels {}",
+            bias.numel(),
+            n_channels
+        ));
+    }
+    if expected == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(device, &BROADCAST_ADD_BIAS_F32_FN, "broadcast_add_bias_f32")?;
+    let stream = device.raw().default_stream();
+    let n_tokens_i32 = n_tokens as i32;
+    let n_channels_i32 = n_channels as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher
+        .arg(x.buf())
+        .arg(bias.buf())
+        .arg(y.buf_mut())
+        .arg(&n_tokens_i32)
+        .arg(&n_channels_i32);
+
+    unsafe { launcher.launch(launch_cfg(expected)) }.map_err(|e| {
+        anyhow!(
+            "broadcast_add_bias_f32 launch (n_tokens={} n_channels={}): {:?}",
+            n_tokens,
+            n_channels,
+            e
+        )
+    })?;
+    Ok(())
+}
+
+/// `y[t, c] = x[t, c] * scale[c]` — broadcast-multiply a per-channel
+/// scale along the fast axis.
+///
+/// Used by the GDN gate path: `g = alpha * ssm_a` where `ssm_a` is
+/// shape `[dt_rank]` and `alpha` is `[n_tokens, dt_rank]`.
+pub fn launch_broadcast_mul_scale_f32(
+    device: &Arc<DeviceContext>,
+    x: &CudaTensor<f32>,
+    scale: &CudaTensor<f32>,
+    y: &mut CudaTensor<f32>,
+    n_tokens: usize,
+    n_channels: usize,
+) -> Result<()> {
+    let expected = n_tokens * n_channels;
+    if x.numel() != expected || y.numel() != expected {
+        return Err(anyhow!(
+            "broadcast_mul_scale_f32: expected numel {}*{}={} (x={}, y={})",
+            n_tokens,
+            n_channels,
+            expected,
+            x.numel(),
+            y.numel()
+        ));
+    }
+    if scale.numel() != n_channels {
+        return Err(anyhow!(
+            "broadcast_mul_scale_f32: scale numel {} != n_channels {}",
+            scale.numel(),
+            n_channels
+        ));
+    }
+    if expected == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(
+        device,
+        &BROADCAST_MUL_SCALE_F32_FN,
+        "broadcast_mul_scale_f32",
+    )?;
+    let stream = device.raw().default_stream();
+    let n_tokens_i32 = n_tokens as i32;
+    let n_channels_i32 = n_channels as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher
+        .arg(x.buf())
+        .arg(scale.buf())
+        .arg(y.buf_mut())
+        .arg(&n_tokens_i32)
+        .arg(&n_channels_i32);
+
+    unsafe { launcher.launch(launch_cfg(expected)) }.map_err(|e| {
+        anyhow!(
+            "broadcast_mul_scale_f32 launch (n_tokens={} n_channels={}): {:?}",
+            n_tokens,
+            n_channels,
+            e
+        )
+    })?;
     Ok(())
 }
 

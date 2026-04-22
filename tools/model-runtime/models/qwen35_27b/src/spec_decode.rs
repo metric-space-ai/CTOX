@@ -204,12 +204,20 @@ impl SpeculativeDecoder {
     fn alloc_gdn_state(
         &self,
         max_verify_tokens: usize,
-    ) -> Result<(Vec<CudaTensor<f32>>, Vec<CudaTensor<f16>>)> {
+    ) -> Result<(
+        Vec<CudaTensor<f32>>,
+        Vec<CudaTensor<f16>>,
+        Vec<CudaTensor<f32>>,
+    )> {
         let cfg = self.target.config;
         let s_v = cfg.gdn_ssm_dim;
         let h_v = cfg.gdn_num_v_heads;
+        let qkv_proj_dim = cfg.gdn_qkv_proj_dim();
+        // ssm_conv1d kernel size (K=4) → rolling cache of K-1=3 rows.
+        let conv_state_rows = 3usize;
         let mut states: Vec<CudaTensor<f32>> = Vec::with_capacity(self.target.n_gdn);
         let mut inter: Vec<CudaTensor<f16>> = Vec::with_capacity(self.target.n_gdn);
+        let mut conv_states: Vec<CudaTensor<f32>> = Vec::with_capacity(self.target.n_gdn);
         for _ in 0..self.target.n_gdn {
             states.push(CudaTensor::<f32>::zeros(
                 self.device.clone(),
@@ -219,8 +227,12 @@ impl SpeculativeDecoder {
                 self.device.clone(),
                 vec![s_v, s_v, h_v, max_verify_tokens],
             )?);
+            conv_states.push(CudaTensor::<f32>::zeros(
+                self.device.clone(),
+                vec![conv_state_rows, qkv_proj_dim],
+            )?);
         }
-        Ok((states, inter))
+        Ok((states, inter, conv_states))
     }
 
     /// Host-side argmax over a `[rows, vocab]` f32 contiguous slab.
@@ -356,7 +368,8 @@ impl SpeculativeDecoder {
 
         // ── 1. State: KV cache + GDN state ─────────────────────────
         let mut kv_cache = self.alloc_kv_cache()?;
-        let (mut gdn_states, mut gdn_inter) = self.alloc_gdn_state(max_verify_tokens)?;
+        let (mut gdn_states, mut gdn_inter, mut gdn_conv_states) =
+            self.alloc_gdn_state(max_verify_tokens)?;
 
         // ── 2. Prefill — chunked through forward_with_capture so the
         //      target_feat_buf is populated for every prompt position.
@@ -380,6 +393,7 @@ impl SpeculativeDecoder {
                 &mut kv_cache,
                 &mut gdn_states,
                 &mut gdn_inter,
+                &mut gdn_conv_states,
                 pf_start,
             )?;
             last_logits = Some(logits);
@@ -467,8 +481,10 @@ impl SpeculativeDecoder {
             let mut draft_tok = Self::argmax_rows(&draft_logits_host, block_size, vocab);
             draft_tok[0] = last_commit_tok;
 
-            // ── 3d. Snapshot GDN state — correctness-first clone.
+            // ── 3d. Snapshot GDN state + conv state — correctness-first clone.
             let gdn_snapshot = self.target.snapshot_gdn_states(&gdn_states)?;
+            let gdn_conv_snapshot =
+                self.target.snapshot_gdn_states(&gdn_conv_states)?;
 
             // ── 3e. Batched target verify at positions
             //       [committed..committed + block_size].
@@ -485,6 +501,7 @@ impl SpeculativeDecoder {
                 &mut kv_cache,
                 &mut gdn_states,
                 &mut gdn_inter,
+                &mut gdn_conv_states,
                 committed,
             )?;
             // kv_cache has now advanced by block_size; target_feat_buf
@@ -626,6 +643,8 @@ impl SpeculativeDecoder {
                 // refreshed over the clean accepted-only state.
                 kv_cache.rewind(block_size);
                 self.target.restore_gdn_states(&mut gdn_states, &gdn_snapshot)?;
+                self.target
+                    .restore_gdn_states(&mut gdn_conv_states, &gdn_conv_snapshot)?;
 
                 let replay_tokens = CudaTensor::<i32>::from_host(
                     self.device.clone(),
@@ -640,6 +659,7 @@ impl SpeculativeDecoder {
                     &mut kv_cache,
                     &mut gdn_states,
                     &mut gdn_inter,
+                    &mut gdn_conv_states,
                     committed,
                 )?;
                 // Argmax of the final replay row → next last_commit_tok.
@@ -656,6 +676,7 @@ impl SpeculativeDecoder {
                 next_last_tok = Self::argmax_rows(last_row, 1, vocab)[0];
             }
             drop(gdn_snapshot);
+            drop(gdn_conv_snapshot);
 
             // ── 3h. Emit exactly `commit_n` tokens — the pending
             //       last_commit_tok at slot 0 plus each subsequent

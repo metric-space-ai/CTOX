@@ -8,7 +8,12 @@
 //!   residual ← hidden
 //!   hidden   ← rmsnorm(hidden)
 //!   qkv      ← matmul(hidden, w_qkvg)          [n_tokens, 10240]
+//!   qkv      ← ssm_conv1d(qkv, ssm_conv_state, ssm_conv_weight) + silu
 //!   (q,k,v)  = qkv.split_by_offset(0, 2048, 4096)
+//!   q, k     ← l2_norm(q), l2_norm(k)
+//!   beta     ← sigmoid(ssm_beta @ hidden)         [n_tokens, 48]
+//!   alpha    ← softplus(ssm_alpha @ hidden + ssm_dt_bias)
+//!   g        ← alpha * ssm_a                      [n_tokens, 48]
 //!   gdn_out  ← launch_gated_delta_net(q, k, v, g, beta, state, inter)
 //!   proj     ← matmul(gdn_out, w_out)
 //!   hidden   ← residual + proj
@@ -38,41 +43,27 @@
 //! the GQA expansion from 16 K heads to 48 V heads; we feed Q/K with
 //! their native 16-head layout rather than pre-expanding to 48.
 //!
-//! # Scope of this port
+//! # Real g / beta / conv pipeline
 //!
-//! The dflash reference is still more elaborate than what this layer
-//! runs today:
+//! The g and beta gating signals are now computed from the real
+//! GGUF weights (ssm_alpha / ssm_beta / ssm_a / ssm_dt_bias), and
+//! the fused qkv stream passes through a causal 1-D depthwise
+//! convolution (kernel=4) with a per-layer rolling state cache
+//! before it is split into Q/K/V. This matches the dflash reference
+//! in `qwen35_target_graph.cpp::build_delta_net_block` (lines
+//! 444-500). The previous port used a V-mean stand-in for g and a
+//! constant 0.1 for beta and skipped the conv entirely; 48 of 64
+//! layers therefore produced numerics unrelated to the model's
+//! trained gating.
 //!
-//!   * A 1D convolution + silu on the fused qkv stream (the
-//!     `ssm_conv1d` weight) — here it's omitted; the matmul output
-//!     feeds Q/K/V directly.
-//!   * L2 normalization on Q and K (`ggml_l2_norm`).
-//!   * `sigmoid(ssm_beta @ hidden)` for beta — we still use a
-//!     constant 0.5 stub.
-//!   * `softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a` for the
-//!     gate — we still use a mean-over-V-head-width stand-in.
-//!   * A separate multiplicative gate `z = wqkv_gate @ hidden`
-//!     (post-GDN, pre-output-projection).
-//!
-//! Those pieces need kernels we haven't ported yet
-//! (`ssm_conv1d`, `l2_norm`, `sigmoid`, `softplus`) and additional
-//! projections (`attn_gate`, `ssm_alpha`, `ssm_beta`, `ssm_a`,
-//! `ssm_norm`). This port wires the **real** Q/K/V weights and the
-//! real `ssm_out` projection into the kernel-composition mechanics
-//! so 48 of 64 layers do genuine weight×activation work instead of
-//! running on zero-placeholder matmuls. Exact-vs-reference numerics
-//! land when the remaining kernels do.
-//!
-//! Open TODOs (tracked inline too):
-//!   * `ssm_conv1d` kernel + pre-conv state management.
-//!   * `l2_norm` kernel for Q/K.
-//!   * `sigmoid` / `softplus` elementwise kernels.
-//!   * Fused `sigmoid_scalar_broadcast` for the beta path.
+//! Still missing versus reference (tracked as follow-on work):
+//!   * `attn_gate.weight` (z-gate) — the reference multiplies the
+//!     GDN output by `sigmoid(wqkv_gate @ hidden)` before the
+//!     output projection. Not wired in this pass.
+//!   * `ssm_norm.weight` — an extra RMSNorm applied to the GDN
+//!     output before the output projection in the reference.
 //!   * `TREE` recurrence — this layer currently always runs
-//!     `GdnRecurrence::Chain`. DDTree verify passes `parent_ids`
-//!     through the stepper, which needs to reach the kernel; plumb
-//!     that when the stepper lands.
-//!   * z-gate (`wqkv_gate @ hidden`) applied post-GDN.
+//!     `GdnRecurrence::Chain`.
 
 use std::sync::Arc;
 
@@ -81,11 +72,13 @@ use half::{bf16, f16};
 
 use ctox_cuda_primitives::device::DeviceContext;
 use crate::kernels::l2_norm::launch_l2_norm_f32;
+use crate::kernels::silu_mul::launch_silu_mul_f32;
 use crate::kernels::{
-    launch_cast_bf16_to_f32, launch_cast_f32_to_bf16, launch_fill_const_f32,
-    launch_gated_delta_net_f32, launch_gdn_gate_v_mean_standin_f32, launch_residual_add_bf16,
-    launch_rmsnorm_f32, launch_row_slice_f32, GdnGateKind, GdnLaunchInputs, GdnPersistInter,
-    GdnRecurrence, GdnShape,
+    launch_broadcast_add_bias_f32, launch_broadcast_mul_scale_f32, launch_cast_bf16_to_f32,
+    launch_cast_f32_to_bf16, launch_gated_delta_net_f32, launch_residual_add_bf16,
+    launch_rmsnorm_f32, launch_row_slice_f32, launch_sigmoid_f32, launch_softplus_f32,
+    launch_ssm_conv1d_f32, GdnGateKind, GdnLaunchInputs, GdnPersistInter, GdnRecurrence,
+    GdnShape,
 };
 use ctox_cuda_primitives::tensor::CudaTensor;
 
@@ -131,6 +124,51 @@ pub struct Qwen35GDN {
     /// via `launch_mmvq_q5k_f32`).
     pub w_out: PackedWeight,
 
+    /// `ssm_alpha.weight` — alpha projection. Logical shape
+    /// `[dt_rank=gdn_num_v_heads, hidden_dim]`, stored `[hidden, dt_rank]`
+    /// in GGUF ne-order. Used as a `PackedWeight` so the matmul
+    /// dispatches through the same f32→packed-weight path as the
+    /// rest of the projections. Shipping GGUF ships this as F32;
+    /// loader upconverts to the current `PackedWeight::Bf16` variant.
+    pub ssm_alpha: PackedWeight,
+
+    /// `ssm_beta.weight` — beta projection, same shape + loader
+    /// convention as [`Self::ssm_alpha`]. Output feeds
+    /// `sigmoid` then into the GDN kernel's `beta` argument.
+    pub ssm_beta: PackedWeight,
+
+    /// `ssm_a` — per-head scaling vector used to build `g`:
+    /// `g = softplus(alpha + ssm_dt_bias) * ssm_a`. In the shipping
+    /// GGUF this is stored as `-A_log.exp()` so entries are always
+    /// negative — which is why the previous stand-in pinned g into
+    /// the `[-5, -1]` band for stability. Shape `[dt_rank]` f32.
+    pub ssm_a: CudaTensor<f32>,
+
+    /// `ssm_dt.bias` — per-head bias for the alpha path. Shape
+    /// `[dt_rank]` f32.
+    pub ssm_dt_bias: CudaTensor<f32>,
+
+    /// `ssm_conv1d.weight` — 1-D causal depthwise convolution weight.
+    /// Shape `[kernel_size=4, conv_channels=qkv_proj_dim]` f32 — the
+    /// `[K, n_channels]` layout `launch_ssm_conv1d_f32` expects.
+    ///
+    /// Applied to `qkv_mixed` (the output of `w_qkvg @ hidden`)
+    /// before the Q/K/V split. Fused SiLU inside the kernel.
+    pub ssm_conv1d_weight: CudaTensor<f32>,
+
+    /// `attn_gate.weight` (a.k.a. `wqkv_gate` in dflash) — z-gate
+    /// projection. Logical shape `[hidden, inner_dim=h_v*s_v]`. The
+    /// reference computes `z = wqkv_gate @ hidden`, then
+    /// `output_n = output_n * silu(z)` after the SSM recurrence and
+    /// ssm_norm. Carried as a `PackedWeight` so the shipping GGUF's
+    /// Q4_K variant dispatches through the same matmul as Q/K/V.
+    pub attn_gate: PackedWeight,
+
+    /// `ssm_norm.weight` — per-head-dim RMSNorm scale applied to the
+    /// GDN attention output before the z-gate multiply. Shape
+    /// `[head_v_dim=s_v]` f32. Fallback is ones (RMSNorm identity).
+    pub ssm_norm: CudaTensor<f32>,
+
     /// Architecture constants — see [`Qwen35Config`].
     pub config: Qwen35Config,
 
@@ -169,6 +207,7 @@ impl Qwen35GDN {
         positions: &CudaTensor<i32>,
         gdn_state: &mut CudaTensor<f32>,
         gdn_inter: &mut CudaTensor<f16>,
+        gdn_conv_state: &mut CudaTensor<f32>,
     ) -> Result<()> {
         let _ = positions; // unused for GDN — see doc comment.
 
@@ -268,6 +307,84 @@ impl Qwen35GDN {
                 n_tokens
             ));
         }
+        // gdn_conv_state: [K-1=3, qkv_proj_dim=10240]. Kept per-layer,
+        // persists across forwards (rolling window of the last K-1
+        // input rows to the conv — rewound on spec-decode rollback
+        // the same way gdn_state is).
+        let conv_kernel_size: usize = 4;
+        let conv_state_rows = conv_kernel_size - 1;
+        if gdn_conv_state.shape() != [conv_state_rows, qkv_proj_dim] {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: gdn_conv_state.shape {:?} != [{}, {}]",
+                self.layer_idx,
+                gdn_conv_state.shape(),
+                conv_state_rows,
+                qkv_proj_dim
+            ));
+        }
+        // ssm_alpha / ssm_beta: [hidden, dt_rank=h_v] in PackedWeight (k, n)
+        // convention so matmul_f32 produces [n_tokens, h_v].
+        let dt_rank = h_v;
+        if self.ssm_alpha.dims() != (hidden_dim, dt_rank) {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_alpha dims {:?} != ({}, {})",
+                self.layer_idx,
+                self.ssm_alpha.dims(),
+                hidden_dim,
+                dt_rank
+            ));
+        }
+        if self.ssm_beta.dims() != (hidden_dim, dt_rank) {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_beta dims {:?} != ({}, {})",
+                self.layer_idx,
+                self.ssm_beta.dims(),
+                hidden_dim,
+                dt_rank
+            ));
+        }
+        if self.ssm_a.shape() != [dt_rank] {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_a.shape {:?} != [{}]",
+                self.layer_idx,
+                self.ssm_a.shape(),
+                dt_rank
+            ));
+        }
+        if self.ssm_dt_bias.shape() != [dt_rank] {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_dt_bias.shape {:?} != [{}]",
+                self.layer_idx,
+                self.ssm_dt_bias.shape(),
+                dt_rank
+            ));
+        }
+        if self.ssm_conv1d_weight.shape() != [conv_kernel_size, qkv_proj_dim] {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_conv1d_weight.shape {:?} != [{}, {}]",
+                self.layer_idx,
+                self.ssm_conv1d_weight.shape(),
+                conv_kernel_size,
+                qkv_proj_dim
+            ));
+        }
+        if self.attn_gate.dims() != (hidden_dim, inner_dim) {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: attn_gate dims {:?} != ({}, {})",
+                self.layer_idx,
+                self.attn_gate.dims(),
+                hidden_dim,
+                inner_dim
+            ));
+        }
+        if self.ssm_norm.shape() != [s_v] {
+            return Err(anyhow!(
+                "qwen35 gdn layer {}: ssm_norm.shape {:?} != [{}]",
+                self.layer_idx,
+                self.ssm_norm.shape(),
+                s_v
+            ));
+        }
 
         // ------------------------------------------------------------
         // 1. Save residual, then cast bf16 -> f32 for rmsnorm.
@@ -298,6 +415,46 @@ impl Qwen35GDN {
 let mut qkv_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
         self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
+
+        // ------------------------------------------------------------
+        // 3. Causal 1-D depthwise conv + fused SiLU on the fused qkv
+        //    stream. Reference: `qwen35_target_graph.cpp` lines
+        //    ~462-497 (concat conv_state || qkv_mixed, ssm_conv, silu,
+        //    save last K-1 rows back to conv_state).
+        //
+        //    The `launch_ssm_conv1d_f32` wrapper handles (a) the
+        //    per-channel dot over K=4 taps with the rolling K-1 state
+        //    padded to the left, (b) the fused SiLU, and (c) the state
+        //    rotation back into `gdn_conv_state`. After this launch
+        //    `qkv_conv` holds the conv output in the same
+        //    `[n_tokens, qkv_proj_dim]` layout as `qkv_f32` — the
+        //    downstream slice offsets are unchanged.
+        // ------------------------------------------------------------
+        let mut qkv_conv =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
+        // The conv kernel reads `state` and writes `state_out`; even
+        // though the kernel launch sequence makes aliasing safe at the
+        // CUDA level (state-update kernel runs strictly after the conv
+        // kernel on the same stream), Rust's borrow checker doesn't
+        // know that. Clone the pre-state into a read-only temp so we
+        // can hold `&` and `&mut` simultaneously without aliasing.
+        let mut conv_state_in =
+            CudaTensor::<f32>::zeros(device.clone(), gdn_conv_state.shape().to_vec())?;
+        {
+            let conv_stream = device.raw().default_stream();
+            conv_stream
+                .memcpy_dtod(gdn_conv_state.buf(), conv_state_in.buf_mut())
+                .map_err(|e| anyhow!("gdn: conv_state clone dtod: {:?}", e))?;
+        }
+        launch_ssm_conv1d_f32(
+            device,
+            &qkv_f32,
+            &conv_state_in,
+            gdn_conv_state,
+            &self.ssm_conv1d_weight,
+            &mut qkv_conv,
+            conv_kernel_size,
+        )?;
 
         // ------------------------------------------------------------
         //    The matmul result is row-major [n_tokens, qkv_proj_dim].
@@ -343,7 +500,7 @@ let mut qkv_f32 =
         )?;
         launch_row_slice_f32(
             device,
-            &qkv_f32,
+            &qkv_conv,
             &mut q_tmp,
             n_tokens,
             qkv_proj_dim,
@@ -362,7 +519,7 @@ let mut qkv_f32 =
         )?;
         launch_row_slice_f32(
             device,
-            &qkv_f32,
+            &qkv_conv,
             &mut k_tmp,
             n_tokens,
             qkv_proj_dim,
@@ -384,7 +541,7 @@ let mut qkv_f32 =
         )?;
         launch_row_slice_f32(
             device,
-            &qkv_f32,
+            &qkv_conv,
             &mut v,
             n_tokens,
             qkv_proj_dim,
@@ -392,38 +549,71 @@ let mut qkv_f32 =
             v_width,
         )?;
 
-        // GDA gate stand-in: for each (t, hi) pair the reference
-        // eventually wants
-        //   g = softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a
-        // but that projection isn't wired yet; we fall back to the
-        // V-mean stand-in pinned to the stable `[-5, -1]` range so
-        // `exp(g)` stays well below 1 and the recurrence is stable
-        // across 48 stacked GDN layers on real Q5_K weights.
+        // ------------------------------------------------------------
+        // 5. Real beta = sigmoid(ssm_beta @ hidden).
         //
-        // The V-mean computation + clamp is one `launch_gdn_gate_v
-        // _mean_standin_f32` kernel now — previously it was a host
-        // vec alloc + nested loop + from_host upload per forward.
+        //    ssm_beta shape (k,n) = (hidden, dt_rank). Matmul produces
+        //    [n_tokens, dt_rank] = [n_tokens, h_v] in row-major (t
+        //    slow, h_idx fast — i.e. `buf[t*h_v + h_idx]`). This is
+        //    EXACTLY the layout the GDN kernel expects, since with
+        //    strides `sb1=1, sb2=h_v, sb3=h_v*n_tokens` its
+        //    `seq*sb3 + t*sb2 + h*sb1` resolves to `t*h_v + h_idx`
+        //    for n_seqs=1. No reshape required — we hand the kernel
+        //    the same linear buffer with a 2-D label; the kernel's
+        //    indexing is axis-agnostic up to stride.
         //
-        // TODO(gdn-ref): replace with `softplus(alpha + dt_bias)
-        // * ssm_a` once the ssm_alpha / ssm_a / ssm_dt_bias weights
-        // + softplus kernel land.
-        let mut g = CudaTensor::<f32>::zeros(
-            device.clone(),
-            vec![1, h_v, n_tokens, n_seqs],
-        )?;
-        launch_gdn_gate_v_mean_standin_f32(device, &v, &mut g, n_tokens, h_v, s_v)?;
+        //    Reference: qwen35_target_graph.cpp line ~445-447.
+        // ------------------------------------------------------------
+        let mut beta_lin =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        self.ssm_beta
+            .matmul_f32(device, &norm_f32, &mut beta_lin)?;
+        let mut beta =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        launch_sigmoid_f32(device, &beta_lin, &mut beta)?;
 
-        // Beta stand-in (constant 0.1). Single device fill — no host
-        // vec or upload. Replaces
-        // `from_host(vec![0.1; h_v*n_tokens*n_seqs])`.
+        // ------------------------------------------------------------
+        // 6. Real g = softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a.
         //
-        // TODO(gdn-ref): replace with sigmoid(ssm_beta @ hidden) once
-        // the ssm_beta weight + sigmoid kernel land.
-        let mut beta = CudaTensor::<f32>::zeros(
-            device.clone(),
-            vec![1, h_v, n_tokens, n_seqs],
+        //    ssm_alpha (hidden, dt_rank) -> alpha [n_tokens, dt_rank].
+        //    broadcast_add_bias_f32 adds ssm_dt_bias[dt_rank] along
+        //    the channel axis. softplus_f32 is the numerically-safe
+        //    log1p(exp(x)) with a linear fall-through for x > 20.
+        //    broadcast_mul_scale_f32 applies ssm_a[dt_rank]. Final
+        //    shape is `[n_tokens, dt_rank]` row-major — the same
+        //    `t*h_v + h_idx` linear order the GDN kernel reads g in.
+        //
+        //    Reference: qwen35_target_graph.cpp lines ~454-459.
+        // ------------------------------------------------------------
+        let mut alpha =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        self.ssm_alpha.matmul_f32(device, &norm_f32, &mut alpha)?;
+        // alpha += ssm_dt_bias (broadcast over n_tokens axis).
+        let mut alpha_biased =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        launch_broadcast_add_bias_f32(
+            device,
+            &alpha,
+            &self.ssm_dt_bias,
+            &mut alpha_biased,
+            n_tokens,
+            dt_rank,
         )?;
-        launch_fill_const_f32(device, &mut beta, 0.1)?;
+        // alpha = softplus(alpha).
+        let mut alpha_sp =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        launch_softplus_f32(device, &alpha_biased, &mut alpha_sp)?;
+        // g = alpha * ssm_a (broadcast over n_tokens axis).
+        let mut g =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, dt_rank])?;
+        launch_broadcast_mul_scale_f32(
+            device,
+            &alpha_sp,
+            &self.ssm_a,
+            &mut g,
+            n_tokens,
+            dt_rank,
+        )?;
 
         // ------------------------------------------------------------
         // 6. Launch the GDN kernel.
@@ -522,6 +712,44 @@ let mut qkv_f32 =
             .map_err(|e| anyhow!("gdn: dst → attn_f32 dtod copy: {:?}", e))?;
 
         // ------------------------------------------------------------
+        // 7b. Gated output norm. Reference
+        //     `qwen35_target_graph.cpp` lines ~650-662:
+        //       output_n = rms_norm(attn_out)
+        //       output_n = output_n * ssm_norm          (per-s_v scale)
+        //       z_silu   = silu(wqkv_gate @ hidden)
+        //       output_n = output_n * z_silu             (z-gate)
+        //
+        //     The rms_norm is taken over `ne[0] = s_v`, so we reshape
+        //     `attn_f32` as `[n_tokens * h_v, s_v]` and feed that to
+        //     `launch_rmsnorm_f32` with `weight = ssm_norm [s_v]`. The
+        //     underlying linear buffer is unchanged — each `s_v`
+        //     stretch is one head's state at one token, matching the
+        //     reference's `ne[0]=s_v fast` iteration order.
+        // ------------------------------------------------------------
+        let attn_rows = n_tokens * h_v;
+        let attn_f32_as_rows = attn_f32.reshape(vec![attn_rows, s_v])?;
+        let mut attn_norm_rows =
+            CudaTensor::<f32>::zeros(device.clone(), vec![attn_rows, s_v])?;
+        launch_rmsnorm_f32(
+            device,
+            &attn_f32_as_rows,
+            &self.ssm_norm,
+            &mut attn_norm_rows,
+            self.config.rms_eps,
+        )?;
+        // Reinterpret the normalized buffer back as `[n_tokens, inner_dim]`
+        // for the z-gate multiply. Same linear bytes, different label.
+        let attn_norm = attn_norm_rows.reshape(vec![n_tokens, inner_dim])?;
+
+        // z = wqkv_gate @ hidden  [n_tokens, inner_dim].
+        let mut z = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, inner_dim])?;
+        self.attn_gate.matmul_f32(device, &norm_f32, &mut z)?;
+        // gated_attn = silu(z) * attn_norm  (elementwise).
+        let mut gated_attn =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, inner_dim])?;
+        launch_silu_mul_f32(device, &z, &attn_norm, &mut gated_attn)?;
+
+        // ------------------------------------------------------------
         // 8. Output projection. [n_tokens, inner_dim] · [inner_dim,
         //    hidden_dim] → [n_tokens, hidden_dim]. Dispatches through
         //    `PackedWeight::matmul_f32` — bf16 cuBLAS gemm for dense,
@@ -531,7 +759,7 @@ let mut qkv_f32 =
         // ------------------------------------------------------------
 let mut proj_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
-        self.w_out.matmul_f32(device, &attn_f32, &mut proj_f32)?;
+        self.w_out.matmul_f32(device, &gated_attn, &mut proj_f32)?;
         let mut proj_bf16 =
             CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         launch_cast_f32_to_bf16(device, &proj_f32, &mut proj_bf16)?;
@@ -647,10 +875,60 @@ mod tests {
             n: hidden_dim,
         };
 
+        // Real-weights smoke needs placeholder ssm_alpha / ssm_beta /
+        // ssm_a / ssm_dt_bias / ssm_conv1d tensors. Zero-initialize —
+        // the forward should still run and produce finite output with
+        // g=0 (no decay) and beta=sigmoid(0)=0.5 (middle-of-the-road
+        // gate), which keeps the shape / plumbing check faithful while
+        // not asserting on specific numerics (those land in the
+        // GGUF-backed test).
+        let dt_rank = h_v;
+        let ssm_alpha_t =
+            CudaTensor::<bf16>::zeros(dev.clone(), vec![hidden_dim, dt_rank])
+                .expect("alloc ssm_alpha");
+        let ssm_alpha = PackedWeight::Bf16 {
+            t: ssm_alpha_t,
+            k: hidden_dim,
+            n: dt_rank,
+        };
+        let ssm_beta_t =
+            CudaTensor::<bf16>::zeros(dev.clone(), vec![hidden_dim, dt_rank])
+                .expect("alloc ssm_beta");
+        let ssm_beta = PackedWeight::Bf16 {
+            t: ssm_beta_t,
+            k: hidden_dim,
+            n: dt_rank,
+        };
+        let ssm_a = CudaTensor::<f32>::zeros(dev.clone(), vec![dt_rank])
+            .expect("alloc ssm_a");
+        let ssm_dt_bias = CudaTensor::<f32>::zeros(dev.clone(), vec![dt_rank])
+            .expect("alloc ssm_dt_bias");
+        let ssm_conv1d_weight = CudaTensor::<f32>::zeros(dev.clone(), vec![4, qkv_proj_dim])
+            .expect("alloc ssm_conv1d_weight");
+        let attn_gate_t = CudaTensor::<bf16>::zeros(dev.clone(), vec![hidden_dim, inner_dim])
+            .expect("alloc attn_gate");
+        let attn_gate = PackedWeight::Bf16 {
+            t: attn_gate_t,
+            k: hidden_dim,
+            n: inner_dim,
+        };
+        // ssm_norm as ones so rms_norm scaling is the identity.
+        let ssm_norm_host = vec![1.0f32; s_v];
+        let ssm_norm =
+            CudaTensor::<f32>::from_host(dev.clone(), vec![s_v], &ssm_norm_host)
+                .expect("upload ssm_norm");
+
         let layer = Qwen35GDN {
             pre_norm,
             w_qkvg,
             w_out,
+            ssm_alpha,
+            ssm_beta,
+            ssm_a,
+            ssm_dt_bias,
+            ssm_conv1d_weight,
+            attn_gate,
+            ssm_norm,
             config,
             layer_idx: 0,
         };
@@ -678,6 +956,9 @@ mod tests {
             vec![s_v, s_v, h_v, max_verify_tokens],
         )
         .expect("alloc inter");
+        let mut gdn_conv_state =
+            CudaTensor::<f32>::zeros(dev.clone(), vec![3, qkv_proj_dim])
+                .expect("alloc gdn_conv_state");
 
         // Snapshot initial state (all zeros) for the diff check.
         let state_before = gdn_state.to_host().expect("download state before");
@@ -698,7 +979,14 @@ mod tests {
         .expect("upload hidden");
 
         layer
-            .forward(&dev, &mut hidden, &positions, &mut gdn_state, &mut gdn_inter)
+            .forward(
+                &dev,
+                &mut hidden,
+                &positions,
+                &mut gdn_state,
+                &mut gdn_inter,
+                &mut gdn_conv_state,
+            )
             .expect("forward 1");
         dev.synchronize().expect("sync 1");
 
@@ -748,7 +1036,14 @@ mod tests {
         .expect("upload hidden 2");
 
         layer
-            .forward(&dev, &mut hidden2, &positions, &mut gdn_state, &mut gdn_inter)
+            .forward(
+                &dev,
+                &mut hidden2,
+                &positions,
+                &mut gdn_state,
+                &mut gdn_inter,
+                &mut gdn_conv_state,
+            )
             .expect("forward 2");
         dev.synchronize().expect("sync 2");
 

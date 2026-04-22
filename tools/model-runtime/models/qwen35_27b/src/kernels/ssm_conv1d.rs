@@ -32,6 +32,8 @@ const BLOCK_DIM: u32 = 256;
 
 static SSM_CONV1D_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SSM_CONV1D_STATE_UPDATE_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
+static SSM_CONV1D_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static SSM_CONV1D_STATE_UPDATE_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 
 /// Load the ssm_conv1d PTX module once and pull out the named function.
 /// Both entry points live in the same compiled PTX; we reload the
@@ -209,6 +211,149 @@ pub fn launch_ssm_conv1d_bf16(
         unsafe { launcher.launch(cfg) }.map_err(|e| {
             anyhow!(
                 "ssm_conv1d_state_update_bf16 launch (K-1={} n_channels={}): {:?}",
+                k_m1,
+                n_channels,
+                e
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+/// f32 version of [`launch_ssm_conv1d_bf16`]. Same semantics, same
+/// causal-conv + fused SiLU, but reads and writes f32 throughout.
+/// Used by the Qwen3.5 GDN forward, which keeps the `qkv_mixed`
+/// projection in f32 (rmsnorm → f32 matmul → conv → split into
+/// Q/K/V) to avoid a bf16 round-trip on the per-layer hot path.
+pub fn launch_ssm_conv1d_f32(
+    device: &Arc<DeviceContext>,
+    x: &CudaTensor<f32>,
+    state: &CudaTensor<f32>,
+    state_out: &mut CudaTensor<f32>,
+    w: &CudaTensor<f32>,
+    y: &mut CudaTensor<f32>,
+    kernel_size: usize,
+) -> Result<()> {
+    if kernel_size < 2 {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: kernel_size must be >= 2, got {}",
+            kernel_size
+        ));
+    }
+    if x.shape().len() != 2 {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: x must be 2D [n_tokens, n_channels], got {:?}",
+            x.shape()
+        ));
+    }
+    if w.shape().len() != 2 {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: w must be 2D [K, n_channels], got {:?}",
+            w.shape()
+        ));
+    }
+    if state.shape().len() != 2 {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: state must be 2D [K-1, n_channels], got {:?}",
+            state.shape()
+        ));
+    }
+    if state_out.shape() != state.shape() {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: state_out.shape {:?} != state.shape {:?}",
+            state_out.shape(),
+            state.shape()
+        ));
+    }
+    if y.shape() != x.shape() {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: y.shape {:?} != x.shape {:?}",
+            y.shape(),
+            x.shape()
+        ));
+    }
+    let n_tokens = x.shape()[0];
+    let n_channels = x.shape()[1];
+    if w.shape() != [kernel_size, n_channels] {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: w.shape {:?} != [K={}, n_channels={}]",
+            w.shape(),
+            kernel_size,
+            n_channels
+        ));
+    }
+    if state.shape() != [kernel_size - 1, n_channels] {
+        return Err(anyhow!(
+            "ssm_conv1d_f32: state.shape {:?} != [K-1={}, n_channels={}]",
+            state.shape(),
+            kernel_size - 1,
+            n_channels
+        ));
+    }
+    if n_tokens == 0 || n_channels == 0 {
+        return Ok(());
+    }
+
+    let n_tokens_i32 = n_tokens as i32;
+    let n_channels_i32 = n_channels as i32;
+    let k_i32 = kernel_size as i32;
+
+    let grid_c = (n_channels as u32).div_ceil(BLOCK_DIM).max(1);
+    let stream = device.raw().default_stream();
+
+    // --- Kernel 1: conv + fused silu → y ---
+    {
+        let cfg = LaunchConfig {
+            grid_dim: (grid_c, n_tokens as u32, 1),
+            block_dim: (BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let f = load_fn(device, &SSM_CONV1D_F32_FN, "ssm_conv1d_f32")?;
+        let mut launcher = stream.launch_builder(&f);
+        launcher
+            .arg(x.buf())
+            .arg(state.buf())
+            .arg(w.buf())
+            .arg(y.buf_mut())
+            .arg(&n_tokens_i32)
+            .arg(&n_channels_i32)
+            .arg(&k_i32);
+        unsafe { launcher.launch(cfg) }.map_err(|e| {
+            anyhow!(
+                "ssm_conv1d_f32 conv launch (n_tokens={} n_channels={} K={}): {:?}",
+                n_tokens,
+                n_channels,
+                kernel_size,
+                e
+            )
+        })?;
+    }
+
+    // --- Kernel 2: state ring rotation → state_out ---
+    {
+        let k_m1 = kernel_size - 1;
+        let cfg = LaunchConfig {
+            grid_dim: (grid_c, k_m1 as u32, 1),
+            block_dim: (BLOCK_DIM, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let f = load_fn(
+            device,
+            &SSM_CONV1D_STATE_UPDATE_F32_FN,
+            "ssm_conv1d_state_update_f32",
+        )?;
+        let mut launcher = stream.launch_builder(&f);
+        launcher
+            .arg(x.buf())
+            .arg(state.buf())
+            .arg(state_out.buf_mut())
+            .arg(&n_tokens_i32)
+            .arg(&n_channels_i32)
+            .arg(&k_i32);
+        unsafe { launcher.launch(cfg) }.map_err(|e| {
+            anyhow!(
+                "ssm_conv1d_state_update_f32 launch (K-1={} n_channels={}): {:?}",
                 k_m1,
                 n_channels,
                 e

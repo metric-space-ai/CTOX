@@ -113,3 +113,73 @@ extern "C" __global__ void ssm_conv1d_state_update_bf16(
     }
     state_out[(size_t)i * n_channels + c] = v;
 }
+
+// ---------------------------------------------------------------------------
+// f32 variants of the two kernels above. The GDN forward keeps
+// qkv_mixed in f32 throughout (rmsnorm -> f32 matmul output), and the
+// downstream gated_delta_net kernel expects f32 q/k/v. Keeping the
+// conv in f32 avoids a bf16 round-trip bounce on the hot path.
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void ssm_conv1d_f32(
+    const float * __restrict__ x,      // [n_tokens, n_channels]
+    const float * __restrict__ state,  // [K-1,       n_channels]
+    const float * __restrict__ w,      // [K,         n_channels]
+    float * __restrict__ y,            // [n_tokens,  n_channels]
+    int n_tokens,
+    int n_channels,
+    int kernel_size                    // K (Qwen3.5 = 4)
+) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int t = blockIdx.y;
+    if (c >= n_channels || t >= n_tokens) {
+        return;
+    }
+
+    const int K     = kernel_size;
+    const int K_m1  = K - 1;
+
+    float acc = 0.0f;
+    #pragma unroll 4
+    for (int k = 0; k < K; ++k) {
+        const int src_idx = t + K_m1 - k;
+        float xv;
+        if (src_idx < K_m1) {
+            xv = state[(size_t)src_idx * n_channels + c];
+        } else {
+            const int xi = src_idx - K_m1;
+            xv = x[(size_t)xi * n_channels + c];
+        }
+        const float wv = w[(size_t)k * n_channels + c];
+        acc += wv * xv;
+    }
+
+    const float silu = ggml_cuda_op_silu_single(acc);
+    y[(size_t)t * n_channels + c] = silu;
+}
+
+extern "C" __global__ void ssm_conv1d_state_update_f32(
+    const float * __restrict__ x,
+    const float * __restrict__ state,
+    float * __restrict__ state_out,
+    int n_tokens,
+    int n_channels,
+    int kernel_size
+) {
+    const int c = blockIdx.x * blockDim.x + threadIdx.x;
+    const int i = blockIdx.y;
+    const int K_m1 = kernel_size - 1;
+    if (c >= n_channels || i >= K_m1) {
+        return;
+    }
+
+    const int src_idx = n_tokens + i;
+    float v;
+    if (src_idx < K_m1) {
+        v = state[(size_t)src_idx * n_channels + c];
+    } else {
+        const int xi = src_idx - K_m1;
+        v = x[(size_t)xi * n_channels + c];
+    }
+    state_out[(size_t)i * n_channels + c] = v;
+}

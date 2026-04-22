@@ -48,9 +48,10 @@ pub use cast::{
 pub use embedding::{launch_embedding_bf16, launch_embedding_f16, launch_embedding_f32};
 pub use flash_attn::{launch_flash_attn_bf16, launch_flash_attn_bf16_kv_slab};
 pub use fused_ops::{
-    launch_fill_const_f32, launch_gdn_gate_v_mean_standin_f32, launch_row_slice_f32,
-    launch_scale_add_f32, launch_scale_add_with_bias_f32, launch_sigmoid_bf16,
-    launch_sigmoid_mul_bf16, launch_transpose_2d_bf16,
+    launch_broadcast_add_bias_f32, launch_broadcast_mul_scale_f32, launch_fill_const_f32,
+    launch_gdn_gate_v_mean_standin_f32, launch_row_slice_f32, launch_scale_add_f32,
+    launch_scale_add_with_bias_f32, launch_sigmoid_bf16, launch_sigmoid_f32,
+    launch_sigmoid_mul_bf16, launch_softplus_f32, launch_transpose_2d_bf16,
 };
 pub use gated_delta_net::{
     launch_gated_delta_net_f32, GdnGateKind, GdnInterDtype, GdnLaunchInputs, GdnPersistInter,
@@ -79,4 +80,4 @@ pub use rope::launch_rope_mrope_bf16;
 pub use rope_neox::launch_rope_neox_bf16_inplace;
 pub use silu_mul::{launch_silu_mul_bf16, launch_silu_mul_f32};
 pub use softmax::launch_softmax_f32;
-pub use ssm_conv1d::launch_ssm_conv1d_bf16;
+pub use ssm_conv1d::{launch_ssm_conv1d_bf16, launch_ssm_conv1d_f32};
