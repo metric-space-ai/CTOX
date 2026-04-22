@@ -18,11 +18,11 @@ use libc::RLIMIT_NOFILE;
 use libc::SIGPIPE;
 #[cfg(unix)]
 use libc::SIG_IGN;
+use rusqlite::params;
+use rusqlite::Connection;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
-use rusqlite::params;
-use rusqlite::Connection;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -2495,6 +2495,18 @@ fn enqueue_review_rework(
     job: &QueuedPrompt,
     outcome: &review::ReviewOutcome,
 ) -> Result<String> {
+    if let Some(existing) = find_superseding_corrective_queue_task(
+        root,
+        job.thread_key.as_deref(),
+        job.workspace_root.as_deref(),
+        &["review rework"],
+    )? {
+        anyhow::bail!(
+            "superseded by runnable corrective work already in queue: {} ({})",
+            existing.title,
+            existing.message_key
+        );
+    }
     let summary_line = clip_text(&outcome.summary, 220);
     let preview = clip_text(&job.preview, 80);
     let title = format!(
@@ -2885,7 +2897,11 @@ fn persist_operating_health_snapshot(
             snapshot.current_goal_preview,
             snapshot.drift_score,
             serde_json::to_string(&snapshot.drift_reasons)?,
-            if snapshot.intervention_recommended { 1 } else { 0 },
+            if snapshot.intervention_recommended {
+                1
+            } else {
+                0
+            },
         ],
     )?;
     Ok(())
@@ -2903,7 +2919,9 @@ fn maybe_enqueue_cto_drift_intervention(
     drop(shared);
 
     if active_source == "queue"
-        && current_goal.to_ascii_lowercase().contains("cto operating drift detected")
+        && current_goal
+            .to_ascii_lowercase()
+            .contains("cto operating drift detected")
     {
         return Ok(false);
     }
@@ -2915,7 +2933,9 @@ fn maybe_enqueue_cto_drift_intervention(
         return Ok(false);
     }
 
-    if busy && active_source == "queue" && !current_goal.to_ascii_lowercase().contains("review rework")
+    if busy
+        && active_source == "queue"
+        && !current_goal.to_ascii_lowercase().contains("review rework")
     {
         return Ok(false);
     }
@@ -3001,6 +3021,15 @@ Do not spend this slice on generic queue janitor work. Do not repeat stale appro
         },
         snapshot.snapshot_id,
     );
+
+    if active_self_work_exists_for_thread(root, CTO_DRIFT_KIND, CTO_DRIFT_THREAD_KEY)? {
+        let conn = Connection::open(root.join("runtime/ctox.sqlite3"))?;
+        let _ = conn.execute(
+            "UPDATE operating_health_snapshots SET intervention_enqueued = 1 WHERE snapshot_id = ?1",
+            params![snapshot.snapshot_id],
+        );
+        return Ok(false);
+    }
 
     let created = create_self_work_backed_queue_task(
         root,
@@ -3376,6 +3405,24 @@ fn route_assigned_ticket_self_work(root: &Path, state: &Arc<Mutex<SharedState>>)
         if item.assigned_to.as_deref() != Some("self") {
             continue;
         }
+        if let Some(reason) = suppress_published_self_work_reason(root, &item)? {
+            let _ = tickets::transition_ticket_self_work_item(
+                root,
+                &item.work_id,
+                "blocked",
+                "ctox-service",
+                Some(&reason),
+                "internal",
+            );
+            push_event(
+                state,
+                format!(
+                    "Suppressed self-work {} [{}]: {}",
+                    item.work_id, item.kind, reason
+                ),
+            );
+            continue;
+        }
         if let Some(created) = queue_ticket_self_work_item(root, &item)? {
             push_event(
                 state,
@@ -3632,6 +3679,16 @@ fn ticket_self_work_priority(item: &tickets::TicketSelfWorkItemView) -> String {
     metadata_string(&item.metadata, "priority").unwrap_or_else(|| "high".to_string())
 }
 
+fn queue_priority_rank(priority: &str) -> u8 {
+    match priority.trim().to_ascii_lowercase().as_str() {
+        "urgent" => 3,
+        "high" => 2,
+        "normal" => 1,
+        "low" => 0,
+        _ => 1,
+    }
+}
+
 fn ticket_self_work_parent_message_key(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
     metadata_string(&item.metadata, "parent_message_key")
 }
@@ -3670,6 +3727,98 @@ fn render_ticket_self_work_prompt(item: &tickets::TicketSelfWorkItemView) -> Str
         prompt_lines.push(format!("Remote-Ticket: {}", locator));
     }
     prompt_lines.join("\n")
+}
+
+fn task_matches_scope(
+    task: &channels::QueueTaskView,
+    thread_key: Option<&str>,
+    workspace_root: Option<&str>,
+) -> bool {
+    if let Some(thread_key) = thread_key {
+        if task.thread_key == thread_key {
+            return true;
+        }
+    }
+    if let (Some(lhs), Some(rhs)) = (
+        workspace_root
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        task.workspace_root
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    ) {
+        if lhs == rhs {
+            return true;
+        }
+    }
+    false
+}
+
+fn task_matches_blocked_labels(task: &channels::QueueTaskView, blocked_labels: &[&str]) -> bool {
+    let haystack = format!("{}\n{}", task.title, task.prompt).to_ascii_lowercase();
+    blocked_labels
+        .iter()
+        .any(|label| haystack.contains(&label.to_ascii_lowercase()))
+}
+
+fn find_superseding_corrective_queue_task(
+    root: &Path,
+    thread_key: Option<&str>,
+    workspace_root: Option<&str>,
+    blocked_labels: &[&str],
+) -> Result<Option<channels::QueueTaskView>> {
+    let tasks =
+        channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 128)?;
+    Ok(tasks
+        .into_iter()
+        .filter(|task| task_matches_scope(task, thread_key, workspace_root))
+        .filter(|task| !task_matches_blocked_labels(task, blocked_labels))
+        .max_by_key(|task| queue_priority_rank(&task.priority)))
+}
+
+fn self_work_has_explicit_supersession(item: &tickets::TicketSelfWorkItemView) -> bool {
+    let haystack = format!("{}\n{}", item.title, item.body_text).to_ascii_lowercase();
+    haystack.contains("superseded by canonical mission conversation")
+        || haystack.contains("superseded by clean probe")
+}
+
+fn suppress_published_self_work_reason(
+    root: &Path,
+    item: &tickets::TicketSelfWorkItemView,
+) -> Result<Option<String>> {
+    if self_work_has_explicit_supersession(item) {
+        return Ok(Some(
+            "suppressed because the work item was explicitly marked as superseded".to_string(),
+        ));
+    }
+
+    let thread_key = ticket_self_work_thread_key(item);
+    let workspace_root = ticket_self_work_workspace_root(item);
+    let blocked_labels: &[&str] = match item.kind.as_str() {
+        "review-rework" => &["review rework"],
+        CTO_DRIFT_KIND => &["cto operating drift correction"],
+        _ => &[],
+    };
+    if blocked_labels.is_empty() {
+        return Ok(None);
+    }
+    if let Some(task) = find_superseding_corrective_queue_task(
+        root,
+        Some(&thread_key),
+        workspace_root.as_deref(),
+        blocked_labels,
+    )? {
+        if queue_priority_rank(&task.priority)
+            >= queue_priority_rank(&ticket_self_work_priority(item))
+        {
+            return Ok(Some(format!(
+                "suppressed because runnable corrective work already exists: {} ({})",
+                task.title, task.message_key
+            )));
+        }
+    }
+    Ok(None)
 }
 
 fn queue_ticket_self_work_item(
@@ -4339,6 +4488,20 @@ fn runnable_queue_work_exists(root: &Path) -> Result<bool> {
     // Without this check the mission watchdog creates redundant
     // continuation tasks and starves the actual queued step.
     channels::has_runnable_inbound_message(root)
+}
+
+fn active_self_work_exists_for_thread(root: &Path, kind: &str, thread_key: &str) -> Result<bool> {
+    for state in ["open", "queued", "published"] {
+        let items = tickets::list_ticket_self_work_items(root, None, Some(state), 256)?;
+        if items.into_iter().any(|item| {
+            item.kind == kind
+                && ticket_self_work_thread_key(&item) == thread_key
+                && item.assigned_to.as_deref().unwrap_or("self") == "self"
+        }) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn mission_thread_key(conversation_id: i64) -> String {
@@ -6703,6 +6866,193 @@ mod tests {
         let tasks = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
             .expect("failed to list queue tasks");
         assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn review_rework_is_suppressed_when_same_scope_corrective_task_exists() {
+        let root = temp_root("ctox-review-rework-suppressed");
+        channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Direct corrective work for the Kunstmen homepage.".to_string(),
+                thread_key: "kunstmen-operator".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("service-deployment".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed direct corrective task");
+
+        let job = QueuedPrompt {
+            prompt: "Bad homepage".to_string(),
+            goal: "Repair the Kunstmen homepage".to_string(),
+            preview: "Repair the Kunstmen homepage".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: vec!["queue-key-1".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-operator".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+        let outcome = review::ReviewOutcome {
+            required: true,
+            verdict: review::ReviewVerdict::Fail,
+            score: 0,
+            summary: "The homepage is still not a platform.".to_string(),
+            report: "report".to_string(),
+            reasons: vec!["Reset the IA".to_string()],
+        };
+
+        let err = enqueue_review_rework(&root, &job, &outcome).expect_err("should suppress");
+        assert!(err
+            .to_string()
+            .contains("superseded by runnable corrective work"));
+        let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert!(self_work.is_empty());
+    }
+
+    #[test]
+    fn published_review_rework_is_blocked_when_same_scope_corrective_task_exists() {
+        let root = temp_root("ctox-review-rework-route-suppressed");
+        channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Direct corrective work for the Kunstmen homepage.".to_string(),
+                thread_key: "kunstmen-operator".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("service-deployment".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed direct corrective task");
+
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: "review-rework".to_string(),
+                title: "Review rework: Kunstmen homepage".to_string(),
+                body_text: "Repair the failed homepage review.".to_string(),
+                state: "open".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "kunstmen-operator",
+                    "workspace_root": "/home/ubuntu/workspace/kunstmen",
+                    "priority": "high",
+                    "skill": "follow-up-orchestrator",
+                    "dedupe_key": "review-rework:kunstmen-operator:fail:test",
+                }),
+            },
+            true,
+        )
+        .expect("failed to create review rework");
+        tickets::assign_ticket_self_work_item(&root, &item.work_id, "self", "ctox", None)
+            .expect("failed to assign self-work");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        route_assigned_ticket_self_work(&root, &state).expect("routing should succeed");
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Kunstmen platform homepage reset");
+
+        let blocked =
+            tickets::list_ticket_self_work_items(&root, Some("local"), Some("blocked"), 10)
+                .expect("failed to list blocked self-work");
+        assert!(blocked.iter().any(|entry| entry.work_id == item.work_id));
+    }
+
+    #[test]
+    fn cto_drift_watchdog_does_not_duplicate_active_thread_work() {
+        let root = temp_root("ctox-drift-dedupes-active-thread");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let conn =
+            Connection::open(root.join("runtime/ctox.sqlite3")).expect("failed to open runtime db");
+        ensure_operating_health_schema(&conn).expect("failed to init operating health schema");
+        let existing = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: CTO_DRIFT_KIND.to_string(),
+                title: "CTO operating drift correction".to_string(),
+                body_text: "Existing drift correction".to_string(),
+                state: "open".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": CTO_DRIFT_THREAD_KEY,
+                    "priority": "urgent",
+                    "skill": "follow-up-orchestrator",
+                    "dedupe_key": "cto-drift:existing",
+                }),
+            },
+            true,
+        )
+        .expect("failed to seed drift self-work");
+        tickets::assign_ticket_self_work_item(&root, &existing.work_id, "self", "ctox", None)
+            .expect("failed to assign drift self-work");
+
+        let snapshot = OperatingHealthSnapshot {
+            snapshot_id: "opsnap-test".to_string(),
+            mission_open_count: 10,
+            active_goal_count: 0,
+            pending_plan_step_count: 0,
+            ticket_items: 0,
+            ticket_cases: 0,
+            ticket_sync_runs: 0,
+            ticket_dry_runs: 0,
+            ticket_knowledge_loads: 0,
+            ticket_self_work_items: 5,
+            ticket_self_work_active: 2,
+            review_rework_active: 3,
+            ticket_knowledge_entries: 1,
+            knowledge_main_skills: 0,
+            knowledge_skillbooks: 0,
+            knowledge_runbooks: 0,
+            knowledge_runbook_items: 0,
+            knowledge_embeddings: 0,
+            verification_runs: 30,
+            local_tickets: 4,
+            local_ticket_events: 20,
+            active_source_label: "queue".to_string(),
+            current_goal_preview: "Review rework".to_string(),
+            drift_score: 17,
+            drift_reasons: vec![
+                "review-rework backlog is crowding the active mission".to_string(),
+            ],
+            intervention_recommended: true,
+            created_at: now_iso_string(),
+        };
+        persist_operating_health_snapshot(&conn, &snapshot).expect("failed to persist snapshot");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let enqueued = maybe_enqueue_cto_drift_intervention(&root, &state, &snapshot)
+            .expect("watchdog should succeed");
+        assert!(!enqueued);
+
+        let open = tickets::list_ticket_self_work_items(&root, Some("local"), None, 20)
+            .expect("failed to list self-work");
+        let drift_items = open
+            .into_iter()
+            .filter(|item| item.kind == CTO_DRIFT_KIND)
+            .collect::<Vec<_>>();
+        assert_eq!(drift_items.len(), 1);
+
+        let enqueued: i64 = conn
+            .query_row(
+                "SELECT intervention_enqueued FROM operating_health_snapshots WHERE snapshot_id = ?1",
+                params![snapshot.snapshot_id],
+                |row| row.get(0),
+            )
+            .expect("failed to read snapshot");
+        assert_eq!(enqueued, 1);
     }
 
     #[test]
