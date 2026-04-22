@@ -1940,8 +1940,14 @@ mod tests {
         // decode when batching is available" number. Each chunk
         // advances the KV cache by 32.
         eprintln!("bench: decode (8× 32-tok chunks continuing from prefill)...");
+        // gdn_inter has to accommodate the largest single forward that
+        // runs on this state — i.e. the 128-token prefill we're about
+        // to feed in. Sizing it for the 32-token decode chunk makes the
+        // GDN shape guard trip on the prefill call. (This only started
+        // mattering once the GDN early-return was removed; previously
+        // the layer no-op'd and never inspected `gdn_inter.shape`.)
         let (mut kv, mut gs, mut gi) =
-            setup_state(&dev, &cfg, &target, max_ctx, 32);
+            setup_state(&dev, &cfg, &target, max_ctx, prefill_len);
         let (tk_prefill, pos_prefill) = build_input(&prefill_tokens, 0, prefill_len, &dev);
         let _ = target
             .forward(
