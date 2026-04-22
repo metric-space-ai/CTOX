@@ -1585,4 +1585,220 @@ mod tests {
         assert_eq!(n_nan, 0, "logits contain {} NaN", n_nan);
         assert_eq!(n_inf, 0, "logits contain {} Inf", n_inf);
     }
+
+    /// Prefill + decode tok/s microbench on the HumanEval prompt,
+    /// repeated to 128 tokens. Loads the 27B with keep_packed=true,
+    /// runs:
+    ///
+    ///   1. 3× warmup forwards of 32 tokens to JIT-cache CUDA modules
+    ///   2. 5× 128-token forwards — report prefill tok/s
+    ///   3. 64× 32-token forwards continuing the KV cache — report
+    ///      "pseudo-decode" tok/s (32 toks per chunk because the bf16
+    ///      matmul kernel's M-dim tile is 32; true 1-token decode
+    ///      needs a small-M kernel variant later)
+    ///
+    /// Reference numbers from Phase-1 FFI on same HumanEval prompt:
+    ///   - chain: ~77 tok/s
+    ///   - DDTree: ~94 tok/s
+    /// Those are from the dflash reference calling hand-tuned
+    /// ggml-cuda kernels via a C++ harness. Our bare-metal stack
+    /// runs the SAME underlying kernels (vendored verbatim) via a
+    /// Rust+cudarc launcher, so per-kernel throughput should match;
+    /// any delta is launcher overhead + our slightly-imperfect
+    /// fattn-mma (Path B wmma vs upstream mma.sync).
+    ///
+    /// Run:
+    ///   cargo test -p ctox-qwen35-27b --features cuda --release -- \
+    ///     --ignored --nocapture qwen35_prefill_decode_bench
+    #[test]
+    #[ignore]
+    fn qwen35_prefill_decode_bench() {
+        use std::time::Instant;
+
+        let dev = Arc::new(DeviceContext::new(0).expect("cuda init"));
+        let meta = crate::gguf_loader::parse_qwen35_metadata(QWEN35_27B_GGUF)
+            .expect("parse_qwen35_metadata");
+        let cfg = Qwen35Config::from_metadata(&meta, 128);
+
+        eprintln!("bench: loading 27B (keep_packed=true)...");
+        let t_load = Instant::now();
+        let target = Qwen35Target::load_from_gguf_with_config(
+            dev.clone(),
+            cfg,
+            QWEN35_27B_GGUF,
+            crate::gguf_loader::LoaderConfig { keep_packed: true },
+        )
+        .expect("load_from_gguf_with_config");
+        let load_s = t_load.elapsed().as_secs_f64();
+        eprintln!(
+            "bench: model loaded in {:.2}s (vocab={} layers={})",
+            load_s,
+            target.vocab_size,
+            target.layers.len()
+        );
+
+        // HumanEval prompt repeated to fill 128 tokens (same 9-token
+        // pattern the Phase-1 FFI bench used).
+        let base: [i32; 9] = [7734, 264, 6185, 36974, 883, 13094, 6326, 61369, 25];
+        let prefill_len = 128usize;
+        let mut prefill_tokens = vec![0i32; prefill_len];
+        for i in 0..prefill_len {
+            prefill_tokens[i] = base[i % 9];
+        }
+
+        let max_ctx = 4096usize;
+
+        // Setup helper — fresh KV cache + GDN states for a single run.
+        let setup_state = |dev: &Arc<DeviceContext>,
+                           cfg: &Qwen35Config,
+                           target: &Qwen35Target,
+                           max_ctx: usize,
+                           n_inter: usize|
+         -> (KvCache, Vec<CudaTensor<f32>>, Vec<CudaTensor<f16>>) {
+            let kv_cache = KvCache::new(
+                dev.clone(),
+                target.n_full_attn,
+                max_ctx,
+                cfg.n_kv_heads,
+                cfg.head_dim,
+            )
+            .expect("alloc kv cache");
+            let s_v = cfg.gdn_ssm_dim;
+            let h = cfg.n_q_heads;
+            let mut gdn_states: Vec<CudaTensor<f32>> = Vec::with_capacity(target.n_gdn);
+            let mut gdn_inter: Vec<CudaTensor<f16>> = Vec::with_capacity(target.n_gdn);
+            for _ in 0..target.n_gdn {
+                gdn_states.push(
+                    CudaTensor::<f32>::zeros(dev.clone(), vec![s_v, s_v, h, 1])
+                        .expect("alloc gdn state"),
+                );
+                gdn_inter.push(
+                    CudaTensor::<f16>::zeros(dev.clone(), vec![s_v, s_v, h, n_inter])
+                        .expect("alloc gdn inter"),
+                );
+            }
+            (kv_cache, gdn_states, gdn_inter)
+        };
+
+        // Build tokens + positions for `n_tokens` starting at position
+        // `start`.
+        let build_input = |tokens_slice: &[i32],
+                           start: usize,
+                           n_tokens: usize,
+                           dev: &Arc<DeviceContext>|
+         -> (CudaTensor<i32>, CudaTensor<i32>) {
+            let t = CudaTensor::<i32>::from_host(
+                dev.clone(),
+                vec![n_tokens],
+                &tokens_slice[..n_tokens],
+            )
+            .expect("upload tokens");
+            let mut pos = vec![0i32; 4 * n_tokens];
+            for i in 0..n_tokens {
+                let p = (start + i) as i32;
+                pos[i] = p;
+                pos[n_tokens + i] = p;
+                pos[2 * n_tokens + i] = p;
+                pos[3 * n_tokens + i] = 0;
+            }
+            let positions =
+                CudaTensor::<i32>::from_host(dev.clone(), vec![4, n_tokens], &pos)
+                    .expect("upload positions");
+            (t, positions)
+        };
+
+        // ── Warmup: 3× 32-token forwards on a throwaway state ─────
+        eprintln!("bench: warmup...");
+        {
+            let (mut kv, mut gs, mut gi) = setup_state(&dev, &cfg, &target, max_ctx, 32);
+            let (tk, pos) = build_input(&prefill_tokens, 0, 32, &dev);
+            for _ in 0..3 {
+                kv.reset();
+                for s in gs.iter_mut() {
+                    // Zero reset via zeros realloc
+                }
+                let _ = target
+                    .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                    .expect("warmup forward");
+                dev.synchronize().ok();
+            }
+        }
+
+        // ── Prefill bench: 5× 128-token forward ─────────────────
+        eprintln!("bench: prefill (5× 128 tokens)...");
+        let mut prefill_ms_samples: Vec<f64> = Vec::new();
+        for _ in 0..5 {
+            let (mut kv, mut gs, mut gi) =
+                setup_state(&dev, &cfg, &target, max_ctx, prefill_len);
+            let (tk, pos) = build_input(&prefill_tokens, 0, prefill_len, &dev);
+            dev.synchronize().ok();
+            let t0 = Instant::now();
+            let _ = target
+                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                .expect("prefill forward");
+            dev.synchronize().ok();
+            prefill_ms_samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+        }
+        prefill_ms_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let prefill_median_ms = prefill_ms_samples[2];
+        let prefill_tok_s = prefill_len as f64 * 1000.0 / prefill_median_ms;
+
+        // ── Decode bench: continue from prefill, 8× 32-tok chunks ─
+        //
+        // We'd prefer 1-token decode but the bf16 matmul kernel tiles
+        // M in blocks of 32 (from the ggml-cuda cuBLAS path); passing
+        // n_tokens=1 would require a small-M kernel variant we don't
+        // have yet. 32-token chunks give a lower-bound "effective
+        // decode when batching is available" number. Each chunk
+        // advances the KV cache by 32.
+        eprintln!("bench: decode (8× 32-tok chunks continuing from prefill)...");
+        let (mut kv, mut gs, mut gi) =
+            setup_state(&dev, &cfg, &target, max_ctx, 32);
+        let (tk_prefill, pos_prefill) = build_input(&prefill_tokens, 0, prefill_len, &dev);
+        let _ = target
+            .forward(
+                &tk_prefill,
+                &pos_prefill,
+                &mut kv,
+                &mut gs,
+                &mut gi,
+            )
+            .expect("prefill for decode");
+        dev.synchronize().ok();
+
+        let mut decode_ms_samples: Vec<f64> = Vec::new();
+        let mut past = prefill_len;
+        let decode_chunk = 32usize;
+        let decode_chunks = 8usize;
+        let chunk_tokens: Vec<i32> = (0..decode_chunk).map(|i| base[i % 9]).collect();
+        for _ in 0..decode_chunks {
+            let (tk, pos) = build_input(&chunk_tokens, past, decode_chunk, &dev);
+            dev.synchronize().ok();
+            let t0 = Instant::now();
+            let _ = target
+                .forward(&tk, &pos, &mut kv, &mut gs, &mut gi)
+                .expect("decode forward");
+            dev.synchronize().ok();
+            decode_ms_samples.push(t0.elapsed().as_secs_f64() * 1000.0);
+            past += decode_chunk;
+        }
+        decode_ms_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let decode_median_ms = decode_ms_samples[decode_chunks / 2];
+        let decode_tok_s = decode_chunk as f64 * 1000.0 / decode_median_ms;
+
+        // ── Report ───────────────────────────────────────────────
+        eprintln!("\n=== QWEN3.5-27B BARE-METAL BENCH (A6000, sm_86) ===");
+        eprintln!("Model load (cold disk → device):  {:>8.2} s", load_s);
+        eprintln!("Prefill (128 tok, median of 5):   {:>8.2} ms  =>  {:>7.2} tok/s",
+                  prefill_median_ms, prefill_tok_s);
+        eprintln!("Pseudo-decode (32-tok chunks):    {:>8.2} ms  =>  {:>7.2} tok/s",
+                  decode_median_ms, decode_tok_s);
+        eprintln!();
+        eprintln!("Reference (dflash FFI, Phase 1):");
+        eprintln!("  chain:  ~77 tok/s");
+        eprintln!("  DDTree: ~94 tok/s");
+        eprintln!();
+        eprintln!("Prefill raw samples (ms):  {:?}", prefill_ms_samples);
+        eprintln!("Decode-chunk raw (ms):     {:?}", decode_ms_samples);
+    }
 }
