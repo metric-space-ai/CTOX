@@ -14,11 +14,13 @@
 //!   ┌──────────────────────────────────┐
 //!   │ ctox-engine-runtime (THIS crate) │  ← model-agnostic, trait-based
 //!   │  • trait Model                    │
+//!   │  • trait GenerativeModel          │
+//!   │  • backends::dflash (FFI prod)    │
 //!   │  • serving loop, streaming        │
 //!   │  • KV pool orchestration          │
 //!   │  • tokenizer bridge               │
 //!   └───────────────┬──────────────────┘
-//!                   │  impl Model
+//!                   │  impl Model / GenerativeModel
 //!   ┌───────────────┴──────────────────┐
 //!   │ ctox-qwen35-27b  (per model)     │  ← model-specific
 //!   │  • 64-layer decoder composition   │
@@ -38,9 +40,25 @@
 //! Per-model kernels (`models/<model>/kernels/sm_XX/*.cu`) are
 //! vendored from upstream (llama.cpp ggml-cuda + dflash), not
 //! reimplemented. See `models/qwen35_27b/vendor/README.md`.
+//!
+//! ## Production paths
+//!
+//! Two parallel backends are supported:
+//!
+//! 1. **Bare-metal native port** (`ctox-qwen35-27b`) — `impl Model`.
+//!    Currently in catch-up on tok/s; see `models/qwen35_27b/src/target.rs`.
+//! 2. **DFlash FFI** (`backends::dflash`) — `impl GenerativeModel`.
+//!    The intermediate production path. Calls into the vendored
+//!    reference library (`libdflash_run_lib.so`) via
+//!    `ctox-dflash-ffi`. Enable with `features = ["dflash-backend"]`.
+//!    This is the path CTOX serves from today while the native port
+//!    closes the tok/s gap.
 
 #![allow(dead_code)]
 
 pub mod model;
 
-pub use model::{Model, ModelInput, ModelOutput};
+#[cfg(feature = "dflash-backend")]
+pub mod backends;
+
+pub use model::{GenerateStats, GenerativeModel, Model, ModelInput, ModelOutput};

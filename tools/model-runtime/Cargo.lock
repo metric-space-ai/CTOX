@@ -1400,7 +1400,9 @@ version = "0.7.1-alpha.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "ctox-dflash-ffi",
  "thiserror 2.0.18",
+ "tokenizers",
  "tokio",
  "tracing",
 ]
