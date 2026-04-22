@@ -21,6 +21,8 @@ include!(concat!(env!("OUT_DIR"), "/ptx_registry.rs"));
 
 pub mod mmq_q4k;
 pub mod rmsnorm;
+pub mod silu_mul;
 
 pub use mmq_q4k::{launch_mmvq_q4k_f16, launch_mmvq_q4k_f32};
 pub use rmsnorm::launch_rmsnorm_f32;
+pub use silu_mul::{launch_silu_mul_bf16, launch_silu_mul_f32};
