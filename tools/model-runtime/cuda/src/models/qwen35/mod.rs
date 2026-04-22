@@ -11,11 +11,13 @@
 //! level up.
 
 pub mod config;
+pub mod ffn;
 pub mod full_attention;
 pub mod gdn;
 pub mod target;
 
 pub use config::Qwen35Config;
+pub use ffn::Qwen35FFN;
 pub use full_attention::Qwen35FullAttention;
 pub use gdn::Qwen35GDN;
 pub use target::{Qwen35Layer, Qwen35Target};

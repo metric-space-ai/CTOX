@@ -26,6 +26,12 @@ pub struct Qwen35Config {
     /// SSM recurrent-state width (`S_v` in the GDN kernel). Equals
     /// `head_dim` on 27B.
     pub gdn_ssm_dim: usize,
+    /// Inner (SwiGLU-intermediate) width of the FFN block. Each Qwen3.5
+    /// layer's FFN maps `hidden_dim → intermediate_dim` via two
+    /// projections (gate, up), applies `silu(gate) * up`, then projects
+    /// back `intermediate_dim → hidden_dim` via `down`.
+    /// Qwen3.5-27B: 13824.
+    pub intermediate_dim: usize,
     /// RoPE base. Brief target: 10_000. Production 27B GGUF uses
     /// 10_000_000; that switch lands with GGUF-driven config in Phase 4.
     pub rope_theta: f32,
@@ -43,6 +49,7 @@ impl Qwen35Config {
         n_kv_heads: 8,
         head_dim: 128,
         gdn_ssm_dim: 128,
+        intermediate_dim: 13824,
         rope_theta: 10_000.0,
         rms_eps: 1e-6,
         max_position_embeddings: 131_072,

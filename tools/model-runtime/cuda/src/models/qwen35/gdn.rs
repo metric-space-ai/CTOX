@@ -616,6 +616,7 @@ mod tests {
             n_kv_heads: 8,
             head_dim: 128,
             gdn_ssm_dim: 128,
+            intermediate_dim: 13824, // unused by GDN; required to satisfy the struct literal after Agent O added the field.
             rope_theta: 1_000_000.0,
             rms_eps: 1e-6,
             max_position_embeddings: 2048,
