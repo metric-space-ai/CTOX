@@ -65,12 +65,13 @@ use half::{bf16, f16};
 use ctox_cuda_primitives::device::DeviceContext;
 use crate::kernels::{
     launch_cast_bf16_to_f32, launch_cast_f32_to_bf16, launch_gated_delta_net_f32,
-    launch_matmul_bf16_bf16, launch_residual_add_bf16, launch_rmsnorm_f32, GdnGateKind,
-    GdnLaunchInputs, GdnPersistInter, GdnRecurrence, GdnShape,
+    launch_residual_add_bf16, launch_rmsnorm_f32, GdnGateKind, GdnLaunchInputs, GdnPersistInter,
+    GdnRecurrence, GdnShape,
 };
 use ctox_cuda_primitives::tensor::CudaTensor;
 
 use crate::config::Qwen35Config;
+use crate::layers::packed_weight::PackedWeight;
 
 /// Weights + config for one Qwen3.5 GDN layer.
 ///
@@ -87,19 +88,21 @@ pub struct Qwen35GDN {
     pub pre_norm: CudaTensor<f32>,
 
     /// Fused Q/K/V/G input projection. `[hidden_dim, n_q_heads * 4 *
-    /// head_dim]` row-major bf16. Split into four equal slices along
-    /// the last axis to produce q, k, v, g (in that order).
+    /// head_dim]` row-major. Carrier dtype is whatever the GGUF
+    /// shipped; dispatch happens inside [`PackedWeight::matmul_f32`].
+    /// Split into four equal slices along the last axis to produce
+    /// q, k, v, g (in that order).
     ///
     /// First port deliberately ignores the reference's separate
     /// `wqkv` + `wqkv_gate` + `ssm_beta` + `ssm_alpha` layout.
     /// Equivalent in expressivity (same total parameter count if
     /// you concatenate the weights), just not byte-compatible with
     /// the reference's GGUF. Byte compatibility is Phase 4.
-    pub w_qkvg: CudaTensor<bf16>,
+    pub w_qkvg: PackedWeight,
 
     /// Output projection back to the residual stream. `[n_q_heads *
-    /// head_dim, hidden_dim]` row-major bf16.
-    pub w_out: CudaTensor<bf16>,
+    /// head_dim, hidden_dim]`.
+    pub w_out: PackedWeight,
 
     /// Architecture constants — see [`Qwen35Config`].
     pub config: Qwen35Config,
@@ -199,22 +202,22 @@ impl Qwen35GDN {
 
         // w_qkvg must be [hidden_dim, proj_dim] so matmul produces
         // [n_tokens, proj_dim].
-        if self.w_qkvg.shape() != [hidden_dim, proj_dim] {
+        if self.w_qkvg.dims() != (hidden_dim, proj_dim) {
             return Err(anyhow!(
-                "qwen35 gdn layer {}: w_qkvg.shape {:?} != [{}, {}]",
+                "qwen35 gdn layer {}: w_qkvg dims {:?} != ({}, {})",
                 self.layer_idx,
-                self.w_qkvg.shape(),
+                self.w_qkvg.dims(),
                 hidden_dim,
                 proj_dim
             ));
         }
         // w_out must be [kv_dim, hidden_dim] so matmul produces
         // [n_tokens, hidden_dim] matching the residual stream.
-        if self.w_out.shape() != [kv_dim, hidden_dim] {
+        if self.w_out.dims() != (kv_dim, hidden_dim) {
             return Err(anyhow!(
-                "qwen35 gdn layer {}: w_out.shape {:?} != [{}, {}]",
+                "qwen35 gdn layer {}: w_out dims {:?} != ({}, {})",
                 self.layer_idx,
-                self.w_out.shape(),
+                self.w_out.dims(),
                 kv_dim,
                 hidden_dim
             ));
@@ -275,13 +278,10 @@ impl Qwen35GDN {
         launch_rmsnorm_f32(device, &hidden_f32, &self.pre_norm, &mut norm_f32, self.config.rms_eps)?;
 
         // ------------------------------------------------------------
-        // 3. Cast back to bf16 for the projection matmul.
-        // ------------------------------------------------------------
-        let mut norm_bf16 = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
-        launch_cast_f32_to_bf16(device, &norm_f32, &mut norm_bf16)?;
-
-        // ------------------------------------------------------------
-        // 4. Fused QKVG projection.
+        // 4. Fused QKVG projection — f32·packed → f32, dispatched on
+        //    the `w_qkvg` carrier variant. `PackedWeight::matmul_f32`
+        //    routes to the bf16 cuBLAS gemm, mmvq row-loop, or a zero
+        //    memset depending on what the GGUF loader produced.
         //    Matmul tiles in multiples of 32, so n_tokens must be a
         //    multiple of 32 (callers pad). proj_dim = H*4*head_dim =
         //    48*4*128 = 24576 for 27B, which is 32-aligned.
@@ -293,30 +293,18 @@ impl Qwen35GDN {
                 n_tokens
             ));
         }
-        let mut qkvg_bf16 =
-            CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, proj_dim])?;
-        launch_matmul_bf16_bf16(
-            device,
-            &norm_bf16,
-            &self.w_qkvg,
-            &mut qkvg_bf16,
-            n_tokens,
-            hidden_dim,
-            proj_dim,
-        )?;
+        let mut qkvg_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, proj_dim])?;
+        self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkvg_f32)?;
 
         // ------------------------------------------------------------
-        // 5. Upcast the fused QKVG result to f32 (the GDN kernel
-        //    expects f32 inputs) and slice into per-stream buffers in
-        //    the kernel's required [S, H, n_tokens, n_seqs] layout.
-        //
         //    The matmul result is row-major [n_tokens, H*4*head_dim]:
-        //      row t column c   ↔   qkvg_bf16[t * 4*H*head_dim + c]
+        //      row t column c   ↔   qkvg_f32[t * 4*H*head_dim + c]
         //    For the kernel we need: [head_dim, H, n_tokens, n_seqs],
         //    where the flat linear index for (s, h, t, 0) is
         //      t * (H * head_dim) + h * head_dim + s
         //    which is *exactly* the layout of the slice
-        //      qkvg_bf16[:, stream_offset .. stream_offset + H*head_dim]
+        //      qkvg_f32[:, stream_offset .. stream_offset + H*head_dim]
         //    iff we slice each stream's full H*head_dim contiguously.
         //
         //    That requires the matmul to produce streams ordered as
@@ -327,9 +315,6 @@ impl Qwen35GDN {
         //    This is the convention this port adopts; the GGUF
         //    loader permutes to match.
         // ------------------------------------------------------------
-        let mut qkvg_f32 =
-            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, proj_dim])?;
-        launch_cast_bf16_to_f32(device, &qkvg_bf16, &mut qkvg_f32)?;
 
         // Download the f32 QKVG buffer to host so we can split / prepare
         // the four input tensors plus beta/g-scalar without writing
@@ -543,12 +528,14 @@ impl Qwen35GDN {
         }
         let attn_f32 =
             CudaTensor::<f32>::from_host(device.clone(), vec![n_tokens, kv_dim], &attn_flat)?;
-        let mut attn_bf16 = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
-        launch_cast_f32_to_bf16(device, &attn_f32, &mut attn_bf16)?;
 
         // ------------------------------------------------------------
         // 8. Output projection. [n_tokens, kv_dim] · [kv_dim,
-        //    hidden_dim] → [n_tokens, hidden_dim].
+        //    hidden_dim] → [n_tokens, hidden_dim]. Dispatches through
+        //    `PackedWeight::matmul_f32` — bf16 cuBLAS gemm for dense,
+        //    per-row mmvq for Q*_K / Q8_0, or a zero memset for
+        //    unloaded placeholders. Final result is cast to bf16 for
+        //    the residual add.
         // ------------------------------------------------------------
         if !kv_dim.is_multiple_of(32) || !hidden_dim.is_multiple_of(32) {
             return Err(anyhow!(
@@ -559,17 +546,12 @@ impl Qwen35GDN {
                 hidden_dim
             ));
         }
+        let mut proj_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
+        self.w_out.matmul_f32(device, &attn_f32, &mut proj_f32)?;
         let mut proj_bf16 =
             CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
-        launch_matmul_bf16_bf16(
-            device,
-            &attn_bf16,
-            &self.w_out,
-            &mut proj_bf16,
-            n_tokens,
-            kv_dim,
-            hidden_dim,
-        )?;
+        launch_cast_f32_to_bf16(device, &proj_f32, &mut proj_bf16)?;
 
         // ------------------------------------------------------------
         // 9. Residual add back into `hidden`.
@@ -676,18 +658,31 @@ mod tests {
             &pre_norm_host,
         )
         .expect("upload pre_norm");
-        let w_qkvg = CudaTensor::<bf16>::from_host(
+        // Wrap the random bf16 weights in `PackedWeight::Bf16`. Same
+        // numerical contract as the old `launch_matmul_bf16_bf16` path —
+        // dispatch routes to cuBLAS bf16→f32 gemm.
+        let w_qkvg_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![hidden_dim, proj_dim],
             &w_qkvg_host,
         )
         .expect("upload w_qkvg");
-        let w_out = CudaTensor::<bf16>::from_host(
+        let w_qkvg = PackedWeight::Bf16 {
+            t: w_qkvg_t,
+            k: hidden_dim,
+            n: proj_dim,
+        };
+        let w_out_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![kv_dim, hidden_dim],
             &w_out_host,
         )
         .expect("upload w_out");
+        let w_out = PackedWeight::Bf16 {
+            t: w_out_t,
+            k: kv_dim,
+            n: hidden_dim,
+        };
 
         let layer = Qwen35GDN {
             pre_norm,

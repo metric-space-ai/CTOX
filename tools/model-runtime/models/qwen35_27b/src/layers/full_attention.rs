@@ -80,6 +80,7 @@ use ctox_cuda_primitives::kv_cache::KvCache;
 use ctox_cuda_primitives::tensor::CudaTensor;
 
 use crate::config::Qwen35Config;
+use crate::layers::packed_weight::PackedWeight;
 
 /// A single full-attention layer's parameters + config.
 ///
@@ -104,20 +105,21 @@ pub struct Qwen35FullAttention {
     /// not reference it.
     pub post_attn_norm: CudaTensor<f32>,
     /// Q projection weight (first half of the GGUF's packed
-    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]` bf16,
-    /// row-major with K=hidden_dim and N=q_dim.
-    pub w_q: CudaTensor<bf16>,
+    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]` with
+    /// K=hidden_dim and N=q_dim. Carrier dtype is whatever the GGUF
+    /// shipped; dispatch happens inside [`PackedWeight::matmul_f32`].
+    pub w_q: PackedWeight,
     /// Q-side gate weight (second half of the GGUF's packed
-    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]` bf16.
+    /// `attn_q.weight`). `[hidden_dim, n_q_heads * head_dim]`.
     /// Consumed by the sigmoid-gate branch after attention: `attn ←
     /// attn * sigmoid(norm @ w_q_gate)`.
-    pub w_q_gate: CudaTensor<bf16>,
-    /// K projection weight. `[hidden_dim, n_kv_heads * head_dim]` bf16.
-    pub w_k: CudaTensor<bf16>,
-    /// V projection weight. `[hidden_dim, n_kv_heads * head_dim]` bf16.
-    pub w_v: CudaTensor<bf16>,
-    /// Output projection weight. `[n_q_heads * head_dim, hidden_dim]` bf16.
-    pub w_o: CudaTensor<bf16>,
+    pub w_q_gate: PackedWeight,
+    /// K projection weight. `[hidden_dim, n_kv_heads * head_dim]`.
+    pub w_k: PackedWeight,
+    /// V projection weight. `[hidden_dim, n_kv_heads * head_dim]`.
+    pub w_v: PackedWeight,
+    /// Output projection weight. `[n_q_heads * head_dim, hidden_dim]`.
+    pub w_o: PackedWeight,
     /// Architectural constants (heads, head_dim, rope base, eps).
     pub config: Qwen35Config,
     /// Which layer of the hybrid stack this is. Used to index into the
@@ -188,42 +190,42 @@ impl Qwen35FullAttention {
                 cfg.hidden_dim
             ));
         }
-        if self.w_q_gate.shape() != [cfg.hidden_dim, cfg.q_dim()] {
+        if self.w_q_gate.dims() != (cfg.hidden_dim, cfg.q_dim()) {
             return Err(anyhow!(
-                "qwen35 full_attn: w_q_gate shape {:?} != [{}, {}]",
-                self.w_q_gate.shape(),
+                "qwen35 full_attn: w_q_gate dims {:?} != ({}, {})",
+                self.w_q_gate.dims(),
                 cfg.hidden_dim,
                 cfg.q_dim()
             ));
         }
-        if self.w_q.shape() != [cfg.hidden_dim, cfg.q_dim()] {
+        if self.w_q.dims() != (cfg.hidden_dim, cfg.q_dim()) {
             return Err(anyhow!(
-                "qwen35 full_attn: w_q shape {:?} != [{}, {}]",
-                self.w_q.shape(),
+                "qwen35 full_attn: w_q dims {:?} != ({}, {})",
+                self.w_q.dims(),
                 cfg.hidden_dim,
                 cfg.q_dim()
             ));
         }
-        if self.w_k.shape() != [cfg.hidden_dim, cfg.kv_dim()] {
+        if self.w_k.dims() != (cfg.hidden_dim, cfg.kv_dim()) {
             return Err(anyhow!(
-                "qwen35 full_attn: w_k shape {:?} != [{}, {}]",
-                self.w_k.shape(),
+                "qwen35 full_attn: w_k dims {:?} != ({}, {})",
+                self.w_k.dims(),
                 cfg.hidden_dim,
                 cfg.kv_dim()
             ));
         }
-        if self.w_v.shape() != [cfg.hidden_dim, cfg.kv_dim()] {
+        if self.w_v.dims() != (cfg.hidden_dim, cfg.kv_dim()) {
             return Err(anyhow!(
-                "qwen35 full_attn: w_v shape {:?} != [{}, {}]",
-                self.w_v.shape(),
+                "qwen35 full_attn: w_v dims {:?} != ({}, {})",
+                self.w_v.dims(),
                 cfg.hidden_dim,
                 cfg.kv_dim()
             ));
         }
-        if self.w_o.shape() != [cfg.q_dim(), cfg.hidden_dim] {
+        if self.w_o.dims() != (cfg.q_dim(), cfg.hidden_dim) {
             return Err(anyhow!(
-                "qwen35 full_attn: w_o shape {:?} != [{}, {}]",
-                self.w_o.shape(),
+                "qwen35 full_attn: w_o dims {:?} != ({}, {})",
+                self.w_o.dims(),
                 cfg.q_dim(),
                 cfg.hidden_dim
             ));
@@ -265,28 +267,45 @@ impl Qwen35FullAttention {
         };
 
         // ── 2. Pre-norm in f32 (RMSNorm is numerically sensitive).
+        //
+        //    `norm_f32` is now kept as the projection input (replacing
+        //    the bf16 round-trip the first-port path did) so the
+        //    PackedWeight dispatch can route to whichever of the mmvq
+        //    or bf16 matmul kernels matches the on-device carrier.
         let mut hidden_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         kernels::launch_cast_bf16_to_f32(device, hidden, &mut hidden_f32)?;
         let mut norm_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         kernels::launch_rmsnorm_f32(device, &hidden_f32, &self.attn_norm, &mut norm_f32, cfg.rms_eps)?;
-        let mut norm = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
-        kernels::launch_cast_f32_to_bf16(device, &norm_f32, &mut norm)?;
 
-        // ── 3. Q/K/V projections (bf16·bf16 → bf16).
+        // ── 3. Q/K/V projections — f32·packed → f32, then cast to bf16
+        //    for the per-head RMSNorm + RoPE path below. The
+        //    `PackedWeight::matmul_f32` dispatch lives in
+        //    `layers::packed_weight`; it picks the bf16 cuBLAS gemm for
+        //    dense bf16 weights, per-row mmvq for Q*_K / Q8_0 packed
+        //    bytes, or a zero memset for unloaded placeholders.
         let q_dim = cfg.q_dim();
         let kv_dim = cfg.kv_dim();
+
+        let mut q_f32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, q_dim])?;
+        self.w_q.matmul_f32(device, &norm_f32, &mut q_f32)?;
         let mut q_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, q_dim])?;
-        kernels::launch_matmul_bf16_bf16(device, &norm, &self.w_q, &mut q_flat, n_tokens, hidden_dim, q_dim)?;
+        kernels::launch_cast_f32_to_bf16(device, &q_f32, &mut q_flat)?;
+
+        let mut k_f32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
+        self.w_k.matmul_f32(device, &norm_f32, &mut k_f32)?;
         let mut k_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
-        kernels::launch_matmul_bf16_bf16(device, &norm, &self.w_k, &mut k_flat, n_tokens, hidden_dim, kv_dim)?;
+        kernels::launch_cast_f32_to_bf16(device, &k_f32, &mut k_flat)?;
+
+        let mut v_f32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
+        self.w_v.matmul_f32(device, &norm_f32, &mut v_f32)?;
         let mut v_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
-        kernels::launch_matmul_bf16_bf16(device, &norm, &self.w_v, &mut v_flat, n_tokens, hidden_dim, kv_dim)?;
+        kernels::launch_cast_f32_to_bf16(device, &v_f32, &mut v_flat)?;
 
         // ── 3b. Compute the sigmoid-gate tensor for the post-attention
         //    elementwise multiply. The gate projection is `norm @ w_q_gate`
-        //    → `[n_tokens, q_dim]` bf16. We apply `sigmoid` on the host
+        //    → `[n_tokens, q_dim]`. We apply `sigmoid` on the host
         //    (no kernel yet) and keep it around until after attention.
         //
         //    Why host-sigmoid: the rest of the pipeline only needs
@@ -295,16 +314,10 @@ impl Qwen35FullAttention {
         //    cost-class as the causal mask's host build above and far
         //    simpler than adding a third kernel for ~kloc of new code.
         //    A fused sigmoid-mul kernel is a Phase-5 optimization.
+        let mut q_gate_f32 = CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, q_dim])?;
+        self.w_q_gate.matmul_f32(device, &norm_f32, &mut q_gate_f32)?;
         let mut q_gate = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, q_dim])?;
-        kernels::launch_matmul_bf16_bf16(
-            device,
-            &norm,
-            &self.w_q_gate,
-            &mut q_gate,
-            n_tokens,
-            hidden_dim,
-            q_dim,
-        )?;
+        kernels::launch_cast_f32_to_bf16(device, &q_gate_f32, &mut q_gate)?;
         let q_gate_sig = sigmoid_host_bf16(&q_gate)?;
 
         // ── 3c. Per-head RMSNorm on Q and K (in place on the flat
@@ -480,9 +493,18 @@ impl Qwen35FullAttention {
         //    sigmoid computation at step 3b to avoid a dedicated kernel.
         elementwise_mul_host_bf16(&mut attn_out, &q_gate_sig)?;
 
-        // ── 8. Output projection.
+        // ── 8. Output projection — `PackedWeight::matmul_f32` takes
+        //    and produces f32, so cast `attn_out` (bf16) up to f32
+        //    first, then cast the projected f32 result back to bf16 for
+        //    the residual add.
+        let mut attn_out_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, q_dim])?;
+        kernels::launch_cast_bf16_to_f32(device, &attn_out, &mut attn_out_f32)?;
+        let mut proj_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
+        self.w_o.matmul_f32(device, &attn_out_f32, &mut proj_f32)?;
         let mut proj = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
-        kernels::launch_matmul_bf16_bf16(device, &attn_out, &self.w_o, &mut proj, n_tokens, q_dim, hidden_dim)?;
+        kernels::launch_cast_f32_to_bf16(device, &proj_f32, &mut proj)?;
 
         // ── 9. Residual add. `hidden ← proj + residual` (in-place on hidden).
         //
@@ -875,37 +897,63 @@ mod tests {
         )
         .expect("upload attn_norm");
 
+        // Weights are bf16 random tensors wrapped in
+        // `PackedWeight::Bf16`. The forward path dispatches through
+        // the Bf16 variant which stages x to bf16 + calls cuBLAS
+        // bf16→f32 gemm — same numerical contract as the old
+        // `launch_matmul_bf16_bf16` path (f32 accumulator), so the
+        // smoke test's finiteness assertions remain valid.
         let w_q_host = random_bf16(cfg.hidden_dim * cfg.q_dim(), &mut seed, 0.02);
-        let w_q = CudaTensor::<bf16>::from_host(
+        let w_q_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![cfg.hidden_dim, cfg.q_dim()],
             &w_q_host,
         )
         .expect("upload w_q");
+        let w_q = PackedWeight::Bf16 {
+            t: w_q_t,
+            k: cfg.hidden_dim,
+            n: cfg.q_dim(),
+        };
 
         let w_k_host = random_bf16(cfg.hidden_dim * cfg.kv_dim(), &mut seed, 0.02);
-        let w_k = CudaTensor::<bf16>::from_host(
+        let w_k_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![cfg.hidden_dim, cfg.kv_dim()],
             &w_k_host,
         )
         .expect("upload w_k");
+        let w_k = PackedWeight::Bf16 {
+            t: w_k_t,
+            k: cfg.hidden_dim,
+            n: cfg.kv_dim(),
+        };
 
         let w_v_host = random_bf16(cfg.hidden_dim * cfg.kv_dim(), &mut seed, 0.02);
-        let w_v = CudaTensor::<bf16>::from_host(
+        let w_v_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![cfg.hidden_dim, cfg.kv_dim()],
             &w_v_host,
         )
         .expect("upload w_v");
+        let w_v = PackedWeight::Bf16 {
+            t: w_v_t,
+            k: cfg.hidden_dim,
+            n: cfg.kv_dim(),
+        };
 
         let w_o_host = random_bf16(cfg.q_dim() * cfg.hidden_dim, &mut seed, 0.02);
-        let w_o = CudaTensor::<bf16>::from_host(
+        let w_o_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![cfg.q_dim(), cfg.hidden_dim],
             &w_o_host,
         )
         .expect("upload w_o");
+        let w_o = PackedWeight::Bf16 {
+            t: w_o_t,
+            k: cfg.q_dim(),
+            n: cfg.hidden_dim,
+        };
 
         // Per-head Q/K norms (shape `[head_dim]`) and post-attn norm
         // (shape `[hidden_dim]`). All three were added in Phase 4 along
@@ -935,12 +983,17 @@ mod tests {
                 .expect("upload post_attn_norm");
 
         let w_q_gate_host = random_bf16(cfg.hidden_dim * cfg.q_dim(), &mut seed, 0.02);
-        let w_q_gate = CudaTensor::<bf16>::from_host(
+        let w_q_gate_t = CudaTensor::<bf16>::from_host(
             dev.clone(),
             vec![cfg.hidden_dim, cfg.q_dim()],
             &w_q_gate_host,
         )
         .expect("upload w_q_gate");
+        let w_q_gate = PackedWeight::Bf16 {
+            t: w_q_gate_t,
+            k: cfg.hidden_dim,
+            n: cfg.q_dim(),
+        };
 
         let layer = Qwen35FullAttention {
             attn_norm,

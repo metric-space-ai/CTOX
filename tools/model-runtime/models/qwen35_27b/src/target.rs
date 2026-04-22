@@ -110,6 +110,7 @@ use ctox_cuda_primitives::tensor::CudaTensor;
 use crate::config::Qwen35Config;
 use crate::layers::full_attention::Qwen35FullAttention;
 use crate::layers::gdn::Qwen35GDN;
+use crate::layers::packed_weight::PackedWeight;
 
 /// One decoder layer — either full attention or GDN.
 pub enum Qwen35Layer {
@@ -494,7 +495,18 @@ fn build_full_attention_layer(
         cfg.hidden_dim,
         cfg.q_dim(),
     ) {
-        Ok(pair) => pair,
+        Ok((q_half, gate_half)) => (
+            PackedWeight::Bf16 {
+                t: q_half,
+                k: cfg.hidden_dim,
+                n: cfg.q_dim(),
+            },
+            PackedWeight::Bf16 {
+                t: gate_half,
+                k: cfg.hidden_dim,
+                n: cfg.q_dim(),
+            },
+        ),
         Err(reason) => {
             tracing::warn!(
                 key = %name_q,
@@ -503,17 +515,35 @@ fn build_full_attention_layer(
                 "qwen35_target: attn_q weight unavailable or packed-shape mismatch; \
                  using zero placeholders for both Q and Q-gate halves"
             );
-            let zeros = || {
-                CudaTensor::<bf16>::zeros(device.clone(), vec![cfg.hidden_dim, cfg.q_dim()])
-                    .expect("alloc bf16 zero Q/Q-gate placeholder")
+            let zero = || PackedWeight::Zero {
+                k: cfg.hidden_dim,
+                n: cfg.q_dim(),
             };
-            (zeros(), zeros())
+            (zero(), zero())
         }
     };
 
-    let w_k = load_bf16_placeholder(device, tensors, &name_k, vec![cfg.hidden_dim, cfg.kv_dim()]);
-    let w_v = load_bf16_placeholder(device, tensors, &name_v, vec![cfg.hidden_dim, cfg.kv_dim()]);
-    let w_o = load_bf16_placeholder(device, tensors, &name_o, vec![cfg.q_dim(), cfg.hidden_dim]);
+    let w_k = load_packed_weight(
+        device,
+        tensors,
+        &name_k,
+        cfg.hidden_dim,
+        cfg.kv_dim(),
+    );
+    let w_v = load_packed_weight(
+        device,
+        tensors,
+        &name_v,
+        cfg.hidden_dim,
+        cfg.kv_dim(),
+    );
+    let w_o = load_packed_weight(
+        device,
+        tensors,
+        &name_o,
+        cfg.q_dim(),
+        cfg.hidden_dim,
+    );
 
     // NOTE: `layer_idx` on Qwen35FullAttention indexes into the KV
     // cache slab vector. Because we allocate a KvCache with one slab
@@ -617,8 +647,8 @@ fn build_gdn_layer(
     // Our per-layer kernel expects [hidden, h*4*head_dim] bf16 — same
     // intent (q/k/v/g fused), different byte layout, and the GGUF
     // dtype isn't loadable at all yet. Placeholder.
-    let w_qkvg = load_bf16_placeholder(device, tensors, &name_qkvg, vec![cfg.hidden_dim, proj_dim]);
-    let w_out = load_bf16_placeholder(device, tensors, &name_out, vec![kv_dim, cfg.hidden_dim]);
+    let w_qkvg = load_packed_weight(device, tensors, &name_qkvg, cfg.hidden_dim, proj_dim);
+    let w_out = load_packed_weight(device, tensors, &name_out, kv_dim, cfg.hidden_dim);
 
     Qwen35GDN {
         pre_norm,
@@ -830,6 +860,46 @@ fn load_bf16_placeholder(
             );
             CudaTensor::<bf16>::zeros(device.clone(), expected_shape)
                 .expect("alloc bf16 zero placeholder")
+        }
+    }
+}
+
+/// Load a `[k, n]` projection weight as a [`PackedWeight`].
+///
+/// Pre-Agent-C behavior:
+///   * BF16 in GGUF → `PackedWeight::Bf16` (carries the bf16 tensor)
+///   * any packed variant, missing key, or shape mismatch →
+///     `PackedWeight::Zero` with the logical `[k, n]` shape so
+///     forward() still validates and zero-fills its output
+///     (behaviorally identical to the pre-refactor
+///     `load_bf16_placeholder` path).
+///
+/// Agent C replaces the `Err` branch with a full GgufBuf→PackedWeight
+/// dispatch (one arm per packed dtype). The call-site signature is
+/// chosen so the per-layer constructors below won't need to change
+/// when that lands.
+fn load_packed_weight(
+    device: &Arc<DeviceContext>,
+    tensors: &HashMap<String, GgufTensor>,
+    key: &str,
+    k: usize,
+    n: usize,
+) -> PackedWeight {
+    match load_bf16_matrix(tensors, key, &[k, n]) {
+        Ok(t) => PackedWeight::Bf16 { t, k, n },
+        Err(reason) => {
+            tracing::warn!(
+                key,
+                k,
+                n,
+                %reason,
+                "qwen35_target: projection weight unavailable; PackedWeight::Zero placeholder"
+            );
+            // Keep `device` in the signature for when Agent C's full
+            // dispatch needs to allocate packed-byte carriers; the
+            // Zero arm doesn't need it.
+            let _ = device;
+            PackedWeight::Zero { k, n }
         }
     }
 }
