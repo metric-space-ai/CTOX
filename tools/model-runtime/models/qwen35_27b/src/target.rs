@@ -101,8 +101,8 @@ use half::{bf16, f16};
 use ctox_cuda_primitives::device::DeviceContext;
 use crate::gguf_loader::{load_gguf_lenient_with_config, GgufBuf, GgufTensor, LoaderConfig};
 use crate::kernels::{
-    launch_cast_bf16_to_f32, launch_cast_f32_to_bf16, launch_embedding_bf16, launch_embedding_f16,
-    launch_embedding_f32, launch_matmul_bf16_f32, launch_rmsnorm_f32,
+    launch_cast_bf16_to_f32, launch_embedding_bf16, launch_embedding_f16, launch_embedding_f32,
+    launch_rmsnorm_f32,
 };
 use ctox_cuda_primitives::kv_cache::KvCache;
 use ctox_cuda_primitives::tensor::CudaTensor;
@@ -137,10 +137,10 @@ pub struct Qwen35Target {
     pub layers: Vec<Qwen35Layer>,
     /// `[hidden]` f32 — final RMSNorm weights (`output_norm.weight`).
     pub final_norm: CudaTensor<f32>,
-    /// `[hidden, vocab]` bf16 — lm head. May be tied to the
-    /// (transposed) embedding when `output.weight` is a GGUF dtype we
-    /// don't yet support.
-    pub lm_head: CudaTensor<bf16>,
+    /// `[hidden, vocab]` — lm head projection weight. Carrier dtype
+    /// depends on the GGUF shipped type (Q6_K on 27B Q4_K_M).
+    /// Dispatch happens inside [`PackedWeight::matmul_f32`].
+    pub lm_head: PackedWeight,
     /// Total number of tokens in the vocabulary. Cached for
     /// convenience since the embed tensor carries it as `shape()[0]`.
     pub vocab_size: usize,
@@ -216,32 +216,25 @@ impl Qwen35Target {
             vec![config.hidden_dim],
         );
 
-        // Try `output.weight` → lm_head (Q6_K in real 27B, so usually
-        // not loadable). Fall back to a bf16 zero tensor of the right
-        // shape. A "correct" tied-weight fallback would transpose the
-        // embedding (`lm_head[i,j] = embed[j,i]`) but that forces a
-        // device-side transpose kernel we don't have yet; we instead
-        // ship a zero lm_head with a tracing warning. The resulting
-        // logits are all zero (finite!) which clears the smoke-test
-        // bar. Phase 5's Q6_K + transpose kernels remove this TODO.
+        // `output.weight` → lm_head. On the production 27B GGUF this
+        // is Q6_K packed bytes; Agent C's full GgufBuf → PackedWeight
+        // dispatch now produces `PackedWeight::Q6K`, which the forward
+        // path routes through `launch_mmvq_q6k_f32`. If the weight is
+        // missing (some checkpoints tie lm_head to the embedding), the
+        // dispatch falls back to a Zero placeholder with a tracing
+        // warning, and logits come out all-zeros.
         //
-        // TODO(phase-5): materialize tied weights by
-        // transposing the embedding when `output.weight` is missing.
-        let lm_head =
-            load_bf16_matrix(&tensors, "output.weight", &[config.hidden_dim, vocab_size])
-                .unwrap_or_else(|missing| {
-                    tracing::warn!(
-                        ?missing,
-                        shape = ?[config.hidden_dim, vocab_size],
-                        "qwen35_target: output.weight missing or unsupported dtype; \
-                         falling back to zeroed lm_head. Logits will be all zero."
-                    );
-                    CudaTensor::<bf16>::zeros(
-                        device.clone(),
-                        vec![config.hidden_dim, vocab_size],
-                    )
-                    .expect("alloc zero lm_head")
-                });
+        // TODO(future): materialize tied weights by transposing the
+        // embedding when `output.weight` is missing, via a device-side
+        // transpose kernel. Until then, 27B runs (which ship a real
+        // `output.weight`) see a real lm_head.
+        let lm_head = load_packed_weight(
+            &device,
+            &tensors,
+            "output.weight",
+            config.hidden_dim,
+            vocab_size,
+        );
 
         // ------------------------------------------------------------
         // Per-layer construction.
@@ -406,7 +399,10 @@ impl Qwen35Target {
             }
         }
 
-        // ── 3. Final norm (f32).
+        // ── 3. Final norm (f32). Keep the output in f32 — the
+        //      PackedWeight lm_head dispatch takes f32 in / f32 out,
+        //      so we don't need the bf16 round-trip the pre-Agent-C
+        //      path used.
         let mut hidden_f32 =
             CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
         launch_cast_bf16_to_f32(&self.device, &hidden, &mut hidden_f32)?;
@@ -419,13 +415,12 @@ impl Qwen35Target {
             &mut norm_f32,
             self.config.rms_eps,
         )?;
-        let mut norm_bf16 =
-            CudaTensor::<bf16>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
-        launch_cast_f32_to_bf16(&self.device, &norm_f32, &mut norm_bf16)?;
 
-        // ── 4. LM head: logits = norm_bf16 · lm_head → [n_tokens, vocab] f32.
-        //      matmul kernel requires M, K, N divisible by 32.
-        //      n_tokens alignment is the caller's responsibility.
+        // ── 4. LM head: logits = norm · lm_head → [n_tokens, vocab] f32.
+        //      Alignment constraints come from the underlying bf16 gemm
+        //      kernel (for PackedWeight::Bf16); the per-row mmvq path
+        //      (for Q*_K / Q8_0 / IQ4_XS) doesn't need them but we
+        //      preserve the check so callers see a uniform contract.
         if !n_tokens.is_multiple_of(32) {
             return Err(anyhow!(
                 "qwen35 target.forward: n_tokens={} must be a multiple of 32 for lm_head matmul",
@@ -440,15 +435,7 @@ impl Qwen35Target {
         }
         let mut logits =
             CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, self.vocab_size])?;
-        launch_matmul_bf16_f32(
-            &self.device,
-            &norm_bf16,
-            &self.lm_head,
-            &mut logits,
-            n_tokens,
-            hidden_dim,
-            self.vocab_size,
-        )?;
+        self.lm_head.matmul_f32(&self.device, &norm_f32, &mut logits)?;
 
         Ok(logits)
     }
