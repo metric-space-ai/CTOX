@@ -468,6 +468,7 @@ pub fn run_foreground(root: &Path) -> Result<()> {
 }
 
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
+    run_plan_routing_repair(root, state, "boot");
     match state_invariants::evaluate_runtime_state_invariants(root, turn_loop::CHAT_CONVERSATION_ID)
     {
         Ok(report) => {
@@ -763,6 +764,7 @@ fn run_turn_end_state_invariant_check(
     state: &Arc<Mutex<SharedState>>,
     conversation_id: i64,
 ) -> Option<lcm::MissionStateRecord> {
+    run_plan_routing_repair(root, state, "turn");
     match state_invariants::evaluate_runtime_state_invariants(root, conversation_id) {
         Ok(report) => {
             let violation_codes = report
@@ -906,6 +908,45 @@ fn run_turn_end_state_invariant_check(
                 },
             );
             None
+        }
+    }
+}
+
+fn run_plan_routing_repair(root: &Path, state: &Arc<Mutex<SharedState>>, phase: &str) {
+    match plan::repair_stale_step_routing_state(root) {
+        Ok(repaired) if repaired > 0 => {
+            push_event(
+                state,
+                format!(
+                    "Repaired {repaired} stale plan routing {} at {phase}",
+                    if repaired == 1 { "entry" } else { "entries" }
+                ),
+            );
+            let _ = governance::record_event(
+                root,
+                governance::GovernanceEventRequest {
+                    mechanism_id: "plan_routing_repair",
+                    conversation_id: Some(turn_loop::CHAT_CONVERSATION_ID),
+                    severity: "info",
+                    reason: "stale_plan_routing_repaired",
+                    action_taken: "released_or_closed_stale_plan_queue_routes",
+                    details: serde_json::json!({
+                        "phase": phase,
+                        "repaired_count": repaired,
+                    }),
+                    idempotence_key: None,
+                },
+            );
+        }
+        Ok(_) => {}
+        Err(err) => {
+            push_event(
+                state,
+                format!(
+                    "Plan routing repair skipped at {phase}: {}",
+                    clip_text(&err.to_string(), 180)
+                ),
+            );
         }
     }
 }
@@ -7024,9 +7065,7 @@ mod tests {
             active_source_label: "queue".to_string(),
             current_goal_preview: "Review rework".to_string(),
             drift_score: 17,
-            drift_reasons: vec![
-                "review-rework backlog is crowding the active mission".to_string(),
-            ],
+            drift_reasons: vec!["review-rework backlog is crowding the active mission".to_string()],
             intervention_recommended: true,
             created_at: now_iso_string(),
         };

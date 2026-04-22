@@ -683,6 +683,28 @@ pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -
     ack_messages(&mut conn, message_keys, status)
 }
 
+pub fn set_queue_task_route_status(
+    root: &Path,
+    message_key: &str,
+    route_status: &str,
+) -> Result<bool> {
+    let db_path = resolve_db_path(root, None);
+    let mut conn = open_channel_db(&db_path)?;
+    ensure_queue_account(&mut conn)?;
+    if load_queue_message_from_conn(&conn, message_key)?.is_none() {
+        return Ok(false);
+    }
+    update_queue_task(
+        root,
+        QueueTaskUpdateRequest {
+            message_key: message_key.to_string(),
+            route_status: Some(route_status.to_string()),
+            ..Default::default()
+        },
+    )?;
+    Ok(true)
+}
+
 pub fn create_queue_task(root: &Path, request: QueueTaskCreateRequest) -> Result<QueueTaskView> {
     create_queue_task_with_metadata(root, request)
 }
