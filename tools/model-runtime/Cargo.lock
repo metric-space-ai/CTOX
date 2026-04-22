@@ -1484,6 +1484,7 @@ dependencies = [
  "cudarc 0.17.8",
  "half",
  "memmap2",
+ "safetensors 0.7.0",
  "thiserror 2.0.18",
  "tokenizers",
  "tracing",

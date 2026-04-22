@@ -62,6 +62,9 @@ pub mod target;
 pub mod tokenizer;
 
 #[cfg(feature = "cuda")]
+pub mod draft;
+
+#[cfg(feature = "cuda")]
 pub mod prelude {
     pub use crate::config::Qwen35Config;
     pub use crate::layers::{Qwen35FFN, Qwen35FullAttention, Qwen35GDN};

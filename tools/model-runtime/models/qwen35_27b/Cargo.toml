@@ -22,6 +22,7 @@ half = { workspace = true, features = ["bytemuck"] }
 bytemuck = { workspace = true }
 memmap2 = { workspace = true }
 tokenizers = { workspace = true, features = ["fancy-regex"] }
+safetensors = { workspace = true }
 
 ctox-cuda-primitives = { path = "../../cuda-primitives" }
 
