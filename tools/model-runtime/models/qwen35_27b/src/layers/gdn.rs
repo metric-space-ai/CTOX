@@ -305,30 +305,6 @@ impl Qwen35GDN {
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
         self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
 
-        // DIAG(agent-gdn): print Q/K/V magnitude stats for the first
-        // GDN layer (idx 0) to help pin down where the NaN chain
-        // originates when 48 layers compound. Guarded on an env var
-        // so the hot path is untouched in production.
-        if std::env::var("QWEN35_GDN_DIAG").ok().as_deref() == Some("1")
-            && (self.layer_idx == 0 || self.layer_idx == 1)
-        {
-            let host = qkv_f32.to_host()?;
-            let (mut maxa, mut nan, mut inf) = (0.0f32, 0usize, 0usize);
-            for &v in &host {
-                if v.is_nan() {
-                    nan += 1;
-                } else if v.is_infinite() {
-                    inf += 1;
-                } else if v.abs() > maxa {
-                    maxa = v.abs();
-                }
-            }
-            eprintln!(
-                "GDN[{}] qkv_f32 stats: nan={} inf={} max_abs={:.3e}",
-                self.layer_idx, nan, inf, maxa
-            );
-        }
-
         // ------------------------------------------------------------
         //    The matmul result is row-major [n_tokens, qkv_proj_dim].
         //    Within each row the layout is Q | K | V at offsets
@@ -569,36 +545,6 @@ impl Qwen35GDN {
         let attn_host_f32 = &dst_host[..attn_elems];
         let state_host_f32 = &dst_host[attn_elems..attn_elems + state_elems];
 
-        // DIAG(agent-gdn): post-kernel stats.
-        if std::env::var("QWEN35_GDN_DIAG").ok().as_deref() == Some("1")
-            && (self.layer_idx == 0 || self.layer_idx == 1)
-        {
-            let (mut amax, mut anan, mut ainf) = (0.0f32, 0usize, 0usize);
-            for &v in attn_host_f32 {
-                if v.is_nan() {
-                    anan += 1;
-                } else if v.is_infinite() {
-                    ainf += 1;
-                } else if v.abs() > amax {
-                    amax = v.abs();
-                }
-            }
-            let (mut smax, mut snan, mut sinf) = (0.0f32, 0usize, 0usize);
-            for &v in state_host_f32 {
-                if v.is_nan() {
-                    snan += 1;
-                } else if v.is_infinite() {
-                    sinf += 1;
-                } else if v.abs() > smax {
-                    smax = v.abs();
-                }
-            }
-            eprintln!(
-                "GDN[{}] attn: nan={} inf={} max_abs={:.3e} | state: nan={} inf={} max_abs={:.3e}",
-                self.layer_idx, anan, ainf, amax, snan, sinf, smax
-            );
-        }
-
         // Write the new state back into gdn_state. Layout is identical
         // (same [S_v, S_v, H_v, n_seqs] shape, same stride), so a flat
         // memcpy suffices.
@@ -714,10 +660,16 @@ mod tests {
         let qkv_proj_dim = config.gdn_qkv_proj_dim();
         let inner_dim = config.gdn_inner_dim();
 
-        // Deterministic weights. Scale small so the matmul products
-        // stay within bf16 range at hidden_dim=5120 fan-in.
+        // Deterministic weights. Scale chosen so the L2-normalized
+        // Q/K, the V matmul output, and the β*Q·K accumulations in
+        // the GDN kernel stay in an f32-representable range where
+        // call 1 vs. call 2 state differences don't round to zero
+        // across 32 tokens. Post-L2-norm, Q/K magnitudes are
+        // bounded; the kernel's accumulator range depends on `scale`
+        // through V and the ssm_out projection output. 0.05 leaves
+        // comfortable headroom without exploding.
         let mut seed: u32 = 0xC0FFEE;
-        let scale = 0.02f32; // empirically keeps outputs bounded
+        let scale = 0.05f32;
         let pre_norm_host: Vec<f32> = (0..hidden_dim).map(|_| 1.0 + 0.1 * lcg_iter(&mut seed)).collect();
         let w_qkvg_host: Vec<bf16> = (0..hidden_dim * qkv_proj_dim)
             .map(|_| bf16::from_f32(lcg_iter(&mut seed) * scale))
@@ -908,9 +860,11 @@ mod tests {
     ///     actually wrote new state)
     ///
     /// Covers TWO sub-configs:
-    ///   1. Small GQA shape (`h_v=6, h_k=2, s_v=64`) — keeps the
+    ///   1. Small GQA shape (`h_v=6, h_k=2, s_v=128`) — keeps the
     ///      weight allocation tiny and verifies the `iq1 = h_idx %
-    ///      h_k` broadcast path works when `h_k < h_v`.
+    ///      h_k` broadcast path works when `h_k < h_v`. s_v stays at
+    ///      128 because the F16 persist-inter kernel template is only
+    ///      instantiated for S_v=128.
     ///   2. Production 27B shape (`h_v=48, h_k=16, s_v=128`) — same
     ///      head counts the shipping GGUF's `attn_qkv.weight` /
     ///      `ssm_out.weight` were built for, just with synthetic bf16
