@@ -5,12 +5,15 @@
 //!   * `hidden = hidden + attn_out`
 //!   * `hidden = hidden + mlp_out`
 //!
-//! See `rmsnorm` for the canonical kernel-wrapper conventions this
-//! module follows (one `.cu` per module, PTX cache via `OnceLock`, no
-//! stream sync).
+//! Backed by the vendored ggml-cuda binary-broadcast module: the
+//! degenerate no-broadcast case is specialized to a flat-buffer
+//! `add_f32`/`add_bf16` kernel in `kernels/sm_86/binbcast.cu`. Math is
+//! byte-identical to upstream's `op_add` — f32 IEEE-754 add for the f32
+//! path; bf16 is promoted to f32 accumulator with a single round-to-
+//! nearest-even on store (matches upstream's bf16 convention).
 //!
-//! Same launch shape as `silu_mul`: element-per-thread, block=256,
-//! grid=ceil(numel/256).
+//! See `rmsnorm` for the canonical kernel-wrapper conventions this
+//! module follows (PTX cache via `OnceLock`, no stream sync).
 
 use std::sync::{Arc, OnceLock};
 
@@ -23,17 +26,18 @@ use ctox_cuda_primitives::device::DeviceContext;
 use ctox_cuda_primitives::tensor::CudaTensor;
 
 // PTX blob comes from the parent module's auto-generated registry.
-use super::RESIDUAL_PTX;
+// `binbcast.cu` compiles to BINBCAST_PTX and exposes add_{f32,bf16}.
+use super::BINBCAST_PTX;
 
 /// Threads per block for the per-element launch. 256 is the canonical
 /// sweet-spot for memory-bound elementwise kernels on SM_86 — matches
 /// `silu_mul` so the two ops share an occupancy profile.
 const BLOCK_DIM: u32 = 256;
 
-static RESIDUAL_ADD_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
-static RESIDUAL_ADD_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
+static ADD_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static ADD_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 
-/// Load the residual PTX module once and pull out the named function.
+/// Load the binbcast PTX module once and pull out the named function.
 /// Both f32 and bf16 entry points live in the same compiled PTX, so we
 /// reload the module lazily per-entry-point rather than caching the
 /// module itself (cudarc's `CudaModule` is the heavy handle; the
@@ -46,13 +50,13 @@ fn load_fn(
     if let Some(f) = cache.get() {
         return Ok(f.clone());
     }
-    let ptx_src = std::str::from_utf8(RESIDUAL_PTX)
-        .map_err(|e| anyhow!("residual.ptx not UTF-8: {}", e))?
+    let ptx_src = std::str::from_utf8(BINBCAST_PTX)
+        .map_err(|e| anyhow!("binbcast.ptx not UTF-8: {}", e))?
         .to_string();
     let module = device
         .raw()
         .load_module(Ptx::from_src(ptx_src))
-        .map_err(|e| anyhow!("load_module residual.ptx: {:?}", e))?;
+        .map_err(|e| anyhow!("load_module binbcast.ptx: {:?}", e))?;
     let f = module
         .load_function(entry)
         .map_err(|e| anyhow!("load_function {}: {:?}", entry, e))?;
@@ -109,7 +113,7 @@ pub fn launch_residual_add_f32(
         return Ok(());
     }
     let cfg = launch_config_for(numel);
-    let f = load_fn(device, &RESIDUAL_ADD_F32_FN, "residual_add_f32")?;
+    let f = load_fn(device, &ADD_F32_FN, "add_f32")?;
     let stream = device.raw().default_stream();
     let numel_i32 = numel as i32;
     let mut launcher = stream.launch_builder(&f);
@@ -119,7 +123,7 @@ pub fn launch_residual_add_f32(
         .arg(y.buf_mut())
         .arg(&numel_i32);
     unsafe { launcher.launch(cfg) }
-        .map_err(|e| anyhow!("residual_add_f32 launch (numel={}): {:?}", numel, e))?;
+        .map_err(|e| anyhow!("add_f32 launch (numel={}): {:?}", numel, e))?;
     Ok(())
 }
 
@@ -138,7 +142,7 @@ pub fn launch_residual_add_bf16(
         return Ok(());
     }
     let cfg = launch_config_for(numel);
-    let f = load_fn(device, &RESIDUAL_ADD_BF16_FN, "residual_add_bf16")?;
+    let f = load_fn(device, &ADD_BF16_FN, "add_bf16")?;
     let stream = device.raw().default_stream();
     let numel_i32 = numel as i32;
     let mut launcher = stream.launch_builder(&f);
@@ -148,7 +152,7 @@ pub fn launch_residual_add_bf16(
         .arg(y.buf_mut())
         .arg(&numel_i32);
     unsafe { launcher.launch(cfg) }
-        .map_err(|e| anyhow!("residual_add_bf16 launch (numel={}): {:?}", numel, e))?;
+        .map_err(|e| anyhow!("add_bf16 launch (numel={}): {:?}", numel, e))?;
     Ok(())
 }
 
