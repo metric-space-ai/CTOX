@@ -98,6 +98,8 @@ const CTO_OPERATING_WATCHER_POLL_SECS: u64 = 60;
 const CHANNEL_ROUTER_LEASE_OWNER: &str = "ctox-service";
 const QUEUE_PRESSURE_GUARD_THRESHOLD: usize = 20;
 const QUEUE_GUARD_SOURCE_LABEL: &str = "queue-guard";
+const PLATFORM_EXPERTISE_KIND: &str = "platform-expertise-pass";
+const PLATFORM_IMPLEMENTATION_KIND: &str = "platform-implementation";
 const SERVICE_SHUTDOWN_TIMEOUT_SECS: u64 = 15;
 const SERVICE_SHUTDOWN_POLL_MILLIS: u64 = 150;
 const SYSTEMCTL_USER_TIMEOUT_SECS: u64 = 5;
@@ -355,6 +357,31 @@ struct DurableSelfWorkQueueRequest {
     parent_message_key: Option<String>,
     metadata: Value,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExpertisePassSpec {
+    pass_kind: &'static str,
+    display_name: &'static str,
+    suggested_skill: &'static str,
+}
+
+const PLATFORM_EXPERTISE_PASSES: [ExpertisePassSpec; 3] = [
+    ExpertisePassSpec {
+        pass_kind: "platform-ia",
+        display_name: "platform IA",
+        suggested_skill: "plan-orchestrator",
+    },
+    ExpertisePassSpec {
+        pass_kind: "messaging-wording",
+        display_name: "messaging and wording",
+        suggested_skill: "plan-orchestrator",
+    },
+    ExpertisePassSpec {
+        pass_kind: "ui-ux",
+        display_name: "UI and UX",
+        suggested_skill: "frontend-skill",
+    },
+];
 
 #[derive(Debug, Clone)]
 enum CompletionReviewDisposition {
@@ -2155,6 +2182,26 @@ fn start_prompt_worker(
                 );
             }
         }
+        match maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job) {
+            Ok(true) => {
+                eprintln!(
+                    "ctox prompt worker rerouted source={} preview={}",
+                    job.source_label,
+                    clip_text(&job.preview, 120)
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                push_event(
+                    &state,
+                    format!(
+                        "Failed to evaluate owner-visible platform pass routing for {}: {}",
+                        job.source_label, err
+                    ),
+                );
+            }
+        }
         eprintln!(
             "ctox prompt worker start source={} preview={}",
             job.source_label,
@@ -2237,6 +2284,7 @@ fn start_prompt_worker(
                 CompletionReviewDisposition::None
             };
             let mut review_requeue: Option<(String, String)> = None;
+            let mut platform_pipeline_event: Option<String> = None;
             let mut next_prompt = None;
             {
                 let mut shared = lock_shared_state(&state);
@@ -2298,6 +2346,12 @@ fn start_prompt_worker(
                                         clip_text(&reply, 220)
                                     );
                                     close_ticket_self_work_item(&root, work_id, &note);
+                                    platform_pipeline_event =
+                                        maybe_continue_platform_expertise_pipeline_after_success(
+                                            &root, &job,
+                                        )
+                                        .ok()
+                                        .flatten();
                                 }
                             }
                         }
@@ -2373,6 +2427,9 @@ fn start_prompt_worker(
                             mission.continuation_mode
                         ),
                     );
+                }
+                if let Some(event) = &platform_pipeline_event {
+                    push_event_locked(&mut shared, event.clone());
                 }
                 if let Some(remaining_secs) = runtime_blocker_backoff_remaining_secs(&shared) {
                     if !shared.pending_prompts.is_empty() {
@@ -3817,6 +3874,369 @@ fn ticket_self_work_parent_message_key(item: &tickets::TicketSelfWorkItemView) -
     metadata_string(&item.metadata, "parent_message_key")
 }
 
+fn platform_expertise_resume_prompt(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "resume_prompt")
+}
+
+fn platform_expertise_resume_goal(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "resume_goal")
+}
+
+fn platform_expertise_resume_preview(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "resume_preview")
+}
+
+fn platform_expertise_resume_skill(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "resume_skill")
+}
+
+fn platform_expertise_pass_kind(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
+    metadata_string(&item.metadata, "pass_kind")
+}
+
+fn is_owner_visible_platform_reset_job(job: &QueuedPrompt) -> bool {
+    if !derive_owner_visible_for_review(&job.source_label) {
+        return false;
+    }
+    let haystack = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        job.prompt,
+        job.goal,
+        job.preview,
+        job.thread_key.clone().unwrap_or_default(),
+        job.workspace_root.clone().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
+    let kunstmen_scope = haystack.contains("kunstmen")
+        || job
+            .workspace_root
+            .as_deref()
+            .map(|path| path.contains("/kunstmen"))
+            .unwrap_or(false);
+    if !kunstmen_scope {
+        return false;
+    }
+    haystack.contains("homepage")
+        || haystack.contains("landing")
+        || haystack.contains("platform")
+        || haystack.contains("marketplace")
+        || haystack.contains("catalog")
+        || haystack.contains("roster")
+        || haystack.contains("hire")
+}
+
+fn list_platform_expertise_scope_items(
+    root: &Path,
+    thread_key: &str,
+    workspace_root: Option<&str>,
+) -> Result<Vec<tickets::TicketSelfWorkItemView>> {
+    let items = tickets::list_ticket_self_work_items(root, Some("local"), None, 512)?;
+    Ok(items
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item.kind.as_str(),
+                PLATFORM_EXPERTISE_KIND | PLATFORM_IMPLEMENTATION_KIND
+            )
+        })
+        .filter(|item| {
+            let item_thread_key = ticket_self_work_thread_key(item);
+            if item_thread_key == thread_key {
+                return true;
+            }
+            if let (Some(lhs), Some(rhs)) = (
+                workspace_root
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+                ticket_self_work_workspace_root(item)
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty()),
+            ) {
+                return lhs == rhs;
+            }
+            false
+        })
+        .collect())
+}
+
+fn next_missing_platform_expertise_pass(
+    items: &[tickets::TicketSelfWorkItemView],
+) -> Option<ExpertisePassSpec> {
+    for spec in PLATFORM_EXPERTISE_PASSES {
+        let mut completed = false;
+        let mut in_progress = false;
+        for item in items {
+            if item.kind != PLATFORM_EXPERTISE_KIND {
+                continue;
+            }
+            if platform_expertise_pass_kind(item).as_deref() != Some(spec.pass_kind) {
+                continue;
+            }
+            match item.state.as_str() {
+                "closed" => completed = true,
+                "open" | "queued" | "published" | "blocked" => in_progress = true,
+                _ => {}
+            }
+        }
+        if completed {
+            continue;
+        }
+        if in_progress {
+            return Some(spec);
+        }
+        return Some(spec);
+    }
+    None
+}
+
+fn queue_platform_expertise_pass(
+    root: &Path,
+    thread_key: &str,
+    workspace_root: Option<&str>,
+    spec: ExpertisePassSpec,
+    resume_prompt: &str,
+    resume_goal: &str,
+    resume_preview: &str,
+    resume_skill: Option<&str>,
+) -> Result<channels::QueueTaskView> {
+    create_self_work_backed_queue_task(
+        root,
+        DurableSelfWorkQueueRequest {
+            kind: PLATFORM_EXPERTISE_KIND.to_string(),
+            title: format!("Kunstmen {} pass", spec.display_name),
+            prompt: format!(
+                "This slice is the dedicated {} pass for the current public Kunstmen platform mission.\n\n\
+Required outputs:\n\
+- stay inside this discipline only\n\
+- persist the result into SQLite-backed runtime state\n\
+- a markdown file in the workspace does not count as durable knowledge\n\
+- leave the implementation pass with concrete, structured guidance for what to build next\n\
+\n\
+Discipline to resolve now: {}\n\
+Future implementation target after all passes complete:\n{}",
+                spec.display_name, spec.display_name, resume_prompt
+            ),
+            thread_key: thread_key.to_string(),
+            workspace_root: workspace_root.map(ToOwned::to_owned),
+            priority: "urgent".to_string(),
+            suggested_skill: Some(spec.suggested_skill.to_string()),
+            parent_message_key: None,
+            metadata: serde_json::json!({
+                "thread_key": thread_key,
+                "workspace_root": workspace_root,
+                "priority": "urgent",
+                "skill": spec.suggested_skill,
+                "pass_kind": spec.pass_kind,
+                "resume_prompt": resume_prompt,
+                "resume_goal": resume_goal,
+                "resume_preview": resume_preview,
+                "resume_skill": resume_skill,
+                "dedupe_key": format!("platform-pass:{}:{}", thread_key, spec.pass_kind),
+            }),
+        },
+    )
+}
+
+fn queue_platform_implementation_resume(
+    root: &Path,
+    thread_key: &str,
+    workspace_root: Option<&str>,
+    resume_prompt: &str,
+    resume_goal: &str,
+    resume_preview: &str,
+    resume_skill: Option<&str>,
+) -> Result<Option<channels::QueueTaskView>> {
+    let items = list_platform_expertise_scope_items(root, thread_key, workspace_root)?;
+    if items.iter().any(|item| {
+        item.kind == PLATFORM_IMPLEMENTATION_KIND
+            && matches!(
+                item.state.as_str(),
+                "open" | "queued" | "published" | "blocked"
+            )
+    }) {
+        return Ok(None);
+    }
+    create_self_work_backed_queue_task(
+        root,
+        DurableSelfWorkQueueRequest {
+            kind: PLATFORM_IMPLEMENTATION_KIND.to_string(),
+            title: "Kunstmen platform implementation reset".to_string(),
+            prompt: format!(
+                "All required pre-implementation CTO passes for this public Kunstmen platform work are complete in SQLite-backed runtime state.\n\n\
+Execute the implementation slice now.\n\
+Build a platform front door, not a poster.\n\
+The public buyer path must make these steps obvious:\n\
+- choose an AI employee / expert from a roster\n\
+- inspect a concrete profile\n\
+- start interview / application chat\n\
+- hire / checkout\n\
+\n\
+No prompt leakage, no source-code leakage, no operator/admin language.\n\n\
+Implementation objective:\n{}",
+                resume_prompt
+            ),
+            thread_key: thread_key.to_string(),
+            workspace_root: workspace_root.map(ToOwned::to_owned),
+            priority: "urgent".to_string(),
+            suggested_skill: Some(
+                resume_skill
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or("frontend-skill")
+                    .to_string(),
+            ),
+            parent_message_key: None,
+            metadata: serde_json::json!({
+                "thread_key": thread_key,
+                "workspace_root": workspace_root,
+                "priority": "urgent",
+                "skill": resume_skill,
+                "resume_prompt": resume_prompt,
+                "resume_goal": resume_goal,
+                "resume_preview": resume_preview,
+                "resume_skill": resume_skill,
+                "dedupe_key": format!("platform-implementation:{}", thread_key),
+            }),
+        },
+    )
+    .map(Some)
+}
+
+fn maybe_continue_platform_expertise_pipeline_after_success(
+    root: &Path,
+    job: &QueuedPrompt,
+) -> Result<Option<String>> {
+    let Some(work_id) = job.ticket_self_work_id.as_deref() else {
+        return Ok(None);
+    };
+    let Some(item) = tickets::load_ticket_self_work_item(root, work_id)? else {
+        return Ok(None);
+    };
+    if item.kind != PLATFORM_EXPERTISE_KIND {
+        return Ok(None);
+    }
+    let thread_key = ticket_self_work_thread_key(&item);
+    let workspace_root = ticket_self_work_workspace_root(&item);
+    let resume_prompt = platform_expertise_resume_prompt(&item)
+        .unwrap_or_else(|| fallback_text(&job.prompt, &job.goal).to_string());
+    let resume_goal = platform_expertise_resume_goal(&item)
+        .unwrap_or_else(|| fallback_text(&job.goal, &job.preview).to_string());
+    let resume_preview = platform_expertise_resume_preview(&item)
+        .unwrap_or_else(|| fallback_text(&job.preview, &job.goal).to_string());
+    let resume_skill = platform_expertise_resume_skill(&item);
+    let items = list_platform_expertise_scope_items(root, &thread_key, workspace_root.as_deref())?;
+    if let Some(next_pass) = next_missing_platform_expertise_pass(&items) {
+        let created = queue_platform_expertise_pass(
+            root,
+            &thread_key,
+            workspace_root.as_deref(),
+            next_pass,
+            &resume_prompt,
+            &resume_goal,
+            &resume_preview,
+            resume_skill.as_deref(),
+        )?;
+        return Ok(Some(format!(
+            "Queued next required CTO pass: {} ({})",
+            created.title, next_pass.pass_kind
+        )));
+    }
+    let created = queue_platform_implementation_resume(
+        root,
+        &thread_key,
+        workspace_root.as_deref(),
+        &resume_prompt,
+        &resume_goal,
+        &resume_preview,
+        resume_skill.as_deref(),
+    )?;
+    Ok(created.map(|task| format!("Queued platform implementation resume: {}", task.title)))
+}
+
+fn maybe_redirect_platform_work_to_expertise_passes(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+    job: &QueuedPrompt,
+) -> Result<bool> {
+    if !is_owner_visible_platform_reset_job(job) {
+        return Ok(false);
+    }
+    let current_item = job.ticket_self_work_id.as_deref().and_then(|work_id| {
+        tickets::load_ticket_self_work_item(root, work_id)
+            .ok()
+            .flatten()
+    });
+    if current_item.as_ref().map(|item| item.kind.as_str()) == Some(PLATFORM_EXPERTISE_KIND) {
+        return Ok(false);
+    }
+    let thread_key = job
+        .thread_key
+        .clone()
+        .unwrap_or_else(|| default_follow_up_thread_key(&job.goal));
+    let workspace_root = job.workspace_root.clone();
+    let items = list_platform_expertise_scope_items(root, &thread_key, workspace_root.as_deref())?;
+    let Some(next_pass) = next_missing_platform_expertise_pass(&items) else {
+        return Ok(false);
+    };
+    let created = queue_platform_expertise_pass(
+        root,
+        &thread_key,
+        workspace_root.as_deref(),
+        next_pass,
+        &job.prompt,
+        &job.goal,
+        &job.preview,
+        job.suggested_skill.as_deref(),
+    )?;
+    if !job.leased_message_keys.is_empty() {
+        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
+    }
+    if !job.leased_ticket_event_keys.is_empty() {
+        let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
+    }
+    if let Some(work_id) = job.ticket_self_work_id.as_deref() {
+        close_ticket_self_work_item(
+            root,
+            work_id,
+            &format!(
+                "Closed without execution because owner-visible platform work must first pass through the `{}` CTO discipline slice.",
+                next_pass.pass_kind
+            ),
+        );
+    }
+
+    let mut next_prompt = None;
+    {
+        let mut shared = lock_shared_state(state);
+        shared.busy = false;
+        shared.current_goal_preview = None;
+        shared.active_source_label = None;
+        shared.last_completed_at = Some(now_iso_string());
+        shared.last_progress_epoch_secs = current_epoch_secs();
+        shared.last_reply_chars = None;
+        shared.last_error = None;
+        release_leased_keys_locked(
+            &mut shared,
+            &job.leased_message_keys,
+            &job.leased_ticket_event_keys,
+        );
+        push_event_locked(
+            &mut shared,
+            format!(
+                "Redirected owner-visible platform work into required CTO pass `{}` via {}",
+                next_pass.pass_kind, created.title
+            ),
+        );
+        if runtime_blocker_backoff_remaining_secs(&shared).is_none() {
+            next_prompt = maybe_start_next_queued_prompt_locked(&mut shared);
+        }
+    }
+    if let Some(queued) = next_prompt {
+        start_prompt_worker(root.to_path_buf(), state.clone(), queued);
+    }
+    Ok(true)
+}
+
 fn resolve_review_rejection_target_self_work_id(root: &Path, job: &QueuedPrompt) -> Option<String> {
     let current_work_id = job.ticket_self_work_id.as_deref()?;
     let item = tickets::load_ticket_self_work_item(root, current_work_id)
@@ -3826,7 +4246,9 @@ fn resolve_review_rejection_target_self_work_id(root: &Path, job: &QueuedPrompt)
         return Some(current_work_id.to_string());
     }
     let parent_key = ticket_self_work_parent_message_key(&item)?;
-    let parent_task = channels::load_queue_task(root, &parent_key).ok().flatten()?;
+    let parent_task = channels::load_queue_task(root, &parent_key)
+        .ok()
+        .flatten()?;
     parent_task
         .ticket_self_work_id
         .filter(|work_id| work_id != current_work_id)
@@ -3951,6 +4373,7 @@ fn suppress_self_work_reason(
     let workspace_root = ticket_self_work_workspace_root(item);
     let blocked_labels: &[&str] = match item.kind.as_str() {
         "review-rework" => &["review rework"],
+        PLATFORM_IMPLEMENTATION_KIND => &["platform implementation reset", "review rework"],
         CTO_DRIFT_KIND => &["cto operating drift correction"],
         "mission-follow-up" if watchdog_generated_mission_follow_up(item) => &[
             "continue mission",
@@ -4097,6 +4520,16 @@ fn requeue_review_rejected_self_work(
         Some(&note),
         "internal",
     )?;
+    if let Some(reason) = suppress_self_work_reason(root, &item)? {
+        close_ticket_self_work_item(
+            root,
+            work_id,
+            &format!(
+                "Closed after review rejection because the work was superseded during requeue: {reason}"
+            ),
+        );
+        return Ok(None);
+    }
     queue_ticket_self_work_item(root, &item)
 }
 
@@ -7537,6 +7970,157 @@ mod tests {
                 .expect("failed to list queue tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Kunstmen platform homepage reset");
+    }
+
+    #[test]
+    fn owner_visible_platform_reset_is_redirected_into_first_expertise_pass() {
+        let root = temp_root("ctox-platform-pass-reroute");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.busy = true;
+            shared.current_goal_preview = Some("Kunstmen platform homepage reset".to_string());
+            shared.active_source_label = Some("queue".to_string());
+            track_leased_keys_locked(&mut shared, &["queue-key-1".to_string()], &[]);
+        }
+        let job = QueuedPrompt {
+            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
+                .to_string(),
+            goal: "Kunstmen platform homepage reset".to_string(),
+            preview: "Kunstmen platform homepage reset".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: vec!["queue-key-1".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        let redirected = maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job)
+            .expect("platform pass reroute should succeed");
+        assert!(redirected);
+
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, PLATFORM_EXPERTISE_KIND);
+        assert_eq!(
+            platform_expertise_pass_kind(&items[0]).as_deref(),
+            Some("platform-ia")
+        );
+        assert_eq!(
+            items[0].suggested_skill.as_deref(),
+            Some("plan-orchestrator")
+        );
+    }
+
+    #[test]
+    fn successful_expertise_pass_queues_next_required_pass() {
+        let root = temp_root("ctox-platform-pass-advance");
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: PLATFORM_EXPERTISE_KIND.to_string(),
+                title: "Kunstmen platform IA pass".to_string(),
+                body_text: "Do the platform IA pass.".to_string(),
+                state: "closed".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "kunstmen-supervisor",
+                    "workspace_root": "/home/ubuntu/workspace/kunstmen",
+                    "priority": "urgent",
+                    "skill": "plan-orchestrator",
+                    "pass_kind": "platform-ia",
+                    "resume_prompt": "Build the platform front door.",
+                    "resume_goal": "Kunstmen platform homepage reset",
+                    "resume_preview": "Kunstmen platform homepage reset",
+                    "resume_skill": "frontend-skill",
+                    "dedupe_key": "platform-pass:kunstmen-supervisor:platform-ia",
+                }),
+            },
+            false,
+        )
+        .expect("failed to create completed expertise pass");
+
+        let job = QueuedPrompt {
+            prompt: "Do the platform IA pass.".to_string(),
+            goal: "Kunstmen platform homepage reset".to_string(),
+            preview: "Kunstmen platform IA pass".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("plan-orchestrator".to_string()),
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: Some(item.work_id.clone()),
+        };
+
+        let note = maybe_continue_platform_expertise_pipeline_after_success(&root, &job)
+            .expect("platform pass continuation should succeed");
+        assert!(note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("messaging-wording"));
+
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert!(items.iter().any(|entry| {
+            entry.kind == PLATFORM_EXPERTISE_KIND
+                && platform_expertise_pass_kind(entry).as_deref() == Some("messaging-wording")
+        }));
+    }
+
+    #[test]
+    fn review_requeue_closes_superseded_platform_work_instead_of_looping() {
+        let root = temp_root("ctox-platform-review-requeue-suppressed");
+        channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Direct corrective work for the Kunstmen homepage.".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("frontend-skill".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed direct corrective task");
+
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: PLATFORM_IMPLEMENTATION_KIND.to_string(),
+                title: "Kunstmen platform implementation reset".to_string(),
+                body_text: "Implement the platform front door.".to_string(),
+                state: "open".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "kunstmen-supervisor",
+                    "workspace_root": "/home/ubuntu/workspace/kunstmen",
+                    "priority": "high",
+                    "skill": "frontend-skill",
+                    "dedupe_key": "platform-implementation:kunstmen-supervisor",
+                }),
+            },
+            false,
+        )
+        .expect("failed to create implementation self-work");
+
+        let queued = requeue_review_rejected_self_work(
+            &root,
+            &item.work_id,
+            "The homepage still does not read like a platform.",
+        )
+        .expect("review requeue should succeed");
+        assert!(queued.is_none());
+
+        let closed = tickets::load_ticket_self_work_item(&root, &item.work_id)
+            .expect("failed to reload self-work")
+            .expect("missing self-work");
+        assert_eq!(closed.state, "closed");
     }
 
     #[test]
