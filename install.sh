@@ -1024,6 +1024,35 @@ WRAPEOF
   chmod +x "$destination"
 }
 
+populate_rebuild_release_layout() {
+  local release_root="$1"
+  local ctox_binary=""
+  local ctox_desktop_host_binary=""
+
+  ctox_binary="$(resolve_ctox_binary_path "$release_root" 2>/dev/null || true)"
+  ctox_desktop_host_binary="$(resolve_ctox_desktop_host_binary_path "$release_root" 2>/dev/null || true)"
+
+  mkdir -p "$release_root/bin" "$release_root/tools/model-runtime/bin" "$INSTALL_ROOT/bin"
+
+  if [[ -n "$ctox_binary" && -x "$ctox_binary" ]]; then
+    cp "$ctox_binary" "$release_root/bin/ctox-real"
+    write_managed_launch_wrapper "$release_root/bin/ctox" "$release_root" "$release_root/bin/ctox-real"
+    cp "$release_root/bin/ctox-real" "$BIN_DIR/ctox-real" 2>/dev/null || true
+    write_managed_launch_wrapper "$INSTALL_ROOT/bin/ctox" "$release_root" "$BIN_DIR/ctox-real"
+  fi
+
+  if [[ -n "$ctox_desktop_host_binary" && -x "$ctox_desktop_host_binary" ]]; then
+    cp "$ctox_desktop_host_binary" "$release_root/bin/ctox-desktop-host"
+    cp "$release_root/bin/ctox-desktop-host" "$INSTALL_ROOT/bin/ctox-desktop-host" 2>/dev/null || true
+  fi
+
+  if [[ -x "$TOOLS_ROOT/model-runtime/bin/ctox-engine" ]]; then
+    cp "$TOOLS_ROOT/model-runtime/bin/ctox-engine" "$release_root/tools/model-runtime/bin/ctox-engine" 2>/dev/null || true
+  elif [[ -x "$release_root/tools/model-runtime/target/release/ctox-engine" ]]; then
+    cp "$release_root/tools/model-runtime/target/release/ctox-engine" "$release_root/tools/model-runtime/bin/ctox-engine" 2>/dev/null || true
+  fi
+}
+
 # ── Rust toolchain ───────────────────────────────────────────────────────────
 ensure_rust_toolchain() {
   if command -v cargo >/dev/null 2>&1 || [[ -x "$HOME/.cargo/bin/cargo" ]]; then
@@ -1485,6 +1514,7 @@ run_rebuild() {
   CUDA_HOME_RESOLVED="$(detect_cuda_home || true)"
   configure_cuda_env
   build_ctox "$root"
+  populate_rebuild_release_layout "$root"
 
   # Ensure ctox is available as a command everywhere
   STATE_ROOT="${CTOX_STATE_ROOT:-$root/runtime}"
