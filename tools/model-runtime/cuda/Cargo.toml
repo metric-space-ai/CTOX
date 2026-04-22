@@ -18,8 +18,9 @@ path = "src/lib.rs"
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-half = { workspace = true }
+half = { workspace = true, features = ["bytemuck"] }
 bytemuck = { workspace = true }
+memmap2 = { workspace = true }
 
 # cudarc provides typed wrappers over CUDA runtime / driver / cuBLAS +
 # raw CudaSlice<T> for owning device buffers. We use it as the thin

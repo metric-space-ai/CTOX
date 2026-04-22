@@ -60,6 +60,9 @@ pub mod kv_cache;
 #[cfg(feature = "cuda")]
 pub mod kernels;
 
+#[cfg(feature = "cuda")]
+pub mod gguf;
+
 /// Re-exports for the common call path. Members gated on the `cuda`
 /// feature — consumers that need them must also gate.
 #[cfg(feature = "cuda")]

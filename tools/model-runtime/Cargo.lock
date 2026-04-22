@@ -1311,6 +1311,7 @@ dependencies = [
  "bytemuck",
  "cudarc 0.17.8",
  "half",
+ "memmap2",
  "thiserror 2.0.18",
  "tracing",
 ]
