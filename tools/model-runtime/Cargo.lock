@@ -1481,6 +1481,7 @@ dependencies = [
  "anyhow",
  "bytemuck",
  "ctox-cuda-primitives",
+ "ctox-engine-runtime",
  "cudarc 0.17.8",
  "half",
  "memmap2",

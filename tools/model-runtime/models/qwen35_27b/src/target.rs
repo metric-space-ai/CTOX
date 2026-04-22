@@ -148,8 +148,25 @@ pub struct Qwen35Target {
     pub n_full_attn: usize,
     /// Number of GDN layers (for sizing the gdn_state vector).
     pub n_gdn: usize,
+    /// Optional feature-capture buffer shared with a draft model for
+    /// DFlash-style speculative decoding. Shape
+    /// `[max_ctx, CAPTURE_LAYERS.len() * hidden_dim]` bf16 when
+    /// allocated. Populated during [`Self::forward_with_capture`] at
+    /// each position `kv_start + i` for the layer indices listed in
+    /// [`CAPTURE_LAYERS`]; consumed by
+    /// [`crate::spec_decode::SpeculativeDecoder`] as the draft's
+    /// `target_hidden_cat` cross-attention feature source.
+    ///
+    /// Sized for the whole context (no ring wrap) — a ring variant can
+    /// be added later to cap the resident footprint at 128K tokens.
+    pub target_feat_buf: Option<CudaTensor<bf16>>,
     pub device: Arc<DeviceContext>,
 }
+
+/// Target layer indices whose post-FFN hidden state feeds the draft
+/// model's `target_hidden_cat` cross-attention features. Matches the
+/// reference's `qwen35_target_graph.cpp::CAPTURE_LAYERS`.
+pub const CAPTURE_LAYERS: [usize; 5] = [1, 16, 31, 46, 61];
 
 impl Qwen35Target {
     /// Load the full weight set from a GGUF file.
@@ -284,8 +301,38 @@ impl Qwen35Target {
             vocab_size,
             n_full_attn,
             n_gdn,
+            target_feat_buf: None,
             device,
         })
+    }
+
+    /// Allocate (or reuse) a feature-capture buffer sized for
+    /// `max_ctx` tokens. Shape `[max_ctx, CAPTURE_LAYERS.len() * hidden]`
+    /// bf16. Idempotent if `self.target_feat_buf` is already sized at
+    /// least `max_ctx`.
+    ///
+    /// Call once during speculative-decode setup; afterwards
+    /// [`Self::forward_with_capture`] writes into the buffer as the
+    /// target consumes prompt / verify tokens.
+    pub fn ensure_capture_buf(&mut self, max_ctx: usize) -> Result<()> {
+        let feat_dim = CAPTURE_LAYERS.len() * self.config.hidden_dim;
+        let needs_alloc = match &self.target_feat_buf {
+            Some(t) => t.shape().first().copied().unwrap_or(0) < max_ctx,
+            None => true,
+        };
+        if needs_alloc {
+            self.target_feat_buf = Some(CudaTensor::<bf16>::zeros(
+                self.device.clone(),
+                vec![max_ctx, feat_dim],
+            )?);
+        }
+        Ok(())
+    }
+
+    /// Read-only accessor for the capture buffer. Used by the
+    /// speculative decoder to build `target_hidden_cat` slices.
+    pub fn capture_buf(&self) -> Option<&CudaTensor<bf16>> {
+        self.target_feat_buf.as_ref()
     }
 
     /// Run one forward pass over a batch of `n_tokens` tokens.
@@ -431,6 +478,266 @@ let mut logits =
         self.lm_head.matmul_f32(&self.device, &norm_f32, &mut logits)?;
 
         Ok(logits)
+    }
+
+    /// [`Self::forward`] with per-layer feature capture. Runs the
+    /// same layer loop but, after each of the layer indices in
+    /// [`CAPTURE_LAYERS`] has executed, copies its post-FFN hidden-state
+    /// rows into `self.target_feat_buf` at positions
+    /// `[kv_start..kv_start + n_tokens]`, column offset
+    /// `capture_idx * hidden`. The capture buffer is the draft model's
+    /// `target_hidden_cat` cross-attention feature source.
+    ///
+    /// Call [`Self::ensure_capture_buf`] once at spec-decode setup
+    /// before the first `forward_with_capture` call; without it this
+    /// method errors.
+    ///
+    /// `kv_start` must match the KV cache's `n_filled` BEFORE the
+    /// call — i.e. the absolute token-position of `tokens[0]`. The
+    /// speculative decoder passes `kv_cache.n_filled()` here.
+    ///
+    /// Correctness-first port: capture writes use one
+    /// `memcpy_dtod` per (capture_layer, token) pair — 5 × n_tokens
+    /// small launches. A single strided-copy kernel is a future
+    /// perf pass.
+    pub fn forward_with_capture(
+        &mut self,
+        tokens: &CudaTensor<i32>,
+        positions: &CudaTensor<i32>,
+        kv_cache: &mut KvCache,
+        gdn_states: &mut [CudaTensor<f32>],
+        gdn_inter: &mut [CudaTensor<f16>],
+        kv_start: usize,
+    ) -> Result<CudaTensor<f32>> {
+        // ── 0. Shape validation. Same checks as `forward`.
+        if tokens.shape().len() != 1 {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: tokens must be 1D [n_tokens], got {:?}",
+                tokens.shape()
+            ));
+        }
+        let n_tokens = tokens.shape()[0];
+        if n_tokens == 0 {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: n_tokens must be > 0"
+            ));
+        }
+        let hidden_dim = self.config.hidden_dim;
+        if positions.shape() != [4, n_tokens] {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: positions shape {:?} != [4, {}]",
+                positions.shape(),
+                n_tokens
+            ));
+        }
+        if gdn_states.len() < self.n_gdn {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: gdn_states.len()={} < n_gdn={}",
+                gdn_states.len(),
+                self.n_gdn
+            ));
+        }
+        if gdn_inter.len() < self.n_gdn {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: gdn_inter.len()={} < n_gdn={}",
+                gdn_inter.len(),
+                self.n_gdn
+            ));
+        }
+        if kv_cache.n_layers() < self.n_full_attn {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: kv_cache has {} layers, need >= {} FA layers",
+                kv_cache.n_layers(),
+                self.n_full_attn
+            ));
+        }
+        if self.target_feat_buf.is_none() {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: target_feat_buf not allocated — \
+                 call ensure_capture_buf first"
+            ));
+        }
+        let feat_dim = CAPTURE_LAYERS.len() * hidden_dim;
+        let feat_cap = self
+            .target_feat_buf
+            .as_ref()
+            .map(|t| t.shape().first().copied().unwrap_or(0))
+            .unwrap_or(0);
+        if kv_start + n_tokens > feat_cap {
+            return Err(anyhow!(
+                "qwen35 target.forward_with_capture: kv_start+n_tokens={} exceeds \
+                 target_feat_buf capacity {}",
+                kv_start + n_tokens,
+                feat_cap
+            ));
+        }
+        {
+            let expected_last = CAPTURE_LAYERS.iter().copied().max().unwrap_or(0);
+            if self.layers.len() <= expected_last {
+                return Err(anyhow!(
+                    "qwen35 target.forward_with_capture: model has {} layers but \
+                     CAPTURE_LAYERS needs index {}",
+                    self.layers.len(),
+                    expected_last
+                ));
+            }
+        }
+
+        // ── 1. Embedding lookup.
+        let mut hidden =
+            CudaTensor::<bf16>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_embedding_bf16(&self.device, &self.embed, tokens, &mut hidden)?;
+
+        // ── 2. Layer loop with capture.
+        let fa_total = self.n_full_attn;
+        let mut fa_seen: usize = 0;
+        let mut gdn_idx: usize = 0;
+
+        let stream = self.device.raw().default_stream();
+        // Element size inside target_feat_buf (bf16 = 2 bytes per elem,
+        // but cudarc slice APIs are typed so we operate in element
+        // counts, not bytes).
+        let hidden_elems = hidden_dim; // elements per (capture_idx, position) strip.
+
+        for (il, layer) in self.layers.iter().enumerate() {
+            match layer {
+                Qwen35Layer::FullAttention(fa) => {
+                    fa.forward(&self.device, &mut hidden, positions, kv_cache)?;
+                    fa_seen += 1;
+                    if fa_seen < fa_total {
+                        kv_cache.rewind(n_tokens);
+                    }
+                }
+                Qwen35Layer::Gdn(gdn) => {
+                    gdn.forward(
+                        &self.device,
+                        &mut hidden,
+                        positions,
+                        &mut gdn_states[gdn_idx],
+                        &mut gdn_inter[gdn_idx],
+                    )?;
+                    gdn_idx += 1;
+                }
+            }
+
+            // Capture hook: after running layer `il`, if it's one of
+            // CAPTURE_LAYERS, blit the current hidden into the buffer.
+            let capture_idx = CAPTURE_LAYERS.iter().position(|&c| c == il);
+            if let Some(k) = capture_idx {
+                // Destination columns for this capture: [k*hidden_dim,
+                // (k+1)*hidden_dim) inside each row of length
+                // `feat_dim`.
+                let feat_buf = self
+                    .target_feat_buf
+                    .as_mut()
+                    .expect("target_feat_buf: checked above");
+                let hidden_src = hidden.buf();
+                let dst_buf = feat_buf.buf_mut();
+                for t in 0..n_tokens {
+                    let src_start = t * hidden_elems;
+                    let src_end = src_start + hidden_elems;
+                    let dst_row = kv_start + t;
+                    let dst_start = dst_row * feat_dim + k * hidden_elems;
+                    let dst_end = dst_start + hidden_elems;
+                    let src_view = hidden_src.slice(src_start..src_end);
+                    let mut dst_view = dst_buf.slice_mut(dst_start..dst_end);
+                    stream.memcpy_dtod(&src_view, &mut dst_view).map_err(|e| {
+                        anyhow!(
+                            "qwen35 target.forward_with_capture: feat capture \
+                             memcpy_dtod (layer={} capture_idx={} tok={}): {:?}",
+                            il,
+                            k,
+                            t,
+                            e
+                        )
+                    })?;
+                }
+            }
+        }
+
+        // ── 3. Final norm.
+        let mut hidden_f32 =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_cast_bf16_to_f32(&self.device, &hidden, &mut hidden_f32)?;
+        let mut norm_f32 =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_rmsnorm_f32(
+            &self.device,
+            &hidden_f32,
+            &self.final_norm,
+            &mut norm_f32,
+            self.config.rms_eps,
+        )?;
+
+        // ── 4. LM head.
+        let mut logits =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, self.vocab_size])?;
+        self.lm_head.matmul_f32(&self.device, &norm_f32, &mut logits)?;
+
+        Ok(logits)
+    }
+
+    /// Snapshot a single GDN recurrent state into a new tensor.
+    ///
+    /// Correctness-first: allocates a fresh `CudaTensor<f32>` with the
+    /// same shape and issues a device-to-device memcpy. For the 48-GDN
+    /// 27B target this is 48 × `[S_v, S_v, H_v, 1]` ≈ 48 × 128×128×48
+    /// f32 ≈ 144 MB per snapshot, which is fine in absolute terms but
+    /// adds ~144 MB of allocation churn per spec-decode step.
+    ///
+    /// TODO(perf): replace with a single preallocated shadow buffer
+    /// + in-place memcpy — no alloc per step. See
+    /// `test_dflash_lib.cpp::snapshot_ssm_state` for the cached-shadow
+    /// pattern we want to mirror. Day-one port prefers bit-accurate
+    /// semantics over allocation count.
+    pub fn snapshot_gdn_states(
+        &self,
+        gdn_states: &[CudaTensor<f32>],
+    ) -> Result<Vec<CudaTensor<f32>>> {
+        let stream = self.device.raw().default_stream();
+        let mut out: Vec<CudaTensor<f32>> = Vec::with_capacity(gdn_states.len());
+        for (i, src) in gdn_states.iter().enumerate() {
+            let mut dst =
+                CudaTensor::<f32>::zeros(self.device.clone(), src.shape().to_vec())?;
+            stream
+                .memcpy_dtod(src.buf(), dst.buf_mut())
+                .map_err(|e| anyhow!("snapshot_gdn_states: layer {}: {:?}", i, e))?;
+            out.push(dst);
+        }
+        Ok(out)
+    }
+
+    /// Restore GDN recurrent states from a snapshot taken by
+    /// [`Self::snapshot_gdn_states`]. Counterpart to that call: each
+    /// entry in `snapshot` memcpy's into the matching entry in
+    /// `gdn_states`. Shapes must match.
+    pub fn restore_gdn_states(
+        &self,
+        gdn_states: &mut [CudaTensor<f32>],
+        snapshot: &[CudaTensor<f32>],
+    ) -> Result<()> {
+        if gdn_states.len() != snapshot.len() {
+            return Err(anyhow!(
+                "restore_gdn_states: gdn_states.len()={} != snapshot.len()={}",
+                gdn_states.len(),
+                snapshot.len()
+            ));
+        }
+        let stream = self.device.raw().default_stream();
+        for (i, (dst, src)) in gdn_states.iter_mut().zip(snapshot.iter()).enumerate() {
+            if dst.shape() != src.shape() {
+                return Err(anyhow!(
+                    "restore_gdn_states: layer {} shape {:?} != snapshot {:?}",
+                    i,
+                    dst.shape(),
+                    src.shape()
+                ));
+            }
+            stream
+                .memcpy_dtod(src.buf(), dst.buf_mut())
+                .map_err(|e| anyhow!("restore_gdn_states: layer {}: {:?}", i, e))?;
+        }
+        Ok(())
     }
 
     /// Chunked prefill matching dflash's reference implementation in
