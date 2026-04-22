@@ -43,6 +43,9 @@ static SCALE_ADD_WITH_BIAS_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SIGMOID_MUL_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 static SIGMOID_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
 static TRANSPOSE_2D_BF16_FN: OnceLock<CudaFunction> = OnceLock::new();
+static ROW_SLICE_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static FILL_CONST_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+static GDN_GATE_V_MEAN_STANDIN_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
 
 fn load_fn(
     device: &Arc<DeviceContext>,
@@ -291,6 +294,180 @@ pub fn launch_transpose_2d_bf16(
             "transpose_2d_bf16 launch (rows={} cols={}): {:?}",
             rows,
             cols,
+            e
+        )
+    })?;
+    Ok(())
+}
+
+/// Strided row slice: `dst[t, :] = src[t, src_offset .. src_offset + slice_width]`
+/// for each row `t`, f32.
+///
+/// Replaces a family of host round-trips inside GDN's forward:
+/// `qkv_f32.to_host()` + three per-stream `Vec::copy_from_slice` +
+/// three `from_host` uploads used to split the fused QKV projection
+/// into its q / k / v streams.
+///
+/// Caller passes the source matrix's logical 2D shape
+/// `[n_rows, src_cols]`, the column offset into each row, and the
+/// slice width. `dst` must already be allocated as
+/// `[n_rows, slice_width]`.
+pub fn launch_row_slice_f32(
+    device: &Arc<DeviceContext>,
+    src: &CudaTensor<f32>,
+    dst: &mut CudaTensor<f32>,
+    n_rows: usize,
+    src_cols: usize,
+    src_offset: usize,
+    slice_width: usize,
+) -> Result<()> {
+    if src.numel() < n_rows * src_cols {
+        return Err(anyhow!(
+            "row_slice_f32: src numel {} < n_rows*src_cols = {}*{} = {}",
+            src.numel(),
+            n_rows,
+            src_cols,
+            n_rows * src_cols
+        ));
+    }
+    if dst.numel() < n_rows * slice_width {
+        return Err(anyhow!(
+            "row_slice_f32: dst numel {} < n_rows*slice_width = {}*{} = {}",
+            dst.numel(),
+            n_rows,
+            slice_width,
+            n_rows * slice_width
+        ));
+    }
+    if src_offset + slice_width > src_cols {
+        return Err(anyhow!(
+            "row_slice_f32: src_offset {} + slice_width {} > src_cols {}",
+            src_offset,
+            slice_width,
+            src_cols
+        ));
+    }
+    let total = n_rows * slice_width;
+    if total == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(device, &ROW_SLICE_F32_FN, "row_slice_f32")?;
+    let stream = device.raw().default_stream();
+    let n_rows_i32 = n_rows as i32;
+    let src_cols_i32 = src_cols as i32;
+    let src_offset_i32 = src_offset as i32;
+    let slice_width_i32 = slice_width as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher
+        .arg(src.buf())
+        .arg(dst.buf_mut())
+        .arg(&n_rows_i32)
+        .arg(&src_cols_i32)
+        .arg(&src_offset_i32)
+        .arg(&slice_width_i32);
+
+    unsafe { launcher.launch(launch_cfg(total)) }.map_err(|e| {
+        anyhow!(
+            "row_slice_f32 launch (rows={} src_cols={} off={} w={}): {:?}",
+            n_rows,
+            src_cols,
+            src_offset,
+            slice_width,
+            e
+        )
+    })?;
+    Ok(())
+}
+
+/// Fill every element of `y` with a constant scalar, f32.
+///
+/// Replaces the `from_host(vec![value; numel])` pattern used
+/// throughout GDN (beta stand-in, zero-init buffers). No host
+/// allocation, no upload, one kernel launch.
+pub fn launch_fill_const_f32(
+    device: &Arc<DeviceContext>,
+    y: &mut CudaTensor<f32>,
+    value: f32,
+) -> Result<()> {
+    let numel = y.numel();
+    if numel == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(device, &FILL_CONST_F32_FN, "fill_const_f32")?;
+    let stream = device.raw().default_stream();
+    let numel_i32 = numel as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher.arg(y.buf_mut()).arg(&value).arg(&numel_i32);
+
+    unsafe { launcher.launch(launch_cfg(numel)) }
+        .map_err(|e| anyhow!("fill_const_f32 launch (numel={}): {:?}", numel, e))?;
+    Ok(())
+}
+
+/// GDN gate stand-in (V-mean version): for each `(t, hi)` pair
+/// writes `g[hi + t*H_v] = clamp(-|mean(v[t, hi, :])| - 1.0, -5.0, -1.0)`.
+///
+/// Matches the pre-real-weights host computation exactly. This is
+/// the computation the previous `g_host = vec![...]; for t { for hi
+/// { ... } }` + `from_host` did — now runs entirely on device, one
+/// thread per `(t, hi)` pair, single launch per GDN forward.
+///
+/// `v` is laid out `[n_tokens, H_v, S_v]` row-major (the GDN kernel
+/// ultimately reshapes it to `[S_v, H_v, n_tokens, n_seqs]`; this
+/// kernel reads the same underlying linear buffer).
+pub fn launch_gdn_gate_v_mean_standin_f32(
+    device: &Arc<DeviceContext>,
+    v: &CudaTensor<f32>,
+    g: &mut CudaTensor<f32>,
+    n_tokens: usize,
+    h_v: usize,
+    s_v: usize,
+) -> Result<()> {
+    let v_needed = n_tokens * h_v * s_v;
+    if v.numel() < v_needed {
+        return Err(anyhow!(
+            "gdn_gate_v_mean_standin_f32: v numel {} < n_tokens*h_v*s_v = {}",
+            v.numel(),
+            v_needed
+        ));
+    }
+    let g_needed = n_tokens * h_v;
+    if g.numel() < g_needed {
+        return Err(anyhow!(
+            "gdn_gate_v_mean_standin_f32: g numel {} < n_tokens*h_v = {}",
+            g.numel(),
+            g_needed
+        ));
+    }
+    if g_needed == 0 {
+        return Ok(());
+    }
+
+    let f = load_fn(
+        device,
+        &GDN_GATE_V_MEAN_STANDIN_F32_FN,
+        "gdn_gate_v_mean_standin_f32",
+    )?;
+    let stream = device.raw().default_stream();
+    let n_tokens_i32 = n_tokens as i32;
+    let h_v_i32 = h_v as i32;
+    let s_v_i32 = s_v as i32;
+    let mut launcher = stream.launch_builder(&f);
+    launcher
+        .arg(v.buf())
+        .arg(g.buf_mut())
+        .arg(&n_tokens_i32)
+        .arg(&h_v_i32)
+        .arg(&s_v_i32);
+
+    unsafe { launcher.launch(launch_cfg(g_needed)) }.map_err(|e| {
+        anyhow!(
+            "gdn_gate_v_mean_standin_f32 launch (n_tokens={} h_v={} s_v={}): {:?}",
+            n_tokens,
+            h_v,
+            s_v,
             e
         )
     })?;

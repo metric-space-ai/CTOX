@@ -82,8 +82,9 @@ use half::{bf16, f16};
 use ctox_cuda_primitives::device::DeviceContext;
 use crate::kernels::l2_norm::launch_l2_norm_f32;
 use crate::kernels::{
-    launch_cast_bf16_to_f32, launch_cast_f32_to_bf16, launch_gated_delta_net_f32,
-    launch_residual_add_bf16, launch_rmsnorm_f32, GdnGateKind, GdnLaunchInputs, GdnPersistInter,
+    launch_cast_bf16_to_f32, launch_cast_f32_to_bf16, launch_fill_const_f32,
+    launch_gated_delta_net_f32, launch_gdn_gate_v_mean_standin_f32, launch_residual_add_bf16,
+    launch_rmsnorm_f32, launch_row_slice_f32, GdnGateKind, GdnLaunchInputs, GdnPersistInter,
     GdnRecurrence, GdnShape,
 };
 use ctox_cuda_primitives::tensor::CudaTensor;
@@ -312,47 +313,18 @@ let mut qkv_f32 =
         //    with GQA broadcast from h_k to h_v handled natively via
         //    `neqk1 = h_k` (kernel does `iq1 = h_idx % neqk1`).
         //
-        //    Flat layout of each stream for the kernel: for stream S
-        //    with per-token width W (= H * head_width), the linear
-        //    index of (col=s, head=hd, token=t, seq=0) is
+        //    Each stream's per-token linear index is
         //      t * W + hd * head_width + s
-        //    Since our matmul output rows are already laid out as
-        //    [t, stream_idx-within-row * stream_stride + ...], each
-        //    stream slice is already contiguous along (head, col) per
-        //    token. Gathering (t, stream) across tokens into a flat
-        //    per-stream buffer reduces to a row-by-row copy.
-        //
-        //    Host round-trip (D→H then H→D x3) is kept from the
-        //    pre-real-weight port; a fused on-device split+repack
-        //    kernel is the obvious next perf lift.
-        //
-        //    TODO(gdn-perf): replace the D→H + H→D×3 shuffle with a
-        //    device-side split.
+        //    where W = H * head_width. Extracting a stream is a
+        //    per-row column slice — done on device via
+        //    `launch_row_slice_f32` (one kernel launch per stream).
+        //    The previous implementation download→split→upload'd on
+        //    the host; every GDN layer paid four CPU syncs that way,
+        //    blocking graph capture.
         // ------------------------------------------------------------
-        let qkv_host = qkv_f32.to_host()?;
-
         let q_offset = 0;
         let k_offset = q_width;
         let v_offset = q_width + k_width;
-
-        let per_q_elems = n_tokens * q_width;
-        let per_k_elems = n_tokens * k_width;
-        let per_v_elems = n_tokens * v_width;
-
-        let build_stream = |offset: usize, width: usize, total: usize| -> Vec<f32> {
-            let mut out = vec![0.0f32; total];
-            for t in 0..n_tokens {
-                let src_row = t * qkv_proj_dim + offset;
-                let dst_row = t * width;
-                out[dst_row..dst_row + width]
-                    .copy_from_slice(&qkv_host[src_row..src_row + width]);
-            }
-            out
-        };
-
-        let q_host = build_stream(q_offset, q_width, per_q_elems);
-        let k_host = build_stream(k_offset, k_width, per_k_elems);
-        let v_host = build_stream(v_offset, v_width, per_v_elems);
 
         // L2-normalize Q and K per-head. Matches the reference
         // (`build_delta_net_block` does `ggml_l2_norm(q_c, EPS);
@@ -361,29 +333,41 @@ let mut qkv_f32 =
         // get far outside the numerically-stable range and the
         // state saturates to NaN/Inf after a few tokens.
         //
-        // Each per-head slice has `s_v` elements; our host layout is
-        // `[t, head, col]` which flattens to `[n_tokens * h_k, s_v]`
-        // rows. That's exactly what `launch_l2_norm_f32` normalizes
-        // (one row per block). The kernel reads the 1-D tensor linear
-        // buffer via the GdnShape strides we set below — the tensor's
-        // `shape` metadata is used only for alloc sizing, so the
-        // `[n_tokens * h_k, s_v]` layout here and the `[s_v, h_k,
-        // n_tokens, n_seqs]` layout the kernel expects are the same
-        // linear buffer, just with different logical shape labels.
-        let q_tmp = CudaTensor::<f32>::from_host(
+        // Each per-head slice has `s_v` elements; the slice output
+        // for Q/K lays out as `[t, head, col]` which flattens to
+        // `[n_tokens * h_k, s_v]` rows — exactly what
+        // `launch_l2_norm_f32` expects (one row per block).
+        let mut q_tmp = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![n_tokens * h_k * n_seqs, s_v],
-            &q_host,
+        )?;
+        launch_row_slice_f32(
+            device,
+            &qkv_f32,
+            &mut q_tmp,
+            n_tokens,
+            qkv_proj_dim,
+            q_offset,
+            q_width,
         )?;
         let mut q = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![n_tokens * h_k * n_seqs, s_v],
         )?;
         launch_l2_norm_f32(device, &q_tmp, &mut q, self.config.rms_eps)?;
-        let k_tmp = CudaTensor::<f32>::from_host(
+
+        let mut k_tmp = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![n_tokens * h_k * n_seqs, s_v],
-            &k_host,
+        )?;
+        launch_row_slice_f32(
+            device,
+            &qkv_f32,
+            &mut k_tmp,
+            n_tokens,
+            qkv_proj_dim,
+            k_offset,
+            k_width,
         )?;
         let mut k = CudaTensor::<f32>::zeros(
             device.clone(),
@@ -391,74 +375,55 @@ let mut qkv_f32 =
         )?;
         launch_l2_norm_f32(device, &k_tmp, &mut k, self.config.rms_eps)?;
 
-        let v = CudaTensor::<f32>::from_host(
+        // V goes straight into the final `[s_v, h_v, n_tokens, n_seqs]`
+        // shape (same linear buffer, different label); the GDN kernel
+        // reads the same element order.
+        let mut v = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![s_v, h_v, n_tokens, n_seqs],
-            &v_host,
+        )?;
+        launch_row_slice_f32(
+            device,
+            &qkv_f32,
+            &mut v,
+            n_tokens,
+            qkv_proj_dim,
+            v_offset,
+            v_width,
         )?;
 
-        // GDA gate stand-in: the reference computes
+        // GDA gate stand-in: for each (t, hi) pair the reference
+        // eventually wants
         //   g = softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a
-        // with `ssm_a = -exp(A_log)` strictly negative. That makes the
-        // per-head `exp(g)` retention factor < 1 and the SSM state
-        // decays predictably as tokens compound. We don't have the
-        // ssm_alpha / ssm_a / softplus pieces wired yet, so we stub g
-        // as a V-derived signal pinned to a strictly-negative range
-        // `[-5, -0.5]`. That keeps the recurrence stable across 48
-        // GDN layers on real Q5_K weights — purely retention-close-
-        // to-1 gates saturate the state to ±inf after a few tokens.
+        // but that projection isn't wired yet; we fall back to the
+        // V-mean stand-in pinned to the stable `[-5, -1]` range so
+        // `exp(g)` stays well below 1 and the recurrence is stable
+        // across 48 stacked GDN layers on real Q5_K weights.
         //
-        // The V-derived contribution is kept so the smoke tests can
-        // still see call 2's state diverge from call 1's; clamping
-        // to a negative-only range ensures `exp(g)` stays well under
-        // 1 and the state magnitudes remain finite.
+        // The V-mean computation + clamp is one `launch_gdn_gate_v
+        // _mean_standin_f32` kernel now — previously it was a host
+        // vec alloc + nested loop + from_host upload per forward.
         //
-        // TODO(gdn-ref): replace with the reference
-        // softplus(alpha + dt_bias) * ssm_a pipeline once the
-        // ssm_alpha / ssm_a / ssm_dt_bias weights + softplus/mul
-        // kernels land.
-        let mut g_host = vec![0.0f32; h_v * n_tokens * n_seqs];
-        for t in 0..n_tokens {
-            for hi in 0..h_v {
-                let base = t * v_width + hi * s_v;
-                let mut acc = 0.0f32;
-                for s in 0..s_v {
-                    acc += v_host[base + s];
-                }
-                // Mean of V chunk, pulled into the stable
-                // `[-g_max, g_min]` band (strictly negative) by
-                // negating the magnitude and subtracting a fixed
-                // bias. Strong decay (`g <= -1`) is needed to keep
-                // the recurrence stable across 48 GDN layers on real
-                // Q5_K weights.
-                let mean = acc / s_v as f32;
-                g_host[hi + t * h_v] = -mean.abs() - 1.0;
-            }
-        }
-        for g in g_host.iter_mut() {
-            *g = g.clamp(-5.0, -1.0);
-        }
-        let g = CudaTensor::<f32>::from_host(
+        // TODO(gdn-ref): replace with `softplus(alpha + dt_bias)
+        // * ssm_a` once the ssm_alpha / ssm_a / ssm_dt_bias weights
+        // + softplus kernel land.
+        let mut g = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![1, h_v, n_tokens, n_seqs],
-            &g_host,
         )?;
+        launch_gdn_gate_v_mean_standin_f32(device, &v, &mut g, n_tokens, h_v, s_v)?;
 
-        // Beta: constant small positive per (token, v-head) stand-in
-        // for the reference's `sigmoid(ssm_beta @ hidden)`. 0.1 keeps
-        // the amount of new signal mixed in per token small enough
-        // that 48 stacked GDN layers on real Q5_K weights don't
-        // saturate the residual stream. (sigmoid(0)=0.5 was too
-        // aggressive — the residual grew ~10x per layer.)
+        // Beta stand-in (constant 0.1). Single device fill — no host
+        // vec or upload. Replaces
+        // `from_host(vec![0.1; h_v*n_tokens*n_seqs])`.
         //
         // TODO(gdn-ref): replace with sigmoid(ssm_beta @ hidden) once
         // the ssm_beta weight + sigmoid kernel land.
-        let beta_host = vec![0.1f32; h_v * n_tokens * n_seqs];
-        let beta = CudaTensor::<f32>::from_host(
+        let mut beta = CudaTensor::<f32>::zeros(
             device.clone(),
             vec![1, h_v, n_tokens, n_seqs],
-            &beta_host,
         )?;
+        launch_fill_const_f32(device, &mut beta, 0.1)?;
 
         // ------------------------------------------------------------
         // 6. Launch the GDN kernel.
@@ -521,53 +486,40 @@ let mut qkv_f32 =
         )?;
 
         // ------------------------------------------------------------
-        // 7. Post-kernel plumbing:
-        //    - Copy the final_state slice of `dst` back into
-        //      `gdn_state` so the next forward picks up where this
-        //      one left off.
-        //    - Lift the attn slice of `dst` back to a [n_tokens,
-        //      kv_dim] bf16 tensor for the output projection.
+        // 7. Post-kernel plumbing — now fully device-side.
         //
-        //    Both are currently host round-trips for the same reason
-        //    as the split above. TODO(gdn-perf): replace with
-        //    device-to-device copies once we expose a `CudaTensor::
-        //    slice_copy_from` primitive or an on-device repacker.
+        //    The GDN kernel writes its packed output as
+        //      dst[..attn_elems]                 = attn region
+        //      dst[attn_elems..+state_elems]     = new SSM state
+        //    Both regions are already in the exact linear layout the
+        //    downstream consumers need:
+        //      * state: `[S_v, S_v, H_v, n_seqs]` row-major — same as
+        //        `gdn_state`, so a flat D→D memcpy advances the state.
+        //      * attn:  `(t * H_v + hi) * S_v + col`, i.e. contiguous
+        //        on `(hi, col)` within a token. Interpreting that same
+        //        buffer as `[n_tokens, H_v*S_v = inner_dim]` needs no
+        //        permute at all — another flat D→D memcpy.
+        //
+        //    Earlier revisions downloaded `dst` to the host, split and
+        //    permuted there, then re-uploaded two tensors. That cost
+        //    three CPU syncs per GDN layer × 48 layers = ~144 host
+        //    syncs per forward on its own, plus blocked graph capture.
         // ------------------------------------------------------------
-        device.synchronize()?;
-        let dst_host = dst.to_host()?;
-        let attn_host_f32 = &dst_host[..attn_elems];
-        let state_host_f32 = &dst_host[attn_elems..attn_elems + state_elems];
+        let stream = device.raw().default_stream();
 
-        // Write the new state back into gdn_state. Layout is identical
-        // (same [S_v, S_v, H_v, n_seqs] shape, same stride), so a flat
-        // memcpy suffices.
-        *gdn_state = CudaTensor::<f32>::from_host(
-            device.clone(),
-            vec![s_v, s_v, h_v, n_seqs],
-            state_host_f32,
-        )?;
+        // State: dst[attn_elems..attn_elems + state_elems] → gdn_state.
+        let state_src = dst.buf().slice(attn_elems..attn_elems + state_elems);
+        stream
+            .memcpy_dtod(&state_src, gdn_state.buf_mut())
+            .map_err(|e| anyhow!("gdn: dst → gdn_state dtod copy: {:?}", e))?;
 
-        // attn layout in dst (per the reference kernel's writes) is
-        // [S_v, H_v, n_tokens, n_seqs] row-major. Flatten to the
-        // [n_tokens, H_v*S_v = inner_dim] layout the output
-        // projection expects by permuting (t, h, s) → (t, h*S_v + s).
-        let mut attn_flat = vec![0.0f32; n_tokens * inner_dim];
-        for t in 0..n_tokens {
-            // The kernel writes linear index
-            //   ((seq * n_tokens + t) * h_v + hi) * s_v + col
-            // For n_seqs = 1 this reduces to
-            //   (t * h_v + hi) * s_v + col
-            // which is already contiguous on (hi, col) inside a token.
-            let src = t * h_v * s_v;
-            let dst_off = t * inner_dim;
-            attn_flat[dst_off..dst_off + inner_dim]
-                .copy_from_slice(&attn_host_f32[src..src + inner_dim]);
-        }
-        let attn_f32 = CudaTensor::<f32>::from_host(
-            device.clone(),
-            vec![n_tokens, inner_dim],
-            &attn_flat,
-        )?;
+        // Attn: dst[..attn_elems] → attn_f32 [n_tokens, inner_dim].
+        let mut attn_f32 =
+            CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, inner_dim])?;
+        let attn_src = dst.buf().slice(..attn_elems);
+        stream
+            .memcpy_dtod(&attn_src, attn_f32.buf_mut())
+            .map_err(|e| anyhow!("gdn: dst → attn_f32 dtod copy: {:?}", e))?;
 
         // ------------------------------------------------------------
         // 8. Output projection. [n_tokens, inner_dim] · [inner_dim,
@@ -593,18 +545,19 @@ let mut proj_f32 =
     }
 }
 
-/// Clone a bf16 CudaTensor via a host round-trip. Used once per
-/// forward to save the pre-norm residual; replace with a device-side
-/// copy primitive once one exists.
-///
-/// TODO(gdn-perf): swap for `CudaTensor::copy_from(&src)` or a memcpy-
-/// on-stream primitive once the tensor API gains one.
+/// Clone a bf16 `CudaTensor` on device via a D→D memcpy. Used once
+/// per forward to save the pre-norm residual — stays on-device so
+/// the whole forward is eligible for graph capture.
 fn clone_tensor_bf16(
     device: &Arc<DeviceContext>,
     src: &CudaTensor<bf16>,
 ) -> Result<CudaTensor<bf16>> {
-    let host = src.to_host()?;
-    CudaTensor::<bf16>::from_host(device.clone(), src.shape().to_vec(), &host)
+    let mut dst = CudaTensor::<bf16>::zeros(device.clone(), src.shape().to_vec())?;
+    let stream = device.raw().default_stream();
+    stream
+        .memcpy_dtod(src.buf(), dst.buf_mut())
+        .map_err(|e| anyhow!("clone_tensor_bf16: D→D memcpy: {:?}", e))?;
+    Ok(dst)
 }
 
 // ---------------------------------------------------------------------------

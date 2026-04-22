@@ -97,3 +97,69 @@ extern "C" __global__ void transpose_2d_bf16(
     const int c = idx - r * cols;
     dst[c * rows + r] = src[idx];
 }
+
+// Row slice: copy `slice_width` columns starting at `src_offset` out
+// of every row of `src[n_rows, src_cols]` into a contiguous
+// `dst[n_rows, slice_width]`. Used inside GDN to split the fused
+// QKV projection output into its q/k/v streams without round-
+// tripping through the host.
+extern "C" __global__ void row_slice_f32(
+    const float * __restrict__ src,
+    float * __restrict__ dst,
+    int n_rows,
+    int src_cols,
+    int src_offset,
+    int slice_width
+) {
+    const int total = n_rows * slice_width;
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    const int t = idx / slice_width;
+    const int c = idx - t * slice_width;
+    dst[idx] = src[t * src_cols + src_offset + c];
+}
+
+// Fill every element of `y` with the same scalar. Used for GDN's
+// constant beta stand-in (`0.1`) which used to be uploaded as a
+// host vector per forward. Single launch per forward per layer.
+extern "C" __global__ void fill_const_f32(
+    float * __restrict__ y,
+    float value,
+    int numel
+) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= numel) return;
+    y[i] = value;
+}
+
+// GDN gate stand-in: for each (token, v-head) computes
+//
+//   g[hi + t * H_v] = clamp(-|mean(v[t, hi, :])| - 1.0, -5.0, -1.0)
+//
+// This matches the pre-real-weights host computation exactly —
+// used until the reference's
+//   g = softplus(ssm_alpha @ hidden + ssm_dt_bias) * ssm_a
+// pipeline is wired up. v is laid out [n_tokens, H_v, S_v] row-major.
+// Launch as one thread per (t, hi) pair.
+extern "C" __global__ void gdn_gate_v_mean_standin_f32(
+    const float * __restrict__ v,   // [n_tokens, H_v, S_v]
+    float * __restrict__ g,         // [n_tokens, H_v] (== [H_v, n_tokens] flat)
+    int n_tokens,
+    int h_v,
+    int s_v
+) {
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = n_tokens * h_v;
+    if (idx >= total) return;
+    const int t = idx / h_v;
+    const int hi = idx - t * h_v;
+
+    const int base = (t * h_v + hi) * s_v;
+    float acc = 0.0f;
+    for (int s = 0; s < s_v; ++s) acc += v[base + s];
+    const float mean = acc / (float)s_v;
+    float g_val = -fabsf(mean) - 1.0f;
+    if (g_val < -5.0f) g_val = -5.0f;
+    if (g_val > -1.0f) g_val = -1.0f;
+    g[hi + t * h_v] = g_val;
+}
