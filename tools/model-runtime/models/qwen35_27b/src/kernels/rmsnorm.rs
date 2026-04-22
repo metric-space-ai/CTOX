@@ -1,68 +1,121 @@
-//! RMSNorm Rust-side wrapper. Template for all future kernel wrappers.
+//! Rust wrapper around the vendored llama.cpp `rms_norm_f32` template
+//! from `ggml-cuda/norm.cu`. We specialize `<block_size=1024,
+//! do_multiply=true, do_add=false>` — fused RMSNorm + per-channel weight
+//! multiply, which is what Qwen3.5's norm layers use.
 //!
-//! Conventions established here (follow when porting new kernels):
-//!
-//!   * One Rust module per `.cu` file. Module name mirrors the .cu stem.
-//!   * `launch_<kernel>_<dtype>()` is the public entry. Takes
-//!     `&Arc<DeviceContext>`, `&CudaTensor<...>` inputs, `&mut
-//!     CudaTensor<...>` outputs, plus scalar params.
-//!   * Validates input shapes with clear error messages — launching
-//!     with mismatched shapes would corrupt memory silently.
-//!   * Caches the loaded `CudaFunction` per process via `OnceLock`.
-//!     Module loading has nontrivial fixed cost and we call these
-//!     kernels hot-path so cache is mandatory.
-//!   * Does NOT synchronize the stream — callers sync at phase
-//!     boundaries. We want kernel launches to queue.
+//! The template has 23 parameters (see `norm.cu:74`) split into three
+//! bands: core (x, dst, ncols, strides, eps), `mul` band (weight ptr,
+//! strides, 4×uint3 fastdiv packings), and `add` band (same layout).
+//! With `do_add=false` the add band's pointer/strides/packings are
+//! ignored by the kernel but the arg slots still have to exist for the
+//! launch to match the compiled signature. For the ignored `add`
+//! pointer we carry a dummy 1-element `CudaSlice<f32>` (`NULL_F32_SLICE`
+//! below) since cudarc's `PushKernelArg::arg` won't accept a raw
+//! `*const f32`.
 //!
 //! Load chain:
-//!   build.rs emits `OUT_DIR/ptx_registry.rs` with `RMSNORM_PTX: &[u8]`.
-//!   We `include!` it below, convert to `Ptx::from_src(String)`, call
-//!   `ctx.load_module(ptx)`, then `module.load_function("rmsnorm_f32")`.
+//!   build.rs compiles `kernels/sm_86/norm.cu` → `norm.ptx` → embeds it
+//!   as `NORM_PTX` in the auto-generated `ptx_registry.rs`. We load the
+//!   Itanium-mangled symbol
+//!   `_Z12rms_norm_f32ILi1024ELb1ELb0EE…` for the `<1024,true,false>`
+//!   instantiation.
 
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{anyhow, Result};
-use cudarc::driver::{CudaFunction, LaunchConfig, PushKernelArg};
+use cudarc::driver::{CudaFunction, CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::Ptx;
 
 use ctox_cuda_primitives::device::DeviceContext;
 use ctox_cuda_primitives::tensor::CudaTensor;
 
 // PTX blob comes from the parent module's auto-generated registry.
-use super::RMSNORM_PTX;
+use super::NORM_PTX;
 
-/// One-shot cache for the loaded kernel function. Safe because we
-/// target single-context-per-process; a second device would need
-/// its own cache. If/when we go multi-GPU, replace this with
-/// something keyed by (ordinal, kernel-name).
-static RMSNORM_F32_FN: OnceLock<CudaFunction> = OnceLock::new();
+/// Itanium-mangled symbol for `rms_norm_f32<1024, true, false>` from
+/// `vendor/ggml-cuda/norm.cu`. Verified against `norm.ptx` entry list.
+const RMS_NORM_F32_1024_MUL_SYM: &str =
+    "_Z12rms_norm_f32ILi1024ELb1ELb0EEvPKfPfilllfS1_lll5uint3S3_S3_S3_S1_lllS3_S3_S3_S3_";
+
+/// ggml-cuda's `uint3` packed fastdiv descriptor: `(mp, L, divisor)`.
+/// Laid out to match CUDA's `uint3` (three 32-bit uints, 12-byte
+/// alignment implied by PTX `.param .align 4 .b8 …[12]`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Uint3 {
+    x: u32,
+    y: u32,
+    z: u32,
+}
+// Safe: plain POD matching the CUDA `uint3` ABI (3×u32, 4-byte aligned,
+// no padding, identical on host and device).
+unsafe impl DeviceRepr for Uint3 {}
+
+/// Port of ggml-cuda's `init_fastdiv_values(uint64_t d)` from
+/// `common.cuh:865`. Returns `(mp, L, d)` such that
+/// `n / d == (mulhi(n, mp) + n) >> L`.
+fn init_fastdiv(d: u32) -> Uint3 {
+    assert!(d != 0, "init_fastdiv: divisor must be > 0");
+    // L = ceil(log2(d)).
+    let mut l: u32 = 0;
+    while l < 32 && (1u32 << l) < d {
+        l += 1;
+    }
+    // mp = floor(2^32 * (2^L - d) / d) + 1, exactly as upstream.
+    let mp = (((1u64 << 32) * ((1u64 << l) - d as u64)) / d as u64 + 1) as u32;
+    Uint3 { x: mp, y: l, z: d }
+}
+
+/// One-shot cache for the loaded kernel function. Same rationale as
+/// the rest of the kernel wrappers: module loading is expensive and
+/// this is hot-path.
+static FN_CACHE: OnceLock<CudaFunction> = OnceLock::new();
 
 fn rmsnorm_f32_fn(device: &Arc<DeviceContext>) -> Result<CudaFunction> {
-    if let Some(f) = RMSNORM_F32_FN.get() {
+    if let Some(f) = FN_CACHE.get() {
         return Ok(f.clone());
     }
-    // PTX is ASCII text; cudarc wants String.
-    let ptx_src = std::str::from_utf8(RMSNORM_PTX)
-        .map_err(|e| anyhow!("rmsnorm.ptx not UTF-8: {}", e))?
+    let ptx_src = std::str::from_utf8(NORM_PTX)
+        .map_err(|e| anyhow!("norm.ptx not UTF-8: {}", e))?
         .to_string();
     let module = device
         .raw()
         .load_module(Ptx::from_src(ptx_src))
-        .map_err(|e| anyhow!("load_module rmsnorm.ptx: {:?}", e))?;
+        .map_err(|e| anyhow!("load_module norm.ptx: {:?}", e))?;
     let f = module
-        .load_function("rmsnorm_f32")
-        .map_err(|e| anyhow!("load_function rmsnorm_f32: {:?}", e))?;
-    // If another thread races us, OnceLock::set returns Err — we just
-    // use whatever got stored. Both copies are equivalent.
-    let _ = RMSNORM_F32_FN.set(f.clone());
+        .load_function(RMS_NORM_F32_1024_MUL_SYM)
+        .map_err(|e| anyhow!("load_function rms_norm_f32<1024,true,false>: {:?}", e))?;
+    let _ = FN_CACHE.set(f.clone());
     Ok(f)
+}
+
+/// Cached zero-backed dummy slice used as the `add` pointer when
+/// `do_add=false`. Allocated once per process on first call; the kernel
+/// never dereferences it (the `if constexpr (do_add)` branch is
+/// statically false for our instantiation).
+static NULL_F32_SLICE: OnceLock<CudaSlice<f32>> = OnceLock::new();
+
+fn null_f32_slice(device: &Arc<DeviceContext>) -> Result<&'static CudaSlice<f32>> {
+    if let Some(s) = NULL_F32_SLICE.get() {
+        return Ok(s);
+    }
+    let s = device
+        .raw()
+        .default_stream()
+        .alloc_zeros::<f32>(1)
+        .map_err(|e| anyhow!("alloc null_f32_slice: {:?}", e))?;
+    // Race-tolerant: whoever wins stores the permanent slice; the
+    // losing allocation is dropped (4 B of GPU memory). `get()` after
+    // the set (or the race-winner's set) always returns the same slice.
+    let _ = NULL_F32_SLICE.set(s);
+    Ok(NULL_F32_SLICE.get().expect("just initialized"))
 }
 
 /// `y ← (x / sqrt(mean(x²) + eps)) * weight`
 ///
 /// Shapes:
 ///   * `x`:      `[n_tokens, hidden_dim]` f32 row-major
-///   * `weight`: `[hidden_dim]`            f32
+///   * `weight`: `[hidden_dim]`            f32 (broadcast across rows)
 ///   * `y`:      `[n_tokens, hidden_dim]` f32 (pre-allocated output)
 ///
 /// Does not synchronize the stream. Caller syncs at phase boundary.
@@ -107,29 +160,80 @@ pub fn launch_rmsnorm_f32(
         return Ok(());
     }
 
-    // Launch config: one block per token, block_dim = hidden_dim rounded
-    // up to a multiple of 32 (warp), capped at 1024 (CUDA max block size).
-    let mut block_dim = hidden_dim.min(1024);
-    block_dim = block_dim.div_ceil(32) * 32;
+    // Launch config matches upstream `rms_norm_mul_f32_cuda` on the
+    // `ncols >= 1024` branch: block_dim.x = 1024, one block per row,
+    // shmem = 32 × sizeof(float) for the warp-partials scratch.
     let cfg = LaunchConfig {
         grid_dim: (n_tokens as u32, 1, 1),
-        block_dim: (block_dim as u32, 1, 1),
-        shared_mem_bytes: 0,
+        block_dim: (1024, 1, 1),
+        shared_mem_bytes: 32 * 4,
     };
 
     let f = rmsnorm_f32_fn(device)?;
     let stream = device.raw().default_stream();
-    let hidden_dim_i32 = hidden_dim as i32;
+
+    // Core band.
+    let ncols: i32 = hidden_dim as i32;
+    let stride_row: i64 = hidden_dim as i64;
+    let stride_channel: i64 = 0;
+    let stride_sample: i64 = 0;
+
+    // Multiply band — weight is [hidden_dim] and broadcasts across
+    // rows/channels/samples, so row/channel/sample strides are 0 and
+    // the row/channel/sample "sizes" (for the fastmodulo reindex) are
+    // all 1. The kernel always evaluates the `mul_ncols` fastmodulo
+    // because `do_multiply=true`, so that one needs real values.
+    let mul_stride_row: i64 = 0;
+    let mul_stride_channel: i64 = 0;
+    let mul_stride_sample: i64 = 0;
+    let mul_ncols_packed = init_fastdiv(hidden_dim as u32);
+    let mul_nrows_packed = init_fastdiv(1);
+    let mul_nchannels_packed = init_fastdiv(1);
+    let mul_nsamples_packed = init_fastdiv(1);
+
+    // Add band — `do_add=false`, so the kernel never reads the add
+    // pointer or touches the add fastmodulo packings. We still have to
+    // fill the arg slots. cudarc's `PushKernelArg::arg` requires a
+    // `DeviceRepr` value, so we pass a cached dummy `CudaSlice<f32>`
+    // (the kernel ignores the pointer under `if constexpr (do_add)`).
+    let null_add = null_f32_slice(device)?;
+    let zero_stride: i64 = 0;
+    let zero_packed = init_fastdiv(1);
+
     let mut launcher = stream.launch_builder(&f);
     launcher
         .arg(x.buf())
-        .arg(weight.buf())
         .arg(y.buf_mut())
-        .arg(&hidden_dim_i32)
-        .arg(&eps);
+        .arg(&ncols)
+        .arg(&stride_row)
+        .arg(&stride_channel)
+        .arg(&stride_sample)
+        .arg(&eps)
+        .arg(weight.buf())
+        .arg(&mul_stride_row)
+        .arg(&mul_stride_channel)
+        .arg(&mul_stride_sample)
+        .arg(&mul_ncols_packed)
+        .arg(&mul_nrows_packed)
+        .arg(&mul_nchannels_packed)
+        .arg(&mul_nsamples_packed)
+        .arg(null_add)
+        .arg(&zero_stride)
+        .arg(&zero_stride)
+        .arg(&zero_stride)
+        .arg(&zero_packed)
+        .arg(&zero_packed)
+        .arg(&zero_packed)
+        .arg(&zero_packed);
 
-    unsafe { launcher.launch(cfg) }
-        .map_err(|e| anyhow!("rmsnorm_f32 launch (n_tokens={} hidden={}): {:?}", n_tokens, hidden_dim, e))?;
+    unsafe { launcher.launch(cfg) }.map_err(|e| {
+        anyhow!(
+            "rms_norm_f32<1024,true,false> launch (n_tokens={} hidden={}): {:?}",
+            n_tokens,
+            hidden_dim,
+            e
+        )
+    })?;
     Ok(())
 }
 
@@ -153,8 +257,8 @@ mod tests {
     }
 
     /// Device-backed end-to-end. Ignored by default — run with:
-    ///   cargo test -p ctox-engine-cuda --features cuda --release -- \
-    ///       --ignored --nocapture rmsnorm
+    ///   cargo test -p ctox-qwen35-27b --features cuda --release -- \
+    ///       --ignored --nocapture rmsnorm_vs_cpu_golden
     #[test]
     #[ignore]
     fn rmsnorm_vs_cpu_golden() {
