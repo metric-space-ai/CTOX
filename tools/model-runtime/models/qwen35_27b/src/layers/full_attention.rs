@@ -553,12 +553,14 @@ fn reshape_3d(src: CudaTensor<bf16>, d0: usize, d1: usize, d2: usize) -> Result<
 }
 
 /// Extract head `h` from a `[n_tokens, n_heads, head_dim]` bf16
-/// tensor into a contiguous `[n_tokens, head_dim]` tensor, one
-/// `memcpy_dtod` per token. O(n_tokens) device dispatches.
+/// tensor into a contiguous `[n_tokens, head_dim]` tensor.
 ///
-/// TODO: Collapse into a single strided gather kernel once it becomes
-///       a hotspot. Per-token memcpy_dtod is strictly a correctness-
-///       first path.
+/// Now a single-launch strided gather kernel
+/// (`launch_head_gather_bf16`). Earlier revisions walked every
+/// token with a dedicated `memcpy_dtod` — 24 heads × ~1024 tokens
+/// × 4 gather/scatter calls per head was one of the two dominant
+/// sources of launch-count overhead in the audit. One kernel
+/// launch per call now, regardless of `n_tokens`.
 fn gather_head_from_packed(
     device: &Arc<DeviceContext>,
     packed: &CudaTensor<bf16>,
@@ -569,30 +571,15 @@ fn gather_head_from_packed(
 ) -> Result<CudaTensor<bf16>> {
     debug_assert_eq!(packed.shape(), [n_tokens, n_heads, head_dim]);
     let mut dst = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, head_dim])?;
-    let stream = device.raw().default_stream();
-    let stride = n_heads * head_dim;
-    for t in 0..n_tokens {
-        let src_start = t * stride + head * head_dim;
-        let src_end = src_start + head_dim;
-        let dst_start = t * head_dim;
-        let dst_end = dst_start + head_dim;
-        let src_view = packed.buf().slice(src_start..src_end);
-        let mut dst_view = dst.buf_mut().slice_mut(dst_start..dst_end);
-        stream.memcpy_dtod(&src_view, &mut dst_view).map_err(|e| {
-            anyhow!(
-                "gather_head_from_packed memcpy_dtod (t={} head={}): {:?}",
-                t,
-                head,
-                e
-            )
-        })?;
-    }
+    kernels::launch_head_gather_bf16(
+        device, packed, &mut dst, n_tokens, n_heads, head_dim, head,
+    )?;
     Ok(dst)
 }
 
 /// Scatter a `[n_tokens, head_dim]` tensor into slot `head` of a
 /// `[n_tokens, n_heads, head_dim]` destination. Mirror of
-/// `gather_head_from_packed`.
+/// [`gather_head_from_packed`].
 fn scatter_head_into_packed(
     device: &Arc<DeviceContext>,
     head_tensor: &CudaTensor<bf16>,
@@ -604,30 +591,17 @@ fn scatter_head_into_packed(
 ) -> Result<()> {
     debug_assert_eq!(head_tensor.shape(), [n_tokens, head_dim]);
     debug_assert_eq!(packed.shape(), [n_tokens, n_heads * head_dim]);
-    let stream = device.raw().default_stream();
-    let stride = n_heads * head_dim;
-    for t in 0..n_tokens {
-        let dst_start = t * stride + head * head_dim;
-        let dst_end = dst_start + head_dim;
-        let src_start = t * head_dim;
-        let src_end = src_start + head_dim;
-        let src_view = head_tensor.buf().slice(src_start..src_end);
-        let mut dst_view = packed.buf_mut().slice_mut(dst_start..dst_end);
-        stream.memcpy_dtod(&src_view, &mut dst_view).map_err(|e| {
-            anyhow!(
-                "scatter_head_into_packed memcpy_dtod (t={} head={}): {:?}",
-                t,
-                head,
-                e
-            )
-        })?;
-    }
-    Ok(())
+    kernels::launch_head_scatter_bf16(
+        device, head_tensor, packed, n_tokens, n_heads, head_dim, head,
+    )
 }
 
-/// Pull a contiguous `[kv_len, head_dim]` slice out of a KV slab. Slab
-/// layout is `[max_ctx, n_kv_heads, head_dim]` row-major, so per-token
-/// elements for `head = h` live at offset `t*stride + h*head_dim`.
+/// Pull a contiguous `[kv_len, head_dim]` slice out of a KV slab.
+///
+/// Slab layout is `[max_ctx, n_kv_heads, head_dim]` row-major;
+/// we emit only the first `kv_len` rows. Single-launch strided
+/// gather — replaces the per-token `memcpy_dtod` loop for the
+/// same reason as [`gather_head_from_packed`].
 fn gather_head_from_kv_slab(
     device: &Arc<DeviceContext>,
     slab: &cudarc::driver::CudaSlice<bf16>,
@@ -637,24 +611,9 @@ fn gather_head_from_kv_slab(
     head: usize,
 ) -> Result<CudaTensor<bf16>> {
     let mut dst = CudaTensor::<bf16>::zeros(device.clone(), vec![kv_len, head_dim])?;
-    let stream = device.raw().default_stream();
-    let stride = n_kv_heads * head_dim;
-    for t in 0..kv_len {
-        let src_start = t * stride + head * head_dim;
-        let src_end = src_start + head_dim;
-        let dst_start = t * head_dim;
-        let dst_end = dst_start + head_dim;
-        let src_view = slab.slice(src_start..src_end);
-        let mut dst_view = dst.buf_mut().slice_mut(dst_start..dst_end);
-        stream.memcpy_dtod(&src_view, &mut dst_view).map_err(|e| {
-            anyhow!(
-                "gather_head_from_kv_slab memcpy_dtod (t={} head={}): {:?}",
-                t,
-                head,
-                e
-            )
-        })?;
-    }
+    kernels::launch_head_gather_slab_bf16(
+        device, slab, &mut dst, kv_len, n_kv_heads, head_dim, head,
+    )?;
     Ok(dst)
 }
 
