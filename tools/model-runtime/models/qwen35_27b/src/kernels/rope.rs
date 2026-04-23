@@ -89,9 +89,12 @@ unsafe impl cudarc::driver::DeviceRepr for MRopeSections {}
 ///   * `positions`: `[4, n_tokens]`                 i32
 ///
 /// `rope_dim` is the number of leading dims per head to rotate (must be
-/// even and ≤ head_dim). `theta_base` is the RoPE base (10000.0 for
-/// Qwen3.5). 4-axis: section s of the rotated range uses
-/// `positions[s, token]`.
+/// even and ≤ head_dim). `theta_base` is the RoPE base (10_000_000 for
+/// Qwen3.5-27B). `sections` is the MRoPE axis partition in pair-units —
+/// shipping 27B uses `[11, 11, 10, 0]` (sum = rope_dim / 2). Each
+/// section counts 2-element rotation pairs. When `sections[3] == 0`
+/// the 4th position axis is disabled, matching the reference's
+/// plain-text MRoPE (no vision/audio modality).
 ///
 /// Does not synchronize the stream.
 pub fn launch_rope_mrope_bf16(
@@ -100,6 +103,7 @@ pub fn launch_rope_mrope_bf16(
     positions: &CudaTensor<i32>,
     theta_base: f32,
     rope_dim: i32,
+    sections: [i32; 4],
 ) -> Result<()> {
     if qk.shape().len() != 3 {
         return Err(anyhow!(
@@ -176,13 +180,22 @@ pub fn launch_rope_mrope_bf16(
     let n_dims = rope_dim; // we rotate the full leading rope_dim of ne00
     let theta_scale = theta_base.powf(-2.0 / n_dims as f32);
 
-    // mrope_sections: split rope_dim/2 pairs evenly across 4 axes so
-    // pair index p maps to axis `p / (rope_dim/8)`. Matches the
-    // self-authored kernel's sectioning AND the CPU reference in tests.
-    let section_size = rope_dim / 8;
-    let sections = MRopeSections {
-        v: [section_size, section_size, section_size, section_size],
-    };
+    // mrope_sections: axis partition in pair-units. Shipping 27B uses
+    // `[11, 11, 10, 0]` (from `qwen35.rope.dimension_sections`). The
+    // previous kernel wrapper hard-coded `[rope_dim/8] * 4`, which only
+    // coincidentally matches when `rope_dim == 32 * sections[0]` — not
+    // the case on 27B. Sum of the four section widths must equal
+    // `rope_dim / 2` (each unit is one 2-element rotation pair).
+    let sum_sections: i32 = sections.iter().sum();
+    if sum_sections * 2 != rope_dim {
+        return Err(anyhow!(
+            "rope_mrope: sections {:?} sum {} * 2 != rope_dim {}",
+            sections,
+            sum_sections,
+            rope_dim
+        ));
+    }
+    let sections = MRopeSections { v: sections };
 
     // No YaRN. corr_dims only consulted when ext_factor != 0.
     let corr_dims = RopeCorrDims { v: [0.0, 0.0] };
@@ -362,7 +375,12 @@ mod tests {
         let pos = CudaTensor::<i32>::from_host(dev.clone(), vec![4, n_tokens], &positions)
             .expect("upload positions");
 
-        launch_rope_mrope_bf16(&dev, &mut qk, &pos, theta_base, rope_dim).expect("launch");
+        // Test uses rope_dim=128 with axis-equal sections — 4 * 16 = 64
+        // pairs total, matching the CPU reference's
+        // `axis = p / (rope_dim/8)` sectioning.
+        let sections = [rope_dim / 8, rope_dim / 8, rope_dim / 8, rope_dim / 8];
+        launch_rope_mrope_bf16(&dev, &mut qk, &pos, theta_base, rope_dim, sections)
+            .expect("launch");
         dev.synchronize().expect("sync");
 
         let y_gpu_bf16: Vec<bf16> = qk.to_host().expect("download qk");

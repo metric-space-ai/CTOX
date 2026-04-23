@@ -354,8 +354,27 @@ impl Qwen35FullAttention {
         let mut k3 = reshape_3d(k_flat, n_tokens, cfg.n_kv_heads, cfg.head_dim)?;
 
         // ── 5. RoPE in place (MRoPE — 4-axis positions).
-        kernels::launch_rope_mrope_bf16(device, &mut q3, positions, cfg.rope_theta, cfg.head_dim as i32)?;
-        kernels::launch_rope_mrope_bf16(device, &mut k3, positions, cfg.rope_theta, cfg.head_dim as i32)?;
+        // MRoPE rotates the first `cfg.rope_dim` dims per head (64 on
+        // 27B out of head_dim=256). Using head_dim here rotates the
+        // whole head and garbles every position-dependent attention
+        // score. Sections come from the GGUF's
+        // `qwen35.rope.dimension_sections` (`[11,11,10,0]` on 27B).
+        kernels::launch_rope_mrope_bf16(
+            device,
+            &mut q3,
+            positions,
+            cfg.rope_theta,
+            cfg.rope_dim as i32,
+            cfg.rope_sections,
+        )?;
+        kernels::launch_rope_mrope_bf16(
+            device,
+            &mut k3,
+            positions,
+            cfg.rope_theta,
+            cfg.rope_dim as i32,
+            cfg.rope_sections,
+        )?;
 
         // ── 6. Write K/V into the KV cache. Order matters: append both
         //    at the current offset, then advance.

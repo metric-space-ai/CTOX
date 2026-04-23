@@ -317,6 +317,16 @@ impl<'a> Cursor<'a> {
         Ok(u32::from_le_bytes(b))
     }
 
+    fn read_i32(&mut self) -> Result<i32> {
+        if self.pos + 4 > self.buf.len() {
+            return Err(anyhow!("read_i32 past end"));
+        }
+        let mut b = [0u8; 4];
+        b.copy_from_slice(&self.buf[self.pos..self.pos + 4]);
+        self.pos += 4;
+        Ok(i32::from_le_bytes(b))
+    }
+
     fn read_u64(&mut self) -> Result<u64> {
         if self.pos + 8 > self.buf.len() {
             return Err(anyhow!("read_u64 past end"));
@@ -1315,6 +1325,15 @@ pub struct Qwen35Metadata {
     /// (`SSM_N_GROUP` / `num_k_heads` in the dflash reference). 16 on
     /// 27B. Defaults to 16 when absent.
     pub ssm_group_count: usize,
+    /// `qwen35.rope.dimension_count` — number of leading per-head dims
+    /// that RoPE rotates (64 on 27B, out of `head_dim=256`). Defaults
+    /// to 64 when absent.
+    pub rope_dimension_count: usize,
+    /// `qwen35.rope.dimension_sections` — MRoPE section widths over the
+    /// 4 position axes. Shipping 27B: `[11, 11, 10, 0]`. Sum equals
+    /// `rope_dimension_count / 2` (each unit counts a 2-element
+    /// rotation pair). Defaults to `[11, 11, 10, 0]` when absent.
+    pub rope_dimension_sections: [i32; 4],
 }
 
 /// Read-only GGUF header walker: opens the file, parses header +
@@ -1378,6 +1397,8 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
     let mut value_length: Option<usize> = None;
     let mut ssm_time_step_rank: Option<usize> = None;
     let mut ssm_group_count: Option<usize> = None;
+    let mut rope_dimension_count: Option<usize> = None;
+    let mut rope_dimension_sections: Option<[i32; 4]> = None;
 
     for _ in 0..metadata_kv_count {
         let key = cur.read_string()?;
@@ -1420,6 +1441,55 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
             "qwen35.rope.freq_base" => {
                 rope_theta = Some(expect_f32_key(&mut cur, &key, ty)?);
             }
+            // `qwen35.rope.dimension_count` — stored as u32. Number of
+            // leading per-head dims that get rotated. 64 on 27B out of
+            // head_dim=256; the remaining 192 dims are pass-through.
+            // Parent of a correctness bug: hard-coding `rope_dim =
+            // head_dim` rotates all 256 dims and desynchronizes Q/K
+            // phases vs. the reference, garbling position-dependent
+            // attention scores.
+            "qwen35.rope.dimension_count" => {
+                rope_dimension_count = Some(expect_u32_key(&mut cur, &key, ty)? as usize);
+            }
+            // `qwen35.rope.dimension_sections` — stored as an array of
+            // four u32s (one per MRoPE position axis). Sum equals
+            // `rope_dimension_count / 2`; each unit is a 2-element
+            // rotation pair. Shipping 27B: `[11, 11, 10, 0]` — axis 3
+            // is zero on plain-text. The vendored rope.cu kernel reads
+            // this as `mrope_sections` (i32[4]).
+            "qwen35.rope.dimension_sections" => match ty {
+                GgufValueType::Array => {
+                    let elem_ty = GgufValueType::from_u32(cur.read_u32()?)?;
+                    let n = cur.read_u64()? as usize;
+                    if n != 4 {
+                        return Err(anyhow!(
+                            "qwen35.rope.dimension_sections: expected 4 elements, got {}",
+                            n
+                        ));
+                    }
+                    let mut sections = [0i32; 4];
+                    for slot in sections.iter_mut() {
+                        *slot = match elem_ty {
+                            GgufValueType::U32 => cur.read_u32()? as i32,
+                            GgufValueType::I32 => cur.read_i32()?,
+                            other => {
+                                return Err(anyhow!(
+                                    "qwen35.rope.dimension_sections elem type must be u32/i32, got {:?}",
+                                    other
+                                ));
+                            }
+                        };
+                    }
+                    rope_dimension_sections = Some(sections);
+                }
+                other => {
+                    cur.skip_value(other)?;
+                    return Err(anyhow!(
+                        "qwen35.rope.dimension_sections must be Array, got {:?}",
+                        other
+                    ));
+                }
+            },
             "qwen35.attention.layer_norm_rms_epsilon" => {
                 rms_eps = Some(expect_f32_key(&mut cur, &key, ty)?);
             }
@@ -1452,6 +1522,10 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
     // these keys is assumed to match the 27B layout.
     let ssm_time_step_rank = ssm_time_step_rank.unwrap_or(48);
     let ssm_group_count = ssm_group_count.unwrap_or(16);
+    // Shipping 27B: `rope.dimension_count=64`,
+    // `rope.dimension_sections=[11, 11, 10, 0]`.
+    let rope_dimension_count = rope_dimension_count.unwrap_or(64);
+    let rope_dimension_sections = rope_dimension_sections.unwrap_or([11, 11, 10, 0]);
 
     Ok(Qwen35Metadata {
         block_count,
@@ -1466,6 +1540,8 @@ pub fn parse_qwen35_metadata<P: AsRef<Path>>(path: P) -> Result<Qwen35Metadata> 
         value_length,
         ssm_time_step_rank,
         ssm_group_count,
+        rope_dimension_count,
+        rope_dimension_sections,
     })
 }
 

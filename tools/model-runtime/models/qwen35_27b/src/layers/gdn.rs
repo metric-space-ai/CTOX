@@ -1156,6 +1156,8 @@ mod tests {
             gdn_num_k_heads: 2,
             intermediate_dim: 17_408,
             rope_theta: 1_000_000.0,
+            rope_dim: 64,
+            rope_sections: [11, 11, 10, 0],
             rms_eps: 1e-6,
             max_position_embeddings: 2048,
         };

@@ -62,6 +62,20 @@ pub struct Qwen35Config {
     pub intermediate_dim: usize,
     /// RoPE base. Shipping 27B GGUF: 10_000_000.
     pub rope_theta: f32,
+    /// Number of leading dims per head that RoPE rotates. Shipping 27B
+    /// GGUF: 64 (from `qwen35.rope.dimension_count`). The remaining
+    /// `head_dim - rope_dim` dims are passed through unrotated. Our
+    /// earlier port hard-coded `rope_dim = head_dim = 256`, rotating
+    /// the entire head — that contradicts the reference's
+    /// `n_rot = 64` and produced subtly wrong Q/K positionally, which
+    /// translates to degenerate next-token argmax on real weights.
+    pub rope_dim: usize,
+    /// MRoPE section widths over the 4 position axes. Shipping 27B
+    /// GGUF: `[11, 11, 10, 0]` (from `qwen35.rope.dimension_sections`).
+    /// Sum equals `rope_dim / 2` — each section counts 2-element
+    /// rotation pairs. Axis 3 is zero on plain-text Qwen3.5, matching
+    /// the reference's no-vision/no-audio pass.
+    pub rope_sections: [i32; 4],
     /// RMSNorm epsilon.
     pub rms_eps: f32,
     /// Upper bound on sequence length / KV cache ring size.
@@ -87,6 +101,8 @@ impl Qwen35Config {
         gdn_num_k_heads: 16,
         intermediate_dim: 17_408,
         rope_theta: 10_000_000.0,
+        rope_dim: 64,
+        rope_sections: [11, 11, 10, 0],
         rms_eps: 1e-6,
         max_position_embeddings: 131_072,
     };
@@ -123,6 +139,8 @@ impl Qwen35Config {
             gdn_num_k_heads: m.ssm_group_count,
             intermediate_dim: m.feed_forward_length,
             rope_theta: m.rope_theta,
+            rope_dim: m.rope_dimension_count,
+            rope_sections: m.rope_dimension_sections,
             rms_eps: m.rms_eps,
             max_position_embeddings: m.context_length,
         }
