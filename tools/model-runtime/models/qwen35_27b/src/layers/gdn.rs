@@ -387,6 +387,30 @@ impl Qwen35GDN {
         }
 
         // ------------------------------------------------------------
+        // 0b. dbg
+        // ------------------------------------------------------------
+        if std::env::var("CTOX_DEBUG_GDN_L2").is_ok() && self.layer_idx == 0 {
+            let residual_h = hidden.to_host().unwrap_or_default();
+            if let Some(last) = residual_h.chunks(hidden_dim).last() {
+                let mut amax_bf16 = 0.0f32;
+                let mut amax_idx = 0usize;
+                let mut l2 = 0.0f64;
+                for (i, v) in last.iter().enumerate() {
+                    let vf = v.to_f32();
+                    l2 += (vf as f64).powi(2);
+                    if vf.abs() > amax_bf16 {
+                        amax_bf16 = vf.abs();
+                        amax_idx = i;
+                    }
+                }
+                eprintln!(
+                    "GDN_DBG L0 RESIDUAL-IN (bf16 hidden) last_row_l2={:.3e} amax={:.3e} amax_idx={}",
+                    l2.sqrt(), amax_bf16, amax_idx
+                );
+            }
+        }
+
+        // ------------------------------------------------------------
         // 1. Save residual, then cast bf16 -> f32 for rmsnorm.
         //    The residual is bf16 and stays bf16 — we add back after
         //    the output projection.
@@ -415,6 +439,45 @@ impl Qwen35GDN {
 let mut qkv_f32 =
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, qkv_proj_dim])?;
         self.w_qkvg.matmul_f32(device, &norm_f32, &mut qkv_f32)?;
+        if std::env::var("CTOX_DEBUG_GDN_L2").is_ok() && self.layer_idx == 0 {
+            let qkv_h = qkv_f32.to_host().unwrap_or_default();
+            if let Some(last) = qkv_h.chunks(qkv_proj_dim).last() {
+                let mut amax = 0.0f32;
+                let mut amax_idx = 0usize;
+                let mut l2 = 0.0f64;
+                for (i, &v) in last.iter().enumerate() {
+                    l2 += (v as f64).powi(2);
+                    if v.abs() > amax {
+                        amax = v.abs();
+                        amax_idx = i;
+                    }
+                }
+                let region = if amax_idx < q_width { "Q" }
+                    else if amax_idx < q_width + k_width { "K" }
+                    else { "V" };
+                eprintln!(
+                    "GDN_DBG L0 qkv_f32 (post wqkvg matmul) last_row_l2={:.3e} amax={:.3e} amax_idx={} region={}",
+                    l2.sqrt(), amax, amax_idx, region
+                );
+            }
+            let norm_h = norm_f32.to_host().unwrap_or_default();
+            if let Some(last) = norm_h.chunks(hidden_dim).last() {
+                let mut amax = 0.0f32;
+                let mut amax_idx = 0usize;
+                let mut l2 = 0.0f64;
+                for (i, &v) in last.iter().enumerate() {
+                    l2 += (v as f64).powi(2);
+                    if v.abs() > amax {
+                        amax = v.abs();
+                        amax_idx = i;
+                    }
+                }
+                eprintln!(
+                    "GDN_DBG L0 norm_f32 (after rmsnorm, input to wqkvg) last_row_l2={:.3e} amax={:.3e} amax_idx={}",
+                    l2.sqrt(), amax, amax_idx
+                );
+            }
+        }
 
         // ------------------------------------------------------------
         // 3. Causal 1-D depthwise conv + fused SiLU on the fused qkv
