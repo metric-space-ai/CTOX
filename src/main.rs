@@ -114,6 +114,7 @@ RUN / EXEC
 GOVERNANCE / MISSION
   ctox governance <subcmd>       governance decisions and audits
   ctox channel <subcmd>          communication channels (email, jami, webrtc)
+  ctox queue <subcmd>            inspect, repair, and manage the service queue
   ctox plan <subcmd>             mission plans
   ctox schedule <subcmd>         recurring / deferred work
   ctox strategy <subcmd>         canonical vision / mission / strategic directives

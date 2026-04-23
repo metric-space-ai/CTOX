@@ -10,6 +10,7 @@ use sha2::Sha256;
 use std::path::Path;
 
 use crate::channels;
+use crate::plan;
 use crate::tickets;
 
 const DEFAULT_LIST_LIMIT: usize = 20;
@@ -53,6 +54,13 @@ struct QueueSpillCandidateView {
     candidate_score: i64,
     recommendation: String,
     reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct QueueRepairView {
+    stale_plan_routes_repaired: usize,
+    open_queue_count: usize,
+    open_queue_preview: Vec<channels::QueueTaskView>,
 }
 
 pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
@@ -273,10 +281,30 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             )?;
             print_json(&json!({"ok": true, "bridge": bridge}))
         }
+        "repair" => {
+            let repaired = repair_queue_state(root)?;
+            print_json(&json!({"ok": true, "repair": repaired}))
+        }
         _ => anyhow::bail!(
-            "usage:\n  ctox queue add --title <label> --prompt <text> [--thread-key <key>] [--workspace-root <path>] [--skill <name>] [--priority <urgent|high|normal|low>] [--parent-message-key <key>]\n  ctox queue list [--status <pending|leased|blocked|failed|handled|cancelled>]... [--limit <n>]\n  ctox queue show --message-key <key>\n  ctox queue edit --message-key <key> [--title <label>] [--prompt <text>] [--thread-key <key>] [--workspace-root <path>] [--clear-workspace-root] [--skill <name>] [--clear-skill] [--priority <urgent|high|normal|low>]\n  ctox queue reprioritize --message-key <key> --priority <urgent|high|normal|low>\n  ctox queue block --message-key <key> --reason <text>\n  ctox queue release --message-key <key> [--priority <urgent|high|normal|low>] [--clear-note] [--note <text>]\n  ctox queue complete --message-key <key> [--note <text>]\n  ctox queue fail --message-key <key> --reason <text>\n  ctox queue cancel --message-key <key> [--reason <text>]\n  ctox queue spill --message-key <key> [--ticket-system <name>] [--reason <text>] [--skill <name>] [--publish]\n  ctox queue spill-candidates [--limit <n>]\n  ctox queue spills [--state <spilled|restored>] [--limit <n>]\n  ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]"
+            "usage:\n  ctox queue add --title <label> --prompt <text> [--thread-key <key>] [--workspace-root <path>] [--skill <name>] [--priority <urgent|high|normal|low>] [--parent-message-key <key>]\n  ctox queue list [--status <pending|leased|blocked|failed|handled|cancelled>]... [--limit <n>]\n  ctox queue show --message-key <key>\n  ctox queue edit --message-key <key> [--title <label>] [--prompt <text>] [--thread-key <key>] [--workspace-root <path>] [--clear-workspace-root] [--skill <name>] [--clear-skill] [--priority <urgent|high|normal|low>]\n  ctox queue reprioritize --message-key <key> --priority <urgent|high|normal|low>\n  ctox queue block --message-key <key> --reason <text>\n  ctox queue release --message-key <key> [--priority <urgent|high|normal|low>] [--clear-note] [--note <text>]\n  ctox queue complete --message-key <key> [--note <text>]\n  ctox queue fail --message-key <key> --reason <text>\n  ctox queue cancel --message-key <key> [--reason <text>]\n  ctox queue spill --message-key <key> [--ticket-system <name>] [--reason <text>] [--skill <name>] [--publish]\n  ctox queue spill-candidates [--limit <n>]\n  ctox queue spills [--state <spilled|restored>] [--limit <n>]\n  ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]\n  ctox queue repair"
         ),
     }
+}
+
+fn repair_queue_state(root: &Path) -> Result<QueueRepairView> {
+    let stale_plan_routes_repaired = plan::repair_stale_step_routing_state(root)?;
+    let open_statuses = vec![
+        "pending".to_string(),
+        "leased".to_string(),
+        "blocked".to_string(),
+    ];
+    let open_queue_preview = channels::list_queue_tasks(root, &open_statuses, 20)?;
+    let open_queue_count = open_queue_preview.len();
+    Ok(QueueRepairView {
+        stale_plan_routes_repaired,
+        open_queue_count,
+        open_queue_preview,
+    })
 }
 
 fn spill_queue_task_to_ticket(
@@ -1123,6 +1151,45 @@ mod tests {
                 .map(|item| item.route_status.as_str()),
             Some("blocked")
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_repair_releases_historical_plan_routes() -> Result<()> {
+        let root = temp_root("queue-repair");
+        std::fs::create_dir_all(&root)?;
+
+        let created = plan::ingest_goal(
+            &root,
+            plan::PlanIngestRequest {
+                title: "Repair stale queue route".to_string(),
+                prompt: "- inspect runtime\n- verify route".to_string(),
+                thread_key: Some("kunstmen-supervisor".to_string()),
+                skill: Some("follow-up-orchestrator".to_string()),
+                auto_advance: true,
+                emit_now: true,
+            },
+        )?;
+        let emitted = format!(
+            "plan:system::{}::{}",
+            created.goal.goal_id, created.steps[0].step_id
+        );
+        let conn = Connection::open(root.join("runtime/ctox.sqlite3"))?;
+        conn.execute(
+            "UPDATE communication_routing_state SET route_status = 'leased', lease_owner = 'test-reviewer', leased_at = ?2 WHERE message_key = ?1",
+            params![emitted, chrono::Utc::now().to_rfc3339()],
+        )?;
+        conn.execute(
+            "UPDATE planned_steps SET status = 'completed' WHERE step_id = ?1",
+            params![created.steps[0].step_id.clone()],
+        )?;
+        drop(conn);
+
+        let repaired = repair_queue_state(&root)?;
+        assert_eq!(repaired.stale_plan_routes_repaired, 1);
+        assert!(repaired.open_queue_preview.is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
