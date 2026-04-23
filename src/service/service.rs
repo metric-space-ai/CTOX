@@ -3474,19 +3474,24 @@ fn mission_waits_for_external_approval(mission: &lcm::MissionStateRecord) -> boo
     let blocker = mission.blocker.to_ascii_lowercase();
     let next_slice = mission.next_slice.to_ascii_lowercase();
     let mission_text = mission.mission.to_ascii_lowercase();
+    let done_gate = mission.done_gate.to_ascii_lowercase();
+    let combined = format!("{blocker}\n{next_slice}\n{mission_text}\n{done_gate}");
     let waits_for_external_input = [
         "approval",
         "blocked_on_user",
         "owner approval",
         "access-grant",
         "access grant",
+        "grant confirmation",
+        "approval visibility",
+        "approval signal",
         "waiting for explicit inbound",
         "waiting for explicit owner",
         "reply in tui",
         "missing input",
     ]
     .iter()
-    .any(|needle| blocker.contains(needle) || mission_text.contains(needle));
+    .any(|needle| combined.contains(needle));
     let monitor_only = [
         "monitor inbound",
         "non-queue channels",
@@ -3494,9 +3499,16 @@ fn mission_waits_for_external_approval(mission: &lcm::MissionStateRecord) -> boo
         "email",
         "approval evidence",
         "wait for vercel approval",
+        "wait for approval visibility",
+        "approval appears",
+        "retry deploy",
+        "retry production deploy",
+        "live html verification",
+        "live verification",
+        "do not retry production deploy",
     ]
     .iter()
-    .any(|needle| next_slice.contains(needle) || mission_text.contains(needle));
+    .any(|needle| combined.contains(needle));
     waits_for_external_input && monitor_only
 }
 
@@ -7422,6 +7434,62 @@ mod tests {
         assert!(prompt.contains("Mission continuity watchdog: the mission was idle for 45s."));
         assert!(prompt.contains("Required actions:"));
         assert!(prompt.len() < 900, "prompt too large: {}", prompt.len());
+    }
+
+    #[test]
+    fn mission_waits_for_external_approval_detects_visibility_gated_deploy_retry() {
+        let mission = lcm::MissionStateRecord {
+            conversation_id: 1,
+            mission: "Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker:
+                "visible inbound Vercel approval or access-grant confirmation for kunstmen-com / kunstmen.com is still missing."
+                    .to_string(),
+            next_slice:
+                "wait for approval visibility, then retry deploy and live HTML verification."
+                    .to_string(),
+            done_gate:
+                "mission is only done after approval visibility plus successful deploy and live verification."
+                    .to_string(),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-1".to_string(),
+            last_synced_at: "2026-04-24T00:00:00Z".to_string(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+        };
+
+        assert!(mission_waits_for_external_approval(&mission));
+    }
+
+    #[test]
+    fn mission_waits_for_external_approval_keeps_real_product_work_runnable() {
+        let mission = lcm::MissionStateRecord {
+            conversation_id: 1639653903753735835,
+            mission: "Rebuild public front door into real platform portal".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker: "none".to_string(),
+            next_slice:
+                "Continue platform-forward delivery from roster -> profile -> interview -> hire with quality hardening."
+                    .to_string(),
+            done_gate:
+                "Mission runtime stays aligned with active strategic directives and live buyer gates remain healthy."
+                    .to_string(),
+            closure_confidence: "high".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-2".to_string(),
+            last_synced_at: "2026-04-24T00:00:00Z".to_string(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+        };
+
+        assert!(!mission_waits_for_external_approval(&mission));
     }
 
     #[test]
