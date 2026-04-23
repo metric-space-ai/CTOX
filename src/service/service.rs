@@ -4040,6 +4040,38 @@ After direction is canonical, the deferred execution target is:\n{}",
     )
 }
 
+fn cancel_runnable_thread_tasks_for_strategy(
+    root: &Path,
+    thread_key: &str,
+    except_message_keys: &[String],
+) -> Result<usize> {
+    let tasks =
+        channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 128)?;
+    let note = "Cancelled because canonical Vision and Mission must be established in SQLite before strategic work on this thread can continue.";
+    let mut cancelled = 0usize;
+    for task in tasks.into_iter().filter(|task| {
+        task.thread_key == thread_key
+            && !except_message_keys
+                .iter()
+                .any(|key| key == &task.message_key)
+    }) {
+        channels::update_queue_task(
+            root,
+            channels::QueueTaskUpdateRequest {
+                message_key: task.message_key.clone(),
+                route_status: Some("cancelled".to_string()),
+                status_note: Some(note.to_string()),
+                ..Default::default()
+            },
+        )?;
+        if let Some(work_id) = task.ticket_self_work_id.as_deref() {
+            close_ticket_self_work_item(root, work_id, note);
+        }
+        cancelled += 1;
+    }
+    Ok(cancelled)
+}
+
 fn maybe_redirect_owner_visible_work_to_strategy_setup(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
@@ -4067,17 +4099,10 @@ fn maybe_redirect_owner_visible_work_to_strategy_setup(
     if strategy.active_vision.is_some() && strategy.active_mission.is_some() {
         return Ok(false);
     }
-    let created = queue_strategy_direction_pass(
-        root,
-        &thread_key,
-        job.workspace_root.as_deref(),
-        &job.prompt,
-        &job.goal,
-        &job.preview,
-        job.suggested_skill.as_deref(),
-    )?;
+    let cancelled_thread_tasks =
+        cancel_runnable_thread_tasks_for_strategy(root, &thread_key, &job.leased_message_keys)?;
     if !job.leased_message_keys.is_empty() {
-        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "blocked");
+        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
     }
     if !job.leased_ticket_event_keys.is_empty() {
         let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
@@ -4089,6 +4114,15 @@ fn maybe_redirect_owner_visible_work_to_strategy_setup(
             "Closed without execution because canonical Vision and Mission must be established in SQLite before strategic work continues.",
         );
     }
+    let created = queue_strategy_direction_pass(
+        root,
+        &thread_key,
+        job.workspace_root.as_deref(),
+        &job.prompt,
+        &job.goal,
+        &job.preview,
+        job.suggested_skill.as_deref(),
+    )?;
     let mut next_prompt = None;
     {
         let mut shared = lock_shared_state(state);
@@ -4107,8 +4141,8 @@ fn maybe_redirect_owner_visible_work_to_strategy_setup(
         push_event_locked(
             &mut shared,
             format!(
-                "Rerouted strategic work to canonical direction setup: {}",
-                created.title
+                "Rerouted strategic work to canonical direction setup: {} (cancelled {} competing runnable task(s) on the thread)",
+                created.title, cancelled_thread_tasks
             ),
         );
         if runtime_blocker_backoff_remaining_secs(&shared).is_none() {
@@ -8264,6 +8298,89 @@ mod tests {
         assert_eq!(
             items[0].suggested_skill.as_deref(),
             Some("plan-orchestrator")
+        );
+    }
+
+    #[test]
+    fn missing_strategy_reroutes_owner_visible_work_into_strategic_direction_pass() {
+        let root = temp_root("ctox-strategy-reroute");
+        let queue_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Reset kunstmen.com so it behaves like a platform.".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("follow-up-orchestrator".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed active queue task");
+        let stale_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Repair Stripe runtime and rerun Kunstmen live gates".to_string(),
+                prompt: "Legacy Stripe recheck that should be superseded by strategy setup."
+                    .to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "high".to_string(),
+                suggested_skill: Some("service-deployment".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed stale competing queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.busy = true;
+            shared.current_goal_preview = Some("Kunstmen platform homepage reset".to_string());
+            shared.active_source_label = Some("queue".to_string());
+            track_leased_keys_locked(
+                &mut shared,
+                std::slice::from_ref(&queue_task.message_key),
+                &[],
+            );
+        }
+        let job = QueuedPrompt {
+            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
+                .to_string(),
+            goal: "Kunstmen platform homepage reset".to_string(),
+            preview: "Kunstmen platform homepage reset".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: vec![queue_task.message_key.clone()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
+            .expect("strategy reroute should succeed");
+        assert!(redirected);
+
+        let stale = channels::load_queue_task(&root, &stale_task.message_key)
+            .expect("failed to reload stale queue task")
+            .expect("missing stale queue task");
+        assert_eq!(stale.route_status, "cancelled");
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Strategic direction setup");
+
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, STRATEGIC_DIRECTION_KIND);
+        assert_eq!(
+            items[0].suggested_skill.as_deref(),
+            Some("follow-up-orchestrator")
         );
     }
 

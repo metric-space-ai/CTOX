@@ -100,6 +100,16 @@ impl ReviewVerdict {
             Self::Unavailable => "unavailable",
         }
     }
+
+    pub fn as_report_label(&self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Fail => "FAIL",
+            Self::Partial => "PARTIAL",
+            Self::Skipped => "SKIPPED",
+            Self::Unavailable => "UNAVAILABLE",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +148,48 @@ impl ReviewOutcome {
 
     pub fn requires_follow_up(&self) -> bool {
         self.required && matches!(self.verdict, ReviewVerdict::Fail)
+    }
+
+    pub fn canonical_report(&self) -> String {
+        if !self.report.trim().is_empty() {
+            return self.report.trim().to_string();
+        }
+
+        let mut rendered = Vec::new();
+        rendered.push(format!("VERDICT: {}", self.verdict.as_report_label()));
+        rendered.push(format!("MISSION_STATE: {}", self.mission_state.trim()));
+        rendered.push(format!("SUMMARY: {}", self.summary.trim()));
+        append_report_section(&mut rendered, "FAILED_GATES", &self.failed_gates);
+        append_report_section(&mut rendered, "FINDINGS", &self.semantic_findings);
+        append_report_section(&mut rendered, "OPEN_ITEMS", &self.open_items);
+        append_report_section(&mut rendered, "EVIDENCE", &self.evidence);
+        rendered.push("HANDOFF:".to_string());
+        match self.handoff.as_deref() {
+            Some(handoff) if !handoff.trim().is_empty() => {
+                for line in handoff.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        rendered.push(format!("- {trimmed}"));
+                    }
+                }
+            }
+            _ => rendered.push("- none".to_string()),
+        }
+        rendered.join("\n")
+    }
+}
+
+fn append_report_section(rendered: &mut Vec<String>, header: &str, items: &[String]) {
+    rendered.push(format!("{header}:"));
+    if items.is_empty() {
+        rendered.push("- none".to_string());
+        return;
+    }
+    for item in items {
+        let trimmed = item.trim();
+        if !trimmed.is_empty() {
+            rendered.push(format!("- {trimmed}"));
+        }
     }
 }
 

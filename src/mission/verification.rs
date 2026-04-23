@@ -141,6 +141,9 @@ pub fn record_slice_assurance(
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
     let created_at = now_millis_string();
     let result_excerpt = clip_text(result_text, 280);
+    let rendered_review_report = review_outcome
+        .map(|outcome| outcome.canonical_report())
+        .unwrap_or_default();
     let run_id = verification_run_id(
         request.conversation_id,
         &request.source_label,
@@ -186,11 +189,9 @@ pub fn record_slice_assurance(
             .map(|outcome| outcome.reasons.clone())
             .unwrap_or_default(),
         report_excerpt: review_outcome
-            .map(|outcome| clip_text(&outcome.report, 280))
+            .map(|_| clip_text(&rendered_review_report, 280))
             .unwrap_or_default(),
-        raw_report: review_outcome
-            .map(|outcome| outcome.report.clone())
-            .unwrap_or_default(),
+        raw_report: rendered_review_report,
         mission_state: review_outcome
             .map(|outcome| outcome.mission_state.clone())
             .unwrap_or_else(|| "UNCLEAR".to_string()),
@@ -638,6 +639,52 @@ mod tests {
         assert!(recorded.run.claim_count >= 1);
         assert_eq!(recorded.run.closure_blocking_claim_count, 0);
         assert!(recorded.closure_blocking_open_items().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn synthesizes_full_raw_report_when_review_outcome_report_is_blank() -> Result<()> {
+        let root = temp_root("verification-synthesizes-raw-report");
+        let request = SliceVerificationRequest {
+            conversation_id: 15,
+            goal: "Reset the buyer-facing product surface".to_string(),
+            prompt: "Rework the owner-visible surface against the active mission.".to_string(),
+            preview: "Homepage reset".to_string(),
+            source_label: "queue".to_string(),
+            owner_visible: true,
+        };
+        let review_outcome = review::ReviewOutcome {
+            required: true,
+            verdict: review::ReviewVerdict::Fail,
+            mission_state: "UNHEALTHY".to_string(),
+            summary: "The public surface still reads like internal process copy.".to_string(),
+            report: String::new(),
+            score: 5,
+            reasons: vec!["owner_visible_claim".to_string()],
+            failed_gates: vec!["Mission fit".to_string()],
+            semantic_findings: vec![
+                "Homepage still behaves like a brochure instead of a platform.".to_string(),
+            ],
+            open_items: vec!["Persist active strategy, then rework the buyer path.".to_string()],
+            evidence: vec!["GET / => static shell".to_string()],
+            handoff: None,
+        };
+
+        let recorded = record_slice_assurance(
+            &root,
+            &request,
+            "Implemented another owner-visible homepage slice.",
+            None,
+            Some(&review_outcome),
+        )?;
+
+        assert!(recorded.run.raw_report.contains("VERDICT: FAIL"));
+        assert!(recorded.run.raw_report.contains("FINDINGS:"));
+        assert!(recorded
+            .run
+            .raw_report
+            .contains("Homepage still behaves like a brochure instead of a platform."));
+        assert!(!recorded.run.report_excerpt.trim().is_empty());
         Ok(())
     }
 }
