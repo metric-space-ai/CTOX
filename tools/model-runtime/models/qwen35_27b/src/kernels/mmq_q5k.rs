@@ -606,4 +606,182 @@ mod tests {
             max_rel_f16
         );
     }
+
+    /// Production-shape golden. The 27B model runs this kernel at
+    /// `(k=6144, n=5120)` for the `ssm_out` / GDN-output projection
+    /// and the `w_o` FullAttention output projection. Live inference
+    /// shows one channel dominating 97-99% of the output L2 at this
+    /// shape — symptom localized to the `mmvq_q5k` kernel.
+    ///
+    /// The 4096×256 `mmvq_q5k_vs_cpu_golden` test above passes, so
+    /// this test independently exercises (a) the view variant
+    /// (`launch_mmvq_q5k_f32_view`) used by the per-row batched
+    /// orchestration in `packed_weight.rs` and (b) the exact `(k, n)`
+    /// numerics that the prod path hits.
+    ///
+    /// Run:
+    ///   CTOX_CUDA_SM=86 cargo test --release --features cuda \
+    ///       -p ctox-qwen35-27b mmvq_q5k_vs_cpu_golden_27b_shape \
+    ///       -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn mmvq_q5k_vs_cpu_golden_27b_shape() {
+        // ssm_out / w_o production shape.
+        let k = 6144usize;
+        let n = 5120usize;
+        let blocks_per_col = k / 256;
+        assert_eq!(blocks_per_col, 24);
+
+        // Deterministic pseudo-random, same LCG as the 4096×256 test.
+        let mut seed: u32 = 0x9E3779B9;
+        let mut rand_f = || -> f32 {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            ((seed >> 16) as f32 / 32768.0) - 1.0
+        };
+
+        let total_bytes = n * blocks_per_col * 176;
+        let mut a_bytes = vec![0u8; total_bytes];
+        let mut a_deq = vec![0.0f32; n * k];
+
+        for col in 0..n {
+            for b in 0..blocks_per_col {
+                let mut vals = [0.0f32; 256];
+                for v in vals.iter_mut() {
+                    *v = rand_f() * 0.5 + 0.25;
+                }
+                let mut block = [0u8; 176];
+                encode_q5k_block(&vals, &mut block);
+                let mut deq = [0.0f32; 256];
+                dequant_q5k_block(&block, &mut deq);
+                a_bytes[(col * blocks_per_col + b) * 176
+                    ..(col * blocks_per_col + b + 1) * 176]
+                    .copy_from_slice(&block);
+                a_deq[col * k + b * 256..col * k + (b + 1) * 256]
+                    .copy_from_slice(&deq);
+            }
+        }
+
+        let x_host: Vec<f32> = (0..k).map(|_| rand_f()).collect();
+
+        // CPU golden via dequantized A.
+        let mut y_cpu = vec![0.0f32; n];
+        for col in 0..n {
+            let mut acc = 0.0f32;
+            for i in 0..k {
+                acc += a_deq[col * k + i] * x_host[i];
+            }
+            y_cpu[col] = acc;
+        }
+
+        let dev = Arc::new(DeviceContext::new(0).expect("cuda init"));
+        let a_i8: Vec<i8> = a_bytes.iter().map(|&b| b as i8).collect();
+        let a_gpu = CudaTensor::<i8>::from_host(
+            dev.clone(),
+            vec![a_i8.len()],
+            &a_i8,
+        )
+        .expect("upload a_q5k");
+        let x_gpu = CudaTensor::<f32>::from_host(dev.clone(), vec![k], &x_host)
+            .expect("upload x");
+
+        // Exercise the owned-tensor variant.
+        {
+            let mut y_gpu = CudaTensor::<f32>::zeros(dev.clone(), vec![n])
+                .expect("alloc y");
+            launch_mmvq_q5k_f32(&dev, &a_gpu, k, n, &x_gpu, &mut y_gpu)
+                .expect("launch f32");
+            dev.synchronize().expect("sync");
+            let y_host = y_gpu.to_host().expect("download y");
+            let (max_abs, max_rel, argmax_channel, chan_energy_frac) =
+                diff_27b(&y_cpu, &y_host);
+            eprintln!(
+                "[owned] mmvq_q5k 27b-shape diff: max_abs={:.6e} max_rel={:.6e} argmax_chan={} chan_energy_frac={:.4}",
+                max_abs, max_rel, argmax_channel, chan_energy_frac
+            );
+            assert!(
+                max_rel < 1e-2,
+                "owned-tensor path diverges at 27B shape: max_rel={}",
+                max_rel
+            );
+            // Any single-channel domination > 10% is a red flag at
+            // this shape — the golden has roughly-balanced outputs.
+            assert!(
+                chan_energy_frac < 0.10,
+                "one-channel domination at 27B shape: argmax={} carries {:.1}% of L2^2",
+                argmax_channel,
+                chan_energy_frac * 100.0
+            );
+        }
+
+        // Exercise the view variant — this is what the decode path
+        // in `matmul_q_rows` actually uses.
+        {
+            let mut y_gpu = CudaTensor::<f32>::zeros(dev.clone(), vec![n])
+                .expect("alloc y_view");
+            {
+                let x_view = x_gpu.buf().slice(0..k);
+                let mut y_view = y_gpu.buf_mut().slice_mut(0..n);
+                launch_mmvq_q5k_f32_view(
+                    &dev, &a_gpu, k, n, &x_view, &mut y_view,
+                )
+                .expect("launch f32_view");
+            }
+            dev.synchronize().expect("sync");
+            let y_host = y_gpu.to_host().expect("download y_view");
+            let (max_abs, max_rel, argmax_channel, chan_energy_frac) =
+                diff_27b(&y_cpu, &y_host);
+            eprintln!(
+                "[view ] mmvq_q5k 27b-shape diff: max_abs={:.6e} max_rel={:.6e} argmax_chan={} chan_energy_frac={:.4}",
+                max_abs, max_rel, argmax_channel, chan_energy_frac
+            );
+            assert!(
+                max_rel < 1e-2,
+                "view-variant path diverges at 27B shape: max_rel={}",
+                max_rel
+            );
+            assert!(
+                chan_energy_frac < 0.10,
+                "one-channel domination at 27B shape (view): argmax={} carries {:.1}% of L2^2",
+                argmax_channel,
+                chan_energy_frac * 100.0
+            );
+        }
+    }
+
+    /// Diff helper that also surfaces the single-channel domination
+    /// metric. Returns `(max_abs, max_rel, argmax_chan, chan_energy_frac)`
+    /// where `chan_energy_frac = y_gpu[argmax_chan]^2 / sum(y_gpu^2)`.
+    fn diff_27b(
+        cpu: &[f32],
+        gpu: &[f32],
+    ) -> (f32, f32, usize, f32) {
+        let mut max_abs = 0.0f32;
+        let mut max_rel = 0.0f32;
+        let mut argmax = 0usize;
+        let mut argmax_val = 0.0f32;
+        let mut sum_sq = 0.0f32;
+        for (i, (a, b)) in cpu.iter().zip(gpu.iter()).enumerate() {
+            let d = (a - b).abs();
+            if d > max_abs {
+                max_abs = d;
+            }
+            let scale = a.abs().max(b.abs()).max(1e-6);
+            let rel = d / scale;
+            if rel > max_rel {
+                max_rel = rel;
+            }
+            let b_sq = b * b;
+            sum_sq += b_sq;
+            if b_sq > argmax_val {
+                argmax_val = b_sq;
+                argmax = i;
+            }
+        }
+        let frac = if sum_sq > 0.0 {
+            argmax_val / sum_sq
+        } else {
+            0.0
+        };
+        (max_abs, max_rel, argmax, frac)
+    }
 }
