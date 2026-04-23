@@ -108,14 +108,33 @@ use ctox_cuda_primitives::kv_cache::KvCache;
 use ctox_cuda_primitives::tensor::CudaTensor;
 
 use crate::config::Qwen35Config;
+use crate::layers::ffn::Qwen35FFN;
 use crate::layers::full_attention::Qwen35FullAttention;
 use crate::layers::gdn::Qwen35GDN;
 use crate::layers::packed_weight::PackedWeight;
 
-/// One decoder layer — either full attention or GDN.
-pub enum Qwen35Layer {
+/// Attention sub-block variant within one decoder layer.
+///
+/// Reference: `qwen35_target_graph.cpp::build_qwen35_graph` — every
+/// layer runs pre-norm + (FA | GDN) + residual, then post-norm + SwiGLU
+/// FFN + residual. Both sub-blocks are mandatory on every layer; only
+/// the attention variant alternates (FA on layers where
+/// `(i+1) % 4 == 0`, else GDN).
+pub enum Qwen35Attention {
     FullAttention(Qwen35FullAttention),
     Gdn(Qwen35GDN),
+}
+
+/// One full decoder layer: attention sub-block + FFN sub-block.
+///
+/// The reference applies BOTH sub-blocks on every layer — attention/GDN
+/// then SwiGLU FFN — with residual adds around each. A port that skips
+/// the FFN loses every layer's SwiGLU projection and collapses the
+/// network to near-identity transforms, which is why the pre-FFN port
+/// was emitting a constant argmax regardless of context.
+pub struct Qwen35Layer {
+    pub attn: Qwen35Attention,
+    pub ffn: Qwen35FFN,
 }
 
 /// Full Qwen3.5 target model: embedding → 64-layer decoder → final
@@ -273,15 +292,18 @@ impl Qwen35Target {
 
         for l in 0..n_layers {
             let is_fa = ((l + 1) % full_attention_interval) == 0;
-            if is_fa {
-                let layer = build_full_attention_layer(&device, &config, &tensors, l, n_full_attn);
-                layers.push(Qwen35Layer::FullAttention(layer));
+            let attn = if is_fa {
+                let layer =
+                    build_full_attention_layer(&device, &config, &tensors, l, n_full_attn);
                 n_full_attn += 1;
+                Qwen35Attention::FullAttention(layer)
             } else {
                 let layer = build_gdn_layer(&device, &config, &tensors, l);
-                layers.push(Qwen35Layer::Gdn(layer));
                 n_gdn += 1;
-            }
+                Qwen35Attention::Gdn(layer)
+            };
+            let ffn = build_ffn_layer(&device, &config, &tensors, l);
+            layers.push(Qwen35Layer { attn, ffn });
         }
 
         tracing::info!(
@@ -437,8 +459,8 @@ impl Qwen35Target {
         let mut gdn_idx: usize = 0;
 
         for layer in &self.layers {
-            match layer {
-                Qwen35Layer::FullAttention(fa) => {
+            match &layer.attn {
+                Qwen35Attention::FullAttention(fa) => {
                     fa.forward(&self.device, &mut hidden, positions, kv_cache)?;
                     fa_seen += 1;
                     // Rewind unless this is the final FA layer.
@@ -446,7 +468,7 @@ impl Qwen35Target {
                         kv_cache.rewind(n_tokens);
                     }
                 }
-                Qwen35Layer::Gdn(gdn) => {
+                Qwen35Attention::Gdn(gdn) => {
                     gdn.forward(
                         &self.device,
                         &mut hidden,
@@ -458,6 +480,13 @@ impl Qwen35Target {
                     gdn_idx += 1;
                 }
             }
+            // SwiGLU FFN sub-block runs on every layer (FA and GDN
+            // alike) after the attention residual add. Reference:
+            // `qwen35_target_graph.cpp::build_qwen35_graph` lines
+            // 736-742 — `rms_norm_mul(cur, attn_post_norm)` → SwiGLU
+            // → `cur = ggml_add(ffn, ffn_residual)`. `Qwen35FFN::
+            // forward` bundles the pre-norm + SwiGLU + residual.
+            layer.ffn.forward(&self.device, &mut hidden)?;
         }
 
         // ── 3. Final norm (f32). Keep the output in f32 — the
@@ -617,15 +646,15 @@ let mut logits =
         let hidden_elems = hidden_dim; // elements per (capture_idx, position) strip.
 
         for (il, layer) in self.layers.iter().enumerate() {
-            match layer {
-                Qwen35Layer::FullAttention(fa) => {
+            match &layer.attn {
+                Qwen35Attention::FullAttention(fa) => {
                     fa.forward(&self.device, &mut hidden, positions, kv_cache)?;
                     fa_seen += 1;
                     if fa_seen < fa_total {
                         kv_cache.rewind(n_tokens);
                     }
                 }
-                Qwen35Layer::Gdn(gdn) => {
+                Qwen35Attention::Gdn(gdn) => {
                     gdn.forward(
                         &self.device,
                         &mut hidden,
@@ -637,6 +666,13 @@ let mut logits =
                     gdn_idx += 1;
                 }
             }
+            // SwiGLU FFN — same contract as the non-capture path. We
+            // capture AFTER the FFN residual so the `target_feat_buf`
+            // content matches the reference's `cur` at loop-tail
+            // (post-FFN, post-residual), which is what the draft's
+            // cross-attention consumes in
+            // `spec_decode::build_target_hidden_cat`.
+            layer.ffn.forward(&self.device, &mut hidden)?;
 
             // Capture hook: after running layer `il`, if it's one of
             // CAPTURE_LAYERS, blit the current hidden into the buffer.
@@ -1402,6 +1438,67 @@ fn build_gdn_layer(
         ssm_conv1d_weight,
         attn_gate,
         ssm_norm,
+        config: cfg,
+        layer_idx,
+    }
+}
+
+/// Build the SwiGLU FFN sub-block for one decoder layer. Loads the
+/// `post_attention_norm.weight` + `ffn_{gate,up,down}.weight` tensors
+/// from the GGUF via [`load_packed_weight`] / [`load_f32_placeholder`]
+/// and assembles a [`Qwen35FFN`] ready for the layer loop.
+///
+/// Shape invariants (matching the reference's
+/// `gguf_target_loader.cpp`):
+///   * `post_attention_norm.weight` — `[hidden]` f32.
+///   * `ffn_gate.weight` — logical `[hidden, intermediate]`; IQ4_XS on
+///     production 27B.
+///   * `ffn_up.weight` — same shape + dtype as `ffn_gate`.
+///   * `ffn_down.weight` — logical `[intermediate, hidden]`.
+///
+/// Applied on every layer (FA and GDN alike) after the attention
+/// residual add — matches the reference loop at
+/// `qwen35_target_graph.cpp` lines 736-742.
+fn build_ffn_layer(
+    device: &Arc<DeviceContext>,
+    config: &Qwen35Config,
+    tensors: &HashMap<String, GgufTensor>,
+    layer_idx: usize,
+) -> Qwen35FFN {
+    let cfg = *config;
+    let name_post_norm = format!("blk.{}.post_attention_norm.weight", layer_idx);
+    let name_gate = format!("blk.{}.ffn_gate.weight", layer_idx);
+    let name_up = format!("blk.{}.ffn_up.weight", layer_idx);
+    let name_down = format!("blk.{}.ffn_down.weight", layer_idx);
+
+    let pre_norm = load_f32_placeholder(device, tensors, &name_post_norm, vec![cfg.hidden_dim]);
+    let w_gate = load_packed_weight(
+        device,
+        tensors,
+        &name_gate,
+        cfg.hidden_dim,
+        cfg.intermediate_dim,
+    );
+    let w_up = load_packed_weight(
+        device,
+        tensors,
+        &name_up,
+        cfg.hidden_dim,
+        cfg.intermediate_dim,
+    );
+    let w_down = load_packed_weight(
+        device,
+        tensors,
+        &name_down,
+        cfg.intermediate_dim,
+        cfg.hidden_dim,
+    );
+
+    Qwen35FFN {
+        pre_norm,
+        w_gate,
+        w_up,
+        w_down,
         config: cfg,
         layer_idx,
     }
