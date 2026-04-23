@@ -285,11 +285,11 @@ impl Qwen35FullAttention {
         // processing position 127 which is the last prompt token). Gated
         // by the env var so normal runs are untouched.
         let dump_fa = std::env::var("CTOX_DEBUG_FA_L2").is_ok()
-            && self.layer_idx == 0
             && kv_cache.n_filled() == 127;
+        let lidx = self.layer_idx;
         if dump_fa {
-            fa_dbg_dump_bf16("00_hidden_in", hidden, n_tokens, hidden_dim);
-            fa_dbg_dump_f32 ("01_norm_f32",  &norm_f32, n_tokens, hidden_dim);
+            fa_dbg_dump_bf16(&format!("FA[{}] 00_hidden_in", lidx), hidden, n_tokens, hidden_dim);
+            fa_dbg_dump_f32 (&format!("FA[{}] 01_norm_f32",  lidx), &norm_f32, n_tokens, hidden_dim);
         }
 
         // ── 3. Q/K/V projections — f32·packed → f32, then cast to bf16
@@ -316,11 +316,6 @@ impl Qwen35FullAttention {
         let mut v_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
         kernels::launch_cast_f32_to_bf16(device, &v_f32, &mut v_flat)?;
 
-        if dump_fa {
-            fa_dbg_dump_f32 ("02_q_f32_raw",    &q_f32,    n_tokens, q_dim);
-            fa_dbg_dump_f32 ("03_k_f32_raw",    &k_f32,    n_tokens, kv_dim);
-            fa_dbg_dump_f32 ("04_v_f32_raw",    &v_f32,    n_tokens, kv_dim);
-        }
 
         // ── 3b. Attention-gate projection. `w_q_gate` is the gate
         //    matrix; the result is fed through a sigmoid and
@@ -333,9 +328,6 @@ impl Qwen35FullAttention {
         let mut q_gate = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, q_dim])?;
         kernels::launch_cast_f32_to_bf16(device, &q_gate_f32, &mut q_gate)?;
 
-        if dump_fa {
-            fa_dbg_dump_f32 ("05_q_gate_f32",   &q_gate_f32, n_tokens, q_dim);
-        }
 
         // ── 3c. Per-head RMSNorm on Q and K (in place on the flat
         //    tensors). dflash applies these after the per-head reshape
@@ -365,10 +357,6 @@ impl Qwen35FullAttention {
             cfg.rms_eps,
         )?;
 
-        if dump_fa {
-            fa_dbg_dump_bf16("06_q_flat_normed", &q_flat, n_tokens, q_dim);
-            fa_dbg_dump_bf16("07_k_flat_normed", &k_flat, n_tokens, kv_dim);
-        }
 
         // ── 4. Reshape Q, K into the per-head layout RoPE expects.
         //    `_flat` tensors are `[n_tokens, N]` row-major; the per-head
@@ -404,10 +392,6 @@ impl Qwen35FullAttention {
             cfg.rope_sections,
         )?;
 
-        if dump_fa {
-            fa_dbg_dump_bf16("08_q3_roped", &q3, n_tokens * cfg.n_q_heads, cfg.head_dim);
-            fa_dbg_dump_bf16("09_k3_roped", &k3, n_tokens * cfg.n_kv_heads, cfg.head_dim);
-        }
 
         // ── 6. Write K/V into the KV cache. Order matters: append both
         //    at the current offset, then advance.
@@ -467,8 +451,7 @@ impl Qwen35FullAttention {
         let mut attn_out = attn_out_3d.reshape(vec![n_tokens, q_dim])?;
 
         if dump_fa {
-            fa_dbg_dump_bf16("10_attn_out_pre_gate", &attn_out, n_tokens, q_dim);
-            fa_dbg_dump_bf16("11_q_gate_bf16",       &q_gate,   n_tokens, q_dim);
+            fa_dbg_dump_bf16(&format!("FA[{}] 10_attn_pre_gate", lidx), &attn_out, n_tokens, q_dim);
         }
 
         // ── 7g. Sigmoid gate elementwise-mul. dflash's
@@ -483,7 +466,7 @@ impl Qwen35FullAttention {
         kernels::launch_sigmoid_mul_bf16(device, &q_gate, &mut attn_out)?;
 
         if dump_fa {
-            fa_dbg_dump_bf16("12_attn_out_post_gate", &attn_out, n_tokens, q_dim);
+            fa_dbg_dump_bf16(&format!("FA[{}] 12_attn_post_gate", lidx), &attn_out, n_tokens, q_dim);
         }
 
         // ── 8. Output projection — `PackedWeight::matmul_f32` takes
@@ -500,18 +483,18 @@ impl Qwen35FullAttention {
         kernels::launch_cast_f32_to_bf16(device, &proj_f32, &mut proj)?;
 
         if dump_fa {
-            fa_dbg_dump_f32 ("13_proj_f32", &proj_f32, n_tokens, hidden_dim);
-            fa_dbg_dump_bf16("14_residual", &residual, n_tokens, hidden_dim);
+            fa_dbg_dump_f32 (&format!("FA[{}] 13_proj_f32", lidx), &proj_f32, n_tokens, hidden_dim);
+            fa_dbg_dump_bf16(&format!("FA[{}] 14_residual", lidx), &residual, n_tokens, hidden_dim);
             // Which output channels are inflated? Top-5 |v| with indices.
             if let Ok(host) = proj_f32.to_host() {
                 let last = &host[(n_tokens - 1) * hidden_dim..n_tokens * hidden_dim];
                 let mut ranked: Vec<(usize, f32)> =
                     last.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
                 ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-                let top: Vec<String> = ranked.iter().take(10)
+                let top: Vec<String> = ranked.iter().take(5)
                     .map(|(i, v)| format!("ch{}={:.2}(raw={:.2})", i, v, last[*i]))
                     .collect();
-                eprintln!("FA_DBG 13_proj_f32 TOP10 {}", top.join(" "));
+                eprintln!("FA_DBG FA[{}] 13_proj_f32 TOP5 {}", lidx, top.join(" "));
             }
         }
 
