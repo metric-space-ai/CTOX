@@ -173,7 +173,7 @@ impl PackedWeight {
             ));
         }
 
-        match self {
+        let result = match self {
             PackedWeight::Bf16 { t, .. } => matmul_bf16_batched(device, t, x, y, m, k, n),
             PackedWeight::Q4K { t, .. } => matmul_q8_1_rows(device, x, y, m, k, n, |dev, xv, yv| {
                 launch_mmvq_q4k_q8_1_f32_view(dev, t, k, n, xv, yv)
@@ -199,7 +199,36 @@ impl PackedWeight {
                 })
             }
             PackedWeight::Zero { .. } => zero_fill_f32(y, m * n),
+        };
+
+        if result.is_ok() && std::env::var("CTOX_DEBUG_MATMUL_L2").is_ok() {
+            let variant = match self {
+                PackedWeight::Bf16 { .. } => "Bf16",
+                PackedWeight::Q4K { .. } => "Q4K",
+                PackedWeight::Q5K { .. } => "Q5K",
+                PackedWeight::Q6K { .. } => "Q6K",
+                PackedWeight::Q8_0 { .. } => "Q8_0",
+                PackedWeight::IQ4XS { .. } => "IQ4XS",
+                PackedWeight::Zero { .. } => "Zero",
+            };
+            // Last row of x and last row of y.
+            let x_host = x.to_host().ok();
+            let y_host = y.to_host().ok();
+            if let (Some(xh), Some(yh)) = (x_host, y_host) {
+                let x_last = &xh[((m - 1) * k)..(m * k)];
+                let y_last = &yh[((m - 1) * n)..(m * n)];
+                let x_l2 = x_last.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
+                let y_l2 = y_last.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>().sqrt();
+                let x_amax = x_last.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                let y_amax = y_last.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+                eprintln!(
+                    "MATMUL_DBG variant={} k={} n={} m={} x_l2={:.4e} x_amax={:.4e} y_l2={:.4e} y_amax={:.4e}",
+                    variant, k, n, m, x_l2, x_amax, y_l2, y_amax
+                );
+            }
         }
+
+        result
     }
 }
 
