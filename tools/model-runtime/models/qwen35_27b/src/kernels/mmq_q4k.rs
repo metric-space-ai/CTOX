@@ -336,6 +336,49 @@ pub fn launch_mmvq_q4k_f16(
     launch_mmvq_q4k_q8_1_f16(device, a_q4k, k, n, &scratch, y)
 }
 
+/// Reference CPU dequant mirroring the kernel math. Decodes one 144-byte
+/// Q4_K_M block into 256 f32 values using the same scale / min math the
+/// device kernels apply, so caller code (diagnostics, CPU-reference
+/// matmul probes) can reconstruct the exact fp32 weights the GPU sees.
+pub fn dequant_q4k_block(bytes: &[u8; 144], out: &mut [f32; 256]) {
+    let d = f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]])).to_f32();
+    let dmin = f16::from_bits(u16::from_le_bytes([bytes[2], bytes[3]])).to_f32();
+    let scales = &bytes[4..16];
+    let qs = &bytes[16..144];
+
+    for il in 0..4usize {
+        let get = |j: usize| -> (u8, u8) {
+            if j < 4 {
+                (scales[j] & 63, scales[j + 4] & 63)
+            } else {
+                let sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
+                let m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
+                (sc, m)
+            }
+        };
+        let (sc_a, m_a) = get(2 * il);
+        let (sc_b, m_b) = get(2 * il + 1);
+        let d1 = d * sc_a as f32;
+        let m1 = dmin * m_a as f32;
+        let d2 = d * sc_b as f32;
+        let m2 = dmin * m_b as f32;
+        for ir in 0..8usize {
+            for l in 0..4usize {
+                let qb = qs[32 * il + 4 * ir + l];
+                let lo = (qb & 0x0F) as f32;
+                let hi = (qb >> 4) as f32;
+                out[64 * il + 4 * ir + l] = d1 * lo - m1;
+                out[64 * il + 4 * ir + l + 32] = d2 * hi - m2;
+            }
+        }
+    }
+}
+
+/// Byte-size of a single Q4_K_M block (144 bytes).
+pub const Q4K_BLOCK_BYTES_PUB: usize = Q4K_BLOCK_BYTES;
+/// Logical elements per Q4_K_M block (256 values).
+pub const Q4K_BLOCK_ELEMS_PUB: usize = Q4K_BLOCK_ELEMS;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,41 +454,6 @@ mod tests {
             }
         }
         out[16..144].copy_from_slice(&qs);
-    }
-
-    /// Reference CPU dequant mirroring the kernel math.
-    fn dequant_q4k_block(bytes: &[u8; 144], out: &mut [f32; 256]) {
-        let d = f16::from_bits(u16::from_le_bytes([bytes[0], bytes[1]])).to_f32();
-        let dmin = f16::from_bits(u16::from_le_bytes([bytes[2], bytes[3]])).to_f32();
-        let scales = &bytes[4..16];
-        let qs = &bytes[16..144];
-
-        for il in 0..4usize {
-            let get = |j: usize| -> (u8, u8) {
-                if j < 4 {
-                    (scales[j] & 63, scales[j + 4] & 63)
-                } else {
-                    let sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
-                    let m = (scales[j + 4] >> 4) | ((scales[j] >> 6) << 4);
-                    (sc, m)
-                }
-            };
-            let (sc_a, m_a) = get(2 * il);
-            let (sc_b, m_b) = get(2 * il + 1);
-            let d1 = d * sc_a as f32;
-            let m1 = dmin * m_a as f32;
-            let d2 = d * sc_b as f32;
-            let m2 = dmin * m_b as f32;
-            for ir in 0..8usize {
-                for l in 0..4usize {
-                    let qb = qs[32 * il + 4 * ir + l];
-                    let lo = (qb & 0x0F) as f32;
-                    let hi = (qb >> 4) as f32;
-                    out[64 * il + 4 * ir + l] = d1 * lo - m1;
-                    out[64 * il + 4 * ir + l + 32] = d2 * hi - m2;
-                }
-            }
-        }
     }
 
     /// Build the standard Q4_K_M test matrix + CPU golden used by both the

@@ -467,6 +467,18 @@ impl Qwen35FullAttention {
 
         if dump_fa {
             fa_dbg_dump_bf16(&format!("FA[{}] 12_attn_post_gate", lidx), &attn_out, n_tokens, q_dim);
+            // Which INPUT channels to w_o are inflated? Top-5 |v| with
+            // indices on the last-token row of `attn_post_gate`.
+            if let Ok(host) = attn_out.to_host() {
+                let last = &host[(n_tokens - 1) * q_dim..n_tokens * q_dim];
+                let mut ranked: Vec<(usize, f32)> =
+                    last.iter().enumerate().map(|(i, v)| (i, v.to_f32().abs())).collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let top: Vec<String> = ranked.iter().take(5)
+                    .map(|(i, v)| format!("ch{}={:.3}(raw={:.3})", i, v, last[*i].to_f32()))
+                    .collect();
+                eprintln!("FA_DBG FA[{}] 12_attn_post_gate TOP5 {}", lidx, top.join(" "));
+            }
         }
 
         // ── 8. Output projection — `PackedWeight::matmul_f32` takes
@@ -496,6 +508,19 @@ impl Qwen35FullAttention {
                     .collect();
                 eprintln!("FA_DBG FA[{}] 13_proj_f32 TOP5 {}", lidx, top.join(" "));
             }
+        }
+
+        // ── CTOX_L3_WO_CPU: CPU-reference w_o matmul for the last
+        //    token row. Dequant Q4_K_M bytes off the device, do a
+        //    naive f32 reduction, and compare channel-3994 against
+        //    the GPU's `proj_f32`. Gated on layer_idx=0 (model L3)
+        //    and the last prompt step so it runs exactly once per
+        //    diagnostic session.
+        if lidx == 0
+            && kv_cache.n_filled() == 127
+            && std::env::var("CTOX_L3_WO_CPU").is_ok()
+        {
+            cpu_ref_wo_probe(&attn_out_f32, &self.w_o, &proj_f32, n_tokens, q_dim, hidden_dim)?;
         }
 
         // ── 9. Residual add. `hidden ← proj + residual` (in-place on hidden).
@@ -663,6 +688,145 @@ fn fa_dbg_dump_f32(tag: &str, t: &CudaTensor<f32>, rows: usize, cols: usize) {
         tag, rows, cols, l2, amax,
         last[0], last[1], last[2], last[3], last[4]
     );
+}
+
+/// CPU-reference w_o matmul for the last-token row.
+///
+/// Downloads the f32 attention-post-gate input, the raw Q4_K_M bytes
+/// for the `w_o` weight, dequants them on the host, and performs a
+/// naive `hidden[j] = sum_i(x[i] * w[i, j])` reduction. Used by the
+/// L3-FA ch-3994 probe — if CPU and GPU agree on the spike, the
+/// weight row genuinely produces that output from this input; if they
+/// disagree, we have a data-dependent mmvq kernel bug.
+///
+/// Only supports `PackedWeight::Q4K` (the shipping 27B format for
+/// `attn_output.weight`). Other variants log a skip.
+fn cpu_ref_wo_probe(
+    attn_in_f32: &CudaTensor<f32>,
+    w_o: &PackedWeight,
+    gpu_proj_f32: &CudaTensor<f32>,
+    n_tokens: usize,
+    q_dim: usize,
+    hidden_dim: usize,
+) -> Result<()> {
+    use crate::kernels::mmq_q4k::{dequant_q4k_block, Q4K_BLOCK_BYTES_PUB, Q4K_BLOCK_ELEMS_PUB};
+
+    let (k, n) = w_o.dims();
+    if k != q_dim || n != hidden_dim {
+        eprintln!(
+            "CPU_WO_PROBE: w_o dims ({},{}) != (q_dim,hidden) ({},{}), skipping",
+            k, n, q_dim, hidden_dim
+        );
+        return Ok(());
+    }
+
+    let raw_bytes: Vec<u8> = match w_o {
+        PackedWeight::Q4K { t, .. } => t
+            .to_host()
+            .map_err(|e| anyhow!("CPU_WO_PROBE: download w_o bytes: {:?}", e))?
+            .into_iter()
+            .map(|b| b as u8)
+            .collect(),
+        other => {
+            let name = match other {
+                PackedWeight::Bf16 { .. } => "Bf16",
+                PackedWeight::Q4K { .. } => "Q4K",
+                PackedWeight::Q5K { .. } => "Q5K",
+                PackedWeight::Q6K { .. } => "Q6K",
+                PackedWeight::Q8_0 { .. } => "Q8_0",
+                PackedWeight::IQ4XS { .. } => "IQ4XS",
+                PackedWeight::Zero { .. } => "Zero",
+            };
+            eprintln!(
+                "CPU_WO_PROBE: w_o variant {} unsupported (Q4K only), skipping",
+                name
+            );
+            return Ok(());
+        }
+    };
+
+    let x_host = attn_in_f32
+        .to_host()
+        .map_err(|e| anyhow!("CPU_WO_PROBE: download attn_in_f32: {:?}", e))?;
+    let x_last = &x_host[(n_tokens - 1) * q_dim..n_tokens * q_dim];
+
+    let blocks_per_col = k / Q4K_BLOCK_ELEMS_PUB;
+    let expected_bytes = blocks_per_col * n * Q4K_BLOCK_BYTES_PUB;
+    if raw_bytes.len() < expected_bytes {
+        return Err(anyhow!(
+            "CPU_WO_PROBE: w_o bytes {} < expected {} (k={},n={})",
+            raw_bytes.len(),
+            expected_bytes,
+            k,
+            n
+        ));
+    }
+
+    // CPU reduction: for each output column j, sum x[i] * w[i, j]
+    // over i in [0, k). Layout: bytes[j * blocks_per_col * 144 + b *
+    // 144 .. + 144] = Q4K block covering rows b*256..(b+1)*256 of col j.
+    let mut cpu_proj = vec![0.0f32; n];
+    let mut dq = [0.0f32; 256];
+    for j in 0..n {
+        let col_off = j * blocks_per_col * Q4K_BLOCK_BYTES_PUB;
+        let mut acc = 0.0f64;
+        for b in 0..blocks_per_col {
+            let off = col_off + b * Q4K_BLOCK_BYTES_PUB;
+            let mut block = [0u8; 144];
+            block.copy_from_slice(&raw_bytes[off..off + Q4K_BLOCK_BYTES_PUB]);
+            dequant_q4k_block(&block, &mut dq);
+            let base = b * Q4K_BLOCK_ELEMS_PUB;
+            for l in 0..Q4K_BLOCK_ELEMS_PUB {
+                acc += (x_last[base + l] as f64) * (dq[l] as f64);
+            }
+        }
+        cpu_proj[j] = acc as f32;
+    }
+
+    // Download GPU result for the same row.
+    let gpu_host = gpu_proj_f32
+        .to_host()
+        .map_err(|e| anyhow!("CPU_WO_PROBE: download gpu proj_f32: {:?}", e))?;
+    let gpu_last = &gpu_host[(n_tokens - 1) * n..n_tokens * n];
+
+    // Log channel 3994 comparison + top-5 CPU channels + delta stats.
+    let probe_ch = 3994usize.min(n - 1);
+    let cpu_v = cpu_proj[probe_ch];
+    let gpu_v = gpu_last[probe_ch];
+    eprintln!(
+        "CPU_WO_PROBE ch{}: cpu={:.4} gpu={:.4} delta={:.4}",
+        probe_ch, cpu_v, gpu_v, gpu_v - cpu_v
+    );
+
+    // Top-5 CPU output channels (by |v|).
+    let mut ranked_cpu: Vec<(usize, f32)> =
+        cpu_proj.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
+    ranked_cpu.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let top_cpu: Vec<String> = ranked_cpu
+        .iter()
+        .take(5)
+        .map(|(i, v)| format!("ch{}={:.2}(raw={:.2})", i, v, cpu_proj[*i]))
+        .collect();
+    eprintln!("CPU_WO_PROBE TOP5_CPU {}", top_cpu.join(" "));
+
+    // Aggregate L2 + amax of the CPU reduction for direct comparison
+    // with `fa_dbg_dump_f32 13_proj_f32`.
+    let mut sumsq = 0.0f64;
+    let mut amax = 0.0f32;
+    for &v in &cpu_proj {
+        sumsq += (v as f64) * (v as f64);
+        let a = v.abs();
+        if a > amax {
+            amax = a;
+        }
+    }
+    eprintln!(
+        "CPU_WO_PROBE cpu_last l2={:.4e} amax={:.4e}",
+        sumsq.sqrt() as f32,
+        amax
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]
