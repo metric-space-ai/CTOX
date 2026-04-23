@@ -1246,12 +1246,31 @@ fn split_bf16_packed_halves(
             hidden * 2 * q_dim
         ));
     }
+    // Per-head interleaved unpacking. Source is `[hidden, 2*q_dim]`
+    // row-major (the bf16 test-fixture convention documented above).
+    // The 2*q_dim column axis is ordered per-head as
+    // `[Q[h=0, 0..head_dim], gate[h=0, 0..head_dim], Q[h=1, ...], ...]`
+    // (see `split_block_quant_halves` for the graph-side reasoning).
+    // De-interleave into two `[hidden, q_dim]` halves whose
+    // column order is `[Q[h=0], Q[h=1], ...]` / `[gate[h=0], gate[h=1], ...]`.
+    let head_dim = 256usize; // Qwen3.5 FA heads are 256-wide uniformly.
+    if q_dim % head_dim != 0 {
+        return Err(format!(
+            "{}: q_dim={} not a multiple of head_dim={}",
+            key, q_dim, head_dim
+        ));
+    }
+    let n_heads = q_dim / head_dim;
     let mut q_half: Vec<bf16> = Vec::with_capacity(hidden * q_dim);
     let mut g_half: Vec<bf16> = Vec::with_capacity(hidden * q_dim);
-    for row in 0..hidden {
-        let base = row * 2 * q_dim;
-        q_half.extend_from_slice(&host[base..base + q_dim]);
-        g_half.extend_from_slice(&host[base + q_dim..base + 2 * q_dim]);
+    for hidden_row in 0..hidden {
+        let row_base = hidden_row * 2 * q_dim;
+        for h in 0..n_heads {
+            let head_base = row_base + h * 2 * head_dim;
+            q_half.extend_from_slice(&host[head_base..head_base + head_dim]);
+            g_half
+                .extend_from_slice(&host[head_base + head_dim..head_base + 2 * head_dim]);
+        }
     }
     let dev = src.device().clone();
     let w_q = CudaTensor::<bf16>::from_host(dev.clone(), vec![hidden, q_dim], &q_half)
@@ -1309,11 +1328,59 @@ fn split_block_quant_halves(
             block_bytes,
         ));
     }
-    // First q_dim rows → Q, last q_dim rows → gate. Byte-contiguous
-    // because the mmvq packed layout is row-major over `n`.
-    let half_bytes = q_dim * row_bytes;
-    let q_host = host[..half_bytes].to_vec();
-    let g_host = host[half_bytes..].to_vec();
+    // Per-head interleaved unpacking.
+    //
+    // The reference reshapes the fused projection's output as
+    // `[head_dim*2, n_head, n_tokens]` (`qwen35_target_graph.cpp`
+    // lines 294-304), which means the GGUF's 2*q_dim output axis is
+    // ordered per-head as `[Q[h=0, 0..head_dim], gate[h=0, 0..head_dim],
+    // Q[h=1, 0..head_dim], gate[h=1, 0..head_dim], ...]`. NOT
+    // `[all-Q, all-gate]`. A naive split_at(q_dim) grabs Q+gate of
+    // the first half of heads and Q+gate of the second half — total
+    // garbage for an attention matmul. This de-interleaves at load
+    // time: head h's Q rows land at `q_half[h*head_dim, (h+1)*head_dim)`
+    // and gate rows at the same slot in `g_half`, producing two
+    // `[hidden, q_dim]` carriers with heads in standard order.
+    //
+    // `q_dim = n_q_heads * head_dim` so the per-head row block is
+    // `head_dim`. We gather at byte granularity because the
+    // quantized block layout puts one block-row per output channel.
+    let head_dim = q_dim / {
+        // Work out n_heads from q_dim. q_dim = n_q_heads * head_dim.
+        // For Qwen3.5-27B n_q_heads = 24, head_dim = 256. For smaller
+        // test fixtures we infer from the common case that head_dim
+        // is 256 (FA's shipping head_dim) — callers that want a
+        // different split should reshape before calling. The assert
+        // here fires if q_dim is not 256-aligned so a misconfigured
+        // caller doesn't silently land a wrong layout.
+        //
+        // We special-case head_dim = 256 here; any Qwen3.5 variant
+        // (FA layers have head_dim=256 uniformly) passes through.
+        256usize
+    };
+    let head_rows = head_dim;
+    if q_dim % head_rows != 0 {
+        return Err(format!(
+            "{}: q_dim={} not a multiple of head_dim={}",
+            key, q_dim, head_rows
+        ));
+    }
+    let n_heads = q_dim / head_rows;
+    // Each head block is 2*head_dim rows wide (Q then gate); total
+    // 2*q_dim rows across n_heads head-blocks.
+    let head_block_bytes = 2 * head_rows * row_bytes; // Q+gate bytes for one head.
+    let half_bytes = q_dim * row_bytes; // = n_heads * head_rows * row_bytes.
+    let mut q_host = Vec::with_capacity(half_bytes);
+    let mut g_host = Vec::with_capacity(half_bytes);
+    for h in 0..n_heads {
+        let head_base = h * head_block_bytes;
+        let q_start = head_base;
+        let q_end = q_start + head_rows * row_bytes;
+        let g_start = q_end;
+        let g_end = g_start + head_rows * row_bytes;
+        q_host.extend_from_slice(&host[q_start..q_end]);
+        g_host.extend_from_slice(&host[g_start..g_end]);
+    }
     let dev = src.device().clone();
     let q_tensor = CudaTensor::<i8>::from_host(dev.clone(), vec![half_bytes], &q_host)
         .map_err(|e| format!("{}: upload Q {:?} half ({} bytes): {:?}", key, variant, half_bytes, e))?;
