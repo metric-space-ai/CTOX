@@ -3,20 +3,12 @@
   "goal": "CTOX source tree layout for build and update orchestration",
   "sourceTrees": [
     {
-      "name": "agent-runtime",
+      "name": "agent-harness",
       "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
       "integrationMode": "hard_fork",
-      "requiredPaths": ["src/inference/Cargo.toml"],
-      "targetDir": "src/inference",
+      "requiredPaths": ["src/harness/Cargo.toml"],
+      "targetDir": "src/harness",
       "purpose": "Codex execution engine for bounded agent turns"
-    },
-    {
-      "name": "model-runtime",
-      "sourceOriginUrl": "https://github.com/metric-space-ai/ctox",
-      "integrationMode": "hard_fork",
-      "requiredPaths": ["tools/model-runtime/Cargo.toml"],
-      "targetDir": "tools/model-runtime",
-      "purpose": "Candle-based local inference runtime"
     }
   ]
 }
