@@ -279,6 +279,19 @@ impl Qwen35FullAttention {
             CudaTensor::<f32>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         kernels::launch_rmsnorm_f32(device, &hidden_f32, &self.attn_norm, &mut norm_f32, cfg.rms_eps)?;
 
+        // CTOX_DEBUG_FA_L2: dump per-stage L2 for the first FA layer
+        // (layer_idx=0, i.e. model layer 3) on the LAST prompt step
+        // (kv_cache.n_filled() == 127 going into this call, i.e. we are
+        // processing position 127 which is the last prompt token). Gated
+        // by the env var so normal runs are untouched.
+        let dump_fa = std::env::var("CTOX_DEBUG_FA_L2").is_ok()
+            && self.layer_idx == 0
+            && kv_cache.n_filled() == 127;
+        if dump_fa {
+            fa_dbg_dump_bf16("00_hidden_in", hidden, n_tokens, hidden_dim);
+            fa_dbg_dump_f32 ("01_norm_f32",  &norm_f32, n_tokens, hidden_dim);
+        }
+
         // ── 3. Q/K/V projections — f32·packed → f32, then cast to bf16
         //    for the per-head RMSNorm + RoPE path below. The
         //    `PackedWeight::matmul_f32` dispatch lives in
@@ -303,6 +316,12 @@ impl Qwen35FullAttention {
         let mut v_flat = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, kv_dim])?;
         kernels::launch_cast_f32_to_bf16(device, &v_f32, &mut v_flat)?;
 
+        if dump_fa {
+            fa_dbg_dump_f32 ("02_q_f32_raw",    &q_f32,    n_tokens, q_dim);
+            fa_dbg_dump_f32 ("03_k_f32_raw",    &k_f32,    n_tokens, kv_dim);
+            fa_dbg_dump_f32 ("04_v_f32_raw",    &v_f32,    n_tokens, kv_dim);
+        }
+
         // ── 3b. Attention-gate projection. `w_q_gate` is the gate
         //    matrix; the result is fed through a sigmoid and
         //    multiplied into the attention output at step 7g. Both
@@ -313,6 +332,10 @@ impl Qwen35FullAttention {
         self.w_q_gate.matmul_f32(device, &norm_f32, &mut q_gate_f32)?;
         let mut q_gate = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, q_dim])?;
         kernels::launch_cast_f32_to_bf16(device, &q_gate_f32, &mut q_gate)?;
+
+        if dump_fa {
+            fa_dbg_dump_f32 ("05_q_gate_f32",   &q_gate_f32, n_tokens, q_dim);
+        }
 
         // ── 3c. Per-head RMSNorm on Q and K (in place on the flat
         //    tensors). dflash applies these after the per-head reshape
@@ -341,6 +364,11 @@ impl Qwen35FullAttention {
             cfg.head_dim,
             cfg.rms_eps,
         )?;
+
+        if dump_fa {
+            fa_dbg_dump_bf16("06_q_flat_normed", &q_flat, n_tokens, q_dim);
+            fa_dbg_dump_bf16("07_k_flat_normed", &k_flat, n_tokens, kv_dim);
+        }
 
         // ── 4. Reshape Q, K into the per-head layout RoPE expects.
         //    `_flat` tensors are `[n_tokens, N]` row-major; the per-head
@@ -375,6 +403,11 @@ impl Qwen35FullAttention {
             cfg.rope_dim as i32,
             cfg.rope_sections,
         )?;
+
+        if dump_fa {
+            fa_dbg_dump_bf16("08_q3_roped", &q3, n_tokens * cfg.n_q_heads, cfg.head_dim);
+            fa_dbg_dump_bf16("09_k3_roped", &k3, n_tokens * cfg.n_kv_heads, cfg.head_dim);
+        }
 
         // ── 6. Write K/V into the KV cache. Order matters: append both
         //    at the current offset, then advance.
@@ -433,6 +466,11 @@ impl Qwen35FullAttention {
         )?;
         let mut attn_out = attn_out_3d.reshape(vec![n_tokens, q_dim])?;
 
+        if dump_fa {
+            fa_dbg_dump_bf16("10_attn_out_pre_gate", &attn_out, n_tokens, q_dim);
+            fa_dbg_dump_bf16("11_q_gate_bf16",       &q_gate,   n_tokens, q_dim);
+        }
+
         // ── 7g. Sigmoid gate elementwise-mul. dflash's
         //    `build_full_attn_block` applies `attn = attn * sigmoid(gate)`
         //    after the attention output is re-flattened into `[q_dim,
@@ -443,6 +481,10 @@ impl Qwen35FullAttention {
         //    keeps everything on the device (the previous host-side
         //    sigmoid + mul blocked graph capture).
         kernels::launch_sigmoid_mul_bf16(device, &q_gate, &mut attn_out)?;
+
+        if dump_fa {
+            fa_dbg_dump_bf16("12_attn_out_post_gate", &attn_out, n_tokens, q_dim);
+        }
 
         // ── 8. Output projection — `PackedWeight::matmul_f32` takes
         //    and produces f32, so cast `attn_out` (bf16) up to f32
@@ -456,6 +498,22 @@ impl Qwen35FullAttention {
         self.w_o.matmul_f32(device, &attn_out_f32, &mut proj_f32)?;
         let mut proj = CudaTensor::<bf16>::zeros(device.clone(), vec![n_tokens, hidden_dim])?;
         kernels::launch_cast_f32_to_bf16(device, &proj_f32, &mut proj)?;
+
+        if dump_fa {
+            fa_dbg_dump_f32 ("13_proj_f32", &proj_f32, n_tokens, hidden_dim);
+            fa_dbg_dump_bf16("14_residual", &residual, n_tokens, hidden_dim);
+            // Which output channels are inflated? Top-5 |v| with indices.
+            if let Ok(host) = proj_f32.to_host() {
+                let last = &host[(n_tokens - 1) * hidden_dim..n_tokens * hidden_dim];
+                let mut ranked: Vec<(usize, f32)> =
+                    last.iter().enumerate().map(|(i, &v)| (i, v.abs())).collect();
+                ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                let top: Vec<String> = ranked.iter().take(10)
+                    .map(|(i, v)| format!("ch{}={:.2}(raw={:.2})", i, v, last[*i]))
+                    .collect();
+                eprintln!("FA_DBG 13_proj_f32 TOP10 {}", top.join(" "));
+            }
+        }
 
         // ── 9. Residual add. `hidden ← proj + residual` (in-place on hidden).
         //
@@ -548,6 +606,80 @@ fn per_head_rmsnorm_bf16(
     // f32 → bf16 into x (in-place output of caller).
     kernels::launch_cast_f32_to_bf16(device, &yf32, x)?;
     Ok(())
+}
+
+/// Debug helper: download a bf16 tensor with logical shape [rows, cols]
+/// row-major and dump last-row L2/absmax and first-5 values.
+fn fa_dbg_dump_bf16(tag: &str, t: &CudaTensor<bf16>, rows: usize, cols: usize) {
+    let host = match t.to_host() {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("FA_DBG {} <download-failed>", tag);
+            return;
+        }
+    };
+    if host.len() < rows * cols {
+        eprintln!(
+            "FA_DBG {} <host.len={} < rows*cols={}>",
+            tag,
+            host.len(),
+            rows * cols
+        );
+        return;
+    }
+    let last = &host[(rows - 1) * cols..rows * cols];
+    let mut sumsq = 0.0f64;
+    let mut amax = 0.0f32;
+    for &v in last {
+        let f = v.to_f32();
+        sumsq += (f as f64) * (f as f64);
+        let a = f.abs();
+        if a > amax {
+            amax = a;
+        }
+    }
+    let l2 = sumsq.sqrt() as f32;
+    eprintln!(
+        "FA_DBG {} rows={} cols={} l2={:.4e} amax={:.4e} row[0..5]={:.3e},{:.3e},{:.3e},{:.3e},{:.3e}",
+        tag, rows, cols, l2, amax,
+        last[0].to_f32(), last[1].to_f32(), last[2].to_f32(), last[3].to_f32(), last[4].to_f32()
+    );
+}
+
+/// Debug helper: same as [`fa_dbg_dump_bf16`] but for f32 tensors.
+fn fa_dbg_dump_f32(tag: &str, t: &CudaTensor<f32>, rows: usize, cols: usize) {
+    let host = match t.to_host() {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("FA_DBG {} <download-failed>", tag);
+            return;
+        }
+    };
+    if host.len() < rows * cols {
+        eprintln!(
+            "FA_DBG {} <host.len={} < rows*cols={}>",
+            tag,
+            host.len(),
+            rows * cols
+        );
+        return;
+    }
+    let last = &host[(rows - 1) * cols..rows * cols];
+    let mut sumsq = 0.0f64;
+    let mut amax = 0.0f32;
+    for &v in last {
+        sumsq += (v as f64) * (v as f64);
+        let a = v.abs();
+        if a > amax {
+            amax = a;
+        }
+    }
+    let l2 = sumsq.sqrt() as f32;
+    eprintln!(
+        "FA_DBG {} rows={} cols={} l2={:.4e} amax={:.4e} row[0..5]={:.3e},{:.3e},{:.3e},{:.3e},{:.3e}",
+        tag, rows, cols, l2, amax,
+        last[0], last[1], last[2], last[3], last[4]
+    );
 }
 
 #[cfg(test)]

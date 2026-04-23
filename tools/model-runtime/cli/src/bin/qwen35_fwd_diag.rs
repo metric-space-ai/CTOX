@@ -1,11 +1,13 @@
 //! Diagnostic forward for the Qwen3.5-27B target.
 //!
-//! Loads the 27B target, runs a SINGLE forward (no chunking,
-//! no speculative decoding) on a 128-token HumanEval-pattern prompt,
-//! prints per-layer L2/absmax of the hidden state's last row, and then
-//! prints the top-10 final-position logits with their token ids.
+//! Loads the 27B target and runs a 128-token PREFILL in single-token
+//! DECODE mode (n_tokens=1 per step, KV cache grows), matching the
+//! reference `dflash-ref/test/test_generate.cpp` execution shape. At the
+//! final step (pos=prompt_len-1) the `forward_diag` variant is used,
+//! which dumps per-layer L2/absmax of the hidden-state last row to
+//! stderr with the `DIAG L2[NN]` tag. After that, top-10 logits and
+//! argmax are printed.
 //!
-//! Used to localize which layer first diverges from the reference.
 //! Expected next token after the reference HumanEval prompt is 6185.
 
 use std::path::PathBuf;
@@ -26,15 +28,15 @@ use half::{bf16, f16};
 #[derive(Parser, Debug)]
 #[command(
     name = "qwen35-fwd-diag",
-    about = "Single-chunk diagnostic forward with per-layer L2 dump."
+    about = "Per-token decode diagnostic with per-layer L2 dump at the final step."
 )]
 struct Args {
     #[arg(long, default_value = "/home/metricspace/dflash-ref/dflash/models/Qwen3.5-27B-Q4_K_M.gguf")]
     target_gguf: PathBuf,
-    /// Number of prompt tokens to feed in a single forward call.
+    /// Number of prompt tokens to feed (single-token decode per token).
     #[arg(long, default_value_t = 128)]
     prompt_len: usize,
-    /// Capacity of the KV cache and feature buffers.
+    /// Capacity of the KV cache.
     #[arg(long, default_value_t = 512)]
     max_ctx: usize,
     #[arg(long, default_value_t = 0)]
@@ -77,7 +79,7 @@ fn main() -> Result<()> {
         target.n_gdn,
     );
 
-    // HumanEval pattern repeated — same prompt as qwen35-spec-bench.
+    // HumanEval pattern repeated — same prompt as reference test_generate.
     let base: [i32; 9] = [7734, 264, 6185, 36974, 883, 13094, 6326, 61369, 25];
     let prompt: Vec<i32> = (0..args.prompt_len).map(|i| base[i % 9]).collect();
     eprintln!(
@@ -110,9 +112,10 @@ fn main() -> Result<()> {
             device.clone(),
             vec![s_v, s_v, h_v, 1],
         )?);
+        // decode mode: n_tokens=1, so gdn_inter holds 1 step's worth.
         gdn_inter.push(CudaTensor::<f16>::zeros(
             device.clone(),
-            vec![s_v, s_v, h_v, args.prompt_len],
+            vec![s_v, s_v, h_v, 1],
         )?);
         gdn_conv_states.push(CudaTensor::<f32>::zeros(
             device.clone(),
@@ -120,54 +123,59 @@ fn main() -> Result<()> {
         )?);
     }
 
-    // Token tensor + 4-axis MRoPE positions for a SINGLE forward.
-    let tokens = CudaTensor::<i32>::from_host(device.clone(), vec![prompt.len()], &prompt)
-        .with_context(|| "upload tokens")?;
-    let mut pos_host = vec![0i32; 4 * prompt.len()];
-    for i in 0..prompt.len() {
-        let p = i as i32;
-        pos_host[i] = p;
-        pos_host[prompt.len() + i] = p;
-        pos_host[2 * prompt.len() + i] = p;
-    }
-    let positions =
-        CudaTensor::<i32>::from_host(device.clone(), vec![4, prompt.len()], &pos_host)
-            .with_context(|| "upload positions")?;
-
     eprintln!(
-        "[diag] running SINGLE forward (n_tokens={}, dump_l2={}) ...",
+        "[diag] running PER-TOKEN decode over {} positions (dump_l2 at final step = {}) ...",
         prompt.len(),
         args.dump_l2
     );
     let t0 = Instant::now();
-    let logits = if args.dump_l2 {
-        target.forward_diag(
-            &tokens,
-            &positions,
-            &mut kv_cache,
-            &mut gdn_states,
-            &mut gdn_inter,
-            &mut gdn_conv_states,
-        )?
-    } else {
-        target.forward(
-            &tokens,
-            &positions,
-            &mut kv_cache,
-            &mut gdn_states,
-            &mut gdn_inter,
-            &mut gdn_conv_states,
-        )?
-    };
-    eprintln!("[diag] forward done in {:.2}s", t0.elapsed().as_secs_f64());
+    let mut last_logits: Option<CudaTensor<f32>> = None;
+    for i in 0..prompt.len() {
+        // Single token.
+        let tok_vec = vec![prompt[i]];
+        let tokens = CudaTensor::<i32>::from_host(device.clone(), vec![1], &tok_vec)
+            .with_context(|| "upload tokens")?;
+        // MRoPE 4D positions: first 3 axes = absolute position, axis 3 = 0.
+        let p = i as i32;
+        let pos_host = vec![p, p, p, 0i32];
+        let positions =
+            CudaTensor::<i32>::from_host(device.clone(), vec![4, 1], &pos_host)
+                .with_context(|| "upload positions")?;
 
-    // Extract the LAST-position row of the logits.
+        let is_last = i + 1 == prompt.len();
+        let logits = if is_last && args.dump_l2 {
+            target.forward_diag(
+                &tokens,
+                &positions,
+                &mut kv_cache,
+                &mut gdn_states,
+                &mut gdn_inter,
+                &mut gdn_conv_states,
+            )?
+        } else {
+            target.forward(
+                &tokens,
+                &positions,
+                &mut kv_cache,
+                &mut gdn_states,
+                &mut gdn_inter,
+                &mut gdn_conv_states,
+            )?
+        };
+        if is_last {
+            last_logits = Some(logits);
+        }
+    }
+    eprintln!("[diag] decode-loop done in {:.2}s", t0.elapsed().as_secs_f64());
+
+    let logits = last_logits.expect("last_logits set on final iter");
+
+    // Extract the LAST-position row of the logits ([1, vocab]).
     let vocab = target.vocab_size;
     let shape = logits.shape().to_vec();
-    assert_eq!(shape, vec![prompt.len(), vocab]);
+    assert_eq!(shape, vec![1, vocab]);
     let host = logits.to_host().with_context(|| "download logits")?;
-    let last_row_start = (prompt.len() - 1) * vocab;
-    let last_row = &host[last_row_start..last_row_start + vocab];
+    let last_row = &host[..vocab];
 
     // Argmax + top-10.
     let mut idx: Vec<usize> = (0..vocab).collect();
@@ -181,13 +189,10 @@ fn main() -> Result<()> {
         eprintln!("  {:>6} : {:.4}", i, last_row[i]);
     }
 
-    // Report rank of expected token 6185.
     let want = 6185usize;
     let rank = idx.iter().position(|&i| i == want).unwrap_or(vocab);
     eprintln!("DIAG rank_of_6185 = {} logit_6185 = {:.4}", rank, last_row[want]);
 
-    // Silence the unused-import warning for `bf16` — the target API
-    // threads bf16 internally; we re-export the type here for clarity.
     let _: Option<bf16> = None;
     Ok(())
 }
