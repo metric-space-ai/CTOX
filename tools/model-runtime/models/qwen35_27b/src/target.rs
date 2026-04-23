@@ -518,6 +518,111 @@ let mut logits =
         Ok(logits)
     }
 
+    /// Diagnostic single-chunk forward with per-layer hidden-state
+    /// statistics printed to stderr.
+    ///
+    /// Same math as [`Self::forward`] but after every decoder layer it
+    /// downloads the current bf16 hidden tensor, converts to f32 on the
+    /// host, and prints per-layer L2 norm and absmax. Used exclusively
+    /// by the `qwen35-fwd-diag` binary to localize the first layer that
+    /// produces anomalous activations versus the reference.
+    ///
+    /// Returns the full `[n_tokens, vocab_size]` logits tensor — callers
+    /// typically argmax the final row.
+    pub fn forward_diag(
+        &self,
+        tokens: &CudaTensor<i32>,
+        positions: &CudaTensor<i32>,
+        kv_cache: &mut KvCache,
+        gdn_states: &mut [CudaTensor<f32>],
+        gdn_inter: &mut [CudaTensor<f16>],
+        gdn_conv_states: &mut [CudaTensor<f32>],
+    ) -> Result<CudaTensor<f32>> {
+        if tokens.shape().len() != 1 {
+            return Err(anyhow!(
+                "qwen35 target.forward_diag: tokens must be 1D, got {:?}",
+                tokens.shape()
+            ));
+        }
+        let n_tokens = tokens.shape()[0];
+        if n_tokens == 0 {
+            return Err(anyhow!("qwen35 target.forward_diag: n_tokens must be > 0"));
+        }
+        let hidden_dim = self.config.hidden_dim;
+
+        let mut hidden =
+            CudaTensor::<bf16>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_embedding_bf16(&self.device, &self.embed, tokens, &mut hidden)?;
+
+        // Dump L2 of the raw embedding lookup for the last row only —
+        // this is the input to layer 0 and should be non-zero and finite.
+        let (l2_embed, amax_embed) = bf16_last_row_l2_and_absmax(&hidden, n_tokens, hidden_dim)?;
+        eprintln!(
+            "DIAG L2[embed] last_row_l2={:.6e} absmax={:.6e}",
+            l2_embed, amax_embed
+        );
+
+        let fa_total = self.n_full_attn;
+        let mut fa_seen: usize = 0;
+        let mut gdn_idx: usize = 0;
+
+        for (il, layer) in self.layers.iter().enumerate() {
+            let is_fa = matches!(layer.attn, Qwen35Attention::FullAttention(_));
+            match &layer.attn {
+                Qwen35Attention::FullAttention(fa) => {
+                    fa.forward(&self.device, &mut hidden, positions, kv_cache)?;
+                    fa_seen += 1;
+                    if fa_seen < fa_total {
+                        kv_cache.rewind(n_tokens);
+                    }
+                }
+                Qwen35Attention::Gdn(gdn) => {
+                    gdn.forward(
+                        &self.device,
+                        &mut hidden,
+                        positions,
+                        &mut gdn_states[gdn_idx],
+                        &mut gdn_inter[gdn_idx],
+                        &mut gdn_conv_states[gdn_idx],
+                    )?;
+                    gdn_idx += 1;
+                }
+            }
+            let (l2_attn, amax_attn) =
+                bf16_last_row_l2_and_absmax(&hidden, n_tokens, hidden_dim)?;
+            layer.ffn.forward(&self.device, &mut hidden)?;
+            let (l2_post, amax_post) =
+                bf16_last_row_l2_and_absmax(&hidden, n_tokens, hidden_dim)?;
+            eprintln!(
+                "DIAG L2[{:02}] {} post_attn_l2={:.6e} amax={:.6e} post_ffn_l2={:.6e} amax={:.6e}",
+                il,
+                if is_fa { "FA " } else { "GDN" },
+                l2_attn,
+                amax_attn,
+                l2_post,
+                amax_post,
+            );
+        }
+
+        let mut hidden_f32 =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_cast_bf16_to_f32(&self.device, &hidden, &mut hidden_f32)?;
+        let mut norm_f32 =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, hidden_dim])?;
+        launch_rmsnorm_f32(
+            &self.device,
+            &hidden_f32,
+            &self.final_norm,
+            &mut norm_f32,
+            self.config.rms_eps,
+        )?;
+
+        let mut logits =
+            CudaTensor::<f32>::zeros(self.device.clone(), vec![n_tokens, self.vocab_size])?;
+        self.lm_head.matmul_f32(&self.device, &norm_f32, &mut logits)?;
+        Ok(logits)
+    }
+
     /// [`Self::forward`] with per-layer feature capture. Runs the
     /// same layer loop but, after each of the layer indices in
     /// [`CAPTURE_LAYERS`] has executed, copies its post-FFN hidden-state
@@ -2328,6 +2433,42 @@ fn clone_i8_bytes(src: &CudaTensor<i8>) -> std::result::Result<CudaTensor<i8>, S
 /// Scan tensor names of the form `blk.N.*` and return `max(N) + 1`.
 ///
 /// Used to size the layer vector when the loader didn't parse the
+/// Download the last row of a `[n_tokens, hidden_dim]` bf16 tensor and
+/// return `(l2, absmax)` computed in f32 on the host. Diagnostic-only —
+/// used by [`Qwen35Target::forward_diag`] to dump per-layer activation
+/// health without adding a device kernel.
+fn bf16_last_row_l2_and_absmax(
+    hidden: &CudaTensor<bf16>,
+    n_tokens: usize,
+    hidden_dim: usize,
+) -> Result<(f32, f32)> {
+    let host = hidden
+        .to_host()
+        .map_err(|e| anyhow!("diag: download hidden: {:?}", e))?;
+    if host.len() < n_tokens * hidden_dim {
+        return Err(anyhow!(
+            "diag: hidden host buf len {} < n_tokens*hidden_dim = {}*{}",
+            host.len(),
+            n_tokens,
+            hidden_dim
+        ));
+    }
+    let last_row_start = (n_tokens - 1) * hidden_dim;
+    let last_row = &host[last_row_start..last_row_start + hidden_dim];
+    let mut sumsq = 0.0f64;
+    let mut absmax = 0.0f32;
+    for &v in last_row {
+        let f = v.to_f32();
+        sumsq += (f as f64) * (f as f64);
+        let a = f.abs();
+        if a > absmax {
+            absmax = a;
+        }
+    }
+    let l2 = (sumsq.sqrt()) as f32;
+    Ok((l2, absmax))
+}
+
 /// GGUF metadata's `qwen35.block_count`. Returns `None` if no `blk.N`
 /// tensor exists (which, for our 27B target, would be catastrophic
 /// — but the caller falls back to a conservative default rather than

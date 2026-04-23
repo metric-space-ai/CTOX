@@ -69,6 +69,12 @@ path = "src/bin/qwen35_spec_bench.rs"
 required-features = ["cuda"]
 doc = false
 
+[[bin]]
+name = "qwen35-fwd-diag"
+path = "src/bin/qwen35_fwd_diag.rs"
+required-features = ["cuda"]
+doc = false
+
 [dependencies]
 engine-core = { workspace = true }
 engine-server-core = { workspace = true }
