@@ -3996,6 +3996,7 @@ fn queue_strategy_direction_pass(
     resume_preview: &str,
     resume_skill: Option<&str>,
 ) -> Result<channels::QueueTaskView> {
+    let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key));
     create_self_work_backed_queue_task(
         root,
         DurableSelfWorkQueueRequest {
@@ -4009,10 +4010,24 @@ Required outputs:\n\
 - if founder or CEO guidance changed the direction, persist that revision with the decision reason\n\
 - do not treat markdown files or chat text as canonical knowledge\n\
 \n\
-Use `ctox strategy show`, `ctox strategy set`, `ctox strategy propose`, and `ctox strategy activate`.\n\
+Required strategy scope for every strategy command in this slice:\n\
+- `--conversation-id {}`\n\
+- `--thread-key {}`\n\
+- Never write global directives without these scope flags.\n\
+\n\
+Use `ctox strategy show --conversation-id {} --thread-key {}` first.\n\
+When creating or revising canonical direction, use `ctox strategy set --conversation-id {} --thread-key {}` or `ctox strategy propose --conversation-id {} --thread-key {}`.\n\
 The authoritative Vision and Mission must live in runtime SQLite state before implementation continues.\n\
 \n\
 After direction is canonical, the deferred execution target is:\n{}",
+                conversation_id,
+                thread_key,
+                conversation_id,
+                thread_key,
+                conversation_id,
+                thread_key,
+                conversation_id,
+                thread_key,
                 resume_prompt
             ),
             thread_key: thread_key.to_string(),
@@ -8382,6 +8397,12 @@ mod tests {
             items[0].suggested_skill.as_deref(),
             Some("follow-up-orchestrator")
         );
+        assert!(items[0]
+            .body_text
+            .contains("Use `ctox strategy show --conversation-id"));
+        assert!(items[0]
+            .body_text
+            .contains("--thread-key kunstmen-supervisor"));
     }
 
     #[test]
