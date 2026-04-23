@@ -124,8 +124,13 @@ pub fn handle_verification_command(root: &Path, args: &[String]) -> Result<()> {
             let claims = engine.list_mission_claims(conversation_id, include_verified, limit)?;
             print_json(&json!({"ok": true, "count": claims.len(), "claims": claims}))
         }
+        "claim-set" => {
+            let claim = parse_manual_claim(args)?;
+            engine.upsert_mission_claim(&claim)?;
+            print_json(&json!({"ok": true, "claim": claim}))
+        }
         _ => anyhow::bail!(
-            "usage:\n  ctox verification init\n  ctox verification assurance [--conversation-id <id>]\n  ctox verification runs [--conversation-id <id>] [--limit <n>]\n  ctox verification claims [--conversation-id <id>] [--limit <n>] [--all]"
+            "usage:\n  ctox verification init\n  ctox verification assurance [--conversation-id <id>]\n  ctox verification runs [--conversation-id <id>] [--limit <n>]\n  ctox verification claims [--conversation-id <id>] [--limit <n>] [--all]\n  ctox verification claim-set --conversation-id <id> --kind <kind> --status <verified|needs_recheck|reported|blocked> --subject <text> --summary <text> --evidence <text> [--blocks-closure] [--recheck-policy <always|on_change|never>] [--expires-at <epoch-ms>] [--last-run-id <id>] [--claim-key <id>]"
         ),
     }
 }
@@ -233,6 +238,47 @@ fn parse_limit(args: &[String], default: usize) -> usize {
         .unwrap_or(default)
 }
 
+fn parse_manual_claim(args: &[String]) -> Result<lcm::MissionClaimRecord> {
+    let conversation_id = parse_conversation_id(args)?;
+    let claim_kind = required_flag_value(args, "--kind")
+        .context("claim-set requires --kind")?
+        .to_string();
+    let claim_status = required_flag_value(args, "--status")
+        .context("claim-set requires --status")?
+        .to_string();
+    let subject = required_flag_value(args, "--subject")
+        .context("claim-set requires --subject")?
+        .to_string();
+    let summary = required_flag_value(args, "--summary")
+        .context("claim-set requires --summary")?
+        .to_string();
+    let evidence_summary = required_flag_value(args, "--evidence")
+        .context("claim-set requires --evidence")?
+        .to_string();
+    let now = now_millis_string();
+    Ok(lcm::MissionClaimRecord {
+        claim_key: find_flag_value(args, "--claim-key")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| mission_claim_key(conversation_id, &claim_kind, &subject)),
+        conversation_id,
+        last_run_id: find_flag_value(args, "--last-run-id")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("manual_{now}")),
+        claim_kind,
+        claim_status,
+        blocks_closure: args.iter().any(|arg| arg == "--blocks-closure"),
+        subject,
+        summary,
+        evidence_summary,
+        recheck_policy: find_flag_value(args, "--recheck-policy")
+            .unwrap_or("on_change")
+            .to_string(),
+        expires_at: find_flag_value(args, "--expires-at").map(ToOwned::to_owned),
+        created_at: now.clone(),
+        updated_at: now,
+    })
+}
+
 fn print_json(value: &serde_json::Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -241,6 +287,10 @@ fn print_json(value: &serde_json::Value) -> Result<()> {
 fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
     let index = args.iter().position(|arg| arg == flag)?;
     args.get(index + 1).map(String::as_str)
+}
+
+fn required_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    find_flag_value(args, flag)
 }
 
 fn derive_claims(
@@ -685,6 +735,39 @@ mod tests {
             .raw_report
             .contains("Homepage still behaves like a brochure instead of a platform."));
         assert!(!recorded.run.report_excerpt.trim().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn claim_set_persists_manual_claim_to_canonical_runtime_db() -> Result<()> {
+        let root = temp_root("claim-set");
+        let args = vec![
+            "claim-set".to_string(),
+            "--conversation-id".to_string(),
+            "42".to_string(),
+            "--kind".to_string(),
+            "design_artifact".to_string(),
+            "--status".to_string(),
+            "verified".to_string(),
+            "--subject".to_string(),
+            "five_front_door_mockups_delivered".to_string(),
+            "--summary".to_string(),
+            "Five front-door mockups were delivered.".to_string(),
+            "--evidence".to_string(),
+            "Gallery plus five HTML mockup files exist.".to_string(),
+        ];
+
+        handle_verification_command(&root, &args)?;
+
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )?;
+        let claims = engine.list_mission_claims(42, true, 10)?;
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].claim_kind, "design_artifact");
+        assert_eq!(claims[0].claim_status, "verified");
+        assert_eq!(claims[0].subject, "five_front_door_mockups_delivered");
         Ok(())
     }
 }

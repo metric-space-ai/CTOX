@@ -1769,51 +1769,56 @@ impl LcmEngine {
         )?;
 
         for claim in claims {
-            self.conn.execute(
-                "INSERT INTO mission_claims (
-                    claim_key,
-                    conversation_id,
-                    last_run_id,
-                    claim_kind,
-                    claim_status,
-                    blocks_closure,
-                    subject,
-                    summary,
-                    evidence_summary,
-                    recheck_policy,
-                    expires_at,
-                    created_at,
-                    updated_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                ON CONFLICT(claim_key) DO UPDATE SET
-                    conversation_id = excluded.conversation_id,
-                    last_run_id = excluded.last_run_id,
-                    claim_kind = excluded.claim_kind,
-                    claim_status = excluded.claim_status,
-                    blocks_closure = excluded.blocks_closure,
-                    subject = excluded.subject,
-                    summary = excluded.summary,
-                    evidence_summary = excluded.evidence_summary,
-                    recheck_policy = excluded.recheck_policy,
-                    expires_at = excluded.expires_at,
-                    updated_at = excluded.updated_at",
-                params![
-                    claim.claim_key,
-                    claim.conversation_id,
-                    claim.last_run_id,
-                    claim.claim_kind,
-                    claim.claim_status,
-                    if claim.blocks_closure { 1 } else { 0 },
-                    claim.subject,
-                    claim.summary,
-                    claim.evidence_summary,
-                    claim.recheck_policy,
-                    claim.expires_at,
-                    claim.created_at,
-                    claim.updated_at,
-                ],
-            )?;
+            self.upsert_mission_claim(claim)?;
         }
+        Ok(())
+    }
+
+    pub fn upsert_mission_claim(&self, claim: &MissionClaimRecord) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO mission_claims (
+                claim_key,
+                conversation_id,
+                last_run_id,
+                claim_kind,
+                claim_status,
+                blocks_closure,
+                subject,
+                summary,
+                evidence_summary,
+                recheck_policy,
+                expires_at,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ON CONFLICT(claim_key) DO UPDATE SET
+                conversation_id = excluded.conversation_id,
+                last_run_id = excluded.last_run_id,
+                claim_kind = excluded.claim_kind,
+                claim_status = excluded.claim_status,
+                blocks_closure = excluded.blocks_closure,
+                subject = excluded.subject,
+                summary = excluded.summary,
+                evidence_summary = excluded.evidence_summary,
+                recheck_policy = excluded.recheck_policy,
+                expires_at = excluded.expires_at,
+                updated_at = excluded.updated_at",
+            params![
+                claim.claim_key,
+                claim.conversation_id,
+                claim.last_run_id,
+                claim.claim_kind,
+                claim.claim_status,
+                if claim.blocks_closure { 1 } else { 0 },
+                claim.subject,
+                claim.summary,
+                claim.evidence_summary,
+                claim.recheck_policy,
+                claim.expires_at,
+                claim.created_at,
+                claim.updated_at,
+            ],
+        )?;
         Ok(())
     }
 

@@ -4375,6 +4375,7 @@ fn queue_platform_expertise_pass(
     resume_preview: &str,
     resume_skill: Option<&str>,
 ) -> Result<channels::QueueTaskView> {
+    let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key));
     create_self_work_backed_queue_task(
         root,
         DurableSelfWorkQueueRequest {
@@ -4384,13 +4385,15 @@ fn queue_platform_expertise_pass(
                 "This slice is the dedicated {} pass for the current public Kunstmen platform mission.\n\n\
 Required outputs:\n\
 - stay inside this discipline only\n\
-- persist the result into SQLite-backed runtime state\n\
+- persist the result into canonical CTOX runtime state via `ctox` CLI commands\n\
+- do not write durable claims into `<workspace>/runtime/ctox.sqlite3`\n\
+- if this pass produces a durable finding or design deliverable, record it with `ctox verification claim-set --conversation-id {} --kind design_artifact --status verified --subject <subject> --summary <summary> --evidence <evidence>`\n\
 - a markdown file in the workspace does not count as durable knowledge\n\
 - leave the implementation pass with concrete, structured guidance for what to build next\n\
 \n\
 Discipline to resolve now: {}\n\
 Future implementation target after all passes complete:\n{}",
-                spec.display_name, spec.display_name, resume_prompt
+                spec.display_name, conversation_id, spec.display_name, resume_prompt
             ),
             thread_key: thread_key.to_string(),
             workspace_root: workspace_root.map(ToOwned::to_owned),
@@ -4422,6 +4425,7 @@ fn queue_platform_implementation_resume(
     resume_preview: &str,
     resume_skill: Option<&str>,
 ) -> Result<Option<channels::QueueTaskView>> {
+    let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key));
     let items = list_platform_expertise_scope_items(root, thread_key, workspace_root)?;
     if items.iter().any(|item| {
         item.kind == PLATFORM_IMPLEMENTATION_KIND
@@ -4447,9 +4451,11 @@ The public buyer path must make these steps obvious:\n\
 - start interview / application chat\n\
 - hire / checkout\n\
 \n\
-No prompt leakage, no source-code leakage, no operator/admin language.\n\n\
+No prompt leakage, no source-code leakage, no operator/admin language.\n\
+Persist any completion claim or durable design artifact into the canonical CTOX runtime DB with `ctox verification claim-set --conversation-id {} --kind design_artifact --status verified --subject <subject> --summary <summary> --evidence <evidence>`.\n\
+Do not treat `<workspace>/runtime/ctox.sqlite3` as canonical state.\n\n\
 Implementation objective:\n{}",
-                resume_prompt
+                conversation_id, resume_prompt
             ),
             thread_key: thread_key.to_string(),
             workspace_root: workspace_root.map(ToOwned::to_owned),
