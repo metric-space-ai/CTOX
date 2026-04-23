@@ -52,26 +52,44 @@ mod imp {
 #[cfg(not(vendored_bwrap_available))]
 mod imp {
     use std::fs::File;
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
 
-    /// Panics with a clear error when the build-time bwrap path is not enabled.
-    pub(crate) fn run_vendored_bwrap_main(
-        _argv: &[String],
-        _preserved_files: &[File],
-    ) -> libc::c_int {
-        panic!(
-            r#"build-time bubblewrap is not available in this build.
-ctox-linux-sandbox should always compile vendored bubblewrap on Linux targets.
-Notes:
-- ensure the target OS is Linux
-- libcap headers must be available via pkg-config
-- bubblewrap sources expected at codex-rs/vendor/bubblewrap (default)"#
-        );
+    fn system_bwrap_binary() -> String {
+        for candidate in [
+            "/usr/bin/bwrap",
+            "/bin/bwrap",
+            "/usr/bin/bubblewrap",
+            "/bin/bubblewrap",
+        ] {
+            if std::path::Path::new(candidate).exists() {
+                return candidate.to_string();
+            }
+        }
+        "bwrap".to_string()
     }
 
-    /// Panics with a clear error when the build-time bwrap path is not enabled.
-    pub(crate) fn exec_vendored_bwrap(_argv: Vec<String>, _preserved_files: Vec<File>) -> ! {
-        let _ = run_vendored_bwrap_main(&[], &[]);
-        unreachable!("run_vendored_bwrap_main should always panic in this configuration")
+    /// Execute a system bubblewrap binary and return its exit code.
+    pub(crate) fn run_vendored_bwrap_main(
+        argv: &[String],
+        _preserved_files: &[File],
+    ) -> libc::c_int {
+        let binary = system_bwrap_binary();
+        let mut command = Command::new(binary);
+        if argv.len() > 1 {
+            command.args(&argv[1..]);
+        }
+        match command.status() {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(err) => panic!("failed to execute system bubblewrap fallback: {err}"),
+        }
+    }
+
+    /// Exec a system bubblewrap binary when vendored sources are unavailable.
+    pub(crate) fn exec_vendored_bwrap(argv: Vec<String>, _preserved_files: Vec<File>) -> ! {
+        let binary = system_bwrap_binary();
+        let err = Command::new(binary).args(argv.into_iter().skip(1)).exec();
+        panic!("failed to exec system bubblewrap fallback: {err}");
     }
 }
 
