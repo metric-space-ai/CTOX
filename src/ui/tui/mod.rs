@@ -1837,6 +1837,7 @@ impl App {
                     | "CTOX_OWNER_NAME"
                     | "CTOX_OWNER_EMAIL_ADDRESS"
                     | "CTOX_FOUNDER_EMAIL_ADDRESSES"
+                    | "CTOX_FOUNDER_EMAIL_ROLES"
                     | "CTOX_ALLOWED_EMAIL_DOMAIN"
                     | "CTOX_EMAIL_ADMIN_POLICIES"
                     | "CTOX_OWNER_PREFERRED_CHANNEL"
@@ -1906,6 +1907,7 @@ impl App {
             | "CTOX_OWNER_NAME"
             | "CTOX_OWNER_EMAIL_ADDRESS"
             | "CTOX_FOUNDER_EMAIL_ADDRESSES"
+            | "CTOX_FOUNDER_EMAIL_ROLES"
             | "CTOX_ALLOWED_EMAIL_DOMAIN"
             | "CTOX_EMAIL_ADMIN_POLICIES"
             | "CTOX_OWNER_PREFERRED_CHANNEL"
@@ -4013,6 +4015,22 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             secret: false,
             choices: Vec::new(),
             help: "Comma/newline list of founder mailboxes that should bypass the employee domain filter and be treated as high-priority strategic senders.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_FOUNDER_EMAIL_ROLES",
+            label: "Founder Roles",
+            value: env_map
+                .get("CTOX_FOUNDER_EMAIL_ROLES")
+                .cloned()
+                .unwrap_or_default(),
+            saved_value: env_map
+                .get("CTOX_FOUNDER_EMAIL_ROLES")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: Vec::new(),
+            help: "Comma/newline list of founder role mappings in the form email=role. Example: michael@example.com=CEO / Founder",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -6595,6 +6613,7 @@ mod tests {
         assert!(keys.contains(&"CTOX_OWNER_NAME"));
         assert!(keys.contains(&"CTOX_OWNER_EMAIL_ADDRESS"));
         assert!(keys.contains(&"CTOX_FOUNDER_EMAIL_ADDRESSES"));
+        assert!(keys.contains(&"CTOX_FOUNDER_EMAIL_ROLES"));
         assert!(keys.contains(&"CTOX_ALLOWED_EMAIL_DOMAIN"));
         assert!(keys.contains(&"CTOX_EMAIL_ADMIN_POLICIES"));
         assert!(keys.contains(&"CTOX_OWNER_PREFERRED_CHANNEL"));

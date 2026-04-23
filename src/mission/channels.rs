@@ -84,6 +84,7 @@ pub struct OwnerPromptContext {
     pub owner_name: String,
     pub owner_email_address: Option<String>,
     pub founder_email_addresses: Vec<String>,
+    pub founder_email_roles: Vec<String>,
     pub allowed_email_domain: Option<String>,
     pub admin_email_policies: Vec<String>,
     pub channels: Vec<String>,
@@ -290,6 +291,7 @@ pub fn load_prompt_identity(
             .map(|value| normalize_email_address(value))
             .filter(|value| !value.is_empty()),
         founder_email_addresses: parse_founder_email_addresses(settings),
+        founder_email_roles: founder_email_role_summaries(settings),
         allowed_email_domain: normalized_allowed_email_domain(settings),
         admin_email_policies: admin_email_policy_summaries(settings),
         channels: channels.into_iter().collect(),
@@ -339,7 +341,10 @@ pub fn classify_email_sender(
         };
     }
 
-    if founder_emails.iter().any(|email| email == &normalized_email) {
+    if founder_emails
+        .iter()
+        .any(|email| email == &normalized_email)
+    {
         return EmailSenderPolicy {
             normalized_email,
             role: "founder".to_string(),
@@ -3100,7 +3105,12 @@ fn sync_identity_profiles(
         )?;
     }
 
+    let founder_roles = parse_founder_email_roles(settings);
     for founder_email in parse_founder_email_addresses(settings) {
+        let founder_role = founder_roles
+            .get(&founder_email)
+            .cloned()
+            .unwrap_or_else(|| "Founder".to_string());
         upsert_identity_profile(
             conn,
             &founder_email,
@@ -3108,6 +3118,7 @@ fn sync_identity_profiles(
             json!({
                 "email": founder_email,
                 "role": "founder",
+                "role_title": founder_role,
                 "allow_admin_actions": true,
                 "allow_sudo_actions": false,
                 "mail_instruction_scope": "founder_strategic",
@@ -3208,6 +3219,45 @@ fn parse_founder_email_addresses(settings: &BTreeMap<String, String>) -> Vec<Str
         .map(normalize_email_address)
         .filter(|value| !value.is_empty())
         .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn parse_founder_email_roles(settings: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let raw = settings
+        .get("CTOX_FOUNDER_EMAIL_ROLES")
+        .map(String::as_str)
+        .unwrap_or("");
+    let mut roles = BTreeMap::new();
+    for entry in raw
+        .split(|ch| matches!(ch, '\n' | ',' | ';'))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let separator_index = entry.find(['|', ':', '=']);
+        let Some(index) = separator_index else {
+            continue;
+        };
+        let email = normalize_email_address(entry[..index].trim());
+        let role = entry[index + 1..].trim();
+        if email.is_empty() || role.is_empty() {
+            continue;
+        }
+        roles.insert(email, role.to_string());
+    }
+    roles
+}
+
+fn founder_email_role_summaries(settings: &BTreeMap<String, String>) -> Vec<String> {
+    let roles = parse_founder_email_roles(settings);
+    parse_founder_email_addresses(settings)
+        .into_iter()
+        .map(|email| {
+            let role = roles
+                .get(&email)
+                .cloned()
+                .unwrap_or_else(|| "Founder".to_string());
+            format!("{email} ({role})")
+        })
         .collect()
 }
 
@@ -3740,6 +3790,58 @@ mod tests {
             .expect("failed to list blocked queue tasks");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].message_key, created.message_key);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_prompt_identity_persists_founder_role_titles() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-founder-role-sync-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create temp test root");
+
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        settings.insert(
+            "CTOX_FOUNDER_EMAIL_ADDRESSES".to_string(),
+            "michael.welsch@metric-space.ai,o.schaefers@gmx.net".to_string(),
+        );
+        settings.insert(
+            "CTOX_FOUNDER_EMAIL_ROLES".to_string(),
+            "michael.welsch@metric-space.ai=CEO / Founder,o.schaefers@gmx.net=Sales Officer"
+                .to_string(),
+        );
+
+        sync_prompt_identity(&root, &settings).expect("failed to sync prompt identity");
+
+        let db_path = resolve_db_path(&root, None);
+        let conn = open_channel_db(&db_path).expect("failed to open channel db");
+        let metadata_json: String = conn
+            .query_row(
+                "SELECT metadata_json FROM owner_profiles WHERE owner_key = ?1",
+                ["o.schaefers@gmx.net"],
+                |row| row.get(0),
+            )
+            .expect("failed to load founder profile");
+        let metadata: Value =
+            serde_json::from_str(&metadata_json).expect("failed to parse founder metadata");
+
+        assert_eq!(
+            metadata.get("role").and_then(Value::as_str),
+            Some("founder")
+        );
+        assert_eq!(
+            metadata.get("role_title").and_then(Value::as_str),
+            Some("Sales Officer")
+        );
 
         let _ = fs::remove_dir_all(&root);
     }

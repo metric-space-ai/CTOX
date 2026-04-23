@@ -26,6 +26,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::env;
 use std::fs::OpenOptions;
 #[cfg(unix)]
 use std::io::BufRead;
@@ -1385,18 +1386,21 @@ fn handle_service_ipc_request(
             let queued = {
                 let mut shared = lock_shared_state(&state);
                 if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
-                    insert_pending_prompt_ordered(&mut shared.pending_prompts, QueuedPrompt {
-                        preview: preview_text(&prompt),
-                        source_label: "tui".to_string(),
-                        goal: prompt.clone(),
-                        prompt: prompt.clone(),
-                        suggested_skill: suggested_skill.clone(),
-                        leased_message_keys: Vec::new(),
-                        leased_ticket_event_keys: Vec::new(),
-                        thread_key: thread_key.clone(),
-                        workspace_root: workspace_root.clone(),
-                        ticket_self_work_id: None,
-                    });
+                    insert_pending_prompt_ordered(
+                        &mut shared.pending_prompts,
+                        QueuedPrompt {
+                            preview: preview_text(&prompt),
+                            source_label: "tui".to_string(),
+                            goal: prompt.clone(),
+                            prompt: prompt.clone(),
+                            suggested_skill: suggested_skill.clone(),
+                            leased_message_keys: Vec::new(),
+                            leased_ticket_event_keys: Vec::new(),
+                            thread_key: thread_key.clone(),
+                            workspace_root: workspace_root.clone(),
+                            ticket_self_work_id: None,
+                        },
+                    );
                     ensure_queue_guard_locked(root, &mut shared);
                     let pending = shared.pending_prompts.len();
                     let reason = runtime_blocker_backoff_remaining_secs(&shared)
@@ -1510,18 +1514,21 @@ fn handle_request(
             let queued = {
                 let mut shared = lock_shared_state(&state);
                 if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
-                    insert_pending_prompt_ordered(&mut shared.pending_prompts, QueuedPrompt {
-                        preview: preview_text(&prompt),
-                        source_label: "tui".to_string(),
-                        goal: prompt.clone(),
-                        prompt: prompt.clone(),
-                        suggested_skill: suggested_skill.clone(),
-                        leased_message_keys: Vec::new(),
-                        leased_ticket_event_keys: Vec::new(),
-                        thread_key: payload.thread_key.clone(),
-                        workspace_root: workspace_root.clone(),
-                        ticket_self_work_id: None,
-                    });
+                    insert_pending_prompt_ordered(
+                        &mut shared.pending_prompts,
+                        QueuedPrompt {
+                            preview: preview_text(&prompt),
+                            source_label: "tui".to_string(),
+                            goal: prompt.clone(),
+                            prompt: prompt.clone(),
+                            suggested_skill: suggested_skill.clone(),
+                            leased_message_keys: Vec::new(),
+                            leased_ticket_event_keys: Vec::new(),
+                            thread_key: payload.thread_key.clone(),
+                            workspace_root: workspace_root.clone(),
+                            ticket_self_work_id: None,
+                        },
+                    );
                     ensure_queue_guard_locked(root, &mut shared);
                     let pending = shared.pending_prompts.len();
                     let reason = runtime_blocker_backoff_remaining_secs(&shared)
@@ -2830,7 +2837,7 @@ fn start_channel_router(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>
 
 fn start_channel_syncer(root: std::path::PathBuf) {
     thread::spawn(move || loop {
-        let settings = runtime_env::load_runtime_env_map(&root).unwrap_or_default();
+        let settings = live_service_settings(&root);
         sync_configured_channels(&root, &settings);
         thread::sleep(Duration::from_secs(CHANNEL_ROUTER_POLL_SECS));
     });
@@ -3501,12 +3508,25 @@ fn mission_watcher_disabled(root: &Path) -> bool {
     matches!(value.as_str(), "1" | "true" | "yes" | "on")
 }
 
+fn live_service_settings(root: &Path) -> BTreeMap<String, String> {
+    let mut settings = runtime_env::load_runtime_env_map(root).unwrap_or_default();
+    for (key, value) in env::vars() {
+        if (!key.starts_with("CTOX_") && !key.starts_with("CTO_"))
+            || crate::inference::runtime_state::is_runtime_state_key(&key)
+        {
+            continue;
+        }
+        settings.insert(key, value);
+    }
+    settings
+}
+
 fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Result<()> {
     if queue_pressure_active(state) {
         return Ok(());
     }
     route_assigned_ticket_self_work(root, state)?;
-    let settings = runtime_env::load_runtime_env_map(root).unwrap_or_default();
+    let settings = live_service_settings(root);
     let scheduled = schedule::emit_due_tasks(root)?;
     if scheduled.emitted_count > 0 {
         push_event(
@@ -3522,7 +3542,9 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     let mut leased =
         channels::lease_pending_inbound_messages(root, 16, CHANNEL_ROUTER_LEASE_OWNER)?;
     leased.sort_by_key(|message| {
-        std::cmp::Reverse(source_label_dispatch_rank(&inbound_source_label(&settings, message)))
+        std::cmp::Reverse(source_label_dispatch_rank(&inbound_source_label(
+            &settings, message,
+        )))
     });
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
@@ -3867,9 +3889,7 @@ fn source_label_dispatch_rank(source_label: &str) -> u8 {
     {
         return 4;
     }
-    if lowered.starts_with("email")
-        || lowered.starts_with("jami")
-        || lowered.starts_with("meeting")
+    if lowered.starts_with("email") || lowered.starts_with("jami") || lowered.starts_with("meeting")
     {
         return 3;
     }
@@ -3881,8 +3901,9 @@ fn source_label_dispatch_rank(source_label: &str) -> u8 {
 
 fn insert_pending_prompt_ordered(queue: &mut VecDeque<QueuedPrompt>, prompt: QueuedPrompt) {
     let new_rank = queued_prompt_dispatch_rank(&prompt);
-    let guard_offset =
-        usize::from(matches!(queue.front(), Some(front) if front.source_label == QUEUE_GUARD_SOURCE_LABEL));
+    let guard_offset = usize::from(
+        matches!(queue.front(), Some(front) if front.source_label == QUEUE_GUARD_SOURCE_LABEL),
+    );
     let insert_at = queue
         .iter()
         .enumerate()
@@ -7560,6 +7581,63 @@ mod tests {
     }
 
     #[test]
+    fn live_service_settings_include_process_env_founder_policy() {
+        let root = temp_root("live-service-settings");
+        let owner_key = "CTOX_OWNER_EMAIL_ADDRESS";
+        let founder_key = "CTOX_FOUNDER_EMAIL_ADDRESSES";
+        let roles_key = "CTOX_FOUNDER_EMAIL_ROLES";
+        let allowed_key = "CTOX_ALLOWED_EMAIL_DOMAIN";
+        let previous_owner = std::env::var_os(owner_key);
+        let previous_founders = std::env::var_os(founder_key);
+        let previous_roles = std::env::var_os(roles_key);
+        let previous_allowed = std::env::var_os(allowed_key);
+
+        std::env::set_var(owner_key, "michael.welsch@metric-space.ai");
+        std::env::set_var(
+            founder_key,
+            "michael.welsch@metric-space.ai,o.schaefers@gmx.net",
+        );
+        std::env::set_var(
+            roles_key,
+            "michael.welsch@metric-space.ai=CEO / Founder,o.schaefers@gmx.net=Sales Officer",
+        );
+        std::env::set_var(allowed_key, "metric-space.ai");
+
+        let settings = live_service_settings(&root);
+        let founder_policy =
+            channels::classify_email_sender(&settings, "michael.welsch@metric-space.ai");
+
+        match previous_owner {
+            Some(value) => std::env::set_var(owner_key, value),
+            None => std::env::remove_var(owner_key),
+        }
+        match previous_founders {
+            Some(value) => std::env::set_var(founder_key, value),
+            None => std::env::remove_var(founder_key),
+        }
+        match previous_roles {
+            Some(value) => std::env::set_var(roles_key, value),
+            None => std::env::remove_var(roles_key),
+        }
+        match previous_allowed {
+            Some(value) => std::env::set_var(allowed_key, value),
+            None => std::env::remove_var(allowed_key),
+        }
+
+        assert_eq!(
+            settings.get(owner_key).map(String::as_str),
+            Some("michael.welsch@metric-space.ai")
+        );
+        assert_eq!(
+            settings.get(founder_key).map(String::as_str),
+            Some("michael.welsch@metric-space.ai,o.schaefers@gmx.net")
+        );
+        assert_eq!(founder_policy.role, "owner");
+        assert!(founder_policy.allowed);
+        assert!(founder_policy.allow_admin_actions);
+    }
+
+    #[test]
     fn ordered_pending_prompts_put_owner_email_ahead_of_queue_work() {
         let mut pending = VecDeque::new();
         insert_pending_prompt_ordered(
@@ -7593,8 +7671,14 @@ mod tests {
             },
         );
 
-        assert_eq!(pending.front().map(|item| item.source_label.as_str()), Some("email:owner"));
-        assert_eq!(pending.back().map(|item| item.source_label.as_str()), Some("queue"));
+        assert_eq!(
+            pending.front().map(|item| item.source_label.as_str()),
+            Some("email:owner")
+        );
+        assert_eq!(
+            pending.back().map(|item| item.source_label.as_str()),
+            Some("queue")
+        );
     }
 
     #[test]
@@ -7635,7 +7719,10 @@ mod tests {
             pending.front().map(|item| item.source_label.as_str()),
             Some("email:founder")
         );
-        assert_eq!(pending.back().map(|item| item.source_label.as_str()), Some("queue"));
+        assert_eq!(
+            pending.back().map(|item| item.source_label.as_str()),
+            Some("queue")
+        );
     }
 
     #[test]
