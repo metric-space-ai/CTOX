@@ -1385,7 +1385,7 @@ fn handle_service_ipc_request(
             let queued = {
                 let mut shared = lock_shared_state(&state);
                 if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
-                    shared.pending_prompts.push_back(QueuedPrompt {
+                    insert_pending_prompt_ordered(&mut shared.pending_prompts, QueuedPrompt {
                         preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
@@ -1510,7 +1510,7 @@ fn handle_request(
             let queued = {
                 let mut shared = lock_shared_state(&state);
                 if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
-                    shared.pending_prompts.push_back(QueuedPrompt {
+                    insert_pending_prompt_ordered(&mut shared.pending_prompts, QueuedPrompt {
                         preview: preview_text(&prompt),
                         source_label: "tui".to_string(),
                         goal: prompt.clone(),
@@ -3519,7 +3519,11 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
         .get("CTO_MEETING_BOT_NAME")
         .cloned()
         .unwrap_or_else(|| "CTOX Notetaker".to_string());
-    let leased = channels::lease_pending_inbound_messages(root, 16, CHANNEL_ROUTER_LEASE_OWNER)?;
+    let mut leased =
+        channels::lease_pending_inbound_messages(root, 16, CHANNEL_ROUTER_LEASE_OWNER)?;
+    leased.sort_by_key(|message| {
+        std::cmp::Reverse(source_label_dispatch_rank(&inbound_source_label(&settings, message)))
+    });
     let mut seen = HashSet::new();
     let mut duplicates = Vec::new();
     let mut blocked = Vec::new();
@@ -3617,7 +3621,7 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             state,
             QueuedPrompt {
                 preview: preview_text(&prompt),
-                source_label: message.channel.clone(),
+                source_label: inbound_source_label(&settings, &message),
                 goal: prompt_body.clone(),
                 prompt,
                 suggested_skill: suggested_skill_from_message(&message),
@@ -3791,7 +3795,7 @@ fn enqueue_prompt(
         );
         let runtime_backoff_remaining = runtime_blocker_backoff_remaining_secs(&shared);
         if shared.busy || runtime_backoff_remaining.is_some() {
-            shared.pending_prompts.push_back(prompt.clone());
+            insert_pending_prompt_ordered(&mut shared.pending_prompts, prompt.clone());
             let pending = shared.pending_prompts.len();
             if let Some(remaining_secs) = runtime_backoff_remaining {
                 let last_error = shared.last_error.clone().unwrap_or_default();
@@ -3844,6 +3848,48 @@ fn enqueue_prompt(
     };
     if !queued {
         start_prompt_worker(root.to_path_buf(), state.clone(), prompt);
+    }
+}
+
+fn queued_prompt_dispatch_rank(prompt: &QueuedPrompt) -> u8 {
+    source_label_dispatch_rank(&prompt.source_label)
+}
+
+fn source_label_dispatch_rank(source_label: &str) -> u8 {
+    let lowered = source_label.trim().to_ascii_lowercase();
+    if lowered == QUEUE_GUARD_SOURCE_LABEL {
+        return 5;
+    }
+    if lowered == "tui" || lowered == "email:owner" || lowered == "email:admin" {
+        return 4;
+    }
+    if lowered.starts_with("email")
+        || lowered.starts_with("jami")
+        || lowered.starts_with("meeting")
+    {
+        return 3;
+    }
+    if lowered.starts_with("ticket:") {
+        return 2;
+    }
+    1
+}
+
+fn insert_pending_prompt_ordered(queue: &mut VecDeque<QueuedPrompt>, prompt: QueuedPrompt) {
+    let new_rank = queued_prompt_dispatch_rank(&prompt);
+    let guard_offset =
+        usize::from(matches!(queue.front(), Some(front) if front.source_label == QUEUE_GUARD_SOURCE_LABEL));
+    let insert_at = queue
+        .iter()
+        .enumerate()
+        .skip(guard_offset)
+        .find_map(|(idx, existing)| {
+            (new_rank > queued_prompt_dispatch_rank(existing)).then_some(idx)
+        });
+    if let Some(idx) = insert_at {
+        queue.insert(idx, prompt);
+    } else {
+        queue.push_back(prompt);
     }
 }
 
@@ -3900,6 +3946,21 @@ fn suggested_skill_from_message(message: &channels::RoutedInboundMessage) -> Opt
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn inbound_source_label(
+    settings: &BTreeMap<String, String>,
+    message: &channels::RoutedInboundMessage,
+) -> String {
+    if message.channel == "email" {
+        let policy = channels::classify_email_sender(settings, &message.sender_address);
+        return match policy.role.as_str() {
+            "owner" => "email:owner".to_string(),
+            "admin" => "email:admin".to_string(),
+            _ => "email".to_string(),
+        };
+    }
+    message.channel.clone()
 }
 
 fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
@@ -7398,6 +7459,70 @@ mod tests {
         };
 
         assert_eq!(blocked_inbound_reason(&message, &settings), None);
+    }
+
+    #[test]
+    fn owner_email_inbound_gets_owner_source_label() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@example.com".to_string(),
+        );
+        let message = channels::RoutedInboundMessage {
+            message_key: "m-owner".to_string(),
+            channel: "email".to_string(),
+            account_key: "email:cto1@example.com".to_string(),
+            thread_key: "t-owner".to_string(),
+            sender_display: "Michael".to_string(),
+            sender_address: "michael.welsch@example.com".to_string(),
+            subject: "prio".to_string(),
+            preview: "prio".to_string(),
+            body_text: "prio".to_string(),
+            external_created_at: "2026-03-26T00:00:00Z".to_string(),
+            workspace_root: None,
+            metadata: serde_json::json!({}),
+            preferred_reply_modality: None,
+        };
+
+        assert_eq!(inbound_source_label(&settings, &message), "email:owner");
+    }
+
+    #[test]
+    fn ordered_pending_prompts_put_owner_email_ahead_of_queue_work() {
+        let mut pending = VecDeque::new();
+        insert_pending_prompt_ordered(
+            &mut pending,
+            QueuedPrompt {
+                prompt: "legacy".to_string(),
+                goal: "legacy".to_string(),
+                preview: "legacy".to_string(),
+                source_label: "queue".to_string(),
+                suggested_skill: None,
+                leased_message_keys: Vec::new(),
+                leased_ticket_event_keys: Vec::new(),
+                thread_key: None,
+                workspace_root: None,
+                ticket_self_work_id: None,
+            },
+        );
+        insert_pending_prompt_ordered(
+            &mut pending,
+            QueuedPrompt {
+                prompt: "owner".to_string(),
+                goal: "owner".to_string(),
+                preview: "owner".to_string(),
+                source_label: "email:owner".to_string(),
+                suggested_skill: None,
+                leased_message_keys: Vec::new(),
+                leased_ticket_event_keys: Vec::new(),
+                thread_key: None,
+                workspace_root: None,
+                ticket_self_work_id: None,
+            },
+        );
+
+        assert_eq!(pending.front().map(|item| item.source_label.as_str()), Some("email:owner"));
+        assert_eq!(pending.back().map(|item| item.source_label.as_str()), Some("queue"));
     }
 
     #[test]
