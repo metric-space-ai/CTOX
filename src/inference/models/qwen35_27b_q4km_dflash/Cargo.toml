@@ -1,0 +1,51 @@
+[package]
+name = "ctox-qwen35-27b-q4km-dflash"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Self-contained Qwen3.5-27B Q4_K_M target + DFlash speculative-decoding draft. Byte-exact Rust port of lucebox/dflash. All ggml + ggml-cuda CUDA kernels and the ggml C FFI are vendored inside this crate — no code shared with other models."
+
+# Keep this crate OUT of any parent workspace. The tree sits under
+# src/inference/ physically, but src/inference/ is the OpenAI-Codex-fork
+# workspace (edition 2024, strict lints) which this port cannot live in,
+# and we don't want it picked up by tools/model-runtime/Cargo.toml either.
+# Declaring an empty [workspace] here makes this a self-contained crate.
+[workspace]
+
+[lib]
+name = "ctox_qwen35_27b_q4km_dflash"
+path = "src/lib.rs"
+
+[[bin]]
+name = "qwen35-27b-q4km-dflash-bench"
+path = "src/bin/bench.rs"
+required-features = ["cuda"]
+
+[features]
+default = []
+# CUDA is the only real build mode — the target model is 27B in Q4_K_M,
+# which is hopeless without GPU. The feature still exists so `cargo check`
+# on a non-CUDA host compiles the Rust surface.
+cuda = []
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+half = { version = "2", features = ["bytemuck"] }
+bytemuck = "1"
+memmap2 = "0.9"
+libc = "0.2"
+# Data-parallel helper for the per-position top-K extract in the
+# DDTree path. Matches the reference's `#pragma omp parallel for`.
+rayon = "1.10"
+# First-party parser for the draft model format.
+safetensors = "0.4"
+# Bench binary CLI.
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
