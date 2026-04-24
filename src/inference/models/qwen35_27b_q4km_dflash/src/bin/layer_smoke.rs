@@ -51,10 +51,11 @@ struct Args {
 }
 
 fn det_fill(v: &mut [f32], seed: f32) {
+    let norm = (v.len() as f32).sqrt();
     for (i, s) in v.iter_mut().enumerate() {
         *s = ((i as f32 * 0.013 + seed).sin() * 0.5
             + (i as f32 * 0.007 + seed * 2.0).cos() * 0.25)
-            / (v.len() as f32).sqrt();
+            / norm;
     }
 }
 
