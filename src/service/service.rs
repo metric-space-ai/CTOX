@@ -2666,6 +2666,16 @@ fn run_completion_review(
     let founder_required_deliverables = founder_reply_key
         .and_then(|message_key| channels::required_founder_reply_deliverables(root, message_key).ok())
         .unwrap_or_default();
+    let founder_commitments = if is_founder_or_owner_email_job(job) {
+        detect_founder_mail_commitments(reply_text)
+    } else {
+        Vec::new()
+    };
+    let founder_commitment_backing = if founder_commitments.is_empty() {
+        Vec::new()
+    } else {
+        founder_commitment_backing_summaries(root)
+    };
     let review_request = review::CompletionReviewRequest {
         preview: job.preview.clone(),
         source_label: job.source_label.clone(),
@@ -2692,8 +2702,25 @@ fn run_completion_review(
             .map(|action| action.attachments.clone())
             .unwrap_or_default(),
         required_deliverables: founder_required_deliverables,
+        artifact_commitments: founder_commitments.clone(),
+        commitment_backing: founder_commitment_backing.clone(),
     };
-    let outcome = review::review_completion_if_needed(root, &review_request, reply_text);
+    let mut outcome = review::review_completion_if_needed(root, &review_request, reply_text);
+    if is_founder_or_owner_email_job(job) {
+        if let Some(guard_outcome) = founder_commitment_guard_outcome(
+            &review_request.artifact_commitments,
+            &review_request.commitment_backing,
+        ) {
+            push_event(
+                state,
+                format!(
+                    "Founder communication guard blocked unbacked commitment(s): {}",
+                    clip_text(&guard_outcome.summary, 180)
+                ),
+            );
+            outcome = guard_outcome;
+        }
+    }
     if !outcome.required {
         // Heuristic decided this slice does not need review — stay quiet.
         return CompletionReviewDisposition::None;
@@ -4361,6 +4388,137 @@ fn founder_email_reply_message_key(job: &QueuedPrompt) -> Option<&str> {
         .iter()
         .find(|key| key.starts_with("email:"))
         .map(|key| key.as_str())
+}
+
+fn detect_founder_mail_commitments(text: &str) -> Vec<String> {
+    let normalized = text.replace('\n', " ");
+    normalized
+        .split_terminator(['.', '!', '?'])
+        .filter_map(|segment| {
+            let trimmed = segment.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let lowered = trimmed.to_ascii_lowercase();
+            let has_commitment_verb = [
+                "i will",
+                "i'll",
+                "we will",
+                "we'll",
+                "send",
+                "deliver",
+                "provide",
+                "share",
+                "update",
+                "inform",
+                "sende",
+                "liefere",
+                "schicke",
+                "melde",
+            ]
+            .iter()
+            .any(|needle| lowered.contains(needle));
+            if !has_commitment_verb {
+                return None;
+            }
+            let has_future_marker = lowered.contains("today")
+                || lowered.contains("tomorrow")
+                || lowered.contains("heute")
+                || lowered.contains("morgen")
+                || lowered.contains(" by ")
+                || lowered.contains(" bis ")
+                || lowered.contains(" until ")
+                || lowered.contains("utc")
+                || contains_clock_time(&lowered)
+                || contains_calendar_date(&lowered);
+            if !has_future_marker {
+                return None;
+            }
+            Some(trimmed.to_string())
+        })
+        .collect()
+}
+
+fn contains_clock_time(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(5).any(|window| {
+        window[0].is_ascii_digit()
+            && window[1].is_ascii_digit()
+            && window[2] == b':'
+            && window[3].is_ascii_digit()
+            && window[4].is_ascii_digit()
+    })
+}
+
+fn contains_calendar_date(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(10).any(|window| {
+        window[0].is_ascii_digit()
+            && window[1].is_ascii_digit()
+            && (window[2] == b'.' || window[2] == b'/')
+            && window[3].is_ascii_digit()
+            && window[4].is_ascii_digit()
+            && (window[5] == b'.' || window[5] == b'/')
+            && window[6].is_ascii_digit()
+            && window[7].is_ascii_digit()
+            && window[8].is_ascii_digit()
+            && window[9].is_ascii_digit()
+    })
+}
+
+fn founder_commitment_backing_summaries(root: &Path) -> Vec<String> {
+    schedule::list_tasks(root)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|task| task.enabled)
+        .map(|task| {
+            format!(
+                "{} @ {}",
+                task.name,
+                task.next_run_at.unwrap_or_else(|| "(no next run)".to_string())
+            )
+        })
+        .collect()
+}
+
+fn founder_commitment_guard_outcome(
+    commitments: &[String],
+    backing: &[String],
+) -> Option<review::ReviewOutcome> {
+    if commitments.is_empty() || backing.len() >= commitments.len() {
+        return None;
+    }
+    Some(review::ReviewOutcome {
+        required: true,
+        verdict: review::ReviewVerdict::Fail,
+        mission_state: "UNHEALTHY".to_string(),
+        summary: format!(
+            "Founder mail makes {} future commitment(s) but only {} tracked schedule/follow-up backing item(s) exist.",
+            commitments.len(),
+            backing.len()
+        ),
+        report: String::new(),
+        score: 100,
+        reasons: vec!["unbacked_commitment".to_string()],
+        failed_gates: vec!["unbacked_commitment".to_string()],
+        semantic_findings: commitments
+            .iter()
+            .map(|item| format!("Commitment requires backing before send: {item}"))
+            .collect(),
+        open_items: vec![
+            "Create concrete CTOX schedule or follow-up backing for every promised founder deadline before sending."
+                .to_string(),
+        ],
+        evidence: if backing.is_empty() {
+            vec!["No enabled CTOX schedule backing was found.".to_string()]
+        } else {
+            backing
+                .iter()
+                .map(|item| format!("Available backing: {item}"))
+                .collect()
+        },
+        handoff: None,
+    })
 }
 
 fn is_owner_visible_strategic_job(job: &QueuedPrompt) -> bool {
@@ -9350,6 +9508,46 @@ mod tests {
         assert!(tasks[0].prompt.contains("Generate or retrieve the Jami QR code."));
         assert!(tasks[0].ticket_self_work_id.is_some());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn detects_founder_deadline_commitments_in_mail_body() {
+        let commitments = detect_founder_mail_commitments(
+            "Hi Michael. Today, 24.04.2026, I send you an update by 20:00 UTC. Tomorrow, 25.04.2026, I will deliver the full redesign by 12:00 UTC.",
+        );
+        assert_eq!(commitments.len(), 2);
+        assert!(commitments[0].contains("20:00 UTC"));
+        assert!(commitments[1].contains("12:00 UTC"));
+    }
+
+    #[test]
+    fn founder_commitment_guard_fails_without_backing() {
+        let outcome = founder_commitment_guard_outcome(
+            &[
+                "Today, 24.04.2026, I send you an update by 20:00 UTC".to_string(),
+                "Tomorrow, 25.04.2026, I will deliver the redesign by 12:00 UTC".to_string(),
+            ],
+            &[],
+        )
+        .expect("unbacked commitments should fail");
+        assert_eq!(outcome.verdict, review::ReviewVerdict::Fail);
+        assert_eq!(outcome.failed_gates, vec!["unbacked_commitment".to_string()]);
+        assert!(outcome.summary.contains("2 future commitment(s)"));
+    }
+
+    #[test]
+    fn founder_commitment_guard_allows_backed_deadlines() {
+        let outcome = founder_commitment_guard_outcome(
+            &[
+                "Today, 24.04.2026, I send you an update by 20:00 UTC".to_string(),
+                "Tomorrow, 25.04.2026, I will deliver the redesign by 12:00 UTC".to_string(),
+            ],
+            &[
+                "kunstmen founder update 20utc @ 2026-04-24T20:00:00+00:00".to_string(),
+                "kunstmen founder deliverable 12utc @ 2026-04-25T12:00:00+00:00".to_string(),
+            ],
+        );
+        assert!(outcome.is_none());
     }
 
     #[test]

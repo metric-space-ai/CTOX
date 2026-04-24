@@ -85,6 +85,8 @@ pub struct CompletionReviewRequest {
     pub artifact_cc: Vec<String>,
     pub artifact_attachments: Vec<String>,
     pub required_deliverables: Vec<String>,
+    pub artifact_commitments: Vec<String>,
+    pub commitment_backing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -449,6 +451,16 @@ fn build_review_prompt(request: &CompletionReviewRequest, reasons: &[String]) ->
     } else {
         request.required_deliverables.join(", ")
     };
+    let artifact_commitments = if request.artifact_commitments.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.artifact_commitments.join(" | ")
+    };
+    let commitment_backing = if request.commitment_backing.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.commitment_backing.join(" | ")
+    };
     let founder_specific_work = if matches!(
         request.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
@@ -459,6 +471,7 @@ Founder/owner communication gate:\n\
 - judge the full mail action, not just the prose: recipients, cc list, and reply/forward behavior are part of the artifact\n\
 - decide whether the draft should be sent now, blocked, or reworked first\n\
 - treat every listed required deliverable as mandatory; if a required deliverable is missing, the mail must fail review and be reworked first\n\
+- treat every listed future promise, dated commitment, or deadline promise as mandatory review context; if a promise is not backed by a concrete CTOX schedule or open follow-up, the mail must fail review and be reworked first\n\
 - fail the review when the draft does not answer the latest founder mail, dodges the requested deliverable, promises future work instead of delivering, or leaks internal/system language\n\
 - fail the review when the recipients or cc list are wrong, when sender-only reply is incorrect, or when a forwarded/delegated founder mail should target different recipients\n\
 - do not fail only because the broader mission is still open; fail only when the draft makes a false claim, omits a required answer, or the missing deliverable means the mail should not be sent yet\n\
@@ -486,6 +499,8 @@ Artifact to: {artifact_to}\n\
 Artifact cc: {artifact_cc}\n\
 Artifact attachments: {artifact_attachments}\n\
 Required deliverables: {required_deliverables}\n\
+Artifact commitments: {artifact_commitments}\n\
+Commitment backing: {commitment_backing}\n\
 --- BEGIN ARTIFACT ---\n\
 {artifact_text}\n\
 --- END ARTIFACT ---\n\
@@ -533,6 +548,8 @@ HANDOFF:\n\
         artifact_cc = artifact_cc,
         artifact_attachments = artifact_attachments,
         required_deliverables = required_deliverables,
+        artifact_commitments = artifact_commitments,
+        commitment_backing = commitment_backing,
         strategy_conversation_id = request.conversation_id,
         verification_conversation_id = request.conversation_id
     )
@@ -840,6 +857,8 @@ mod tests {
             artifact_cc: vec!["michael.welsch@metric-space.ai".to_string()],
             artifact_attachments: vec!["/srv/runtime/communication/artifacts/jami/ctox-jami-setup.pdf".to_string()],
             required_deliverables: vec!["qr_code".to_string()],
+            artifact_commitments: vec!["Today, 24.04.2026, send an update by 20:00 UTC.".to_string()],
+            commitment_backing: vec!["kunstmen founder update 20utc @ 2026-04-24T20:00:00+00:00".to_string()],
         };
         let rendered = build_review_prompt(&request, &["founder_communication".to_string()]);
         assert!(rendered.contains("Artifact kind: founder_or_owner_outbound_email_draft"));
@@ -851,8 +870,11 @@ mod tests {
         ));
         assert!(rendered.contains("Artifact attachments: /srv/runtime/communication/artifacts/jami/ctox-jami-setup.pdf"));
         assert!(rendered.contains("Required deliverables: qr_code"));
+        assert!(rendered.contains("Artifact commitments: Today, 24.04.2026, send an update by 20:00 UTC."));
+        assert!(rendered.contains("Commitment backing: kunstmen founder update 20utc @ 2026-04-24T20:00:00+00:00"));
         assert!(rendered.contains("judge the full mail action, not just the prose"));
         assert!(rendered.contains("treat every listed required deliverable as mandatory"));
+        assert!(rendered.contains("future promise, dated commitment, or deadline promise"));
         assert!(rendered.contains("does not answer the latest founder mail"));
         assert!(rendered.contains("Kurzstand: Ich liefere spaeter."));
     }
