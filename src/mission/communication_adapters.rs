@@ -73,6 +73,7 @@ pub(crate) struct EmailSendCommandRequest<'a> {
     pub sender_display: Option<&'a str>,
     pub subject: &'a str,
     pub body: &'a str,
+    pub attachments: &'a [String],
 }
 
 pub(crate) struct JamiSendCommandRequest<'a> {
@@ -84,6 +85,7 @@ pub(crate) struct JamiSendCommandRequest<'a> {
     pub subject: &'a str,
     pub body: &'a str,
     pub send_voice: bool,
+    pub attachments: &'a [String],
 }
 
 pub(crate) struct EmailTestCommandRequest<'a> {

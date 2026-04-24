@@ -83,6 +83,7 @@ pub struct CompletionReviewRequest {
     pub artifact_action: Option<String>,
     pub artifact_to: Vec<String>,
     pub artifact_cc: Vec<String>,
+    pub artifact_attachments: Vec<String>,
     pub required_deliverables: Vec<String>,
 }
 
@@ -438,6 +439,11 @@ fn build_review_prompt(request: &CompletionReviewRequest, reasons: &[String]) ->
     } else {
         request.artifact_cc.join(", ")
     };
+    let artifact_attachments = if request.artifact_attachments.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.artifact_attachments.join(", ")
+    };
     let required_deliverables = if request.required_deliverables.is_empty() {
         "(none recorded)".to_string()
     } else {
@@ -478,6 +484,7 @@ Artifact under review:\n\
 Artifact action: {artifact_action}\n\
 Artifact to: {artifact_to}\n\
 Artifact cc: {artifact_cc}\n\
+Artifact attachments: {artifact_attachments}\n\
 Required deliverables: {required_deliverables}\n\
 --- BEGIN ARTIFACT ---\n\
 {artifact_text}\n\
@@ -524,6 +531,7 @@ HANDOFF:\n\
         artifact_action = artifact_action,
         artifact_to = artifact_to,
         artifact_cc = artifact_cc,
+        artifact_attachments = artifact_attachments,
         required_deliverables = required_deliverables,
         strategy_conversation_id = request.conversation_id,
         verification_conversation_id = request.conversation_id
@@ -830,6 +838,7 @@ mod tests {
             artifact_action: Some("reply".to_string()),
             artifact_to: vec!["o.schaefers@gmx.net".to_string()],
             artifact_cc: vec!["michael.welsch@metric-space.ai".to_string()],
+            artifact_attachments: vec!["/srv/runtime/communication/artifacts/jami/ctox-jami-setup.pdf".to_string()],
             required_deliverables: vec!["qr_code".to_string()],
         };
         let rendered = build_review_prompt(&request, &["founder_communication".to_string()]);
@@ -840,6 +849,7 @@ mod tests {
         assert!(rendered.contains(
             "Artifact cc: michael.welsch@metric-space.ai"
         ));
+        assert!(rendered.contains("Artifact attachments: /srv/runtime/communication/artifacts/jami/ctox-jami-setup.pdf"));
         assert!(rendered.contains("Required deliverables: qr_code"));
         assert!(rendered.contains("judge the full mail action, not just the prose"));
         assert!(rendered.contains("treat every listed required deliverable as mandatory"));

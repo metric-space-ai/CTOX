@@ -2333,6 +2333,9 @@ fn start_prompt_worker(
                     Ok(reply) => {
                         let founder_reply_key =
                             founder_email_reply_message_key(&job).map(ToOwned::to_owned);
+                        let founder_reply_action = founder_reply_key
+                            .as_ref()
+                            .and_then(|message_key| channels::prepare_reviewed_founder_reply(&root, message_key).ok());
                         let mut founder_send_error: Option<String> = None;
                         let should_handle_messages = if let Some(message_key) = &founder_reply_key {
                             match &review_disposition {
@@ -2341,6 +2344,10 @@ fn start_prompt_worker(
                                         &root,
                                         message_key,
                                         &reply,
+                                        founder_reply_action
+                                            .as_ref()
+                                            .map(|action| action.attachments.as_slice())
+                                            .unwrap_or(&[]),
                                     ) {
                                         Ok(_) => match channels::send_reviewed_founder_reply(
                                             &root,
@@ -2679,6 +2686,10 @@ fn run_completion_review(
         artifact_cc: founder_reply_action
             .as_ref()
             .map(|action| action.cc.clone())
+            .unwrap_or_default(),
+        artifact_attachments: founder_reply_action
+            .as_ref()
+            .map(|action| action.attachments.clone())
             .unwrap_or_default(),
         required_deliverables: founder_required_deliverables,
     };
@@ -5322,7 +5333,7 @@ fn enrich_inbound_prompt(
         let authority = render_email_sender_authority(&policy);
         let communication_contract = render_email_context_contract(root, message);
         let reply_instruction = if matches!(policy.role.as_str(), "owner" | "founder" | "admin") {
-            "Wenn eine Antwort sinnvoll ist, sende keine direkte E-Mail aus diesem Run. Erstelle stattdessen nur den empfaengerorientierten Antwortentwurf auf Basis des gesamten Founder-/Owner-Kontexts; Founder-/Owner-Outbound darf nur ueber den dedizierten reviewed communication path rausgehen. Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext und sonst nichts: keine Analyse, keine Revalidierungsnotizen, keine Queue-/Review-/Runtime-Sprache, keine Host-Pfade, keine Tool-Evidenz. Beantworte die neueste Founder-/Owner-Nachricht direkt; wenn konkrete Deliverables oder Links bereits vorhanden sind, liefere sie unmittelbar in der Mail. Wenn etwas objektiv noch fehlt, benenne nur den fehlenden Punkt kurz und klar statt internen Status zu berichten.".to_string()
+            "Wenn eine Antwort sinnvoll ist, sende keine direkte E-Mail aus diesem Run. Erstelle stattdessen nur den empfaengerorientierten Antwortentwurf auf Basis des gesamten Founder-/Owner-Kontexts; Founder-/Owner-Outbound darf nur ueber den dedizierten reviewed communication path rausgehen. Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext und sonst nichts: keine Analyse, keine Revalidierungsnotizen, keine Queue-/Review-/Runtime-Sprache, keine Host-Pfade, keine Tool-Evidenz. Beantworte die neueste Founder-/Owner-Nachricht direkt; wenn konkrete Deliverables oder Links bereits vorhanden sind, liefere sie unmittelbar in der Mail. Wenn ein konkreter Anhang verlangt ist (zum Beispiel QR-Code-PDF, Installationsdatei oder Mockup-Datei), darfst du ihn nicht durch einen oeffentlichen Link ersetzen. Wenn etwas objektiv noch fehlt, benenne nur den fehlenden Punkt kurz und klar statt internen Status zu berichten.".to_string()
         } else {
             format!(
                 "Wenn eine Antwort per E-Mail sinnvoll ist, nutze `ctox channel send --channel email --account-key {} --thread-key '{}' --to {} --subject \"Re: {}\"`. Nutze bei Antworten auf bestehende Mail-Threads keinen leeren oder neuen Betreff.",
@@ -5353,7 +5364,7 @@ fn enrich_inbound_prompt(
         };
         let sender = display_inbound_sender(message);
         return format!(
-            "[Jami-Nachricht eingegangen]\nSender: {sender}\nThread: {}\nWenn du antwortest, nutze `ctox channel send --channel jami --account-key {} --thread-key '{}' --body \"<deine Antwort>\"{voice_hint}`.{voice_note}\n\n{}",
+            "[Jami-Nachricht eingegangen]\nSender: {sender}\nThread: {}\nWenn du antwortest, nutze `ctox channel send --channel jami --account-key {} --thread-key '{}' --body \"<deine Antwort>\" [--attach-file <pfad>]...{voice_hint}`.{voice_note} Wenn ein QR-Code, PDF, Bild oder anderer konkreter Anhang verlangt ist, sende ihn als echte Datei ueber `--attach-file` und niemals als oeffentlichen Link.\n\n{}",
             message.thread_key,
             message.account_key,
             message.thread_key,

@@ -7,6 +7,8 @@ use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use qrcode::types::Color as QrColor;
+use qrcode::QrCode;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
@@ -14,6 +16,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -559,7 +562,7 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
         }
         _ => {
             anyhow::bail!(
-                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--send-voice] [--reviewed-founder-send]\n  ctox channel founder-reply --message-key <inbound-email-key> --body <text>\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]\n  ctox channel context --thread-key <key> [--db <path>] [--query <text>] [--sender <addr>] [--limit <n>]"
+                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--cc <addr>]... [--attach-file <path>]... [--send-voice] [--reviewed-founder-send]\n  ctox channel founder-reply --message-key <inbound-email-key> --body <text>\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]\n  ctox channel context --thread-key <key> [--db <path>] [--query <text>] [--sender <addr>] [--limit <n>]"
             )
         }
     }
@@ -1230,6 +1233,7 @@ struct ChannelSendRequest {
     subject: String,
     to: Vec<String>,
     cc: Vec<String>,
+    attachments: Vec<String>,
     sender_display: Option<String>,
     sender_address: Option<String>,
     send_voice: bool,
@@ -1242,6 +1246,7 @@ pub(crate) struct FounderReplyAction {
     pub subject: String,
     pub to: Vec<String>,
     pub cc: Vec<String>,
+    pub attachments: Vec<String>,
 }
 
 fn sync_channel(root: &Path, db_path: &Path, channel: &str, args: &[String]) -> Result<Value> {
@@ -1360,6 +1365,7 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
                     sender_display: request.sender_display.as_deref(),
                     subject: &request.subject,
                     body: &request.body,
+                    attachments: &request.attachments,
                 },
             )?;
             Ok(json!({
@@ -1397,6 +1403,7 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
                     subject: &request.subject,
                     body: &request.body,
                     send_voice,
+                    attachments: &request.attachments,
                 },
             )?;
             Ok(json!({
@@ -1612,7 +1619,31 @@ fn detect_required_founder_deliverables(subject: &str, body: &str) -> Vec<String
     normalize_email_list(required)
 }
 
-fn founder_reply_satisfies_deliverable(body: &str, deliverable: &str) -> bool {
+fn attachments_satisfy_deliverable(attachments: &[String], deliverable: &str) -> bool {
+    let lowered = attachments
+        .iter()
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    match deliverable {
+        "qr_code" => lowered.iter().any(|value| {
+            (value.contains("jami") || value.contains("qr")) && value.ends_with(".pdf")
+        }),
+        "mockup_links_or_files" => lowered.iter().any(|value| {
+            value.ends_with(".html") || value.ends_with(".pdf") || value.ends_with(".png")
+        }),
+        "link_set" => false,
+        _ => false,
+    }
+}
+
+fn founder_reply_satisfies_deliverable(
+    body: &str,
+    attachments: &[String],
+    deliverable: &str,
+) -> bool {
+    if attachments_satisfy_deliverable(attachments, deliverable) {
+        return true;
+    }
     let normalized = normalize_deliverable_text(body);
     match deliverable {
         "qr_code" => text_mentions_any(
@@ -1626,6 +1657,134 @@ fn founder_reply_satisfies_deliverable(body: &str, deliverable: &str) -> bool {
         "link_set" => text_mentions_any(&normalized, &["http", "https", "link", "links"]),
         _ => true,
     }
+}
+
+fn prepare_founder_reply_attachments(root: &Path, subject: &str, body: &str) -> Result<Vec<String>> {
+    let required = detect_required_founder_deliverables(subject, body);
+    let mut attachments = Vec::new();
+    if required.iter().any(|value| value == "qr_code")
+        && normalize_deliverable_text(&format!("{subject} {body}"))
+            .contains("jami")
+    {
+        attachments.push(generate_jami_setup_pdf_artifact(root)?);
+    }
+    Ok(attachments)
+}
+
+fn generate_jami_setup_pdf_artifact(root: &Path) -> Result<String> {
+    let settings = communication_gateway::runtime_settings_from_root(
+        root,
+        communication_gateway::CommunicationAdapterKind::Jami,
+    );
+    let account_id = settings
+        .get("CTO_JAMI_ACCOUNT_ID")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .context("missing CTO_JAMI_ACCOUNT_ID for Jami QR artifact generation")?;
+    let profile_name = settings
+        .get("CTO_JAMI_PROFILE_NAME")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("CTO1");
+    let share_uri = format!("jami:{account_id}");
+    let artifact_dir = root.join("runtime/communication/artifacts/jami");
+    fs::create_dir_all(&artifact_dir)
+        .with_context(|| format!("failed to create Jami artifact dir {}", artifact_dir.display()))?;
+    let file_name = format!(
+        "ctox-jami-setup-{}.pdf",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    );
+    let path = artifact_dir.join(file_name);
+    let bytes = build_simple_jami_setup_pdf(profile_name, &share_uri)?;
+    fs::write(&path, bytes)
+        .with_context(|| format!("failed to write Jami setup PDF {}", path.display()))?;
+    Ok(path.display().to_string())
+}
+
+fn build_simple_jami_setup_pdf(profile_name: &str, share_uri: &str) -> Result<Vec<u8>> {
+    let qr = QrCode::new(share_uri.as_bytes()).context("failed to build Jami QR code")?;
+    let width = qr.width();
+    let colors = qr.to_colors();
+    let mut content = String::new();
+    content.push_str("BT /F1 20 Tf 72 760 Td ");
+    content.push_str(&pdf_text(profile_name));
+    content.push_str(" Tj ET\n");
+    content.push_str("BT /F1 12 Tf 72 738 Td ");
+    content.push_str(&pdf_text("Scan this QR code in Jami or use the URI below."));
+    content.push_str(" Tj ET\n");
+    content.push_str("BT /F1 11 Tf 72 718 Td ");
+    content.push_str(&pdf_text(share_uri));
+    content.push_str(" Tj ET\n");
+    content.push_str("0 0 0 rg\n");
+    let module = 5.0f32;
+    let origin_x = 72.0f32;
+    let origin_y = 420.0f32;
+    for y in 0..width {
+        for x in 0..width {
+            let idx = y * width + x;
+            if matches!(colors.get(idx), Some(QrColor::Dark)) {
+                let px = origin_x + (x as f32 * module);
+                let py = origin_y + ((width - 1 - y) as f32 * module);
+                content.push_str(&format!("{px:.2} {py:.2} {module:.2} {module:.2} re f\n"));
+            }
+        }
+    }
+    content.push_str("BT /F1 10 Tf 72 396 Td ");
+    content.push_str(&pdf_text("Account name:"));
+    content.push_str(" Tj ET\n");
+    content.push_str("BT /F1 10 Tf 140 396 Td ");
+    content.push_str(&pdf_text(profile_name));
+    content.push_str(" Tj ET\n");
+    content.push_str("BT /F1 10 Tf 72 380 Td ");
+    content.push_str(&pdf_text("Fallback URI:"));
+    content.push_str(" Tj ET\n");
+    content.push_str("BT /F1 10 Tf 140 380 Td ");
+    content.push_str(&pdf_text(share_uri));
+    content.push_str(" Tj ET\n");
+
+    let mut objects = Vec::new();
+    objects.push("1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n".to_string());
+    objects.push("2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n".to_string());
+    objects.push("3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >> endobj\n".to_string());
+    objects.push("4 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n".to_string());
+    objects.push(format!(
+        "5 0 obj << /Length {} >> stream\n{}endstream\nendobj\n",
+        content.as_bytes().len(),
+        content
+    ));
+
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![0usize];
+    for object in &objects {
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(object.as_bytes());
+    }
+    let xref_start = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n", offsets.len()).as_bytes());
+    pdf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    pdf.extend_from_slice(
+        format!(
+            "trailer << /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+            offsets.len(),
+            xref_start
+        )
+        .as_bytes(),
+    );
+    Ok(pdf)
+}
+
+fn pdf_text(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('(', "\\(")
+        .replace(')', "\\)");
+    format!("({escaped})")
 }
 
 fn derives_targets_from_forward(subject: &str, body: &str) -> bool {
@@ -1706,6 +1865,14 @@ fn ensure_founder_outbound_body_clean(request: &ChannelSendRequest) -> Result<()
         "host-pfad",
         "host-pfade",
         "vps-pfad",
+        "api.qrserver.com",
+        "qrserver.com",
+        "public server",
+        "public link",
+        "oeffentlicher server",
+        "oeffentlicher link",
+        "offentlicher server",
+        "offentlicher link",
     ];
     let hits = forbidden_markers
         .iter()
@@ -1748,6 +1915,7 @@ fn send_email_message(
             sender_display: request.sender_display.as_deref(),
             subject: &request.subject,
             body: &request.body,
+            attachments: &request.attachments,
         },
     )?;
     Ok(json!({
@@ -1782,6 +1950,7 @@ pub(crate) fn prepare_reviewed_founder_reply(
     let addressing = load_message_addressing_from_conn(&conn, inbound_message_key)?
         .with_context(|| format!("missing communication addressing for {inbound_message_key}"))?;
     let (to, cc) = derive_founder_reply_recipients(&inbound, &addressing);
+    let attachments = prepare_founder_reply_attachments(root, &inbound.subject, &inbound.body_text)?;
     let request = resolve_outbound_subject(
         &conn,
         ChannelSendRequest {
@@ -1792,6 +1961,7 @@ pub(crate) fn prepare_reviewed_founder_reply(
             subject: format!("Re: {}", inbound.subject.trim()),
             to,
             cc,
+            attachments,
             sender_display: None,
             sender_address: None,
             send_voice: false,
@@ -1803,6 +1973,7 @@ pub(crate) fn prepare_reviewed_founder_reply(
         subject: request.subject,
         to: request.to,
         cc: request.cc,
+        attachments: request.attachments,
     })
 }
 
@@ -1824,11 +1995,12 @@ pub(crate) fn ensure_founder_reply_deliverables_present(
     root: &Path,
     inbound_message_key: &str,
     body: &str,
+    attachments: &[String],
 ) -> Result<()> {
     let required = required_founder_reply_deliverables(root, inbound_message_key)?;
     let missing = required
         .into_iter()
-        .filter(|deliverable| !founder_reply_satisfies_deliverable(body, deliverable))
+        .filter(|deliverable| !founder_reply_satisfies_deliverable(body, attachments, deliverable))
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         anyhow::bail!(
@@ -1859,6 +2031,7 @@ pub fn send_reviewed_founder_reply(
             subject: action.subject,
             to: action.to,
             cc: action.cc,
+            attachments: action.attachments,
             sender_display: None,
             sender_address: None,
             send_voice: false,
@@ -1875,7 +2048,12 @@ pub fn send_reviewed_founder_reply(
         "reviewed founder reply requires founder/owner/admin recipient"
     );
     ensure_founder_outbound_body_clean(&request)?;
-    ensure_founder_reply_deliverables_present(root, inbound_message_key, &request.body)?;
+    ensure_founder_reply_deliverables_present(
+        root,
+        inbound_message_key,
+        &request.body,
+        &request.attachments,
+    )?;
     send_email_message(root, &conn, &db_path, &request)
 }
 
@@ -2072,6 +2250,7 @@ fn parse_send_request(args: &[String]) -> Result<ChannelSendRequest> {
         subject,
         to,
         cc: collect_flag_values(args, "--cc"),
+        attachments: collect_flag_values(args, "--attach-file"),
         sender_display: find_flag_value(args, "--sender-display").map(ToOwned::to_owned),
         sender_address: find_flag_value(args, "--sender-address").map(ToOwned::to_owned),
         send_voice: has_flag(args, "--send-voice"),
@@ -4487,6 +4666,7 @@ mod tests {
                 subject: String::new(),
                 to: vec!["owner@example.com".to_string()],
                 cc: Vec::new(),
+                attachments: Vec::new(),
                 sender_display: None,
                 sender_address: None,
                 send_voice: false,
@@ -4513,6 +4693,7 @@ mod tests {
                 subject: "(no subject)".to_string(),
                 to: vec!["owner@example.com".to_string()],
                 cc: Vec::new(),
+                attachments: Vec::new(),
                 sender_display: None,
                 sender_address: None,
                 send_voice: false,
@@ -4548,6 +4729,7 @@ mod tests {
                 subject: "Re: Test".to_string(),
                 to: vec!["michael.welsch@metric-space.ai".to_string()],
                 cc: Vec::new(),
+                attachments: Vec::new(),
                 sender_display: None,
                 sender_address: None,
                 send_voice: false,
@@ -4582,6 +4764,7 @@ mod tests {
                 subject: "Re: Test".to_string(),
                 to: vec!["founder@example.com".to_string()],
                 cc: Vec::new(),
+                attachments: Vec::new(),
                 sender_display: None,
                 sender_address: None,
                 send_voice: false,
@@ -4616,6 +4799,7 @@ mod tests {
                 subject: "Re: Test".to_string(),
                 to: vec!["founder@example.com".to_string()],
                 cc: Vec::new(),
+                attachments: Vec::new(),
                 sender_display: None,
                 sender_address: None,
                 send_voice: false,
@@ -4740,6 +4924,7 @@ mod tests {
             &root,
             "email:cto1@metric-space.ai::INBOX::qr-1",
             "Hi Michael,\n\nhier ist der direkte Jami-Zugang:\n\njami:abc123",
+            &[],
         )
         .expect_err("missing qr code should block founder reply");
         assert!(error

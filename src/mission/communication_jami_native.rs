@@ -83,6 +83,7 @@ struct JamiOutboundDelivery {
     remote_uri: Option<String>,
     conversation_id: Option<String>,
     voice_attachment: Option<PathBuf>,
+    file_attachments: Vec<PathBuf>,
     submitted_text: bool,
     submitted_file: bool,
 }
@@ -241,9 +242,11 @@ fn execute_send(options: &JamiOptions, request: &JamiSendCommandRequest<'_>) -> 
         .unwrap_or_else(|| thread_key.clone());
     let raw_payload_ref = delivery
         .voice_attachment
-        .as_ref()
+        .iter()
+        .chain(delivery.file_attachments.iter())
         .map(|path| path.display().to_string())
-        .unwrap_or_default();
+        .collect::<Vec<_>>()
+        .join("\n");
     upsert_communication_message(
         &mut conn,
         UpsertMessage {
@@ -273,7 +276,7 @@ fn execute_send(options: &JamiOptions, request: &JamiSendCommandRequest<'_>) -> 
             trust_level: &options.trust_level,
             status: "submitted",
             seen: true,
-            has_attachments: request.send_voice,
+            has_attachments: request.send_voice || !request.attachments.is_empty(),
             external_created_at: &timestamp,
             observed_at: &timestamp,
             metadata_json: &serde_json::to_string(&json!({
@@ -285,6 +288,7 @@ fn execute_send(options: &JamiOptions, request: &JamiSendCommandRequest<'_>) -> 
                 "submittedText": delivery.submitted_text,
                 "submittedFile": delivery.submitted_file,
                 "voiceAttachmentPath": delivery.voice_attachment.as_ref().map(|path| path.display().to_string()),
+                "fileAttachmentPaths": delivery.file_attachments.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
             }))?,
         },
     )?;
@@ -303,6 +307,7 @@ fn execute_send(options: &JamiOptions, request: &JamiSendCommandRequest<'_>) -> 
             "submittedText": delivery.submitted_text,
             "submittedFile": delivery.submitted_file,
             "voiceAttachmentPath": delivery.voice_attachment.as_ref().map(|path| path.display().to_string()),
+            "fileAttachmentPaths": delivery.file_attachments.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
         },
         "accountKey": account_key,
         "to": request.to,
@@ -1195,14 +1200,19 @@ fn submit_jami_delivery(
     } else {
         None
     };
+    let file_attachments = request
+        .attachments
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
     let conversation_id = ensure_conversation_for_delivery(
         options,
         &account_key,
         request.thread_key,
         remote_uri.as_deref(),
     )?;
-    if conversation_id.is_none() && voice_attachment.is_some() {
-        bail!("Jami voice delivery requires a resolvable conversation");
+    if conversation_id.is_none() && (voice_attachment.is_some() || !file_attachments.is_empty()) {
+        bail!("Jami attachment delivery requires a resolvable conversation");
     }
     let mut submitted_text = false;
     if !request.body.trim().is_empty() {
@@ -1230,10 +1240,27 @@ fn submit_jami_delivery(
         )?;
         submitted_file = true;
     }
+    if let Some(conversation_id) = conversation_id.as_deref() {
+        for file_path in &file_attachments {
+            let display_name = file_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("attachment.bin");
+            send_file(
+                &options.account_id,
+                conversation_id,
+                file_path,
+                display_name,
+                "",
+            )?;
+            submitted_file = true;
+        }
+    }
     Ok(JamiOutboundDelivery {
         remote_uri,
         conversation_id,
         voice_attachment,
+        file_attachments,
         submitted_text,
         submitted_file,
     })
