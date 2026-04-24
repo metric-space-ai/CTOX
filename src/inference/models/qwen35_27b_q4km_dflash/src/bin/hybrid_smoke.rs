@@ -86,9 +86,13 @@ fn main() -> Result<()> {
     gctx.realize().map_err(|e| anyhow!(e))?;
     println!("[hybrid] tensors realized on backend");
 
+    eprintln!("[hybrid] about to upload x");
     gctx.upload_f32(t_x, &h_x).map_err(|e| anyhow!(e))?;
+    eprintln!("[hybrid] about to upload w");
     gctx.upload_f32(t_w, &h_w).map_err(|e| anyhow!(e))?;
+    eprintln!("[hybrid] about to upload bias");
     gctx.upload_f32(t_bias, &h_bias).map_err(|e| anyhow!(e))?;
+    eprintln!("[hybrid] uploads done");
 
     let stream = CUstream(std::ptr::null_mut());
     let exec = ExecCtx::new(kernels, stream);
