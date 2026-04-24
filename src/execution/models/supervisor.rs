@@ -1528,32 +1528,21 @@ fn is_qwen35_vision_request_model(model: &str) -> bool {
 }
 
 fn resolve_managed_engine_binary(
-    root: &Path,
-    launch_spec: &ManagedBackendLaunchSpec,
+    _root: &Path,
+    _launch_spec: &ManagedBackendLaunchSpec,
 ) -> Result<PathBuf> {
-    let configured = launch_spec
-        .engine_config
-        .binary_path
-        .as_deref()
-        .map(PathBuf::from)
-        .filter(|path| path.is_file());
-    let binary = configured
-        .unwrap_or_else(|| engine::discover_source_layout_paths(root).model_runtime_binary);
-    if !binary.is_file() {
-        anyhow::bail!(
-            "ctox-engine binary missing at {}. Reinstall the CTOX tools payload or run `ctox engine rebuild`.",
-            binary.display()
-        );
-    }
-    runtime_engine_guard::ensure_engine_binary_matches_host(
-        root,
-        &binary,
-        launch_spec
-            .compute_target
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("cpu")),
-    )?;
-    Ok(binary)
+    // ctox-engine (Candle-based tools/model-runtime/) was retired. Local
+    // inference now runs through per-model self-contained crates under
+    // src/inference/models/<model>/, called directly from CTOX. Any code
+    // path that reaches this function belongs to the old subprocess
+    // architecture and needs to be rewritten on top of the new crates
+    // before it can work again.
+    anyhow::bail!(
+        "ctox-engine subprocess backend has been retired. Local inference \
+         lives in the per-model crates under src/inference/models/<model>/ \
+         now and must be called in-process; the managed-subprocess path is \
+         no longer available."
+    )
 }
 
 fn configure_managed_engine_runtime_env(

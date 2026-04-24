@@ -311,7 +311,7 @@ pub fn discover_source_layout_paths(root: &Path) -> SourceLayoutPaths {
                 .then_some(default_runtime_tools)
         })
         .unwrap_or_else(|| root.join("tools"));
-    let default_agent_runtime_root = root.join("src/inference");
+    let default_agent_runtime_root = root.join("src/harness");
     let agent_runtime_root = runtime_env::env_or_config(root, "CTOX_AGENT_RUNTIME_ROOT")
         .map(PathBuf::from)
         .filter(|path| !path.as_os_str().is_empty())
@@ -320,7 +320,7 @@ pub fn discover_source_layout_paths(root: &Path) -> SourceLayoutPaths {
                 .is_dir()
                 .then_some(default_agent_runtime_root)
         })
-        .unwrap_or_else(|| root.join("src/inference"));
+        .unwrap_or_else(|| root.join("src/harness"));
     let model_runtime_root = tools_root.join("model-runtime");
     SourceLayoutPaths {
         tools_root,
@@ -1917,12 +1917,12 @@ mod tests {
     }
 
     #[test]
-    fn source_layout_paths_use_inference_runtime_root() {
+    fn source_layout_paths_use_harness_runtime_root() {
         let deps = discover_source_layout_paths(Path::new("/tmp/ctox"));
         assert_eq!(deps.tools_root, PathBuf::from("/tmp/ctox/tools"));
         assert_eq!(
             deps.agent_runtime_root,
-            PathBuf::from("/tmp/ctox/src/inference")
+            PathBuf::from("/tmp/ctox/src/harness")
         );
         assert_eq!(
             deps.model_runtime_binary,

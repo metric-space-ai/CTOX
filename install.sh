@@ -761,7 +761,7 @@ sync_skills_to_codex_home() {
 
   # System skills are embedded into the ctox binary via include_dir! and
   # registered into SQLite + materialized to $CODEX_HOME/skills/.system/ at
-  # service start by install_system_skills() in src/inference/core/. We do
+  # service start by install_system_skills() in src/harness/core/. We do
   # not copy them here — the Rust path is the source of truth.
 
   # Packs in the repo are organized into category subfolders (deploy/,
@@ -1277,7 +1277,7 @@ build_ctox() {
 
   # 4. Do not build or publish a secondary agent-runtime CLI. CTOX consumes
   # the integrated agent-runtime source tree in-process via direct session.
-  if [[ -f "$source_root/src/inference/Cargo.toml" ]]; then
+  if [[ -f "$source_root/src/harness/Cargo.toml" ]]; then
     printf '  %b%bintegrated agent-runtime kept in-process; no standalone runtime CLI built%b\n' \
       "$C_BOLD" "$C_GREY" "$C_RESET" >&2
   fi
