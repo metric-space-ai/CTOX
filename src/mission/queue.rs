@@ -3,13 +3,17 @@ use anyhow::Result;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use sha2::Digest;
 use sha2::Sha256;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::channels;
+use crate::execution::agent::direct_session::PersistentSession;
+use crate::inference::runtime_env;
 use crate::plan;
 use crate::tickets;
 
@@ -17,6 +21,75 @@ const DEFAULT_LIST_LIMIT: usize = 20;
 const DEFAULT_TICKET_SYSTEM: &str = "internal";
 const SPILL_RESTORE_LEASE_OWNER: &str = "spill-restore-hold";
 const SPILL_RESTORE_TITLE_PREFIX: &str = "spill restore: ";
+const QUEUE_REPAIR_TIMEOUT_SECS: u64 = 300;
+const QUEUE_REPAIR_SKILL_RELATIVE_PATH: &str =
+    "skills/system/mission_orchestration/queue-cleanup/SKILL.md";
+
+const QUEUE_REPAIR_SYSTEM_PROMPT: &str = r#"You are CTOX Queue Repair.
+
+You run a dedicated external queue-repair pass.
+This is not normal execution. Gather facts yourself from the runtime SQLite store, queue state,
+self-work and ticket state, active strategic directives, founder or owner communication state,
+review state, and service status.
+
+Use the queue-cleanup skill first and follow it.
+
+Primary goals:
+- preserve the canonical mission hot path
+- stop stale, duplicate, superseded, or flooding queue work
+- keep founder or owner visible work separate from internal queue churn
+- avoid deleting valid work when block, release, or reprioritize would be safer
+
+Do not mutate the queue directly from this run.
+Return a repair plan only. The caller will apply the plan deterministically.
+
+Use exact output format:
+
+STATE: READY|NOOP|BLOCKED|PARTIAL
+SUMMARY: <one sentence>
+CANONICAL_HOT_PATH:
+- <message_key or thread> :: <why>
+STALE_QUEUE_ITEMS:
+- <message_key> :: <why>
+SURVIVING_QUEUE_ITEMS:
+- <message_key> :: <why>
+REPAIR_ACTIONS:
+- cancel <message_key> :: <reason>
+- block <message_key> :: <reason>
+- release <message_key> :: <reason>
+- reprioritize <message_key> <urgent|high|normal|low> :: <reason>
+- none
+EVIDENCE:
+- <check> => <result>
+HANDOFF:
+- <only when another queue repair pass should continue; otherwise write "none">
+"#;
+
+const QUEUE_REPAIR_VERIFY_SYSTEM_PROMPT: &str = r#"You are CTOX Queue Repair Verification.
+
+You verify a queue repair after deterministic actions were applied.
+Gather facts yourself from the runtime SQLite store, queue state, strategic directives,
+founder or owner communication state, and service status.
+
+Use the queue-cleanup skill first and follow it.
+
+Decide whether the queue is now stable enough to resume the canonical hot path.
+
+Use exact output format:
+
+STATE: STABLE|UNSTABLE|PARTIAL
+SUMMARY: <one sentence>
+CANONICAL_HOT_PATH:
+- <message_key or thread> :: <why>
+REMAINING_RISKS:
+- <risk or "none">
+FOLLOW_UP_ACTIONS:
+- <action or "none">
+EVIDENCE:
+- <check> => <result>
+HANDOFF:
+- <only when another verification pass should continue; otherwise write "none">
+"#;
 
 #[derive(Debug, Clone, Serialize)]
 struct QueueTicketBridgeView {
@@ -61,6 +134,40 @@ struct QueueRepairView {
     stale_plan_routes_repaired: usize,
     open_queue_count: usize,
     open_queue_preview: Vec<channels::QueueTaskView>,
+    agentic: Option<AgenticQueueRepairView>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AgenticQueueRepairView {
+    state: String,
+    summary: String,
+    canonical_hot_path: Vec<String>,
+    stale_queue_items: Vec<String>,
+    surviving_queue_items: Vec<String>,
+    repair_actions: Vec<QueueRepairActionView>,
+    evidence: Vec<String>,
+    handoff: Option<String>,
+    applied_actions: Vec<QueueRepairActionView>,
+    verification: Option<QueueRepairVerificationView>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct QueueRepairActionView {
+    action: String,
+    message_key: String,
+    priority: Option<String>,
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+struct QueueRepairVerificationView {
+    state: String,
+    summary: String,
+    canonical_hot_path: Vec<String>,
+    remaining_risks: Vec<String>,
+    follow_up_actions: Vec<String>,
+    evidence: Vec<String>,
+    handoff: Option<String>,
 }
 
 pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
@@ -282,17 +389,30 @@ pub fn handle_queue_command(root: &Path, args: &[String]) -> Result<()> {
             print_json(&json!({"ok": true, "bridge": bridge}))
         }
         "repair" => {
-            let repaired = repair_queue_state(root)?;
+            let repaired = repair_queue_state(
+                root,
+                args.iter().any(|arg| arg == "--mechanical"),
+                args.iter().any(|arg| arg == "--dry-run"),
+            )?;
             print_json(&json!({"ok": true, "repair": repaired}))
         }
         _ => anyhow::bail!(
-            "usage:\n  ctox queue add --title <label> --prompt <text> [--thread-key <key>] [--workspace-root <path>] [--skill <name>] [--priority <urgent|high|normal|low>] [--parent-message-key <key>]\n  ctox queue list [--status <pending|leased|blocked|failed|handled|cancelled>]... [--limit <n>]\n  ctox queue show --message-key <key>\n  ctox queue edit --message-key <key> [--title <label>] [--prompt <text>] [--thread-key <key>] [--workspace-root <path>] [--clear-workspace-root] [--skill <name>] [--clear-skill] [--priority <urgent|high|normal|low>]\n  ctox queue reprioritize --message-key <key> --priority <urgent|high|normal|low>\n  ctox queue block --message-key <key> --reason <text>\n  ctox queue release --message-key <key> [--priority <urgent|high|normal|low>] [--clear-note] [--note <text>]\n  ctox queue complete --message-key <key> [--note <text>]\n  ctox queue fail --message-key <key> --reason <text>\n  ctox queue cancel --message-key <key> [--reason <text>]\n  ctox queue spill --message-key <key> [--ticket-system <name>] [--reason <text>] [--skill <name>] [--publish]\n  ctox queue spill-candidates [--limit <n>]\n  ctox queue spills [--state <spilled|restored>] [--limit <n>]\n  ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]\n  ctox queue repair"
+            "usage:\n  ctox queue add --title <label> --prompt <text> [--thread-key <key>] [--workspace-root <path>] [--skill <name>] [--priority <urgent|high|normal|low>] [--parent-message-key <key>]\n  ctox queue list [--status <pending|leased|blocked|failed|handled|cancelled>]... [--limit <n>]\n  ctox queue show --message-key <key>\n  ctox queue edit --message-key <key> [--title <label>] [--prompt <text>] [--thread-key <key>] [--workspace-root <path>] [--clear-workspace-root] [--skill <name>] [--clear-skill] [--priority <urgent|high|normal|low>]\n  ctox queue reprioritize --message-key <key> --priority <urgent|high|normal|low>\n  ctox queue block --message-key <key> --reason <text>\n  ctox queue release --message-key <key> [--priority <urgent|high|normal|low>] [--clear-note] [--note <text>]\n  ctox queue complete --message-key <key> [--note <text>]\n  ctox queue fail --message-key <key> --reason <text>\n  ctox queue cancel --message-key <key> [--reason <text>]\n  ctox queue spill --message-key <key> [--ticket-system <name>] [--reason <text>] [--skill <name>] [--publish]\n  ctox queue spill-candidates [--limit <n>]\n  ctox queue spills [--state <spilled|restored>] [--limit <n>]\n  ctox queue restore --message-key <key> [--priority <urgent|high|normal|low>] [--note <text>]\n  ctox queue repair [--dry-run] [--mechanical]"
         ),
     }
 }
 
-fn repair_queue_state(root: &Path) -> Result<QueueRepairView> {
+fn repair_queue_state(
+    root: &Path,
+    mechanical_only: bool,
+    dry_run: bool,
+) -> Result<QueueRepairView> {
     let stale_plan_routes_repaired = plan::repair_stale_step_routing_state(root)?;
+    let agentic = if mechanical_only {
+        None
+    } else {
+        Some(run_agentic_queue_repair(root, dry_run)?)
+    };
     let open_statuses = vec![
         "pending".to_string(),
         "leased".to_string(),
@@ -304,7 +424,394 @@ fn repair_queue_state(root: &Path) -> Result<QueueRepairView> {
         stale_plan_routes_repaired,
         open_queue_count,
         open_queue_preview,
+        agentic,
     })
+}
+
+fn run_agentic_queue_repair(root: &Path, dry_run: bool) -> Result<AgenticQueueRepairView> {
+    let settings = runtime_env::effective_runtime_env_map(root).unwrap_or_default();
+    let report = run_queue_repair_agent(
+        root,
+        &settings,
+        QUEUE_REPAIR_SYSTEM_PROMPT,
+        &build_queue_repair_prompt(root, dry_run),
+    )?;
+    let parsed = parse_queue_repair_report(&report);
+    let applied_actions = if dry_run {
+        Vec::new()
+    } else {
+        apply_queue_repair_actions(root, &parsed.repair_actions)?
+    };
+    let verification = if dry_run {
+        None
+    } else {
+        let verify_report = run_queue_repair_agent(
+            root,
+            &settings,
+            QUEUE_REPAIR_VERIFY_SYSTEM_PROMPT,
+            &build_queue_repair_verify_prompt(root, &report, &applied_actions),
+        )?;
+        Some(parse_queue_repair_verification(&verify_report))
+    };
+
+    Ok(AgenticQueueRepairView {
+        state: parsed.state,
+        summary: parsed.summary,
+        canonical_hot_path: parsed.canonical_hot_path,
+        stale_queue_items: parsed.stale_queue_items,
+        surviving_queue_items: parsed.surviving_queue_items,
+        repair_actions: parsed.repair_actions,
+        evidence: parsed.evidence,
+        handoff: parsed.handoff,
+        applied_actions,
+        verification,
+    })
+}
+
+fn run_queue_repair_agent(
+    root: &Path,
+    settings: &std::collections::BTreeMap<String, String>,
+    system_prompt: &str,
+    prompt: &str,
+) -> Result<String> {
+    let mut session =
+        PersistentSession::start_with_instructions(root, settings, Some(system_prompt), true)?;
+    let report = session.run_turn(
+        prompt,
+        Some(Duration::from_secs(QUEUE_REPAIR_TIMEOUT_SECS)),
+        None,
+        Some(false),
+        0,
+    )?;
+    session.shutdown();
+    Ok(report)
+}
+
+fn build_queue_repair_prompt(root: &Path, dry_run: bool) -> String {
+    let skill_path = root.join(QUEUE_REPAIR_SKILL_RELATIVE_PATH);
+    let skill = if skill_path.exists() {
+        skill_path.to_string_lossy().into_owned()
+    } else {
+        "(missing)".to_string()
+    };
+    let runtime_db_path = root.join("runtime/ctox.sqlite3");
+    format!(
+        "== QUEUE REPAIR ASSIGNMENT ==\n\
+\n\
+Workspace root: {}\n\
+Runtime DB: {}\n\
+Queue cleanup skill: {}\n\
+Dry run: {}\n\
+\n\
+Open the queue cleanup skill first and follow it.\n\
+\n\
+Gather the queue-repair facts yourself from the runtime SQLite store, queue state, ticket/self-work state, active strategic directives, founder or owner communication threads, review findings, and service status.\n\
+\n\
+Required work:\n\
+1. identify the canonical hot path that should survive\n\
+2. identify stale, duplicate, superseded, or contaminated queue work\n\
+3. pay special attention to founder or owner communication drift contaminating queue work\n\
+4. propose the minimum safe queue actions needed to recover focus\n\
+5. do not mutate anything directly; only return the repair plan\n",
+        root.display(),
+        runtime_db_path.display(),
+        skill,
+        if dry_run { "yes" } else { "no" }
+    )
+}
+
+fn build_queue_repair_verify_prompt(
+    root: &Path,
+    prior_report: &str,
+    applied_actions: &[QueueRepairActionView],
+) -> String {
+    let skill_path = root.join(QUEUE_REPAIR_SKILL_RELATIVE_PATH);
+    let skill = if skill_path.exists() {
+        skill_path.to_string_lossy().into_owned()
+    } else {
+        "(missing)".to_string()
+    };
+    let runtime_db_path = root.join("runtime/ctox.sqlite3");
+    let mut actions_rendered = String::new();
+    if applied_actions.is_empty() {
+        actions_rendered.push_str("- none\n");
+    } else {
+        for action in applied_actions {
+            let priority = action
+                .priority
+                .as_deref()
+                .map(|value| format!(" {value}"))
+                .unwrap_or_default();
+            actions_rendered.push_str(&format!(
+                "- {} {}{} :: {}\n",
+                action.action, action.message_key, priority, action.reason
+            ));
+        }
+    }
+    format!(
+        "== QUEUE REPAIR VERIFICATION ==\n\
+\n\
+Workspace root: {}\n\
+Runtime DB: {}\n\
+Queue cleanup skill: {}\n\
+\n\
+Open the queue cleanup skill first and follow it.\n\
+\n\
+Prior repair report:\n\
+{}\n\
+\n\
+Applied actions:\n\
+{}\n\
+Verify the current queue state and judge whether the canonical hot path is now clear enough to resume.\n",
+        root.display(),
+        runtime_db_path.display(),
+        skill,
+        prior_report.trim(),
+        actions_rendered
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedQueueRepairReport {
+    state: String,
+    summary: String,
+    canonical_hot_path: Vec<String>,
+    stale_queue_items: Vec<String>,
+    surviving_queue_items: Vec<String>,
+    repair_actions: Vec<QueueRepairActionView>,
+    evidence: Vec<String>,
+    handoff: Option<String>,
+}
+
+fn parse_queue_repair_report(report: &str) -> ParsedQueueRepairReport {
+    ParsedQueueRepairReport {
+        state: parse_prefixed_line(report, "STATE:")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "PARTIAL".to_string()),
+        summary: parse_prefixed_line(report, "SUMMARY:")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| clip_text(report, 220)),
+        canonical_hot_path: parse_section_items(report, "CANONICAL_HOT_PATH:"),
+        stale_queue_items: parse_section_items(report, "STALE_QUEUE_ITEMS:"),
+        surviving_queue_items: parse_section_items(report, "SURVIVING_QUEUE_ITEMS:"),
+        repair_actions: parse_queue_repair_actions(report),
+        evidence: parse_section_items(report, "EVIDENCE:"),
+        handoff: parse_handoff_block(report),
+    }
+}
+
+fn parse_queue_repair_verification(report: &str) -> QueueRepairVerificationView {
+    QueueRepairVerificationView {
+        state: parse_prefixed_line(report, "STATE:")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "PARTIAL".to_string()),
+        summary: parse_prefixed_line(report, "SUMMARY:")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| clip_text(report, 220)),
+        canonical_hot_path: parse_section_items(report, "CANONICAL_HOT_PATH:"),
+        remaining_risks: parse_section_items(report, "REMAINING_RISKS:"),
+        follow_up_actions: parse_section_items(report, "FOLLOW_UP_ACTIONS:"),
+        evidence: parse_section_items(report, "EVIDENCE:"),
+        handoff: parse_handoff_block(report),
+    }
+}
+
+fn parse_queue_repair_actions(report: &str) -> Vec<QueueRepairActionView> {
+    parse_section_items(report, "REPAIR_ACTIONS:")
+        .into_iter()
+        .filter_map(|item| parse_queue_repair_action_line(&item))
+        .collect()
+}
+
+fn parse_queue_repair_action_line(value: &str) -> Option<QueueRepairActionView> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let (command_part, reason_part) = trimmed.rsplit_once("::")?;
+    let reason = reason_part.trim();
+    if reason.is_empty() {
+        return None;
+    }
+    let mut tokens = command_part.split_whitespace();
+    let action = tokens.next()?.trim().to_ascii_lowercase();
+    let message_key = tokens.next()?.trim().to_string();
+    let priority = if action == "reprioritize" {
+        Some(tokens.next()?.trim().to_string())
+    } else {
+        None
+    };
+    match action.as_str() {
+        "cancel" | "block" | "release" | "reprioritize" | "complete" => {
+            Some(QueueRepairActionView {
+                action,
+                message_key,
+                priority,
+                reason: reason.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn apply_queue_repair_actions(
+    root: &Path,
+    actions: &[QueueRepairActionView],
+) -> Result<Vec<QueueRepairActionView>> {
+    let mut applied = Vec::new();
+    for action in actions {
+        if channels::load_queue_task(root, &action.message_key)?.is_none() {
+            continue;
+        }
+        match action.action.as_str() {
+            "cancel" => {
+                let _ = channels::update_queue_task(
+                    root,
+                    channels::QueueTaskUpdateRequest {
+                        message_key: action.message_key.clone(),
+                        route_status: Some("cancelled".to_string()),
+                        status_note: Some(action.reason.clone()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            "block" => {
+                let _ = channels::update_queue_task(
+                    root,
+                    channels::QueueTaskUpdateRequest {
+                        message_key: action.message_key.clone(),
+                        route_status: Some("blocked".to_string()),
+                        status_note: Some(action.reason.clone()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            "release" => {
+                let _ = channels::update_queue_task(
+                    root,
+                    channels::QueueTaskUpdateRequest {
+                        message_key: action.message_key.clone(),
+                        route_status: Some("pending".to_string()),
+                        status_note: Some(action.reason.clone()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            "reprioritize" => {
+                let Some(priority) = action.priority.clone() else {
+                    continue;
+                };
+                let _ = channels::update_queue_task(
+                    root,
+                    channels::QueueTaskUpdateRequest {
+                        message_key: action.message_key.clone(),
+                        priority: Some(priority),
+                        status_note: Some(action.reason.clone()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            "complete" => {
+                let _ = channels::update_queue_task(
+                    root,
+                    channels::QueueTaskUpdateRequest {
+                        message_key: action.message_key.clone(),
+                        route_status: Some("handled".to_string()),
+                        status_note: Some(action.reason.clone()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            _ => continue,
+        }
+        applied.push(action.clone());
+    }
+    Ok(applied)
+}
+
+fn parse_prefixed_line(report: &str, prefix: &str) -> Option<String> {
+    for line in report.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix(prefix) else {
+            continue;
+        };
+        let value = rest.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn parse_section_items(report: &str, header: &str) -> Vec<String> {
+    let mut collecting = false;
+    let mut items = Vec::new();
+    for line in report.lines() {
+        let trimmed = line.trim();
+        if trimmed == header {
+            collecting = true;
+            continue;
+        }
+        if collecting {
+            if trimmed.ends_with(':') && !trimmed.starts_with("- ") && trimmed != header {
+                break;
+            }
+            if let Some(item) = trimmed.strip_prefix("- ") {
+                let value = item.trim();
+                if !value.is_empty() && !value.eq_ignore_ascii_case("none") {
+                    items.push(value.to_string());
+                }
+            }
+        }
+    }
+    items
+}
+
+fn parse_handoff_block(report: &str) -> Option<String> {
+    let mut collecting = false;
+    let mut lines = Vec::new();
+    for line in report.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("HANDOFF:") {
+            collecting = true;
+            let remainder = rest.trim();
+            if !remainder.is_empty() {
+                lines.push(remainder.to_string());
+            }
+            continue;
+        }
+        if collecting {
+            if trimmed.ends_with(':') && !trimmed.starts_with("- ") {
+                break;
+            }
+            if !trimmed.is_empty() {
+                lines.push(trimmed.to_string());
+            }
+        }
+    }
+    let joined = lines.join("\n");
+    let normalized = joined.trim();
+    if normalized.is_empty()
+        || normalized.eq_ignore_ascii_case("none")
+        || normalized.eq_ignore_ascii_case("- none")
+    {
+        None
+    } else {
+        Some(normalized.to_string())
+    }
+}
+
+fn clip_text(value: &str, max_chars: usize) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut clipped = collapsed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    clipped.push('…');
+    clipped
 }
 
 fn spill_queue_task_to_ticket(
@@ -1187,9 +1694,60 @@ mod tests {
         )?;
         drop(conn);
 
-        let repaired = repair_queue_state(&root)?;
+        let repaired = repair_queue_state(&root, true, false)?;
         assert_eq!(repaired.stale_plan_routes_repaired, 1);
         assert!(repaired.open_queue_preview.is_empty());
+        assert!(repaired.agentic.is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_queue_repair_action_line_supports_reprioritize() {
+        let parsed = parse_queue_repair_action_line(
+            "reprioritize queue:system::abc123 urgent :: founder mail must preempt stale review churn",
+        )
+        .expect("action should parse");
+        assert_eq!(parsed.action, "reprioritize");
+        assert_eq!(parsed.message_key, "queue:system::abc123");
+        assert_eq!(parsed.priority.as_deref(), Some("urgent"));
+        assert!(parsed.reason.contains("founder mail"));
+    }
+
+    #[test]
+    fn apply_queue_repair_actions_updates_queue_state() -> Result<()> {
+        let root = temp_root("queue-repair-actions");
+        std::fs::create_dir_all(&root)?;
+
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Stale review rework".to_string(),
+                prompt: "Cancel me".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: Some("queue-orchestrator".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )?;
+        let actions = vec![QueueRepairActionView {
+            action: "cancel".to_string(),
+            message_key: task.message_key.clone(),
+            priority: None,
+            reason: "superseded by canonical supervisor task".to_string(),
+        }];
+        let applied = apply_queue_repair_actions(&root, &actions)?;
+        assert_eq!(applied.len(), 1);
+        let updated =
+            channels::load_queue_task(&root, &task.message_key)?.expect("updated task missing");
+        assert_eq!(updated.route_status, "cancelled");
+        assert_eq!(
+            updated.status_note.as_deref(),
+            Some("superseded by canonical supervisor task")
+        );
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
