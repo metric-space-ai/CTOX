@@ -5,19 +5,38 @@ nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
 
 ## Was verifiziert läuft (A6000)
 
+12 `.cu`-Files, 22+ Kernel-Varianten — jede einzeln bit-close /
+bit-exakt verifiziert durch `src/bin/<op>_verify.rs`:
+
 | Op | Source | Verify | Max-Drift |
 |---|---|---|---:|
-| `rms_norm` (f32) | norm.cu:297-475 | `qwen35-27b-q4km-dflash-rms-norm-verify` | 2.4e-7 (~1 ULP) |
-| `silu` (f32) | unary.cu:124-178 | `qwen35-27b-q4km-dflash-unary-verify` | 2.4e-7 |
-| `neg` (f32) | unary.cu:157 | (same bin) | 0 (exact) |
-| `exp` (f32) | unary.cu:201 | (same bin) | 9.5e-7 |
+| `rms_norm` (f32, B=256 + B=1024) | norm.cu:297-475 | `rms-norm-verify` | 2.4e-7 (~1 ULP) |
+| `silu` (f32) | unary.cu:124-178 | `unary-verify` | 2.4e-7 |
+| `neg` (f32) | unary.cu:157 | (same) | 0 (exact) |
+| `exp` (f32) | unary.cu:201 | (same) | 9.5e-7 |
+| `sigmoid` (f32) | unary.cu:189-191 | (same) | 1.2e-7 |
+| `softplus` (f32) | unary.cu:249-251 | (same) | 4.8e-7 |
+| `scale` (f32) | scale.cu:15-34 | `scale-verify` | 2.4e-7 |
+| `fill` (f32) | fill.cu:29 | `fill-verify` | 0 (exact) |
+| `fill` (f16) | fill.cu:32 | (same) | 0 (exact) |
+| `diag` (f32) | diag.cu:36 | `diag-verify` | 0 (exact) |
+| `add` (f32 non-fused) | binbcast.cu:397 | `binbcast-verify` | 0 (exact) |
+| `sub` (f32 non-fused) | binbcast.cu:401 | (same) | 0 (exact) |
+| `mul` (f32 non-fused) | binbcast.cu:405 | (same) | 0 (exact) |
+| `tri` (f32, LOWER) | tri.cu:94-112 | `tri-verify` | 0 (exact) |
+| `tri` (f32, LOWER_DIAG) | (same) | (same) | 0 (exact) |
+| `tri` (f32, UPPER) | (same) | (same) | 0 (exact) |
+| `tri` (f32, UPPER_DIAG) | (same) | (same) | 0 (exact) |
+| `pad` (f32, non-circular) | pad.cu:64-106 | `pad-verify` | 0 (exact) |
+| `pad` (f32, circular) | (same) | (same) | 0 (exact) |
+| `cumsum` (f32 fallback) | cumsum.cu:213-265 | `cumsum-verify` | 1.1e-5 |
 
 ## Infrastruktur (bewiesen, reusable)
 
 - **Vendored tree self-build.** `build.rs::compile_kernel_to_ptx(stem)` feuert
   nvcc gegen `vendor/ggml-cuda/<stem>.cu` mit exakt den Flags die ggml's
-  CMake nutzt; kein externer ggml-Build mehr nötig. Getestet: 243 KB
-  norm.ptx, ~400 KB unary.ptx auf A6000.
+  CMake nutzt; kein externer ggml-Build mehr nötig. Include-Paths:
+  `vendor/ggml-cuda`, `vendor/ggml-include`, `vendor/`.
 - **Mangled-name extraction.** `build.rs::generate_ptx_entries_module(stem)`
   parst alle `.entry <mangled>(...)` aus der compiled PTX und emittiert
   `$OUT_DIR/<stem>_entries.rs` mit einer `&[&[u8]]` Tabelle NUL-terminierter
@@ -37,25 +56,35 @@ nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
 - **Verifier-Pattern.** `src/bin/<op>_verify.rs` = standalone Binary das
   den Port gegen CPU-f64-Referenz-Impl vergleicht. Tolerance 1e-5 deckt
   fast-math drift ab.
+- **Host-side fastdiv cookies.** `binbcast.rs::init_fastdiv_values(d)`
+  replicates upstream's uint3 (mp, L, d) packing — für Ops mit
+  fastdiv/fastmodulo-Parametern.
 
-## Was noch fehlt (priorisiert)
+## Was noch fehlt
 
-### Phase A — Restliche Op-Dispatcher (~20 ops)
+### Phase A — Restliche Op-Dispatcher
 
-Geschätzt 30-90 Min pro Op je nach Komplexität:
+#### Pending simple (~30-60 min/each)
+- `cpy`, `cont` (mapped to cpy) — generic dtype conversion + layout copy
+- `diag_mask_inf` (`diagmask.cu`) — causal mask for attention
+- `get_rows` — embedding lookup
 
-- **einfach** (~30 min): `scale`, `cpy`, `cont` (+ `cont_2d`/`cont_4d`),
-  `fill`, `diag`, `get_rows` (nur f32/bf16 paths)
-- **mittel** (~60 min): `add`/`sub`/`mul` (binbcast — template-varadic mit
-  dim-collapsing), `concat`, `pad`, `repeat_4d`, `cumsum`, `tri`,
-  `solve_tri`
-- **komplex** (~90 min): `soft_max_ext`, `rope` (M-RoPE section-aware
-  variant), `ssm_conv`
-- **sehr komplex** (Tage): `mmq_{q4k,q5k,q6k,q8_0,iq4_xs}`,
-  `mm_f16`/`mm_bf16` (matmul-family — viele kernel-variants, kompliziertes
-  auto-tuning nach Shape), `flash_attn_ext` (custom-FA2 kernels),
-  `gated_delta_net` (+ `_tree`, `_tree_persist` — Qwen3.5-spezifische
-  DeltaNet-Kernels von lucebox)
+#### Pending medium (~60-120 min/each)
+- `concat` — axis concatenation (used in DeltaNet state packing)
+- `repeat_4d` — full 4D tensor repeat (different from binbcast's repeat)
+- `solve_tri` — backwards-substitution triangular solve
+- `mul_mat` — massive op-family, needs mmq_q4k/q5k/q6k/q8_0/iq4_xs + mmf
+
+#### Pending komplex (~2-6 h/each)
+- `soft_max_ext` — fused softmax with scale + alibi + sink
+- `rope_ext` / `rope_multi` — M-RoPE with per-section freqs
+- `ssm_conv` / `ssm_conv_tree` — DeltaNet short-conv over state
+
+#### Pending sehr komplex (1-3 d/each)
+- `flash_attn_ext` — custom-FA2 with vec / MMA / tile-size variants,
+  M-RoPE-aware path for Qwen3.5
+- `gated_delta_net`, `_tree`, `_tree_persist` — lucebox/dflash-specific
+  DeltaNet kernels, 3000+ lines CUDA each
 
 ### Phase B — Rust-Side Graph-Executor
 
@@ -86,20 +115,3 @@ Rust-Graph-Builder umschreiben. 2-3 Tage.
 `build.rs` trimmt die `libggml*` linkage raus, nur noch `cudart` + `cuda`
 (Driver-API) bleiben. CTOX bench-bin + server-bin bauen weiter, nur gegen
 Rust-native Pfad.
-
-## Commit-Reihenfolge
-
-```
-834e4fd  fix(cuda_port/module): tighten unary needle — op_exp was matching op_expm1
-6e82d81  fix(unary_verify): CUresult not u32 for dispatch closure return type
-1b31ac0  test(qwen35-bare-metal): unary_verify bin — silu/neg/exp vs CPU reference
-71cfc38  port(qwen35-bare-metal): unary ops + PTX-entry-table code-gen
-988925b  fix(cuda_port/norm): push all 23 kernel args — C++ defaults don't apply at PTX level
-3b662f2  fix(cuda_port): ensure primary context is current before Driver API calls
-0cff2b8  test(qwen35-bare-metal): rms_norm_verify bin — ported path vs CPU reference
-bbabb32  wire(qwen35-bare-metal): PTX compile + load + kernel-handle resolve
-180ffa4  port(qwen35-bare-metal): rms_norm dispatcher (norm.cu → Rust)
-84e5758  build(qwen35-bare-metal): add compile_kernel_to_ptx helper
-fc8b4ba  scaffold(qwen35-bare-metal): cuda_port module + CUDA Driver API FFI
-32e26c1  docs(CLAUDE.md): HARD rules for per-model inference-engine architecture
-```
