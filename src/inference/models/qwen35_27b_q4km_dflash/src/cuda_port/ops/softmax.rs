@@ -48,8 +48,9 @@ const WARP_SIZE: c_int = 32;
 pub struct SoftMaxParams {
     pub nheads: i64,
     pub n_head_log2: u32,
-    // 4 bytes of padding to align the next i64 on 8.
-    _pad0: u32,
+    /// 4 bytes of padding so the next i64 lands on an 8-byte
+    /// boundary — matches the C struct layout nvcc emits.
+    pub _pad0: u32,
     pub ncols: i64,
     pub nrows_x: i64,
     pub nrows_y: i64,
