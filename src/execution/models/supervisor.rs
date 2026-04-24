@@ -1528,20 +1528,51 @@ fn is_qwen35_vision_request_model(model: &str) -> bool {
 }
 
 fn resolve_managed_engine_binary(
-    _root: &Path,
-    _launch_spec: &ManagedBackendLaunchSpec,
+    root: &Path,
+    launch_spec: &ManagedBackendLaunchSpec,
 ) -> Result<PathBuf> {
-    // ctox-engine (Candle-based tools/model-runtime/) was retired. Local
-    // inference now runs through per-model self-contained crates under
-    // src/inference/models/<model>/, called directly from CTOX. Any code
-    // path that reaches this function belongs to the old subprocess
-    // architecture and needs to be rewritten on top of the new crates
-    // before it can work again.
+    // New architecture: route request models that have a local
+    // per-model server binary under src/inference/models/<model>/ to
+    // that binary directly. See `local_model::resolve_local_model_backend`
+    // for the registry — Qwen3.5-27B Q4_K_M + DFlash is the first entry.
+    //
+    // The legacy ctox-engine (Candle-based tools/model-runtime/) was
+    // retired in the Candle-engine removal; any request-model that
+    // doesn't resolve to a local backend ends up here and bails
+    // clearly rather than trying to spawn a deleted binary.
+    if let Some(backend) = super::local_model::resolve_local_model_backend(
+        super::local_model::LocalModelRequest {
+            request_model: launch_spec.request_model.as_str(),
+            transport_endpoint: launch_spec.transport_endpoint.as_deref(),
+            root,
+        },
+    ) {
+        if backend.binary.exists() {
+            return Ok(backend.binary);
+        }
+        anyhow::bail!(
+            "local inference backend `{}` is registered for model `{}` \
+             but the server binary is missing at {}. Build it with: \
+             `(cd {} && cargo build --release --features=cuda --bin \
+             qwen35-27b-q4km-dflash-server)`",
+            backend.model_id,
+            launch_spec.request_model,
+            backend.binary.display(),
+            backend
+                .binary
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "src/inference/models/<model>".to_string()),
+        );
+    }
     anyhow::bail!(
-        "ctox-engine subprocess backend has been retired. Local inference \
-         lives in the per-model crates under src/inference/models/<model>/ \
-         now and must be called in-process; the managed-subprocess path is \
-         no longer available."
+        "no local inference backend registered for `{}`. The Candle-based \
+         ctox-engine subprocess backend was retired; add a per-model crate \
+         under src/inference/models/<model>/ and register it in \
+         `local_model::resolve_local_model_backend` to serve it locally, or \
+         configure this role against an external API provider.",
+        launch_spec.request_model
     )
 }
 
@@ -1623,6 +1654,45 @@ fn spawn_managed_engine_backend(
     stderr: Stdio,
 ) -> Result<Child> {
     let engine_binary = resolve_managed_engine_binary(root, launch_spec)?;
+
+    // If this request model maps to one of the per-model server
+    // binaries under src/inference/models/<model>/, build the
+    // spawn with *that* server's CLI and skip the legacy
+    // TOML-config flow entirely. Those binaries take their model
+    // paths + socket as plain CLI args; no runtime config file.
+    if let Some(backend) = super::local_model::resolve_local_model_backend(
+        super::local_model::LocalModelRequest {
+            request_model: launch_spec.request_model.as_str(),
+            transport_endpoint: launch_spec.transport_endpoint.as_deref(),
+            root,
+        },
+    ) {
+        let mut command = Command::new(&engine_binary);
+        for arg in &backend.args {
+            command.arg(arg);
+        }
+        for (k, v) in &backend.env {
+            command.env(k, v);
+        }
+        command.current_dir(root);
+        command.stdin(Stdio::null()).stdout(stdout).stderr(stderr);
+        apply_clean_child_env(&mut command);
+        configure_managed_engine_runtime_env(&mut command, launch_spec);
+        configure_managed_child_process(&mut command);
+        return command.spawn().with_context(|| {
+            format!(
+                "failed to spawn local {} server for managed backend {}",
+                backend.model_id, launch_spec.display_model
+            )
+        });
+    }
+
+    // Legacy path: request models without a per-model server binary
+    // used to fall through to the ctox-engine `from-config` CLI. That
+    // binary is gone; `resolve_managed_engine_binary` returns an
+    // error before we get here for these models. Keeping the code
+    // path for the rare test case that passes in a mock binary path
+    // via env-based overrides.
     let config_path = persist_managed_engine_runtime_config(root, spec, launch_spec)?;
     let mut command = Command::new(&engine_binary);
     command.arg("from-config").arg("--file").arg(config_path);
@@ -1633,7 +1703,7 @@ fn spawn_managed_engine_backend(
     configure_managed_child_process(&mut command);
     command.spawn().with_context(|| {
         format!(
-            "failed to spawn ctox-engine for managed backend {}",
+            "failed to spawn local inference server for managed backend {}",
             launch_spec.display_model
         )
     })
