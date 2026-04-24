@@ -21,9 +21,11 @@ use super::ops::norm::{
     mangled_rms_norm_f32_b1024, mangled_rms_norm_f32_b256, RmsNormKernels,
 };
 use super::ops::scale::{mangled_scale_f32, ScaleKernel};
+use super::ops::tri::{mangled_tri_kernel_f32, TriKernels};
 use super::ops::unary::{mangled_unary_op_f32, UnaryKernels};
 use super::ptx::{
-    get_function, load_module, BINBCAST_PTX, DIAG_PTX, FILL_PTX, NORM_PTX, SCALE_PTX, UNARY_PTX,
+    get_function, load_module, BINBCAST_PTX, DIAG_PTX, FILL_PTX, NORM_PTX, SCALE_PTX, TRI_PTX,
+    UNARY_PTX,
 };
 
 /// All kernel handles the Rust side needs, resolved once.
@@ -41,12 +43,15 @@ pub struct PortedKernels {
     diag_module: CUmodule,
     #[allow(dead_code)]
     binbcast_module: CUmodule,
+    #[allow(dead_code)]
+    tri_module: CUmodule,
     pub rms_norm: RmsNormKernels,
     pub unary: UnaryKernels,
     pub scale: ScaleKernel,
     pub fill: FillKernels,
     pub diag: DiagKernels,
     pub binbcast: BinBcastKernels,
+    pub tri: TriKernels,
 }
 
 // SAFETY: `CUmodule` / `CUfunction` are opaque device-side handles.
@@ -158,6 +163,23 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         unsafe { *slot = f };
     }
 
+    // tri.cu — tri_kernel<float, prefix_keep, add_to_split>
+    let tri_module = load_module(TRI_PTX).map_err(|e| format!("tri.ptx: {e}"))?;
+    let mut tk = TriKernels::default();
+    for (slot, (prefix_keep, add)) in [
+        (&mut tk.f32_keep_split0 as *mut _, (true, 0i32)),  // LOWER
+        (&mut tk.f32_keep_split1 as *mut _, (true, 1i32)),  // LOWER_DIAG
+        (&mut tk.f32_zero_split0 as *mut _, (false, 0i32)), // UPPER_DIAG
+        (&mut tk.f32_zero_split1 as *mut _, (false, 1i32)), // UPPER
+    ] {
+        let name = mangled_tri_kernel_f32(prefix_keep, add)
+            .map_err(|e| format!("tri<f32,{prefix_keep},{add}> lookup: {e}"))?;
+        let f = get_function(tri_module, name)
+            .map_err(|e| format!("tri<f32,{prefix_keep},{add}>: {e}"))?;
+        // SAFETY: slot points into the stack-local `tk`.
+        unsafe { *slot = f };
+    }
+
     Ok(PortedKernels {
         norm_module,
         unary_module,
@@ -165,11 +187,13 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         fill_module,
         diag_module,
         binbcast_module,
+        tri_module,
         rms_norm: RmsNormKernels { b256, b1024 },
         unary: uk,
         scale,
         fill,
         diag,
         binbcast: bb,
+        tri: tk,
     })
 }

@@ -90,7 +90,7 @@ fn main() {
 /// `$OUT_DIR`, consumed by the Rust side via `include_str!` in
 /// `src/cuda_port/ptx.rs`.
 const CUDA_PORT_PTX_MODULES: &[&str] =
-    &["norm", "unary", "scale", "fill", "diag", "binbcast"];
+    &["norm", "unary", "scale", "fill", "diag", "binbcast", "tri"];
 
 fn compile_cuda_port_ptx_modules() {
     for stem in CUDA_PORT_PTX_MODULES {

@@ -10,4 +10,5 @@ pub mod diag;
 pub mod fill;
 pub mod norm;
 pub mod scale;
+pub mod tri;
 pub mod unary;
