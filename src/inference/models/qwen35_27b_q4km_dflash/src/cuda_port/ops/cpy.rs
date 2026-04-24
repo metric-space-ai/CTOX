@@ -83,19 +83,33 @@ impl CpyKernels {
 /// observed in the emitted PTX.
 pub fn mangled_cpy_scalar(dtype: CpyDtype) -> Result<&'static [u8], String> {
     // Needle tying to the inner `cpy_1_scalar<src,dst>`'s dtype
-    // run. In Itanium:
-    //   (float, float)      → `If f` split as `If … f E`
-    //   (float, __half)     → `If 6__half`
-    //   (__half, __half)    → `I 6__half S_` (S_ = backref)
-    let dtype_needle: &[u8] = match dtype {
-        CpyDtype::F32ToF32 => b"IffEvPKcPc",
-        CpyDtype::F32ToF16 => b"If6__halfEvPKcPc",
-        CpyDtype::F16ToF16 => b"I6__halfS_EvPKcPc",
-    };
-    crate::cuda_port::ptx::find_entry(
-        crate::cuda_port::ptx::cpy_entries::ENTRIES,
-        &[b"cpy_scalar", dtype_needle],
-    )
+    // run. Verified against the actual PTX emit:
+    //   (float, float)   → `cpy_1_scalarIffEEvPKcPc`
+    //   (float, __half)  → `cpy_1_scalarIf6__halfEEvPKcPc`
+    //   (__half, __half) → `cpy_1_scalarI6__halfS2_EEvPKcPc`
+    //
+    // For f16→f16 `S2_` is the Itanium back-reference to the prior
+    // `__half` — the exact index (S_, S0_, S2_, …) depends on the
+    // mangling-table state at that point in the name, so we match
+    // on `I6__halfS` plus an `EEvPKcPc` anchor for the end of the
+    // signature. `10cpy_scalar` is the outer kernel's length-10
+    // prefix; `cpy_scalar_contiguous` (21) and `cpy_scalar_transpose`
+    // (22) have different length prefixes, so this disambiguates.
+    let entries = crate::cuda_port::ptx::cpy_entries::ENTRIES;
+    match dtype {
+        CpyDtype::F32ToF32 => crate::cuda_port::ptx::find_entry(
+            entries,
+            &[b"10cpy_scalar", b"cpy_1_scalarIffEEvPKcPc"],
+        ),
+        CpyDtype::F32ToF16 => crate::cuda_port::ptx::find_entry(
+            entries,
+            &[b"10cpy_scalar", b"cpy_1_scalarIf6__halfEEvPKcPc"],
+        ),
+        CpyDtype::F16ToF16 => crate::cuda_port::ptx::find_entry(
+            entries,
+            &[b"10cpy_scalar", b"cpy_1_scalarI6__halfS", b"EEvPKcPc"],
+        ),
+    }
 }
 
 /// ref: vendor/ggml-cuda/cpy.cu:199-234 (`ggml_cpy_scalar_cuda`, non-transposed branch)
