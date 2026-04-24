@@ -14,6 +14,7 @@
 use std::sync::OnceLock;
 
 use super::driver::CUmodule;
+use super::ops::binbcast::{mangled_k_bin_bcast_fff, BinBcastKernels, BinOp};
 use super::ops::diag::{mangled_diag_kernel_f16, mangled_diag_kernel_f32, DiagKernels};
 use super::ops::fill::{mangled_fill_kernel_f16, mangled_fill_kernel_f32, FillKernels};
 use super::ops::norm::{
@@ -22,7 +23,7 @@ use super::ops::norm::{
 use super::ops::scale::{mangled_scale_f32, ScaleKernel};
 use super::ops::unary::{mangled_unary_op_f32, UnaryKernels};
 use super::ptx::{
-    get_function, load_module, DIAG_PTX, FILL_PTX, NORM_PTX, SCALE_PTX, UNARY_PTX,
+    get_function, load_module, BINBCAST_PTX, DIAG_PTX, FILL_PTX, NORM_PTX, SCALE_PTX, UNARY_PTX,
 };
 
 /// All kernel handles the Rust side needs, resolved once.
@@ -38,11 +39,14 @@ pub struct PortedKernels {
     fill_module: CUmodule,
     #[allow(dead_code)]
     diag_module: CUmodule,
+    #[allow(dead_code)]
+    binbcast_module: CUmodule,
     pub rms_norm: RmsNormKernels,
     pub unary: UnaryKernels,
     pub scale: ScaleKernel,
     pub fill: FillKernels,
     pub diag: DiagKernels,
+    pub binbcast: BinBcastKernels,
 }
 
 // SAFETY: `CUmodule` / `CUfunction` are opaque device-side handles.
@@ -136,16 +140,36 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
     .map_err(|e| format!("diag<__half>: {e}"))?;
     let diag = DiagKernels { diag_f32, diag_f16 };
 
+    // binbcast.cu — k_bin_bcast<op_add/sub/mul, float, float, float>
+    let binbcast_module =
+        load_module(BINBCAST_PTX).map_err(|e| format!("binbcast.ptx: {e}"))?;
+    let mut bb = BinBcastKernels::default();
+    for (slot, op) in [
+        (&mut bb.add_fff as *mut _, BinOp::Add),
+        (&mut bb.sub_fff as *mut _, BinOp::Sub),
+        (&mut bb.mul_fff as *mut _, BinOp::Mul),
+    ] {
+        let name = mangled_k_bin_bcast_fff(op)
+            .map_err(|e| format!("binbcast {op:?} lookup: {e}"))?;
+        let f = get_function(binbcast_module, name)
+            .map_err(|e| format!("binbcast {op:?}: {e}"))?;
+        // SAFETY: each slot points at a CUfunction field in the
+        // stack-local `bb` we keep alive until the final Ok(...).
+        unsafe { *slot = f };
+    }
+
     Ok(PortedKernels {
         norm_module,
         unary_module,
         scale_module,
         fill_module,
         diag_module,
+        binbcast_module,
         rms_norm: RmsNormKernels { b256, b1024 },
         unary: uk,
         scale,
         fill,
         diag,
+        binbcast: bb,
     })
 }

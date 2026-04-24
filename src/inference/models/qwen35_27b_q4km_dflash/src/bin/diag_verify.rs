@@ -93,7 +93,7 @@ fn main() -> Result<()> {
         ne1,
         ne2,
         ne3,
-        (ne0 * ne1 * ne2 * ne3),
+        ne0 * ne1 * ne2 * ne3,
         stream,
     );
     if rc != CUDA_SUCCESS {
