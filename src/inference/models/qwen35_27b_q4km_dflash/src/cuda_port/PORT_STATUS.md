@@ -5,7 +5,7 @@ nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
 
 ## Was verifiziert läuft (A6000)
 
-12 `.cu`-Files, 22+ Kernel-Varianten — jede einzeln bit-close /
+13 `.cu`-Files, 26+ Kernel-Varianten — jede einzeln bit-close /
 bit-exakt verifiziert durch `src/bin/<op>_verify.rs`:
 
 | Op | Source | Verify | Max-Drift |
@@ -30,6 +30,10 @@ bit-exakt verifiziert durch `src/bin/<op>_verify.rs`:
 | `pad` (f32, non-circular) | pad.cu:64-106 | `pad-verify` | 0 (exact) |
 | `pad` (f32, circular) | (same) | (same) | 0 (exact) |
 | `cumsum` (f32 fallback) | cumsum.cu:213-265 | `cumsum-verify` | 1.1e-5 |
+| `concat` (f32 contig, dim=0) | concat.cu:4-28 | `concat-verify` | 0 (exact) |
+| `concat` (f32 contig, dim=1) | concat.cu:30-54 | (same) | 0 (exact) |
+| `concat` (f32 contig, dim=2) | concat.cu:56-80 | (same) | 0 (exact) |
+| `concat` (f32 non-cont, dim=0) | concat.cu:97-154 | (same, spot-check) | 0 (exact) |
 
 ## Infrastruktur (bewiesen, reusable)
 
