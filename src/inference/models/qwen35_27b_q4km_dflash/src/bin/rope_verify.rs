@@ -153,21 +153,16 @@ fn main() -> Result<()> {
     unsafe { cuMemFree_v2(d_dst) };
     unsafe { cuMemFree_v2(d_pos) };
 
-    // CPU reference — match the rope_norm kernel body (rope.cu:65-180).
+    // CPU reference — match the rope_norm kernel body (rope.cu:43-113).
     //
-    // Layout: x indexed as x[i0 + i1*s01 + i2*s02 + i3*s03].
-    //   i0 is the pair-offset within head (steps of 2)
-    //   i1 row inside head / heads dim
-    //   i2 position
-    //   i3 batch (1 here)
+    // rope_norm uses **interleaved** pair access: x0 = x[ix+0],
+    // x1 = x[ix+1]. Each thread processes the pair (i0, i0+1) and
+    // writes dst[idst+0] = x0*cos - x1*sin, dst[idst+1] = x0*sin + x1*cos.
     //
-    // For i0 < n_dims:
-    //   theta = pos[i2] * freq_base ^ (-i0 / n_dims)
-    //   (cos, sin) = rope_yarn(theta, freq_scale, corr_dims, i0, ext_factor, attn_factor)
-    //   dst[ix + 0]          = x0*cos - x1*sin
-    //   dst[ix + n_dims/2]   = x0*sin + x1*cos
-    //     where x0 = x[ix + 0], x1 = x[ix + n_dims/2]
-    // For i0 >= n_dims (not in our run since n_dims == ne00): identity copy.
+    // (rope_neox is the split-half variant; rope_norm is interleaved.)
+    //
+    // ext_factor = 0 → no ramp mix; attn_factor = 1 → no mscale.
+    // So rope_yarn collapses to plain rotate at theta = freq_scale * theta_base.
     let theta_scale = args.freq_base.powf(-2.0_f32 / n_dims as f32);
     let mut max_abs = 0.0_f32;
     let mut max_pos = (0i32, 0i32, 0i32);
@@ -176,28 +171,25 @@ fn main() -> Result<()> {
             let base = (i1 * ne00 + i2 * ne00 * ne01) as usize;
             for pair in 0..(n_dims / 2) {
                 let i0 = 2 * pair;
-                // ext_factor = 0 → no ramp mix; attn_factor = 1 → no mscale.
-                // rope_yarn with those settings collapses to plain rotate
-                // at theta = freq_scale * theta_base.
                 let theta_base = h_pos[i2 as usize] as f32 * theta_scale.powi(pair);
                 let theta = args.freq_scale * theta_base;
                 let cos_t = theta.cos();
                 let sin_t = theta.sin();
                 let x0 = h_x[base + i0 as usize];
-                let x1 = h_x[base + (i0 + n_dims / 2) as usize];
+                let x1 = h_x[base + (i0 + 1) as usize];
                 let expected_0 = x0 * cos_t - x1 * sin_t;
-                let expected_n = x0 * sin_t + x1 * cos_t;
+                let expected_1 = x0 * sin_t + x1 * cos_t;
                 let got_0 = h_dst[base + i0 as usize];
-                let got_n = h_dst[base + (i0 + n_dims / 2) as usize];
+                let got_1 = h_dst[base + (i0 + 1) as usize];
                 let d0 = (got_0 - expected_0).abs();
-                let dn = (got_n - expected_n).abs();
+                let d1 = (got_1 - expected_1).abs();
                 if d0 > max_abs {
                     max_abs = d0;
                     max_pos = (i0, i1, i2);
                 }
-                if dn > max_abs {
-                    max_abs = dn;
-                    max_pos = (i0 + n_dims / 2, i1, i2);
+                if d1 > max_abs {
+                    max_abs = d1;
+                    max_pos = (i0 + 1, i1, i2);
                 }
             }
         }
