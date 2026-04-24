@@ -2763,14 +2763,27 @@ fn take_messages(
                 r.updated_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY m.thread_key
-                    ORDER BY m.external_created_at ASC, m.observed_at ASC, m.message_key ASC
+                    ORDER BY
+                        CASE
+                            WHEN r.route_status = 'pending' THEN 0
+                            WHEN r.route_status = 'leased' THEN 1
+                            ELSE 2
+                        END ASC,
+                        m.external_created_at DESC,
+                        m.observed_at DESC,
+                        m.message_key DESC
                 ) AS thread_rank
             FROM communication_messages m
             JOIN communication_routing_state r ON r.message_key = m.message_key
             WHERE m.direction = 'inbound'
               AND m.channel = ?1
               AND r.route_status IN ('pending', 'leased')
-              AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?2)
+              AND (
+                    r.route_status = 'pending'
+                    OR r.lease_owner IS NULL
+                    OR r.lease_owner = ''
+                    OR r.lease_owner = ?2
+              )
         )
         SELECT
             message_key,
@@ -2797,7 +2810,7 @@ fn take_messages(
             updated_at
         FROM eligible
         WHERE thread_rank = 1
-        ORDER BY external_created_at ASC, observed_at ASC, message_key ASC
+        ORDER BY external_created_at DESC, observed_at DESC, message_key DESC
         LIMIT ?3
         "#
     } else {
@@ -2828,13 +2841,26 @@ fn take_messages(
                 r.updated_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY m.thread_key
-                    ORDER BY m.external_created_at ASC, m.observed_at ASC, m.message_key ASC
+                    ORDER BY
+                        CASE
+                            WHEN r.route_status = 'pending' THEN 0
+                            WHEN r.route_status = 'leased' THEN 1
+                            ELSE 2
+                        END ASC,
+                        m.external_created_at DESC,
+                        m.observed_at DESC,
+                        m.message_key DESC
                 ) AS thread_rank
             FROM communication_messages m
             JOIN communication_routing_state r ON r.message_key = m.message_key
             WHERE m.direction = 'inbound'
               AND r.route_status IN ('pending', 'leased')
-              AND (r.lease_owner IS NULL OR r.lease_owner = '' OR r.lease_owner = ?1)
+              AND (
+                    r.route_status = 'pending'
+                    OR r.lease_owner IS NULL
+                    OR r.lease_owner = ''
+                    OR r.lease_owner = ?1
+              )
         )
         SELECT
             message_key,
@@ -2861,7 +2887,7 @@ fn take_messages(
             updated_at
         FROM eligible
         WHERE thread_rank = 1
-        ORDER BY external_created_at ASC, observed_at ASC, message_key ASC
+        ORDER BY external_created_at DESC, observed_at DESC, message_key DESC
         LIMIT ?2
         "#
     };
@@ -4932,6 +4958,104 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn take_messages_allows_pending_rows_with_stale_lease_owner() {
+        let db_path = unique_test_db_path("ctox-channel-take-pending-stale-owner");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "pending-stale-owner-1",
+                channel: "email",
+                account_key: "email:cto1@metric-space.ai",
+                thread_key: "<pending-stale-owner@example.com>",
+                remote_id: "remote-pending-stale-owner-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Michael Welsch",
+                sender_address: "michael.welsch@metric-space.ai",
+                recipient_addresses_json: "[\"cto1@metric-space.ai\"]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Re: Visuelle Homepage",
+                preview: "latest founder reply",
+                body_text: "Please answer the latest founder feedback.",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "trusted",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-24T18:41:06Z",
+                observed_at: "2026-04-24T18:41:06Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("message upsert");
+        ensure_routing_rows_for_inbound(&conn).expect("routing rows");
+        conn.execute(
+            "UPDATE communication_routing_state SET route_status='pending', lease_owner='ctox', leased_at='2026-04-24T18:41:07Z' WHERE message_key=?1",
+            params!["pending-stale-owner-1"],
+        )
+        .expect("failed to seed stale lease owner");
+
+        let taken = take_messages(&mut conn, Some("email"), 10, "ctox-service")
+            .expect("take messages should succeed");
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].message_key, "pending-stale-owner-1");
+
+        let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn take_messages_prefers_latest_pending_message_in_thread() {
+        let db_path = unique_test_db_path("ctox-channel-take-latest-per-thread");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        for (message_key, external_created_at, preview) in [
+            ("thread-msg-old", "2026-04-24T18:10:00Z", "old founder reply"),
+            ("thread-msg-new", "2026-04-24T18:41:06Z", "latest founder reply"),
+        ] {
+            upsert_communication_message(
+                &mut conn,
+                UpsertMessage {
+                    message_key,
+                    channel: "email",
+                    account_key: "email:cto1@metric-space.ai",
+                    thread_key: "<latest-thread@example.com>",
+                    remote_id: message_key,
+                    direction: "inbound",
+                    folder_hint: "INBOX",
+                    sender_display: "Michael Welsch",
+                    sender_address: "michael.welsch@metric-space.ai",
+                    recipient_addresses_json: "[\"cto1@metric-space.ai\"]",
+                    cc_addresses_json: "[]",
+                    bcc_addresses_json: "[]",
+                    subject: "Re: Visuelle Homepage",
+                    preview,
+                    body_text: preview,
+                    body_html: "",
+                    raw_payload_ref: "",
+                    trust_level: "trusted",
+                    status: "received",
+                    seen: false,
+                    has_attachments: false,
+                    external_created_at,
+                    observed_at: external_created_at,
+                    metadata_json: "{}",
+                },
+            )
+            .expect("message upsert");
+        }
+        ensure_routing_rows_for_inbound(&conn).expect("routing rows");
+
+        let taken = take_messages(&mut conn, Some("email"), 10, "ctox-service")
+            .expect("take messages should succeed");
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].message_key, "thread-msg-new");
+
+        let _ = fs::remove_file(&db_path);
     }
 
     #[test]
