@@ -6,4 +6,5 @@
 //! discipline as `graph.rs` for the Qwen3.5 forward pass).
 
 pub mod norm;
+pub mod scale;
 pub mod unary;

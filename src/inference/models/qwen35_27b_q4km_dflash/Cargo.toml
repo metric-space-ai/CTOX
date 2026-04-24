@@ -46,6 +46,12 @@ name = "qwen35-27b-q4km-dflash-unary-verify"
 path = "src/bin/unary_verify.rs"
 required-features = ["cuda"]
 
+[[bin]]
+# Verifier for the `cuda_port::ops::scale` port.
+name = "qwen35-27b-q4km-dflash-scale-verify"
+path = "src/bin/scale_verify.rs"
+required-features = ["cuda"]
+
 [features]
 default = []
 # CUDA is the only real build mode — the target model is 27B in Q4_K_M,

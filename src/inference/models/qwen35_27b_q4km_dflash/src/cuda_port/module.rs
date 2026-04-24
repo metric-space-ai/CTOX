@@ -17,8 +17,9 @@ use super::driver::CUmodule;
 use super::ops::norm::{
     mangled_rms_norm_f32_b1024, mangled_rms_norm_f32_b256, RmsNormKernels,
 };
+use super::ops::scale::{mangled_scale_f32, ScaleKernel};
 use super::ops::unary::{mangled_unary_op_f32, UnaryKernels};
-use super::ptx::{get_function, load_module, NORM_PTX, UNARY_PTX};
+use super::ptx::{get_function, load_module, NORM_PTX, SCALE_PTX, UNARY_PTX};
 
 /// All kernel handles the Rust side needs, resolved once.
 pub struct PortedKernels {
@@ -27,8 +28,11 @@ pub struct PortedKernels {
     norm_module: CUmodule,
     #[allow(dead_code)]
     unary_module: CUmodule,
+    #[allow(dead_code)]
+    scale_module: CUmodule,
     pub rms_norm: RmsNormKernels,
     pub unary: UnaryKernels,
+    pub scale: ScaleKernel,
 }
 
 // SAFETY: `CUmodule` / `CUfunction` are opaque device-side handles.
@@ -83,10 +87,21 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         unsafe { **slot = f };
     }
 
+    // scale.cu — scale_f32
+    let scale_module = load_module(SCALE_PTX).map_err(|e| format!("scale.ptx: {e}"))?;
+    let scale_fn = get_function(
+        scale_module,
+        mangled_scale_f32().map_err(|e| format!("scale_f32 lookup: {e}"))?,
+    )
+    .map_err(|e| format!("scale_f32: {e}"))?;
+    let scale = ScaleKernel { scale_f32: scale_fn };
+
     Ok(PortedKernels {
         norm_module,
         unary_module,
+        scale_module,
         rms_norm: RmsNormKernels { b256, b1024 },
         unary: uk,
+        scale,
     })
 }
