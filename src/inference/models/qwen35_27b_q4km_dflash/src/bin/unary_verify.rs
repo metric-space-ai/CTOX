@@ -21,7 +21,7 @@ use clap::Parser;
 use ctox_qwen35_27b_q4km_dflash as dflash;
 use dflash::cuda_port::driver::{
     cuInit, cuMemAlloc_v2, cuMemFree_v2, cuStreamSynchronize, ensure_current_context,
-    CUdeviceptr, CUstream, CUDA_SUCCESS,
+    CUdeviceptr, CUresult, CUstream, CUDA_SUCCESS,
 };
 use dflash::cuda_port::module::porter;
 use dflash::cuda_port::ops::unary::{
@@ -58,7 +58,7 @@ fn run_op(
     name: &str,
     h_x: &[f32],
     tol: f32,
-    dispatch: impl FnOnce(CUdeviceptr, CUdeviceptr, c_int, CUstream) -> u32,
+    dispatch: impl FnOnce(CUdeviceptr, CUdeviceptr, c_int, CUstream) -> CUresult,
     cpu: impl Fn(f32) -> f32,
     bytes: libc::size_t,
     k: c_int,
