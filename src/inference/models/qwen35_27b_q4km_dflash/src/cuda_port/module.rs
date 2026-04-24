@@ -21,12 +21,13 @@ use super::ops::norm::{
     mangled_rms_norm_f32_b1024, mangled_rms_norm_f32_b256, RmsNormKernels,
 };
 use super::ops::scale::{mangled_scale_f32, ScaleKernel};
+use super::ops::cumsum::{mangled_cumsum_kernel_f32, CumsumKernels};
 use super::ops::pad::{mangled_pad_f32, PadKernels};
 use super::ops::tri::{mangled_tri_kernel_f32, TriKernels};
 use super::ops::unary::{mangled_unary_op_f32, UnaryKernels};
 use super::ptx::{
-    get_function, load_module, BINBCAST_PTX, DIAG_PTX, FILL_PTX, NORM_PTX, PAD_PTX, SCALE_PTX,
-    TRI_PTX, UNARY_PTX,
+    get_function, load_module, BINBCAST_PTX, CUMSUM_PTX, DIAG_PTX, FILL_PTX, NORM_PTX, PAD_PTX,
+    SCALE_PTX, TRI_PTX, UNARY_PTX,
 };
 
 /// All kernel handles the Rust side needs, resolved once.
@@ -48,6 +49,8 @@ pub struct PortedKernels {
     tri_module: CUmodule,
     #[allow(dead_code)]
     pad_module: CUmodule,
+    #[allow(dead_code)]
+    cumsum_module: CUmodule,
     pub rms_norm: RmsNormKernels,
     pub unary: UnaryKernels,
     pub scale: ScaleKernel,
@@ -56,6 +59,7 @@ pub struct PortedKernels {
     pub binbcast: BinBcastKernels,
     pub tri: TriKernels,
     pub pad: PadKernels,
+    pub cumsum: CumsumKernels,
 }
 
 // SAFETY: `CUmodule` / `CUfunction` are opaque device-side handles.
@@ -193,6 +197,16 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
     .map_err(|e| format!("pad_f32: {e}"))?;
     let pad = PadKernels { pad_f32: pad_fn };
 
+    // cumsum.cu — cumsum_kernel<float> (non-CUB fallback).
+    let cumsum_module =
+        load_module(CUMSUM_PTX).map_err(|e| format!("cumsum.ptx: {e}"))?;
+    let cumsum_fn = get_function(
+        cumsum_module,
+        mangled_cumsum_kernel_f32().map_err(|e| format!("cumsum<float> lookup: {e}"))?,
+    )
+    .map_err(|e| format!("cumsum<float>: {e}"))?;
+    let cumsum = CumsumKernels { cumsum_f32: cumsum_fn };
+
     Ok(PortedKernels {
         norm_module,
         unary_module,
@@ -202,6 +216,7 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         binbcast_module,
         tri_module,
         pad_module,
+        cumsum_module,
         rms_norm: RmsNormKernels { b256, b1024 },
         unary: uk,
         scale,
@@ -210,5 +225,6 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         binbcast: bb,
         tri: tk,
         pad,
+        cumsum,
     })
 }

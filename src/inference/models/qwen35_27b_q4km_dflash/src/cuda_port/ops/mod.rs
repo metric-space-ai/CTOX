@@ -6,6 +6,7 @@
 //! discipline as `graph.rs` for the Qwen3.5 forward pass).
 
 pub mod binbcast;
+pub mod cumsum;
 pub mod diag;
 pub mod fill;
 pub mod norm;
