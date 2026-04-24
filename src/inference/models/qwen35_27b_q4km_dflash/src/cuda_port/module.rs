@@ -84,6 +84,8 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         (&mut uk.silu_f32 as *mut _, b"7op_siluE".as_slice()),
         (&mut uk.neg_f32 as *mut _, b"6op_negE".as_slice()),
         (&mut uk.exp_f32 as *mut _, b"6op_expE".as_slice()),
+        (&mut uk.sigmoid_f32 as *mut _, b"10op_sigmoidE".as_slice()),
+        (&mut uk.softplus_f32 as *mut _, b"11op_softplusE".as_slice()),
     ] {
         let name = mangled_unary_op_f32(needle).map_err(|e| format!("unary lookup: {e}"))?;
         let f = get_function(unary_module, &name).map_err(|e| format!("unary: {e}"))?;

@@ -10,10 +10,10 @@
 //! (`ggml_cuda_op_silu`, `…_neg`, `…_exp`, plus the generic
 //! `ggml_cuda_op_unary<op>` they all route through).
 //!
-//! For qwen35 the only three variants we actually exercise are
-//! `op_silu`, `op_neg`, `op_exp` — all on f32 tensors. Other
-//! unary ops (gelu, tanh, sigmoid, …) are not ported because
-//! qwen35's forward graph never calls them.
+//! For qwen35 the five variants we exercise are `op_silu`,
+//! `op_neg`, `op_exp`, `op_sigmoid`, `op_softplus` — all on f32
+//! tensors. Other unary ops (gelu, tanh, …) are not ported
+//! because qwen35's forward graph never calls them.
 //!
 //! # Mangled-name handling
 //!
@@ -44,6 +44,8 @@ pub struct UnaryKernels {
     pub silu_f32: CUfunction,
     pub neg_f32: CUfunction,
     pub exp_f32: CUfunction,
+    pub sigmoid_f32: CUfunction,
+    pub softplus_f32: CUfunction,
 }
 
 impl Default for CUfunction {
@@ -144,4 +146,26 @@ pub fn ggml_cuda_op_exp_f32(
     stream: CUstream,
 ) -> CUresult {
     unary_cuda_f32(kernels.exp_f32, src0, dst, k, stream)
+}
+
+/// ref: vendor/ggml-cuda/unary.cu:189-191
+pub fn ggml_cuda_op_sigmoid_f32(
+    kernels: &UnaryKernels,
+    src0: CUdeviceptr,
+    dst: CUdeviceptr,
+    k: c_int,
+    stream: CUstream,
+) -> CUresult {
+    unary_cuda_f32(kernels.sigmoid_f32, src0, dst, k, stream)
+}
+
+/// ref: vendor/ggml-cuda/unary.cu:249-251
+pub fn ggml_cuda_op_softplus_f32(
+    kernels: &UnaryKernels,
+    src0: CUdeviceptr,
+    dst: CUdeviceptr,
+    k: c_int,
+    stream: CUstream,
+) -> CUresult {
+    unary_cuda_f32(kernels.softplus_f32, src0, dst, k, stream)
 }

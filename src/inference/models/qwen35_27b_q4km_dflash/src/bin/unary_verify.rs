@@ -1,4 +1,5 @@
-//! Bit-close verifier for the bare-metal unary-op port (silu, neg, exp on f32).
+//! Bit-close verifier for the bare-metal unary-op port
+//! (silu, neg, exp, sigmoid, softplus on f32).
 //!
 //! Same structure as `rms_norm_verify`: pull up a CUDA primary
 //! context (via ggml_backend_cuda_init + ensure_current_context),
@@ -25,7 +26,8 @@ use dflash::cuda_port::driver::{
 };
 use dflash::cuda_port::module::porter;
 use dflash::cuda_port::ops::unary::{
-    ggml_cuda_op_exp_f32, ggml_cuda_op_neg_f32, ggml_cuda_op_silu_f32,
+    ggml_cuda_op_exp_f32, ggml_cuda_op_neg_f32, ggml_cuda_op_sigmoid_f32,
+    ggml_cuda_op_silu_f32, ggml_cuda_op_softplus_f32,
 };
 use dflash::ffi as sys;
 
@@ -52,6 +54,22 @@ fn neg_cpu(x: f32) -> f32 {
 }
 fn exp_cpu(x: f32) -> f32 {
     (x as f64).exp() as f32
+}
+fn sigmoid_cpu(x: f32) -> f32 {
+    (1.0 / (1.0 + (-x as f64).exp())) as f32
+}
+fn softplus_cpu(x: f32) -> f32 {
+    // ref: vendor/ggml-cuda/unary.cu:88-90 — log(1 + exp(x)) with
+    // the usual numerically-stable branch: large positive x collapses
+    // to x; large negative to exp(x). log1pf/expf underneath.
+    let xf = x as f64;
+    if xf > 20.0 {
+        xf as f32
+    } else if xf < -20.0 {
+        xf.exp() as f32
+    } else {
+        xf.exp().ln_1p() as f32
+    }
 }
 
 fn run_op(
@@ -149,7 +167,7 @@ fn main() -> Result<()> {
     unsafe { cuInit(0) };
     ensure_current_context(args.cuda_device).map_err(|e| anyhow!("context: {e}"))?;
     let kernels = porter().map_err(|e| anyhow!("porter(): {e}"))?;
-    println!("unary kernels resolved: silu_f32 / neg_f32 / exp_f32");
+    println!("unary kernels resolved: silu_f32 / neg_f32 / exp_f32 / sigmoid_f32 / softplus_f32");
 
     let n = args.k as usize;
     let bytes = (n * std::mem::size_of::<f32>()) as libc::size_t;
@@ -186,6 +204,26 @@ fn main() -> Result<()> {
         args.tol,
         |x, y, k, s| ggml_cuda_op_exp_f32(&kernels.unary, x, y, k, s),
         exp_cpu,
+        bytes,
+        args.k,
+    )?;
+
+    run_op(
+        "sigmoid",
+        &h_x,
+        args.tol,
+        |x, y, k, s| ggml_cuda_op_sigmoid_f32(&kernels.unary, x, y, k, s),
+        sigmoid_cpu,
+        bytes,
+        args.k,
+    )?;
+
+    run_op(
+        "softplus",
+        &h_x,
+        args.tol,
+        |x, y, k, s| ggml_cuda_op_softplus_f32(&kernels.unary, x, y, k, s),
+        softplus_cpu,
         bytes,
         args.k,
     )?;
