@@ -120,6 +120,12 @@ name = "qwen35-27b-q4km-dflash-softmax-verify"
 path = "src/bin/softmax_verify.rs"
 required-features = ["cuda"]
 
+[[bin]]
+# End-to-end smoke test: 5-op Rust-dispatch chain vs CPU reference.
+name = "qwen35-27b-q4km-dflash-graph-smoke"
+path = "src/bin/graph_smoke.rs"
+required-features = ["cuda"]
+
 [features]
 default = []
 # CUDA is the only real build mode — the target model is 27B in Q4_K_M,
