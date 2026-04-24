@@ -5112,7 +5112,7 @@ fn enrich_inbound_prompt(
         let authority = render_email_sender_authority(&policy);
         let communication_contract = render_email_context_contract(root, message);
         let reply_instruction = if matches!(policy.role.as_str(), "owner" | "founder" | "admin") {
-            "Wenn eine Antwort sinnvoll ist, sende keine direkte E-Mail aus diesem Run. Erstelle stattdessen nur den empfaengerorientierten Antwortentwurf auf Basis des gesamten Founder-/Owner-Kontexts; Founder-/Owner-Outbound darf nur ueber den dedizierten reviewed communication path rausgehen.".to_string()
+            "Wenn eine Antwort sinnvoll ist, sende keine direkte E-Mail aus diesem Run. Erstelle stattdessen nur den empfaengerorientierten Antwortentwurf auf Basis des gesamten Founder-/Owner-Kontexts; Founder-/Owner-Outbound darf nur ueber den dedizierten reviewed communication path rausgehen. Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext und sonst nichts: keine Analyse, keine Revalidierungsnotizen, keine Queue-/Review-/Runtime-Sprache, keine Host-Pfade, keine Tool-Evidenz. Beantworte die neueste Founder-/Owner-Nachricht direkt; wenn konkrete Deliverables oder Links bereits vorhanden sind, liefere sie unmittelbar in der Mail. Wenn etwas objektiv noch fehlt, benenne nur den fehlenden Punkt kurz und klar statt internen Status zu berichten.".to_string()
         } else {
             format!(
                 "Wenn eine Antwort per E-Mail sinnvoll ist, nutze `ctox channel send --channel email --account-key {} --thread-key '{}' --to {} --subject \"Re: {}\"`. Nutze bei Antworten auf bestehende Mail-Threads keinen leeren oder neuen Betreff.",
@@ -9390,6 +9390,8 @@ mod tests {
         assert!(prompt.contains("ctox lcm-grep"));
         assert!(prompt.contains("[E-Mail Berechtigung]"));
         assert!(prompt.contains("email/thread-1"));
+        assert!(prompt.contains("Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext"));
+        assert!(prompt.contains("keine Queue-/Review-/Runtime-Sprache"));
     }
 
     #[test]
