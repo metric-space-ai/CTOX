@@ -74,7 +74,18 @@ impl BinBcastKernels {
 }
 
 /// Resolve a single `k_bin_bcast<op_X, float, float, float>` entry
-/// in binbcast.ptx.
+/// in binbcast.ptx (non-fused variant — empty variadic pack).
+///
+/// Needle set:
+///   • `11k_bin_bcast` — Itanium length prefix for the kernel name,
+///     11 chars. Excludes `k_bin_bcast_unravel` (length 19).
+///   • `6op_addE` / `_subE` / `_mulE` — Itanium-mangled functor
+///     name, picks the bin_op template arg.
+///   • `fffJEE` — dtype triple `(float,float,float)` followed by an
+///     empty variadic pack (`J…E`). Disambiguates against:
+///       - f16/mixed triples (`6__half…`)
+///       - fused variants where the pack carries src1 pointers
+///         (`fffJPKfE`, `fffJPKfPKfE`, …)
 pub fn mangled_k_bin_bcast_fff(op: BinOp) -> Result<&'static [u8], String> {
     let op_needle: &[u8] = match op {
         BinOp::Add => b"6op_addE",
@@ -83,11 +94,7 @@ pub fn mangled_k_bin_bcast_fff(op: BinOp) -> Result<&'static [u8], String> {
     };
     crate::cuda_port::ptx::find_entry(
         crate::cuda_port::ptx::binbcast_entries::ENTRIES,
-        // k_bin_bcast prefix + dtype-triple + op functor +
-        // exclude the unravel variant by requiring `15k_bin_bcast`
-        // (Itanium length-15) — `k_bin_bcast_unravel` has length 23
-        // so this needle uniquely selects the tiled kernel.
-        &[b"15k_bin_bcast", b"PKfPKfPf", op_needle],
+        &[b"11k_bin_bcast", op_needle, b"fffJEE"],
     )
 }
 
