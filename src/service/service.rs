@@ -2336,12 +2336,22 @@ fn start_prompt_worker(
                         let should_handle_messages = if let Some(message_key) = &founder_reply_key {
                             match &review_disposition {
                                 CompletionReviewDisposition::Approved => {
-                                    match channels::send_reviewed_founder_reply(
+                                    match channels::ensure_founder_reply_deliverables_present(
                                         &root,
                                         message_key,
                                         &reply,
                                     ) {
-                                        Ok(_) => true,
+                                        Ok(_) => match channels::send_reviewed_founder_reply(
+                                            &root,
+                                            message_key,
+                                            &reply,
+                                        ) {
+                                            Ok(_) => true,
+                                            Err(err) => {
+                                                founder_send_error = Some(err.to_string());
+                                                false
+                                            }
+                                        },
                                         Err(err) => {
                                             founder_send_error = Some(err.to_string());
                                             false
@@ -2645,6 +2655,9 @@ fn run_completion_review(
     let founder_reply_key = founder_email_reply_message_key(job);
     let founder_reply_action = founder_reply_key
         .and_then(|message_key| channels::prepare_reviewed_founder_reply(root, message_key).ok());
+    let founder_required_deliverables = founder_reply_key
+        .and_then(|message_key| channels::required_founder_reply_deliverables(root, message_key).ok())
+        .unwrap_or_default();
     let review_request = review::CompletionReviewRequest {
         preview: job.preview.clone(),
         source_label: job.source_label.clone(),
@@ -2666,6 +2679,7 @@ fn run_completion_review(
             .as_ref()
             .map(|action| action.cc.clone())
             .unwrap_or_default(),
+        required_deliverables: founder_required_deliverables,
     };
     let outcome = review::review_completion_if_needed(root, &review_request, reply_text);
     if !outcome.required {

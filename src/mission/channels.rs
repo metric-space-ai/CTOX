@@ -1553,6 +1553,81 @@ fn normalize_email_list(values: impl IntoIterator<Item = String>) -> Vec<String>
     ordered
 }
 
+fn normalize_deliverable_text(value: &str) -> String {
+    value.to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+}
+
+fn text_mentions_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
+fn detect_required_founder_deliverables(subject: &str, body: &str) -> Vec<String> {
+    let normalized = format!(
+        "{} {}",
+        normalize_deliverable_text(subject),
+        normalize_deliverable_text(body)
+    );
+    let mut required = Vec::new();
+    if text_mentions_any(&normalized, &["qr code", "qrcode", "jami qr", "qr zugang"]) {
+        required.push("qr_code".to_string());
+    }
+    if text_mentions_any(
+        &normalized,
+        &[
+            "5 mockups",
+            "fuenf mockups",
+            "fuenf verschiedenen design vorlagen",
+            "5 verschiedenen design vorlagen",
+            "mockups",
+            "entwuerfe",
+            "entwurfe",
+            "standalone html mockup",
+        ],
+    ) {
+        required.push("mockup_links_or_files".to_string());
+    }
+    if text_mentions_any(
+        &normalized,
+        &[
+            "link set",
+            "linkset",
+            "links schicken",
+            "schick links",
+            "verlinkten zwischenstand",
+            "oeffentlichen links",
+            "offentlichen links",
+        ],
+    ) {
+        required.push("link_set".to_string());
+    }
+    normalize_email_list(required)
+}
+
+fn founder_reply_satisfies_deliverable(body: &str, deliverable: &str) -> bool {
+    let normalized = normalize_deliverable_text(body);
+    match deliverable {
+        "qr_code" => text_mentions_any(
+            &normalized,
+            &["qr code", "qrcode", "jami qr", "qr zugang"],
+        ),
+        "mockup_links_or_files" => text_mentions_any(
+            &normalized,
+            &["mockup", "entwurf", "design vorlage", "html", "http", "https", "link"],
+        ),
+        "link_set" => text_mentions_any(&normalized, &["http", "https", "link", "links"]),
+        _ => true,
+    }
+}
+
 fn derives_targets_from_forward(subject: &str, body: &str) -> bool {
     let lowered_subject = subject.to_ascii_lowercase();
     if lowered_subject.starts_with("fwd:") || lowered_subject.starts_with("fw:") {
@@ -1731,6 +1806,39 @@ pub(crate) fn prepare_reviewed_founder_reply(
     })
 }
 
+pub(crate) fn required_founder_reply_deliverables(
+    root: &Path,
+    inbound_message_key: &str,
+) -> Result<Vec<String>> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let inbound = load_message_from_conn(&conn, inbound_message_key)?
+        .with_context(|| format!("missing inbound communication message {inbound_message_key}"))?;
+    Ok(detect_required_founder_deliverables(
+        &inbound.subject,
+        &inbound.body_text,
+    ))
+}
+
+pub(crate) fn ensure_founder_reply_deliverables_present(
+    root: &Path,
+    inbound_message_key: &str,
+    body: &str,
+) -> Result<()> {
+    let required = required_founder_reply_deliverables(root, inbound_message_key)?;
+    let missing = required
+        .into_iter()
+        .filter(|deliverable| !founder_reply_satisfies_deliverable(body, deliverable))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "founder reply is missing required deliverable(s): {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 pub fn send_reviewed_founder_reply(
     root: &Path,
     inbound_message_key: &str,
@@ -1767,6 +1875,7 @@ pub fn send_reviewed_founder_reply(
         "reviewed founder reply requires founder/owner/admin recipient"
     );
     ensure_founder_outbound_body_clean(&request)?;
+    ensure_founder_reply_deliverables_present(root, inbound_message_key, &request.body)?;
     send_email_message(root, &conn, &db_path, &request)
 }
 
@@ -4573,6 +4682,72 @@ mod tests {
         assert_eq!(cc, vec!["michael.welsch@metric-space.ai".to_string()]);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn founder_reply_detects_qr_code_as_required_deliverable() {
+        let required = detect_required_founder_deliverables(
+            "Jami zugang schicken.",
+            "Schick mir bitte den Jami QR code Zugang für den Chat mir dir.",
+        );
+        assert_eq!(required, vec!["qr_code".to_string()]);
+    }
+
+    #[test]
+    fn founder_reply_blocks_send_when_qr_code_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-founder-qr-deliverable-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "email:cto1@metric-space.ai::INBOX::qr-1",
+                channel: "email",
+                account_key: "email:cto1@metric-space.ai",
+                thread_key: "<qr-thread@example.com>",
+                remote_id: "remote-qr-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Michael Welsch",
+                sender_address: "michael.welsch@metric-space.ai",
+                recipient_addresses_json: "[\"cto1@metric-space.ai\"]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Jami zugang schicken.",
+                preview: "QR code needed",
+                body_text: "Schick mir bitte den Jami QR code Zugang für den Chat mir dir.",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "trusted",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-24T14:28:56Z",
+                observed_at: "2026-04-24T14:28:56Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("message upsert");
+
+        let error = ensure_founder_reply_deliverables_present(
+            &root,
+            "email:cto1@metric-space.ai::INBOX::qr-1",
+            "Hi Michael,\n\nhier ist der direkte Jami-Zugang:\n\njami:abc123",
+        )
+        .expect_err("missing qr code should block founder reply");
+        assert!(error
+            .to_string()
+            .contains("missing required deliverable(s): qr_code"));
+
+        let _ = std::fs::remove_file(&db_path);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

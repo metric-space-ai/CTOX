@@ -83,6 +83,7 @@ pub struct CompletionReviewRequest {
     pub artifact_action: Option<String>,
     pub artifact_to: Vec<String>,
     pub artifact_cc: Vec<String>,
+    pub required_deliverables: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -437,6 +438,11 @@ fn build_review_prompt(request: &CompletionReviewRequest, reasons: &[String]) ->
     } else {
         request.artifact_cc.join(", ")
     };
+    let required_deliverables = if request.required_deliverables.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.required_deliverables.join(", ")
+    };
     let founder_specific_work = if matches!(
         request.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
@@ -446,6 +452,7 @@ Founder/owner communication gate:\n\
 - judge the outbound draft itself as the artifact under review\n\
 - judge the full mail action, not just the prose: recipients, cc list, and reply/forward behavior are part of the artifact\n\
 - decide whether the draft should be sent now, blocked, or reworked first\n\
+- treat every listed required deliverable as mandatory; if a required deliverable is missing, the mail must fail review and be reworked first\n\
 - fail the review when the draft does not answer the latest founder mail, dodges the requested deliverable, promises future work instead of delivering, or leaks internal/system language\n\
 - fail the review when the recipients or cc list are wrong, when sender-only reply is incorrect, or when a forwarded/delegated founder mail should target different recipients\n\
 - do not fail only because the broader mission is still open; fail only when the draft makes a false claim, omits a required answer, or the missing deliverable means the mail should not be sent yet\n\
@@ -471,6 +478,7 @@ Artifact under review:\n\
 Artifact action: {artifact_action}\n\
 Artifact to: {artifact_to}\n\
 Artifact cc: {artifact_cc}\n\
+Required deliverables: {required_deliverables}\n\
 --- BEGIN ARTIFACT ---\n\
 {artifact_text}\n\
 --- END ARTIFACT ---\n\
@@ -516,6 +524,7 @@ HANDOFF:\n\
         artifact_action = artifact_action,
         artifact_to = artifact_to,
         artifact_cc = artifact_cc,
+        required_deliverables = required_deliverables,
         strategy_conversation_id = request.conversation_id,
         verification_conversation_id = request.conversation_id
     )
@@ -821,6 +830,7 @@ mod tests {
             artifact_action: Some("reply".to_string()),
             artifact_to: vec!["o.schaefers@gmx.net".to_string()],
             artifact_cc: vec!["michael.welsch@metric-space.ai".to_string()],
+            required_deliverables: vec!["qr_code".to_string()],
         };
         let rendered = build_review_prompt(&request, &["founder_communication".to_string()]);
         assert!(rendered.contains("Artifact kind: founder_or_owner_outbound_email_draft"));
@@ -830,7 +840,9 @@ mod tests {
         assert!(rendered.contains(
             "Artifact cc: michael.welsch@metric-space.ai"
         ));
+        assert!(rendered.contains("Required deliverables: qr_code"));
         assert!(rendered.contains("judge the full mail action, not just the prose"));
+        assert!(rendered.contains("treat every listed required deliverable as mandatory"));
         assert!(rendered.contains("does not answer the latest founder mail"));
         assert!(rendered.contains("Kurzstand: Ich liefere spaeter."));
     }
