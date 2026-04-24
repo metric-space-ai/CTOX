@@ -150,6 +150,12 @@ name = "qwen35-27b-q4km-dflash-block-smoke"
 path = "src/bin/block_smoke.rs"
 required-features = ["cuda"]
 
+[[bin]]
+# Verifier for the `cuda_port::ops::ssm_conv` port (short-token path).
+name = "qwen35-27b-q4km-dflash-ssm-conv-verify"
+path = "src/bin/ssm_conv_verify.rs"
+required-features = ["cuda"]
+
 [features]
 default = []
 # CUDA is the only real build mode — the target model is 27B in Q4_K_M,
