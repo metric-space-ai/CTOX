@@ -173,3 +173,83 @@ fn compile_f16_convert() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
     println!("cargo:rustc-link-lib=static=ctox_f16_convert");
 }
+
+/// Compile a single vendored `.cu` file to PTX under `$OUT_DIR/<stem>.ptx`.
+///
+/// Used by the incremental `cuda_port` bare-metal dispatcher migration —
+/// each op dispatcher ported to Rust needs the matching kernel source
+/// compiled to PTX so the Rust side can load it at runtime via
+/// `cuModuleLoadData`. Flags + defines mirror the ones ggml's own CMake
+/// build uses for ggml-cuda (inspected from compile_commands.json on
+/// the A6000 dev box):
+///
+/// ```text
+/// nvcc -forward-unknown-to-host-compiler -O3 -DNDEBUG -std=c++17
+///   -DGGML_CUDA_PEER_MAX_BATCH_SIZE=128 -DGGML_SCHED_MAX_COPIES=4
+///   --generate-code=arch=compute_<SM>,code=[compute_<SM>,sm_<SM>]
+///   -use_fast_math -extended-lambda
+///   -I vendor/ggml-include -I vendor/ggml-cuda
+///   --ptx -o $OUT_DIR/<stem>.ptx  vendor/ggml-cuda/<stem>.cu
+/// ```
+///
+/// Returns true on success, false on any failure (a warning is emitted
+/// so the caller can decide whether to bail the whole build or degrade
+/// gracefully to the FFI path).
+#[allow(dead_code)]
+fn compile_kernel_to_ptx(stem: &str) -> bool {
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("vendor/ggml-cuda").join(format!("{stem}.cu"));
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let ptx = out_dir.join(format!("{stem}.ptx"));
+
+    println!("cargo:rerun-if-changed={}", src.display());
+    if !src.exists() {
+        println!(
+            "cargo:warning=ctox-qwen35-27b-q4km-dflash: vendor/ggml-cuda/{stem}.cu missing — skipping PTX"
+        );
+        return false;
+    }
+
+    let include_cuda = manifest.join("vendor/ggml-cuda");
+    let include_ggml = manifest.join("vendor/ggml-include");
+    let nvcc = env::var("NVCC").unwrap_or_else(|_| "nvcc".into());
+    let sm = env::var("CTOX_CUDA_SM").unwrap_or_else(|_| "86".into());
+    let gencode = format!("--generate-code=arch=compute_{sm},code=[compute_{sm},sm_{sm}]");
+
+    let status = Command::new(&nvcc)
+        .args([
+            "-forward-unknown-to-host-compiler",
+            "-O3",
+            "-DNDEBUG",
+            "-std=c++17",
+            "-DGGML_CUDA_PEER_MAX_BATCH_SIZE=128",
+            "-DGGML_SCHED_MAX_COPIES=4",
+            "-use_fast_math",
+            "-extended-lambda",
+        ])
+        .arg(&gencode)
+        .arg("-I")
+        .arg(&include_cuda)
+        .arg("-I")
+        .arg(&include_ggml)
+        .arg("--ptx")
+        .arg("-o")
+        .arg(&ptx)
+        .arg(&src)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("cargo:warning=ctox-qwen35-27b-q4km-dflash: PTX compiled: {stem}.ptx");
+            true
+        }
+        Ok(s) => {
+            println!("cargo:warning=ctox-qwen35-27b-q4km-dflash: PTX nvcc failed for {stem}.cu: exit {s}");
+            false
+        }
+        Err(e) => {
+            println!("cargo:warning=ctox-qwen35-27b-q4km-dflash: PTX nvcc not available ({e}) — skipping {stem}");
+            false
+        }
+    }
+}
