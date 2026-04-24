@@ -241,6 +241,139 @@ pub fn mul(
     }
 }
 
+/// `dst = a - b`, elementwise f32 (no broadcast).
+pub fn sub(
+    ctx: &ExecCtx<'_>,
+    a: &Tensor,
+    b: &Tensor,
+    dst: &Tensor,
+) -> Result<(), String> {
+    use crate::cuda_port::ops::binbcast::{
+        ggml_cuda_op_sub_f32, BinBcastTensor,
+    };
+    let shape = BinBcastTensor { ne: dst.ne, s: dst.s };
+    let rc = ggml_cuda_op_sub_f32(
+        &ctx.kernels.binbcast,
+        a.data,
+        b.data,
+        dst.data,
+        &shape,
+        &shape,
+        &shape,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("sub launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// `dst[i] = sigmoid(x[i])`, f32.
+pub fn sigmoid(ctx: &ExecCtx<'_>, x: &Tensor, dst: &Tensor) -> Result<(), String> {
+    use crate::cuda_port::ops::unary::ggml_cuda_op_sigmoid_f32;
+    let rc = ggml_cuda_op_sigmoid_f32(
+        &ctx.kernels.unary,
+        x.data,
+        dst.data,
+        x.nelements() as c_int,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("sigmoid launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// `dst[i] = -x[i]`, f32.
+pub fn neg(ctx: &ExecCtx<'_>, x: &Tensor, dst: &Tensor) -> Result<(), String> {
+    use crate::cuda_port::ops::unary::ggml_cuda_op_neg_f32;
+    let rc = ggml_cuda_op_neg_f32(
+        &ctx.kernels.unary,
+        x.data,
+        dst.data,
+        x.nelements() as c_int,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("neg launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// `dst[i] = exp(x[i])`, f32.
+pub fn exp(ctx: &ExecCtx<'_>, x: &Tensor, dst: &Tensor) -> Result<(), String> {
+    use crate::cuda_port::ops::unary::ggml_cuda_op_exp_f32;
+    let rc = ggml_cuda_op_exp_f32(
+        &ctx.kernels.unary,
+        x.data,
+        dst.data,
+        x.nelements() as c_int,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("exp launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// `dst[i] = softplus(x[i]) = log(1 + exp(x[i]))`, f32.
+pub fn softplus(ctx: &ExecCtx<'_>, x: &Tensor, dst: &Tensor) -> Result<(), String> {
+    use crate::cuda_port::ops::unary::ggml_cuda_op_softplus_f32;
+    let rc = ggml_cuda_op_softplus_f32(
+        &ctx.kernels.unary,
+        x.data,
+        dst.data,
+        x.nelements() as c_int,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("softplus launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Fill `dst` with a constant f32 value.
+pub fn fill_f32(ctx: &ExecCtx<'_>, dst: &Tensor, value: f32) -> Result<(), String> {
+    use crate::cuda_port::ops::fill::ggml_cuda_op_fill_f32;
+    let rc = ggml_cuda_op_fill_f32(
+        &ctx.kernels.fill,
+        dst.data,
+        dst.nelements(),
+        value,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("fill launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+/// Cumsum along axis 0 (inclusive prefix sum per row), f32.
+pub fn cumsum(ctx: &ExecCtx<'_>, x: &Tensor, dst: &Tensor) -> Result<(), String> {
+    use crate::cuda_port::ops::cumsum::ggml_cuda_op_cumsum_f32;
+    let rc = ggml_cuda_op_cumsum_f32(
+        &ctx.kernels.cumsum,
+        x.data,
+        dst.data,
+        x.ne,
+        x.s,
+        dst.s,
+        ctx.stream,
+    );
+    if rc != 0 {
+        Err(format!("cumsum launch: {rc}"))
+    } else {
+        Ok(())
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
