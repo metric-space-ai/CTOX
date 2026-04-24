@@ -357,14 +357,21 @@ fn compile_f16_convert() {
 #[allow(dead_code)]
 fn compile_kernel_to_ptx(stem: &str) -> bool {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let src = manifest.join("vendor/ggml-cuda").join(format!("{stem}.cu"));
+    // Prefer a shim in src/cuda_port/shims/<stem>.cu if one exists — that
+    // shim typically `#include`s the vendored .cu and adds explicit template
+    // instantiations for kernels that upstream only declares (see
+    // ssm-conv.cu's CTOX-MODIFICATION comment).
+    let shim = manifest.join("src/cuda_port/shims").join(format!("{stem}.cu"));
+    let vendor = manifest.join("vendor/ggml-cuda").join(format!("{stem}.cu"));
+    let src = if shim.exists() { shim.clone() } else { vendor.clone() };
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let ptx = out_dir.join(format!("{stem}.ptx"));
 
     println!("cargo:rerun-if-changed={}", src.display());
+    println!("cargo:rerun-if-changed={}", vendor.display());
     if !src.exists() {
         println!(
-            "cargo:warning=ctox-qwen35-27b-q4km-dflash: vendor/ggml-cuda/{stem}.cu missing — skipping PTX"
+            "cargo:warning=ctox-qwen35-27b-q4km-dflash: neither shim nor vendor source for {stem} — skipping PTX"
         );
         return false;
     }
