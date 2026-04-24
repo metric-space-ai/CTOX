@@ -10,6 +10,15 @@ nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
   131K Elemente, drift **1.9e-6** vs CPU-f64.
 - `hybrid_smoke`: 3-op Rust+ggml chain (Rust RMSNorm → ggml mul_mat →
   Rust Add) vs pure-ggml reference, drift **0 (bit-exact)**.
+- `layer_smoke`: Qwen3.5 SwiGLU FFN block (8 ops, 4 Rust + 4 ggml) at
+  real 27B dims (hidden=5120, ffn=17408, seq=16), drift **2.2e-5**
+  vs pure-ggml full-graph compute. **Hybrid executor validated on
+  production-scale Qwen3.5 sub-graph.**
+
+Perf note: hybrid is ~2.6× slower than pure-ggml on this sub-graph
+(7.9ms vs 3.0ms) because each ggml-fallback mul_mat goes through its
+own `graph_compute()` cycle. A `compute_many` batched API that groups
+consecutive fallback ops into one graph would close most of the gap.
 
 17 `.cu`-Files, 37+ Kernel-Varianten — jede einzeln bit-close /
 bit-exakt verifiziert durch `src/bin/<op>_verify.rs`:
