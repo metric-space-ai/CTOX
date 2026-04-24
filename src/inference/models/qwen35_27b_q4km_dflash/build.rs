@@ -178,7 +178,15 @@ fn generate_ptx_entries_module(stem: &str) {
     let mut entries: Vec<String> = Vec::new();
     for line in ptx.lines() {
         let t = line.trim_start();
-        let Some(rest) = t.strip_prefix(".entry ") else {
+        // Match both `.entry ...` (internal-linkage templates that
+        // upstream declares as `static`) and `.visible .entry ...`
+        // (external-linkage templates like those forced by our
+        // shims/*.cu via function-pointer tables).
+        let rest_opt = t
+            .strip_prefix(".entry ")
+            .or_else(|| t.strip_prefix(".visible .entry "))
+            .or_else(|| t.strip_prefix(".weak .entry "));
+        let Some(rest) = rest_opt else {
             continue;
         };
         let Some(paren) = rest.find('(') else {
