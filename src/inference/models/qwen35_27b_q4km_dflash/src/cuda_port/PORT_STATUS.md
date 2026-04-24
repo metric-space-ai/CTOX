@@ -5,20 +5,27 @@ nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
 
 ## Was verifiziert läuft (A6000)
 
-**Executor-Status:**
-- `graph_smoke`: 5-op pure-Rust chain (RMSNorm → SiLU → Scale → Add → Mul),
-  131K Elemente, drift **1.9e-6** vs CPU-f64.
-- `hybrid_smoke`: 3-op Rust+ggml chain (Rust RMSNorm → ggml mul_mat →
-  Rust Add) vs pure-ggml reference, drift **0 (bit-exact)**.
-- `layer_smoke`: Qwen3.5 SwiGLU FFN block (8 ops, 4 Rust + 4 ggml) at
-  real 27B dims (hidden=5120, ffn=17408, seq=16), drift **2.2e-5**
-  vs pure-ggml full-graph compute. **Hybrid executor validated on
-  production-scale Qwen3.5 sub-graph.**
+**Executor-Status — alle smokes grün:**
 
-Perf note: hybrid is ~2.6× slower than pure-ggml on this sub-graph
-(7.9ms vs 3.0ms) because each ggml-fallback mul_mat goes through its
-own `graph_compute()` cycle. A `compute_many` batched API that groups
-consecutive fallback ops into one graph would close most of the gap.
+| Smoke | Shape | Ops | Drift | Hybrid-Zeit | ggml-Zeit |
+|---|---|---|---:|---:|---:|
+| `graph_smoke` | 4096×32 | 5 Rust | 1.9e-6 | 58µs | n/a (CPU-ref) |
+| `hybrid_smoke` | 128×64×32 | 3 (1 Rust + 1 ggml + 1 Rust) | **0 bit-exact** | — | — |
+| `layer_smoke` | hidden=5120, ffn=17408, seq=16 | 8 (4 Rust + 4 ggml) | 2.2e-5 | 7.9ms | 3.0ms |
+| `attn_smoke` | hidden=6144, heads=24/4×256, seq=16 | 6+FA (2 Rust + 4+FA ggml) | **0 bit-exact** | 7.6ms | 1.9ms |
+| `block_smoke` | **full Q35-27B transformer block**, seq=16 | 17 (6 Rust + 11 ggml incl. FA) | 2.2e-5 | 9.8ms | 4.1ms |
+
+**`block_smoke` ist das Milestone:** kompletter Qwen3.5-27B
+transformer-block (Attention + FFN Half) läuft durch den Hybrid-
+Executor mit production-scale Dimensionen, Output matches pure-ggml
+auf 5 Dezimalstellen.
+
+Perf note: hybrid ist ~2.4× langsamer als pure-ggml auf block_smoke
+(9.8ms vs 4.1ms) — jeder ggml-fallback mul_mat geht durch seinen
+eigenen `graph_compute()` Cycle. Ein `compute_many` batched-API der
+consecutive fallback ops in einem Graph zusammenfasst würde den
+größten Teil des Gaps schließen. Bit-exactness ist wichtiger als
+perf beim Bring-up.
 
 17 `.cu`-Files, 37+ Kernel-Varianten — jede einzeln bit-close /
 bit-exakt verifiziert durch `src/bin/<op>_verify.rs`:
