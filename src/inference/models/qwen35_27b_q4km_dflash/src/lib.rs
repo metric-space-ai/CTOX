@@ -41,6 +41,7 @@
 //! algorithm; paraphrased only when they reference C/C++ constructs that
 //! don't exist in Rust.
 
+pub mod cuda_port;
 pub mod ddtree;
 pub mod driver;
 pub mod ffi;
