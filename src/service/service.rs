@@ -2333,9 +2333,10 @@ fn start_prompt_worker(
                     Ok(reply) => {
                         let founder_reply_key =
                             founder_email_reply_message_key(&job).map(ToOwned::to_owned);
-                        let founder_reply_action = founder_reply_key
-                            .as_ref()
-                            .and_then(|message_key| channels::prepare_reviewed_founder_reply(&root, message_key).ok());
+                        let founder_reply_action =
+                            founder_reply_key.as_ref().and_then(|message_key| {
+                                channels::prepare_reviewed_founder_reply(&root, message_key).ok()
+                            });
                         let mut founder_send_error: Option<String> = None;
                         let should_handle_messages = if let Some(message_key) = &founder_reply_key {
                             match &review_disposition {
@@ -2664,7 +2665,9 @@ fn run_completion_review(
     let founder_reply_action = founder_reply_key
         .and_then(|message_key| channels::prepare_reviewed_founder_reply(root, message_key).ok());
     let founder_required_deliverables = founder_reply_key
-        .and_then(|message_key| channels::required_founder_reply_deliverables(root, message_key).ok())
+        .and_then(|message_key| {
+            channels::required_founder_reply_deliverables(root, message_key).ok()
+        })
         .unwrap_or_default();
     let founder_commitments = if is_founder_or_owner_email_job(job) {
         detect_founder_mail_commitments(reply_text)
@@ -2686,9 +2689,7 @@ fn run_completion_review(
         runtime_db_path: db_path.to_string_lossy().to_string(),
         review_skill_path,
         artifact_text: reply_text.to_string(),
-        artifact_action: founder_reply_action
-            .as_ref()
-            .map(|_| "reply".to_string()),
+        artifact_action: founder_reply_action.as_ref().map(|_| "reply".to_string()),
         artifact_to: founder_reply_action
             .as_ref()
             .map(|action| action.to.clone())
@@ -2785,12 +2786,7 @@ fn run_completion_review(
                         summary: outcome.summary.clone(),
                     }
                 } else if let Some(message_key) = founder_reply_key {
-                    match enqueue_founder_communication_rework(
-                        root,
-                        job,
-                        message_key,
-                        &outcome,
-                    ) {
+                    match enqueue_founder_communication_rework(root, job, message_key, &outcome) {
                         Ok(title) => {
                             push_event(
                                 state,
@@ -3950,7 +3946,9 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
                 suggested_skill: suggested_skill_from_message(&message),
                 leased_message_keys: vec![leased_message_key],
                 leased_ticket_event_keys: Vec::new(),
-                thread_key: Some(execution_thread_key_for_inbound_message(&settings, &message)),
+                thread_key: Some(execution_thread_key_for_inbound_message(
+                    &settings, &message,
+                )),
                 workspace_root: message.workspace_root.clone(),
                 ticket_self_work_id: ticket_self_work_id_from_metadata(&message.metadata),
             },
@@ -4297,7 +4295,11 @@ fn isolated_founder_email_thread_key(raw_thread_key: &str, role: &str) -> String
         .iter()
         .map(|byte| format!("{:02x}", byte))
         .collect::<String>();
-    format!("email-review:{}:{}", role.trim().to_ascii_lowercase(), suffix)
+    format!(
+        "email-review:{}:{}",
+        role.trim().to_ascii_lowercase(),
+        suffix
+    )
 }
 
 fn execution_thread_key_for_inbound_message(
@@ -4401,20 +4403,8 @@ fn detect_founder_mail_commitments(text: &str) -> Vec<String> {
             }
             let lowered = trimmed.to_ascii_lowercase();
             let has_commitment_verb = [
-                "i will",
-                "i'll",
-                "we will",
-                "we'll",
-                "send",
-                "deliver",
-                "provide",
-                "share",
-                "update",
-                "inform",
-                "sende",
-                "liefere",
-                "schicke",
-                "melde",
+                "i will", "i'll", "we will", "we'll", "send", "deliver", "provide", "share",
+                "update", "inform", "sende", "liefere", "schicke", "melde",
             ]
             .iter()
             .any(|needle| lowered.contains(needle));
@@ -4475,7 +4465,8 @@ fn founder_commitment_backing_summaries(root: &Path) -> Vec<String> {
             format!(
                 "{} @ {}",
                 task.name,
-                task.next_run_at.unwrap_or_else(|| "(no next run)".to_string())
+                task.next_run_at
+                    .unwrap_or_else(|| "(no next run)".to_string())
             )
         })
         .collect()
@@ -4649,12 +4640,40 @@ fn cancel_runnable_thread_tasks_for_strategy(
     Ok(cancelled)
 }
 
+fn has_runnable_founder_or_owner_email(root: &Path) -> Result<bool> {
+    let settings = live_service_settings(root);
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT m.sender_address
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = 'email'
+          AND m.direction = 'inbound'
+          AND COALESCE(r.route_status, 'pending') IN ('pending', 'leased')
+        "#,
+    )?;
+    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for sender in rows {
+        let sender = sender?;
+        let role = channels::classify_email_sender(&settings, &sender).role;
+        if matches!(role.as_str(), "owner" | "founder" | "admin") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn maybe_redirect_owner_visible_work_to_strategy_setup(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
     job: &QueuedPrompt,
 ) -> Result<bool> {
     if !is_owner_visible_strategic_job(job) {
+        return Ok(false);
+    }
+    if has_runnable_founder_or_owner_email(root)? {
         return Ok(false);
     }
     let current_item = job.ticket_self_work_id.as_deref().and_then(|work_id| {
@@ -5351,7 +5370,10 @@ fn queue_ticket_self_work_item(
     Ok(Some(queue_task))
 }
 
-fn find_runnable_thread_task(root: &Path, thread_key: &str) -> Result<Option<channels::QueueTaskView>> {
+fn find_runnable_thread_task(
+    root: &Path,
+    thread_key: &str,
+) -> Result<Option<channels::QueueTaskView>> {
     let tasks =
         channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 64)?;
     Ok(tasks.into_iter().find(|task| task.thread_key == thread_key))
@@ -9352,6 +9374,84 @@ mod tests {
     }
 
     #[test]
+    fn open_founder_inbound_blocks_strategy_reroute_for_queue_work() {
+        let root = temp_root("ctox-open-founder-blocks-strategy-reroute");
+        let owner_key = "CTOX_OWNER_EMAIL_ADDRESS";
+        let previous_owner = std::env::var_os(owner_key);
+        std::env::set_var(owner_key, "michael.welsch@metric-space.ai");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', '<founder-thread@example.com>',
+                'remote-founder-1', 'inbound', 'INBOX', 'Michael Welsch',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]', 'Founder input',
+                'Founder input', 'Please answer me before doing anything else.', '', '',
+                'normal', 'received', 0, 0, '2026-04-24T18:55:00Z', '2026-04-24T18:55:00Z', '{}'
+            )"#,
+            rusqlite::params!["email:cto1@metric-space.ai::INBOX::91"],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'pending', NULL, NULL, NULL, NULL, '2026-04-24T18:55:00Z')"#,
+            rusqlite::params!["email:cto1@metric-space.ai::INBOX::91"],
+        )
+        .expect("failed to insert founder routing state");
+
+        let queue_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Platform homepage work".to_string(),
+                prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
+                    .to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("follow-up-orchestrator".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let job = QueuedPrompt {
+            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
+                .to_string(),
+            goal: "Kunstmen platform homepage reset".to_string(),
+            preview: "Kunstmen platform homepage reset".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            leased_message_keys: vec![queue_task.message_key.clone()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
+            .expect("strategy evaluation should succeed");
+        assert!(!redirected);
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Platform homepage work");
+        match previous_owner {
+            Some(value) => std::env::set_var(owner_key, value),
+            None => std::env::remove_var(owner_key),
+        }
+    }
+
+    #[test]
     fn founder_email_thread_is_not_rerouted_into_strategy_setup() {
         let root = temp_root("ctox-founder-email-no-strategy-reroute");
         let queue_task = channels::create_queue_task(
@@ -9504,8 +9604,12 @@ mod tests {
                 .expect("failed to list queue tasks");
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, title);
-        assert!(tasks[0].prompt.contains("Do not send any founder or owner reply yet."));
-        assert!(tasks[0].prompt.contains("Generate or retrieve the Jami QR code."));
+        assert!(tasks[0]
+            .prompt
+            .contains("Do not send any founder or owner reply yet."));
+        assert!(tasks[0]
+            .prompt
+            .contains("Generate or retrieve the Jami QR code."));
         assert!(tasks[0].ticket_self_work_id.is_some());
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9531,7 +9635,10 @@ mod tests {
         )
         .expect("unbacked commitments should fail");
         assert_eq!(outcome.verdict, review::ReviewVerdict::Fail);
-        assert_eq!(outcome.failed_gates, vec!["unbacked_commitment".to_string()]);
+        assert_eq!(
+            outcome.failed_gates,
+            vec!["unbacked_commitment".to_string()]
+        );
         assert!(outcome.summary.contains("2 future commitment(s)"));
     }
 
@@ -9870,7 +9977,9 @@ mod tests {
         assert!(prompt.contains("ctox lcm-grep"));
         assert!(prompt.contains("[E-Mail Berechtigung]"));
         assert!(prompt.contains("email/thread-1"));
-        assert!(prompt.contains("Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext"));
+        assert!(prompt.contains(
+            "Dein gesamter Assistenten-Output in diesem Run ist exakt der zu versendende Mailtext"
+        ));
         assert!(prompt.contains("keine Queue-/Review-/Runtime-Sprache"));
     }
 
