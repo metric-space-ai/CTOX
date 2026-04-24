@@ -132,6 +132,12 @@ name = "qwen35-27b-q4km-dflash-hybrid-smoke"
 path = "src/bin/hybrid_smoke.rs"
 required-features = ["cuda"]
 
+[[bin]]
+# Qwen3.5 FFN (SwiGLU) block through hybrid executor.
+name = "qwen35-27b-q4km-dflash-layer-smoke"
+path = "src/bin/layer_smoke.rs"
+required-features = ["cuda"]
+
 [features]
 default = []
 # CUDA is the only real build mode — the target model is 27B in Q4_K_M,
