@@ -15,7 +15,10 @@
 #include "../../../vendor/ggml-cuda/ssm-conv.cu"
 
 // clang-format off
-__host__ void ctox_force_emit_ssm_conv(cudaStream_t s,
+// extern "C" + no static so nvcc's host-side DCE doesn't drop the
+// function body before the `<<<>>>` launches trigger PTX emission.
+extern "C" __host__ __attribute__((used)) __attribute__((visibility("default")))
+void ctox_force_emit_ssm_conv(cudaStream_t s,
                                        const float *x, const float *w, float *y,
                                        int a, int b, int c, int d,
                                        int e, int f, int g, int64_t n) {
