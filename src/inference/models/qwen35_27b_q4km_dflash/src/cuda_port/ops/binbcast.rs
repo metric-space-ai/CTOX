@@ -74,18 +74,22 @@ impl BinBcastKernels {
 }
 
 /// Resolve a single `k_bin_bcast<op_X, float, float, float>` entry
-/// in binbcast.ptx (non-fused variant — empty variadic pack).
+/// in binbcast.ptx for the n_fuse=1 (default) case.
+///
+/// `bin_bcast_cuda` defaults `n_fuse` to 1 for op_add/sub/mul (only
+/// op_repeat uses n_fuse=0). With n_fuse=1 the variadic pack holds
+/// exactly one `const float *` — mangled as `JPKfEE`. The call site
+/// still passes the non-pack `src1` pointer too (the kernel body
+/// ignores it under `if constexpr (sizeof...(src1_ptrs) > 0)`), so
+/// the ABI takes 23 pointer/scalar slots total.
 ///
 /// Needle set:
-///   • `11k_bin_bcast` — Itanium length prefix for the kernel name,
-///     11 chars. Excludes `k_bin_bcast_unravel` (length 19).
-///   • `6op_addE` / `_subE` / `_mulE` — Itanium-mangled functor
-///     name, picks the bin_op template arg.
-///   • `fffJEE` — dtype triple `(float,float,float)` followed by an
-///     empty variadic pack (`J…E`). Disambiguates against:
-///       - f16/mixed triples (`6__half…`)
-///       - fused variants where the pack carries src1 pointers
-///         (`fffJPKfE`, `fffJPKfPKfE`, …)
+///   • `11k_bin_bcast`  — Itanium length prefix, excludes unravel.
+///   • `6op_addE` / `_subE` / `_mulE` — functor name.
+///   • `fffJPKfEE`      — dtype triple (float,float,float) + pack
+///                         `JPKfE` (one const-float*) + close `E`.
+///                         Rejects f16 triples and fused n_fuse≥2
+///                         variants (`fffJPKfPKfE…`).
 pub fn mangled_k_bin_bcast_fff(op: BinOp) -> Result<&'static [u8], String> {
     let op_needle: &[u8] = match op {
         BinOp::Add => b"6op_addE",
@@ -94,7 +98,7 @@ pub fn mangled_k_bin_bcast_fff(op: BinOp) -> Result<&'static [u8], String> {
     };
     crate::cuda_port::ptx::find_entry(
         crate::cuda_port::ptx::binbcast_entries::ENTRIES,
-        &[b"11k_bin_bcast", op_needle, b"fffJEE"],
+        &[b"11k_bin_bcast", op_needle, b"fffJPKfEE"],
     )
 }
 
@@ -229,9 +233,15 @@ pub fn launch_bin_bcast_f32(
     //               uint3 ne10, uint3 ne11, uint3 ne12, uint3 ne13,
     //               int s1, int s2, int s3,
     //               int s00, int s01, int s02, int s03,
-    //               int s10, int s11, int s12, int s13)
-    // — 22 scalar/uint3 parameter slots + 3 pointers = 25 slots.
-    let args: [*const c_void; 25] = [
+    //               int s10, int s11, int s12, int s13,
+    //               src1_ptrs...)
+    // For n_fuse=1 the pack expands to one `const float *`. Total =
+    // 3 ptrs + 3 ints + 5 uint3 + 11 ints + 1 pack-ptr = 23 args.
+    //
+    // The non-pack `src1` pointer is still passed — the kernel body
+    // ignores it under `if constexpr (sizeof...(src1_ptrs) > 0)`,
+    // but the ABI slot is present.
+    let args: [*const c_void; 23] = [
         &src0_val as *const u64 as *const c_void,
         &src1_val as *const u64 as *const c_void,
         &dst_val as *const u64 as *const c_void,
@@ -254,13 +264,10 @@ pub fn launch_bin_bcast_f32(
         &s11 as *const c_int as *const c_void,
         &s12 as *const c_int as *const c_void,
         &s13 as *const c_int as *const c_void,
-        // Pad three nulls so static-size asserts don't drift if
-        // kernel sig ever grows; values never referenced for the
-        // current call — but leave them here to make the slot count
-        // match the actual ABI exactly.
-        std::ptr::null(),
-        std::ptr::null(),
-        std::ptr::null(),
+        // Pack element 0: const float * — upstream passes
+        // `dst->src[1]->data`, which for the non-fused ggml_cuda_op_add
+        // is the same buffer as src1_dd.
+        &src1_val as *const u64 as *const c_void,
     ];
 
     unsafe {
@@ -274,9 +281,7 @@ pub fn launch_bin_bcast_f32(
             block_dims[2],
             0, // shmem
             stream,
-            // Only pass the 22 real slots; the trailing pad is
-            // there for compile-time safety, drop it at launch.
-            args[..22].as_ptr(),
+            args.as_ptr(),
             std::ptr::null(),
         )
     }
