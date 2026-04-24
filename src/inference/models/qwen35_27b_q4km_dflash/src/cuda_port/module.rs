@@ -65,13 +65,17 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
     )
     .map_err(|e| format!("rms_norm<1024>: {e}"))?;
 
-    // unary.cu — unary_op_kernel<op_silu|op_neg|op_exp, float>
+    // unary.cu — unary_op_kernel<op_silu|op_neg|op_exp, float>.
+    //
+    // Itanium mangles the nested-name `op_<X>` as `<len><name>E`
+    // (length byte, identifier, closing E). Strict needles include
+    // both so `op_exp` doesn't collide with `op_expm1`, etc.
     let unary_module = load_module(UNARY_PTX).map_err(|e| format!("unary.ptx: {e}"))?;
     let mut uk = UnaryKernels::default();
     for (slot, needle) in &[
-        (&mut uk.silu_f32 as *mut _, b"op_silu".as_slice()),
-        (&mut uk.neg_f32 as *mut _, b"op_neg".as_slice()),
-        (&mut uk.exp_f32 as *mut _, b"op_exp".as_slice()),
+        (&mut uk.silu_f32 as *mut _, b"7op_siluE".as_slice()),
+        (&mut uk.neg_f32 as *mut _, b"6op_negE".as_slice()),
+        (&mut uk.exp_f32 as *mut _, b"6op_expE".as_slice()),
     ] {
         let name = mangled_unary_op_f32(needle).map_err(|e| format!("unary lookup: {e}"))?;
         let f = get_function(unary_module, &name).map_err(|e| format!("unary: {e}"))?;
