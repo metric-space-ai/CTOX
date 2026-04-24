@@ -363,6 +363,15 @@ fn assess_review_requirement(
         push_unique_reason(&mut reasons, "long_complex_slice");
     }
 
+    let founder_or_owner_email = matches!(
+        request.source_label.to_ascii_lowercase().as_str(),
+        "email:owner" | "email:founder" | "email:admin"
+    );
+    if founder_or_owner_email {
+        score = score.saturating_add(3);
+        push_unique_reason(&mut reasons, "founder_communication");
+    }
+
     if request.owner_visible && (closure_claim || runtime_or_infra_change) {
         score = score.saturating_add(1);
         push_unique_reason(&mut reasons, "owner_visible_claim");
@@ -693,6 +702,25 @@ mod tests {
             "Explained the current queue backlog and highlighted the blocked task.",
         );
         assert!(!required);
+    }
+
+    #[test]
+    fn requires_review_for_founder_email_even_without_runtime_change() {
+        let request = CompletionReviewRequest {
+            preview: "[E-Mail eingegangen] Sender: Founder".to_string(),
+            source_label: "email:owner".to_string(),
+            owner_visible: true,
+            ..CompletionReviewRequest::default()
+        };
+        let (required, score, reasons) = assess_review_requirement(
+            &request,
+            "Kurzstand: Ich habe die 5 Mockups vorliegen und schicke dir als Nächstes die Auswahl.",
+        );
+        assert!(required);
+        assert!(score >= 3);
+        assert!(reasons
+            .iter()
+            .any(|reason| reason == "founder_communication"));
     }
 
     #[test]
