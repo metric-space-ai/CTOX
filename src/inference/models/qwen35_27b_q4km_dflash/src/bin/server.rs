@@ -66,6 +66,14 @@ struct Args {
     /// Model ID reported in health probes + Responses envelopes.
     #[arg(long, default_value = "qwen35-27b-q4km-dflash")]
     model_id: String,
+    /// Optional request-model alias that CTOX's supervisor may inject
+    /// into the spawn so its `ps -o command=`-based readiness match
+    /// against the managed backend spec succeeds. Not used for any
+    /// runtime behavior — present purely so the alias (e.g.
+    /// "Qwen/Qwen3.5-27B") appears in the process command line.
+    #[arg(long)]
+    #[allow(dead_code)]
+    request_model_alias: Option<String>,
 }
 
 fn main() -> Result<()> {

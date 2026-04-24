@@ -123,6 +123,15 @@ fn qwen35_27b_q4km_dflash_backend(
     args.push(socket.into());
     args.push("--model-id".into());
     args.push("qwen35-27b-q4km-dflash".into());
+    // Embed the canonical request-model alias in the command line so
+    // the supervisor's `socket_backed_process_matches_spec` check
+    // (which does a literal `command.contains(spec.request_model)`
+    // match against the `ps -o command=` output) succeeds against
+    // the managed backend spec for Chat, whose request_model is
+    // "Qwen/Qwen3.5-27B". The server bin accepts the flag but does
+    // not need it for runtime behavior — it's a commandline marker.
+    args.push("--request-model-alias".into());
+    args.push("Qwen/Qwen3.5-27B".into());
 
     // No extra env currently. CUDA_VISIBLE_DEVICES / launch-spec env
     // gets layered by the supervisor's shared env helper.
