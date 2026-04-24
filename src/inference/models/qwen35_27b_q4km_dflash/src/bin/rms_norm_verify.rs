@@ -33,8 +33,8 @@ use clap::Parser;
 
 use ctox_qwen35_27b_q4km_dflash as dflash;
 use dflash::cuda_port::driver::{
-    cuInit, cuMemAlloc_v2, cuMemFree_v2, cuStreamSynchronize, CUdeviceptr, CUDA_SUCCESS,
-    CUstream,
+    cuInit, cuMemAlloc_v2, cuMemFree_v2, cuStreamSynchronize, ensure_current_context,
+    CUdeviceptr, CUstream, CUDA_SUCCESS,
 };
 use dflash::cuda_port::module::porter;
 use dflash::cuda_port::ops::norm::ggml_cuda_op_rms_norm;
@@ -96,11 +96,20 @@ fn main() -> Result<()> {
         ));
     }
 
-    // 2. cuInit is a no-op after ggml initialized — idempotent.
+    // 2. cuInit + bind the device's primary context to this thread.
+    //    ggml_backend_cuda uses the primary context internally but
+    //    does not set it current on arbitrary threads — our
+    //    driver-API calls (cuModuleLoadData, cuLaunchKernel, …) need
+    //    it current or they fail with CUDA_ERROR_INVALID_CONTEXT.
     let rc = unsafe { cuInit(0) };
     if rc != CUDA_SUCCESS {
-        return Err(anyhow!("cuInit: {}", dflash::cuda_port::driver::error_string(rc)));
+        return Err(anyhow!(
+            "cuInit: {}",
+            dflash::cuda_port::driver::error_string(rc)
+        ));
     }
+    ensure_current_context(args.cuda_device)
+        .map_err(|e| anyhow!("ensure_current_context: {e}"))?;
 
     // 3. Resolve the ported kernels (loads norm.ptx, looks up the
     //    two mangled rms_norm_f32 entries).
