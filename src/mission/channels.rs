@@ -1452,6 +1452,181 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
     }
 }
 
+fn load_message_from_conn(
+    conn: &Connection,
+    message_key: &str,
+) -> Result<Option<ChannelMessageView>> {
+    conn.query_row(
+        r#"
+        SELECT
+            m.message_key,
+            m.channel,
+            m.account_key,
+            m.thread_key,
+            m.remote_id,
+            m.direction,
+            m.folder_hint,
+            m.sender_display,
+            m.sender_address,
+            m.subject,
+            m.preview,
+            m.body_text,
+            m.status,
+            m.seen,
+            m.external_created_at,
+            m.observed_at,
+            m.metadata_json,
+            COALESCE(r.route_status, 'pending'),
+            r.lease_owner,
+            r.leased_at,
+            r.acked_at,
+            COALESCE(r.updated_at, m.observed_at)
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.message_key = ?1
+        LIMIT 1
+        "#,
+        params![message_key],
+        map_channel_message_row,
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
+fn protected_recipient_policies(
+    settings: &BTreeMap<String, String>,
+    request: &ChannelSendRequest,
+) -> Vec<EmailSenderPolicy> {
+    request
+        .to
+        .iter()
+        .chain(request.cc.iter())
+        .map(|email| classify_email_sender(settings, email))
+        .filter(|policy| matches!(policy.role.as_str(), "owner" | "founder" | "admin"))
+        .collect::<Vec<_>>()
+}
+
+fn ensure_founder_outbound_body_clean(request: &ChannelSendRequest) -> Result<()> {
+    let lowered = request.body.to_ascii_lowercase();
+    let forbidden_markers = [
+        "/home/",
+        "queue:",
+        "runtime/ctox.sqlite3",
+        "strategic direction setup",
+        "review rework",
+        "review-rework",
+        "self-work",
+        "thread_key",
+        "conversation_id",
+        "lease_owner",
+        "route_status",
+        "sqlite",
+        "host-pfad",
+        "host-pfade",
+        "vps-pfad",
+    ];
+    let hits = forbidden_markers
+        .iter()
+        .filter(|marker| lowered.contains(**marker))
+        .copied()
+        .collect::<Vec<_>>();
+    if !hits.is_empty() {
+        anyhow::bail!(
+            "founder/owner outbound email failed communication review due to internal-language leakage: {}",
+            hits.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn send_email_message(
+    root: &Path,
+    conn: &Connection,
+    db_path: &Path,
+    request: &ChannelSendRequest,
+) -> Result<Value> {
+    let adapter = communication_adapters::email();
+    let sender_email = request
+        .sender_address
+        .clone()
+        .unwrap_or_else(|| email_address_from_account_key(&request.account_key));
+    let account_config = load_account_config(conn, &request.account_key)?;
+    let adapter_json = adapter.send_cli(
+        root,
+        &communication_adapters::EmailSendCommandRequest {
+            db_path,
+            sender_email: &sender_email,
+            provider: account_config
+                .as_ref()
+                .map(|config| config.provider.as_str()),
+            profile_json: account_config.as_ref().map(|config| &config.profile_json),
+            thread_key: &request.thread_key,
+            to: &request.to,
+            cc: &request.cc,
+            sender_display: request.sender_display.as_deref(),
+            subject: &request.subject,
+            body: &request.body,
+        },
+    )?;
+    Ok(json!({
+        "ok": true,
+        "channel": "email",
+        "db_path": db_path,
+        "status": adapter_json
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("accepted"),
+        "delivery_confirmed": adapter_json
+            .get("delivery")
+            .and_then(|value| value.get("confirmed"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "adapter_result": adapter_json,
+    }))
+}
+
+pub fn send_reviewed_founder_reply(
+    root: &Path,
+    inbound_message_key: &str,
+    body: &str,
+) -> Result<Value> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let inbound = load_message_from_conn(&conn, inbound_message_key)?
+        .with_context(|| format!("missing inbound communication message {inbound_message_key}"))?;
+    anyhow::ensure!(
+        inbound.channel == "email" && inbound.direction == "inbound",
+        "reviewed founder reply requires an inbound email message"
+    );
+    let request = resolve_outbound_subject(
+        &conn,
+        ChannelSendRequest {
+            channel: "email".to_string(),
+            account_key: inbound.account_key.clone(),
+            thread_key: inbound.thread_key.clone(),
+            body: body.trim().to_string(),
+            subject: format!("Re: {}", inbound.subject.trim()),
+            to: vec![inbound.sender_address.clone()],
+            cc: Vec::new(),
+            sender_display: None,
+            sender_address: None,
+            send_voice: false,
+            reviewed_founder_send: true,
+        },
+    )?;
+    let settings = communication_gateway::runtime_settings_from_root(
+        root,
+        communication_gateway::CommunicationAdapterKind::Email,
+    );
+    let protected = protected_recipient_policies(&settings, &request);
+    anyhow::ensure!(
+        !protected.is_empty(),
+        "reviewed founder reply requires founder/owner/admin recipient"
+    );
+    ensure_founder_outbound_body_clean(&request)?;
+    send_email_message(root, &conn, &db_path, &request)
+}
+
 fn test_channel(
     root: &Path,
     db_path: &Path,

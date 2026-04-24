@@ -2328,7 +2328,30 @@ fn start_prompt_worker(
                 );
                 match result {
                     Ok(reply) => {
-                        if !job.leased_message_keys.is_empty() {
+                        let founder_reply_key =
+                            founder_email_reply_message_key(&job).map(ToOwned::to_owned);
+                        let mut founder_send_error: Option<String> = None;
+                        let should_handle_messages = if let Some(message_key) = &founder_reply_key {
+                            match &review_disposition {
+                                CompletionReviewDisposition::None => {
+                                    match channels::send_reviewed_founder_reply(
+                                        &root,
+                                        message_key,
+                                        &reply,
+                                    ) {
+                                        Ok(_) => true,
+                                        Err(err) => {
+                                            founder_send_error = Some(err.to_string());
+                                            false
+                                        }
+                                    }
+                                }
+                                CompletionReviewDisposition::RequeueSelfWork { .. } => false,
+                            }
+                        } else {
+                            true
+                        };
+                        if !job.leased_message_keys.is_empty() && should_handle_messages {
                             let _ = channels::ack_leased_messages(
                                 &root,
                                 &job.leased_message_keys,
@@ -2342,6 +2365,12 @@ fn start_prompt_worker(
                                     let _ = plan::complete_step_by_message_key(&root, key, &reply);
                                 }
                             }
+                        } else if !job.leased_message_keys.is_empty() {
+                            let _ = channels::ack_leased_messages(
+                                &root,
+                                &job.leased_message_keys,
+                                "pending",
+                            );
                         }
                         if !job.leased_ticket_event_keys.is_empty() {
                             let _ = tickets::ack_leased_ticket_events(
@@ -2350,7 +2379,7 @@ fn start_prompt_worker(
                                 "handled",
                             );
                         }
-                        shared.last_error = None;
+                        shared.last_error = founder_send_error.clone();
                         shared.last_reply_chars = Some(reply.chars().count());
                         if let Some(work_id) = job.ticket_self_work_id.as_deref() {
                             match &review_disposition {
@@ -2369,27 +2398,38 @@ fn start_prompt_worker(
                                     );
                                 }
                                 CompletionReviewDisposition::None => {
-                                    let note = format!(
-                                        "Execution slice completed successfully. Reply summary: {}",
-                                        clip_text(&reply, 220)
-                                    );
-                                    close_ticket_self_work_item(&root, work_id, &note);
-                                    platform_pipeline_event =
-                                        maybe_continue_platform_expertise_pipeline_after_success(
-                                            &root, &job,
-                                        )
-                                        .ok()
-                                        .flatten();
+                                    if founder_send_error.is_none() {
+                                        let note = format!(
+                                            "Execution slice completed successfully. Reply summary: {}",
+                                            clip_text(&reply, 220)
+                                        );
+                                        close_ticket_self_work_item(&root, work_id, &note);
+                                        platform_pipeline_event =
+                                            maybe_continue_platform_expertise_pipeline_after_success(
+                                                &root, &job,
+                                            )
+                                            .ok()
+                                            .flatten();
+                                    }
                                 }
                             }
                         }
                         push_event_locked(
                             &mut shared,
-                            format!(
-                                "Completed {} reply with {} chars",
-                                job.source_label,
-                                reply.chars().count()
-                            ),
+                            if let Some(err) = founder_send_error {
+                                format!(
+                                    "Completed {} draft with {} chars but founder send stayed pending: {}",
+                                    job.source_label,
+                                    reply.chars().count(),
+                                    clip_text(&err, 180)
+                                )
+                            } else {
+                                format!(
+                                    "Completed {} reply with {} chars",
+                                    job.source_label,
+                                    reply.chars().count()
+                                )
+                            },
                         );
                     }
                     Err(err) => {
@@ -4066,6 +4106,16 @@ fn is_founder_or_owner_email_job(job: &QueuedPrompt) -> bool {
         job.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
     )
+}
+
+fn founder_email_reply_message_key(job: &QueuedPrompt) -> Option<&str> {
+    if !is_founder_or_owner_email_job(job) {
+        return None;
+    }
+    job.leased_message_keys
+        .iter()
+        .find(|key| key.starts_with("email:"))
+        .map(|key| key.as_str())
 }
 
 fn is_owner_visible_strategic_job(job: &QueuedPrompt) -> bool {
