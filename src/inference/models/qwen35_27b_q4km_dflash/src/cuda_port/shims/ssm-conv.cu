@@ -2,32 +2,40 @@
 // instantiations for the (apply_silu, split_d_inner=128, d_conv) combos we
 // need at runtime. Upstream's ssm-conv.cu already has `static` stripped
 // from `ssm_conv_f32` and `ssm_conv_long_token_f32` (see the CTOX-
-// MODIFICATION comment there), but the instantiating caller lives in
-// lucebox/dflash's `kernels/sm_86/ssm_conv.cu` which isn't in our vendor
-// tree. This file plays that role for the cuda_port path.
+// MODIFICATION comment there), but bare `template __global__ void ...`
+// declarations aren't enough to force PTX emission — nvcc only emits an
+// entry when a __global__ kernel is actually referenced from host-side
+// launch syntax or via a function-pointer take.
 //
-// The vendored file's compile command still happens through our build.rs
-// (we compile the shim, which `#include`s the vendored .cu — so the
-// upstream source stays byte-identical on disk).
+// The trick: host stubs that `<<<1,1,0,s>>>` each instantiation. The
+// stubs are `__host__`-only, never called at runtime, but their presence
+// forces nvcc to emit the corresponding device entries. We hide them
+// under a name that won't collide with anything upstream.
 
 #include "../../../vendor/ggml-cuda/ssm-conv.cu"
 
-// 8 short-token instantiations: ssm_conv_f32<apply_silu, 128, d_conv>
-template __global__ void ssm_conv_f32<false, 128, 3>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<false, 128, 4>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<false, 128, 5>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<false, 128, 9>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<true,  128, 3>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<true,  128, 4>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<true,  128, 5>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_f32<true,  128, 9>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-
-// 8 long-token instantiations: ssm_conv_long_token_f32<apply_silu, 128, d_conv, 32>
-template __global__ void ssm_conv_long_token_f32<false, 128, 3, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<false, 128, 4, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<false, 128, 5, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<false, 128, 9, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<true,  128, 3, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<true,  128, 4, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<true,  128, 5, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
-template __global__ void ssm_conv_long_token_f32<true,  128, 9, 32>(const float *, const float *, int, int, int, int, float *, int, int, int, const int64_t);
+// clang-format off
+__host__ void ctox_force_emit_ssm_conv(cudaStream_t s,
+                                       const float *x, const float *w, float *y,
+                                       int a, int b, int c, int d,
+                                       int e, int f, int g, int64_t n) {
+    // Short-token, apply_silu ∈ {0,1} × d_conv ∈ {3,4,5,9}
+    ssm_conv_f32<false, 128, 3><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<false, 128, 4><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<false, 128, 5><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<false, 128, 9><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<true,  128, 3><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<true,  128, 4><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<true,  128, 5><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_f32<true,  128, 9><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    // Long-token, apply_silu ∈ {0,1} × d_conv ∈ {3,4,5,9} × split_n_t=32
+    ssm_conv_long_token_f32<false, 128, 3, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<false, 128, 4, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<false, 128, 5, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<false, 128, 9, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<true,  128, 3, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<true,  128, 4, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<true,  128, 5, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+    ssm_conv_long_token_f32<true,  128, 9, 32><<<1,1,0,s>>>(x, w, a, b, c, d, y, e, f, g, n);
+}
+// clang-format on
