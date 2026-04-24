@@ -22,11 +22,10 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use tokio::sync::Mutex;
 
 use ctox_qwen35_27b_q4km_dflash as dflash;
 use dflash::ffi as sys;
