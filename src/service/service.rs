@@ -5193,6 +5193,12 @@ fn queue_ticket_self_work_item(
     Ok(Some(queue_task))
 }
 
+fn find_runnable_thread_task(root: &Path, thread_key: &str) -> Result<Option<channels::QueueTaskView>> {
+    let tasks =
+        channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 64)?;
+    Ok(tasks.into_iter().find(|task| task.thread_key == thread_key))
+}
+
 fn requeue_review_rejected_self_work(
     root: &Path,
     work_id: &str,
@@ -5267,7 +5273,11 @@ fn create_self_work_backed_queue_task(
             Some("durable complex follow-up for CTOX"),
         );
     }
-    queue_ticket_self_work_item(root, &item)?.context("failed to queue durable self-work follow-up")
+    if let Some(view) = queue_ticket_self_work_item(root, &item)? {
+        return Ok(view);
+    }
+    find_runnable_thread_task(root, &ticket_self_work_thread_key(&item))?
+        .context("failed to queue durable self-work follow-up")
 }
 
 fn close_ticket_self_work_item(root: &Path, work_id: &str, note: &str) {
