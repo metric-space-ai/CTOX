@@ -1669,17 +1669,16 @@ fn validate_founder_outbound_email(
     if protected_recipients.is_empty() {
         return Ok(());
     }
-    if !request.reviewed_founder_send {
-        let recipient_summary = protected_recipients
-            .iter()
-            .map(|policy| format!("{} ({})", policy.normalized_email, policy.role))
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow::bail!(
-            "direct outbound email to founder/owner/admin recipients is blocked without review: {}. Use a reviewed founder-send path.",
-            recipient_summary
-        );
-    }
+    let recipient_summary = protected_recipients
+        .iter()
+        .map(|policy| format!("{} ({})", policy.normalized_email, policy.role))
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::ensure!(
+        request.reviewed_founder_send,
+        "direct outbound email to founder/owner/admin recipients is blocked without review: {}. Use a reviewed founder-send path.",
+        recipient_summary
+    );
     let lowered = request.body.to_ascii_lowercase();
     let forbidden_markers = [
         "/home/",
@@ -1709,7 +1708,10 @@ fn validate_founder_outbound_email(
             hits.join(", ")
         );
     }
-    Ok(())
+    anyhow::bail!(
+        "generic channel send is disabled for founder/owner/admin outbound email: {}. Use the dedicated reviewed founder communication path instead.",
+        recipient_summary
+    );
 }
 
 fn resolve_outbound_subject(
@@ -4165,6 +4167,40 @@ mod tests {
             error
                 .to_string()
                 .contains("internal-language leakage"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn founder_outbound_email_still_blocks_generic_send_after_review_override() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_FOUNDER_EMAIL_ADDRESSES".to_string(),
+            "founder@example.com".to_string(),
+        );
+
+        let error = validate_founder_outbound_email(
+            &settings,
+            &ChannelSendRequest {
+                channel: "email".to_string(),
+                account_key: "email:cto1@metric-space.ai".to_string(),
+                thread_key: "mail-thread".to_string(),
+                body: "Kurzes sauberes Update ohne internen Systemmuell.".to_string(),
+                subject: "Re: Test".to_string(),
+                to: vec!["founder@example.com".to_string()],
+                cc: Vec::new(),
+                sender_display: None,
+                sender_address: None,
+                send_voice: false,
+                reviewed_founder_send: true,
+            },
+        )
+        .expect_err("generic founder send should still be blocked");
+
+        assert!(
+            error
+                .to_string()
+                .contains("generic channel send is disabled"),
             "unexpected error: {error}"
         );
     }
