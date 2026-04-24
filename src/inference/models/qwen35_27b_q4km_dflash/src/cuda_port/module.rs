@@ -328,35 +328,27 @@ fn init_ported_kernels() -> Result<PortedKernels, String> {
         .map_err(|e| format!("soft_max<f16-mask>: {e}"))?,
     };
 
-    // ssm-conv.cu — 16 instantiations: 2 paths (short/long) × 2 silu × 4 d_conv.
+    // ssm-conv.cu — 16 non-tree instantiations via `shims/ssm-conv.cu`:
+    //   • `ssm_conv_f32<apply_silu, 128, d_conv>`           — short-token path
+    //   • `ssm_conv_long_token_f32<apply_silu, 128, d_conv, 32>` — long-token path
     //
-    // KNOWN ISSUE: upstream ssm-conv.cu declares `ssm_conv_f32` and
-    // `ssm_conv_long_token_f32` as non-static templates but never
-    // instantiates them in the vendored .cu. nvcc with `--ptx` does NOT
-    // emit entries for kernels reached only via function-pointer take —
-    // so the shim trick we use for other ops doesn't land here. Only the
-    // `ssm_conv_tree_f32` variants (which upstream DOES reference via
-    // static dispatch in the cu source) make it to PTX.
-    //
-    // Best-effort resolution: if the non-tree entries aren't present,
-    // leave those handles null and let the caller fall through to the
-    // tree-kernel path (parent_ids != nullptr) or the ggml-cuda
-    // dispatcher until we figure out the shim story.
+    // apply_silu ∈ {false, true} × d_conv ∈ {3, 4, 5, 9} = 8 per path.
+    // All forced into PTX via the shim's function-pointer tables
+    // (`ctox_ssm_conv_{short,long}_tbl`). Strict lookup — any miss is a
+    // build-infra regression.
     let ssm_conv_module =
         load_module(SSM_CONV_PTX).map_err(|e| format!("ssm-conv.ptx: {e}"))?;
     let mut sc = SsmConvKernels::default();
     for (silu_idx, apply_silu) in [(0, false), (1, true)] {
         for (nc_idx, nc) in [(0, 3i64), (1, 4), (2, 5), (3, 9)] {
-            if let Ok(name) = mangled_ssm_conv_short(apply_silu, nc) {
-                if let Ok(f) = get_function(ssm_conv_module, name) {
-                    sc.short_kernels[silu_idx][nc_idx] = f;
-                }
-            }
-            if let Ok(name) = mangled_ssm_conv_long(apply_silu, nc) {
-                if let Ok(f) = get_function(ssm_conv_module, name) {
-                    sc.long_kernels[silu_idx][nc_idx] = f;
-                }
-            }
+            let short_name = mangled_ssm_conv_short(apply_silu, nc)
+                .map_err(|e| format!("ssm_conv_short[{apply_silu},{nc}] lookup: {e}"))?;
+            sc.short_kernels[silu_idx][nc_idx] = get_function(ssm_conv_module, short_name)
+                .map_err(|e| format!("ssm_conv_short[{apply_silu},{nc}]: {e}"))?;
+            let long_name = mangled_ssm_conv_long(apply_silu, nc)
+                .map_err(|e| format!("ssm_conv_long[{apply_silu},{nc}] lookup: {e}"))?;
+            sc.long_kernels[silu_idx][nc_idx] = get_function(ssm_conv_module, long_name)
+                .map_err(|e| format!("ssm_conv_long[{apply_silu},{nc}]: {e}"))?;
         }
     }
 

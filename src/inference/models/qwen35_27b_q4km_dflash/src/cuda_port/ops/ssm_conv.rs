@@ -75,9 +75,10 @@ pub fn mangled_ssm_conv_short(apply_silu: bool, nc: i64) -> Result<&'static [u8]
     let silu: &[u8] = if apply_silu { b"Lb1E" } else { b"Lb0E" };
     crate::cuda_port::ptx::find_entry(
         crate::cuda_port::ptx::ssm_conv_entries::ENTRIES,
-        // `11ssm_conv_f32` — the short-path kernel has length 11.
-        // `ssm_conv_long_token_f32` (length 23) is excluded by this.
-        &[b"11ssm_conv_f32", b"IL", silu, nc_needle(nc)],
+        // `12ssm_conv_f32` — Itanium length prefix for "ssm_conv_f32"
+        // (12 chars). Excludes `ssm_conv_long_token_f32` (length 23)
+        // and `ssm_conv_tree_f32` (length 17).
+        &[b"12ssm_conv_f32", b"IL", silu, nc_needle(nc)],
     )
 }
 
@@ -86,8 +87,9 @@ pub fn mangled_ssm_conv_long(apply_silu: bool, nc: i64) -> Result<&'static [u8],
     let silu: &[u8] = if apply_silu { b"Lb1E" } else { b"Lb0E" };
     crate::cuda_port::ptx::find_entry(
         crate::cuda_port::ptx::ssm_conv_entries::ENTRIES,
+        // "ssm_conv_long_token_f32" = 23 chars.
         &[
-            b"22ssm_conv_long_token_f32",
+            b"23ssm_conv_long_token_f32",
             silu,
             nc_needle(nc),
             b"Ll32E",
