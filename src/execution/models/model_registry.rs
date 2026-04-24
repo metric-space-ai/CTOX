@@ -41,6 +41,7 @@ pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
     "Qwen/Qwen3.5-2B",
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.5-9B",
+    "Qwen/Qwen3.5-27B",
     "Qwen/Qwen3.6-35B-A3B",
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
@@ -770,6 +771,43 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
             pa_memory_fraction: Some("0.80"),
             pa_context_len: None,
             max_seq_len: 262_144,
+            max_batch_size: 1,
+            max_seqs: 1,
+            isq: Some("Q4K"),
+            tensor_parallel_backend: None,
+            disable_nccl: true,
+            target_world_size: None,
+            preferred_gpu_count: Some(1),
+        },
+        family: engine::LocalModelFamily::Qwen35Vision,
+    },
+    // Qwen3.5-27B Q4_K_M + DFlash draft — served via the in-tree
+    // per-model socket server `qwen35-27b-q4km-dflash-server`
+    // (see src/execution/models/local_model.rs and
+    // src/inference/models/qwen35_27b_q4km_dflash/). The runtime
+    // manifest below is cosmetic for the Candle-era `launcher_mode`
+    // path; the supervisor routes the spawn to the per-model server
+    // binary before those fields are consumed.
+    LocalModelCatalogEntry {
+        canonical_model: "Qwen/Qwen3.5-27B",
+        aliases: &["Qwen3.5-27B", "qwen35-27b-q4km-dflash"],
+        chat_family: Some(engine::ChatModelFamily::Qwen35),
+        runtime_manifest_slug: Some("qwen3_5_27b"),
+        auxiliary_manifest_slug: None,
+        runtime: StaticRuntimeConfig {
+            port: 1235,
+            max_seq_len: Some(131_072),
+            max_seqs: 1,
+            max_batch_size: 1,
+        },
+        profile: StaticFamilyProfile {
+            launcher_mode: "chat",
+            arch: None,
+            paged_attn: "auto",
+            pa_cache_type: None,
+            pa_memory_fraction: Some("0.85"),
+            pa_context_len: None,
+            max_seq_len: 131_072,
             max_batch_size: 1,
             max_seqs: 1,
             isq: Some("Q4K"),
@@ -1648,6 +1686,17 @@ const MODEL_OPS_METADATA_REGISTRY: &[ModelOpsMetadataEntry] = &[
         startup_wait_secs: 240,
         default_tokens_per_second: Some(95.0),
         estimated_chat_base_memory_mb: Some(7_000),
+        gpu_short_label: None,
+    },
+    ModelOpsMetadataEntry {
+        // Qwen3.5-27B Q4_K_M + DFlash. Warm decode ~78 tok/s chain /
+        // ~88 tok/s ddtree on A6000, measured 2026-04-24.
+        canonical_model: "Qwen/Qwen3.5-27B",
+        process_aliases: &["Qwen/Qwen3.5-27B", "Qwen3.5-27B", "qwen35-27b-q4km-dflash"],
+        startup_wait_secs: 240,
+        default_tokens_per_second: Some(77.0),
+        // Q4_K_M weights ~16 GB + draft ~3.5 GB + KV cache + activations.
+        estimated_chat_base_memory_mb: Some(22_000),
         gpu_short_label: None,
     },
     ModelOpsMetadataEntry {
