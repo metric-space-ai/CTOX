@@ -388,6 +388,8 @@ const PLATFORM_EXPERTISE_PASSES: [ExpertisePassSpec; 3] = [
 #[derive(Debug, Clone)]
 enum CompletionReviewDisposition {
     None,
+    Approved,
+    Hold { summary: String },
     RequeueSelfWork { work_id: String, summary: String },
 }
 
@@ -2333,7 +2335,7 @@ fn start_prompt_worker(
                         let mut founder_send_error: Option<String> = None;
                         let should_handle_messages = if let Some(message_key) = &founder_reply_key {
                             match &review_disposition {
-                                CompletionReviewDisposition::None => {
+                                CompletionReviewDisposition::Approved => {
                                     match channels::send_reviewed_founder_reply(
                                         &root,
                                         message_key,
@@ -2346,7 +2348,9 @@ fn start_prompt_worker(
                                         }
                                     }
                                 }
-                                CompletionReviewDisposition::RequeueSelfWork { .. } => false,
+                                CompletionReviewDisposition::None
+                                | CompletionReviewDisposition::Hold { .. }
+                                | CompletionReviewDisposition::RequeueSelfWork { .. } => false,
                             }
                         } else {
                             true
@@ -2397,7 +2401,8 @@ fn start_prompt_worker(
                                         ),
                                     );
                                 }
-                                CompletionReviewDisposition::None => {
+                                CompletionReviewDisposition::Approved
+                                | CompletionReviewDisposition::None => {
                                     if founder_send_error.is_none() {
                                         let note = format!(
                                             "Execution slice completed successfully. Reply summary: {}",
@@ -2411,6 +2416,15 @@ fn start_prompt_worker(
                                             .ok()
                                             .flatten();
                                     }
+                                }
+                                CompletionReviewDisposition::Hold { summary } => {
+                                    push_event_locked(
+                                        &mut shared,
+                                        format!(
+                                            "Review held the slice open without send/closure: {}",
+                                            clip_text(summary, 180)
+                                        ),
+                                    );
                                 }
                             }
                         }
@@ -2628,6 +2642,9 @@ fn run_completion_review(
         .join("skills/system/review/external-review/SKILL.md")
         .to_string_lossy()
         .to_string();
+    let founder_reply_key = founder_email_reply_message_key(job);
+    let founder_reply_action = founder_reply_key
+        .and_then(|message_key| channels::prepare_reviewed_founder_reply(root, message_key).ok());
     let review_request = review::CompletionReviewRequest {
         preview: job.preview.clone(),
         source_label: job.source_label.clone(),
@@ -2638,6 +2655,17 @@ fn run_completion_review(
         runtime_db_path: db_path.to_string_lossy().to_string(),
         review_skill_path,
         artifact_text: reply_text.to_string(),
+        artifact_action: founder_reply_action
+            .as_ref()
+            .map(|_| "reply".to_string()),
+        artifact_to: founder_reply_action
+            .as_ref()
+            .map(|action| action.to.clone())
+            .unwrap_or_default(),
+        artifact_cc: founder_reply_action
+            .as_ref()
+            .map(|action| action.cc.clone())
+            .unwrap_or_default(),
     };
     let outcome = review::review_completion_if_needed(root, &review_request, reply_text);
     if !outcome.required {
@@ -2683,6 +2711,37 @@ fn run_completion_review(
     // on a flaky reviewer.
     let actionable_rejection = outcome.requires_follow_up()
         && !matches!(outcome.verdict, review::ReviewVerdict::Unavailable);
+    let founder_mail_source = matches!(
+        job.source_label.to_ascii_lowercase().as_str(),
+        "email:owner" | "email:founder" | "email:admin"
+    );
+    if founder_mail_source {
+        return match outcome.verdict {
+            review::ReviewVerdict::Pass => CompletionReviewDisposition::Approved,
+            review::ReviewVerdict::Fail if actionable_rejection => {
+                if let Some(work_id) = resolve_review_rejection_target_self_work_id(root, job) {
+                    push_event(
+                        state,
+                        format!(
+                            "Founder review fail for {} will resume durable self-work {} instead of sending",
+                            job.source_label, work_id
+                        ),
+                    );
+                    CompletionReviewDisposition::RequeueSelfWork {
+                        work_id,
+                        summary: outcome.summary.clone(),
+                    }
+                } else {
+                    CompletionReviewDisposition::Hold {
+                        summary: outcome.summary.clone(),
+                    }
+                }
+            }
+            _ => CompletionReviewDisposition::Hold {
+                summary: outcome.summary.clone(),
+            },
+        };
+    }
     let active_plan_has_work = if actionable_rejection {
         plan::has_active_goal_with_pending_step(root).unwrap_or(false)
     } else {
@@ -2725,7 +2784,7 @@ fn run_completion_review(
             }
         }
     }
-    CompletionReviewDisposition::None
+    CompletionReviewDisposition::Approved
 }
 
 /// Background-driven slices (watchdog, timeout continuation, queue-pressure

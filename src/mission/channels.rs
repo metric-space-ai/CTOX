@@ -1236,6 +1236,14 @@ struct ChannelSendRequest {
     reviewed_founder_send: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FounderReplyAction {
+    pub thread_key: String,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+}
+
 fn sync_channel(root: &Path, db_path: &Path, channel: &str, args: &[String]) -> Result<Value> {
     let conn = open_channel_db(db_path)?;
     match communication_adapters::external_adapter_for_channel(channel) {
@@ -1684,11 +1692,10 @@ fn send_email_message(
     }))
 }
 
-pub fn send_reviewed_founder_reply(
+pub(crate) fn prepare_reviewed_founder_reply(
     root: &Path,
     inbound_message_key: &str,
-    body: &str,
-) -> Result<Value> {
+) -> Result<FounderReplyAction> {
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
     let inbound = load_message_from_conn(&conn, inbound_message_key)?
@@ -1706,10 +1713,44 @@ pub fn send_reviewed_founder_reply(
             channel: "email".to_string(),
             account_key: inbound.account_key.clone(),
             thread_key: inbound.thread_key.clone(),
-            body: body.trim().to_string(),
+            body: String::new(),
             subject: format!("Re: {}", inbound.subject.trim()),
             to,
             cc,
+            sender_display: None,
+            sender_address: None,
+            send_voice: false,
+            reviewed_founder_send: true,
+        },
+    )?;
+    Ok(FounderReplyAction {
+        thread_key: request.thread_key,
+        subject: request.subject,
+        to: request.to,
+        cc: request.cc,
+    })
+}
+
+pub fn send_reviewed_founder_reply(
+    root: &Path,
+    inbound_message_key: &str,
+    body: &str,
+) -> Result<Value> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let inbound = load_message_from_conn(&conn, inbound_message_key)?
+        .with_context(|| format!("missing inbound communication message {inbound_message_key}"))?;
+    let action = prepare_reviewed_founder_reply(root, inbound_message_key)?;
+    let request = resolve_outbound_subject(
+        &conn,
+        ChannelSendRequest {
+            channel: "email".to_string(),
+            account_key: inbound.account_key.clone(),
+            thread_key: action.thread_key,
+            body: body.trim().to_string(),
+            subject: action.subject,
+            to: action.to,
+            cc: action.cc,
             sender_display: None,
             sender_address: None,
             send_voice: false,

@@ -80,6 +80,9 @@ pub struct CompletionReviewRequest {
     pub runtime_db_path: String,
     pub review_skill_path: String,
     pub artifact_text: String,
+    pub artifact_action: Option<String>,
+    pub artifact_to: Vec<String>,
+    pub artifact_cc: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -418,6 +421,22 @@ fn build_review_prompt(request: &CompletionReviewRequest, reasons: &[String]) ->
     } else {
         request.artifact_text.trim()
     };
+    let artifact_action = request
+        .artifact_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("(none recorded)");
+    let artifact_to = if request.artifact_to.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.artifact_to.join(", ")
+    };
+    let artifact_cc = if request.artifact_cc.is_empty() {
+        "(none recorded)".to_string()
+    } else {
+        request.artifact_cc.join(", ")
+    };
     let founder_specific_work = if matches!(
         request.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
@@ -425,8 +444,10 @@ fn build_review_prompt(request: &CompletionReviewRequest, reasons: &[String]) ->
         "\
 Founder/owner communication gate:\n\
 - judge the outbound draft itself as the artifact under review\n\
+- judge the full mail action, not just the prose: recipients, cc list, and reply/forward behavior are part of the artifact\n\
 - decide whether the draft should be sent now, blocked, or reworked first\n\
 - fail the review when the draft does not answer the latest founder mail, dodges the requested deliverable, promises future work instead of delivering, or leaks internal/system language\n\
+- fail the review when the recipients or cc list are wrong, when sender-only reply is incorrect, or when a forwarded/delegated founder mail should target different recipients\n\
 - do not fail only because the broader mission is still open; fail only when the draft makes a false claim, omits a required answer, or the missing deliverable means the mail should not be sent yet\n\
 "
     } else {
@@ -439,7 +460,7 @@ Founder/owner communication gate:\n\
 Source label: {source}\n\
 Artifact kind: {artifact_kind}\n\
 Owner visible: {owner_visible}\n\
-Conversation id: {}\n\
+Conversation id: {conversation_id}\n\
 Thread key: {thread_key}\n\
 Workspace root: {workspace_root}\n\
 Runtime DB: {runtime_db_path}\n\
@@ -447,6 +468,9 @@ Review skill: {review_skill_path}\n\
 Trigger reasons: {reason_block}\n\
 \n\
 Artifact under review:\n\
+Artifact action: {artifact_action}\n\
+Artifact to: {artifact_to}\n\
+Artifact cc: {artifact_cc}\n\
 --- BEGIN ARTIFACT ---\n\
 {artifact_text}\n\
 --- END ARTIFACT ---\n\
@@ -470,7 +494,7 @@ Use the runtime DB path and workspace root above as the primary grounding points
 {founder_specific_work}\
 \n\
 Helpful runtime entrypoint:\n\
-- use `ctox strategy show --conversation-id {}` and `ctox verification runs --conversation-id {}` as starting lookups, then continue with direct SQLite/runtime/browser inspection\n\
+- use `ctox strategy show --conversation-id {strategy_conversation_id}` and `ctox verification runs --conversation-id {verification_conversation_id}` as starting lookups, then continue with direct SQLite/runtime/browser inspection\n\
 \n\
 If active vision or active mission is missing for strategic or owner-visible work, that is a review failure unless the slice itself is explicitly establishing them.\n\
 \n\
@@ -488,9 +512,12 @@ EVIDENCE:\n\
 - <command or check> => <observed result>\n\
 HANDOFF:\n\
 - <only when another review run should continue; otherwise write \"none\">\n",
-        request.conversation_id,
-        request.conversation_id,
-        request.conversation_id
+        conversation_id = request.conversation_id,
+        artifact_action = artifact_action,
+        artifact_to = artifact_to,
+        artifact_cc = artifact_cc,
+        strategy_conversation_id = request.conversation_id,
+        verification_conversation_id = request.conversation_id
     )
 }
 
@@ -768,6 +795,7 @@ mod tests {
             runtime_db_path: "/srv/runtime/ctox.sqlite3".to_string(),
             review_skill_path: "/srv/skills/system/review/external-review/SKILL.md".to_string(),
             artifact_text: "Patched rollout artifact".to_string(),
+            ..CompletionReviewRequest::default()
         };
         let rendered = build_review_prompt(&request, &["closure_claim".to_string()]);
         assert!(rendered.contains("== REVIEW ASSIGNMENT =="));
@@ -790,10 +818,19 @@ mod tests {
             runtime_db_path: "/srv/runtime/ctox.sqlite3".to_string(),
             review_skill_path: "/srv/skills/system/review/external-review/SKILL.md".to_string(),
             artifact_text: "Kurzstand: Ich liefere spaeter.".to_string(),
+            artifact_action: Some("reply".to_string()),
+            artifact_to: vec!["o.schaefers@gmx.net".to_string()],
+            artifact_cc: vec!["michael.welsch@metric-space.ai".to_string()],
         };
         let rendered = build_review_prompt(&request, &["founder_communication".to_string()]);
         assert!(rendered.contains("Artifact kind: founder_or_owner_outbound_email_draft"));
         assert!(rendered.contains("judge the outbound draft itself as the artifact under review"));
+        assert!(rendered.contains("Artifact action: reply"));
+        assert!(rendered.contains("Artifact to: o.schaefers@gmx.net"));
+        assert!(rendered.contains(
+            "Artifact cc: michael.welsch@metric-space.ai"
+        ));
+        assert!(rendered.contains("judge the full mail action, not just the prose"));
         assert!(rendered.contains("does not answer the latest founder mail"));
         assert!(rendered.contains("Kurzstand: Ich liefere spaeter."));
     }
