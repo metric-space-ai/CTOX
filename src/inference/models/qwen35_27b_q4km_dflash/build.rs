@@ -370,6 +370,9 @@ fn compile_kernel_to_ptx(stem: &str) -> bool {
 
     let include_cuda = manifest.join("vendor/ggml-cuda");
     let include_ggml = manifest.join("vendor/ggml-include");
+    // Some .cu files (`cumsum.cu`) use `#include "ggml-cuda/common.cuh"`
+    // — needs `vendor/` on the include path so the sub-path resolves.
+    let include_vendor = manifest.join("vendor");
     let nvcc = env::var("NVCC").unwrap_or_else(|_| "nvcc".into());
     let sm = env::var("CTOX_CUDA_SM").unwrap_or_else(|_| "86".into());
     let gencode = format!("--generate-code=arch=compute_{sm},code=[compute_{sm},sm_{sm}]");
@@ -390,6 +393,8 @@ fn compile_kernel_to_ptx(stem: &str) -> bool {
         .arg(&include_cuda)
         .arg("-I")
         .arg(&include_ggml)
+        .arg("-I")
+        .arg(&include_vendor)
         .arg("--ptx")
         .arg("-o")
         .arg(&ptx)
