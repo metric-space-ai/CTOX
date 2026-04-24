@@ -89,15 +89,33 @@ pub fn rms_norm_f32_cuda(
     };
 
     // Kernel args — pointers to each argument (cuLaunchKernel's ABI).
-    // Order must match `rms_norm_f32`'s signature:
-    //   (const float * x, float * dst, const int ncols,
-    //    const int64_t stride_row, const int64_t stride_channel,
-    //    const int64_t stride_sample, const float eps)
     //
-    // ref: norm.cu:303 (kernel call expression)
+    // `rms_norm_f32<N, do_multiply=false, do_add=false>` has 23
+    // template parameters total (see vendor/ggml-cuda/norm.cu:74-98).
+    // The C++ caller omits the trailing ones because they default,
+    // but cuLaunchKernel sees the full PTX parameter list and we
+    // must push every slot. For do_multiply/do_add = false the
+    // kernel skips the corresponding code paths (via `if constexpr`),
+    // so the zero values we pass are never dereferenced / used.
+    //
+    // Layout (ref: norm.cu:74-98):
+    //   PKf        const float *  x
+    //   Pf         float *        dst
+    //   i          int            ncols
+    //   l l l      int64_t × 3    stride_{row,channel,sample}
+    //   f          float          eps
+    //   PKf        const float *  mul               (default nullptr)
+    //   l l l      int64_t × 3    mul_stride_{row,channel,sample}
+    //   uint3 ×4                  mul_{ncols,nrows,nchannels,nsamples}_packed
+    //   PKf        const float *  add               (default nullptr)
+    //   l l l      int64_t × 3    add_stride_{row,channel,sample}
+    //   uint3 ×4                  add_{ncols,nrows,nchannels,nsamples}_packed
     let x_val = x.0;
     let dst_val = dst.0;
-    let args: [*const c_void; 7] = [
+    let null_ptr: u64 = 0;
+    let zero_i64: i64 = 0;
+    let zero_u3: [u32; 3] = [0, 0, 0];
+    let args: [*const c_void; 23] = [
         &x_val as *const u64 as *const c_void,
         &dst_val as *const u64 as *const c_void,
         &ncols as *const c_int as *const c_void,
@@ -105,6 +123,24 @@ pub fn rms_norm_f32_cuda(
         &stride_channel as *const i64 as *const c_void,
         &stride_sample as *const i64 as *const c_void,
         &eps as *const f32 as *const c_void,
+        // mul defaults
+        &null_ptr as *const u64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        // add defaults
+        &null_ptr as *const u64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_i64 as *const i64 as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
+        &zero_u3 as *const [u32; 3] as *const c_void,
     ];
 
     unsafe {
