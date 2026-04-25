@@ -676,6 +676,14 @@
             without arguments to open the TUI; use explicit commands when
             scripting, debugging, or letting the daemon inspect its own state.
           </p>
+          <p class="note">
+            In normal operation, you do not drive CTOX by typing most of these
+            commands yourself. They are the daemon's tool surface: CTOX calls
+            them to inspect queues, tickets, context, verification, process
+            state, and transition health. Humans usually use the TUI, Desktop,
+            or <code>ctox chat</code>; direct CLI calls are for operations,
+            debugging, automation, and controlled recovery.
+          </p>
           <div class="table-wrap">
             <table>
               <thead>
