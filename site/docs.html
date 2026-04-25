@@ -459,7 +459,7 @@
 
       .context-pickers {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(6, minmax(0, 1fr));
         gap: 1px;
         background: var(--line);
       }
@@ -965,13 +965,15 @@
           </div>
           <div class="context-example" id="context-example">
             <div class="context-example-head">
-              <h3>Example: real VPS runtime context</h3>
+              <h3>Example: assembled multi-turn worker prompt</h3>
               <p>
-                Hover or click a context source to see the prompt fragment CTOX
-                can build for a worker run. This example was read from the
-                CTOX SQLite runtime on the Ubuntu VPS and shortened for the
-                public docs. Secrets and irrelevant private material are not
-                printed.
+                A CTOX worker run is not started from a single chat message.
+                CTOX assembles a bounded prompt by concatenating the static
+                mission contract with selected runtime blocks from SQLite:
+                current work, Focus, Anchors, Narrative, workflow state, recent
+                multi-turn conversation, and process evidence. The example
+                below is based on the VPS runtime database, translated to
+                English, shortened, and redacted for documentation.
               </p>
               <div class="data-strip">
                 <div>
@@ -984,60 +986,114 @@
                 </div>
                 <div>
                   <b>Context rows</b>
-                  <span><code>644</code> materialized items, plus continuity docs</span>
+                  <span><code>644</code> materialized multi-turn items, plus continuity docs</span>
                 </div>
                 <div>
                   <b>Runtime log</b>
                   <span><code>context-log.jsonl</code> showed 39,533 / 258,400 tokens</span>
                 </div>
               </div>
+              <pre><code>worker_prompt =
+  system_contract
+  + latest_task
+  + focus
+  + anchors
+  + narrative
+  + workflow_state
+  + recent_multi_turn_conversation
+  + process_evidence
+  + worker_instruction</code></pre>
             </div>
             <div class="context-pickers" aria-label="Context prompt examples">
-              <button class="is-active" type="button" data-context-example="watchdog">Watchdog task</button>
-              <button type="button" data-context-example="focus">Focus doc</button>
-              <button type="button" data-context-example="anchors">Anchors doc</button>
-              <button type="button" data-context-example="narrative">Narrative doc</button>
-              <button type="button" data-context-example="turnlog">Turn log</button>
+              <button class="is-active" type="button" data-context-example="assembled">Assembled prompt</button>
+              <button type="button" data-context-example="task">Latest task</button>
+              <button type="button" data-context-example="focus">Focus</button>
+              <button type="button" data-context-example="anchors">Anchors</button>
+              <button type="button" data-context-example="narrative">Narrative</button>
+              <button type="button" data-context-example="tail">Conversation tail</button>
             </div>
             <div class="prompt-viewer">
               <div class="prompt-meta">
-                <b id="context-example-title">Watchdog task</b>
+                <b id="context-example-title">Assembled prompt</b>
                 <p id="context-example-note">
-                  A real mission-continuity watchdog prompt stored as a user
-                  message in the VPS runtime.
+                  This is the important part: the worker sees a single prompt
+                  made from multiple persisted blocks, not just the latest chat
+                  turn.
                 </p>
               </div>
               <div class="prompt-output">
-                <pre><code id="context-example-output">message_id: 1970
-role: user
-token_count: 304
-source_table: messages + context_items
+                <pre><code id="context-example-output">SYSTEM CONTRACT
+You are CTOX, a persistent technical daemon. Work on the current mission
+across turns. Prefer verified evidence over memory. If work remains open,
+persist the next step in CTOX runtime state; prose alone does not count.
 
-Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
-Titel: Continue mission [...]
-Art: mission-follow-up
-Work-ID: self-work:local:d18d0cf29045
+RUNTIME CONTEXT SOURCE
+database: ctox.sqlite3
+conversation_id: 2429960041906776199
+source rows: context_items + messages + continuity_documents + continuity_commits
+note: English translation of real German runtime records; shortened and redacted.
 
+LATEST TASK
 Mission continuity watchdog: the mission was idle for 47s.
-
-Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+Mission: Process the published CTOX self-work for local.
 State: active
 Mode: continuous
 Intensity: hot
-Blocker: Closure gate not met; Kunstmen runtime down on 127.0.0.1:4173;
-validation incomplete; intermittent database lock.
+Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
+validation is incomplete; intermittent database lock.
 Next step: Recheck live Kunstmen runtime/health and queue state, then complete
 mission validation for self-work:local:d18d0cf29045.
-Task is complete only when: Kunstmen runtime reachable and required checks pass,
-queue item cleared, and validation evidence complete.
+Task is complete only when: runtime is reachable, required checks pass, queue
+item is cleared, and validation evidence is complete.
+
+FOCUS
+Mission state: active
+Continuation mode: continuous
+Trigger intensity: hot
+Next slice: Process the next concrete part of the CTOX self-work mission.
+Done gate: Complete and verify the concrete slice before closing the thread.
 Closure confidence: low
 
-Required actions:
-- re-check repo, runtime, queue, progress artifacts, and continuity
-- decide whether the mission is complete, safely handed off, or still open
-- if still open, do the next concrete step
-- if more than one turn remains, leave exactly one open CTOX plan or queue item
-- a sentence in the reply does not count as open work</code></pre>
+ANCHORS
+- Initial task prompt created this mission-follow-up run.
+- Mission remained open after repeated runtime/queue/continuity checks.
+- Required gate: POST /api/checkout must return 200 with a non-empty checkout.url.
+- Do not close from a verbal claim; close only from verified evidence.
+
+NARRATIVE
+- 2026-04-22: mission-follow-up started after the continuity watchdog detected
+  an idle mission.
+- 2026-04-23: repeated rechecks kept the mission open because validation and
+  runtime health were not complete.
+- 2026-04-25: a renewed follow-up run reported progress, but later evidence
+  again showed the local runtime down and the closure gate unmet.
+
+WORKFLOW STATE
+- active queue item: one leased mission-follow-up item for queue/mission-1
+- open plan items for this mission thread: none in the sampled state
+- blocking condition: local runtime and validation evidence are not sufficient
+- required persistence rule: if still open, create exactly one durable follow-up
+
+RECENT MULTI-TURN CONVERSATION
+user#1968: Continue the mission. Runtime was last seen down; recheck runtime,
+queue/plan counts, continuity health, artifact persistence, and claims.
+assistant#1969: Status remains open. Runtime 127.0.0.1:4173 is down; queue has
+one leased item; continuity health is critical; closure gate is not met.
+user#1970: Watchdog fired again after 47s idle. Recheck live runtime/health and
+queue state; complete mission validation.
+assistant#1971: Status remains open. No listener on 127.0.0.1:4173; checked
+endpoints returned 000; one queue item is leased; validation is incomplete.
+assistant#1972: Status: blocked. Blocker: database is locked.
+
+PROCESS EVIDENCE
+context_window: 258400
+token sample: 39533 total tokens, fill_pct 0.078
+observed command: ctox continuity-update --kind focus --mode full
+
+WORKER INSTRUCTION
+Use the blocks above as the current working state. Do the next concrete check,
+record evidence, update continuity if the state changed, and leave exactly one
+durable follow-up item if the mission cannot be closed.</code></pre>
               </div>
             </div>
           </div>
@@ -1276,31 +1332,103 @@ ctox follow-up evaluate --goal "finish rollout" --result "blocked on access" --b
     </footer>
     <script>
       const contextExamples = {
-        watchdog: {
-          title: "Watchdog task",
-          note: "A real mission-continuity watchdog prompt stored as a user message in the VPS runtime.",
+        assembled: {
+          title: "Assembled prompt",
+          note: "The worker sees one prompt made from persisted runtime blocks, not just the latest chat turn.",
+          prompt: `SYSTEM CONTRACT
+You are CTOX, a persistent technical daemon. Work on the current mission
+across turns. Prefer verified evidence over memory. If work remains open,
+persist the next step in CTOX runtime state; prose alone does not count.
+
+RUNTIME CONTEXT SOURCE
+database: ctox.sqlite3
+conversation_id: 2429960041906776199
+source rows: context_items + messages + continuity_documents + continuity_commits
+note: English translation of real German runtime records; shortened and redacted.
+
+LATEST TASK
+Mission continuity watchdog: the mission was idle for 47s.
+Mission: Process the published CTOX self-work for local.
+State: active
+Mode: continuous
+Intensity: hot
+Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
+validation is incomplete; intermittent database lock.
+Next step: Recheck live Kunstmen runtime/health and queue state, then complete
+mission validation for self-work:local:d18d0cf29045.
+Task is complete only when: runtime is reachable, required checks pass, queue
+item is cleared, and validation evidence is complete.
+
+FOCUS
+Mission state: active
+Continuation mode: continuous
+Trigger intensity: hot
+Next slice: Process the next concrete part of the CTOX self-work mission.
+Done gate: Complete and verify the concrete slice before closing the thread.
+Closure confidence: low
+
+ANCHORS
+- Initial task prompt created this mission-follow-up run.
+- Mission remained open after repeated runtime/queue/continuity checks.
+- Required gate: POST /api/checkout must return 200 with a non-empty checkout.url.
+- Do not close from a verbal claim; close only from verified evidence.
+
+NARRATIVE
+- 2026-04-22: mission-follow-up started after the continuity watchdog detected
+  an idle mission.
+- 2026-04-23: repeated rechecks kept the mission open because validation and
+  runtime health were not complete.
+- 2026-04-25: a renewed follow-up run reported progress, but later evidence
+  again showed the local runtime down and the closure gate unmet.
+
+WORKFLOW STATE
+- active queue item: one leased mission-follow-up item for queue/mission-1
+- open plan items for this mission thread: none in the sampled state
+- blocking condition: local runtime and validation evidence are not sufficient
+- required persistence rule: if still open, create exactly one durable follow-up
+
+RECENT MULTI-TURN CONVERSATION
+user#1968: Continue the mission. Runtime was last seen down; recheck runtime,
+queue/plan counts, continuity health, artifact persistence, and claims.
+assistant#1969: Status remains open. Runtime 127.0.0.1:4173 is down; queue has
+one leased item; continuity health is critical; closure gate is not met.
+user#1970: Watchdog fired again after 47s idle. Recheck live runtime/health and
+queue state; complete mission validation.
+assistant#1971: Status remains open. No listener on 127.0.0.1:4173; checked
+endpoints returned 000; one queue item is leased; validation is incomplete.
+assistant#1972: Status: blocked. Blocker: database is locked.
+
+PROCESS EVIDENCE
+context_window: 258400
+token sample: 39533 total tokens, fill_pct 0.078
+observed command: ctox continuity-update --kind focus --mode full
+
+WORKER INSTRUCTION
+Use the blocks above as the current working state. Do the next concrete check,
+record evidence, update continuity if the state changed, and leave exactly one
+durable follow-up item if the mission cannot be closed.`
+        },
+        task: {
+          title: "Latest task",
+          note: "This block comes from a real mission-continuity watchdog message in the VPS runtime.",
           prompt: `message_id: 1970
 role: user
 token_count: 304
 source_table: messages + context_items
-
-Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
-Titel: Continue mission [...]
-Art: mission-follow-up
-Work-ID: self-work:local:d18d0cf29045
+language: English translation of German source content
 
 Mission continuity watchdog: the mission was idle for 47s.
 
-Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+Mission: Process the published CTOX self-work for local.
 State: active
 Mode: continuous
 Intensity: hot
-Blocker: Closure gate not met; Kunstmen runtime down on 127.0.0.1:4173;
-validation incomplete; intermittent database lock.
+Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
+validation is incomplete; intermittent database lock.
 Next step: Recheck live Kunstmen runtime/health and queue state, then complete
 mission validation for self-work:local:d18d0cf29045.
-Task is complete only when: Kunstmen runtime reachable and required checks pass,
-queue item cleared, and validation evidence complete.
+Task is complete only when: runtime is reachable, required checks pass, queue
+item is cleared, and validation evidence is complete.
 Closure confidence: low
 
 Required actions:
@@ -1311,16 +1439,17 @@ Required actions:
 - a sentence in the reply does not count as open work`
         },
         focus: {
-          title: "Focus doc",
+          title: "Focus",
           note: "The Focus continuity document is the compact state contract for the next worker run.",
           prompt: `document_id: contdoc_2429960041906776199_focus
 head_commit_id: contc_84e7336c15d72bf5
 source_table: continuity_documents + continuity_commits
+language: English translation of German source content
 
 # ACTIVE FOCUS
 
 ## Status
-- Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- Mission: Process the published CTOX self-work for local.
 - Mission state: active
 - Continuation mode: continuous
 - Trigger intensity: hot
@@ -1329,7 +1458,7 @@ source_table: continuity_documents + continuity_commits
 - Current blocker: none | superseded by canonical mission conversation 1
 
 ## Next
-- Next slice: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- Next slice: Process the next concrete part of the CTOX self-work mission.
 
 ## Done / Gate
 - Done gate: Complete the next concrete slice and verify the result before
@@ -1337,27 +1466,28 @@ source_table: continuity_documents + continuity_commits
 - Closure confidence: low
 
 ## Contract
-- mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- mission: Process the published CTOX self-work for local.
 - mission_state: active
 - continuation_mode: continuous
 - trigger_intensity: hot
-- slice: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- slice: Process the next concrete part of the mission.
 - slice_state: active`
         },
         anchors: {
-          title: "Anchors doc",
+          title: "Anchors",
           note: "Anchors are durable facts, boundaries, and verification gates. Private material is omitted here.",
           prompt: `document_id: contdoc_2429960041906776199_anchors
 head_commit_id: contc_755de8d6374574dd
 source_table: continuity_documents + continuity_commits
+language: English translation of German source content
 
 # CONTINUITY ANCHORS
 
 ## Entries
 - anchor_id: bootstrap-goal
 - anchor_type: task_prompt
-- statement: Initial task prompt requires: Bearbeite das veroeffentlichte
-  CTOX-Self-Work fuer local. Titel: Continue mission 1 [...]
+- statement: Initial task prompt requires processing the published CTOX self-work
+  for local. Title: Continue mission 1 [...]
 - source_class: user_prompt
 - source_ref: user#1
 - observed_at: 2026-04-22T10:02:27.859526840+00:00
@@ -1380,11 +1510,12 @@ source_table: continuity_documents + continuity_commits
   checkout.url.`
         },
         narrative: {
-          title: "Narrative doc",
+          title: "Narrative",
           note: "Narrative is causal history. It explains why the current state exists but does not override fresher evidence.",
           prompt: `document_id: contdoc_2429960041906776199_narrative
 head_commit_id: contc_d444ec968292fab4
 source_table: continuity_documents + continuity_commits
+language: English translation of German source content
 
 # CONTINUITY NARRATIVE
 
@@ -1397,8 +1528,8 @@ source_table: continuity_documents + continuity_commits
 ## Entries
 - entry_id: bootstrap-open
 - event_type: intake
-- summary: Received the initial task prompt: Bearbeite das veroeffentlichte
-  CTOX-Self-Work fuer local. Titel: Continue mission 1 [...]
+- summary: Received the initial task prompt to process the published CTOX
+  self-work for local. Title: Continue mission 1 [...]
 - consequence: Keep this conversation attached to the active mission until the
   requested slice is verified.
 
@@ -1414,35 +1545,38 @@ source_table: continuity_documents + continuity_commits
 - consequence: Current follow-up slice is closed after verification unless new
   external input arrives.`
         },
-        turnlog: {
-          title: "Turn log",
-          note: "Runtime token pressure and tool-call evidence from context-log.jsonl.",
-          prompt: `source_file: context-log.jsonl
-session_kind: mission
+        tail: {
+          title: "Conversation tail",
+          note: "The worker prompt can also include recent raw turns. This is the actual multi-turn part that is not captured by Focus/Anchors/Narrative alone.",
+          prompt: `source_table: messages + context_items
+conversation_id: 2429960041906776199
+language: English translation of German source content
+
+user#1968:
+Continue the mission. Runtime was last seen down; recheck runtime, queue/plan
+counts, continuity health, artifact persistence, and claims.
+
+assistant#1969:
+Status remains open. Runtime 127.0.0.1:4173 is down; queue has one leased item;
+continuity health is critical; closure gate is not met.
+
+user#1970:
+Watchdog fired again after 47s idle. Recheck live runtime/health and queue
+state; complete mission validation.
+
+assistant#1971:
+Status remains open. No listener on 127.0.0.1:4173; checked endpoints returned
+000; one queue item is leased; validation is incomplete.
+
+assistant#1972:
+Status: blocked.
+Blocker: database is locked.
+
+context-log.jsonl:
 context_window: 258400
-
-event: token_count
-total_tokens: 19239
-call_input: 18442
-call_output: 797
-fill_pct: 0.071
-
-event: tool_call_begin
-command:
-  printf '%s' "# ACTIVE FOCUS [...]" | ctox continuity-update --kind focus --mode full
-
-event: tool_call_end
-exit_code: 0
-status: Completed
-
-event: token_count
 total_tokens: 39533
-call_input: 20247
-call_output: 47
 fill_pct: 0.078
-
-event: turn_complete
-has_last_message: true`
+observed command: ctox continuity-update --kind focus --mode full`
         }
       };
 
