@@ -1,205 +1,183 @@
 # CTOX
 
-CTOX brings autonomy to servers.
+CTOX is an agentic daemon for long-running technical work.
 
-CTOX is an AI agent system for autonomous work on hosts and services. It is built for long-running build, operations, and infrastructure missions.
+It is built for people who already use coding agents and notice where a single
+agent session stops being enough: real work spreads across tickets, servers,
+communication, approvals, waiting states, failed checks, follow-ups, and context
+that must still be correct tomorrow.
 
-Install CTOX on a server and it acts as a persistent technical control layer around that host: planning work, continuing interrupted tasks, managing communication, supervising context, and driving execution until the mission is actually closed.
+CTOX does not try to be "another better coding agent". It owns the layer around
+agent execution: durable work state, context assembly, queue and ticket
+management, verification, process evidence, communication, and continuation.
 
+## Links
 
-## What CTOX Is
+- Project page: <https://metric-space-ai.github.io/ctox/>
+- Technical documentation: <https://metric-space-ai.github.io/ctox/docs.html>
+- CLI reference: <https://metric-space-ai.github.io/ctox/cli.html>
+- Releases and binaries: <https://github.com/metric-space-ai/ctox/releases>
 
-CTOX combines four layers:
+## Quick Introduction
 
-- a CTOX orchestration layer optimized for autonomous server and DevOps work
-- Codex as the current execution engine
-- a CTOX model gateway that keeps the internal model contract on OpenAI Responses
-- a standalone local inference engine for on-host AI models
+Coding agents are good at bounded sessions. CTOX is for the work around those
+sessions.
 
+A CTOX instance runs on a workstation, server, or remote host. You give it work
+through the TUI, `ctox chat`, mail, tickets, schedules, or other configured
+channels. The daemon records that work in durable state, builds the next worker
+context from the runtime database, lets an agent perform a bounded run, records
+the result, and decides whether the work is done, blocked, waiting, scheduled,
+or needs another continuation.
 
-## The CTOX Orchestration Layer
+The important unit is not a chat transcript. The important unit is the runtime
+state:
 
-CTOX adds system behavior that standalone execution CLIs do not provide:
+- current work, queue items, plans, schedules, and follow-ups
+- tickets, cases, approvals, writebacks, and audit history
+- Focus, Anchors, Narrative, knowledge, claims, and recent communication
+- verification records and process-mining events
+- a core state model with transition checks and process evidence
 
-- persistent service and control-plane behavior
-- external communication routing across TUI, email, Jami, cron, and queue-backed work
-- durable queue, plan, schedule, and follow-up execution
-- long-run mission state with explicit blocker, next slice, and done gate
-- long-context memory with continuity tracking, memory retrieval, long-run context optimization and self heal mechanisms
-- mission watchdogs, timeout continuations, queue-pressure guards, and other background repair mechanisms
-- completion review, verification runs, persistent claims, and mission assurance
-- native integration for LLM, embeddings, STT, TTS
-- a `WebSearch`, `WebRead`, `WebScrape`, and browser-automation stack
-- built-in DevOps skills and tools
-- built-in email and chat-app integration
+That is the practical difference: CTOX uses agents, but CTOX itself is the
+daemon that keeps technical work organized over time.
 
-
-## Execution Engine
-
-CTOX currently uses Codex as its execution engine.
-
-That means CTOX drives the bounded execution slice through the embedded `ctox-core` runtime, but wraps that slice in:
-
-- persistent mission context
-- durable routing and scheduling
-- review and assurance
-- model and backend control
-- host-side operational policy
-
-This is the intended split between orchestration and execution:
-
-- CTOX owns persistence, orchestration, governance, communication, verification, and runtime control
-- Codex owns execution semantics inside the bounded agent run
-
-## Model Gateway
-
-The CTOX model gateway serves local and adapter-mediated model workloads for LLM, embeddings, STT, and TTS. CTOX uses `responses` as its internal model contract; adapters translate to provider-native formats only at the outer edge. This is an internal gateway contract, not a public localhost inference proxy.
-
-It provides:
-
-- one internal Responses-shaped gateway surface
-- adapter rewriting from `responses` into backend-specific upstream forms for GPT-OSS, Qwen, Nemotron, GLM, MiniMax, and the local engine bridges
-- routing for generation, embeddings, transcription, speech, and other auxiliary runtime roles
-- runtime telemetry and switch metadata for the CTOX control plane
-- backend readiness checks, startup, and recovery behavior
-
-The gateway gives CTOX and `ctox-core` one stable model contract while runtime control handles model-family differences and host-side behavior.
-
-For execution, `ctox-core` runs in two explicit provider modes:
-
-- `ctox_core_local` for managed local inference over private IPC
-- `ctox_core_api` for remote/API providers whose edge adapters still normalize back to Responses
-
-Both modes remain Responses-facing inside CTOX. `ctox_core_local` must execute over private IPC rather than machine-internal HTTP.
-
-## Web Capability Model
-
-CTOX uses four distinct web paths:
-
-- `WebSearch` for current discovery and recent-information lookup
-- `WebRead` for reading concrete sources well
-- `interactive-browser` for real browser interaction when the page behavior itself matters
-- `WebScrape` for durable, repeatable extraction
-
-## Integrated Source Trees
-
-CTOX carries integrated hard-fork and per-model source trees inside the project:
-
-- `src/harness/` — integrated in-process **agent harness**, hard-forked from the OpenAI Codex runtime (`ctox-core`). CTOX drives its turn loop through this tree in-process via `InProcessAppServerClient`, not as an external subprocess.
-- `src/inference/models/<model>/` — per-model, **self-contained** inference crates. Each curated model (first one: `qwen35_27b_q4km_dflash` — Qwen3.5-27B Q4_K_M target + z-lab DFlash draft) vendors its own Rust inference code plus its own kernels in-tree; no code is shared across model crates. CTOX calls these crates directly.
-
-The previously-carried Candle-based `tools/model-runtime/` subtree has been retired in favor of the per-model direct-call architecture. Run `ctox source-status` to validate the source layout and provenance markers. CTOX's context system, orchestration, governance, routing, verification, and runtime mediation live in the main repository code.
-
-
-## Installation
-
-### One-liner (remote server)
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh | bash
 ```
 
-### From a checked-out repository
+The installer creates a managed layout by default:
 
-```sh
-./install.sh
-```
+- install root: `~/.local/lib/ctox`
+- state root: `~/.local/state/ctox`
+- cache root: `~/.cache/ctox`
+- binary symlink directory: `~/.local/bin`
 
-### Installer options
-
-The installer accepts the following flags:
-
-| Flag | Default | Description |
-| --- | --- | --- |
-| `--backend=<cuda\|metal\|cpu>` | auto-detected | Compute backend (skip interactive selection) |
-| `--model=<model>` | `google/gemma-4-E4B-it` | Default model for local inference |
-| `--features=<features>` | auto | Override engine features (comma or space separated) |
-| `--branch=<branch>` | `main` | Git branch to install from |
-| `--repo=<url>` | `metric-space-ai/ctox` | Git repository URL |
-| `--install-root=<path>` | `~/.local/lib/ctox` | Installation directory |
-| `--state-root=<path>` | `~/.local/state/ctox` | State directory |
-| `--cache-root=<path>` | `~/.cache/ctox` | Cache directory |
-| `--bin-dir=<path>` | `~/.local/bin` | Binary symlink directory |
-| `--rebuild` | | Rebuild in-place (used by `ctox update`) |
-
-All flags can also be set as environment variables:
-
-| Variable | Equivalent flag |
-| --- | --- |
-| `CTOX_BACKEND` | `--backend` |
-| `CTOX_MODEL` | `--model` |
-| `CTOX_INSTALL_ROOT` | `--install-root` |
-| `CTOX_STATE_ROOT` | `--state-root` |
-| `CTOX_CACHE_ROOT` | `--cache-root` |
-| `CTOX_BIN_DIR` | `--bin-dir` |
-| `CTOX_REPO` | `--repo` |
-| `CTOX_BRANCH` | `--branch` |
-
-### Example: install with CUDA backend and a specific model
+Installer flags:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
-  | bash -s -- --backend=cuda --model=openai/gpt-oss-20b
+  | bash -s -- --backend=metal --model=google/gemma-4-E4B-it
 ```
 
+Common options:
 
-## Quick Start
-
-```sh
-ctox version          # verify installation
-ctox start            # start the persistent loop
-ctox status           # check service status
-ctox                  # open the TUI
-ctox stop             # stop the persistent loop
-```
-
-## macOS Build Note
-
-This repository now ships a macOS-specific Cargo `rustc-wrapper` in
-`.cargo/config.toml` that clears `com.apple.quarantine` from the active Cargo
-registry/git caches and the current `target/` tree before invoking `rustc`.
-
-That is necessary because macOS may otherwise reject generated proc-macro and
-build dylibs with `library load disallowed by system policy` during local Rust
-builds.
-
-If an older build tree is already poisoned, you can still force a manual reset:
-
-```sh
-xattr -dr com.apple.quarantine target ~/.cargo/registry ~/.cargo/git
-```
-
-## Updates
-
-Upgrade existing installations through the managed release layout:
-
-```sh
-ctox update channel set-github --repo metric-space-ai/ctox
-ctox update apply --latest
-ctox update status
-```
-
-Or adopt an existing checkout into the managed layout:
-
-```sh
-ctox update adopt --install-root ~/.local/lib/ctox --state-root ~/.local/state/ctox
-ctox update apply --source /path/to/new/ctox-checkout
-```
-
-
-## Supported Local 128k Models
-
-<!-- BEGIN GENERATED 128K README SUMMARY -->
-
-These are the current minimum `128k` entry points for local CTOX models. Multi GPU minima are only shown when the model also has a working power-of-two NCCL performance path. Above these minima, CTOX uses all available VRAM on the target host to optimize the selected preset.
-
-| Model | Single GPU Minimum | Multi GPU Minimum |
+| Flag | Environment variable | Purpose |
 | --- | --- | --- |
-| Qwen/Qwen3.5-4B | 1x21.3 GB | 2x16.6 GB |
-| openai/gpt-oss-20b | 1x37.1 GB | 2x20.5 GB |
+| `--backend=<cuda\|metal\|cpu>` | `CTOX_BACKEND` | Select local inference backend. |
+| `--model=<model>` | `CTOX_MODEL` | Seed the default local model profile. |
+| `--install-root=<path>` | `CTOX_INSTALL_ROOT` | Override install root. |
+| `--state-root=<path>` | `CTOX_STATE_ROOT` | Override runtime state root. |
+| `--cache-root=<path>` | `CTOX_CACHE_ROOT` | Override cache root. |
+| `--bin-dir=<path>` | `CTOX_BIN_DIR` | Override binary symlink directory. |
+| `--repo=<url>` | `CTOX_REPO` | Install from a custom repository. |
+| `--branch=<branch>` | `CTOX_BRANCH` | Install from a custom branch. |
 
-<!-- END GENERATED 128K README SUMMARY -->
+## First Run
 
+```sh
+ctox doctor
+ctox
+ctox start
+ctox status
+ctox chat "Take ownership of OPS-204. Wait for approval, deploy when allowed, verify the gates, and update the ticket."
+```
+
+What these commands do:
+
+- `ctox doctor` checks the installation and runtime environment.
+- `ctox` opens the TUI for configuration and operation.
+- `ctox start` starts the persistent daemon.
+- `ctox status` shows the current service state.
+- `ctox chat <instruction>` submits work to the daemon.
+
+Most users should start in the TUI, configure the model backend and credentials
+there, then submit work through the TUI or `ctox chat`.
+
+## How CTOX Runs Work
+
+The daemon loop is roughly:
+
+```text
+intake
+  -> durable queue item, ticket case, schedule, or plan step
+  -> leased worker run
+  -> context build from runtime state
+  -> bounded agent execution
+  -> verification, writeback, knowledge, and process events
+  -> complete, blocked, waiting, scheduled, requeued, or continued
+```
+
+CTOX workers can call CTOX commands themselves. This is intentional: internal
+tools such as `ctox ticket`, `ctox queue`, `ctox verification`, and
+`ctox process-mining` make the daemon inspect and update its own runtime state
+through an auditable command surface instead of relying only on prompt memory.
+
+The command surface is documented in the
+[CLI reference](https://metric-space-ai.github.io/ctox/cli.html). Many commands
+are daemon tools first and human commands second; normal operation should happen
+through the TUI, `ctox chat`, configured channels, tickets, and schedules.
+
+## Model Backends
+
+CTOX can run with API-backed models or with the integrated local inference path,
+depending on the configured runtime.
+
+Typical configuration is done in the TUI. Important settings include:
+
+- `CTOX_CHAT_SOURCE=api|local`
+- `CTOX_API_PROVIDER=openai|anthropic|openrouter|minimax`
+- provider API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
+- `CTOX_LOCAL_RUNTIME`
+- `CTOX_CHAT_MODEL`
+- `CTOX_CHAT_MODEL_MAX_CONTEXT`
+- `CTOX_AUTONOMY_LEVEL`
+
+See the technical documentation for the current model/runtime details:
+<https://metric-space-ai.github.io/ctox/docs.html#configuration>
+
+## Desktop App
+
+The CTOX Desktop app is an optional management surface. It is useful when you
+want to install CTOX locally, connect to remote CTOX instances, or manage
+multiple instances from one place.
+
+The core runtime is still the daemon. The Desktop app manages instances; the
+daemon owns the work.
+
+## Update
+
+```sh
+ctox update status
+ctox update check
+ctox upgrade --stable
+ctox update apply --version <tag>
+ctox update rollback
+```
+
+## Repository Layout
+
+- `src/` - CTOX daemon, runtime, mission systems, TUI, model control, and tools.
+- `src/harness/` - integrated in-process agent harness.
+- `src/inference/` - local inference work.
+- `skills/` - system skills used by CTOX workers.
+- `tools/` - supporting tool packages.
+- `site/` - GitHub Pages project site and documentation.
+- `.github/workflows/` - CI, release, and Pages workflows.
+
+## Development
+
+```sh
+cargo fmt --check
+cargo check
+cargo test
+```
+
+The repository contains platform-specific code paths for macOS, Linux, Windows,
+and optional local inference backends. Use the release workflow for production
+binaries.
 
 ## License
 
