@@ -13,6 +13,7 @@ use serde_json::Value;
 use sha2::Digest;
 use sha2::Sha256;
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -30,6 +31,10 @@ use crate::inference::supervisor;
 use crate::mission::ticket_adapters;
 use crate::mission::ticket_protocol;
 use crate::mission::ticket_translation;
+use crate::service::core_state_machine::{
+    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
+};
+use crate::service::core_transition_guard::enforce_core_transition;
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_LIST_LIMIT: usize = 20;
@@ -5756,6 +5761,7 @@ fn writeback_transition(
             ticket.source_system
         );
     }
+    enforce_ticket_case_close_transition(&conn, &case, "writeback_engine")?;
     let result = adapter.writeback_transition(
         root,
         ticket_protocol::TicketTransitionWritebackRequest {
@@ -5833,6 +5839,7 @@ fn writeback_transition(
 fn close_case(root: &Path, case_id: &str, summary: Option<&str>) -> Result<TicketCaseView> {
     let mut conn = open_ticket_db(root)?;
     let case = load_case(root, case_id)?.context("ticket case not found")?;
+    enforce_ticket_case_close_transition(&conn, &case, "control_plane")?;
     let now = now_iso_string();
     conn.execute(
         "UPDATE ticket_cases SET state = 'closed', updated_at = ?2, closed_at = ?2 WHERE case_id = ?1",
@@ -5852,6 +5859,92 @@ fn close_case(root: &Path, case_id: &str, summary: Option<&str>) -> Result<Ticke
         },
     )?;
     load_case(root, case_id)?.context("failed to load case after close")
+}
+
+fn enforce_ticket_case_close_transition(
+    conn: &Connection,
+    case: &TicketCaseView,
+    actor: &str,
+) -> Result<()> {
+    let verification_id = latest_passed_ticket_verification_id(conn, &case.case_id)?;
+    let from_state = ticket_case_core_state(&case.state)?;
+    let mut metadata = BTreeMap::new();
+    metadata.insert("ticket_key".to_string(), case.ticket_key.clone());
+    metadata.insert("label".to_string(), case.label.clone());
+    metadata.insert("support_mode".to_string(), case.support_mode.clone());
+    metadata.insert("owner_visible_completion".to_string(), "true".to_string());
+
+    enforce_core_transition(
+        conn,
+        &CoreTransitionRequest {
+            entity_type: CoreEntityType::Ticket,
+            entity_id: case.case_id.clone(),
+            lane: RuntimeLane::P2MissionDelivery,
+            from_state,
+            to_state: CoreState::Closed,
+            event: CoreEvent::Close,
+            actor: actor.to_string(),
+            evidence: CoreEvidenceRefs {
+                verification_id,
+                review_audit_key: latest_ticket_review_audit_key(conn, &case.case_id)?,
+                ..CoreEvidenceRefs::default()
+            },
+            metadata,
+        },
+    )?;
+    Ok(())
+}
+
+fn latest_passed_ticket_verification_id(
+    conn: &Connection,
+    case_id: &str,
+) -> Result<Option<String>> {
+    conn.query_row(
+        r#"
+        SELECT verification_id
+        FROM ticket_verifications
+        WHERE case_id = ?1 AND status = 'passed'
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+        params![case_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
+fn latest_ticket_review_audit_key(conn: &Connection, case_id: &str) -> Result<Option<String>> {
+    conn.query_row(
+        r#"
+        SELECT audit_id
+        FROM ticket_audit_log
+        WHERE case_id = ?1
+          AND action_type IN ('source_skill_review_note', 'approval_decision', 'verification_record')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+        params![case_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
+fn ticket_case_core_state(raw: &str) -> Result<CoreState> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "created" | "open" | "queued" => Ok(CoreState::Created),
+        "classified" => Ok(CoreState::Classified),
+        "planned" | "ready" => Ok(CoreState::Planned),
+        "executing" | "in_progress" | "running" => Ok(CoreState::Executing),
+        "awaiting_review" | "review" | "reviewing" => Ok(CoreState::AwaitingReview),
+        "rework_required" | "rework" => Ok(CoreState::ReworkRequired),
+        "awaiting_verification" | "verification" => Ok(CoreState::AwaitingVerification),
+        "verified" | "writeback_pending" => Ok(CoreState::Verified),
+        "closed" | "done" | "completed" => Ok(CoreState::Closed),
+        "blocked" => Ok(CoreState::Blocked),
+        other => anyhow::bail!("ticket case state is not mapped to core state machine: {other}"),
+    }
 }
 
 fn create_learning_candidate(
@@ -8775,6 +8868,95 @@ mod tests {
         assert!(err
             .to_string()
             .contains("is not ready for writeback; current state is executing"));
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn ticket_close_is_blocked_without_verified_guard_proof() -> Result<()> {
+        let root = temp_root("ticket-close-guard");
+        std::fs::create_dir_all(&root)?;
+
+        let remote = ticket_local_native::create_local_ticket(
+            &root,
+            "Registration password rejected",
+            "Hello, during registration my password is not accepted.",
+            Some("open"),
+            Some("normal"),
+        )?;
+        sync_ticket_system(&root, "local")?;
+        let ticket_key = format!("local:{}", remote.ticket_id);
+
+        set_ticket_label(
+            &root,
+            &ticket_key,
+            "support/registration",
+            "test",
+            Some("Bind this ticket to the registration reply flow."),
+            json!({}),
+        )?;
+        put_control_bundle(
+            &root,
+            ControlBundleInput {
+                label: "support/registration".to_string(),
+                runbook_id: "eventus.runbook.registration.v1".to_string(),
+                runbook_version: "v1".to_string(),
+                policy_id: "eventus.reply.policy".to_string(),
+                policy_version: "v1".to_string(),
+                approval_mode: "direct_execute_allowed".to_string(),
+                autonomy_level: "A1".to_string(),
+                verification_profile_id: "reply-verification".to_string(),
+                writeback_profile_id: "writeback-comment".to_string(),
+                support_mode: "support_case".to_string(),
+                default_risk_level: "low".to_string(),
+                execution_actions: default_execution_actions(),
+                notes: Some("Public reply flow for registration FAQ-style tickets.".to_string()),
+            },
+        )?;
+
+        let dry_run = create_dry_run(
+            &root,
+            &ticket_key,
+            Some("Prepare a registration reply"),
+            None,
+        )?;
+        decide_case_approval(
+            &root,
+            &dry_run.case_id,
+            "approved",
+            "owner",
+            Some("Approved bounded reply work."),
+        )?;
+        record_execution_action(&root, &dry_run.case_id, "Prepared reply draft")?;
+
+        let err = close_case(&root, &dry_run.case_id, Some("premature close"))
+            .expect_err("close without verification must be rejected by the core guard");
+        assert!(err.to_string().contains("closure_requires_verification"));
+
+        let case = record_verification(
+            &root,
+            &dry_run.case_id,
+            "passed",
+            Some("Reply was verified against source-skill evidence."),
+        )?;
+        assert_eq!(case.state, "writeback_pending");
+        let case = close_case(&root, &dry_run.case_id, Some("verified close"))?;
+        assert_eq!(case.state, "closed");
+
+        let conn = open_ticket_db(&root)?;
+        let accepted_proofs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ctox_core_transition_proofs WHERE entity_id = ?1 AND accepted = 1",
+            params![dry_run.case_id],
+            |row| row.get(0),
+        )?;
+        let rejected_proofs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ctox_core_transition_proofs WHERE entity_id = ?1 AND accepted = 0",
+            params![dry_run.case_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(accepted_proofs, 1);
+        assert_eq!(rejected_proofs, 1);
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())

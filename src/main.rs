@@ -15,6 +15,7 @@ mod secrets;
 mod service;
 mod skill_store;
 mod ui;
+mod vendor;
 mod web_stack;
 
 pub use capabilities::browser;

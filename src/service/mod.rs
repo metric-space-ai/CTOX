@@ -1,10 +1,14 @@
 // Origin: CTOX
 // License: Apache-2.0
 
+pub mod core_state_machine;
+pub mod core_transition_guard;
 pub mod db_migration;
 pub mod governance;
 pub mod mission_governor;
+pub mod process_mining;
 pub mod state_invariants;
+pub mod turn_ledger;
 
 #[path = "service.rs"]
 mod service_loop;
