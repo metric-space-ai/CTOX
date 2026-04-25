@@ -624,8 +624,8 @@
             <p class="lead">
               You have servers, services, releases, incidents, migrations, and
               maintenance tasks. CTOX keeps that work organized, uses tickets
-              and knowledge to build context, then dispatches agents to execute
-              the next slice.
+              and knowledge to build context, then starts the next useful
+              action.
             </p>
           </div>
         </div>
@@ -639,7 +639,7 @@
             <p>
               CTOX is for ongoing work on real systems. It owns the operating
               loop around tickets, plans, schedules, knowledge, communication,
-              review, and follow-up. Coding agents are one execution layer
+              review, and follow-up. Coding agents are one worker layer
               inside that loop.
             </p>
           </div>
@@ -651,11 +651,11 @@
             </div>
             <div>
               <b>Knowledge builder</b>
-              <span>CTOX preserves findings, decisions, blockers, evidence, and context so the next run does not start cold.</span>
+              <span>CTOX preserves findings, decisions, open issues, evidence, and context so the next run does not start cold.</span>
             </div>
             <div>
               <b>Agent execution</b>
-              <span>When work is runnable, CTOX sends a focused slice through the coding-agent stack and local tools.</span>
+              <span>When work is ready, CTOX starts the next action with coding agents and local tools.</span>
             </div>
             <div>
               <b>Follow-up</b>
@@ -674,15 +674,15 @@
             <div class="platform-list">
               <div class="platform-row">
                 <b>1. Track</b>
-                <p>CTOX watches the work backlog: tickets, plans, queues, schedules, channel input, and mission state.</p>
+                <p>CTOX watches the work backlog: tickets, plans, queues, schedules, channel input, and current task state.</p>
               </div>
               <div class="platform-row">
                 <b>2. Build context</b>
-                <p>It pulls together prior decisions, known blockers, relevant knowledge, current state, and expected next action.</p>
+                <p>It pulls together prior decisions, open issues, relevant knowledge, current state, and expected next action.</p>
               </div>
               <div class="platform-row">
                 <b>3. Execute</b>
-                <p>It dispatches the next runnable slice to agents and tools: code changes, checks, scripts, browser work, or documentation.</p>
+                <p>It starts the next action with agents and tools: code changes, checks, scripts, browser work, or documentation.</p>
               </div>
               <div class="platform-row">
                 <b>4. Close or continue</b>
@@ -701,7 +701,7 @@
 work: release / incident / migration
 tickets: synced
 knowledge: updated
-next: runnable slice</pre>
+next: publish notes</pre>
               </div>
             </div>
           </div>
@@ -720,7 +720,7 @@ next: runnable slice</pre>
             </div>
             <div class="compare-row">
               <b>OpenClaw, Hermes-style agent runners</b>
-              <p>CTOX focuses on the daemon layer: keep the goal, ticket, knowledge, current state, next slice, result, and handoff.</p>
+              <p>CTOX focuses on the daemon role: keep the goal, ticket, knowledge, current state, next action, result, and handoff.</p>
             </div>
             <div class="compare-row">
               <b>CTOX</b>
