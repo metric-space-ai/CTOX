@@ -972,25 +972,26 @@
                 mission contract with selected runtime blocks from SQLite:
                 current work, Focus, Anchors, Narrative, workflow state, recent
                 multi-turn conversation, and process evidence. The example
-                below is based on the VPS runtime database, translated to
-                English, shortened, and redacted for documentation.
+                below is synthetic. It is modeled after CTOX runtime structure,
+                but it is not copied from a real project, host, ticket, or
+                database.
               </p>
               <div class="data-strip">
                 <div>
-                  <b>Database</b>
-                  <span><code>ctox.sqlite3</code> on the VPS, opened read-only</span>
+                  <b>Example type</b>
+                  <span>Synthetic ops mission</span>
                 </div>
                 <div>
-                  <b>Conversation</b>
-                  <span><code>2429960041906776199</code>, largest context item set</span>
+                  <b>Mission</b>
+                  <span>Payment callback rollout</span>
                 </div>
                 <div>
-                  <b>Context rows</b>
-                  <span><code>644</code> materialized multi-turn items, plus continuity docs</span>
+                  <b>Runtime blocks</b>
+                  <span>Ticket, queue, continuity, checks, recent turns</span>
                 </div>
                 <div>
-                  <b>Runtime log</b>
-                  <span><code>context-log.jsonl</code> showed 39,533 / 258,400 tokens</span>
+                  <b>Outcome</b>
+                  <span>Rollout verified and closed with evidence</span>
                 </div>
               </div>
               <pre><code>worker_prompt =
@@ -1027,73 +1028,80 @@ You are CTOX, a persistent technical daemon. Work on the current mission
 across turns. Prefer verified evidence over memory. If work remains open,
 persist the next step in CTOX runtime state; prose alone does not count.
 
-RUNTIME CONTEXT SOURCE
-database: ctox.sqlite3
-conversation_id: 2429960041906776199
-source rows: context_items + messages + continuity_documents + continuity_commits
-note: English translation of real German runtime records; shortened and redacted.
+EXAMPLE CONTEXT SOURCE
+scenario: synthetic payment callback rollout
+source blocks: ticket case + queue item + Focus + Anchors + Narrative +
+workflow state + recent turns + verification evidence
 
 LATEST TASK
-Mission continuity watchdog: the mission was idle for 47s.
-Mission: Process the published CTOX self-work for local.
+Scheduled follow-up fired after the payment provider maintenance window ended.
+Mission: Roll out the payment callback fix and verify the checkout pipeline.
 State: active
 Mode: continuous
 Intensity: hot
-Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
-validation is incomplete; intermittent database lock.
-Next step: Recheck live Kunstmen runtime/health and queue state, then complete
-mission validation for self-work:local:d18d0cf29045.
-Task is complete only when: runtime is reachable, required checks pass, queue
-item is cleared, and validation evidence is complete.
+Blocker: provider maintenance is over; production approval is present.
+Next step: deploy the callback fix, replay one provider webhook, run checkout
+smoke tests, verify alerts, and update the ticket.
+Task is complete only when: checkout returns a live payment URL, webhook replay
+is accepted once, backup verification is current, and the ticket contains the
+deploy marker plus evidence links.
 
 FOCUS
 Mission state: active
 Continuation mode: continuous
 Trigger intensity: hot
-Next slice: Process the next concrete part of the CTOX self-work mission.
-Done gate: Complete and verify the concrete slice before closing the thread.
+Next slice: run production rollout and verification for the payment callback fix.
+Done gate: live checkout, webhook replay, backup probe, alert check, ticket
+writeback, and continuity update all passed.
 Closure confidence: low
 
 ANCHORS
-- Initial task prompt created this mission-follow-up run.
-- Mission remained open after repeated runtime/queue/continuity checks.
-- Required gate: POST /api/checkout must return 200 with a non-empty checkout.url.
-- Do not close from a verbal claim; close only from verified evidence.
+- Do not deploy payment changes without ticket approval.
+- Roll back if checkout success rate drops or webhook replay is rejected twice.
+- Do not close from a verbal claim; close only from runtime and ticket evidence.
+- Required gate: live checkout returns 200 and contains a non-empty payment URL.
+- Required gate: provider webhook replay is accepted exactly once.
+- Required gate: nightly backup verification is current before production close.
 
 NARRATIVE
-- 2026-04-22: mission-follow-up started after the continuity watchdog detected
-  an idle mission.
-- 2026-04-23: repeated rechecks kept the mission open because validation and
-  runtime health were not complete.
-- 2026-04-25: a renewed follow-up run reported progress, but later evidence
-  again showed the local runtime down and the closure gate unmet.
+- Turn 1: operator asked CTOX to ship a payment callback fix, but provider
+  maintenance was active and production approval was missing.
+- Turn 2: CTOX validated staging, wrote the waiting state into Focus, and left
+  one durable follow-up instead of keeping the work in chat.
+- Turn 3: while waiting, backup verification became due; CTOX ran the probe,
+  fixed retention config, and linked the backup evidence to the rollout ticket.
+- Turn 4: ticket approval arrived and the maintenance window ended; CTOX resumed
+  the rollout from durable state.
 
 WORKFLOW STATE
-- active queue item: one leased mission-follow-up item for queue/mission-1
-- open plan items for this mission thread: none in the sampled state
-- blocking condition: local runtime and validation evidence are not sufficient
-- required persistence rule: if still open, create exactly one durable follow-up
+- ticket OPS-204: approved, assigned to CTOX, production writeback required.
+- linked ticket OPS-199: backup verification fixed and passed.
+- active queue item: deploy payment callback fix and verify production gates.
+- plan progress: 4 of 6 steps complete; current step is production verification.
+- schedule: retry window opened after provider maintenance ended.
 
 RECENT MULTI-TURN CONVERSATION
-user#1968: Continue the mission. Runtime was last seen down; recheck runtime,
-queue/plan counts, continuity health, artifact persistence, and claims.
-assistant#1969: Status remains open. Runtime 127.0.0.1:4173 is down; queue has
-one leased item; continuity health is critical; closure gate is not met.
-user#1970: Watchdog fired again after 47s idle. Recheck live runtime/health and
-queue state; complete mission validation.
-assistant#1971: Status remains open. No listener on 127.0.0.1:4173; checked
-endpoints returned 000; one queue item is leased; validation is incomplete.
-assistant#1972: Status: blocked. Blocker: database is locked.
+operator: Ship the payment callback fix, but wait for provider maintenance and
+ticket approval before touching production.
+ctox: Staging is green. I recorded the approval blocker and scheduled a retry.
+scheduler: Provider maintenance window ended.
+ticket: OPS-204 approval granted. Production rollout may proceed.
+ctox: Resuming from Focus. I will deploy, replay one webhook, run checkout
+smoke tests, verify backups and alerts, then write evidence back to the ticket.
 
 PROCESS EVIDENCE
-context_window: 258400
-token sample: 39533 total tokens, fill_pct 0.078
-observed command: ctox continuity-update --kind focus --mode full
+ctox ticket show OPS-204
+ctox queue lease queue:payment-rollout
+ctox verification run --gate checkout-live
+ctox verification run --gate webhook-replay
+ctox verification run --gate backup-current
+ctox process-mining assert-clean --case OPS-204
 
 WORKER INSTRUCTION
-Use the blocks above as the current working state. Do the next concrete check,
-record evidence, update continuity if the state changed, and leave exactly one
-durable follow-up item if the mission cannot be closed.</code></pre>
+Use the blocks above as the current working state. Deploy only if the approval
+anchor still holds. Run the production checks, persist evidence, update Focus
+and Narrative, write the result to OPS-204, and close the mission only after all
+done gates pass.</code></pre>
               </div>
             </div>
           </div>
@@ -1123,11 +1131,11 @@ ctox lcm-expand &lt;db-path&gt; &lt;summary-id&gt; [depth] [--messages] [token-c
 ctox continuity-show &lt;db-path&gt; &lt;conversation-id&gt; [narrative|anchors|focus]
 ctox continuity-update --kind focus --mode full</code></pre>
           <p class="note">
-            In the VPS sample, the context log showed a mission run at
-            <code>fill_pct=0.078</code> with a <code>258400</code> token window,
-            so there was no evidence that compaction should have fired in that
-            moment. What did happen was a normal continuity update:
-            <code>ctox continuity-update --kind focus --mode full</code>.
+            In this example, compaction is not the interesting part. The
+            important behavior is that CTOX can drop temporary prompt material
+            later because the mission status, approval boundary, retry window,
+            done gates, ticket state, and verification evidence were promoted
+            into durable runtime state.
           </p>
         </section>
 
@@ -1340,243 +1348,207 @@ You are CTOX, a persistent technical daemon. Work on the current mission
 across turns. Prefer verified evidence over memory. If work remains open,
 persist the next step in CTOX runtime state; prose alone does not count.
 
-RUNTIME CONTEXT SOURCE
-database: ctox.sqlite3
-conversation_id: 2429960041906776199
-source rows: context_items + messages + continuity_documents + continuity_commits
-note: English translation of real German runtime records; shortened and redacted.
+EXAMPLE CONTEXT SOURCE
+scenario: synthetic payment callback rollout
+source blocks: ticket case + queue item + Focus + Anchors + Narrative +
+workflow state + recent turns + verification evidence
 
 LATEST TASK
-Mission continuity watchdog: the mission was idle for 47s.
-Mission: Process the published CTOX self-work for local.
+Scheduled follow-up fired after the payment provider maintenance window ended.
+Mission: Roll out the payment callback fix and verify the checkout pipeline.
 State: active
 Mode: continuous
 Intensity: hot
-Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
-validation is incomplete; intermittent database lock.
-Next step: Recheck live Kunstmen runtime/health and queue state, then complete
-mission validation for self-work:local:d18d0cf29045.
-Task is complete only when: runtime is reachable, required checks pass, queue
-item is cleared, and validation evidence is complete.
+Blocker: provider maintenance is over; production approval is present.
+Next step: deploy the callback fix, replay one provider webhook, run checkout
+smoke tests, verify alerts, and update the ticket.
+Task is complete only when: checkout returns a live payment URL, webhook replay
+is accepted once, backup verification is current, and the ticket contains the
+deploy marker plus evidence links.
 
 FOCUS
 Mission state: active
 Continuation mode: continuous
 Trigger intensity: hot
-Next slice: Process the next concrete part of the CTOX self-work mission.
-Done gate: Complete and verify the concrete slice before closing the thread.
+Next slice: run production rollout and verification for the payment callback fix.
+Done gate: live checkout, webhook replay, backup probe, alert check, ticket
+writeback, and continuity update all passed.
 Closure confidence: low
 
 ANCHORS
-- Initial task prompt created this mission-follow-up run.
-- Mission remained open after repeated runtime/queue/continuity checks.
-- Required gate: POST /api/checkout must return 200 with a non-empty checkout.url.
-- Do not close from a verbal claim; close only from verified evidence.
+- Do not deploy payment changes without ticket approval.
+- Roll back if checkout success rate drops or webhook replay is rejected twice.
+- Do not close from a verbal claim; close only from runtime and ticket evidence.
+- Required gate: live checkout returns 200 and contains a non-empty payment URL.
+- Required gate: provider webhook replay is accepted exactly once.
+- Required gate: nightly backup verification is current before production close.
 
 NARRATIVE
-- 2026-04-22: mission-follow-up started after the continuity watchdog detected
-  an idle mission.
-- 2026-04-23: repeated rechecks kept the mission open because validation and
-  runtime health were not complete.
-- 2026-04-25: a renewed follow-up run reported progress, but later evidence
-  again showed the local runtime down and the closure gate unmet.
+- Turn 1: operator asked CTOX to ship a payment callback fix, but provider
+  maintenance was active and production approval was missing.
+- Turn 2: CTOX validated staging, wrote the waiting state into Focus, and left
+  one durable follow-up instead of keeping the work in chat.
+- Turn 3: while waiting, backup verification became due; CTOX ran the probe,
+  fixed retention config, and linked the backup evidence to the rollout ticket.
+- Turn 4: ticket approval arrived and the maintenance window ended; CTOX resumed
+  the rollout from durable state.
 
 WORKFLOW STATE
-- active queue item: one leased mission-follow-up item for queue/mission-1
-- open plan items for this mission thread: none in the sampled state
-- blocking condition: local runtime and validation evidence are not sufficient
-- required persistence rule: if still open, create exactly one durable follow-up
+- ticket OPS-204: approved, assigned to CTOX, production writeback required.
+- linked ticket OPS-199: backup verification fixed and passed.
+- active queue item: deploy payment callback fix and verify production gates.
+- plan progress: 4 of 6 steps complete; current step is production verification.
+- schedule: retry window opened after provider maintenance ended.
 
 RECENT MULTI-TURN CONVERSATION
-user#1968: Continue the mission. Runtime was last seen down; recheck runtime,
-queue/plan counts, continuity health, artifact persistence, and claims.
-assistant#1969: Status remains open. Runtime 127.0.0.1:4173 is down; queue has
-one leased item; continuity health is critical; closure gate is not met.
-user#1970: Watchdog fired again after 47s idle. Recheck live runtime/health and
-queue state; complete mission validation.
-assistant#1971: Status remains open. No listener on 127.0.0.1:4173; checked
-endpoints returned 000; one queue item is leased; validation is incomplete.
-assistant#1972: Status: blocked. Blocker: database is locked.
+operator: Ship the payment callback fix, but wait for provider maintenance and
+ticket approval before touching production.
+ctox: Staging is green. I recorded the approval blocker and scheduled a retry.
+scheduler: Provider maintenance window ended.
+ticket: OPS-204 approval granted. Production rollout may proceed.
+ctox: Resuming from Focus. I will deploy, replay one webhook, run checkout
+smoke tests, verify backups and alerts, then write evidence back to the ticket.
 
 PROCESS EVIDENCE
-context_window: 258400
-token sample: 39533 total tokens, fill_pct 0.078
-observed command: ctox continuity-update --kind focus --mode full
+ctox ticket show OPS-204
+ctox queue lease queue:payment-rollout
+ctox verification run --gate checkout-live
+ctox verification run --gate webhook-replay
+ctox verification run --gate backup-current
+ctox process-mining assert-clean --case OPS-204
 
 WORKER INSTRUCTION
-Use the blocks above as the current working state. Do the next concrete check,
-record evidence, update continuity if the state changed, and leave exactly one
-durable follow-up item if the mission cannot be closed.`
+Use the blocks above as the current working state. Deploy only if the approval
+anchor still holds. Run the production checks, persist evidence, update Focus
+and Narrative, write the result to OPS-204, and close the mission only after all
+done gates pass.`
         },
         task: {
           title: "Latest task",
-          note: "This block comes from a real mission-continuity watchdog message in the VPS runtime.",
-          prompt: `message_id: 1970
-role: user
-token_count: 304
-source_table: messages + context_items
-language: English translation of German source content
+          note: "A scheduled follow-up turns waiting state back into executable work.",
+          prompt: `work_item: queue:payment-rollout
+source: scheduled follow-up + ticket update
+priority: high
 
-Mission continuity watchdog: the mission was idle for 47s.
+Scheduled follow-up fired after the payment provider maintenance window ended.
 
-Mission: Process the published CTOX self-work for local.
+Mission: Roll out the payment callback fix and verify the checkout pipeline.
 State: active
 Mode: continuous
 Intensity: hot
-Blocker: Closure gate not met; Kunstmen runtime is down on 127.0.0.1:4173;
-validation is incomplete; intermittent database lock.
-Next step: Recheck live Kunstmen runtime/health and queue state, then complete
-mission validation for self-work:local:d18d0cf29045.
-Task is complete only when: runtime is reachable, required checks pass, queue
-item is cleared, and validation evidence is complete.
-Closure confidence: low
+Blocker: provider maintenance is over; production approval is present.
 
-Required actions:
-- re-check repo, runtime, queue, progress artifacts, and continuity
-- decide whether the mission is complete, safely handed off, or still open
-- if still open, do the next concrete step
-- if more than one turn remains, leave exactly one open CTOX plan or queue item
-- a sentence in the reply does not count as open work`
+Next step:
+Deploy the callback fix, replay one provider webhook, run checkout smoke tests,
+verify alerts, and update the ticket.
+
+Task is complete only when:
+- live checkout returns 200 with a non-empty payment URL
+- provider webhook replay is accepted exactly once
+- backup verification is current
+- alerts are green after deploy
+- ticket OPS-204 contains deploy marker and evidence links`
         },
         focus: {
           title: "Focus",
-          note: "The Focus continuity document is the compact state contract for the next worker run.",
-          prompt: `document_id: contdoc_2429960041906776199_focus
-head_commit_id: contc_84e7336c15d72bf5
-source_table: continuity_documents + continuity_commits
-language: English translation of German source content
-
-# ACTIVE FOCUS
+          note: "Focus is the compact state contract for the next worker run.",
+          prompt: `# ACTIVE FOCUS
 
 ## Status
-- Mission: Process the published CTOX self-work for local.
+- Mission: Roll out the payment callback fix and verify checkout.
 - Mission state: active
 - Continuation mode: continuous
 - Trigger intensity: hot
 
 ## Blocker
-- Current blocker: none | superseded by canonical mission conversation 1
+- Current blocker: none. Production approval is present and the maintenance
+  window is over.
 
 ## Next
-- Next slice: Process the next concrete part of the CTOX self-work mission.
+- Next slice: run production rollout and verification for the payment callback fix.
 
 ## Done / Gate
-- Done gate: Complete the next concrete slice and verify the result before
-  closing the thread.
-- Closure confidence: low
-
-## Contract
-- mission: Process the published CTOX self-work for local.
-- mission_state: active
-- continuation_mode: continuous
-- trigger_intensity: hot
-- slice: Process the next concrete part of the mission.
-- slice_state: active`
+- Done gate: live checkout, webhook replay, backup probe, alert check, ticket
+  writeback, and continuity update all passed.
+- Closure confidence: low until all production gates are recorded.`
         },
         anchors: {
           title: "Anchors",
-          note: "Anchors are durable facts, boundaries, and verification gates. Private material is omitted here.",
-          prompt: `document_id: contdoc_2429960041906776199_anchors
-head_commit_id: contc_755de8d6374574dd
-source_table: continuity_documents + continuity_commits
-language: English translation of German source content
-
-# CONTINUITY ANCHORS
+          note: "Anchors are durable rules and facts that should survive compaction and future turns.",
+          prompt: `# CONTINUITY ANCHORS
 
 ## Entries
-- anchor_id: bootstrap-goal
-- anchor_type: task_prompt
-- statement: Initial task prompt requires processing the published CTOX self-work
-  for local. Title: Continue mission 1 [...]
-- source_class: user_prompt
-- source_ref: user#1
-- observed_at: 2026-04-22T10:02:27.859526840+00:00
-- confidence: medium
+- anchor_id: payment-approval-required
+  type: approval_boundary
+  statement: Do not deploy payment changes without ticket approval.
 
-[... private continuity literals and unrelated anchors omitted ...]
+- anchor_id: rollback-boundary
+  type: safety_rule
+  statement: Roll back if checkout success rate drops or webhook replay is
+  rejected twice.
 
-- anchor_id: mission_state_blocked_on_external_20260422
-- anchor_type: blocker
-- statement: Mission remains open as of 2026-04-25; closure gate is not
-  satisfied, and local runtime check http://127.0.0.1:4173/ returned
-  connection refused (000).
-- source_class: recent_message
-- source_ref: assistant#226
-- confidence: high
+- anchor_id: checkout-live-gate
+  type: done_gate
+  statement: Live checkout must return 200 and contain a non-empty payment URL.
 
-- anchor_id: checkout_gate_invariant_20260422
-- anchor_type: invariant
-- statement: Required gate remains POST /api/checkout => 200 with non-empty
-  checkout.url.`
+- anchor_id: webhook-replay-gate
+  type: done_gate
+  statement: Provider webhook replay must be accepted exactly once.
+
+- anchor_id: backup-current-gate
+  type: done_gate
+  statement: Nightly backup verification must be current before production close.`
         },
         narrative: {
           title: "Narrative",
-          note: "Narrative is causal history. It explains why the current state exists but does not override fresher evidence.",
-          prompt: `document_id: contdoc_2429960041906776199_narrative
-head_commit_id: contc_d444ec968292fab4
-source_table: continuity_documents + continuity_commits
-language: English translation of German source content
-
-# CONTINUITY NARRATIVE
-
-## Situation
-- summary: Mission follow-up activity continued on 2026-04-25 with a temporary
-  needs_followup phase and completed messaging plus UI/UX slices, while overall
-  continuity remains active.
-- state: active
+          note: "Narrative is causal history: why CTOX is doing this now and what changed over time.",
+          prompt: `# CONTINUITY NARRATIVE
 
 ## Entries
-- entry_id: bootstrap-open
-- event_type: intake
-- summary: Received the initial task prompt to process the published CTOX
-  self-work for local. Title: Continue mission 1 [...]
-- consequence: Keep this conversation attached to the active mission until the
-  requested slice is verified.
+- Turn 1:
+  Operator asked CTOX to ship a payment callback fix, but provider maintenance
+  was active and production approval was missing.
+  Consequence: CTOX validated staging and parked production work.
 
-- entry_id: mission-rechecks-still-blocked-external-2026-04-23
-- event_type: status_update
-- summary: Repeated mission-follow-up rechecks on 2026-04-23 kept status open
-  after repo/runtime/queue/continuity validation.
-- consequence: Mission continuity remains active with no internal closure path.
+- Turn 2:
+  CTOX wrote the waiting state into Focus and left exactly one durable follow-up.
+  Consequence: the work did not depend on a chat session staying open.
 
-- entry_id: mission-followup-closed-2026-04-25
-- event_type: status_update
-- summary: A renewed mission-follow-up run was rechecked and reported as done.
-- consequence: Current follow-up slice is closed after verification unless new
-  external input arrives.`
+- Turn 3:
+  Backup verification became due while production rollout was waiting. CTOX ran
+  the probe, fixed retention config, and linked the backup evidence.
+  Consequence: production close can include backup-current evidence.
+
+- Turn 4:
+  Ticket approval arrived and the provider maintenance window ended.
+  Consequence: the rollout can resume from durable state.`
         },
         tail: {
           title: "Conversation tail",
-          note: "The worker prompt can also include recent raw turns. This is the actual multi-turn part that is not captured by Focus/Anchors/Narrative alone.",
-          prompt: `source_table: messages + context_items
-conversation_id: 2429960041906776199
-language: English translation of German source content
+          note: "Recent raw turns can be included when they still carry useful details not yet promoted into continuity.",
+          prompt: `operator:
+Ship the payment callback fix, but wait for provider maintenance and ticket
+approval before touching production.
 
-user#1968:
-Continue the mission. Runtime was last seen down; recheck runtime, queue/plan
-counts, continuity health, artifact persistence, and claims.
+ctox:
+Staging is green. Production is waiting on approval and the provider
+maintenance window. I recorded the blocker and scheduled a retry.
 
-assistant#1969:
-Status remains open. Runtime 127.0.0.1:4173 is down; queue has one leased item;
-continuity health is critical; closure gate is not met.
+scheduler:
+Provider maintenance window ended.
 
-user#1970:
-Watchdog fired again after 47s idle. Recheck live runtime/health and queue
-state; complete mission validation.
+ticket:
+OPS-204 approval granted. Production rollout may proceed.
 
-assistant#1971:
-Status remains open. No listener on 127.0.0.1:4173; checked endpoints returned
-000; one queue item is leased; validation is incomplete.
+ctox:
+Resuming from Focus. I will deploy, replay one webhook, run checkout smoke
+tests, verify backups and alerts, then write evidence back to the ticket.
 
-assistant#1972:
-Status: blocked.
-Blocker: database is locked.
-
-context-log.jsonl:
-context_window: 258400
-total_tokens: 39533
-fill_pct: 0.078
-observed command: ctox continuity-update --kind focus --mode full`
+verification tail:
+- checkout-live: pending
+- webhook-replay: pending
+- backup-current: passed
+- process-conformance: clean before deploy`
         }
       };
 
