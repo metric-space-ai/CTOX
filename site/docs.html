@@ -349,6 +349,10 @@
         align-items: stretch;
       }
 
+      .harness-row.single {
+        grid-template-columns: 1fr;
+      }
+
       .harness-box {
         padding: 16px;
         border: 1px solid rgba(255, 255, 255, 0.14);
@@ -384,10 +388,64 @@
         background: rgba(0, 168, 223, 0.12);
       }
 
+      .harness-detail {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.14);
+      }
+
+      .harness-detail div {
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.06);
+      }
+
+      .harness-detail b {
+        display: block;
+        margin-bottom: 8px;
+        color: #fff;
+        font-size: 13px;
+      }
+
+      .harness-detail span {
+        display: block;
+        color: rgba(233, 245, 248, 0.74);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
       .context-example {
         margin-top: 28px;
         border: 1px solid var(--line);
         background: #fff;
+      }
+
+      .data-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 22px;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .data-strip div {
+        padding: 16px;
+        background: #fff;
+      }
+
+      .data-strip b {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 13px;
+      }
+
+      .data-strip span {
+        display: block;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
       }
 
       .context-example-head {
@@ -449,6 +507,7 @@
       .prompt-meta p {
         margin: 0;
         font-size: 15px;
+        overflow-wrap: anywhere;
       }
 
       .prompt-output pre {
@@ -490,6 +549,8 @@
         }
 
         .harness-row,
+        .harness-detail,
+        .data-strip,
         .prompt-viewer {
           grid-template-columns: 1fr;
         }
@@ -772,22 +833,24 @@
             process, verify, wait on, repair, or resume.
           </p>
           <pre class="flow"><code>1. Intake
-   queue task, ticket event, scheduled task, channel message, or chat prompt
+   TUI chat, email/Jami/WebRTC thread, scheduled task, ticket sync, plan step, direct CLI
 
 2. Lease
-   select executable work and mark it leased/running
+   select executable work from SQLite and mark it leased/running
 
 3. Context build
-   mission contract + current task + continuity + knowledge + verification
+   mission contract + active work + Focus + Anchors + Narrative + workflow state
+   + knowledge + claims + governance + context health + recent conversation
 
 4. Worker turn
-   agent uses tools, shell, browser, files, and CTOX CLI commands
+   agent uses shell/browser/files and, when needed, calls ctox CLI commands itself
 
 5. Persist result
-   write event, status, evidence, note, claim, knowledge, or follow-up
+   message, event, command ledger row, continuity commit, claim, ticket update,
+   verification run, knowledge entry, queue item, schedule, or blocker
 
 6. Decide next state
-   close, verify, requeue, block, schedule, escalate, or continue</code></pre>
+   close, verify, requeue, block, wait, schedule, repair, escalate, or continue</code></pre>
           <p>
             The loop survives a finished chat turn because the queue, tickets,
             schedules, continuity, claims, and process events live outside the
@@ -808,30 +871,59 @@
             </div>
             <div class="harness-row">
               <div class="harness-box">
-                <strong>Context builder</strong>
-                <span>Builds the worker prompt from mission contract, active work, Focus, Anchors, Narrative, knowledge, claims, and recent events.</span>
+                <strong>Lease and dispatch</strong>
+                <span>The daemon leases pending work, starts the bounded worker run, and keeps the durable mission state outside the model transcript.</span>
               </div>
               <div class="harness-arrow">-&gt;</div>
               <div class="harness-box">
-                <strong>Worker run</strong>
-                <span>The agent executes bounded work with shell, browser, file tools, and CTOX CLI commands. The chat turn is not the durable state.</span>
+                <strong>Context builder</strong>
+                <span>Builds the worker prompt from mission contract, active work, Focus, Anchors, Narrative, workflow state, knowledge, claims, governance, context health, and recent conversation.</span>
               </div>
             </div>
             <div class="harness-row">
               <div class="harness-box">
-                <strong>Continuity refresh</strong>
-                <span>Focus, Anchors, Narrative, knowledge, and verification claims are updated when the run produced useful new state.</span>
+                <strong>ctox-core worker loop</strong>
+                <span>The worker alternates model reasoning, tool calls, tool results, and CTOX CLI calls. It can inspect and update the runtime through the same command surface a human operator sees.</span>
               </div>
               <div class="harness-arrow">-&gt;</div>
               <div class="harness-box">
-                <strong>Decision</strong>
-                <span>Close, verify, requeue, block, schedule, escalate, or emit follow-up work. The daemon returns to intake while service is running.</span>
+                <strong>Continuity refresh</strong>
+                <span>When the run produced durable state, CTOX writes Focus, Anchors, Narrative, claims, verification, ticket, queue, or knowledge updates back into SQLite.</span>
+              </div>
+            </div>
+            <div class="harness-row">
+              <div class="harness-box">
+                <strong>Decision and continuation</strong>
+                <span>Mission state decides whether work is complete, blocked, waiting, requeued, timed out, scheduled, or continued by the idle watchdog.</span>
+              </div>
+              <div class="harness-arrow">-&gt;</div>
+              <div class="harness-box">
+                <strong>Process evidence</strong>
+                <span>Command ledger, process events, transition proofs, context log, verification runs, and claims make the run reconstructable after the fact.</span>
+              </div>
+            </div>
+            <div class="harness-row single">
+              <div class="harness-detail">
+                <div>
+                  <b>Prompt plane</b>
+                  <span>Mission contract, latest user turn, verified evidence, Focus, Anchors, workflow state, Narrative, governance, context health, and recent conversation.</span>
+                </div>
+                <div>
+                  <b>Control plane</b>
+                  <span>Queue leases, ticket cases, schedules, follow-ups, mission states, operating health, model backend selection, and timeout/watchdog continuations.</span>
+                </div>
+                <div>
+                  <b>Audit plane</b>
+                  <span>SQLite mutation events, command rows, graph-based transition checks, liveness scans, Petri/DFG discovery, replay, violations, and coverage.</span>
+                </div>
               </div>
             </div>
             <div class="harness-loop">
               <strong>Persistent loop:</strong>
               the next run is created from database state and continuity, not
-              from an ever-growing chat transcript.
+              from an ever-growing chat transcript. That is the difference
+              between chaining sessions and running a daemon with durable
+              process state.
             </div>
           </div>
         </section>
@@ -873,55 +965,114 @@
           </div>
           <div class="context-example" id="context-example">
             <div class="context-example-head">
-              <h3>Example: VPS maintenance context</h3>
+              <h3>Example: real VPS runtime context</h3>
               <p>
                 Hover or click a context source to see the prompt fragment CTOX
-                can build for a worker run. Values use documentation examples;
-                secrets are referenced, not printed into the prompt.
+                can build for a worker run. This example was read from the
+                CTOX SQLite runtime on the Ubuntu VPS and shortened for the
+                public docs. Secrets and irrelevant private material are not
+                printed.
               </p>
+              <div class="data-strip">
+                <div>
+                  <b>Database</b>
+                  <span><code>ctox.sqlite3</code> on the VPS, opened read-only</span>
+                </div>
+                <div>
+                  <b>Conversation</b>
+                  <span><code>2429960041906776199</code>, largest context item set</span>
+                </div>
+                <div>
+                  <b>Context rows</b>
+                  <span><code>644</code> materialized items, plus continuity docs</span>
+                </div>
+                <div>
+                  <b>Runtime log</b>
+                  <span><code>context-log.jsonl</code> showed 39,533 / 258,400 tokens</span>
+                </div>
+              </div>
             </div>
             <div class="context-pickers" aria-label="Context prompt examples">
-              <button class="is-active" type="button" data-context-example="queue">Queue task</button>
-              <button type="button" data-context-example="focus">Continuity: Focus</button>
-              <button type="button" data-context-example="anchors">Continuity: Anchors</button>
-              <button type="button" data-context-example="narrative">Continuity: Narrative</button>
-              <button type="button" data-context-example="worker">Worker prompt</button>
+              <button class="is-active" type="button" data-context-example="watchdog">Watchdog task</button>
+              <button type="button" data-context-example="focus">Focus doc</button>
+              <button type="button" data-context-example="anchors">Anchors doc</button>
+              <button type="button" data-context-example="narrative">Narrative doc</button>
+              <button type="button" data-context-example="turnlog">Turn log</button>
             </div>
             <div class="prompt-viewer">
               <div class="prompt-meta">
-                <b id="context-example-title">Queue task</b>
+                <b id="context-example-title">Watchdog task</b>
                 <p id="context-example-note">
-                  Executable work that entered CTOX through chat, ticket,
-                  channel, plan, or schedule.
+                  A real mission-continuity watchdog prompt stored as a user
+                  message in the VPS runtime.
                 </p>
               </div>
               <div class="prompt-output">
-                <pre><code id="context-example-output">queue_task:
-  title: "Inspect VPS and prepare CTOX remote host"
-  source: "operator_chat"
-  priority: "high"
-  thread_key: "ops/vps-maintenance"
-  workspace_root: "/srv/ctox"
-  prompt: |
-    Check whether the Ubuntu VPS can run CTOX as a remote instance.
-    Use SSH with stored credentials only. Do not print secrets.
-    Verify disk, memory, systemd, network reachability, and current CTOX status.
-    If CTOX is missing, prepare an install plan and stop before destructive changes.</code></pre>
+                <pre><code id="context-example-output">message_id: 1970
+role: user
+token_count: 304
+source_table: messages + context_items
+
+Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+Titel: Continue mission [...]
+Art: mission-follow-up
+Work-ID: self-work:local:d18d0cf29045
+
+Mission continuity watchdog: the mission was idle for 47s.
+
+Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+State: active
+Mode: continuous
+Intensity: hot
+Blocker: Closure gate not met; Kunstmen runtime down on 127.0.0.1:4173;
+validation incomplete; intermittent database lock.
+Next step: Recheck live Kunstmen runtime/health and queue state, then complete
+mission validation for self-work:local:d18d0cf29045.
+Task is complete only when: Kunstmen runtime reachable and required checks pass,
+queue item cleared, and validation evidence complete.
+Closure confidence: low
+
+Required actions:
+- re-check repo, runtime, queue, progress artifacts, and continuity
+- decide whether the mission is complete, safely handed off, or still open
+- if still open, do the next concrete step
+- if more than one turn remains, leave exactly one open CTOX plan or queue item
+- a sentence in the reply does not count as open work</code></pre>
               </div>
             </div>
           </div>
           <h3>Compaction and continuation</h3>
           <p>
-            When context pressure rises, CTOX compacts or refreshes continuity
-            instead of losing the mission. The next turn is rebuilt from Focus,
-            Anchors, Narrative, the current work record, and durable runtime
-            state. This is the practical meaning of long-running multi-turn
-            execution: each turn is bounded, but the mission state is not.
+            CTOX does not have an infinite prompt. It has a persistent loop
+            plus two different context mechanisms. The CTOX LCM layer stores
+            raw messages, summaries, summary links, ordered context items, and
+            continuity documents in SQLite. The harness layer can also compact
+            the active model session when model token usage crosses the model's
+            auto-compact limit or when a run switches to a smaller context
+            window.
           </p>
-          <pre><code>ctox context-health
-ctox context-retrieve --mode continuity --document focus
-ctox continuity-show
-ctox continuity-apply --kind focus --diff-file focus.patch</code></pre>
+          <p>
+            The CTOX LCM compaction path is explicit: it counts the current
+            context tokens, compares them with a threshold derived from the
+            token budget, creates leaf summaries for older material, can create
+            condensed summaries over summary trees, resequences
+            <code>context_items</code>, and keeps fresh tail messages available.
+            The public point is not "nothing is ever removed from the prompt".
+            The point is that important state is promoted into the right
+            durable structure before temporary prompt material can be compressed.
+          </p>
+          <pre><code>ctox lcm-compact &lt;db-path&gt; &lt;conversation-id&gt; [token-budget] [--force]
+ctox lcm-grep &lt;db-path&gt; &lt;conversation-id&gt; &lt;query&gt;
+ctox lcm-expand &lt;db-path&gt; &lt;summary-id&gt; [depth] [--messages] [token-cap]
+ctox continuity-show &lt;db-path&gt; &lt;conversation-id&gt; [narrative|anchors|focus]
+ctox continuity-update --kind focus --mode full</code></pre>
+          <p class="note">
+            In the VPS sample, the context log showed a mission run at
+            <code>fill_pct=0.078</code> with a <code>258400</code> token window,
+            so there was no evidence that compaction should have fired in that
+            moment. What did happen was a normal continuity update:
+            <code>ctox continuity-update --kind focus --mode full</code>.
+          </p>
         </section>
 
         <section id="self-calls">
@@ -1125,126 +1276,173 @@ ctox follow-up evaluate --goal "finish rollout" --result "blocked on access" --b
     </footer>
     <script>
       const contextExamples = {
-        queue: {
-          title: "Queue task",
-          note: "Executable work that entered CTOX through chat, ticket, channel, plan, or schedule.",
-          prompt: `queue_task:
-  title: "Inspect VPS and prepare CTOX remote host"
-  source: "operator_chat"
-  priority: "high"
-  thread_key: "ops/vps-maintenance"
-  workspace_root: "/srv/ctox"
-  prompt: |
-    Check whether the Ubuntu VPS can run CTOX as a remote instance.
-    Use SSH with stored credentials only. Do not print secrets.
-    Verify disk, memory, systemd, network reachability, and current CTOX status.
-    If CTOX is missing, prepare an install plan and stop before destructive changes.`
+        watchdog: {
+          title: "Watchdog task",
+          note: "A real mission-continuity watchdog prompt stored as a user message in the VPS runtime.",
+          prompt: `message_id: 1970
+role: user
+token_count: 304
+source_table: messages + context_items
+
+Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+Titel: Continue mission [...]
+Art: mission-follow-up
+Work-ID: self-work:local:d18d0cf29045
+
+Mission continuity watchdog: the mission was idle for 47s.
+
+Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+State: active
+Mode: continuous
+Intensity: hot
+Blocker: Closure gate not met; Kunstmen runtime down on 127.0.0.1:4173;
+validation incomplete; intermittent database lock.
+Next step: Recheck live Kunstmen runtime/health and queue state, then complete
+mission validation for self-work:local:d18d0cf29045.
+Task is complete only when: Kunstmen runtime reachable and required checks pass,
+queue item cleared, and validation evidence complete.
+Closure confidence: low
+
+Required actions:
+- re-check repo, runtime, queue, progress artifacts, and continuity
+- decide whether the mission is complete, safely handed off, or still open
+- if still open, do the next concrete step
+- if more than one turn remains, leave exactly one open CTOX plan or queue item
+- a sentence in the reply does not count as open work`
         },
         focus: {
-          title: "Continuity: Focus",
-          note: "The short live state CTOX wants the next worker run to preserve.",
-          prompt: `# Focus
+          title: "Focus doc",
+          note: "The Focus continuity document is the compact state contract for the next worker run.",
+          prompt: `document_id: contdoc_2429960041906776199_focus
+head_commit_id: contc_84e7336c15d72bf5
+source_table: continuity_documents + continuity_commits
+
+# ACTIVE FOCUS
+
+## Status
+- Mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- Mission state: active
+- Continuation mode: continuous
+- Trigger intensity: hot
+
+## Blocker
+- Current blocker: none | superseded by canonical mission conversation 1
+
+## Next
+- Next slice: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+
+## Done / Gate
+- Done gate: Complete the next concrete slice and verify the result before
+  closing the thread.
+- Closure confidence: low
 
 ## Contract
-mission: Prepare remote CTOX host for VPS maintenance
-mission_state: active
-continuation_mode: continuous
-done_gate: host status known, install path selected, no secrets leaked
-
-## State
-goal: inspect and prepare the VPS for CTOX remote management
-target_host: vps-example-01.vps.example.net
-ssh_user: ubuntu
-credential_ref: secret://ops/vps-example-01/ssh-password
-next_step: run non-destructive host checks through SSH
-blocker:
-verification_gap: host has not been checked in this run
-
-## Rules
-- Never print stored credentials.
-- Do not run destructive package or firewall changes without an explicit plan.
-- Record findings back into queue notes or ticket evidence.`
+- mission: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- mission_state: active
+- continuation_mode: continuous
+- trigger_intensity: hot
+- slice: Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.
+- slice_state: active`
         },
         anchors: {
-          title: "Continuity: Anchors",
-          note: "Durable facts that should survive context compaction and future turns.",
-          prompt: `# Anchors
+          title: "Anchors doc",
+          note: "Anchors are durable facts, boundaries, and verification gates. Private material is omitted here.",
+          prompt: `document_id: contdoc_2429960041906776199_anchors
+head_commit_id: contc_755de8d6374574dd
+source_table: continuity_documents + continuity_commits
+
+# CONTINUITY ANCHORS
 
 ## Entries
-- anchor_id: vps-hostname
-  anchor_type: host_identity
-  statement: Target host is vps-example-01.vps.example.net.
-  source_class: operator_supplied
-  confidence: high
+- anchor_id: bootstrap-goal
+- anchor_type: task_prompt
+- statement: Initial task prompt requires: Bearbeite das veroeffentlichte
+  CTOX-Self-Work fuer local. Titel: Continue mission 1 [...]
+- source_class: user_prompt
+- source_ref: user#1
+- observed_at: 2026-04-22T10:02:27.859526840+00:00
+- confidence: medium
 
-- anchor_id: vps-addresses
-  anchor_type: network
-  statement: IPv4 203.0.113.120 and IPv6 2001:db8:404:200::2c56 are documentation examples for the VPS record.
-  source_class: sanitized_doc_example
-  confidence: medium
+[... private continuity literals and unrelated anchors omitted ...]
 
-- anchor_id: ssh-user
-  anchor_type: access
-  statement: SSH user is ubuntu; password is stored as a secret reference and must not be placed in prompts.
-  source_class: secret_hygiene
-  confidence: high
+- anchor_id: mission_state_blocked_on_external_20260422
+- anchor_type: blocker
+- statement: Mission remains open as of 2026-04-25; closure gate is not
+  satisfied, and local runtime check http://127.0.0.1:4173/ returned
+  connection refused (000).
+- source_class: recent_message
+- source_ref: assistant#226
+- confidence: high
 
-[...]
-- anchor_id: done-gate
-  anchor_type: verification
-  statement: Done requires ctox status or install-readiness evidence, not a verbal claim.`
+- anchor_id: checkout_gate_invariant_20260422
+- anchor_type: invariant
+- statement: Required gate remains POST /api/checkout => 200 with non-empty
+  checkout.url.`
         },
         narrative: {
-          title: "Continuity: Narrative",
-          note: "A compressed history of prior turns, not a full chat transcript.",
-          prompt: `# Narrative
+          title: "Narrative doc",
+          note: "Narrative is causal history. It explains why the current state exists but does not override fresher evidence.",
+          prompt: `document_id: contdoc_2429960041906776199_narrative
+head_commit_id: contc_d444ec968292fab4
+source_table: continuity_documents + continuity_commits
+
+# CONTINUITY NARRATIVE
+
+## Situation
+- summary: Mission follow-up activity continued on 2026-04-25 with a temporary
+  needs_followup phase and completed messaging plus UI/UX slices, while overall
+  continuity remains active.
+- state: active
 
 ## Entries
-- Turn 1: Operator asked CTOX to prepare a remote VPS instance.
-  CTOX stored the access material as a secret reference and redacted it from working prompts.
+- entry_id: bootstrap-open
+- event_type: intake
+- summary: Received the initial task prompt: Bearbeite das veroeffentlichte
+  CTOX-Self-Work fuer local. Titel: Continue mission 1 [...]
+- consequence: Keep this conversation attached to the active mission until the
+  requested slice is verified.
 
-- Turn 2: Host identity and intended remote-management goal were written into Focus and Anchors.
-  No SSH command has been executed yet in this example.
+- entry_id: mission-rechecks-still-blocked-external-2026-04-23
+- event_type: status_update
+- summary: Repeated mission-follow-up rechecks on 2026-04-23 kept status open
+  after repo/runtime/queue/continuity validation.
+- consequence: Mission continuity remains active with no internal closure path.
 
-- Turn 3: Next worker run should inspect the host non-destructively:
-  hostname, OS release, disk, memory, systemd availability, network reachability, and CTOX install status.
-
-[...]
-- Current risk: confusing "credential available" with "host verified".
-  Required evidence: command output from the target host or an explicit blocker.`
+- entry_id: mission-followup-closed-2026-04-25
+- event_type: status_update
+- summary: A renewed mission-follow-up run was rechecked and reported as done.
+- consequence: Current follow-up slice is closed after verification unless new
+  external input arrives.`
         },
-        worker: {
-          title: "Final worker prompt",
-          note: "The bounded prompt assembled from mission contract, queue item, continuity, knowledge, and verification.",
-          prompt: `You are CTOX running a bounded worker execution for a persistent mission.
+        turnlog: {
+          title: "Turn log",
+          note: "Runtime token pressure and tool-call evidence from context-log.jsonl.",
+          prompt: `source_file: context-log.jsonl
+session_kind: mission
+context_window: 258400
 
-Active task:
-Inspect the Ubuntu VPS and prepare CTOX remote-host setup.
+event: token_count
+total_tokens: 19239
+call_input: 18442
+call_output: 797
+fill_pct: 0.071
 
-Target:
-- host: vps-example-01.vps.example.net
-- IPv4: 203.0.113.120
-- IPv6: 2001:db8:404:200::2c56
-- ssh_user: ubuntu
-- credential_ref: secret://ops/vps-example-01/ssh-password
+event: tool_call_begin
+command:
+  printf '%s' "# ACTIVE FOCUS [...]" | ctox continuity-update --kind focus --mode full
 
-Relevant continuity:
-- Mission is active.
-- Do not reveal or echo secrets.
-- No destructive host changes without an explicit install plan.
-- Done gate: host status known and evidence recorded.
+event: tool_call_end
+exit_code: 0
+status: Completed
 
-Use CTOX tools where useful:
-- ctox status
-- ctox queue show --message-key <current>
-- ctox process-mining assert-clean
-- ctox verification claim-set [...]
+event: token_count
+total_tokens: 39533
+call_input: 20247
+call_output: 47
+fill_pct: 0.078
 
-Work:
-1. Retrieve the secret through the approved secret path if SSH is required.
-2. Run non-destructive checks only: whoami, hostname, lsb_release, df, free, systemctl, ctox status.
-3. Summarize findings.
-4. If CTOX is missing, create the next queue task for installation instead of silently changing the host.`
+event: turn_complete
+has_last_message: true`
         }
       };
 
