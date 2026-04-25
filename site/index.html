@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Download CTOX CLI and learn how its persistent agent runtime differs from ordinary coding agents."
+      content="CTOX is an agentic daemon for long-running technical work, not another coding agent."
     />
-    <title>CTOX CLI</title>
+    <title>CTOX</title>
     <link rel="icon" href="assets/ctox-app-icon.png" />
     <link rel="preload" href="assets/ctox-full-logo.png" as="image" />
     <style>
@@ -413,7 +413,7 @@
 
       .install .section-inner {
         display: grid;
-        grid-template-columns: minmax(0, 1.1fr) minmax(260px, 0.9fr);
+        grid-template-columns: minmax(0, 0.86fr) minmax(420px, 1.14fr);
         gap: 56px;
         align-items: center;
       }
@@ -439,6 +439,21 @@
       .release-actions {
         display: grid;
         gap: 18px;
+      }
+
+      .install .download-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin-top: 0;
+        box-shadow: none;
+      }
+
+      .install .release-note {
+        margin: 0;
+        color: rgba(249, 251, 255, 0.68);
+      }
+
+      .install .release-note a {
+        color: #fff;
       }
 
       .final-link {
@@ -521,6 +536,7 @@
         .what-layout,
         .platform-grid,
         .compare-row,
+        .install .download-strip,
         .install .section-inner {
           grid-template-columns: 1fr;
         }
@@ -604,35 +620,11 @@
         <div class="hero-inner">
           <div class="hero-copy">
             <img class="brand-mark" src="assets/ctox-full-logo.png" alt="" />
-            <h1 id="hero-title">CTOX CLI keeps agent work alive.</h1>
+            <h1 id="hero-title">An agentic daemon, not another coding agent.</h1>
             <p class="lead">
-              Start a local service, submit work from the terminal, and let CTOX
-              keep the queue, context, review state, and follow-up after a single
-              agent turn would normally be over.
-            </p>
-
-            <nav class="download-strip" aria-label="CTOX CLI downloads">
-              <a class="download" data-asset="ctox-macos-arm64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
-                <strong>macOS Apple Silicon</strong>
-                <span>CLI archive for M-series Macs</span>
-              </a>
-              <a class="download" data-asset="ctox-macos-x64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
-                <strong>macOS Intel</strong>
-                <span>CLI archive for x64 Macs</span>
-              </a>
-              <a class="download" data-asset="ctox-linux-x64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
-                <strong>Linux x64</strong>
-                <span>CLI archive for Linux hosts</span>
-              </a>
-              <a class="download" data-asset="ctox-windows-x64.zip" href="https://github.com/metric-space-ai/ctox/releases/latest">
-                <strong>Windows x64</strong>
-                <span>CLI ZIP for Windows PCs</span>
-              </a>
-            </nav>
-
-            <p class="release-note">
-              <span id="release-status">Checking latest release assets...</span>
-              <a href="https://github.com/metric-space-ai/ctox/releases/latest">View releases</a>
+              CTOX keeps technical work alive between agent runs. It watches
+              queues and plans, starts the next slice, records what happened,
+              and resumes until the work is done, blocked, or handed back.
             </p>
           </div>
         </div>
@@ -642,27 +634,26 @@
         <div class="section-inner what-layout">
           <div class="what-copy">
             <p class="section-kicker">What CTOX is</p>
-            <h2 id="what-title">A CLI daemon around agent turns.</h2>
+            <h2 id="what-title">The daemon around the agents.</h2>
             <p>
-              CTOX is not primarily a desktop app. It is a command-line runtime:
-              start the service with <code>ctox start</code>, send work with
-              <code>ctox chat</code>, and let the service decide whether to run,
-              queue, review, block, or continue that work later.
+              Coding agents do the concrete work: inspect code, edit files, run
+              commands, explain results. CTOX is the persistent layer around
+              them: it owns the queue, state, checks, and continuation.
             </p>
           </div>
 
           <div class="capability-lines" aria-label="CTOX capabilities">
             <div>
-              <b>Service first</b>
-              <span>The CLI talks to a persistent local service instead of treating every prompt as a disposable process.</span>
+              <b>Daemon</b>
+              <span>CTOX keeps running and tracks work even when no one is actively steering a chat session.</span>
             </div>
             <div>
-              <b>Durable state</b>
-              <span>Queue items, plans, schedules, governance events, secrets, continuity, and mission state live in <code>runtime/ctox.sqlite3</code>.</span>
+              <b>Agentic</b>
+              <span>It can choose the next runnable slice, dispatch it through the agent stack, and react to blockers.</span>
             </div>
             <div>
-              <b>Execution slices</b>
-              <span>Work is leased, executed through the embedded Codex harness, reviewed, persisted, and followed up when it is not actually done.</span>
+              <b>Durable</b>
+              <span>Queue, context, review notes, blockers, decisions, and follow-ups survive beyond one agent turn.</span>
             </div>
           </div>
         </div>
@@ -670,22 +661,22 @@
 
       <section class="platforms" aria-labelledby="platforms-title">
         <div class="section-inner">
-          <p class="section-kicker">How it feels in use</p>
-          <h2 id="platforms-title">You operate CTOX from the terminal, but it behaves like a running service.</h2>
+          <p class="section-kicker">How it works</p>
+          <h2 id="platforms-title">CTOX runs the work loop around the coding agent.</h2>
 
           <div class="platform-grid">
             <div class="platform-list">
               <div class="platform-row">
-                <b>Submit</b>
-                <p><code>ctox chat</code>, queue items, plans, schedules, tickets, and communication channels all feed the same service loop.</p>
+                <b>1. Observe</b>
+                <p>CTOX watches plans, queues, schedules, tickets, channel input, and the current mission state.</p>
               </div>
               <div class="platform-row">
-                <b>Coordinate</b>
-                <p>CTOX tracks what is pending, leased, blocked, failed, handled, or waiting for owner approval.</p>
+                <b>2. Dispatch</b>
+                <p>It hands one focused slice to the coding-agent stack and records the result as durable state.</p>
               </div>
               <div class="platform-row">
-                <b>Resume</b>
-                <p>Context health, compaction, continuity refreshes, and mission sync keep long work from depending on one perfect chat transcript.</p>
+                <b>3. Continue</b>
+                <p>If the slice is incomplete, blocked, or fails review, CTOX keeps the next action instead of losing the thread.</p>
               </div>
             </div>
 
@@ -696,11 +687,11 @@
                   <span class="dot"></span>
                   <span class="dot"></span>
                 </div>
-                <pre>ctox start
-ctox chat "ship the release" --wait
-ctox queue list --status pending
-ctox plan tick
-ctox runtime switch &lt;model&gt; quality</pre>
+                <pre>daemon: running
+mission: ship release
+slice: build binaries
+review: pending
+next: publish notes</pre>
               </div>
             </div>
           </div>
@@ -709,21 +700,21 @@ ctox runtime switch &lt;model&gt; quality</pre>
 
       <section class="compare" aria-labelledby="compare-title">
         <div class="section-inner">
-          <p class="section-kicker">Compared with agent CLIs</p>
-          <h2 id="compare-title">CTOX is the runtime around the worker.</h2>
+          <p class="section-kicker">Compared with coding agents</p>
+          <h2 id="compare-title">The coding agent is the worker. CTOX is the daemon.</h2>
 
           <div class="compare-list">
             <div class="compare-row">
-              <b>Codex-style agents</b>
-              <p>They are strongest at an interactive turn: inspect a repo, edit files, run commands, explain the result. CTOX keeps that kind of turn, but wraps it in a service, queue, database, watchdogs, and recovery rules.</p>
+              <b>OpenAI Codex, Claude Code, OpenCode</b>
+              <p>These tools are strongest while a person is actively steering a coding session. CTOX is built for work that must keep moving after that moment.</p>
             </div>
             <div class="compare-row">
-              <b>Claude Code, OpenCode, OpenClaw, Hermes-style tools</b>
-              <p>The difference is not another chat box. CTOX is built for lifecycle: intake, lease, execute, review, persist evidence, schedule follow-up, and continue when the first slice is not enough.</p>
+              <b>OpenClaw, Hermes-style agent runners</b>
+              <p>CTOX focuses on the daemon layer: keep the goal, decide the next slice, run it, check it, and preserve the handoff.</p>
             </div>
             <div class="compare-row">
-              <b>CTOX CLI</b>
-              <p>The CLI is the operator interface for that runtime: start or stop the daemon, switch models, inspect status, repair queues, manage plans, store secrets, and keep autonomous work bounded by explicit governance.</p>
+              <b>CTOX</b>
+              <p>The important part is ownership. CTOX keeps responsibility for the unfinished task until it is blocked, handed back, or closed.</p>
             </div>
           </div>
         </div>
@@ -732,15 +723,37 @@ ctox runtime switch &lt;model&gt; quality</pre>
       <section class="install" aria-labelledby="install-title">
         <div class="section-inner">
           <div>
-            <p class="section-kicker">Release binaries</p>
-            <h2 id="install-title">Download the CLI. Use Desktop only if you want a guided local surface.</h2>
+            <p class="section-kicker">Downloads</p>
+            <h2 id="install-title">Download the current release.</h2>
             <p>
-              Releases include native CLI archives for macOS, Linux, and Windows.
-              Desktop installers are published too, but the core product is
-              <code>ctox</code> on your command line.
+              The release includes builds for macOS, Linux, and Windows. The
+              binaries are just the delivery form; CTOX itself is the autonomous
+              work system described above.
             </p>
           </div>
           <div class="release-actions">
+            <nav class="download-strip" aria-label="CTOX downloads">
+              <a class="download" data-asset="ctox-macos-arm64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
+                <strong>macOS Apple Silicon</strong>
+                <span>CTOX archive for M-series Macs</span>
+              </a>
+              <a class="download" data-asset="ctox-macos-x64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
+                <strong>macOS Intel</strong>
+                <span>CTOX archive for x64 Macs</span>
+              </a>
+              <a class="download" data-asset="ctox-linux-x64.tar.gz" href="https://github.com/metric-space-ai/ctox/releases/latest">
+                <strong>Linux x64</strong>
+                <span>CTOX archive for Linux hosts</span>
+              </a>
+              <a class="download" data-asset="ctox-windows-x64.zip" href="https://github.com/metric-space-ai/ctox/releases/latest">
+                <strong>Windows x64</strong>
+                <span>CTOX ZIP for Windows PCs</span>
+              </a>
+            </nav>
+            <p class="release-note">
+              <span id="release-status">Checking latest release assets...</span>
+              <a href="https://github.com/metric-space-ai/ctox/releases/latest">View releases</a>
+            </p>
             <a class="final-link" href="https://github.com/metric-space-ai/ctox/releases/latest">
               Open latest release
             </a>
@@ -758,7 +771,7 @@ ctox runtime switch &lt;model&gt; quality</pre>
 
     <footer>
       <div class="section-inner">
-        <span>CTOX CLI downloads</span>
+        <span>CTOX downloads</span>
         <span>metric-space-ai/ctox</span>
       </div>
     </footer>
