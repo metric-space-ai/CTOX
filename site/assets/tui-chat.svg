@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1034" height="574" viewBox="0 0 1034 574" role="img" aria-label="CTOX TUI - Chat">
+  <rect width="100%" height="100%" rx="12" fill="#0f141a"/>
+  <rect x="0.5" y="0.5" width="1033" height="573" rx="11.5" fill="none" stroke="#2a3642"/>
+  <text x="24" y="23" fill="#7edcff" font-family="SFMono-Regular, ui-monospace, Cascadia Code, Menlo, monospace" font-size="12" font-weight="700">CTOX TUI - Chat</text>
+  <g fill="#d9eef6" font-family="SFMono-Regular, ui-monospace, Cascadia Code, Menlo, monospace" font-size="13" xml:space="preserve">
+<text x="24" y="38"> CTOX</text>
+<text x="24" y="54">GPU telemetry unavailable</text>
+<text x="24" y="70"></text>
+<text x="24" y="86">source local model gemma-4-E4B-it</text>
+<text x="24" y="102">▕                                          ◆             │                                                       ▏</text>
+<text x="24" y="118">context critical 45 stop and rebuild mission context 2 warning(s)</text>
+<text x="24" y="134">──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="24" y="150">Chat Skills Settings</text>
+<text x="24" y="166"> turn ────────────────────────────────────────────────────────────────────────── live ────────────────────────────</text>
+<text x="24" y="182">state loop stopped  idle                                                        • Waiting for the next CTOX event.</text>
+<text x="24" y="198">queue 0 pending  drafts 0                                                       inbox</text>
+<text x="24" y="214">last reply -                                                                    • No channel traffic yet.</text>
+<text x="24" y="230"></text>
+<text x="24" y="246">                                                                                 active ──────────────────────────</text>
+<text x="24" y="262">                                                                                Service offline.</text>
+<text x="24" y="278"></text>
+<text x="24" y="294"> chat ────────────────────────────────────────────────────────────────────────── missions ────────────────────────</text>
+<text x="24" y="310">                                                                                Mission not classified yet.</text>
+<text x="24" y="326">                                                                                active • continuous</text>
+<text x="24" y="342">                                                                                closed</text>
+<text x="24" y="358"></text>
+<text x="24" y="374">                                                                                 queue ───────────────────────────</text>
+<text x="24" y="390">                                                                                No queued drafts.</text>
+<text x="24" y="406"></text>
+<text x="24" y="422"></text>
+<text x="24" y="438"></text>
+<text x="24" y="454"></text>
+<text x="24" y="470">╭ compose ─────────────────────────────────────────────────────────────────────╮⠁ degraded</text>
+<text x="24" y="486">│Type your next instruction.                                                   │Esc interrupt  Tab next page</text>
+<text x="24" y="502">│                                                                              │Ctrl-C quit</text>
+<text x="24" y="518">│                                                                              │</text>
+<text x="24" y="534">╰──────────────────────────────────────────────────────────────────────────────╯</text>
+  </g>
+</svg>

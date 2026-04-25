@@ -514,6 +514,92 @@
         margin: 0;
       }
 
+      .quick-strip {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 1px;
+        margin-top: 26px;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .quick-strip a,
+      .quick-strip div {
+        min-height: 142px;
+        padding: 20px;
+        background: #fff;
+        text-decoration: none;
+      }
+
+      .quick-strip b {
+        display: block;
+        margin-bottom: 10px;
+        font-size: 16px;
+      }
+
+      .quick-strip span {
+        display: block;
+        color: #3f4650;
+        font-size: 14px;
+        line-height: 1.45;
+      }
+
+      .tui-gallery {
+        display: grid;
+        gap: 22px;
+        margin-top: 28px;
+      }
+
+      .tui-shot {
+        margin: 0;
+        padding: 0;
+      }
+
+      .tui-shot img {
+        display: block;
+        width: 100%;
+        height: auto;
+        border: 1px solid #24313d;
+        background: #0f141a;
+      }
+
+      .tui-shot figcaption {
+        margin-top: 9px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      .inventory-list {
+        display: grid;
+        gap: 14px;
+        margin-top: 24px;
+      }
+
+      .inventory-row {
+        display: grid;
+        grid-template-columns: 220px minmax(0, 1fr);
+        gap: 1px;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .inventory-row b,
+      .inventory-row div {
+        padding: 16px;
+        background: #fff;
+      }
+
+      .inventory-row b {
+        font-size: 14px;
+      }
+
+      .inventory-row div {
+        color: #3f4650;
+        font-size: 14px;
+        line-height: 1.65;
+      }
+
       footer {
         padding: 28px 0;
         background: #111418;
@@ -551,6 +637,8 @@
         .harness-row,
         .harness-detail,
         .data-strip,
+        .quick-strip,
+        .inventory-row,
         .prompt-viewer {
           grid-template-columns: 1fr;
         }
@@ -620,6 +708,9 @@
       <aside class="toc" aria-label="Documentation navigation">
         <strong>Docs</strong>
         <nav>
+          <a href="#intake">Giving CTOX Work</a>
+          <a href="#tui">TUI</a>
+          <a href="#desktop">Desktop App</a>
           <a href="#runtime">Runtime</a>
           <a href="#layout">Runtime Layout</a>
           <a href="#commands">CLI Commands</a>
@@ -627,6 +718,7 @@
           <a href="#harness-diagram">Harness Diagram</a>
           <a href="#context">Context Build</a>
           <a href="#self-calls">CTOX Calls CTOX</a>
+          <a href="#skills-tools">Skills & Tools</a>
           <a href="#state-model">State Model</a>
           <a href="#process-mining">Process Mining</a>
           <a href="#work">Work Systems</a>
@@ -637,15 +729,132 @@
       <article class="doc">
         <div class="hero">
           <p class="kicker">Technical Documentation</p>
-          <h1>CTOX daemon, CLI, context loop, and runtime state.</h1>
+          <h1>CTOX daemon, operator surfaces, context loop, and runtime state.</h1>
           <p class="lead">
             This document explains the CTOX runtime as implemented by the
-            daemon and command-line tools: where state lives, how work enters
-            the loop, how context is rebuilt across turns, how CTOX calls its
-            own tools, and how process mining plus the core state model constrain
-            long-running technical work.
+            daemon, TUI, Desktop app, channels, command tools, and packed
+            skills: how work enters the loop, where state lives, how context is
+            rebuilt across turns, how CTOX calls its own tools, and how process
+            mining plus the core state model constrain long-running technical
+            work.
           </p>
         </div>
+
+        <section id="intake">
+          <p class="kicker">Work Intake</p>
+          <h2>How you give CTOX work</h2>
+          <p>
+            CTOX is not normally operated by manually calling every internal
+            command. You give it work through an operator surface, a direct chat
+            submission, an external channel, or a ticket/schedule. The daemon
+            turns that input into durable runtime state before a worker run
+            starts.
+          </p>
+          <div class="quick-strip">
+            <a href="#tui">
+              <b>TUI</b>
+              <span>Open <code>ctox</code> or <code>ctox tui</code>, type the request, configure model/channel settings, and watch active work.</span>
+            </a>
+            <div>
+              <b>Direct chat</b>
+              <span>Use <code>ctox chat</code> for scripts, terminals, and automation that submit one concrete instruction to the running daemon.</span>
+            </div>
+            <div>
+              <b>Mail and channels</b>
+              <span>Use configured email, Jami, Teams, or WebRTC channels when work should arrive as an asynchronous operator thread.</span>
+            </div>
+            <div>
+              <b>Tickets and schedules</b>
+              <span>Use ticket sync, plans, and schedules when work needs approval, follow-up, replay, verification, or long-term ownership.</span>
+            </div>
+          </div>
+          <h3>Direct terminal submission</h3>
+          <pre><code>ctox start
+ctox chat "Investigate the failing checkout worker, open a ticket if it is not a one-line fix, and verify production health." --wait --thread-key ops/checkout --workspace /srv/checkout</code></pre>
+          <p>
+            <code>--wait</code> blocks until the leased worker run finishes.
+            <code>--thread-key</code> ties the request to a durable thread.
+            <code>--workspace</code> gives the worker an explicit working
+            directory. Without <code>--wait</code>, the prompt is queued for the
+            daemon and the caller can disconnect.
+          </p>
+          <h3>Channel and ticket intake</h3>
+          <pre><code># channel-oriented operation
+ctox channel sync --source email
+ctox channel context --thread-key email/customer-ops-204
+
+# ticket-oriented operation
+ctox ticket sync
+ctox ticket dry-run --ticket-key OPS-204
+ctox ticket execute --ticket-key OPS-204</code></pre>
+          <p class="note">
+            The direct commands are useful for operators and tests, but the
+            normal CTOX flow is: input enters through a surface, the daemon
+            records it, the worker receives assembled context, and the result is
+            written back into the same runtime state.
+          </p>
+        </section>
+
+        <section id="tui">
+          <p class="kicker">TUI</p>
+          <h2>The local operator console</h2>
+          <p>
+            The TUI is the fastest way to operate a local CTOX instance. It has
+            a chat composer for new work, a live view of daemon state and queued
+            drafts, a skills view, and settings for model backend, communication
+            paths, secrets, install paths, updates, and process-mining checks.
+          </p>
+          <pre><code>ctox
+ctox tui</code></pre>
+          <div class="tui-gallery" aria-label="CTOX TUI screenshots">
+            <figure class="tui-shot">
+              <img src="assets/tui-chat.svg" alt="CTOX TUI chat screen" />
+              <figcaption>Chat view: submit work, see daemon state, queue pressure, mission status, and channel traffic.</figcaption>
+            </figure>
+            <figure class="tui-shot">
+              <img src="assets/tui-settings.svg" alt="CTOX TUI settings screen" />
+              <figcaption>Settings view: configure runtime backend, model profile, context window, autonomy, secrets, paths, update channel, and process-mining controls.</figcaption>
+            </figure>
+            <figure class="tui-shot">
+              <img src="assets/tui-skills.svg" alt="CTOX TUI skills screen" />
+              <figcaption>Skills view: inspect installed skill sources when a runtime root includes system and packed skills.</figcaption>
+            </figure>
+          </div>
+        </section>
+
+        <section id="desktop">
+          <p class="kicker">Desktop App</p>
+          <h2>Manage local and remote CTOX instances</h2>
+          <p>
+            The Desktop app is an optional management surface. It is not the
+            core product boundary; the daemon is. The Desktop app exists to make
+            installation, remote attachment, and multi-instance operation easier
+            when you run CTOX on your own machine, a server, or several hosts.
+          </p>
+          <div class="grid">
+            <div class="cell">
+              <b>Local instances</b>
+              <p>Create or attach a local CTOX install, launch the TUI, start and stop the daemon, and run configured commands.</p>
+            </div>
+            <div class="cell">
+              <b>Existing remotes</b>
+              <p>Register an already installed remote CTOX instance and open its operator surface through the Desktop app.</p>
+            </div>
+            <div class="cell">
+              <b>Provisioned remotes</b>
+              <p>Use SSH host details to provision a remote install, then keep it in the same instance registry as local installations.</p>
+            </div>
+            <div class="cell">
+              <b>Instance registry</b>
+              <p>Keep multiple CTOX instances visible at once, including local and remote targets, instead of treating every host as a separate manual terminal workflow.</p>
+            </div>
+          </div>
+          <p class="note">
+            The Desktop app can be the easiest installation path. After the
+            instance exists, the same daemon, TUI, SQLite state, channels,
+            tickets, schedules, process mining, and worker context loop are used.
+          </p>
+        </section>
 
         <section id="runtime">
           <p class="kicker">Runtime</p>
@@ -1167,6 +1376,139 @@ ctox queue complete --message-key queue-123 --note "deployed and verified"</code
             process. The important property is that the process has commands,
             persisted events, transition checks, and queryable evidence.
           </p>
+        </section>
+
+        <section id="skills-tools">
+          <p class="kicker">Skills & Tools</p>
+          <h2>Installed system skills, packed skills, and utility tools</h2>
+          <p>
+            Skills are not marketing categories. They are runtime instructions
+            that tell CTOX how to perform recurring classes of work. System
+            skills are part of the CTOX operating layer. Packed skills are
+            bundled capabilities that can be installed or exposed for concrete
+            domains such as deployment, testing, documents, integrations, or
+            security. Utility tools are code packages under <code>tools/</code>
+            that provide supporting runtimes or adapters.
+          </p>
+          <h3>System skills</h3>
+          <div class="inventory-list">
+            <div class="inventory-row">
+              <b>Communication</b>
+              <div><code>applicant-interview</code>, <code>communication-context</code>, <code>interactive-browser</code>, <code>meeting-participant</code>, <code>owner-communication</code>, <code>universal-scraping</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Host operations</b>
+              <div><code>acceptance-verification</code>, <code>change-lifecycle</code>, <code>incident-response</code>, <code>ops-insight</code>, <code>recovery-assurance</code>, <code>reliability-ops</code>, <code>service-deployment</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Knowledge bootstrap</b>
+              <div><code>discovery-graph</code>, <code>skillbook-runbook-bootstrap</code>, <code>system-onboarding</code>, <code>tabular-knowledge-bootstrap</code>, <code>ticket-dataset-knowledge-bootstrap</code>, <code>ticket-operating-model-bootstrap</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Mission orchestration</b>
+              <div><code>automation-engineering</code>, <code>follow-up-orchestrator</code>, <code>plan-orchestrator</code>, <code>queue-cleanup</code>, <code>queue-orchestrator</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Process mining</b>
+              <div><code>process-mining-diagnostics</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Review</b>
+              <div><code>external-review</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Security and access</b>
+              <div><code>privilege-escalation</code>, <code>secret-hygiene</code>, <code>secret-management</code>, <code>security-posture</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Skill meta</b>
+              <div><code>canonical-delivery-template</code>, <code>canonical-ops-template</code>, <code>dataset-skill-creator</code>, <code>self-improving-review</code>, <code>skill-creator</code>, <code>skill-installer</code>, <code>skill-lifecycle</code>, <code>skill-updater</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Ticket integration</b>
+              <div><code>ticket-access-and-secrets</code>, <code>ticket-knowledge</code>, <code>ticket-knowledge-maintenance</code>, <code>ticket-monitoring-ingest</code></div>
+            </div>
+          </div>
+          <h3>Packed skills</h3>
+          <div class="inventory-list">
+            <div class="inventory-row">
+              <b>Content</b>
+              <div><code>doc</code>, <code>imagegen</code>, <code>pdf</code>, <code>screenshot</code>, <code>slides</code>, <code>sora</code>, <code>speech</code>, <code>spreadsheet</code>, <code>transcribe</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Deployment</b>
+              <div><code>cloudflare-deploy</code>, <code>netlify-deploy</code>, <code>render-deploy</code>, <code>vercel-deploy</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Design</b>
+              <div><code>figma</code>, <code>figma-implement-design</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Development</b>
+              <div><code>aspnet-core</code>, <code>chatgpt-apps</code>, <code>develop-web-game</code>, <code>frontend-skill</code>, <code>jupyter-notebook</code>, <code>winui-app</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Git</b>
+              <div><code>gh-address-comments</code>, <code>gh-fix-ci</code>, <code>yeet</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Integration</b>
+              <div><code>linear</code>, <code>notion-knowledge-capture</code>, <code>notion-meeting-intelligence</code>, <code>notion-research-documentation</code>, <code>notion-spec-to-implementation</code>, <code>sentry</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Reference</b>
+              <div><code>openai-docs</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Security</b>
+              <div><code>security-best-practices</code>, <code>security-ownership-map</code>, <code>security-threat-model</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Testing</b>
+              <div><code>playwright</code>, <code>playwright-interactive</code></div>
+            </div>
+            <div class="inventory-row">
+              <b>Vendor</b>
+              <div><code>zammad-printengine-monitoring-sim</code>, <code>zammad-rest</code></div>
+            </div>
+          </div>
+          <h3>Utility tool packages</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tool package</th>
+                  <th>Role</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td><code>tools/agent-runtime</code></td>
+                  <td>Auxiliary agent runtime code used by CTOX-owned execution paths.</td>
+                </tr>
+                <tr>
+                  <td><code>tools/doc-stack</code></td>
+                  <td>Document-processing support stack.</td>
+                </tr>
+                <tr>
+                  <td><code>tools/google-fetch</code></td>
+                  <td>Google-facing fetch adapter code.</td>
+                </tr>
+                <tr>
+                  <td><code>tools/pdf-parse</code></td>
+                  <td>PDF parsing utility package.</td>
+                </tr>
+                <tr>
+                  <td><code>tools/speaches-runtime</code></td>
+                  <td>Speech runtime support package.</td>
+                </tr>
+                <tr>
+                  <td><code>tools/web-stack</code></td>
+                  <td>Web automation and browsing support stack.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section id="state-model">
