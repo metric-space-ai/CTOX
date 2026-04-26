@@ -2408,7 +2408,11 @@ fn run_process_mining_self_diagnosis(conn: &Connection, limit: i64) -> Result<Va
     subsystems.push(diagnose_knowledge(conn)?);
     subsystems.push(diagnose_lcm(conn)?);
     subsystems.push(diagnose_queue(conn)?);
-    subsystems.push(diagnose_founder_review(conn)?);
+    let current_scan_at = state_summary
+        .get("scanned_at")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    subsystems.push(diagnose_founder_review(conn, current_scan_at.as_deref())?);
     subsystems.push(diagnose_tickets(conn)?);
     subsystems.push(diagnose_schedules(conn)?);
 
@@ -2705,9 +2709,9 @@ fn diagnose_queue(conn: &Connection) -> Result<Value> {
     ))
 }
 
-fn diagnose_founder_review(conn: &Connection) -> Result<Value> {
+fn diagnose_founder_review(conn: &Connection, current_scan_at: Option<&str>) -> Result<Value> {
     let reviews = table_count(conn, "communication_founder_reply_reviews")?;
-    let rejected_founder = if table_exists(conn, "ctox_pm_core_transition_audit")? {
+    let historical_rejected_founder = if table_exists(conn, "ctox_pm_core_transition_audit")? {
         conn.query_row(
             r#"
             SELECT COUNT(*)
@@ -2721,7 +2725,26 @@ fn diagnose_founder_review(conn: &Connection) -> Result<Value> {
     } else {
         0
     };
-    let critical_review_violations = if table_exists(conn, "ctox_pm_state_violations")? {
+    let current_rejected_founder = if let Some(scan_at) = current_scan_at {
+        if table_exists(conn, "ctox_pm_core_transition_audit")? {
+            conn.query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM ctox_pm_core_transition_audit
+                WHERE entity_type = 'FounderCommunication'
+                  AND accepted = 0
+                  AND scanned_at = ?1
+                "#,
+                params![scan_at],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            0
+        }
+    } else {
+        historical_rejected_founder
+    };
+    let historical_critical_review_violations = if table_exists(conn, "ctox_pm_state_violations")? {
         conn.query_row(
             r#"
             SELECT COUNT(*)
@@ -2739,6 +2762,29 @@ fn diagnose_founder_review(conn: &Connection) -> Result<Value> {
     } else {
         0
     };
+    let current_critical_review_violations = if let Some(scan_at) = current_scan_at {
+        if table_exists(conn, "ctox_pm_state_violations")? {
+            conn.query_row(
+                r#"
+                SELECT COUNT(*)
+                FROM ctox_pm_state_violations
+                WHERE severity = 'critical'
+                  AND detected_at = ?1
+                  AND (
+                      violation_code LIKE 'founder_%'
+                      OR message LIKE '%Founder%'
+                      OR message LIKE '%Communication%'
+                  )
+                "#,
+                params![scan_at],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            0
+        }
+    } else {
+        historical_critical_review_violations
+    };
     let mut findings = Vec::new();
     if reviews == 0 {
         findings.push(json!({
@@ -2747,11 +2793,17 @@ fn diagnose_founder_review(conn: &Connection) -> Result<Value> {
             "message": "No founder reply review rows are present."
         }));
     }
-    if rejected_founder > 0 || critical_review_violations > 0 {
+    if current_rejected_founder > 0 || current_critical_review_violations > 0 {
         findings.push(json!({
             "severity": "critical",
             "code": "founder_review_gate_rejections",
-            "message": "Founder communication has rejected or critical review-gate evidence."
+            "message": "The current process-mining scan contains rejected or critical founder review-gate evidence."
+        }));
+    } else if historical_rejected_founder > 0 || historical_critical_review_violations > 0 {
+        findings.push(json!({
+            "severity": "warning",
+            "code": "historical_founder_review_gate_rejections",
+            "message": "Historical founder review-gate violations remain in the forensic ledger, but the current scan did not reproduce them."
         }));
     }
     let status = status_from_findings(&findings);
@@ -2761,8 +2813,11 @@ fn diagnose_founder_review(conn: &Connection) -> Result<Value> {
         "Founder communication must be blocked unless reviewed with matching content and recipients.",
         json!({
             "founder_reply_reviews": reviews,
-            "rejected_founder_transition_audits": rejected_founder,
-            "critical_founder_review_violations": critical_review_violations,
+            "current_scan_at": current_scan_at,
+            "current_rejected_founder_transition_audits": current_rejected_founder,
+            "current_critical_founder_review_violations": current_critical_review_violations,
+            "historical_rejected_founder_transition_audits": historical_rejected_founder,
+            "historical_critical_founder_review_violations": historical_critical_review_violations,
         }),
         findings,
     ))
@@ -6353,6 +6408,54 @@ mod tests {
             names.contains(&"schedules_and_commitments".to_string()),
             "{report}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn self_diagnose_keeps_historical_founder_violations_noncritical() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("ctox.sqlite3");
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE communication_founder_reply_reviews (
+                review_id TEXT PRIMARY KEY,
+                verdict TEXT NOT NULL
+            );
+            "#,
+        )?;
+        ensure_process_mining_schema(&conn, &db_path)?;
+        conn.execute(
+            "INSERT INTO communication_founder_reply_reviews (review_id, verdict) VALUES ('r1', 'approved')",
+            [],
+        )?;
+        conn.execute(
+            r#"
+            INSERT INTO ctox_pm_state_violations (
+                violation_id, event_id, case_id, violation_code, severity, message, detected_at
+            )
+            VALUES (
+                'old-founder-send', 'old-event', 'old-case',
+                'founder_send_requires_review_audit', 'critical',
+                'old founder communication review failure', '2026-04-25T22:54:55Z'
+            )
+            "#,
+            [],
+        )?;
+
+        let report = run_process_mining_self_diagnosis(&conn, 100)?;
+        let founder_status = report
+            .get("subsystems")
+            .and_then(Value::as_array)
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("name").and_then(Value::as_str) == Some("founder_communication_review")
+                })
+            })
+            .and_then(|item| item.get("status"))
+            .and_then(Value::as_str);
+
+        assert_eq!(founder_status, Some("warning"), "{report}");
         Ok(())
     }
 
