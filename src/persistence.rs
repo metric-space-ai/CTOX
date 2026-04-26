@@ -28,7 +28,7 @@ pub fn sqlite_busy_timeout_duration() -> Duration {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|value| (1..=5_000).contains(value))
-        .unwrap_or(250);
+        .unwrap_or(5_000);
     Duration::from_millis(millis)
 }
 

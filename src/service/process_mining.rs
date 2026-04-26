@@ -3296,6 +3296,19 @@ fn upsert_default_core_transition_rules(conn: &Connection) -> Result<()> {
             json!({"core_transition": false, "records_runtime_skill_registry": true}),
         ),
         (
+            "strategic-directive-telemetry",
+            20,
+            Some("=strategic_directives"),
+            None,
+            None,
+            None,
+            "telemetry",
+            "StrategicDirective",
+            "P1RuntimeSafety",
+            "telemetry.strategy.directive",
+            json!({"core_transition": false, "records_runtime_strategy": true}),
+        ),
+        (
             "communication-founder",
             10,
             Some("communication_founder"),
@@ -5699,6 +5712,70 @@ mod tests {
         assert_eq!(account_telemetry, 1);
         assert_eq!(thread_telemetry, 1);
         assert_eq!(routing_core, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn strategic_directives_are_explicit_runtime_telemetry() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("ctox.sqlite3");
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE strategic_directives (
+                directive_id TEXT PRIMARY KEY,
+                conversation_id INTEGER NOT NULL,
+                thread_key TEXT,
+                directive_kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body_text TEXT NOT NULL,
+                status TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                previous_directive_id TEXT,
+                author TEXT NOT NULL,
+                decided_by TEXT,
+                decision_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+        ensure_process_mining_schema(&conn, &db_path)?;
+        conn.execute(
+            r#"
+            INSERT INTO strategic_directives (
+                directive_id, conversation_id, thread_key, directive_kind,
+                title, body_text, status, revision, previous_directive_id,
+                author, decided_by, decision_reason, created_at, updated_at
+            )
+            VALUES (
+                'sdir-test', 42, 'queue/follow-up-test', 'mission',
+                'Runtime mission', 'Keep canonical direction in SQLite.',
+                'active', 1, NULL, 'ctox', 'ctox', 'test',
+                '2026-04-26T00:00:00Z', '2026-04-26T00:00:00Z'
+            )
+            "#,
+            [],
+        )?;
+
+        let summary = scan_core_state_machine_violations(&conn, 100)?;
+        let unmapped = summary
+            .get("unmapped")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        let strategy_telemetry: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM ctox_pm_event_transition_coverage
+            WHERE rule_id = 'strategic-directive-telemetry'
+              AND mapping_kind = 'telemetry'
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(unmapped, 0, "{summary}");
+        assert_eq!(strategy_telemetry, 1);
         Ok(())
     }
 
