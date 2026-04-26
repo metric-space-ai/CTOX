@@ -832,19 +832,16 @@ ctox chat "Check this CTOX installation, summarize what is configured, and list 
               <thead>
                 <tr>
                   <th>Installer flag</th>
-                  <th>Environment variable</th>
                   <th>When to use it</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <td><code>--backend=&lt;cuda|metal|cpu&gt;</code></td>
-                  <td><code>CTOX_BACKEND</code></td>
                   <td>Force local inference backend only when auto-detection is wrong or CPU fallback is intentional. <code>cuda</code> is for NVIDIA Linux hosts; <code>metal</code> is for Apple Silicon macOS.</td>
                 </tr>
                 <tr>
                   <td><code>--model=&lt;model&gt;</code></td>
-                  <td><code>CTOX_MODEL</code></td>
                   <td>Seed the default local model profile. This is not required for API usage and can be changed later in the TUI.</td>
                 </tr>
               </tbody>
@@ -856,34 +853,28 @@ ctox chat "Check this CTOX installation, summarize what is configured, and list 
               <thead>
                 <tr>
                   <th>Installer flag</th>
-                  <th>Environment variable</th>
                   <th>What it changes</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <td><code>--install-root=&lt;path&gt;</code></td>
-                  <td><code>CTOX_INSTALL_ROOT</code></td>
                   <td>Where the managed CTOX installation is stored. Use this for nonstandard filesystem layouts or multiple installs on one host.</td>
                 </tr>
                 <tr>
                   <td><code>--state-root=&lt;path&gt;</code></td>
-                  <td><code>CTOX_STATE_ROOT</code></td>
                   <td>Where runtime state is stored, including the SQLite database. Use this when state must live on a specific volume or service account path.</td>
                 </tr>
                 <tr>
                   <td><code>--cache-root=&lt;path&gt;</code></td>
-                  <td><code>CTOX_CACHE_ROOT</code></td>
                   <td>Where downloaded models and cache files are stored. Use this when the default home cache does not have enough disk space.</td>
                 </tr>
                 <tr>
                   <td><code>--bin-dir=&lt;path&gt;</code></td>
-                  <td><code>CTOX_BIN_DIR</code></td>
                   <td>Where the <code>ctox</code> command symlink is placed. Use this if <code>~/.local/bin</code> is not on <code>PATH</code>.</td>
                 </tr>
                 <tr>
                   <td><code>--repo</code>, <code>--branch</code>, <code>--rebuild</code></td>
-                  <td><code>CTOX_REPO</code>, <code>CTOX_BRANCH</code></td>
                   <td>Development and controlled-rollout options for forks, non-default branches, or rebuilds. Normal users should not need them.</td>
                 </tr>
               </tbody>
@@ -907,29 +898,35 @@ ctox update rollback</code></pre>
           <h2>Runtime, model, context, communication, and paths</h2>
           <p>
             Most configuration should be done in the TUI. CTOX persists runtime
-            settings and also reads environment overrides. The important split
-            is model source: either API-backed models through provider keys, or
-            local inference through the integrated runtime.
+            settings in its own state. The important split is model source:
+            either API-backed models through stored provider keys, or local
+            inference through the integrated runtime.
           </p>
           <h3>API model example</h3>
-          <pre><code>export CTOX_CHAT_SOURCE=api
-export CTOX_API_PROVIDER=openai
-export OPENAI_API_KEY="sk-..."
-export CTOX_CHAT_MODEL=gpt-5.4-mini
+          <pre><code>ctox secret put --scope credentials --name OPENAI_API_KEY --value "sk-..."
+ctox
+
+# In TUI Settings:
+# Chat Source: api
+# API Provider: openai
+# Chat Model: gpt-5.4-mini
 
 ctox start
 ctox chat "Check this CTOX installation and confirm that the API model is reachable."</code></pre>
           <p>
-            For persistent use, enter the provider and key in the TUI instead
-            of leaving credentials in shell history.
+            The API key can also be entered directly in the TUI. Do not use
+            global shell exports for normal CTOX configuration.
           </p>
           <h3>CUDA 27B local example</h3>
           <pre><code>curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
   | bash -s -- --backend=cuda --model=Qwen/Qwen3.5-27B
 
-export CTOX_CHAT_SOURCE=local
-export CTOX_LOCAL_RUNTIME=candle
-export CTOX_CHAT_MODEL=Qwen/Qwen3.5-27B
+ctox
+
+# In TUI Settings:
+# Chat Source: local
+# Local Runtime: candle
+# Chat Model: Qwen/Qwen3.5-27B
 
 ctox doctor
 ctox runtime switch Qwen/Qwen3.5-27B quality --context 128k</code></pre>
@@ -943,49 +940,49 @@ ctox runtime switch Qwen/Qwen3.5-27B quality --context 128k</code></pre>
             <table>
               <thead>
                 <tr>
-                  <th>Setting</th>
+                  <th>TUI setting</th>
                   <th>Typical values</th>
                   <th>Purpose</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
-                  <td><code>CTOX_CHAT_SOURCE</code></td>
+                  <td>Chat source</td>
                   <td><code>local</code>, <code>api</code></td>
                   <td>Select local integrated inference or API model execution.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_API_PROVIDER</code></td>
+                  <td>API provider</td>
                   <td><code>openai</code>, <code>anthropic</code>, <code>openrouter</code>, <code>minimax</code></td>
-                  <td>API provider when <code>CTOX_CHAT_SOURCE=api</code>.</td>
+                  <td>Provider used when the chat source is set to <code>api</code>.</td>
                 </tr>
                 <tr>
-                  <td><code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, <code>OPENROUTER_API_KEY</code>, <code>MINIMAX_API_KEY</code></td>
+                  <td>Provider credential</td>
                   <td>Provider credentials</td>
-                  <td>Keys are configured through the TUI or secret-aware runtime settings.</td>
+                  <td>Keys are configured through the TUI or CTOX secret store, not global shell exports.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_LOCAL_RUNTIME</code></td>
+                  <td>Local runtime</td>
                   <td><code>candle</code></td>
                   <td>Local inference runtime selection.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_CHAT_MODEL</code></td>
+                  <td>Chat model</td>
                   <td>Local or API model id</td>
                   <td>Active chat model. API examples include <code>gpt-5.4</code>, <code>gpt-5.4-mini</code>, <code>anthropic/claude-sonnet-4.6</code>, and MiniMax profiles supported by the build.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_CHAT_MODEL_MAX_CONTEXT</code></td>
+                  <td>Context window</td>
                   <td><code>32768</code>, <code>65536</code>, <code>131072</code>, <code>262144</code></td>
                   <td>Target context window for prompt assembly and runtime planning.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_CHAT_SKILL_PRESET</code>, <code>CTOX_CHAT_LOCAL_PRESET</code></td>
+                  <td>Skill and runtime preset</td>
                   <td><code>Standard</code>, <code>Simple</code>, <code>Quality</code>, <code>Performance</code></td>
                   <td>Skill loading and local runtime performance profile.</td>
                 </tr>
                 <tr>
-                  <td><code>CTOX_AUTONOMY_LEVEL</code></td>
+                  <td>Autonomy level</td>
                   <td><code>progressive</code>, <code>balanced</code>, <code>defensive</code></td>
                   <td>Controls how aggressively CTOX can continue, approve low-risk operations, and ask for confirmation.</td>
                 </tr>

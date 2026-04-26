@@ -69,27 +69,37 @@ curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.s
 
 First-install overrides:
 
-| Flag | Environment variable | When to use it |
-| --- | --- | --- |
-| `--backend=<cuda\|metal\|cpu>` | `CTOX_BACKEND` | Forces the local inference backend. Leave it unset unless auto-detection is wrong or you intentionally want CPU fallback. `cuda` is for NVIDIA Linux hosts, `metal` is for Apple Silicon macOS, and `cpu` is the slow fallback. |
-| `--model=<model>` | `CTOX_MODEL` | Seeds the default local model profile. Do not use this during a first install unless you know the exact model id is supported by the current build; model selection can be changed later in the TUI. |
+| Flag | When to use it |
+| --- | --- |
+| `--backend=<cuda\|metal\|cpu>` | Forces the local inference backend. Leave it unset unless auto-detection is wrong or you intentionally want CPU fallback. `cuda` is for NVIDIA Linux hosts, `metal` is for Apple Silicon macOS, and `cpu` is the slow fallback. |
+| `--model=<model>` | Seeds the default local model profile. Do not use this during a first install unless you know the exact model id is supported by the current build; model selection can be changed later in the TUI. |
 
 ### Example: API model with key
 
 Use this when CTOX should call an API-backed model instead of local inference:
 
 ```sh
-export CTOX_CHAT_SOURCE=api
-export CTOX_API_PROVIDER=openai
-export OPENAI_API_KEY="sk-..."
-export CTOX_CHAT_MODEL=gpt-5.4-mini
+ctox secret put --scope credentials --name OPENAI_API_KEY --value "sk-..."
+ctox
+```
 
+In the TUI settings, select:
+
+```text
+Chat Source: api
+API Provider: openai
+Chat Model: gpt-5.4-mini
+```
+
+Then start the daemon:
+
+```sh
 ctox start
 ctox chat "Check this CTOX installation and confirm that the API model is reachable."
 ```
 
-For a persistent setup, enter the provider and key in the TUI instead of leaving
-the key in shell history.
+You can also enter the API key directly in the TUI. Do not use global shell
+exports for normal CTOX configuration.
 
 ### Example: supported 27B model on CUDA
 
@@ -99,11 +109,20 @@ model artifacts for `Qwen/Qwen3.5-27B`:
 ```sh
 curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
   | bash -s -- --backend=cuda --model=Qwen/Qwen3.5-27B
+ctox
+```
 
-export CTOX_CHAT_SOURCE=local
-export CTOX_LOCAL_RUNTIME=candle
-export CTOX_CHAT_MODEL=Qwen/Qwen3.5-27B
+In the TUI settings, select:
 
+```text
+Chat Source: local
+Local Runtime: candle
+Chat Model: Qwen/Qwen3.5-27B
+```
+
+Then verify and switch:
+
+```sh
 ctox doctor
 ctox runtime switch Qwen/Qwen3.5-27B quality --context 128k
 ```
@@ -113,14 +132,14 @@ If the CUDA backend, model weights, or runtime artifacts are missing,
 
 Advanced installer options:
 
-| Flag | Environment variable | What it changes |
-| --- | --- | --- |
-| `--install-root=<path>` | `CTOX_INSTALL_ROOT` | Where the managed CTOX installation is stored. Use this for nonstandard filesystem layouts or multiple installs on one host. |
-| `--state-root=<path>` | `CTOX_STATE_ROOT` | Where runtime state is stored, including the SQLite database. Use this when state must live on a specific volume or service account path. |
-| `--cache-root=<path>` | `CTOX_CACHE_ROOT` | Where downloaded models and cache files are stored. Use this when the default home cache does not have enough disk space. |
-| `--bin-dir=<path>` | `CTOX_BIN_DIR` | Where the `ctox` command symlink is placed. Use this if `~/.local/bin` is not on `PATH` or your system uses a different user-local binary directory. |
-| `--repo=<url>` | `CTOX_REPO` | Installs from a fork or custom repository. Normal users should keep the default repository. |
-| `--branch=<branch>` | `CTOX_BRANCH` | Installs from a non-default branch. This is mainly for development, testing, or controlled rollout of a fork. |
+| Flag | What it changes |
+| --- | --- |
+| `--install-root=<path>` | Where the managed CTOX installation is stored. Use this for nonstandard filesystem layouts or multiple installs on one host. |
+| `--state-root=<path>` | Where runtime state is stored, including the SQLite database. Use this when state must live on a specific volume or service account path. |
+| `--cache-root=<path>` | Where downloaded models and cache files are stored. Use this when the default home cache does not have enough disk space. |
+| `--bin-dir=<path>` | Where the `ctox` command symlink is placed. Use this if `~/.local/bin` is not on `PATH` or your system uses a different user-local binary directory. |
+| `--repo=<url>` | Installs from a fork or custom repository. Normal users should keep the default repository. |
+| `--branch=<branch>` | Installs from a non-default branch. This is mainly for development, testing, or controlled rollout of a fork. |
 
 ## First Run
 
@@ -172,15 +191,15 @@ through the TUI, `ctox chat`, configured channels, tickets, and schedules.
 CTOX can run with API-backed models or with the integrated local inference path,
 depending on the configured runtime.
 
-Typical configuration is done in the TUI. Important settings include:
+Typical configuration is done in the TUI. Important runtime settings include:
 
-- `CTOX_CHAT_SOURCE=api|local`
-- `CTOX_API_PROVIDER=openai|anthropic|openrouter|minimax`
-- provider API keys such as `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`
-- `CTOX_LOCAL_RUNTIME`
-- `CTOX_CHAT_MODEL`
-- `CTOX_CHAT_MODEL_MAX_CONTEXT`
-- `CTOX_AUTONOMY_LEVEL`
+- chat source: `api` or `local`
+- API provider: `openai`, `anthropic`, `openrouter`, or `minimax`
+- provider credentials, stored through the TUI or CTOX secret store
+- local runtime
+- active chat model
+- context window
+- autonomy level
 
 See the technical documentation for the current model/runtime details:
 <https://metric-space-ai.github.io/ctox/docs.html#configuration>
