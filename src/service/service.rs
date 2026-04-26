@@ -1922,9 +1922,8 @@ fn service_ipc_timeout(request: &ServiceIpcRequest) -> Duration {
     match request {
         ServiceIpcRequest::Status => Duration::from_secs(5),
         ServiceIpcRequest::ScrapeApi { .. } => Duration::from_millis(750),
-        ServiceIpcRequest::ChatSubmit { .. } | ServiceIpcRequest::Stop => {
-            Duration::from_millis(300)
-        }
+        ServiceIpcRequest::ChatSubmit { .. } => Duration::from_secs(10),
+        ServiceIpcRequest::Stop => Duration::from_secs(2),
     }
 }
 
@@ -7908,6 +7907,55 @@ mod tests {
         assert!(status.running);
         assert_eq!(status.pid, Some(5151));
         assert_eq!(status.recent_events, vec!["slow status ok".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn service_chat_submit_socket_tolerates_slow_accept_response() {
+        let root = std::path::PathBuf::from(format!(
+            "/tmp/ctox-chat-slow-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let socket_path = service_socket_path(&root);
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let response = serde_json::to_string(&ServiceIpcResponse::Accepted(AcceptedResponse {
+            accepted: true,
+            status: "started".to_string(),
+        }))
+        .unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            reader.read_line(&mut request).unwrap();
+            assert!(request.contains("\"chat_submit\""));
+            std::thread::sleep(Duration::from_secs(1));
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.write_all(b"\n").unwrap();
+            stream.flush().unwrap();
+        });
+
+        let accepted = send_service_ipc_request(
+            &root,
+            ServiceIpcRequest::ChatSubmit {
+                prompt: "Run an internal harness self-check.".to_string(),
+                thread_key: None,
+            },
+        )
+        .unwrap();
+        handle.join().unwrap();
+
+        match accepted {
+            ServiceIpcResponse::Accepted(response) => {
+                assert!(response.accepted);
+                assert_eq!(response.status, "started");
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     #[test]
