@@ -6140,7 +6140,7 @@ fn mission_is_internal_harness_or_forensics(mission: &lcm::MissionStateRecord) -
         mission.mission, mission.blocker, mission.next_slice, mission.done_gate
     )
     .to_ascii_lowercase();
-    (haystack.contains("harness")
+    let internal_harness = (haystack.contains("harness")
         || haystack.contains("forensics")
         || haystack.contains("process-mining")
         || haystack.contains("smoke")
@@ -6150,7 +6150,10 @@ fn mission_is_internal_harness_or_forensics(mission: &lcm::MissionStateRecord) -
             || haystack.contains("internal")
             || haystack.contains("interner")
             || haystack.contains("knowledge-put")
-            || haystack.contains("harness_forensics"))
+            || haystack.contains("harness_forensics"));
+    let recursive_strategy_gate =
+        haystack.contains("continue mission") && haystack.contains("strategic direction setup");
+    internal_harness || recursive_strategy_gate
 }
 
 fn mission_watchdog_terminal_follow_up_exists(
@@ -9077,6 +9080,38 @@ mod tests {
                 turn_loop::CHAT_CONVERSATION_ID,
                 lcm::ContinuityKind::Focus,
                 "## Status\n+ Mission: Codex internal no-op smoke after watchdog fix\n+ Mission state: active\n+ Continuation mode: continuous\n+ Trigger intensity: hot\n## Blocker\n+ Current blocker: none\n## Next\n+ Next slice: Codex internal no-op smoke after watchdog fix\n## Done / Gate\n+ Done gate: only close the mission when current evidence clearly satisfies the gate\n+ Closure confidence: low\n",
+            )
+            .expect("failed to update focus");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("service state poisoned");
+            shared.last_progress_epoch_secs = current_epoch_secs().saturating_sub(120);
+        }
+
+        monitor_mission_continuity(&root, &state).expect("mission watcher should succeed");
+
+        let tasks = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
+            .expect("failed to list queue tasks");
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn mission_watcher_skips_recursive_strategy_direction_gate() {
+        let root = temp_root("ctox-mission-watcher-recursive-strategy-gate");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+        let _ = engine
+            .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
+            .expect("failed to init continuity");
+        engine
+            .continuity_apply_diff(
+                turn_loop::CHAT_CONVERSATION_ID,
+                lcm::ContinuityKind::Focus,
+                "## Status\n+ Mission: Continue mission Strategic direction setup\n+ Mission state: active\n+ Continuation mode: continuous\n+ Trigger intensity: hot\n## Blocker\n+ Current blocker: none\n## Next\n+ Next slice: reconstruct the next concrete slice from continuity\n## Done / Gate\n+ Done gate: only close the mission when current evidence clearly satisfies the gate\n+ Closure confidence: low\n",
             )
             .expect("failed to update focus");
         let state = Arc::new(Mutex::new(SharedState::default()));
