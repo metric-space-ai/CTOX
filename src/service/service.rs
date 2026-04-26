@@ -3712,6 +3712,9 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
         if mission_waits_for_external_approval(mission) {
             return false;
         }
+        if mission_is_internal_harness_or_forensics(mission) {
+            return false;
+        }
         if idle_secs < mission_idle_tolerance_secs(mission) {
             return false;
         }
@@ -6126,6 +6129,24 @@ fn mission_idle_tolerance_secs(mission: &lcm::MissionStateRecord) -> u64 {
             _ => 120,
         },
     }
+}
+
+fn mission_is_internal_harness_or_forensics(mission: &lcm::MissionStateRecord) -> bool {
+    let haystack = format!(
+        "{}\n{}\n{}\n{}",
+        mission.mission, mission.blocker, mission.next_slice, mission.done_gate
+    )
+    .to_ascii_lowercase();
+    (haystack.contains("harness")
+        || haystack.contains("forensics")
+        || haystack.contains("process-mining")
+        || haystack.contains("smoke-test")
+        || haystack.contains("smoke compliance"))
+        && (haystack.contains("codex")
+            || haystack.contains("internal")
+            || haystack.contains("interner")
+            || haystack.contains("knowledge-put")
+            || haystack.contains("harness_forensics"))
 }
 
 fn mission_task_priority(mission: &lcm::MissionStateRecord) -> &'static str {
@@ -8911,6 +8932,38 @@ mod tests {
                 turn_loop::CHAT_CONVERSATION_ID,
                 lcm::ContinuityKind::Focus,
                 "## Status\n+ Mission: Monitor inbound non-queue channels for explicit owner approval/access-grant confirmation for Vercel team/project access.\n+ Mission state: active\n+ Continuation mode: continuous\n+ Trigger intensity: hot\n## Blocker\n+ Current blocker: blocked_on_user | waiting for explicit inbound owner approval evidence.\n## Next\n+ Next slice: continue monitoring inbound non-queue channels (jami/email) for approval evidence.\n## Done / Gate\n+ Done gate: explicit approval evidence is visible before deploy retry.\n+ Closure confidence: low\n",
+            )
+            .expect("failed to update focus");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("service state poisoned");
+            shared.last_progress_epoch_secs = current_epoch_secs().saturating_sub(120);
+        }
+
+        monitor_mission_continuity(&root, &state).expect("mission watcher should succeed");
+
+        let tasks = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
+            .expect("failed to list queue tasks");
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn mission_watcher_skips_internal_harness_forensics_missions() {
+        let root = temp_root("ctox-mission-watcher-internal-harness");
+        std::fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let engine = lcm::LcmEngine::open(
+            &root.join("runtime/ctox.sqlite3"),
+            lcm::LcmConfig::default(),
+        )
+        .expect("failed to open lcm");
+        let _ = engine
+            .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
+            .expect("failed to init continuity");
+        engine
+            .continuity_apply_diff(
+                turn_loop::CHAT_CONVERSATION_ID,
+                lcm::ContinuityKind::Focus,
+                "## Status\n+ Mission: Interner Codex harness smoke for process-mining forensics.\n+ Mission state: active\n+ Continuation mode: continuous\n+ Trigger intensity: hot\n## Blocker\n+ Current blocker: Pending explicit smoke-compliance persistence confirmation.\n## Next\n+ Next slice: persist one harness_forensics knowledge-put note.\n## Done / Gate\n+ Done gate: harness_forensics knowledge-put note exists.\n+ Closure confidence: low\n",
             )
             .expect("failed to update focus");
         let state = Arc::new(Mutex::new(SharedState::default()));
