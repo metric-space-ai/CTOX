@@ -272,6 +272,10 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         render_settings_update(frame, app, outer[1]);
         return;
     }
+    if app.settings_view == SettingsView::HarnessMining {
+        render_settings_harness_mining(frame, app, outer[1]);
+        return;
+    }
     if app.settings_view == SettingsView::Secrets {
         render_secrets(frame, app, outer[1]);
         return;
@@ -449,6 +453,186 @@ fn render_settings_update(frame: &mut Frame, app: &App, area: ratatui::layout::R
         Paragraph::new(Span::styled(footer, Style::default().fg(Color::DarkGray))),
         split[3],
     );
+}
+
+fn render_settings_harness_mining(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    use crate::service::harness_mining;
+    let snap = harness_mining::ui_snapshot(&app.root);
+
+    let body = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    if let Some(err) = &snap.error {
+        lines.push(Line::from(Span::styled(
+            format!("status: unavailable — {err}"),
+            Style::default().fg(Color::Red),
+        )));
+    } else if !snap.samples_known {
+        lines.push(Line::from(Span::styled(
+            "status: snapshot unavailable",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.push(harness_status_line(&snap));
+        lines.push(Line::from(""));
+        lines.push(harness_metric_line(
+            "conformance (preventive)",
+            &format!("{:.1}%", snap.preventive_fitness * 100.0),
+            snap.preventive_fitness >= 0.95,
+        ));
+        lines.push(harness_metric_line(
+            "conformance (trigger)",
+            &format!("{:.1}%", snap.trigger_fitness * 100.0),
+            snap.trigger_fitness >= 0.95,
+        ));
+        lines.push(harness_metric_line(
+            "concept drift",
+            if snap.drift_detected {
+                "detected"
+            } else {
+                "stable"
+            },
+            !snap.drift_detected,
+        ));
+        lines.push(harness_metric_line(
+            "stuck cases (≥5 retries)",
+            &snap.stuck_case_count.to_string(),
+            snap.stuck_case_count == 0,
+        ));
+        lines.push(harness_metric_line(
+            "trace variants",
+            &snap.variant_count.to_string(),
+            true,
+        ));
+        if snap.dominant_variant_share > 0.0 {
+            lines.push(harness_metric_line(
+                "dominant variant share",
+                &format!("{:.0}%", snap.dominant_variant_share * 100.0),
+                snap.dominant_variant_share < 0.7,
+            ));
+        }
+        if snap.worst_state_p95_seconds > 0.0 {
+            lines.push(harness_metric_line(
+                "worst state p95 dwell",
+                &format_duration(snap.worst_state_p95_seconds),
+                snap.worst_state_p95_seconds < 600.0,
+            ));
+        }
+        if !snap.stuck_top_violation_codes.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "top violation codes:",
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            for code in &snap.stuck_top_violation_codes {
+                lines.push(Line::from(Span::styled(
+                    format!("  • {code}"),
+                    Style::default().fg(Color::White),
+                )));
+            }
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                pane_block().borders(Borders::TOP).title(Span::styled(
+                    " harness health ",
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            )
+            .wrap(Wrap { trim: false }),
+        body[0],
+    );
+
+    let explainer = "Harness mining audits what the agent actually did,\n\
+        independent of what it said. Trigger-level events,\n\
+        preventive proofs and the declared state machine\n\
+        are joined into a small set of health signals.\n\n\
+        Green = conformant, no drift, no stuck cases.\n\
+        Yellow/red = open the CLI for the full report:\n\n\
+            ctox harness-mining stuck-cases\n\
+            ctox harness-mining variants --cluster\n\
+            ctox harness-mining sojourn\n\
+            ctox harness-mining conformance\n\
+            ctox harness-mining alignment\n\
+            ctox harness-mining causal\n\
+            ctox harness-mining drift\n\
+            ctox harness-mining multiperspective\n\n\
+        No bodies, hashes, or recipients are shown here.\n\
+        The CLI returns aggregates only by default.";
+
+    frame.render_widget(
+        Paragraph::new(explainer)
+            .block(
+                sidebar_block().borders(Borders::TOP).title(Span::styled(
+                    " what this is ",
+                    Style::default()
+                        .fg(Color::LightBlue)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            )
+            .style(Style::default().fg(Color::Gray))
+            .wrap(Wrap { trim: false }),
+        body[1],
+    );
+}
+
+fn harness_status_line(snap: &crate::service::harness_mining::UiSnapshot) -> Line<'static> {
+    let healthy = snap.conformance_ok && !snap.drift_detected && snap.stuck_case_count == 0;
+    if healthy {
+        Line::from(Span::styled(
+            "status: healthy",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ))
+    } else if !snap.conformance_ok || snap.stuck_case_count > 0 {
+        Line::from(Span::styled(
+            "status: attention required",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "status: drift detected",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ))
+    }
+}
+
+fn harness_metric_line(label: &str, value: &str, ok: bool) -> Line<'static> {
+    let dot_color = if ok { Color::Green } else { Color::Red };
+    Line::from(vec![
+        Span::styled("● ", Style::default().fg(dot_color)),
+        Span::styled(format!("{:<28}", label), Style::default().fg(Color::Gray)),
+        Span::styled(
+            value.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+fn format_duration(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{:.0}s", seconds)
+    } else if seconds < 3600.0 {
+        format!("{:.0}m", seconds / 60.0)
+    } else if seconds < 86400.0 {
+        format!("{:.1}h", seconds / 3600.0)
+    } else {
+        format!("{:.1}d", seconds / 86400.0)
+    }
 }
 
 fn update_install_summary_text(raw: &str) -> String {
@@ -693,6 +877,10 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
     render_settings_view_tabs(frame, app, outer[0]);
     if app.settings_view == SettingsView::Update {
         render_settings_update(frame, app, outer[1]);
+        return;
+    }
+    if app.settings_view == SettingsView::HarnessMining {
+        render_settings_harness_mining(frame, app, outer[1]);
         return;
     }
     if app.settings_view == SettingsView::Secrets {
@@ -2473,11 +2661,19 @@ fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout
         SettingsView::Secrets => 2,
         SettingsView::Paths => 3,
         SettingsView::Update => 4,
+        SettingsView::HarnessMining => 5,
     };
-    let titles = ["Model", "Communication", "Secrets", "Paths", "Update"]
-        .into_iter()
-        .map(Line::from)
-        .collect::<Vec<_>>();
+    let titles = [
+        "Model",
+        "Communication",
+        "Secrets",
+        "Paths",
+        "Update",
+        "Harness",
+    ]
+    .into_iter()
+    .map(Line::from)
+    .collect::<Vec<_>>();
     let widget = Tabs::new(titles)
         .select(selected)
         .divider(" ")

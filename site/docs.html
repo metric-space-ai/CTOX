@@ -1402,8 +1402,13 @@ ctox service --foreground --autonomy balanced</code></pre>
                 </tr>
                 <tr>
                   <td>Process mining</td>
-                  <td><code>ctox process-mining events</code>, <code>cases</code>, <code>dfg</code>, <code>discover-petri</code>, <code>replay</code>, <code>core-liveness</code>, <code>assert-clean</code></td>
-                  <td>Analyze what actually happened in the runtime database and compare events with expected process models.</td>
+                  <td><code>ctox process-mining events</code>, <code>cases</code>, <code>dfg</code>, <code>core-liveness</code>, <code>state-scan</code>, <code>assert-clean</code>, <code>violations</code></td>
+                  <td>Analyze what actually happened in the runtime database and validate it against the declarative core state machine.</td>
+                </tr>
+                <tr>
+                  <td>Harness mining</td>
+                  <td><code>ctox harness-mining stuck-cases</code>, <code>variants</code>, <code>sojourn</code>, <code>conformance</code>, <code>alignment</code>, <code>causal</code>, <code>drift</code>, <code>multiperspective</code></td>
+                  <td>Forensic + conformance mining of the agent harness against the declarative state machine (Tier 1 + Tier 2).</td>
                 </tr>
                 <tr>
                   <td>Secrets and turns</td>
@@ -2079,11 +2084,15 @@ ctox process-mining cases --limit 20
 ctox process-mining explain-case case-123 --limit 50</code></pre>
             </div>
             <div class="cmd">
-              <h3>Discover and replay models</h3>
-              <pre><code>ctox process-mining discover-dfg --model-id model-dfg
-ctox process-mining discover-petri --model-id model-petri
-ctox process-mining replay model-petri
-ctox process-mining deadlocks --model-id model-petri</code></pre>
+              <h3>Surface harness drift</h3>
+              <pre><code>ctox harness-mining stuck-cases
+ctox harness-mining variants --cluster
+ctox harness-mining sojourn
+ctox harness-mining conformance
+ctox harness-mining alignment
+ctox harness-mining causal
+ctox harness-mining drift
+ctox harness-mining multiperspective</code></pre>
             </div>
             <div class="cmd">
               <h3>Audit state and coverage</h3>

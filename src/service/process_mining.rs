@@ -3,7 +3,6 @@
 
 use crate::service::core_state_machine as csm;
 use crate::service::core_transition_guard;
-use crate::vendor::rust4pm_process_mining as pm;
 use anyhow::Context;
 use anyhow::Result;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
@@ -33,16 +32,9 @@ const PROCESS_MINING_USAGE: &str = "usage:
   ctox process-mining objects [--limit <n>]
   ctox process-mining transitions [--limit <n>]
   ctox process-mining dfg [--limit <n>]
-  ctox process-mining discover-dfg [--model-id <id>]
-  ctox process-mining discover-petri [--model-id <id>]
   ctox process-mining core-liveness
-  ctox process-mining replay <model-id>
-  ctox process-mining models [--limit <n>]
-  ctox process-mining model <model-id>
-  ctox process-mining export <model-id> --format json|dot
   ctox process-mining explain-case <case-id> [--limit <n>]
-  ctox process-mining conformance-runs [--limit <n>]
-  ctox process-mining deadlocks [--model-id <id>] [--limit <n>]
+  ctox process-mining deadlocks [--limit <n>]
   ctox process-mining mapping-rules [--limit <n>]
   ctox process-mining proofs [--limit <n>]
   ctox process-mining state-scan [--limit <n>]
@@ -113,8 +105,34 @@ struct CoreTransitionRule {
     evidence_policy_json: String,
 }
 
+fn drop_legacy_rust4pm_tables(conn: &Connection) -> Result<()> {
+    // Removed in the harness-mining migration: the rust4pm-vendored
+    // discovery/Petri/conformance schema was never populated in production
+    // and is replaced by the harness-mining tier-1/2 modules. We drop here
+    // (rather than ignore) so live deployments reclaim the disk and so that
+    // re-introducing one of these names later cannot silently inherit stale
+    // foreign-key dependencies.
+    conn.execute_batch(
+        r#"
+        DROP INDEX IF EXISTS idx_ctox_pm_dfg_edges_model_frequency;
+        DROP INDEX IF EXISTS idx_ctox_pm_conformance_model_started;
+        DROP TABLE IF EXISTS ctox_pm_petri_markings;
+        DROP TABLE IF EXISTS ctox_pm_petri_arcs;
+        DROP TABLE IF EXISTS ctox_pm_petri_transitions;
+        DROP TABLE IF EXISTS ctox_pm_petri_places;
+        DROP TABLE IF EXISTS ctox_pm_dfg_edges;
+        DROP TABLE IF EXISTS ctox_pm_dfg_activities;
+        DROP TABLE IF EXISTS ctox_pm_conformance_runs;
+        DROP TABLE IF EXISTS ctox_pm_process_models;
+        DROP TABLE IF EXISTS ctox_pm_case_classifiers;
+        "#,
+    )?;
+    Ok(())
+}
+
 pub fn ensure_process_mining_schema(conn: &Connection, db_path: &Path) -> Result<()> {
     core_transition_guard::ensure_core_transition_guard_schema(conn)?;
+    drop_legacy_rust4pm_tables(conn)?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS ctox_process_context (
@@ -172,98 +190,6 @@ pub fn ensure_process_mining_schema(conn: &Connection, db_path: &Path) -> Result
             trigger_delete TEXT,
             schema_version INTEGER NOT NULL,
             installed_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_case_classifiers (
-            classifier_id TEXT PRIMARY KEY,
-            label TEXT NOT NULL,
-            case_scope TEXT NOT NULL,
-            case_expr TEXT NOT NULL,
-            activity_expr TEXT NOT NULL,
-            filter_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}'
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_process_models (
-            model_id TEXT PRIMARY KEY,
-            model_kind TEXT NOT NULL,
-            algorithm TEXT NOT NULL,
-            classifier_id TEXT,
-            source_filter_json TEXT NOT NULL DEFAULT '{}',
-            created_at TEXT NOT NULL,
-            metadata_json TEXT NOT NULL DEFAULT '{}',
-            FOREIGN KEY(classifier_id) REFERENCES ctox_pm_case_classifiers(classifier_id)
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_dfg_activities (
-            model_id TEXT NOT NULL,
-            activity TEXT NOT NULL,
-            frequency INTEGER NOT NULL,
-            PRIMARY KEY(model_id, activity),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_dfg_edges (
-            model_id TEXT NOT NULL,
-            from_activity TEXT NOT NULL,
-            to_activity TEXT NOT NULL,
-            frequency INTEGER NOT NULL,
-            PRIMARY KEY(model_id, from_activity, to_activity),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_petri_places (
-            model_id TEXT NOT NULL,
-            place_id TEXT NOT NULL,
-            PRIMARY KEY(model_id, place_id),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_petri_transitions (
-            model_id TEXT NOT NULL,
-            transition_id TEXT NOT NULL,
-            label TEXT,
-            is_silent INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(model_id, transition_id),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_petri_arcs (
-            model_id TEXT NOT NULL,
-            arc_id TEXT NOT NULL,
-            from_node_id TEXT NOT NULL,
-            from_node_kind TEXT NOT NULL CHECK(from_node_kind IN ('place', 'transition')),
-            to_node_id TEXT NOT NULL,
-            to_node_kind TEXT NOT NULL CHECK(to_node_kind IN ('place', 'transition')),
-            weight INTEGER NOT NULL DEFAULT 1,
-            PRIMARY KEY(model_id, arc_id),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_petri_markings (
-            model_id TEXT NOT NULL,
-            marking_kind TEXT NOT NULL CHECK(marking_kind IN ('initial', 'final')),
-            marking_index INTEGER NOT NULL DEFAULT 0,
-            place_id TEXT NOT NULL,
-            token_count INTEGER NOT NULL,
-            PRIMARY KEY(model_id, marking_kind, marking_index, place_id),
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id) ON DELETE CASCADE
-        );
-
-        CREATE TABLE IF NOT EXISTS ctox_pm_conformance_runs (
-            run_id TEXT PRIMARY KEY,
-            model_id TEXT NOT NULL,
-            algorithm TEXT NOT NULL,
-            classifier_id TEXT,
-            source_filter_json TEXT NOT NULL DEFAULT '{}',
-            started_at TEXT NOT NULL,
-            finished_at TEXT,
-            status TEXT NOT NULL,
-            metrics_json TEXT NOT NULL DEFAULT '{}',
-            error_text TEXT,
-            FOREIGN KEY(model_id) REFERENCES ctox_pm_process_models(model_id),
-            FOREIGN KEY(classifier_id) REFERENCES ctox_pm_case_classifiers(classifier_id)
         );
 
         CREATE TABLE IF NOT EXISTS ctox_pm_state_violations (
@@ -343,10 +269,6 @@ pub fn ensure_process_mining_schema(conn: &Connection, db_path: &Path) -> Result
             metadata_json TEXT NOT NULL DEFAULT '{}'
         );
 
-        CREATE INDEX IF NOT EXISTS idx_ctox_pm_dfg_edges_model_frequency
-          ON ctox_pm_dfg_edges(model_id, frequency DESC);
-        CREATE INDEX IF NOT EXISTS idx_ctox_pm_conformance_model_started
-          ON ctox_pm_conformance_runs(model_id, started_at DESC);
         CREATE INDEX IF NOT EXISTS idx_ctox_pm_state_violations_detected
           ON ctox_pm_state_violations(detected_at DESC);
         CREATE INDEX IF NOT EXISTS idx_ctox_pm_core_transition_audit_event
@@ -941,317 +863,11 @@ pub fn handle_process_mining_command(root: &Path, args: &[String]) -> Result<()>
             );
             Ok(())
         }
-        Some("discover-dfg") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let model_id = find_flag_value(args, "--model-id")
-                .map(ToString::to_string)
-                .unwrap_or_else(|| format!("dfg-{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f")));
-            let classifier_id = find_flag_value(args, "--classifier-id");
-            let log = load_vendor_event_log(&conn)?;
-            let dfg = pm::discover_dfg(&log);
-            conn.execute(
-                r#"
-                INSERT INTO ctox_pm_process_models (
-                    model_id, model_kind, algorithm, classifier_id,
-                    source_filter_json, created_at, metadata_json
-                )
-                VALUES (?1, 'dfg', 'rust4pm-vendored-dfg', ?2, json_object(), ?3, json_object())
-                ON CONFLICT(model_id) DO UPDATE SET
-                    model_kind = excluded.model_kind,
-                    algorithm = excluded.algorithm,
-                    classifier_id = excluded.classifier_id,
-                    source_filter_json = excluded.source_filter_json,
-                    created_at = excluded.created_at,
-                    metadata_json = excluded.metadata_json
-                "#,
-                params![model_id, classifier_id, now_expr_value()],
-            )?;
-            persist_vendor_dfg(&conn, &model_id, &dfg)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "model_id": model_id,
-                    "model_kind": "dfg",
-                    "algorithm": "rust4pm-vendored-dfg",
-                    "trace_count": log.traces.len(),
-                    "activity_count": dfg.activities.len(),
-                    "edge_count": dfg.edges.len()
-                }))?
-            );
-            Ok(())
-        }
-        Some("discover-petri") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let model_id = find_flag_value(args, "--model-id")
-                .map(ToString::to_string)
-                .unwrap_or_else(|| {
-                    format!("petri-{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"))
-                });
-            let classifier_id = find_flag_value(args, "--classifier-id");
-            let log = load_vendor_event_log(&conn)?;
-            let dfg = pm::discover_dfg(&log);
-            let net = pm::discover_petri_from_dfg(&dfg);
-            let deadlock_suspects = pm::petri_deadlock_suspects(&net);
-            conn.execute(
-                r#"
-                INSERT INTO ctox_pm_process_models (
-                    model_id, model_kind, algorithm, classifier_id,
-                    source_filter_json, created_at, metadata_json
-                )
-                VALUES (?1, 'petri_net', 'rust4pm-vendored-dfg-petri', ?2, json_object(), ?3, ?4)
-                ON CONFLICT(model_id) DO UPDATE SET
-                    model_kind = excluded.model_kind,
-                    algorithm = excluded.algorithm,
-                    classifier_id = excluded.classifier_id,
-                    source_filter_json = excluded.source_filter_json,
-                    created_at = excluded.created_at,
-                    metadata_json = excluded.metadata_json
-                "#,
-                params![
-                    model_id,
-                    classifier_id,
-                    now_expr_value(),
-                    serde_json::to_string(&json!({
-                        "source": "ctox_pm_case_events",
-                        "trace_count": log.traces.len(),
-                        "dfg_activity_count": dfg.activities.len(),
-                        "dfg_edge_count": dfg.edges.len()
-                    }))?
-                ],
-            )?;
-            persist_vendor_dfg(&conn, &model_id, &dfg)?;
-            persist_vendor_petri(&conn, &model_id, &net)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "model_id": model_id,
-                    "model_kind": "petri_net",
-                    "algorithm": "rust4pm-vendored-dfg-petri",
-                    "trace_count": log.traces.len(),
-                    "place_count": net.places.len(),
-                    "transition_count": net.transitions.len(),
-                    "arc_count": net.arcs.len(),
-                    "deadlock_suspect_count": deadlock_suspects.len()
-                }))?
-            );
-            Ok(())
-        }
         Some("core-liveness") => {
             let report = csm::analyze_core_liveness();
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.ok {
                 anyhow::bail!("core state machine liveness check failed");
-            }
-            Ok(())
-        }
-        Some("models") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let limit = process_mining_limit(args, 50, 500);
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT m.model_id, m.model_kind, m.algorithm, m.classifier_id, m.created_at,
-                       COALESCE(a.activity_count, 0) AS activity_count,
-                       COALESCE(e.edge_count, 0) AS edge_count,
-                       COALESCE(p.place_count, 0) AS place_count,
-                       COALESCE(t.transition_count, 0) AS transition_count,
-                       COALESCE(r.arc_count, 0) AS arc_count
-                FROM ctox_pm_process_models m
-                LEFT JOIN (
-                    SELECT model_id, COUNT(*) AS activity_count
-                    FROM ctox_pm_dfg_activities GROUP BY model_id
-                ) a ON a.model_id = m.model_id
-                LEFT JOIN (
-                    SELECT model_id, COUNT(*) AS edge_count
-                    FROM ctox_pm_dfg_edges GROUP BY model_id
-                ) e ON e.model_id = m.model_id
-                LEFT JOIN (
-                    SELECT model_id, COUNT(*) AS place_count
-                    FROM ctox_pm_petri_places GROUP BY model_id
-                ) p ON p.model_id = m.model_id
-                LEFT JOIN (
-                    SELECT model_id, COUNT(*) AS transition_count
-                    FROM ctox_pm_petri_transitions GROUP BY model_id
-                ) t ON t.model_id = m.model_id
-                LEFT JOIN (
-                    SELECT model_id, COUNT(*) AS arc_count
-                    FROM ctox_pm_petri_arcs GROUP BY model_id
-                ) r ON r.model_id = m.model_id
-                ORDER BY m.created_at DESC
-                LIMIT ?1
-                "#,
-            )?;
-            let rows = stmt
-                .query_map(params![limit], |row| {
-                    Ok(json!({
-                        "model_id": row.get::<_, String>(0)?,
-                        "model_kind": row.get::<_, String>(1)?,
-                        "algorithm": row.get::<_, String>(2)?,
-                        "classifier_id": row.get::<_, Option<String>>(3)?,
-                        "created_at": row.get::<_, String>(4)?,
-                        "activity_count": row.get::<_, i64>(5)?,
-                        "edge_count": row.get::<_, i64>(6)?,
-                        "place_count": row.get::<_, i64>(7)?,
-                        "transition_count": row.get::<_, i64>(8)?,
-                        "arc_count": row.get::<_, i64>(9)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({"ok": true, "models": rows}))?
-            );
-            Ok(())
-        }
-        Some("model") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let model_id = args.get(1).context("missing <model-id>")?;
-            let model = conn.query_row(
-                r#"
-                SELECT model_id, model_kind, algorithm, classifier_id,
-                       source_filter_json, created_at, metadata_json
-                FROM ctox_pm_process_models
-                WHERE model_id = ?1
-                "#,
-                params![model_id],
-                |row| {
-                    Ok(json!({
-                        "model_id": row.get::<_, String>(0)?,
-                        "model_kind": row.get::<_, String>(1)?,
-                        "algorithm": row.get::<_, String>(2)?,
-                        "classifier_id": row.get::<_, Option<String>>(3)?,
-                        "source_filter_json": row.get::<_, String>(4)?,
-                        "created_at": row.get::<_, String>(5)?,
-                        "metadata_json": row.get::<_, String>(6)?,
-                    }))
-                },
-            )?;
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT from_activity, to_activity, frequency
-                FROM ctox_pm_dfg_edges
-                WHERE model_id = ?1
-                ORDER BY frequency DESC, from_activity, to_activity
-                LIMIT 100
-                "#,
-            )?;
-            let edges = stmt
-                .query_map(params![model_id], |row| {
-                    Ok(json!({
-                        "from_activity": row.get::<_, String>(0)?,
-                        "to_activity": row.get::<_, String>(1)?,
-                        "frequency": row.get::<_, i64>(2)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT place_id
-                FROM ctox_pm_petri_places
-                WHERE model_id = ?1
-                ORDER BY place_id
-                LIMIT 100
-                "#,
-            )?;
-            let places = stmt
-                .query_map(params![model_id], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT transition_id, label, is_silent
-                FROM ctox_pm_petri_transitions
-                WHERE model_id = ?1
-                ORDER BY transition_id
-                LIMIT 100
-                "#,
-            )?;
-            let transitions = stmt
-                .query_map(params![model_id], |row| {
-                    Ok(json!({
-                        "transition_id": row.get::<_, String>(0)?,
-                        "label": row.get::<_, Option<String>>(1)?,
-                        "is_silent": row.get::<_, i64>(2)? != 0,
-                    }))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "model": model,
-                    "dfg_edges": edges,
-                    "petri_places": places,
-                    "petri_transitions": transitions
-                }))?
-            );
-            Ok(())
-        }
-        Some("replay") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let model_id = args.get(1).context("missing <model-id>")?;
-            let started_at = now_expr_value();
-            let log = load_vendor_event_log(&conn)?;
-            let projection = pm::activity_projection(&log);
-            let net = load_vendor_petri(&conn, model_id)?;
-            let result = pm::token_replay(&net, &projection);
-            let metrics = json!({
-                "trace_count": result.trace_count,
-                "produced": result.produced,
-                "consumed": result.consumed,
-                "missing": result.missing,
-                "remaining": result.remaining,
-                "fitness": result.fitness()
-            });
-            let run_id = format!("replay-{}", chrono::Utc::now().format("%Y%m%d%H%M%S%3f"));
-            conn.execute(
-                r#"
-                INSERT INTO ctox_pm_conformance_runs (
-                    run_id, model_id, algorithm, classifier_id, source_filter_json,
-                    started_at, finished_at, status, metrics_json, error_text
-                )
-                VALUES (?1, ?2, 'rust4pm-vendored-token-replay', NULL, json_object(),
-                        ?3, ?4, 'completed', ?5, NULL)
-                "#,
-                params![
-                    run_id,
-                    model_id,
-                    started_at,
-                    now_expr_value(),
-                    serde_json::to_string(&metrics)?
-                ],
-            )?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "ok": true,
-                    "run_id": run_id,
-                    "model_id": model_id,
-                    "metrics": metrics
-                }))?
-            );
-            Ok(())
-        }
-        Some("export") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let model_id = args.get(1).context("missing <model-id>")?;
-            let format = find_flag_value(args, "--format").unwrap_or("json");
-            let net = load_vendor_petri(&conn, model_id)?;
-            match format {
-                "dot" => {
-                    println!("{}", pm::petri_to_dot(&net));
-                }
-                "json" => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&json!({
-                            "ok": true,
-                            "model_id": model_id,
-                            "petri_net": net
-                        }))?
-                    );
-                }
-                other => anyhow::bail!("unsupported export format: {other}"),
             }
             Ok(())
         }
@@ -1317,59 +933,9 @@ pub fn handle_process_mining_command(root: &Path, args: &[String]) -> Result<()>
             );
             Ok(())
         }
-        Some("conformance-runs") => {
-            ensure_process_mining_schema(&conn, &db_path)?;
-            let limit = process_mining_limit(args, 50, 500);
-            let mut stmt = conn.prepare(
-                r#"
-                SELECT run_id, model_id, algorithm, classifier_id, started_at,
-                       finished_at, status, metrics_json, error_text
-                FROM ctox_pm_conformance_runs
-                ORDER BY started_at DESC
-                LIMIT ?1
-                "#,
-            )?;
-            let rows = stmt
-                .query_map(params![limit], |row| {
-                    Ok(json!({
-                        "run_id": row.get::<_, String>(0)?,
-                        "model_id": row.get::<_, String>(1)?,
-                        "algorithm": row.get::<_, String>(2)?,
-                        "classifier_id": row.get::<_, Option<String>>(3)?,
-                        "started_at": row.get::<_, String>(4)?,
-                        "finished_at": row.get::<_, Option<String>>(5)?,
-                        "status": row.get::<_, String>(6)?,
-                        "metrics_json": row.get::<_, String>(7)?,
-                        "error_text": row.get::<_, Option<String>>(8)?,
-                    }))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({"ok": true, "conformance_runs": rows}))?
-            );
-            Ok(())
-        }
         Some("deadlocks") => {
             ensure_process_mining_schema(&conn, &db_path)?;
             let limit = process_mining_limit(args, 50, 500);
-            if let Some(model_id) = find_flag_value(args, "--model-id") {
-                let net = load_vendor_petri(&conn, model_id)?;
-                let suspects = pm::petri_deadlock_suspects(&net)
-                    .into_iter()
-                    .take(limit as usize)
-                    .collect::<Vec<_>>();
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&json!({
-                        "ok": true,
-                        "model_id": model_id,
-                        "algorithm": "rust4pm-vendored-petri-deadlock-suspects",
-                        "deadlocks": suspects
-                    }))?
-                );
-                return Ok(());
-            }
             let mut stmt = conn.prepare(
                 r#"
                 WITH activities AS (
@@ -5379,213 +4945,6 @@ fn core_violation_severity(request: &csm::CoreTransitionRequest, code: &str) -> 
     }
 }
 
-fn load_vendor_event_log(conn: &Connection) -> Result<pm::EventLog> {
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT case_id, activity, timestamp, attributes_json
-        FROM ctox_pm_case_events
-        ORDER BY case_id, timestamp, event_seq
-        "#,
-    )?;
-    let mut traces = std::collections::BTreeMap::<String, Vec<pm::Event>>::new();
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            pm::Event {
-                activity: row.get::<_, String>(1)?,
-                timestamp: row.get::<_, Option<String>>(2)?,
-                attributes_json: row.get::<_, String>(3)?,
-            },
-        ))
-    })?;
-    for row in rows {
-        let (case_id, event) = row?;
-        traces.entry(case_id).or_default().push(event);
-    }
-    Ok(pm::EventLog {
-        traces: traces
-            .into_iter()
-            .map(|(case_id, events)| pm::Trace { case_id, events })
-            .collect(),
-    })
-}
-
-fn persist_vendor_dfg(
-    conn: &Connection,
-    model_id: &str,
-    dfg: &pm::DirectlyFollowsGraph,
-) -> Result<()> {
-    conn.execute(
-        "DELETE FROM ctox_pm_dfg_activities WHERE model_id = ?1",
-        params![model_id],
-    )?;
-    conn.execute(
-        "DELETE FROM ctox_pm_dfg_edges WHERE model_id = ?1",
-        params![model_id],
-    )?;
-    for (activity, frequency) in &dfg.activities {
-        conn.execute(
-            "INSERT INTO ctox_pm_dfg_activities (model_id, activity, frequency) VALUES (?1, ?2, ?3)",
-            params![model_id, activity, *frequency as i64],
-        )?;
-    }
-    for ((from, to), frequency) in &dfg.edges {
-        conn.execute(
-            "INSERT INTO ctox_pm_dfg_edges (model_id, from_activity, to_activity, frequency) VALUES (?1, ?2, ?3, ?4)",
-            params![model_id, from, to, *frequency as i64],
-        )?;
-    }
-    Ok(())
-}
-
-fn persist_vendor_petri(conn: &Connection, model_id: &str, net: &pm::PetriNet) -> Result<()> {
-    for table in [
-        "ctox_pm_petri_markings",
-        "ctox_pm_petri_arcs",
-        "ctox_pm_petri_transitions",
-        "ctox_pm_petri_places",
-    ] {
-        conn.execute(
-            &format!("DELETE FROM {table} WHERE model_id = ?1"),
-            params![model_id],
-        )?;
-    }
-    for place in &net.places {
-        conn.execute(
-            "INSERT INTO ctox_pm_petri_places (model_id, place_id) VALUES (?1, ?2)",
-            params![model_id, place],
-        )?;
-    }
-    for transition in net.transitions.values() {
-        conn.execute(
-            "INSERT INTO ctox_pm_petri_transitions (model_id, transition_id, label, is_silent) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                model_id,
-                transition.transition_id.as_str(),
-                transition.label.as_deref(),
-                if transition.is_silent { 1 } else { 0 }
-            ],
-        )?;
-    }
-    for arc in &net.arcs {
-        conn.execute(
-            r#"
-            INSERT INTO ctox_pm_petri_arcs (
-                model_id, arc_id, from_node_id, from_node_kind,
-                to_node_id, to_node_kind, weight
-            )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                model_id,
-                arc.arc_id.as_str(),
-                arc.from_node_id.as_str(),
-                arc.from_node_kind.as_str(),
-                arc.to_node_id.as_str(),
-                arc.to_node_kind.as_str(),
-                arc.weight as i64,
-            ],
-        )?;
-    }
-    for (place_id, token_count) in &net.initial_marking {
-        conn.execute(
-            "INSERT INTO ctox_pm_petri_markings (model_id, marking_kind, marking_index, place_id, token_count) VALUES (?1, 'initial', 0, ?2, ?3)",
-            params![model_id, place_id, *token_count as i64],
-        )?;
-    }
-    for (index, marking) in net.final_markings.iter().enumerate() {
-        for (place_id, token_count) in marking {
-            conn.execute(
-                "INSERT INTO ctox_pm_petri_markings (model_id, marking_kind, marking_index, place_id, token_count) VALUES (?1, 'final', ?2, ?3, ?4)",
-                params![model_id, index as i64, place_id, *token_count as i64],
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn load_vendor_petri(conn: &Connection, model_id: &str) -> Result<pm::PetriNet> {
-    let mut net = pm::PetriNet::default();
-    let mut stmt = conn.prepare("SELECT place_id FROM ctox_pm_petri_places WHERE model_id = ?1")?;
-    for row in stmt.query_map(params![model_id], |row| row.get::<_, String>(0))? {
-        net.places.insert(row?);
-    }
-    let mut stmt = conn.prepare(
-        "SELECT transition_id, label, is_silent FROM ctox_pm_petri_transitions WHERE model_id = ?1",
-    )?;
-    for row in stmt.query_map(params![model_id], |row| {
-        Ok(pm::PetriTransition {
-            transition_id: row.get(0)?,
-            label: row.get(1)?,
-            is_silent: row.get::<_, i64>(2)? != 0,
-        })
-    })? {
-        let transition = row?;
-        net.transitions
-            .insert(transition.transition_id.clone(), transition);
-    }
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT arc_id, from_node_id, from_node_kind, to_node_id, to_node_kind, weight
-        FROM ctox_pm_petri_arcs
-        WHERE model_id = ?1
-        ORDER BY arc_id
-        "#,
-    )?;
-    for row in stmt.query_map(params![model_id], |row| {
-        let from_node_kind = row.get::<_, String>(2)?;
-        let to_node_kind = row.get::<_, String>(4)?;
-        Ok(pm::PetriArc {
-            arc_id: row.get(0)?,
-            from_node_id: row.get(1)?,
-            from_node_kind: parse_node_kind(&from_node_kind),
-            to_node_id: row.get(3)?,
-            to_node_kind: parse_node_kind(&to_node_kind),
-            weight: row.get::<_, i64>(5)? as u64,
-        })
-    })? {
-        net.arcs.push(row?);
-    }
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT marking_kind, marking_index, place_id, token_count
-        FROM ctox_pm_petri_markings
-        WHERE model_id = ?1
-        ORDER BY marking_kind, marking_index, place_id
-        "#,
-    )?;
-    let mut finals =
-        std::collections::BTreeMap::<i64, std::collections::BTreeMap<String, u64>>::new();
-    for row in stmt.query_map(params![model_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, i64>(3)? as u64,
-        ))
-    })? {
-        let (kind, index, place_id, token_count) = row?;
-        if kind == "initial" {
-            net.initial_marking.insert(place_id, token_count);
-        } else {
-            finals
-                .entry(index)
-                .or_default()
-                .insert(place_id, token_count);
-        }
-    }
-    net.final_markings = finals.into_values().collect();
-    Ok(net)
-}
-
-fn parse_node_kind(value: &str) -> pm::PetriNodeKind {
-    if value == "transition" {
-        pm::PetriNodeKind::Transition
-    } else {
-        pm::PetriNodeKind::Place
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5712,7 +5071,7 @@ mod tests {
     }
 
     #[test]
-    fn process_mining_schema_exposes_rust4pm_projection_surfaces() -> Result<()> {
+    fn process_mining_schema_exposes_state_machine_surfaces() -> Result<()> {
         let dir = tempdir()?;
         let db_path = dir.path().join("ctox.sqlite3");
         let conn = Connection::open(&db_path)?;
@@ -5741,24 +5100,37 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        let model_table_count: i64 = conn.query_row(
+        let live_table_count: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN (
+                'ctox_pm_state_violations',
+                'ctox_pm_core_transition_audit',
+                'ctox_pm_core_transition_rules',
+                'ctox_pm_event_transition_coverage',
+                'ctox_pm_unmapped_events'
+              )
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        let legacy_rust4pm_table_count: i64 = conn.query_row(
             r#"
             SELECT COUNT(*)
             FROM sqlite_master
             WHERE type = 'table'
               AND name IN (
                 'ctox_pm_process_models',
+                'ctox_pm_dfg_activities',
                 'ctox_pm_dfg_edges',
                 'ctox_pm_petri_places',
                 'ctox_pm_petri_transitions',
                 'ctox_pm_petri_arcs',
                 'ctox_pm_petri_markings',
                 'ctox_pm_conformance_runs',
-                'ctox_pm_state_violations',
-                'ctox_pm_core_transition_audit',
-                'ctox_pm_core_transition_rules',
-                'ctox_pm_event_transition_coverage',
-                'ctox_pm_unmapped_events'
+                'ctox_pm_case_classifiers'
               )
             "#,
             [],
@@ -5777,9 +5149,47 @@ mod tests {
 
         assert_eq!(projection_count, 1);
         assert_eq!(object_relation_count, 1);
-        assert_eq!(model_table_count, 12);
+        assert_eq!(live_table_count, 5);
+        assert_eq!(legacy_rust4pm_table_count, 0);
         assert_eq!(instrumented_pm_table_count, 0);
         assert_eq!(proof_table_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_schema_drops_legacy_rust4pm_tables() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("ctox.sqlite3");
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE ctox_pm_process_models (
+                model_id TEXT PRIMARY KEY,
+                model_kind TEXT NOT NULL,
+                algorithm TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE ctox_pm_dfg_edges (
+                model_id TEXT NOT NULL,
+                from_activity TEXT NOT NULL,
+                to_activity TEXT NOT NULL,
+                frequency INTEGER NOT NULL,
+                PRIMARY KEY(model_id, from_activity, to_activity)
+            );
+            INSERT INTO ctox_pm_process_models VALUES ('m1','dfg','rust4pm','2026-01-01T00:00:00Z');
+            INSERT INTO ctox_pm_dfg_edges VALUES ('m1','A','B',5);
+            "#,
+        )?;
+        ensure_process_mining_schema(&conn, &db_path)?;
+        let remaining: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+              AND name IN ('ctox_pm_process_models','ctox_pm_dfg_edges')
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(remaining, 0, "legacy rust4pm tables must be dropped");
         Ok(())
     }
 

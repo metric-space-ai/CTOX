@@ -412,6 +412,7 @@ enum SettingsView {
     Secrets,
     Paths,
     Update,
+    HarnessMining,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1877,6 +1878,7 @@ impl App {
                     | "CTOX_DEPENDENCIES_ROOT"
             ),
             SettingsView::Update => false,
+            SettingsView::HarnessMining => false,
         }
     }
 
@@ -5796,11 +5798,12 @@ fn overlay_load_observation_gpu_cards(
 
 fn previous_settings_view(view: SettingsView) -> SettingsView {
     match view {
-        SettingsView::Model => SettingsView::Update,
+        SettingsView::Model => SettingsView::HarnessMining,
         SettingsView::Communication => SettingsView::Model,
         SettingsView::Secrets => SettingsView::Communication,
         SettingsView::Paths => SettingsView::Secrets,
         SettingsView::Update => SettingsView::Paths,
+        SettingsView::HarnessMining => SettingsView::Update,
     }
 }
 
@@ -5810,7 +5813,8 @@ fn next_settings_view(view: SettingsView) -> SettingsView {
         SettingsView::Communication => SettingsView::Secrets,
         SettingsView::Secrets => SettingsView::Paths,
         SettingsView::Paths => SettingsView::Update,
-        SettingsView::Update => SettingsView::Model,
+        SettingsView::Update => SettingsView::HarnessMining,
+        SettingsView::HarnessMining => SettingsView::Model,
     }
 }
 
@@ -7286,6 +7290,9 @@ mod tests {
                 .unwrap();
             rows.map(|row| row.unwrap()).collect::<Vec<_>>()
         };
-        assert!(persisted.is_none(), "persisted={persisted:?} rows={all_rows:?}");
+        assert!(
+            persisted.is_none(),
+            "persisted={persisted:?} rows={all_rows:?}"
+        );
     }
 }

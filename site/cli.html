@@ -928,8 +928,13 @@ ctox jami-daemon --foreground</code></pre>
                 </tr>
                 <tr>
                   <td>Models</td>
-                  <td><code>transitions</code>, <code>dfg</code>, <code>discover-dfg</code>, <code>discover-petri</code>, <code>replay</code>, <code>deadlocks</code></td>
-                  <td>Discover and replay directly-follows graphs and Petri-net style models.</td>
+                  <td><code>transitions</code>, <code>dfg</code>, <code>deadlocks</code></td>
+                  <td>SQL-based directly-follows frequency analysis and stuck-activity detection over the live event log.</td>
+                </tr>
+                <tr>
+                  <td>Harness mining</td>
+                  <td><code>harness-mining stuck-cases</code>, <code>variants</code>, <code>sojourn</code>, <code>conformance</code>, <code>alignment</code>, <code>causal</code>, <code>drift</code>, <code>multiperspective</code></td>
+                  <td>Tier 1 + Tier 2 forensic + conformance mining of the agent harness against the declarative state machine.</td>
                 </tr>
                 <tr>
                   <td>State checks</td>

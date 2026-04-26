@@ -15,7 +15,6 @@ mod secrets;
 mod service;
 mod skill_store;
 mod ui;
-mod vendor;
 mod web_stack;
 
 pub use capabilities::browser;
@@ -122,6 +121,9 @@ GOVERNANCE / MISSION
   ctox state-invariants [--conversation-id <id>]
   ctox turn status|end           inspect or close the current CLI turn ledger
   ctox process-mining <subcmd>   SQLite mutation event log and transition mining
+  ctox harness-mining <subcmd>   forensic + conformance mining of the agent harness
+                                 (stuck-cases, variants, sojourn, conformance,
+                                  alignment, causal, drift, multiperspective)
 
 CONTEXT / LCM (power-user)
   ctox lcm-init | lcm-add-message | lcm-compact | lcm-grep | lcm-dump
@@ -300,6 +302,9 @@ fn main() -> anyhow::Result<()> {
         Some("turn") => service::turn_ledger::handle_turn_command(&root, &args[1..]),
         Some("process-mining") => {
             service::process_mining::handle_process_mining_command(&root, &args[1..])
+        }
+        Some("harness-mining") => {
+            service::harness_mining::handle_harness_mining_command(&root, &args[1..])
         }
         Some("tui-smoke") => {
             let page = args.get(1).map(String::as_str).unwrap_or("chat");

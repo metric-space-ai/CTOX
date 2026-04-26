@@ -9,17 +9,15 @@ Use this skill when CTOX needs to audit its own harness behavior, SQLite state t
    ctox process-mining ensure
    ```
 
-2. Build a current process model:
+2. Verify the declarative state-machine model is internally consistent:
    ```bash
-   ctox process-mining discover-petri --model-id current-harness
    ctox process-mining core-liveness
-   ctox process-mining replay current-harness
    ```
 
 3. Check hard failure surfaces:
    ```bash
    ctox process-mining self-diagnose --limit 20000
-   ctox process-mining deadlocks --model-id current-harness
+   ctox process-mining deadlocks --limit 50
    ctox process-mining mapping-rules --limit 200
    ctox process-mining proofs --limit 50
    ctox process-mining state-scan --limit 20000
@@ -28,6 +26,18 @@ Use this skill when CTOX needs to audit its own harness behavior, SQLite state t
    ctox process-mining coverage --limit 50
    ctox process-mining scan-violations
    ctox process-mining violations --limit 50
+   ```
+
+3a. For deeper forensics use the harness-mining suite (Tier 1 + Tier 2):
+   ```bash
+   ctox harness-mining stuck-cases             # retry-loops & idle cases
+   ctox harness-mining variants --cluster      # trace variant Pareto + clustering
+   ctox harness-mining sojourn                 # state-holding-time distribution
+   ctox harness-mining conformance             # threshold-gated conformance replay
+   ctox harness-mining alignment               # alignment-based reparation hypotheses
+   ctox harness-mining causal                  # predecessor lift per violation code
+   ctox harness-mining drift                   # Page-Hinkley + chi-squared drift
+   ctox harness-mining multiperspective        # data-aware constraint coverage
    ```
 
 4. Inspect a suspicious case before responding:
