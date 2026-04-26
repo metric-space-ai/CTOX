@@ -911,6 +911,34 @@ ctox update rollback</code></pre>
             is model source: either API-backed models through provider keys, or
             local inference through the integrated runtime.
           </p>
+          <h3>API model example</h3>
+          <pre><code>export CTOX_CHAT_SOURCE=api
+export CTOX_API_PROVIDER=openai
+export OPENAI_API_KEY="sk-..."
+export CTOX_CHAT_MODEL=gpt-5.4-mini
+
+ctox start
+ctox chat "Check this CTOX installation and confirm that the API model is reachable."</code></pre>
+          <p>
+            For persistent use, enter the provider and key in the TUI instead
+            of leaving credentials in shell history.
+          </p>
+          <h3>CUDA 27B local example</h3>
+          <pre><code>curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
+  | bash -s -- --backend=cuda --model=Qwen/Qwen3.5-27B
+
+export CTOX_CHAT_SOURCE=local
+export CTOX_LOCAL_RUNTIME=candle
+export CTOX_CHAT_MODEL=Qwen/Qwen3.5-27B
+
+ctox doctor
+ctox runtime switch Qwen/Qwen3.5-27B quality --context 128k</code></pre>
+          <p>
+            The 27B local example is for a Linux host with NVIDIA CUDA and the
+            required local model artifacts. If CUDA, weights, or runtime files
+            are missing, check <code>ctox doctor</code> and the TUI before
+            assigning real work.
+          </p>
           <div class="table-wrap">
             <table>
               <thead>

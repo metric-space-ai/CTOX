@@ -74,6 +74,43 @@ First-install overrides:
 | `--backend=<cuda\|metal\|cpu>` | `CTOX_BACKEND` | Forces the local inference backend. Leave it unset unless auto-detection is wrong or you intentionally want CPU fallback. `cuda` is for NVIDIA Linux hosts, `metal` is for Apple Silicon macOS, and `cpu` is the slow fallback. |
 | `--model=<model>` | `CTOX_MODEL` | Seeds the default local model profile. Do not use this during a first install unless you know the exact model id is supported by the current build; model selection can be changed later in the TUI. |
 
+### Example: API model with key
+
+Use this when CTOX should call an API-backed model instead of local inference:
+
+```sh
+export CTOX_CHAT_SOURCE=api
+export CTOX_API_PROVIDER=openai
+export OPENAI_API_KEY="sk-..."
+export CTOX_CHAT_MODEL=gpt-5.4-mini
+
+ctox start
+ctox chat "Check this CTOX installation and confirm that the API model is reachable."
+```
+
+For a persistent setup, enter the provider and key in the TUI instead of leaving
+the key in shell history.
+
+### Example: supported 27B model on CUDA
+
+Use this on a Linux host with an NVIDIA GPU/CUDA setup and the required local
+model artifacts for `Qwen/Qwen3.5-27B`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
+  | bash -s -- --backend=cuda --model=Qwen/Qwen3.5-27B
+
+export CTOX_CHAT_SOURCE=local
+export CTOX_LOCAL_RUNTIME=candle
+export CTOX_CHAT_MODEL=Qwen/Qwen3.5-27B
+
+ctox doctor
+ctox runtime switch Qwen/Qwen3.5-27B quality --context 128k
+```
+
+If the CUDA backend, model weights, or runtime artifacts are missing,
+`ctox doctor` or the TUI should show that before you assign real work.
+
 Advanced installer options:
 
 | Flag | Environment variable | What it changes |
