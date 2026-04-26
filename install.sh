@@ -884,8 +884,9 @@ build_google_fetch_helper() {
   local source_root="$1"
   local tool_dir="$source_root/tools/google-fetch"
   [[ -f "$tool_dir/Cargo.toml" ]] || return 0
-  command -v cargo >/dev/null 2>&1 || return 0
-  run_build_module "ctox Google fetch helper" "$tool_dir" cargo build --release --bin ctox-google-fetch
+  local cargo; cargo="$(resolve_cargo 2>/dev/null || true)"
+  [[ -n "$cargo" && -x "$cargo" ]] || return 0
+  run_build_module "ctox Google fetch helper" "$tool_dir" "$cargo" build --release --bin ctox-google-fetch
 }
 
 # ── systemd services ─────────────────────────────────────────────────────────
