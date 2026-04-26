@@ -82,7 +82,7 @@ ctox doctor
 ctox
 ctox start
 ctox status
-ctox chat "Take ownership of OPS-204. Wait for approval, deploy when allowed, verify the gates, and update the ticket."
+ctox chat "Check this CTOX installation, summarize what is configured, and list the next setup steps before taking on real work."
 ```
 
 What these commands do:
@@ -91,7 +91,7 @@ What these commands do:
 - `ctox` opens the TUI for configuration and operation.
 - `ctox start` starts the persistent daemon.
 - `ctox status` shows the current service state.
-- `ctox chat <instruction>` submits work to the daemon.
+- `ctox chat <instruction>` submits a small first check to the daemon.
 
 Most users should start in the TUI, configure the model backend and credentials
 there, then submit work through the TUI or `ctox chat`.

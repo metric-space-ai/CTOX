@@ -782,18 +782,18 @@
 
         <section id="quick-start">
           <p class="kicker">Quick Start</p>
-          <h2>From install to first managed mission</h2>
+          <h2>From install to first daemon check</h2>
           <p>
             The minimal path is: install CTOX on the host that should own the
             work, configure the runtime in the TUI, start the daemon, and submit
-            a mission that may need waiting, verification, and ticket updates.
+            one harmless setup check before handing it real work.
           </p>
           <pre><code>curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh | bash
 ctox doctor
 ctox
 ctox start
 ctox status
-ctox chat "Take ownership of OPS-204. Wait for approval, deploy when allowed, verify the gates, and update the ticket."</code></pre>
+ctox chat "Check this CTOX installation, summarize what is configured, and list the next setup steps before taking on real work."</code></pre>
           <div class="grid">
             <div class="cell">
               <b>Install on the owning host</b>
@@ -808,8 +808,8 @@ ctox chat "Take ownership of OPS-204. Wait for approval, deploy when allowed, ve
               <p><code>ctox start</code> starts the persistent background service. <code>ctox status</code> prints the service snapshot as JSON.</p>
             </div>
             <div class="cell">
-              <b>Submit a mission</b>
-              <p>Use <code>ctox chat</code>, TUI chat, mail, tickets, or schedules. The daemon turns input into durable work state.</p>
+              <b>Run a setup check</b>
+              <p>Use <code>ctox chat</code> or TUI chat for a harmless first request. Real tickets, schedules, and channels come after configuration.</p>
             </div>
           </div>
         </section>
