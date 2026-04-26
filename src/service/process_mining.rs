@@ -3621,6 +3621,23 @@ fn upsert_default_core_transition_rules(conn: &Connection) -> Result<()> {
             }),
         ),
         (
+            "secret-store-telemetry",
+            140,
+            Some("ctox_secret"),
+            None,
+            None,
+            None,
+            "telemetry",
+            "SecretStore",
+            "P1RuntimeSafety",
+            "telemetry.secret.store",
+            json!({
+                "core_transition": false,
+                "records_secret_store_mutation": true,
+                "requires_redaction": true
+            }),
+        ),
+        (
             "turn-ledger",
             800,
             Some("ctox_turns"),
@@ -4157,6 +4174,23 @@ fn scan_core_state_machine_violations(conn: &Connection, limit: i64) -> Result<V
             }
             continue;
         };
+
+        if event.operation.eq_ignore_ascii_case("UPDATE") && request.from_state == request.to_state
+        {
+            mapped_telemetry += 1;
+            record_event_coverage(
+                conn,
+                &event,
+                "telemetry",
+                Some(&rule.rule_id),
+                Some(&rule.petri_transition_id),
+                "state_preserving_inferred_transition",
+                &scanned_at,
+            )?;
+            clear_unmapped_event(conn, &event.event_id)?;
+            clear_state_violations_for_event(conn, &event.event_id)?;
+            continue;
+        }
 
         inferred_transitions += 1;
         let proof = core_transition_guard::evaluate_core_transition(conn, &request)?;
@@ -4876,14 +4910,16 @@ fn map_commitment_state(raw: Option<&str>) -> Option<csm::CoreState> {
 fn map_schedule_state(raw: Option<&str>) -> Option<csm::CoreState> {
     match normalize_state(raw).as_deref()? {
         "created" => Some(csm::CoreState::Created),
-        "enabled" | "active" => Some(csm::CoreState::Enabled),
+        "enabled" | "active" | "1" | "true" | "yes" | "y" => Some(csm::CoreState::Enabled),
         "due" => Some(csm::CoreState::Due),
         "emitted" | "fired" => Some(csm::CoreState::Emitted),
         "backing_work_queued" | "queued" => Some(csm::CoreState::BackingWorkQueued),
         "acknowledged" | "ack" => Some(csm::CoreState::Acknowledged),
         "paused" => Some(csm::CoreState::Paused),
         "expired" => Some(csm::CoreState::Expired),
-        "disabled_by_policy" | "disabled" => Some(csm::CoreState::DisabledByPolicy),
+        "disabled_by_policy" | "disabled" | "0" | "false" | "no" | "n" => {
+            Some(csm::CoreState::DisabledByPolicy)
+        }
         _ => None,
     }
 }
