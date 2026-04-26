@@ -21,7 +21,7 @@
 use anyhow::Context;
 use anyhow::Result;
 use rusqlite::Connection;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 pub mod alignment;

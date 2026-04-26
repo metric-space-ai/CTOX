@@ -41,7 +41,6 @@ use crate::inference::local_transport::LocalTransport;
 use crate::inference::model_registry;
 use crate::inference::runtime_contract;
 use crate::inference::runtime_control;
-use crate::inference::runtime_engine_guard;
 use crate::inference::runtime_env;
 use crate::inference::runtime_gpu_manager;
 use crate::inference::runtime_kernel;

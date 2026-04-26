@@ -925,6 +925,7 @@ fn apply_update(
     manifest.current_release = Some(release.to_string());
     manifest.updated_at = now_rfc3339();
     persist_install_manifest(&layout.install_manifest_path(), &manifest)?;
+    prune_old_releases(&releases_dir, &manifest);
     let completed = UpdateState {
         schema_version: 1,
         phase: "completed".to_string(),
@@ -987,6 +988,7 @@ fn rollback_update(root: &Path) -> Result<RollbackResult> {
     manifest.previous_release = Some(current_release);
     manifest.updated_at = now_rfc3339();
     persist_install_manifest(&layout.install_manifest_path(), &manifest)?;
+    prune_old_releases(&install_root.join("releases"), &manifest);
     persist_update_state(
         &layout.update_state_path(),
         &UpdateState {
@@ -1163,6 +1165,32 @@ fn maybe_restart_service(previous_release_root: Option<&Path>) -> Result<()> {
         let _ = service::start_background(previous_release_root);
     }
     Ok(())
+}
+
+fn prune_old_releases(releases_dir: &Path, manifest: &InstallManifest) {
+    let current = manifest.current_release.as_deref();
+    let previous = manifest.previous_release.as_deref();
+    let Ok(entries) = fs::read_dir(releases_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if Some(name) == current || Some(name) == previous {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => progress_step(format!("pruned old release {name}")),
+            Err(err) => progress_step(format!(
+                "warning: failed to prune old release {name}: {err}"
+            )),
+        }
+    }
 }
 
 fn resolve_active_root(root: &Path) -> PathBuf {
@@ -2336,5 +2364,33 @@ mod tests {
         assert_eq!(state.phase, "building");
         assert!(state.finished_at.is_none());
         assert!(state.last_error.is_none());
+    }
+
+    #[test]
+    fn prune_old_releases_keeps_current_and_previous_only() {
+        let temp = tempdir().unwrap();
+        let releases = temp.path().join("releases");
+        ensure_dir(&releases.join("current")).unwrap();
+        ensure_dir(&releases.join("previous")).unwrap();
+        ensure_dir(&releases.join("old")).unwrap();
+        fs::write(releases.join("note.txt"), "keep non-release files").unwrap();
+
+        let manifest = InstallManifest {
+            schema_version: 1,
+            install_root: temp.path().join("install"),
+            state_root: temp.path().join("state"),
+            current_release: Some("current".to_string()),
+            previous_release: Some("previous".to_string()),
+            adopted_from: None,
+            release_channel: None,
+            updated_at: now_rfc3339(),
+        };
+
+        prune_old_releases(&releases, &manifest);
+
+        assert!(releases.join("current").is_dir());
+        assert!(releases.join("previous").is_dir());
+        assert!(!releases.join("old").exists());
+        assert!(releases.join("note.txt").is_file());
     }
 }
