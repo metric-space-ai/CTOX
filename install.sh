@@ -842,6 +842,14 @@ setup_browser_runtime() {
   fi
 }
 
+build_google_fetch_helper() {
+  local source_root="$1"
+  local tool_dir="$source_root/tools/google-fetch"
+  [[ -f "$tool_dir/Cargo.toml" ]] || return 0
+  command -v cargo >/dev/null 2>&1 || return 0
+  (cd "$tool_dir" && cargo build --release --bin ctox-google-fetch >/dev/null 2>&1)
+}
+
 # ── systemd services ─────────────────────────────────────────────────────────
 install_ctox_service() {
   [[ "$PLATFORM" == "linux" ]] || return 0
@@ -1859,6 +1867,9 @@ main() {
   fi
   if setup_browser_runtime "$source_root" 2>/dev/null; then
     runtime_details="${runtime_details:+$runtime_details, }Browser"
+  fi
+  if build_google_fetch_helper "$source_root" 2>/dev/null; then
+    runtime_details="${runtime_details:+$runtime_details, }Google-Fetch"
   fi
   tui_complete_step 11 "${runtime_details:-bereitgestellt}"
 
