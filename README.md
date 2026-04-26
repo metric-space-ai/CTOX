@@ -55,25 +55,35 @@ The installer creates a managed layout by default:
 - cache root: `~/.cache/ctox`
 - binary symlink directory: `~/.local/bin`
 
-Installer flags:
+Most first-time users should not pass installer flags. Install CTOX first, then
+open the TUI with `ctox` and configure model source, API keys, local inference,
+context window, autonomy, and communication there.
+
+Only use installer flags during the first install when you already know you need
+to override hardware detection or seed a specific local model:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/metric-space-ai/ctox/main/install.sh \
   | bash -s -- --backend=metal --model=google/gemma-4-E4B-it
 ```
 
-Common options:
+First-install overrides:
 
-| Flag | Environment variable | Purpose |
+| Flag | Environment variable | When to use it |
 | --- | --- | --- |
-| `--backend=<cuda\|metal\|cpu>` | `CTOX_BACKEND` | Select local inference backend. |
-| `--model=<model>` | `CTOX_MODEL` | Seed the default local model profile. |
-| `--install-root=<path>` | `CTOX_INSTALL_ROOT` | Override install root. |
-| `--state-root=<path>` | `CTOX_STATE_ROOT` | Override runtime state root. |
-| `--cache-root=<path>` | `CTOX_CACHE_ROOT` | Override cache root. |
-| `--bin-dir=<path>` | `CTOX_BIN_DIR` | Override binary symlink directory. |
-| `--repo=<url>` | `CTOX_REPO` | Install from a custom repository. |
-| `--branch=<branch>` | `CTOX_BRANCH` | Install from a custom branch. |
+| `--backend=<cuda\|metal\|cpu>` | `CTOX_BACKEND` | Forces the local inference backend. Leave it unset unless auto-detection is wrong or you intentionally want CPU fallback. `cuda` is for NVIDIA Linux hosts, `metal` is for Apple Silicon macOS, and `cpu` is the slow fallback. |
+| `--model=<model>` | `CTOX_MODEL` | Seeds the default local model profile. This is not required for API usage and can be changed later in the TUI. |
+
+Advanced installer options:
+
+| Flag | Environment variable | What it changes |
+| --- | --- | --- |
+| `--install-root=<path>` | `CTOX_INSTALL_ROOT` | Where the managed CTOX installation is stored. Use this for nonstandard filesystem layouts or multiple installs on one host. |
+| `--state-root=<path>` | `CTOX_STATE_ROOT` | Where runtime state is stored, including the SQLite database. Use this when state must live on a specific volume or service account path. |
+| `--cache-root=<path>` | `CTOX_CACHE_ROOT` | Where downloaded models and cache files are stored. Use this when the default home cache does not have enough disk space. |
+| `--bin-dir=<path>` | `CTOX_BIN_DIR` | Where the `ctox` command symlink is placed. Use this if `~/.local/bin` is not on `PATH` or your system uses a different user-local binary directory. |
+| `--repo=<url>` | `CTOX_REPO` | Installs from a fork or custom repository. Normal users should keep the default repository. |
+| `--branch=<branch>` | `CTOX_BRANCH` | Installs from a non-default branch. This is mainly for development, testing, or controlled rollout of a fork. |
 
 ## First Run
 

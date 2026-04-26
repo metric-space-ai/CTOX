@@ -822,53 +822,69 @@ ctox chat "Check this CTOX installation, summarize what is configured, and list 
             installation files under <code>~/.local/lib/ctox</code>, runtime
             state under <code>~/.local/state/ctox</code>, cache files under
             <code>~/.cache/ctox</code>, and command symlinks under
-            <code>~/.local/bin</code>. The exact paths can be overridden at
-            install time or through environment variables.
+            <code>~/.local/bin</code>. First-time users normally should not
+            pass flags; install CTOX first, then configure model source, API
+            keys, local inference, autonomy, and communication in the TUI.
           </p>
+          <h3>First-install overrides</h3>
           <div class="table-wrap">
             <table>
               <thead>
                 <tr>
                   <th>Installer flag</th>
                   <th>Environment variable</th>
-                  <th>Purpose</th>
+                  <th>When to use it</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <td><code>--backend=&lt;cuda|metal|cpu&gt;</code></td>
                   <td><code>CTOX_BACKEND</code></td>
-                  <td>Select the local inference backend instead of relying on auto-detection.</td>
+                  <td>Force local inference backend only when auto-detection is wrong or CPU fallback is intentional. <code>cuda</code> is for NVIDIA Linux hosts; <code>metal</code> is for Apple Silicon macOS.</td>
                 </tr>
                 <tr>
                   <td><code>--model=&lt;model&gt;</code></td>
                   <td><code>CTOX_MODEL</code></td>
-                  <td>Seed the default local model profile.</td>
+                  <td>Seed the default local model profile. This is not required for API usage and can be changed later in the TUI.</td>
                 </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>Advanced installer options</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Installer flag</th>
+                  <th>Environment variable</th>
+                  <th>What it changes</th>
+                </tr>
+              </thead>
+              <tbody>
                 <tr>
                   <td><code>--install-root=&lt;path&gt;</code></td>
                   <td><code>CTOX_INSTALL_ROOT</code></td>
-                  <td>Managed install root; default <code>~/.local/lib/ctox</code>.</td>
+                  <td>Where the managed CTOX installation is stored. Use this for nonstandard filesystem layouts or multiple installs on one host.</td>
                 </tr>
                 <tr>
                   <td><code>--state-root=&lt;path&gt;</code></td>
                   <td><code>CTOX_STATE_ROOT</code></td>
-                  <td>Runtime state root; default <code>~/.local/state/ctox</code>.</td>
+                  <td>Where runtime state is stored, including the SQLite database. Use this when state must live on a specific volume or service account path.</td>
                 </tr>
                 <tr>
                   <td><code>--cache-root=&lt;path&gt;</code></td>
                   <td><code>CTOX_CACHE_ROOT</code></td>
-                  <td>Model and runtime cache root; default <code>~/.cache/ctox</code>.</td>
+                  <td>Where downloaded models and cache files are stored. Use this when the default home cache does not have enough disk space.</td>
                 </tr>
                 <tr>
                   <td><code>--bin-dir=&lt;path&gt;</code></td>
                   <td><code>CTOX_BIN_DIR</code></td>
-                  <td>Directory for command symlinks; default <code>~/.local/bin</code>.</td>
+                  <td>Where the <code>ctox</code> command symlink is placed. Use this if <code>~/.local/bin</code> is not on <code>PATH</code>.</td>
                 </tr>
                 <tr>
                   <td><code>--repo</code>, <code>--branch</code>, <code>--rebuild</code></td>
                   <td><code>CTOX_REPO</code>, <code>CTOX_BRANCH</code></td>
-                  <td>Use a custom repository, branch, or in-place rebuild path.</td>
+                  <td>Development and controlled-rollout options for forks, non-default branches, or rebuilds. Normal users should not need them.</td>
                 </tr>
               </tbody>
             </table>
