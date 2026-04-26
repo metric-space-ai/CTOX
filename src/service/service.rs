@@ -3741,7 +3741,7 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
             parent_message_key: None,
             metadata: serde_json::json!({
                 "conversation_id": mission.conversation_id,
-                "dedupe_key": format!("mission-watchdog:{}", mission.conversation_id),
+                "dedupe_key": mission_watchdog_dedupe_key(&mission),
             }),
         },
     )?;
@@ -6137,6 +6137,27 @@ fn mission_task_priority(mission: &lcm::MissionStateRecord) -> &'static str {
     }
 }
 
+fn mission_watchdog_dedupe_key(mission: &lcm::MissionStateRecord) -> String {
+    let signature = [
+        mission.conversation_id.to_string(),
+        clip_text(&mission.mission, 240),
+        clip_text(&mission.mission_status, 80),
+        clip_text(&mission.continuation_mode, 80),
+        clip_text(&mission.trigger_intensity, 80),
+        clip_text(&mission.blocker, 240),
+        clip_text(&mission.next_slice, 240),
+        clip_text(&mission.done_gate, 240),
+    ]
+    .join("|");
+    let digest = {
+        use sha2::Digest;
+        let bytes = sha2::Sha256::digest(signature.as_bytes());
+        let hex = format!("{bytes:x}");
+        hex[..12].to_string()
+    };
+    format!("mission-watchdog:{}:{digest}", mission.conversation_id)
+}
+
 fn render_mission_continuation_prompt(mission: &lcm::MissionStateRecord, idle_secs: u64) -> String {
     let mission_label = if mission.mission.trim().is_empty() {
         "Keep the active mission alive from the latest durable continuity."
@@ -8039,6 +8060,34 @@ mod tests {
         assert!(prompt.contains("Mission continuity watchdog: the mission was idle for 45s."));
         assert!(prompt.contains("Required actions:"));
         assert!(prompt.len() < 900, "prompt too large: {}", prompt.len());
+    }
+
+    #[test]
+    fn mission_watchdog_dedupe_key_tracks_mission_semantics() {
+        let base = lcm::MissionStateRecord {
+            conversation_id: 1,
+            mission: "Rebuild public front door into real platform portal".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker: "none".to_string(),
+            next_slice: "Ship the buyer search slice.".to_string(),
+            done_gate: "Live buyer gates are healthy.".to_string(),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-1".to_string(),
+            last_synced_at: "2026-04-26T00:00:00Z".to_string(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+        };
+        let same_key = mission_watchdog_dedupe_key(&base);
+        let mut changed = base.clone();
+        changed.mission = "Expose ticket knowledge-put for harness forensics".to_string();
+        changed.next_slice = "Persist one harness_forensics note.".to_string();
+
+        assert_eq!(same_key, mission_watchdog_dedupe_key(&base));
+        assert_ne!(same_key, mission_watchdog_dedupe_key(&changed));
     }
 
     #[test]
