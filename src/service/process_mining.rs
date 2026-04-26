@@ -3967,6 +3967,14 @@ fn clear_unmapped_event(conn: &Connection, event_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn clear_state_violations_for_event(conn: &Connection, event_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM ctox_pm_state_violations WHERE event_id = ?1",
+        params![event_id],
+    )?;
+    Ok(())
+}
+
 fn unmapped_event_json(event: &ProcessEventForStateMachine, reason: &str) -> Value {
     json!({
         "event_id": event.event_id,
@@ -4145,6 +4153,7 @@ fn scan_core_state_machine_violations(conn: &Connection, limit: i64) -> Result<V
             &scanned_at,
         )?;
         clear_unmapped_event(conn, &event.event_id)?;
+        clear_state_violations_for_event(conn, &event.event_id)?;
 
         if report.accepted {
             accepted += 1;
@@ -5039,13 +5048,19 @@ fn full_sha256_hex(input: &str) -> String {
 }
 
 fn founder_text(haystack: &str) -> bool {
-    haystack.contains("founder")
-        || haystack.contains("owner")
-        || haystack.contains("admin")
-        || haystack.contains("ceo")
-        || haystack.contains("michael")
-        || haystack.contains("olaf")
-        || haystack.contains("marco")
+    has_domain_token(
+        haystack,
+        &[
+            "founder", "owner", "admin", "ceo", "michael", "olaf", "marco",
+        ],
+    )
+}
+
+fn has_domain_token(haystack: &str, needles: &[&str]) -> bool {
+    haystack
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|token| !token.is_empty())
+        .any(|token| needles.iter().any(|needle| token == *needle))
 }
 
 fn owner_visible_text(haystack: &str) -> bool {
@@ -5732,6 +5747,102 @@ mod tests {
         assert_eq!(account_telemetry, 1);
         assert_eq!(thread_telemetry, 1);
         assert_eq!(routing_core, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_lease_owner_key_does_not_mark_founder_lane() -> Result<()> {
+        let dir = tempdir()?;
+        let db_path = dir.path().join("ctox.sqlite3");
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE communication_routing_state (
+                message_key TEXT PRIMARY KEY,
+                route_status TEXT NOT NULL,
+                lease_owner TEXT,
+                leased_at TEXT,
+                acked_at TEXT,
+                last_error TEXT,
+                updated_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+        ensure_process_mining_schema(&conn, &db_path)?;
+        conn.execute(
+            r#"
+            INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, updated_at
+            )
+            VALUES (
+                'queue:system::normal', 'leased', 'ctox-service',
+                '2026-04-26T01:50:16Z', '2026-04-26T01:50:16Z'
+            )
+            "#,
+            [],
+        )?;
+        conn.execute(
+            r#"
+            UPDATE communication_routing_state
+            SET route_status = 'cancelled',
+                lease_owner = NULL,
+                leased_at = NULL,
+                acked_at = '2026-04-26T01:50:23Z',
+                updated_at = '2026-04-26T01:50:23Z'
+            WHERE message_key = 'queue:system::normal'
+            "#,
+            [],
+        )?;
+
+        let _ = scan_core_state_machine_violations(&conn, 100)?;
+        let event_id: String = conn.query_row(
+            r#"
+            SELECT event_id
+            FROM ctox_pm_core_transition_audit
+            WHERE rule_id = 'communication-routing-state'
+              AND to_state = 'Superseded'
+            LIMIT 1
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        conn.execute(
+            r#"
+            INSERT INTO ctox_pm_state_violations (
+                violation_id, event_id, case_id, violation_code, severity, message, detected_at
+            )
+            VALUES (
+                'stale-founder-spill', ?1, 'case', 'founder_work_cannot_spill',
+                'critical', 'stale violation from an older model', '2026-04-26T01:00:00Z'
+            )
+            "#,
+            params![event_id],
+        )?;
+
+        let summary = scan_core_state_machine_violations(&conn, 100)?;
+        let founder_spill_violations: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*)
+            FROM ctox_pm_state_violations
+            WHERE violation_code = 'founder_work_cannot_spill'
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        let lane: String = conn.query_row(
+            r#"
+            SELECT lane
+            FROM ctox_pm_core_transition_audit
+            WHERE rule_id = 'communication-routing-state'
+              AND to_state = 'Superseded'
+            LIMIT 1
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(founder_spill_violations, 0, "{summary}");
+        assert_eq!(lane, "P2MissionDelivery");
         Ok(())
     }
 
