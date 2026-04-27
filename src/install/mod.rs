@@ -1951,7 +1951,9 @@ fn write_managed_wrapper(install_root: &Path, state_root: &Path) -> Result<()> {
         &current_root,
         state_root,
         &launcher_binary,
-    )
+    )?;
+    ensure_global_command_shim(&wrapper_path);
+    Ok(())
 }
 
 fn sync_managed_launch_binaries(
@@ -1977,6 +1979,9 @@ fn sync_managed_launch_binaries(
     let current_desktop_host = current_root.join("bin/ctox-desktop-host");
     if current_desktop_host.is_file() {
         copy_launch_binary(&current_desktop_host, &bin_dir.join("ctox-desktop-host"))?;
+    }
+    if let Ok(wrapper) = wrapper_path() {
+        ensure_global_command_shim(&wrapper);
     }
     Ok(())
 }
@@ -2128,6 +2133,37 @@ fn refresh_service_unit(
 fn wrapper_path() -> Result<PathBuf> {
     let home_dir = home_dir().context("failed to resolve HOME for CTOX wrapper")?;
     Ok(home_dir.join(".local/bin/ctox"))
+}
+
+fn ensure_global_command_shim(wrapper_path: &Path) {
+    if !cfg!(unix) {
+        return;
+    }
+    let shim = Path::new("/usr/local/bin/ctox");
+    if shim == wrapper_path {
+        return;
+    }
+    if let Ok(metadata) = fs::symlink_metadata(shim) {
+        if !metadata.file_type().is_symlink() {
+            return;
+        }
+        let _ = fs::remove_file(shim);
+    }
+    if let Some(parent) = shim.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if create_symlink(wrapper_path, shim).is_ok() {
+        return;
+    }
+    let _ = Command::new("sudo")
+        .args([
+            "-n",
+            "ln",
+            "-sfn",
+            &wrapper_path.display().to_string(),
+            "/usr/local/bin/ctox",
+        ])
+        .status();
 }
 
 fn home_dir() -> Option<PathBuf> {

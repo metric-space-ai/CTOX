@@ -1071,6 +1071,23 @@ WRAPEOF
   chmod +x "$destination"
 }
 
+ensure_command_shim() {
+  local target="$BIN_DIR/ctox"
+  local shim="/usr/local/bin/ctox"
+  [[ -x "$target" ]] || return 0
+  [[ "$BIN_DIR" == "/usr/local/bin" ]] && return 0
+  [[ -d "/usr/local/bin" ]] || return 0
+
+  if [[ -L "$shim" || ! -e "$shim" ]]; then
+    if [[ -w "/usr/local/bin" ]]; then
+      ln -sfn "$target" "$shim" 2>/dev/null || true
+    elif can_sudo; then
+      run_sudo ln -sfn "$target" "$shim" 2>/dev/null || true
+      run_sudo chmod 755 "$shim" 2>/dev/null || true
+    fi
+  fi
+}
+
 populate_rebuild_release_layout() {
   local release_root="$1"
   local ctox_binary=""
@@ -1586,6 +1603,7 @@ run_rebuild() {
 
   # Ensure ctox is available as a command everywhere
   write_wrapper_script "$root"
+  ensure_command_shim
 
   # Ensure BIN_DIR is in PATH for future shells
   local shell_rc=""
@@ -1967,8 +1985,9 @@ main() {
 
   # Set update channel
   "$BIN_DIR/ctox" update channel set-github --repo metric-space-ai/ctox 2>/dev/null || true
+  ensure_command_shim
 
-  tui_complete_step 12 "PATH + Update-Channel"
+  tui_complete_step 12 "PATH + command shim + Update-Channel"
 
   tui_success "$shell_rc_hint"
 }
