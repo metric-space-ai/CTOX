@@ -1069,6 +1069,8 @@ fn overlay_process_runtime_selection_env(env_map: &mut BTreeMap<String, String>)
         "CTOX_CHAT_SOURCE",
         "CTOX_LOCAL_RUNTIME",
         "CTOX_API_PROVIDER",
+        "CTOX_AZURE_FOUNDRY_ENDPOINT",
+        "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID",
         "CTOX_UPSTREAM_BASE_URL",
         "CTOX_CHAT_MODEL",
         "CTOX_CHAT_MODEL_BASE",
@@ -1172,12 +1174,23 @@ fn apply_selection_runtime_projection(
                 .filter(|model| engine::is_api_chat_model(model))
                 .map(|model| engine::default_api_provider_for_model(model).to_string())
                 .unwrap_or_else(|| runtime_state::infer_api_provider_from_env_map(env_map));
+            let azure_foundry_base_url = api_provider
+                .eq_ignore_ascii_case("azure_foundry")
+                .then(|| {
+                    env_map
+                        .get("CTOX_AZURE_FOUNDRY_ENDPOINT")
+                        .and_then(|endpoint| {
+                            runtime_state::azure_foundry_responses_base_url(endpoint)
+                        })
+                })
+                .flatten();
             next_state.upstream_base_url = env_map
                 .get("CTOX_UPSTREAM_BASE_URL")
                 .map(String::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .filter(|value| !runtime_state::is_local_loopback_base_url(value))
                 .map(str::to_string)
+                .or(azure_foundry_base_url)
                 .unwrap_or_else(|| {
                     runtime_state::default_api_upstream_base_url_for_provider(&api_provider)
                         .to_string()

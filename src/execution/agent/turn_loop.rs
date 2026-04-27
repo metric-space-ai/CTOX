@@ -867,6 +867,9 @@ pub fn conversation_id_for_thread_key(thread_key: Option<&str>) -> i64 {
 
 fn responses_api_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
     if trimmed.ends_with("/v1") {
         trimmed.to_string()
     } else {
@@ -907,6 +910,7 @@ pub(crate) fn resolve_api_model_provider_spec(
     let (env_key, default_provider, wire_api) = match normalized.as_str() {
         "openrouter" => ("OPENROUTER_API_KEY", "openrouter", "responses"),
         "minimax" => ("MINIMAX_API_KEY", "minimax", "responses"),
+        "azure_foundry" => ("AZURE_FOUNDRY_API_KEY", "azure_foundry", "responses"),
         _ => return None,
     };
     let base_url = resolved_runtime

@@ -1883,7 +1883,12 @@ fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
         ));
     }
     match item.key {
-        "CTOX_API_PROVIDER" | "OPENAI_API_KEY" | "OPENROUTER_API_KEY" => {
+        "CTOX_API_PROVIDER"
+        | "OPENAI_API_KEY"
+        | "OPENROUTER_API_KEY"
+        | "AZURE_FOUNDRY_API_KEY"
+        | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+        | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID" => {
             append_provider_details(&mut lines, app, width);
         }
         "CTOX_CHAT_MODEL" | "CTOX_CHAT_LOCAL_PRESET" | "CTOX_CHAT_SKILL_PRESET" => {
@@ -2036,6 +2041,18 @@ fn append_provider_details(lines: &mut Vec<String>, app: &App, width: usize) {
         .find(|item| item.key == "OPENROUTER_API_KEY")
         .map(|item| !item.value.trim().is_empty())
         .unwrap_or(false);
+    let azure_token_present = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == "AZURE_FOUNDRY_API_KEY")
+        .map(|item| !item.value.trim().is_empty())
+        .unwrap_or(false);
+    let azure_deployment_present = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID")
+        .map(|item| !item.value.trim().is_empty())
+        .unwrap_or(false);
     lines.push(format!("local    {local_pool} models"));
     lines.push(format!(
         "openai   {}",
@@ -2057,6 +2074,14 @@ fn append_provider_details(lines: &mut Vec<String>, app: &App, width: usize) {
                 "{} models locked until token is saved",
                 engine::SUPPORTED_OPENROUTER_API_CHAT_MODELS.len()
             )
+        }
+    ));
+    lines.push(format!(
+        "foundry  {}",
+        if azure_token_present && azure_deployment_present {
+            "deployment ready".to_string()
+        } else {
+            "needs endpoint, deployment ID, and token".to_string()
         }
     ));
     lines.push(format!(

@@ -367,6 +367,10 @@ pub fn is_minimax_api_chat_model(model: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn is_azure_foundry_api_chat_model(model: &str) -> bool {
+    !model.trim().is_empty()
+}
+
 pub fn supports_local_chat_runtime(model: &str) -> bool {
     runtime_config_for_model(model).is_ok()
 }
@@ -383,6 +387,7 @@ pub fn api_provider_supports_model(provider: &str, model: &str) -> bool {
         "openrouter" => is_openrouter_api_chat_model(model),
         "anthropic" => is_anthropic_api_chat_model(model),
         "minimax" => is_minimax_api_chat_model(model),
+        "azure_foundry" => is_azure_foundry_api_chat_model(model),
         "openai" => is_openai_api_chat_model(model),
         _ => false,
     }

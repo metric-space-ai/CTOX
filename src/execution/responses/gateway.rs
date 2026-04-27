@@ -27,6 +27,8 @@ fn uses_remote_api_upstream(upstream_base_url: &str) -> bool {
         || upstream_base_url.starts_with(runtime_state::default_api_upstream_base_url_for_provider(
             "minimax",
         ))
+        || runtime_state::api_provider_for_upstream_base_url(upstream_base_url)
+            .eq_ignore_ascii_case("azure_foundry")
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

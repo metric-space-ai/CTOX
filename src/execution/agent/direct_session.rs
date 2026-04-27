@@ -36,7 +36,9 @@ use ctox_protocol::user_input::UserInput;
 use ctox_utils_absolute_path::AbsolutePathBuf;
 
 use crate::context::compact::{CompactDecision, CompactMode, CompactPolicy, CompactTrigger};
+use crate::inference::engine;
 use crate::inference::runtime_kernel;
+use crate::inference::runtime_state;
 use crate::secrets;
 
 // ---------------------------------------------------------------------------
@@ -205,22 +207,47 @@ impl PersistentSession {
             .or_else(|| settings.get("CODEX_MODEL"))
             .cloned()
             .unwrap_or_else(|| "gpt-5.4-mini".to_string());
+        let selected_api_provider = settings
+            .get("CTOX_API_PROVIDER")
+            .map(|value| runtime_state::normalize_api_provider(value).to_string())
+            .filter(|provider| {
+                !provider.eq_ignore_ascii_case("local")
+                    && engine::api_provider_supports_model(provider, &model)
+            })
+            .or_else(|| {
+                let explicit_api_source = settings
+                    .get("CTOX_CHAT_SOURCE")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("api"));
+                (explicit_api_source || engine::is_api_chat_model(&model))
+                    .then(|| engine::default_api_provider_for_model(&model).to_string())
+            });
         let cwd: PathBuf = root.to_path_buf();
 
         let codex_home =
             find_codex_home().map_err(|err| anyhow::anyhow!("find_codex_home: {err}"))?;
 
-        let api_key = settings
-            .get("OPENAI_API_KEY")
-            .or_else(|| settings.get("OPENROUTER_API_KEY"))
-            .or_else(|| settings.get("ANTHROPIC_API_KEY"))
-            .or_else(|| settings.get("MINIMAX_API_KEY"))
-            .cloned()
-            .or_else(|| secrets::get_credential(root, "OPENAI_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "OPENROUTER_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "ANTHROPIC_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "MINIMAX_API_KEY"))
-            .filter(|v| !v.trim().is_empty());
+        let selected_api_key_name = selected_api_provider
+            .as_deref()
+            .map(runtime_state::api_key_env_var_for_provider);
+        let api_key = match selected_api_key_name {
+            Some(key) => settings
+                .get(key)
+                .cloned()
+                .or_else(|| secrets::get_credential(root, key)),
+            None => settings
+                .get("OPENAI_API_KEY")
+                .or_else(|| settings.get("OPENROUTER_API_KEY"))
+                .or_else(|| settings.get("ANTHROPIC_API_KEY"))
+                .or_else(|| settings.get("MINIMAX_API_KEY"))
+                .or_else(|| settings.get("AZURE_FOUNDRY_API_KEY"))
+                .cloned()
+                .or_else(|| secrets::get_credential(root, "OPENAI_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "OPENROUTER_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "ANTHROPIC_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "MINIMAX_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "AZURE_FOUNDRY_API_KEY")),
+        }
+        .filter(|v| !v.trim().is_empty());
         let config_cwd =
             AbsolutePathBuf::from_absolute_path(cwd.canonicalize().unwrap_or(cwd.clone()))
                 .map_err(|err| anyhow::anyhow!("cwd resolve: {err}"))?;
