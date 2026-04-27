@@ -495,6 +495,7 @@ fn build_queue_repair_prompt(root: &Path, dry_run: bool) -> String {
         "(missing)".to_string()
     };
     let runtime_db_path = root.join("runtime/ctox.sqlite3");
+    let harness_block = render_confirmed_harness_findings_block(root);
     format!(
         "== QUEUE REPAIR ASSIGNMENT ==\n\
 \n\
@@ -502,7 +503,7 @@ Workspace root: {}\n\
 Runtime DB: {}\n\
 Queue cleanup skill: {}\n\
 Dry run: {}\n\
-\n\
+{}\
 Open the queue cleanup skill first and follow it.\n\
 \n\
 Gather the queue-repair facts yourself from the runtime SQLite store, queue state, ticket/self-work state, active strategic directives, founder or owner communication threads, review findings, and service status.\n\
@@ -511,13 +512,82 @@ Required work:\n\
 1. identify the canonical hot path that should survive\n\
 2. identify stale, duplicate, superseded, or contaminated queue work\n\
 3. pay special attention to founder or owner communication drift contaminating queue work\n\
-4. propose the minimum safe queue actions needed to recover focus\n\
-5. do not mutate anything directly; only return the repair plan\n",
+4. for every confirmed harness finding listed above whose entity touches the queue scope, decide: block the entity (with `ctox queue block --reason \"harness-mining: ...\"`) and then `ctox harness-mining finding-mitigate --finding-id <id> --by agent --note \"<what was done>\"`. Do NOT release a queue item that appears as a confirmed stuck-case finding without mitigating the finding first.\n\
+5. propose the minimum safe queue actions needed to recover focus\n\
+6. do not mutate anything directly; only return the repair plan\n",
         root.display(),
         runtime_db_path.display(),
         skill,
-        if dry_run { "yes" } else { "no" }
+        if dry_run { "yes" } else { "no" },
+        harness_block,
     )
+}
+
+fn render_confirmed_harness_findings_block(root: &Path) -> String {
+    // Read-only peek into ctox_hm_findings before constructing the prompt.
+    // If the audit-tick has not run yet (table missing) or the read fails
+    // for any reason we silently skip the block — the agent then falls
+    // back to gathering signals via `ctox harness-mining findings` itself.
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let conn =
+        match Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(c) => c,
+            Err(_) => return String::new(),
+        };
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ctox_hm_findings'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if table_exists == 0 {
+        return String::new();
+    }
+    let findings =
+        match crate::service::harness_mining::findings::list(&conn, Some("confirmed"), None, 15) {
+            Ok(rows) => rows,
+            Err(_) => return String::new(),
+        };
+    if findings.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\nConfirmed harness-mining findings (mitigate or acknowledge before resuming protected work):\n");
+    for f in &findings {
+        let id = f
+            .get("finding_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let kind = f
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let severity = f
+            .get("severity")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("?");
+        let entity_type = f
+            .get("entity_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let entity_id = f
+            .get("entity_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let lane = f
+            .get("lane")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        out.push_str(&format!(
+            "- [{severity}] {kind} :: {id} (entity_type={entity_type}, lane={lane})"
+        ));
+        if !entity_id.is_empty() {
+            out.push_str(&format!(" entity_id={entity_id}"));
+        }
+        out.push('\n');
+    }
+    out.push('\n');
+    out
 }
 
 fn build_queue_repair_verify_prompt(

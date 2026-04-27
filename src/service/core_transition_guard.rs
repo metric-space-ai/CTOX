@@ -50,6 +50,26 @@ pub fn evaluate_core_transition(
 ) -> Result<CoreTransitionProof> {
     ensure_core_transition_guard_schema(conn)?;
 
+    // Defensive noop guard: a state-preserving update is by definition not
+    // a transition. Returning early here closes a class of false-positive
+    // `invalid_transition` rejections that hit production before this fix
+    // (e.g. the mission-watchdog refreshing metadata of a closed
+    // ticket_self_work_items row 193 times — none of which were attempts to
+    // *change* the state).  We do not write a proof for the noop because no
+    // transition occurred; the caller sees `accepted = true` and proceeds.
+    if request.from_state == request.to_state {
+        let report = csm::CoreTransitionReport {
+            accepted: true,
+            violations: Vec::new(),
+        };
+        let proof_id = noop_proof_id(request)?;
+        return Ok(CoreTransitionProof {
+            proof_id,
+            accepted: true,
+            report,
+        });
+    }
+
     let report = csm::validate_transition(request);
     let request_json = serde_json::to_string(request)?;
     let report_json = serde_json::to_string(&report)?;
@@ -118,6 +138,14 @@ fn deterministic_proof_id(request_json: &str) -> String {
     hasher.update(b"ctox-core-transition-proof-v1");
     hasher.update(request_json.as_bytes());
     format!("ctp-{:x}", hasher.finalize())
+}
+
+fn noop_proof_id(request: &csm::CoreTransitionRequest) -> Result<String> {
+    let request_json = serde_json::to_string(request)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"ctox-core-transition-proof-noop-v1");
+    hasher.update(request_json.as_bytes());
+    Ok(format!("ctp-noop-{:x}", hasher.finalize()))
 }
 
 fn agent_recovery_message(report: &csm::CoreTransitionReport) -> String {
@@ -210,6 +238,37 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(accepted, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn noop_transition_returns_accepted_without_writing_proof() -> Result<()> {
+        // Bug B regression: a state-preserving update (from_state == to_state)
+        // is by definition not a transition. The guard must short-circuit
+        // before writing a proof, so that the mission-watchdog refreshing
+        // metadata of a closed work item cannot generate hundreds of
+        // false-positive `invalid_transition` rejections.
+        let conn = Connection::open_in_memory()?;
+        let request = CoreTransitionRequest {
+            entity_type: CoreEntityType::WorkItem,
+            entity_id: "wi-1".to_string(),
+            lane: RuntimeLane::P2MissionDelivery,
+            from_state: CoreState::Planned,
+            to_state: CoreState::Planned,
+            event: CoreEvent::Plan,
+            actor: "queue".to_string(),
+            evidence: CoreEvidenceRefs::default(),
+            metadata: BTreeMap::new(),
+        };
+        let proof = evaluate_core_transition(&conn, &request)?;
+        assert!(proof.accepted);
+        assert!(proof.report.violations.is_empty());
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ctox_core_transition_proofs",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 0, "noop transitions must not write proofs");
         Ok(())
     }
 

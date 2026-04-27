@@ -2005,6 +2005,7 @@ fn run_process_mining_self_diagnosis(conn: &Connection, limit: i64) -> Result<Va
     subsystems.push(diagnose_founder_review(conn, current_scan_at.as_deref())?);
     subsystems.push(diagnose_tickets(conn)?);
     subsystems.push(diagnose_schedules(conn)?);
+    subsystems.push(diagnose_harness_findings(conn)?);
 
     let critical_count = subsystems
         .iter()
@@ -2178,6 +2179,94 @@ fn push_subsystem(
         "metrics": metrics,
         "findings": findings,
     }));
+}
+
+fn diagnose_harness_findings(conn: &Connection) -> Result<Value> {
+    // Surface confirmed harness-mining findings as a self-diagnose subsystem
+    // so callers like queue-cleanup, incident-response, and reliability-ops
+    // see the same signal whether they read self-diagnose or harness-mining
+    // directly. We do NOT write here — findings flow only from the
+    // audit-tick. Read-only.
+    let table_exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ctox_hm_findings'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if table_exists == 0 {
+        // Audit-tick has not run yet on this deployment — nothing to surface.
+        return Ok(subsystem_json(
+            "harness_findings",
+            "ok",
+            "Harness-mining audit findings (none yet — audit-tick has not run).",
+            json!({"confirmed": 0, "acknowledged": 0, "mitigated": 0, "verified": 0}),
+            Vec::new(),
+        ));
+    }
+
+    let confirmed =
+        crate::service::harness_mining::findings::list(conn, Some("confirmed"), None, 100)?;
+    let acknowledged =
+        crate::service::harness_mining::findings::list(conn, Some("acknowledged"), None, 100)?;
+    let mitigated_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ctox_hm_findings WHERE status = 'mitigated'",
+        [],
+        |row| row.get(0),
+    )?;
+    let verified_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM ctox_hm_findings WHERE status = 'verified'",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let critical_confirmed = confirmed
+        .iter()
+        .filter(|f| f.get("severity").and_then(Value::as_str) == Some("critical"))
+        .count();
+    let warning_confirmed = confirmed.len() - critical_confirmed;
+
+    let mut findings: Vec<Value> = Vec::new();
+    for f in confirmed.iter().take(10) {
+        let kind = f.get("kind").and_then(Value::as_str).unwrap_or("?");
+        let severity = f.get("severity").and_then(Value::as_str).unwrap_or("?");
+        let entity_type = f.get("entity_type").and_then(Value::as_str).unwrap_or("");
+        let lane = f.get("lane").and_then(Value::as_str).unwrap_or("");
+        let confirmed_at = f.get("confirmed_at").and_then(Value::as_str).unwrap_or("");
+        findings.push(json!({
+            "code": format!("harness_finding:{kind}"),
+            "severity": severity,
+            "message": format!(
+                "{kind} confirmed at {confirmed_at} ({entity_type}{}{}) — review via `ctox harness-mining findings --status confirmed` and acknowledge / mitigate before continuing protected work",
+                if lane.is_empty() { "" } else { ", " },
+                lane
+            ),
+            "finding_id": f.get("finding_id"),
+        }));
+    }
+
+    let status = if critical_confirmed > 0 {
+        "critical"
+    } else if !confirmed.is_empty() || !acknowledged.is_empty() {
+        "warning"
+    } else {
+        "ok"
+    };
+
+    Ok(subsystem_json(
+        "harness_findings",
+        status,
+        "Confirmed harness-mining findings drive recovery decisions; the agent must transition them through the lifecycle (acknowledge → mitigate → verify) instead of letting them accumulate.",
+        json!({
+            "confirmed": confirmed.len(),
+            "confirmed_critical": critical_confirmed,
+            "confirmed_warning": warning_confirmed,
+            "acknowledged": acknowledged.len(),
+            "mitigated": mitigated_count,
+            "verified": verified_count,
+        }),
+        findings,
+    ))
 }
 
 fn subsystem_json(
@@ -4162,6 +4251,21 @@ fn infer_communication_transition(
     let to_state = communication_state_from_row(event, after)
         .or_else(|| map_communication_state(event.to_state.as_deref()))
         .or_else(|| communication_state_from_activity(&event.activity))?;
+
+    // Inbound-direction rows must not be classified as outgoing founder
+    // sends. Production saw 109+ rejected `founder_send_body_hash_mismatch`
+    // proofs per inbound mail because every UPDATE on a received mail was
+    // routed into the FounderCommunication-Send rule and asked to honour an
+    // approved-body-hash that never existed for an incoming message.  The
+    // guard here filters at the inference layer instead of relying on every
+    // downstream gate to reject silently.
+    if matches!(to_state, csm::CoreState::Sending | csm::CoreState::Sent) {
+        if let Some(direction) = after.get("direction").and_then(Value::as_str) {
+            if !direction.eq_ignore_ascii_case("outbound") {
+                return None;
+            }
+        }
+    }
     let from_state =
         map_communication_state(event.from_state.as_deref()).unwrap_or_else(|| match to_state {
             csm::CoreState::InboundObserved => csm::CoreState::InboundObserved,
@@ -5613,6 +5717,70 @@ mod tests {
 
         assert_eq!(unmapped, 0, "{summary}");
         assert_eq!(strategy_telemetry, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn inbound_message_status_update_to_sending_value_is_not_classified_as_outgoing_send(
+    ) -> Result<()> {
+        // Bug A regression: production saw 109 rejected
+        // `founder_send_body_hash_mismatch` proofs per inbound mail because
+        // every UPDATE on `communication_messages` was routed into the
+        // FounderCommunication-Send rule, regardless of the row's
+        // `direction` column. The inference must skip Sending/Sent
+        // classification when the underlying row is not direction=outbound.
+        let dir = tempdir()?;
+        let db_path = dir.path().join("ctox.sqlite3");
+        let conn = Connection::open(&db_path)?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE communication_messages (
+                message_key TEXT PRIMARY KEY,
+                direction TEXT NOT NULL,
+                folder_hint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                sender_address TEXT,
+                recipient_addresses_json TEXT,
+                body_text TEXT
+            );
+            "#,
+        )?;
+        ensure_process_mining_schema(&conn, &db_path)?;
+        conn.execute(
+            r#"
+            INSERT INTO communication_messages (
+                message_key, direction, folder_hint, status,
+                sender_address, recipient_addresses_json, body_text
+            )
+            VALUES (
+                'email:cto1@example::INBOX::42', 'inbound', 'INBOX', 'received',
+                'sender@external', '["cto1@example"]', 'incoming text'
+            )
+            "#,
+            [],
+        )?;
+        // Now an UPDATE bumps the status to a value the existing inference
+        // historically treated as a Sending-trigger. The fix must keep this
+        // a noop classification — we are NOT sending an inbound mail.
+        conn.execute(
+            "UPDATE communication_messages SET status = 'sending' WHERE message_key = 'email:cto1@example::INBOX::42'",
+            [],
+        )?;
+
+        let summary = scan_core_state_machine_violations(&conn, 100)?;
+        let send_proofs: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM ctox_core_transition_proofs
+            WHERE entity_type = 'FounderCommunication'
+              AND to_state IN ('Sending','Sent')
+            "#,
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            send_proofs, 0,
+            "inbound mail must not produce Sending/Sent proofs, got summary {summary}"
+        );
         Ok(())
     }
 
