@@ -11,6 +11,8 @@ use std::fs::OpenOptions;
 use std::io::{copy, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::inference::engine;
@@ -25,17 +27,93 @@ const DEFAULT_CACHE_ROOT_RELATIVE_PATH: &str = ".cache/ctox";
 const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com";
 const DEFAULT_GITHUB_TOKEN_ENV: &str = "CTOX_UPDATE_GITHUB_TOKEN";
 const DEFAULT_RELEASE_REPO: &str = "metric-space-ai/ctox";
+static UPGRADE_PROGRESS_STEP: AtomicUsize = AtomicUsize::new(0);
+static UPGRADE_PROGRESS_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
+
+fn progress_reset() {
+    UPGRADE_PROGRESS_STEP.store(0, Ordering::SeqCst);
+    if let Ok(mut started) = UPGRADE_PROGRESS_STARTED.lock() {
+        *started = Some(Instant::now());
+    }
+}
 
 fn progress_step(label: impl AsRef<str>) {
-    eprintln!("ctox upgrade | {}", label.as_ref());
+    let step = UPGRADE_PROGRESS_STEP.fetch_add(1, Ordering::SeqCst) + 1;
+    eprintln!(
+        "{}",
+        format_progress_step(progress_elapsed_secs(), step, label.as_ref())
+    );
+}
+
+fn progress_info(label: impl AsRef<str>) {
+    eprintln!(
+        "{}",
+        format_progress_info(progress_elapsed_secs(), label.as_ref())
+    );
 }
 
 fn progress_done(label: impl AsRef<str>, started: Instant) {
     eprintln!(
-        "ctox upgrade | ok | {} | {}s",
-        label.as_ref(),
-        started.elapsed().as_secs()
+        "{}",
+        format_progress_done(
+            progress_elapsed_secs(),
+            label.as_ref(),
+            started.elapsed().as_secs()
+        )
     );
+}
+
+fn progress_elapsed_secs() -> u64 {
+    UPGRADE_PROGRESS_STARTED
+        .lock()
+        .ok()
+        .and_then(|started| started.as_ref().map(Instant::elapsed))
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+fn format_progress_step(elapsed_secs: u64, step: usize, label: &str) -> String {
+    format!(
+        "ctox upgrade | {} | step {step:02} | {label}",
+        format_elapsed(elapsed_secs)
+    )
+}
+
+fn format_progress_info(elapsed_secs: u64, label: &str) -> String {
+    format!(
+        "ctox upgrade | {} | info    | {label}",
+        format_elapsed(elapsed_secs)
+    )
+}
+
+fn format_progress_done(elapsed_secs: u64, label: &str, duration_secs: u64) -> String {
+    format!(
+        "ctox upgrade | {} | done    | {} | took {}",
+        format_elapsed(elapsed_secs),
+        label,
+        format_duration(duration_secs)
+    )
+}
+
+fn format_elapsed(total_secs: u64) -> String {
+    let hours = total_secs / 3600;
+    let minutes = (total_secs / 60) % 60;
+    let seconds = total_secs % 60;
+    if hours == 0 {
+        format!("{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours:02}:{minutes:02}:{seconds:02}")
+    }
+}
+
+fn format_duration(total_secs: u64) -> String {
+    let minutes = total_secs / 60;
+    let seconds = total_secs % 60;
+    if minutes == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -387,6 +465,7 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             .iter()
             .all(|arg| matches!(arg.as_str(), "--stable" | "--dev"));
     if args.is_empty() || top_flags_only {
+        progress_reset();
         let layout = InstallLayout::resolve(root)?;
         let _lease = acquire_update_operation_lease(
             &layout,
@@ -404,12 +483,12 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             RemoteReleaseRequest::Latest
         };
         progress_step(if use_dev {
-            "starting dev upgrade from main"
+            "start dev upgrade from main"
         } else {
-            "starting stable upgrade"
+            "start stable upgrade"
         });
         let result = apply_remote_update(root, request, false, false, false)?;
-        progress_step("upgrade completed; emitting machine-readable summary");
+        progress_info("upgrade completed; emitting machine-readable summary on stdout");
         println!("{}", serde_json::to_string_pretty(&result)?);
         return Ok(());
     }
@@ -469,6 +548,7 @@ pub fn handle_update_command(root: &Path, args: &[String]) -> Result<()> {
             Ok(())
         }
         Some("apply") => {
+            progress_reset();
             let layout = InstallLayout::resolve(root)?;
             let source = find_flag_value(args, "--source").map(PathBuf::from);
             let requested_release = find_flag_value(args, "--release").map(ToOwned::to_owned);
@@ -681,9 +761,9 @@ fn apply_remote_update(
     let force = force || is_branch;
     let download_started = Instant::now();
     progress_step(if from_source {
-        "fetching source archive"
+        "fetch source archive"
     } else {
-        "fetching binary release bundle"
+        "fetch binary release bundle"
     });
     let (downloaded, kind) = if from_source {
         (
@@ -866,10 +946,15 @@ fn apply_update(
         progress_step("release installer finished");
     }
     let pre_switch_status = service::service_status_snapshot(&layout.active_root).ok();
+    // If we cannot read the pre-switch status (e.g. the service is in the
+    // middle of a migration and answers slowly, or the socket has already
+    // been torn down by a previous half-completed upgrade), default to
+    // restarting. The previous default of `false` left the daemon dead
+    // after exactly that scenario.
     let should_restart = pre_switch_status
         .as_ref()
         .map(|status| status.running || status.autostart_enabled)
-        .unwrap_or(false);
+        .unwrap_or(true);
     persist_update_phase(&layout.update_state_path(), "switching", None)?;
     progress_step("switching current symlink and restarting service if required");
     let _ = service::stop_background(&layout.active_root);
@@ -902,9 +987,22 @@ fn apply_update(
     }
     if should_restart {
         progress_step("starting CTOX background service");
-        if let Err(err) = service::start_background(&current_link)
-            .and_then(|_| service::service_status_snapshot(&current_link).map(|_| ()))
-        {
+        // Verify post-start that the daemon is actually `running`. The old
+        // logic only checked that the snapshot call succeeded, which it does
+        // even when `running == false` — a silent-success path that left
+        // production dead after several upgrades. Now any non-running
+        // post-start state triggers rollback with a precise error.
+        if let Err(err) = service::start_background(&current_link).and_then(|_| {
+            let status = service::service_status_snapshot(&current_link)?;
+            if status.running {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(
+                    "post-upgrade verification: CTOX service did not reach running state on {}",
+                    status.listen_addr
+                ))
+            }
+        }) {
             rollback_to_previous_release(
                 &install_root,
                 &current_link,
@@ -1709,7 +1807,7 @@ fn run_release_installer(release_root: &Path, state_root: &Path) -> Result<()> {
         chosen_script.display(),
         args.join(" ")
     ));
-    progress_step("installer output follows");
+    progress_info("installer output follows");
     let status = cmd
         .status()
         .with_context(|| format!("failed to start installer {}", chosen_script.display()))?;
@@ -2325,6 +2423,22 @@ fn create_symlink(target: &Path, link_path: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn upgrade_progress_lines_are_numbered_and_timed() {
+        assert_eq!(
+            format_progress_step(8, 3, "fetch binary release bundle"),
+            "ctox upgrade | 00:08 | step 03 | fetch binary release bundle"
+        );
+        assert_eq!(
+            format_progress_info(9, "installer output follows"),
+            "ctox upgrade | 00:09 | info    | installer output follows"
+        );
+        assert_eq!(
+            format_progress_done(80, "downloaded v1.2.3", 75),
+            "ctox upgrade | 01:20 | done    | downloaded v1.2.3 | took 1m 15s"
+        );
+    }
 
     #[test]
     fn update_lock_blocks_second_active_holder() {

@@ -1015,8 +1015,17 @@ pub fn start_background(root: &Path) -> Result<String> {
         systemctl_user(["daemon-reload"])?;
         systemctl_user(["enable", SYSTEMD_USER_UNIT_NAME])?;
         systemctl_user(["start", SYSTEMD_USER_UNIT_NAME])?;
-        for _ in 0..40 {
-            thread::sleep(Duration::from_millis(150));
+        // After an upgrade the freshly-deployed binary needs noticeably
+        // longer to settle (cargo-built artefact, on-disk caches cold,
+        // SQLite migrations, model registry boot).  The previous 6 s
+        // timeout silently returned `Ok` when the service had not actually
+        // come up, leaving the caller (the upgrade pipeline) believing
+        // the daemon was running while production stayed down.  60 s with
+        // a hard error on miss closes that silent-failure window.
+        let attempts: usize = 200;
+        let interval = Duration::from_millis(300);
+        for _ in 0..attempts {
+            thread::sleep(interval);
             let status = service_status_snapshot(root)?;
             if status.running {
                 return Ok(format!(
@@ -1025,7 +1034,12 @@ pub fn start_background(root: &Path) -> Result<String> {
                 ));
             }
         }
-        return Ok("CTOX systemd service start requested.".to_string());
+        anyhow::bail!(
+            "CTOX systemd service did not come up within {:?} of `systemctl --user start {}`. Inspect `journalctl --user -u {}` for the boot failure.",
+            interval * (attempts as u32),
+            SYSTEMD_USER_UNIT_NAME,
+            SYSTEMD_USER_UNIT_NAME,
+        );
     }
     let status = service_status_snapshot(root)?;
     if status.running {
