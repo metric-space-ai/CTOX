@@ -12,6 +12,18 @@ Use this skill whenever CTOX needs to interpret, continue, or initiate communica
 
 For CTOX mission work, only SQLite-backed runtime communication state counts as durable communication knowledge. Messages, sync runs, approvals, ticket state, continuity, and verification records count. Workspace notes or copied email snippets in files do not count as durable knowledge.
 
+## Audience Register
+
+The agent's tone register depends on whether the recipient is part of the **internal team** or an **external client (Mandant)**, classified by `protected_recipient_policies` against the operator-configured `CTOX_OWNER_EMAIL_ADDRESS` and `CTOX_FOUNDER_EMAIL_ADDRESSES`:
+
+- **Internal team** (`role` is `owner`, `founder`, or `admin`): collegial. First names, no "Sehr geehrte/r"-style salutation. Address as a peer who happens to be an AI colleague — same team, same project. Short, direct, warm. Default register for any team-internal mail.
+- **External Mandant** (every other recipient): formal Sie. Anrede "Sehr geehrte/r {Vorname Nachname}". This is the right register for grant-application drafts, mails to clients, formal program submissions.
+- **Mixed audience** (team + external on the same mail): formal Sie wins. Internal team members read along; external recipients dictate the register.
+
+Do not derive register from prompt wording. Derive it from the recipient classification.
+
+Anti-pattern: addressing the operator/founders with "Sehr geehrter Herr X / Sehr geehrte Damen und Herren" — these are colleagues, not Mandanten.
+
 ## Scope
 
 - Channels are limited to `tui`, `email`, and `jami`.
@@ -141,9 +153,22 @@ How to give a job the outbound-email intent (operator-side):
 Agent responsibilities for such a job:
 
 - Produce the email body as the turn reply, in mandantengerechter Sprache.
-- Do **not** include internal CTOX vocabulary (`queue`, `runtime/`, `sqlite`, `route_status`, `runtime_env_kv`, host paths, etc.) — these will be rejected by the body cleanliness check.
 - Do **not** invoke `ctox channel send` yourself; the service routes the send.
 - The reply you produce **is** the email body; the service uses recipients/subject from the job metadata.
+
+### Anti-pattern: internal vocabulary in mandantengerechter Sprache
+
+CTOX core does **not** scan the outbound body for "internal vocabulary" — body cleanliness is your responsibility. Treat the following categories as forbidden in any text that goes to a founder, owner, or admin recipient. The list is illustrative, not exhaustive: any term that exposes CTOX-internal mechanics belongs in the same bucket.
+
+- **Storage and runtime layout**: `sqlite`, `runtime/ctox.sqlite3`, `/home/...`, `runtime_env_kv`, host paths, VPS paths.
+- **Queue and orchestration internals**: `queue`, `queue:`, `self-work`, `mission-follow-up`, `lease_owner`, `route_status`, `thread_key`, `conversation_id`, `dedupe_key`, `claim_key`.
+- **Mission machinery and review pipeline names**: `strategic direction setup`, `review rework`, `mission watchdog`, `continuation slice`, `agent_outcome`, `approval_key`.
+- **Tool / technical scaffolding**: `ctox channel send`, `ctox lcm-grep`, `governance::record_event`, table names, column names.
+- **Generic infrastructure naming that the recipient did not ask about**: "public server", "öffentlicher Link", QR-server URLs (`api.qrserver.com`), JSON shapes, headers, env keys.
+
+If you need to mention a deliverable, name the **business artifact** (the file the recipient cares about, the date, the decision, the next step), not the CTOX subsystem that produced it.
+
+If you cannot describe something to the founder without leaking internal vocabulary, that is a signal the message is not ready to send — request a clarifying review or escalate to TUI.
 
 ## References
 
