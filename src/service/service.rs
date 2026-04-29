@@ -1777,10 +1777,10 @@ fn handle_request(
                 respond_json(
                     request,
                     StatusCode(202),
-                    &ServiceIpcResponse::Accepted(AcceptedResponse {
+                    &AcceptedResponse {
                         accepted: true,
                         status: "ignored".to_string(),
-                    }),
+                    },
                 )?;
                 return Ok(());
             }
