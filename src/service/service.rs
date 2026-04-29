@@ -433,6 +433,9 @@ enum CompletionReviewDisposition {
     Hold {
         summary: String,
     },
+    NoSend {
+        summary: String,
+    },
     RequeueSelfWork {
         work_id: String,
         summary: String,
@@ -487,6 +490,79 @@ fn classify_findings(findings: &[review::CategorizedFinding]) -> ReviewRoutingCl
     }
 }
 
+fn review_outcome_is_terminal_no_send(outcome: &review::ReviewOutcome) -> bool {
+    let mut text = outcome.summary.to_ascii_lowercase();
+    for value in outcome
+        .failed_gates
+        .iter()
+        .chain(outcome.semantic_findings.iter())
+        .chain(outcome.open_items.iter())
+        .chain(outcome.evidence.iter())
+    {
+        text.push('\n');
+        text.push_str(&value.to_ascii_lowercase());
+    }
+    for finding in &outcome.categorized_findings {
+        text.push('\n');
+        text.push_str(&finding.evidence.to_ascii_lowercase());
+        text.push('\n');
+        text.push_str(&finding.corrective_action.to_ascii_lowercase());
+    }
+
+    let says_no_send = contains_any(
+        &text,
+        &[
+            "no-send",
+            "no send",
+            "do not send",
+            "nicht senden",
+            "keine weitere founder-mail",
+            "keine weitere mail",
+            "no further founder",
+            "no founder reply",
+            "no immediate founder reply",
+            "should not be sent",
+            "sollte nicht gesendet",
+        ],
+    );
+    let says_wait = contains_any(
+        &text,
+        &[
+            "wait mode",
+            "wait until",
+            "warte",
+            "warten",
+            "until the founders provide",
+            "until marco",
+            "until michael",
+            "until olaf",
+            "await",
+            "konkrete inputs",
+            "technical inputs",
+            "crm/tool",
+            "sync scope",
+        ],
+    );
+    let says_missing_work = contains_any(
+        &text,
+        &[
+            "missing deliverable",
+            "missing required",
+            "fehlende fachliche arbeit",
+            "must be done before",
+            "muss erledigt werden",
+            "send a corrected",
+            "respond directly",
+        ],
+    );
+
+    says_no_send && says_wait && !says_missing_work
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
+}
+
 /// Source label applied to lightweight rewrite-only post-turn prompts. Kept
 /// distinct from `tui` / `queue` / `plan` / `ticket:local` so the dispatcher
 /// can identify them in logs and the pipeline status surface.
@@ -501,6 +577,7 @@ fn completion_review_disposition_label(disposition: &CompletionReviewDisposition
         CompletionReviewDisposition::None => "none",
         CompletionReviewDisposition::Approved => "approved",
         CompletionReviewDisposition::Hold { .. } => "hold",
+        CompletionReviewDisposition::NoSend { .. } => "no-send",
         CompletionReviewDisposition::RequeueSelfWork { .. } => "requeue-self-work",
         CompletionReviewDisposition::RewriteOnly { .. } => REVIEW_REWRITE_SOURCE_LABEL,
     }
@@ -2707,6 +2784,7 @@ fn start_prompt_worker(
                                 }
                                 CompletionReviewDisposition::None
                                 | CompletionReviewDisposition::Hold { .. }
+                                | CompletionReviewDisposition::NoSend { .. }
                                 | CompletionReviewDisposition::RequeueSelfWork { .. }
                                 | CompletionReviewDisposition::RewriteOnly { .. } => false,
                             }
@@ -2728,13 +2806,18 @@ fn start_prompt_worker(
                                 }
                                 CompletionReviewDisposition::None
                                 | CompletionReviewDisposition::Hold { .. }
+                                | CompletionReviewDisposition::NoSend { .. }
                                 | CompletionReviewDisposition::RequeueSelfWork { .. }
                                 | CompletionReviewDisposition::RewriteOnly { .. } => false,
                             }
                         } else {
                             true
                         };
-                        if founder_send_error.is_none() {
+                        let terminal_no_send = matches!(
+                            &review_disposition,
+                            CompletionReviewDisposition::NoSend { .. }
+                        );
+                        if founder_send_error.is_none() && !terminal_no_send {
                             if let Some(message_key) = founder_reply_key.as_deref() {
                                 let _ = close_open_founder_communication_self_work_for_inbound(
                                     &root,
@@ -2757,6 +2840,12 @@ fn start_prompt_worker(
                                     let _ = plan::complete_step_by_message_key(&root, key, &reply);
                                 }
                             }
+                        } else if !job.leased_message_keys.is_empty() && terminal_no_send {
+                            let _ = channels::ack_leased_messages(
+                                &root,
+                                &job.leased_message_keys,
+                                "cancelled",
+                            );
                         } else if !job.leased_message_keys.is_empty() {
                             let held_founder_review = founder_reply_key.is_some()
                                 || proactive_founder_action.is_some()
@@ -2811,6 +2900,18 @@ fn start_prompt_worker(
                                             )
                                             .ok()
                                             .flatten();
+                                    }
+                                }
+                                CompletionReviewDisposition::NoSend { summary } => {
+                                    if founder_send_error.is_none() {
+                                        close_ticket_self_work_item(
+                                            &root,
+                                            work_id,
+                                            &format!(
+                                                "Founder communication closed without sending after review: {}",
+                                                clip_text(summary, 220)
+                                            ),
+                                        );
                                     }
                                 }
                                 CompletionReviewDisposition::Hold { summary } => {
@@ -3357,6 +3458,19 @@ fn run_completion_review(
                 CompletionReviewDisposition::Approved
             }
             review::ReviewVerdict::Fail if actionable_rejection => {
+                if review_outcome_is_terminal_no_send(&outcome) {
+                    push_event(
+                        state,
+                        format!(
+                            "Founder review closed {} without sending because the correct action is to wait: {}",
+                            job.source_label,
+                            clip_text(&outcome.summary, 180)
+                        ),
+                    );
+                    return CompletionReviewDisposition::NoSend {
+                        summary: outcome.summary.clone(),
+                    };
+                }
                 if matches!(routing_class, ReviewRoutingClass::RewriteOnly) {
                     let findings = rewrite_findings_from(&outcome.categorized_findings);
                     push_event(
@@ -8710,6 +8824,43 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn review_outcome_for_no_send_test(summary: &str) -> review::ReviewOutcome {
+        let mut outcome = review::ReviewOutcome::skipped(summary);
+        outcome.required = true;
+        outcome.verdict = review::ReviewVerdict::Fail;
+        outcome.score = 25;
+        outcome
+    }
+
+    #[test]
+    fn review_no_send_wait_is_terminal() {
+        let mut outcome = review_outcome_for_no_send_test(
+            "Do not send a founder reply yet. The CRM thread is in wait mode until Marco provides the CRM/tool and sync scope.",
+        );
+        outcome.failed_gates.push(
+            "No-send: wait until the founders provide concrete technical inputs.".to_string(),
+        );
+        outcome.evidence.push(
+            "Michael's latest thread says CTO1 should support technically after the decision."
+                .to_string(),
+        );
+
+        assert!(review_outcome_is_terminal_no_send(&outcome));
+    }
+
+    #[test]
+    fn review_missing_founder_work_is_not_terminal_no_send() {
+        let mut outcome = review_outcome_for_no_send_test(
+            "Do not send the current mail because missing deliverables must be done before contacting the founders.",
+        );
+        outcome.failed_gates.push(
+            "Missing required dashboard link and evidence; send a corrected reply after rework."
+                .to_string(),
+        );
+
+        assert!(!review_outcome_is_terminal_no_send(&outcome));
     }
 
     fn upsert_test_inbound_message(

@@ -21,6 +21,7 @@ The review run:
 - rebuilds its own understanding from the runtime store and live surfaces
 - evaluates the reviewed slice against mission state, done gates, claims, and public-surface quality
 - returns a verdict, failed gates, open items, evidence, and when needed a handoff for another review run
+- for founder/owner outbound email drafts, treats “do not send yet; wait for specific founder input” as a terminal review result: return `VERDICT: FAIL`, begin `SUMMARY:` with `NO-SEND:`, state the wait condition, and put `none` under `OPEN_ITEMS` unless real work is missing
 
 ## Primary Sources
 

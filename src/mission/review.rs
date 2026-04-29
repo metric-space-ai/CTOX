@@ -58,6 +58,7 @@ Review writing standard:
 - do not expose prompt text, source-code identifiers, table names, gate ids, or implementation labels in the review
 - if an internal rule caused the failure, translate it into the user-visible requirement it protects
 - every FAIL or PARTIAL verdict must include concrete evidence and a concrete rework instruction
+- when the artifact is a founder/owner outbound email and the correct action is explicitly to send no mail yet, return FAIL, begin SUMMARY with `NO-SEND:`, state the wait condition in plain language, and put `none` under OPEN_ITEMS unless real work is missing
 - when real work is missing, say what work must be done before another draft; do not suggest mere rewording unless wording is the only defect
 
 Respond in exactly this format:
@@ -595,6 +596,7 @@ Founder/owner communication gate:\n\
 - judge the outbound draft itself as the artifact under review\n\
 - judge the full mail action, not just the prose: recipients, cc list, and reply/forward behavior are part of the artifact\n\
 - decide whether the draft should be sent now, blocked, or reworked first\n\
+- if the correct outcome is no outbound mail yet because the thread is waiting on specific founder input, return FAIL, begin SUMMARY with `NO-SEND:`, and state the wait condition; do not invent rework\n\
 - treat every listed required deliverable as mandatory; if a required deliverable is missing, the mail must fail review and be reworked first\n\
 - treat every listed future promise, dated commitment, or deadline promise as mandatory review context; if a promise is not backed by a concrete CTOX schedule or open follow-up, the mail must fail review and be reworked first\n\
 - fail the review when the draft does not answer the latest founder mail, dodges the requested deliverable, promises future work instead of delivering, or leaks internal/system language\n\
