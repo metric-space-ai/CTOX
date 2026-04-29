@@ -5734,6 +5734,50 @@ fn repair_stalled_founder_communications(
     settings: &BTreeMap<String, String>,
 ) -> Result<usize> {
     let mut repaired = close_stale_founder_communication_self_work_after_reviewed_reply(root)?;
+    let invalid_handled = channels::list_unreviewed_handled_inbound_messages(root, 64)?;
+    for message in invalid_handled {
+        if !is_founder_or_owner_inbound_message(settings, &message) {
+            continue;
+        }
+        if founder_thread_has_later_reviewed_send(root, &message)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "cancelled",
+            )
+            .unwrap_or(0);
+            continue;
+        }
+        if founder_sender_has_later_reviewed_send(root, &message)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "cancelled",
+            )
+            .unwrap_or(0);
+            continue;
+        }
+        let rework_changed = ensure_founder_communication_rework_runnable(
+            root,
+            &message,
+            "Diese Founder-/Owner-Mail war als erledigt markiert, hat aber keinen exakt geprüften und gesendeten Antwortbeleg.",
+        )?;
+        let _ = channels::ack_leased_messages(
+            root,
+            std::slice::from_ref(&message.message_key),
+            "review_rework",
+        );
+        if rework_changed {
+            push_event(
+                state,
+                format!(
+                    "Restored unreviewed handled founder communication {} into review rework",
+                    message.message_key
+                ),
+            );
+        }
+        repaired += 1;
+    }
     let candidates = channels::list_stalled_inbound_messages(root, 64)?;
     for message in candidates {
         if !is_founder_or_owner_inbound_message(settings, &message) {

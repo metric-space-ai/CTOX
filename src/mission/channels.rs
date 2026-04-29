@@ -317,6 +317,15 @@ pub fn merge_owner_profile_settings(
     Ok(())
 }
 
+fn runtime_settings_with_owner_profiles(
+    root: &Path,
+    kind: communication_gateway::CommunicationAdapterKind,
+) -> BTreeMap<String, String> {
+    let mut settings = communication_gateway::runtime_settings_from_root(root, kind);
+    let _ = merge_owner_profile_settings(root, &mut settings);
+    settings
+}
+
 pub fn ensure_store(root: &Path) -> Result<()> {
     let db_path = resolve_db_path(root, None);
     let _conn = open_channel_db(&db_path)?;
@@ -1268,6 +1277,63 @@ pub fn list_stalled_inbound_messages(
         })
 }
 
+pub fn list_unreviewed_handled_inbound_messages(
+    root: &Path,
+    limit: usize,
+) -> Result<Vec<RoutedInboundMessage>> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            m.message_key,
+            m.channel,
+            m.account_key,
+            m.thread_key,
+            m.remote_id,
+            m.direction,
+            m.folder_hint,
+            m.sender_display,
+            m.sender_address,
+            m.subject,
+            m.preview,
+            m.body_text,
+            m.status,
+            m.seen,
+            m.external_created_at,
+            m.observed_at,
+            m.metadata_json,
+            COALESCE(r.route_status, 'pending'),
+            r.lease_owner,
+            r.leased_at,
+            r.acked_at,
+            COALESCE(r.updated_at, m.observed_at)
+        FROM communication_messages m
+        JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.direction = 'inbound'
+          AND m.channel IN ('email', 'jami')
+          AND r.route_status = 'handled'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM communication_founder_reply_reviews review
+              WHERE review.inbound_message_key = m.message_key
+                AND review.sent_at IS NOT NULL
+          )
+        ORDER BY m.external_created_at DESC, m.observed_at DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement.query_map(params![limit as i64], map_channel_message_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(routed_inbound_message_from_view)
+                .collect()
+        })
+}
+
 pub fn founder_reply_sent_after_review_for_message(
     root: &Path,
     inbound_message_key: &str,
@@ -1934,7 +2000,7 @@ fn send_message(root: &Path, db_path: &Path, request: ChannelSendRequest) -> Res
             }))
         }
         "email" => {
-            let settings = communication_gateway::runtime_settings_from_root(
+            let settings = runtime_settings_with_owner_profiles(
                 root,
                 communication_gateway::CommunicationAdapterKind::Email,
             );
@@ -2936,7 +3002,7 @@ fn protected_founder_inbound_message(
     if channel != "email" || direction != "inbound" {
         return Ok(false);
     }
-    let settings = communication_gateway::runtime_settings_from_root(
+    let settings = runtime_settings_with_owner_profiles(
         root,
         communication_gateway::CommunicationAdapterKind::Email,
     );
@@ -2996,7 +3062,7 @@ pub fn send_reviewed_founder_reply(
             reviewed_founder_send: true,
         },
     )?;
-    let settings = communication_gateway::runtime_settings_from_root(
+    let settings = runtime_settings_with_owner_profiles(
         root,
         communication_gateway::CommunicationAdapterKind::Email,
     );
@@ -3048,7 +3114,7 @@ pub(crate) fn send_reviewed_founder_outbound(
             reviewed_founder_send: true,
         },
     )?;
-    let settings = communication_gateway::runtime_settings_from_root(
+    let settings = runtime_settings_with_owner_profiles(
         root,
         communication_gateway::CommunicationAdapterKind::Email,
     );
@@ -5762,6 +5828,66 @@ mod tests {
         assert!(settings
             .get("CTOX_FOUNDER_EMAIL_ROLES")
             .is_some_and(|roles| roles.contains("mp@iip-gmbh.de=CFO / Founder")));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn founder_ack_guard_uses_sqlite_owner_profiles() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-founder-ack-owner-profiles-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create temp test root");
+
+        let db_path = resolve_db_path(&root, None);
+        let mut conn = open_channel_db(&db_path).expect("failed to open channel db");
+        upsert_identity_profile(
+            &mut conn,
+            "mp@iip-gmbh.de",
+            "Marco Pucciarelli",
+            json!({
+                "email": "mp@iip-gmbh.de",
+                "role": "founder",
+                "role_title": "CFO / Founder",
+            }),
+        )
+        .expect("failed to insert founder profile");
+        let message_key = "email:cto1@metric-space.ai::INBOX::101";
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', 'crm-thread',
+                '101', 'inbound', 'INBOX', 'Marco Pucciarelli',
+                'mp@iip-gmbh.de', '[]', '[]', '[]',
+                'AW: Kunstmen CRM', 'CRM reply', 'Bitte beantworten.',
+                '', '', 'normal', 'received', 0, 0,
+                '2026-04-29T06:51:46Z', '2026-04-29T08:13:36Z', '{}'
+            )"#,
+            params![message_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'leased', 'ctox-service', '2026-04-29T08:20:00Z', NULL, NULL, '2026-04-29T08:20:00Z')"#,
+            params![message_key],
+        )
+        .expect("failed to insert route");
+
+        let err = ack_leased_messages(&root, &[message_key.to_string()], "handled")
+            .expect_err("founder mail must not be handled without reviewed send proof");
+        assert!(err
+            .to_string()
+            .contains("cannot mark founder/owner/admin inbound mail as handled"));
 
         let _ = fs::remove_dir_all(&root);
     }
