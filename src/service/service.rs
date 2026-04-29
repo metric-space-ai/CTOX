@@ -106,6 +106,7 @@ const PLATFORM_EXPERTISE_KIND: &str = "platform-expertise-pass";
 const PLATFORM_IMPLEMENTATION_KIND: &str = "platform-implementation";
 const STRATEGIC_DIRECTION_KIND: &str = "strategic-direction-pass";
 const FOUNDER_COMMUNICATION_REWORK_KIND: &str = "founder-communication-rework";
+const FOUNDER_REWORK_REQUEUE_BLOCK_THRESHOLD: usize = 3;
 const SERVICE_SHUTDOWN_TIMEOUT_SECS: u64 = 15;
 const SERVICE_SHUTDOWN_POLL_MILLIS: u64 = 150;
 const SYSTEMCTL_USER_TIMEOUT_SECS: u64 = 5;
@@ -7572,6 +7573,11 @@ fn requeue_review_rejected_self_work(
     work_id: &str,
     summary: &str,
 ) -> Result<Option<channels::QueueTaskView>> {
+    if let Some(note) = founder_rework_review_loop_block_note(root, work_id, summary)? {
+        block_founder_rework_queue_tasks_for_work(root, work_id, &note)?;
+        block_ticket_self_work_item(root, work_id, &note);
+        return Ok(None);
+    }
     let note = format!(
         "External review rejected the last slice. Summary: {}. Resume this existing work item, consult the persisted review verdict/evidence, and address the failed gates before closing it.",
         clip_text(summary, 220)
@@ -7595,6 +7601,99 @@ fn requeue_review_rejected_self_work(
         return Ok(None);
     }
     queue_ticket_self_work_item(root, &item)
+}
+
+fn founder_rework_review_loop_block_note(
+    root: &Path,
+    work_id: &str,
+    summary: &str,
+) -> Result<Option<String>> {
+    let Some(item) = tickets::load_ticket_self_work_item(root, work_id)? else {
+        return Ok(None);
+    };
+    if item.kind != FOUNDER_COMMUNICATION_REWORK_KIND {
+        return Ok(None);
+    }
+    let active_attempts = founder_rework_queue_attempt_count(root, work_id)?;
+    if active_attempts < FOUNDER_REWORK_REQUEUE_BLOCK_THRESHOLD {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "Diese Founder-Antwort wurde {active_attempts} Mal ohne neue belastbare Grundlage erneut vom Review zurueckgewiesen. Stoppe diese Kommunikationsschleife jetzt: arbeite zuerst die fachliche Grundlage ab, sammle neue Evidenz und erstelle danach eine frische Antwort im selben Thread. Letzter Review-Hinweis: {}",
+        clip_text(summary, 220)
+    )))
+}
+
+fn founder_rework_queue_attempt_count(root: &Path, work_id: &str) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let count: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = 'queue'
+          AND m.direction = 'inbound'
+          AND json_extract(m.metadata_json, '$.ticket_self_work_id') = ?1
+          AND (
+                json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+             OR m.subject LIKE 'Founder communication rework:%'
+          )
+          AND lower(COALESCE(r.route_status, 'pending')) IN (
+                'pending', 'leased', 'review_rework', 'blocked', 'failed'
+          )
+        "#,
+        params![work_id, FOUNDER_COMMUNICATION_REWORK_KIND],
+        |row| row.get(0),
+    )?;
+    Ok(count.max(0) as usize)
+}
+
+fn block_founder_rework_queue_tasks_for_work(
+    root: &Path,
+    work_id: &str,
+    note: &str,
+) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT m.message_key
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = 'queue'
+          AND m.direction = 'inbound'
+          AND json_extract(m.metadata_json, '$.ticket_self_work_id') = ?1
+          AND (
+                json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+             OR m.subject LIKE 'Founder communication rework:%'
+          )
+          AND lower(COALESCE(r.route_status, 'pending')) IN (
+                'pending', 'leased', 'review_rework'
+          )
+        "#,
+    )?;
+    let rows = statement.query_map(params![work_id, FOUNDER_COMMUNICATION_REWORK_KIND], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let message_keys = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    drop(conn);
+
+    let mut blocked = 0usize;
+    for message_key in message_keys {
+        channels::update_queue_task(
+            root,
+            channels::QueueTaskUpdateRequest {
+                message_key,
+                route_status: Some("blocked".to_string()),
+                status_note: Some(note.to_string()),
+                ..Default::default()
+            },
+        )?;
+        blocked += 1;
+    }
+    Ok(blocked)
 }
 
 fn create_self_work_backed_queue_task(
@@ -12778,6 +12877,87 @@ mod tests {
     }
 
     #[test]
+    fn repeated_founder_rework_review_rejections_block_the_loop() {
+        let root = temp_root("ctox-founder-rework-loop-block");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::loop";
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: FOUNDER_COMMUNICATION_REWORK_KIND.to_string(),
+                title: "Founder communication rework: CRM update".to_string(),
+                body_text: "Answer the founder after doing the CRM work.".to_string(),
+                state: "queued".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "email-review:founder:loop",
+                    "priority": "urgent",
+                    "skill": "follow-up-orchestrator",
+                    "parent_message_key": inbound_key,
+                    "inbound_message_key": inbound_key,
+                    "dedupe_key": format!("founder-communication-rework:{inbound_key}"),
+                }),
+            },
+            false,
+        )
+        .expect("failed to seed founder rework");
+
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        for attempt in 0..FOUNDER_REWORK_REQUEUE_BLOCK_THRESHOLD {
+            let task = channels::create_queue_task(
+                &root,
+                channels::QueueTaskCreateRequest {
+                    title: format!("Founder communication rework: CRM update {attempt}"),
+                    prompt: "Review rejected the founder reply; do real rework.".to_string(),
+                    thread_key: "email-review:founder:loop".to_string(),
+                    workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                    priority: "urgent".to_string(),
+                    suggested_skill: Some("follow-up-orchestrator".to_string()),
+                    parent_message_key: Some(inbound_key.to_string()),
+                    extra_metadata: Some(serde_json::json!({
+                        "ticket_self_work_id": item.work_id.clone(),
+                        "ticket_self_work_kind": FOUNDER_COMMUNICATION_REWORK_KIND,
+                        "parent_message_key": inbound_key,
+                        "inbound_message_key": inbound_key,
+                    })),
+                },
+            )
+            .expect("failed to create queued attempt");
+            conn.execute(
+                "UPDATE communication_routing_state SET route_status = 'review_rework' WHERE message_key = ?1",
+                params![task.message_key],
+            )
+            .expect("failed to mark attempt as review rework");
+        }
+
+        let queued = requeue_review_rejected_self_work(
+            &root,
+            &item.work_id,
+            "The reply still lacks CRM evidence and only restates intent.",
+        )
+        .expect("review requeue should be handled");
+        assert!(queued.is_none());
+
+        let reloaded = tickets::load_ticket_self_work_item(&root, &item.work_id)
+            .expect("failed to reload self-work")
+            .expect("missing self-work");
+        assert_eq!(reloaded.state, "blocked");
+        let open_tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list open queue tasks");
+        assert!(open_tasks.is_empty());
+        let blocked_tasks = channels::list_queue_tasks(&root, &["blocked".to_string()], 10)
+            .expect("failed to list blocked queue tasks");
+        assert_eq!(blocked_tasks.len(), FOUNDER_REWORK_REQUEUE_BLOCK_THRESHOLD);
+        assert!(blocked_tasks.iter().all(|task| task
+            .status_note
+            .as_deref()
+            .unwrap_or("")
+            .contains("neue belastbare Grundlage")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn channel_router_does_not_repair_founder_mail_during_active_agent_loop() {
         let root = temp_root("ctox-founder-router-active-loop");
         let mut settings = BTreeMap::new();
@@ -12822,8 +13002,7 @@ mod tests {
             busy: true,
             ..SharedState::default()
         }));
-        route_external_messages(&root, &state)
-            .expect("busy channel router pass should not fail");
+        route_external_messages(&root, &state).expect("busy channel router pass should not fail");
 
         let route_status: String = conn
             .query_row(
