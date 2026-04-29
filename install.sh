@@ -23,9 +23,12 @@ DEPENDENCIES_ROOT_EXPLICIT=0
 # CLI flags
 BACKEND_FLAG="${CTOX_BACKEND:-}"
 MODEL_FLAG="${CTOX_MODEL:-}"
+API_PROVIDER_FLAG="${CTOX_API_PROVIDER:-}"
+AZURE_FOUNDRY_ENDPOINT_FLAG="${CTOX_AZURE_FOUNDRY_ENDPOINT:-}"
+AZURE_FOUNDRY_DEPLOYMENT_ID_FLAG="${CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID:-}"
 
-# Default model — Gemma4-4B runs on CPU as minimal fallback
-DEFAULT_MODEL="google/gemma-4-E4B-it"
+# Default local model
+DEFAULT_MODEL="Qwen/Qwen3.5-27B"
 
 # ── Internal state ───────────────────────────────────────────────────────────
 SCRIPT_DIR=""
@@ -316,20 +319,13 @@ tui_select_model() {
   local -a model_ids=()
   local -a model_descs=()
 
-  if [[ "$has_gpu" == "yes" ]]; then
-    models+=("openai/gpt-oss-20b")
-    model_descs+=("${C_BOLD}GPT-OSS 20B${C_RESET}         ${C_GREY}Leistungsstärkstes Modell via Candle (empfohlen mit GPU)${C_RESET}")
-
-    models+=("google/gemma-4-26B-A4B-it")
-    model_descs+=("${C_BOLD}Gemma4 26B A4B${C_RESET}      ${C_GREY}MoE-Modell via Candle, 4B aktive Parameter${C_RESET}")
-
-    models+=("Qwen/Qwen3.5-9B")
-    model_descs+=("${C_BOLD}Qwen 3.5 9B${C_RESET}         ${C_GREY}Multilingual via Candle${C_RESET}")
+  if [[ "$has_gpu" != "yes" ]]; then
+    err "Qwen/Qwen3.5-27B local inference requires a supported GPU."
+    exit 1
   fi
 
-  # Gemma4-E4B: always available, served via Candle (works on CPU and GPU).
   models+=("$DEFAULT_MODEL")
-  model_descs+=("${C_BOLD}Gemma4 E4B${C_RESET}          ${C_GREY}Candle-Engine, läuft auf CPU und GPU (Standard)${C_RESET}")
+  model_descs+=("${C_BOLD}Qwen 3.5 27B${C_RESET}        ${C_GREY}CTOX local runtime, CUDA/Metal optimized path${C_RESET}")
 
   # If only one option or flag provided, skip selection
   if [[ -n "$MODEL_FLAG" ]]; then
@@ -1464,6 +1460,21 @@ sql_escape() {
   printf "%s" "$1" | sed "s/'/''/g"
 }
 
+azure_foundry_responses_base_url() {
+  local endpoint="${1:-}"
+  endpoint="${endpoint%"${endpoint##*[![:space:]]}"}"
+  endpoint="${endpoint#"${endpoint%%[![:space:]]*}"}"
+  endpoint="${endpoint%/}"
+  [[ -n "$endpoint" ]] || return 0
+  local lower
+  lower="$(printf '%s' "$endpoint" | tr '[:upper:]' '[:lower:]')"
+  case "$lower" in
+    */openai/v1) printf '%s\n' "$endpoint" ;;
+    */openai) printf '%s/v1\n' "$endpoint" ;;
+    *) printf '%s/openai/v1\n' "$endpoint" ;;
+  esac
+}
+
 write_runtime_sqlite_config() {
   local state_root="$1"
   mkdir -p "$state_root"
@@ -1471,25 +1482,46 @@ write_runtime_sqlite_config() {
   local engine_binary="$TOOLS_ROOT/model-runtime/bin/ctox-engine"
   local engine_log="$state_root/logs/model-runtime/ctox-engine.log"
   local model="${SELECTED_MODEL:-$DEFAULT_MODEL}"
+  local api_provider="${API_PROVIDER_FLAG:-local}"
+  local azure_endpoint="${AZURE_FOUNDRY_ENDPOINT_FLAG:-}"
+  local azure_deployment_id="${AZURE_FOUNDRY_DEPLOYMENT_ID_FLAG:-}"
+  local chat_source="${CTOX_CHAT_SOURCE:-local}"
+  local chat_model="${CTOX_CHAT_MODEL:-$model}"
+  local active_model="${CTOX_ACTIVE_MODEL:-$chat_model}"
 
   # Model-specific defaults
-  local port="1234" arch="gpt_oss" max_seq="131072" paged_attn="auto"
-  local tp_backend="disabled" isq="" pa_cache_type="f8e4m3" pa_mem_frac="0.80"
+  local port="1235" arch="" max_seq="131072" paged_attn="auto"
+  local tp_backend="disabled" isq="Q4K" pa_cache_type="turboquant3" pa_mem_frac="0.80"
   local disable_nccl="1" world_size=""
 
   case "$model" in
-    openai/gpt-oss-20b) ;;
+    Qwen/Qwen3.5-27B)
+      port="1235"; arch=""; max_seq="131072"; isq="Q4K"; pa_cache_type="turboquant3"; pa_mem_frac="0.80" ;;
     google/gemma-4-26B-A4B-it)
       port="1234"; arch=""; max_seq="131072"; isq=""; pa_mem_frac="0.80" ;;
     google/gemma-4-E4B-it)
       port="1234"; arch=""; max_seq="131072"; isq="" ;;
-    Qwen/Qwen3.6-35B-A3B)
+    Qwen/Qwen3.5-35B-A3B)
       port="1235"; arch=""; max_seq="131072"; isq="Q4K"; pa_cache_type="turboquant3"; pa_mem_frac="0.80" ;;
     Qwen/Qwen3.5-9B|Qwen/Qwen3.5-4B)
       port="1235"; arch=""; max_seq="65536"; isq="Q4K" ;;
   esac
 
   local proxy_port="12434"
+  local upstream_base_url="${CTOX_UPSTREAM_BASE_URL:-http://127.0.0.1:$port}"
+  if [[ "$api_provider" == "azure" || "$api_provider" == "azure-foundry" || "$api_provider" == "azure_openai" ]]; then
+    api_provider="azure_foundry"
+  fi
+  if [[ "$api_provider" == "azure_foundry" ]]; then
+    chat_source="api"
+    if [[ -n "$azure_deployment_id" ]]; then
+      chat_model="$azure_deployment_id"
+      active_model="$azure_deployment_id"
+    fi
+    if [[ -n "$azure_endpoint" && -z "${CTOX_UPSTREAM_BASE_URL:-}" ]]; then
+      upstream_base_url="$(azure_foundry_responses_base_url "$azure_endpoint")"
+    fi
+  fi
 
   # Auxiliary models require a local inference runtime.  On hosts without a
   # GPU (detected_gpu=none) leave them empty so CTOX does not attempt to
@@ -1529,13 +1561,17 @@ INSERT INTO runtime_env_kv(env_key, env_value) VALUES
 ('CTOX_ENGINE_MN_LOCAL_WORLD_SIZE', '$(sql_escape "${CTOX_ENGINE_MN_LOCAL_WORLD_SIZE:-$world_size}")'),
 ('CTOX_ENGINE_TOPOLOGY', '$(sql_escape "${CTOX_ENGINE_TOPOLOGY:-}")'),
 ('CTOX_ENGINE_NUM_DEVICE_LAYERS', '$(sql_escape "${CTOX_ENGINE_NUM_DEVICE_LAYERS:-}")'),
-('CTOX_CHAT_MODEL', '$(sql_escape "${CTOX_CHAT_MODEL:-$model}")'),
+('CTOX_API_PROVIDER', '$(sql_escape "$api_provider")'),
+('CTOX_CHAT_SOURCE', '$(sql_escape "$chat_source")'),
+('CTOX_AZURE_FOUNDRY_ENDPOINT', '$(sql_escape "$azure_endpoint")'),
+('CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID', '$(sql_escape "$azure_deployment_id")'),
+('CTOX_CHAT_MODEL', '$(sql_escape "$chat_model")'),
 ('CTOX_CHAT_MODEL_MAX_CONTEXT', '$(sql_escape "${CTOX_CHAT_MODEL_MAX_CONTEXT:-131072}")'),
 ('CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT', '$(sql_escape "${CTOX_CHAT_COMPACTION_THRESHOLD_PERCENT:-75}")'),
-('CTOX_ACTIVE_MODEL', '$(sql_escape "${CTOX_ACTIVE_MODEL:-$model}")'),
+('CTOX_ACTIVE_MODEL', '$(sql_escape "$active_model")'),
 ('CTOX_PROXY_HOST', '$(sql_escape "${CTOX_PROXY_HOST:-127.0.0.1}")'),
 ('CTOX_PROXY_PORT', '$(sql_escape "${CTOX_PROXY_PORT:-$proxy_port}")'),
-('CTOX_UPSTREAM_BASE_URL', '$(sql_escape "${CTOX_UPSTREAM_BASE_URL:-http://127.0.0.1:$port}")'),
+('CTOX_UPSTREAM_BASE_URL', '$(sql_escape "$upstream_base_url")'),
 ('CTOX_INSTALL_ROOT', '$(sql_escape "${CTOX_INSTALL_ROOT:-$INSTALL_ROOT}")'),
 ('CTOX_STATE_ROOT', '$(sql_escape "${CTOX_STATE_ROOT:-$state_root}")'),
 ('CTOX_CACHE_ROOT', '$(sql_escape "${CTOX_CACHE_ROOT:-$CACHE_ROOT}")'),
@@ -1706,11 +1742,35 @@ parse_args() {
         shift
         MODEL_FLAG="${1:-}"
         ;;
+      --api-provider=*)
+        API_PROVIDER_FLAG="${1#*=}"
+        ;;
+      --api-provider)
+        shift
+        API_PROVIDER_FLAG="${1:-}"
+        ;;
+      --azure-foundry-endpoint=*)
+        AZURE_FOUNDRY_ENDPOINT_FLAG="${1#*=}"
+        ;;
+      --azure-foundry-endpoint)
+        shift
+        AZURE_FOUNDRY_ENDPOINT_FLAG="${1:-}"
+        ;;
+      --azure-foundry-deployment-id=*)
+        AZURE_FOUNDRY_DEPLOYMENT_ID_FLAG="${1#*=}"
+        ;;
+      --azure-foundry-deployment-id)
+        shift
+        AZURE_FOUNDRY_DEPLOYMENT_ID_FLAG="${1:-}"
+        ;;
       --help|-h)
         printf 'Usage: install.sh [OPTIONS]\n\n'
         printf 'Options:\n'
         printf '  --backend=<cuda|metal|cpu>  Set compute backend (skip interactive selection)\n'
-        printf '  --model=<model>             Set default model (default: google/gemma-4-E4B-it)\n'
+        printf '  --model=<model>             Set default model (default: Qwen/Qwen3.5-27B)\n'
+        printf '  --api-provider=<provider>   Seed API provider (for example: azure_foundry)\n'
+        printf '  --azure-foundry-endpoint=<url>       Seed Azure Foundry endpoint\n'
+        printf '  --azure-foundry-deployment-id=<id>   Seed Azure Foundry deployment/model id\n'
         printf '  --features=<features>       Override engine features (comma or space separated)\n'
         printf '  --branch=<branch>           Git branch to install from (default: main)\n'
         printf '  --repo=<url>                Git repository URL (default: metric-space-ai/ctox)\n'
@@ -1724,6 +1784,9 @@ parse_args() {
         printf '  --help                      Show this help\n\n'
         printf 'Environment:\n'
         printf '  CTOX_BACKEND                Same as --backend\n'
+        printf '  CTOX_API_PROVIDER           Same as --api-provider\n'
+        printf '  CTOX_AZURE_FOUNDRY_ENDPOINT Same as --azure-foundry-endpoint\n'
+        printf '  CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID Same as --azure-foundry-deployment-id\n'
         printf '  CTOX_ENGINE_FEATURES        Override engine features (space-separated)\n'
         printf '  CTOX_CUDA_HOME              Override CUDA home directory\n'
         printf '  CTOX_CUDA_COMPUTE_CAP       Override CUDA compute capability\n'

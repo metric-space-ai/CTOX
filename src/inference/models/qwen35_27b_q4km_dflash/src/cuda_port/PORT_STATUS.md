@@ -3,6 +3,30 @@
 Byte-für-byte Port von llama.cpp's ggml-cuda Host-Side Dispatchern
 nach Rust, pro CLAUDE.md Inference-Engine Architecture Rules.
 
+## Stand 2026-04-27
+
+Der 27B-CUDA-Pfad ist **korrekt und schnell im Hybridbetrieb**, aber
+**noch keine fertige bare-metal CTOX-Engine**.
+
+Verifiziert auf `100.87.204.48` / NVIDIA RTX A6000:
+
+| Run | Mode | Ergebnis |
+|---|---|---:|
+| C++ Referenz | default replay | 98.93 decode tok/s |
+| C++ Referenz | `--fast-rollback` | 141.38 decode tok/s |
+| C++ Referenz | `--fast-rollback --ddtree --ddtree-budget=22` | 165.81 decode tok/s |
+| CTOX Rust hybrid | `--fast-rollback --ddtree --ddtree-budget=22` | 156.69 decode tok/s |
+
+Prompt/Modelle:
+
+- `/home/metricspace/dflash-ref/dflash/tmp_prompt128.bin`
+- `/home/metricspace/dflash-ref/dflash/models/Qwen3.5-27B-Q4_K_M.gguf`
+- `/home/metricspace/dflash-ref/dflash/models/draft/model.safetensors`
+
+Der CTOX-output für den DDTree-Run ist byte-identisch zur C++ Referenz
+(`cmp` ohne Diff). `ldd` zeigt aber weiterhin `libggml-base.so` und
+`libggml-cuda.so`; der finale Cutover ist also nicht erledigt.
+
 ## Was verifiziert läuft (A6000)
 
 **18 `.cu`-Files ported + verified** (alle 17 aus der vorherigen Liste

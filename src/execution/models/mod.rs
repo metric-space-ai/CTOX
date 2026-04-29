@@ -7,6 +7,8 @@ pub mod local_transport;
 pub mod model_adapters;
 pub mod model_manifest;
 pub mod model_registry;
+pub mod native_embedding;
+pub mod native_tts;
 pub mod resource_state;
 pub mod runtime_contract;
 pub mod runtime_control;

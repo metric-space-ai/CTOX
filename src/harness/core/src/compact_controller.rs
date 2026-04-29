@@ -826,7 +826,7 @@ fn select_model_routing(
         1 | 2 => (
             "simple",
             vec![
-                "gpt-oss-20b".to_string(),
+                "gpt-oss-120b".to_string(),
                 "Qwen3.5-35B-A3B".to_string(),
                 "gpt-4.5-nano".to_string(),
             ],
@@ -1796,10 +1796,10 @@ mod tests {
     #[test]
     fn model_slug_matches_handles_namespaced_suffixes() {
         assert!(model_slug_matches(
-            "custom_openai>Qwen/Qwen3.6-35B-A3B",
-            "Qwen3.6-35B-A3B"
+            "custom_openai>Qwen/Qwen3.5-35B-A3B",
+            "Qwen3.5-35B-A3B"
         ));
-        assert!(model_slug_matches("openai/gpt-oss-20b", "gpt-oss-20b"));
+        assert!(model_slug_matches("openai/gpt-oss-120b", "gpt-oss-120b"));
     }
 
     #[test]

@@ -27,6 +27,8 @@ fn uses_remote_api_upstream(upstream_base_url: &str) -> bool {
         || upstream_base_url.starts_with(runtime_state::default_api_upstream_base_url_for_provider(
             "minimax",
         ))
+        || runtime_state::api_provider_for_upstream_base_url(upstream_base_url)
+            .eq_ignore_ascii_case("azure_foundry")
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -724,7 +726,7 @@ mod tests {
 
     #[test]
     fn local_ipc_routes_do_not_synthesize_loopback_urls() {
-        let config = gateway_config("openai/gpt-oss-20b", "");
+        let config = gateway_config("openai/gpt-oss-120b", "");
 
         assert_eq!(config.join_routed_url("/v1/responses"), "/v1/responses");
         assert_eq!(config.join_routed_url("/v1/embeddings"), "/v1/embeddings");
@@ -754,7 +756,7 @@ mod tests {
             speech_transport: Some(LocalTransport::UnixSocket {
                 path: PathBuf::from("/tmp/speech.sock"),
             }),
-            ..gateway_config("openai/gpt-oss-20b", "")
+            ..gateway_config("openai/gpt-oss-120b", "")
         };
 
         match config.routed_transport("/v1/embeddings").unwrap() {
@@ -791,7 +793,7 @@ mod tests {
         std::fs::create_dir_all(root.join("runtime")).unwrap();
         persist_runtime_env_text(
             &root,
-            "CTOX_CHAT_SOURCE=local\nCTOX_CHAT_RUNTIME_PLAN_ACTIVE=1\nCTOX_ENGINE_MODEL=Qwen/Qwen3.6-35B-A3B\nCTOX_ENGINE_PAGED_ATTN=auto\nCTOX_ENGINE_DEVICE_LAYERS=0:20;1:10;2:10\n",
+            "CTOX_CHAT_SOURCE=local\nCTOX_CHAT_RUNTIME_PLAN_ACTIVE=1\nCTOX_ENGINE_MODEL=Qwen/Qwen3.5-35B-A3B\nCTOX_ENGINE_PAGED_ATTN=auto\nCTOX_ENGINE_DEVICE_LAYERS=0:20;1:10;2:10\n",
         );
 
         let config = GatewayConfig {
@@ -850,12 +852,12 @@ mod tests {
         std::fs::create_dir_all(root.join("runtime")).unwrap();
         persist_runtime_env_text(
             &root,
-            "CTOX_ACTIVE_MODEL=openai/gpt-oss-20b\nCTOX_CHAT_MODEL_BASE=openai/gpt-oss-20b\nCTOX_CHAT_SOURCE=local\nCTOX_ENGINE_PORT=2235\n",
+            "CTOX_ACTIVE_MODEL=openai/gpt-oss-120b\nCTOX_CHAT_MODEL_BASE=openai/gpt-oss-120b\nCTOX_CHAT_SOURCE=local\nCTOX_ENGINE_PORT=2235\n",
         );
 
         let config = GatewayConfig::resolve_with_root(&root);
 
-        assert_eq!(config.active_model.as_deref(), Some("openai/gpt-oss-20b"));
+        assert_eq!(config.active_model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!(config.listen_port, 12434);
         assert_eq!(config.upstream_base_url, "");
         assert!(config.upstream_transport.is_some());
@@ -877,12 +879,12 @@ mod tests {
         std::fs::create_dir_all(root.join("runtime")).unwrap();
         persist_runtime_env_text(
             &root,
-            "CTOX_ACTIVE_MODEL=openai/gpt-oss-20b\nCTOX_CHAT_MODEL_BASE=openai/gpt-oss-20b\nCTOX_CHAT_SOURCE=local\nCTOX_ENGINE_PORT=2235\nCTOX_UPSTREAM_BASE_URL=http://127.0.0.1:1235\n",
+            "CTOX_ACTIVE_MODEL=openai/gpt-oss-120b\nCTOX_CHAT_MODEL_BASE=openai/gpt-oss-120b\nCTOX_CHAT_SOURCE=local\nCTOX_ENGINE_PORT=2235\nCTOX_UPSTREAM_BASE_URL=http://127.0.0.1:1235\n",
         );
 
         let config = GatewayConfig::resolve_with_root(&root);
 
-        assert_eq!(config.active_model.as_deref(), Some("openai/gpt-oss-20b"));
+        assert_eq!(config.active_model.as_deref(), Some("openai/gpt-oss-120b"));
         assert_eq!(config.listen_port, 12434);
         assert_eq!(config.upstream_base_url, "");
         assert!(config.upstream_transport.is_some());

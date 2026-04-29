@@ -1657,7 +1657,9 @@ dependencies = [
  "ctox-feedback",
  "ctox-pdf-parse",
  "ctox-protocol",
+ "ctox-qwen3-embedding-0-6b",
  "ctox-utils-absolute-path",
+ "ctox-voxtral-4b-tts-2603",
  "ctox-web-stack",
  "git2",
  "include_dir",
@@ -2281,6 +2283,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctox-qwen3-embedding-0-6b"
+version = "0.1.0"
+
+[[package]]
 name = "ctox-rmcp-client"
 version = "0.0.0"
 dependencies = [
@@ -2481,6 +2487,10 @@ version = "0.0.0"
 dependencies = [
  "regex-lite",
 ]
+
+[[package]]
+name = "ctox-voxtral-4b-tts-2603"
+version = "0.1.0"
 
 [[package]]
 name = "ctox-web-stack"

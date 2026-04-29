@@ -302,7 +302,7 @@ mod tests {
             BackendRuntimeResidency {
                 role: BackendRole::Chat,
                 phase: RuntimeResidencyPhase::Active,
-                model: "openai/gpt-oss-20b".to_string(),
+                model: "openai/gpt-oss-120b".to_string(),
                 pid: Some(std::process::id()),
                 port: Some(1234),
                 health_path: Some("/health".to_string()),

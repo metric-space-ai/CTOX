@@ -29,12 +29,8 @@ impl Tokenizer {
     /// Load from a `tokenizer.json` path. Does not cache across
     /// invocations — the server calls this exactly once at startup.
     pub fn from_file(path: &Path) -> Result<Self> {
-        let inner = HfTokenizer::from_file(path).map_err(|e| {
-            anyhow!(
-                "failed to load tokenizer.json from {}: {e}",
-                path.display()
-            )
-        })?;
+        let inner = HfTokenizer::from_file(path)
+            .map_err(|e| anyhow!("failed to load tokenizer.json from {}: {e}", path.display()))?;
         Ok(Self { inner })
     }
 
@@ -78,36 +74,50 @@ impl Tokenizer {
     }
 
     /// Find a cached tokenizer.json in the standard HuggingFace
-    /// snapshot location. Returns the first match under
-    /// `~/.cache/huggingface/hub/models--Qwen--Qwen3.5-27B*/snapshots/*/tokenizer.json`.
+    /// snapshot location. Checks the normal home cache first, then
+    /// the CTOX model-store mount points used by the CUDA and Metal
+    /// dev machines.
     pub fn resolve_default() -> Result<std::path::PathBuf> {
-        let home = std::env::var_os("HOME")
-            .context("HOME env var not set; cannot locate HF cache")?;
-        let hub = Path::new(&home).join(".cache/huggingface/hub");
-        for entry in std::fs::read_dir(&hub)
-            .with_context(|| format!("read_dir {}", hub.display()))?
-        {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if !name_str.starts_with("models--Qwen--Qwen3.5-27B") {
+        let home =
+            std::env::var_os("HOME").context("HOME env var not set; cannot locate HF cache")?;
+        let hubs = [
+            Path::new(&home).join(".cache/huggingface/hub"),
+            Path::new("/mnt/hfcache/huggingface/hub").to_path_buf(),
+            Path::new("/Volumes/Models/huggingface/hub").to_path_buf(),
+        ];
+        for hub in hubs {
+            if !hub.is_dir() {
                 continue;
             }
-            let snapshots = entry.path().join("snapshots");
-            if !snapshots.is_dir() {
-                continue;
-            }
-            for snap in std::fs::read_dir(&snapshots)? {
-                let snap = snap?;
-                let cand = snap.path().join("tokenizer.json");
-                if cand.is_file() {
-                    return Ok(cand);
-                }
+            if let Some(found) = find_qwen35_tokenizer_in_hub(&hub)? {
+                return Ok(found);
             }
         }
         Err(anyhow!(
-            "no tokenizer.json found under {}/models--Qwen--Qwen3.5-27B*/snapshots/*/",
-            hub.display()
+            "no tokenizer.json found under ~/.cache/huggingface/hub, /mnt/hfcache/huggingface/hub, or /Volumes/Models/huggingface/hub"
         ))
     }
+}
+
+fn find_qwen35_tokenizer_in_hub(hub: &Path) -> Result<Option<std::path::PathBuf>> {
+    for entry in std::fs::read_dir(hub).with_context(|| format!("read_dir {}", hub.display()))? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("models--Qwen--Qwen3.5-27B") {
+            continue;
+        }
+        let snapshots = entry.path().join("snapshots");
+        if !snapshots.is_dir() {
+            continue;
+        }
+        for snap in std::fs::read_dir(&snapshots)? {
+            let snap = snap?;
+            let cand = snap.path().join("tokenizer.json");
+            if cand.is_file() {
+                return Ok(Some(cand));
+            }
+        }
+    }
+    Ok(None)
 }

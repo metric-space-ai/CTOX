@@ -474,6 +474,15 @@ fn classify_prompt_secret(
             "MiniMax API key",
         ));
     }
+    if (combined.contains("azure") || combined.contains("foundry")) && combined.contains("token") {
+        return Some(named_prompt_secret(
+            "credentials",
+            "AZURE_FOUNDRY_API_KEY",
+            raw_value,
+            &stored_value,
+            "Azure Foundry token",
+        ));
+    }
     if combined.contains("database url")
         || combined.contains("neon postgres")
         || combined.contains("postgres zugriff")
@@ -1017,6 +1026,7 @@ const SECRET_KEYS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENROUTER_API_KEY",
     "MINIMAX_API_KEY",
+    "AZURE_FOUNDRY_API_KEY",
     "DATABASE_URL",
     "CTO_EMAIL_PASSWORD",
     "CTOX_WEBRTC_PASSWORD",

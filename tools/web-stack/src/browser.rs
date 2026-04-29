@@ -18,6 +18,7 @@ use std::time::UNIX_EPOCH;
 use url::Url;
 
 const DEFAULT_REFERENCE_RELATIVE_DIR: &str = "runtime/browser/interactive-reference";
+const LOCAL_PLAYWRIGHT_BROWSERS_RELATIVE_DIR: &str = "ms-playwright";
 const MINIMUM_NODE_MAJOR: u64 = 18;
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +39,8 @@ struct BrowserDoctorReport {
     node_version_compatible: bool,
     playwright_dependency_declared: bool,
     playwright_dependency_installed: bool,
+    playwright_browser_cache_dir: PathBuf,
+    playwright_browser_installed: bool,
     chromium_fallback_executable: Option<String>,
     toolchain: serde_json::Value,
     automation_ready: bool,
@@ -182,7 +185,8 @@ pub fn run_browser_automation(root: &Path, request: &BrowserAutomationRequest) -
         .or(directive.timeout_ms)
         .unwrap_or(30_000)
         .clamp(1_000, 300_000);
-    let fallback_executable = find_browser_executable().map(|value| value.display().to_string());
+    let fallback_executable =
+        find_browser_executable(&reference_dir).map(|value| value.display().to_string());
     let runner_path = reference_dir.join(format!(
         ".ctox-browser-run-{}-{}.mjs",
         std::process::id(),
@@ -244,18 +248,24 @@ pub fn capture_browser_transport(root: &Path, request: &BrowserCaptureRequest) -
     let Some(node_path) = find_command_on_path("node") else {
         anyhow::bail!("node is required for browser capture");
     };
-    let (browser_source, browser_executable) = find_capture_browser_executable()
-        .context("browser capture requires a Chrome-compatible executable")?;
+    let (browser_source, browser_executable) = find_capture_browser_executable(&reference_dir).context(
+        "browser capture requires Playwright Chrome for Testing; run `ctox web browser-prepare --install-browser`",
+    )?;
 
     let timeout_ms = request.timeout_ms.unwrap_or(45_000).clamp(5_000, 300_000);
-    let out_dir = request.out_dir.clone().unwrap_or_else(|| {
-        root.join("runtime")
-            .join("browser")
-            .join("captures")
-            .join(format!("capture-{}", unix_ts()))
-    });
+    let out_dir = resolve_root_relative_path(
+        root,
+        request.out_dir.clone().unwrap_or_else(|| {
+            root.join("runtime")
+                .join("browser")
+                .join("captures")
+                .join(format!("capture-{}", unix_ts()))
+        }),
+    );
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create browser capture dir {}", out_dir.display()))?;
+    let out_dir = fs::canonicalize(&out_dir)
+        .with_context(|| format!("failed to canonicalize browser capture dir {}", out_dir.display()))?;
     let profile_dir = out_dir.join("chrome-profile");
     fs::create_dir_all(&profile_dir).with_context(|| {
         format!(
@@ -272,8 +282,8 @@ pub fn capture_browser_transport(root: &Path, request: &BrowserCaptureRequest) -
         .with_context(|| format!("failed to create {}", chrome_stderr_path.display()))?;
 
     let headless_without_gui = looks_headless_without_browser_session();
-    let chrome_launch_args =
-        capture_chrome_extra_args(headless_without_gui, cfg!(target_os = "linux"));
+    let headless_capture = true;
+    let chrome_launch_args = capture_chrome_extra_args(headless_capture, cfg!(target_os = "linux"));
     let mut chrome_command = Command::new(&browser_executable);
     chrome_command
         .arg(format!("--user-data-dir={}", profile_dir.display()))
@@ -379,6 +389,7 @@ pub fn capture_browser_transport(root: &Path, request: &BrowserCaptureRequest) -
             "headless_without_gui".to_string(),
             Value::Bool(headless_without_gui),
         );
+        object.insert("headless".to_string(), Value::Bool(headless_capture));
         object.insert(
             "chrome_launch_args".to_string(),
             Value::Array(
@@ -421,8 +432,10 @@ fn build_doctor_report(reference_dir: &Path) -> Result<BrowserDoctorReport> {
         .join("playwright")
         .join("package.json")
         .is_file();
+    let playwright_browser_cache_dir = playwright_browser_cache_dir(reference_dir);
     let chromium_fallback_executable =
-        find_browser_executable().map(|value| value.display().to_string());
+        find_browser_executable(reference_dir).map(|value| value.display().to_string());
+    let playwright_browser_installed = chromium_fallback_executable.is_some();
     let node = detect_tool("node", &["--version"]);
     let npm = detect_tool("npm", &["--version"]);
     let npx = detect_tool("npx", &["--version"]);
@@ -441,13 +454,18 @@ fn build_doctor_report(reference_dir: &Path) -> Result<BrowserDoctorReport> {
         node_version_compatible,
         playwright_dependency_declared,
         playwright_dependency_installed,
+        playwright_browser_cache_dir,
+        playwright_browser_installed,
         chromium_fallback_executable,
         toolchain: json!({
             "node": node,
             "npm": npm,
             "npx": npx,
         }),
-        automation_ready: ok && node_version_compatible && playwright_dependency_installed,
+        automation_ready: ok
+            && node_version_compatible
+            && playwright_dependency_installed
+            && playwright_browser_installed,
     })
 }
 
@@ -475,10 +493,12 @@ fn install_reference(
         )?;
     }
     if install_browser {
-        run_command(
+        let browser_cache_dir = playwright_browser_cache_dir(reference_dir);
+        run_command_with_env(
             reference_dir,
             "npx",
             &["playwright", "install", "chromium"],
+            &[("PLAYWRIGHT_BROWSERS_PATH", browser_cache_dir.as_path())],
             "failed to install Playwright chromium browser",
         )?;
     }
@@ -534,9 +554,22 @@ fn read_playwright_dependency_declared(reference_dir: &Path) -> Result<bool> {
 }
 
 fn run_command(cwd: &Path, program: &str, args: &[&str], error_message: &str) -> Result<()> {
-    let output = Command::new(program)
-        .current_dir(cwd)
-        .args(args)
+    run_command_with_env(cwd, program, args, &[], error_message)
+}
+
+fn run_command_with_env(
+    cwd: &Path,
+    program: &str,
+    args: &[&str],
+    envs: &[(&str, &Path)],
+    error_message: &str,
+) -> Result<()> {
+    let mut command = Command::new(program);
+    command.current_dir(cwd).args(args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .output()
         .with_context(|| format!("{error_message}: failed to launch `{program}`"))?;
     if output.status.success() {
@@ -632,7 +665,7 @@ fn resolve_reference_dir(root: &Path, args: &[String]) -> PathBuf {
 }
 
 fn bootstrap_payload(reference_dir: &Path) -> serde_json::Value {
-    let chromium_fallback_executable = find_browser_executable();
+    let chromium_fallback_executable = find_browser_executable(reference_dir);
     let chromium_fallback_string = chromium_fallback_executable
         .as_ref()
         .map(|value| value.display().to_string());
@@ -652,33 +685,44 @@ fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 fn bootstrap_snippet(chromium_fallback_executable: Option<&str>) -> String {
     let launch_options = if let Some(path) = chromium_fallback_executable {
         format!(
-            "{{ headless: false, executablePath: \"{}\" }}",
+            "{{ headless: true, executablePath: \"{}\" }}",
             path.replace('\\', "\\\\").replace('"', "\\\"")
         )
     } else {
-        "{ headless: false }".to_string()
+        "{ headless: true }".to_string()
     };
     format!(
-        "const {{ chromium }} = await import(\"playwright\");\nconst context = await chromium.launchPersistentContext(\"./.ctox-browser-profile\", {launch_options});\nconst page = context.pages()[0] || await context.newPage();\nawait page.goto(\"http://127.0.0.1:3000\", {{ waitUntil: \"domcontentloaded\" }});\nconsole.log(await page.title());"
+        "const {{ chromium }} = await import(\"playwright\");\nconst browser = await chromium.launch({launch_options});\nconst context = await browser.newContext();\nconst page = await context.newPage();\nawait page.goto(\"http://127.0.0.1:3000\", {{ waitUntil: \"domcontentloaded\" }});\nconsole.log(await page.title());\nawait browser.close();"
     )
 }
 
-fn find_browser_executable() -> Option<PathBuf> {
-    find_playwright_cache_chromium_executable().or_else(find_system_chrome_executable)
+fn find_browser_executable(reference_dir: &Path) -> Option<PathBuf> {
+    find_playwright_chromium_executable_in(&playwright_browser_cache_dir(reference_dir))
 }
 
-fn find_capture_browser_executable() -> Option<(&'static str, PathBuf)> {
-    find_system_chrome_executable()
-        .map(|path| ("system-chrome", path))
-        .or_else(|| {
-            find_playwright_cache_chromium_executable().map(|path| ("playwright-cache", path))
-        })
+fn find_capture_browser_executable(reference_dir: &Path) -> Option<(&'static str, PathBuf)> {
+    select_capture_browser_executable(find_browser_executable(reference_dir))
 }
 
-fn find_playwright_cache_chromium_executable() -> Option<PathBuf> {
-    let cache_root = std::env::var_os("HOME")
-        .map(PathBuf::from)?
-        .join("Library/Caches/ms-playwright");
+fn select_capture_browser_executable(
+    playwright_cache: Option<PathBuf>,
+) -> Option<(&'static str, PathBuf)> {
+    playwright_cache.map(|path| ("playwright-cache", path))
+}
+
+fn resolve_root_relative_path(root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn playwright_browser_cache_dir(reference_dir: &Path) -> PathBuf {
+    reference_dir.join(LOCAL_PLAYWRIGHT_BROWSERS_RELATIVE_DIR)
+}
+
+fn find_playwright_chromium_executable_in(cache_root: &Path) -> Option<PathBuf> {
     let entries = fs::read_dir(&cache_root).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -701,20 +745,6 @@ fn find_playwright_cache_chromium_executable() -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn find_system_chrome_executable() -> Option<PathBuf> {
-    [
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .find(|candidate| candidate.is_file())
 }
 
 fn print_json(value: &serde_json::Value) -> Result<()> {
@@ -965,7 +995,10 @@ fn build_browser_capture_runner_script(
     let host = target
         .host_str()
         .context("browser capture target URL requires a host")?;
-    let homepage_url = format!("{}://{host}/", target.scheme());
+    let homepage_url = match target.port() {
+        Some(port) => format!("{}://{host}:{port}/", target.scheme()),
+        None => format!("{}://{host}/", target.scheme()),
+    };
     let encoded_homepage_url = serde_json::to_string(&homepage_url)
         .context("failed to encode browser capture homepage url")?;
     Ok(format!(
@@ -1182,10 +1215,13 @@ fn unix_ts() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::build_browser_runner_script;
+    use super::build_browser_capture_runner_script;
     use super::capture_chrome_extra_args;
     use super::ensure_reference_package_json;
     use super::parse_browser_automation_source;
     use super::parse_node_major_version;
+    use super::resolve_root_relative_path;
+    use super::select_capture_browser_executable;
     use std::fs;
     use std::path::PathBuf;
     use std::time::SystemTime;
@@ -1253,5 +1289,45 @@ mod tests {
         let args = capture_chrome_extra_args(false, false);
         assert!(!args.contains(&"--headless=new"));
         assert!(!args.contains(&"--disable-gpu"));
+    }
+
+    #[test]
+    fn browser_capture_resolves_relative_output_under_root() {
+        let root = PathBuf::from("/tmp/ctox-root");
+        assert_eq!(
+            resolve_root_relative_path(&root, PathBuf::from("runtime/capture")),
+            PathBuf::from("/tmp/ctox-root/runtime/capture")
+        );
+        assert_eq!(
+            resolve_root_relative_path(&root, PathBuf::from("/tmp/absolute-capture")),
+            PathBuf::from("/tmp/absolute-capture")
+        );
+    }
+
+    #[test]
+    fn browser_capture_uses_playwright_chrome_for_testing() {
+        let selected = select_capture_browser_executable(Some(PathBuf::from(
+            "/tmp/chrome-for-testing",
+        )))
+        .expect("browser executable");
+        assert_eq!(selected.0, "playwright-cache");
+        assert_eq!(selected.1, PathBuf::from("/tmp/chrome-for-testing"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_missing_playwright_chrome_for_testing() {
+        assert!(select_capture_browser_executable(None).is_none());
+    }
+
+    #[test]
+    fn browser_capture_homepage_preserves_explicit_port() {
+        let script = build_browser_capture_runner_script(
+            "http://127.0.0.1:12345",
+            "http://127.0.0.1:8765/browser.html",
+            PathBuf::from("/tmp/capture").as_path(),
+            5000,
+        )
+        .unwrap();
+        assert!(script.contains("const homepageUrl = \"http://127.0.0.1:8765/\";"));
     }
 }

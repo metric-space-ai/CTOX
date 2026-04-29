@@ -5,7 +5,7 @@
     "repeating_layer_weight_mb_q4": 240,
     "load_peak_slack_mb_q4": 1024,
     "kv_mb_per_1k_tokens_q4": 180,
-    "base_toks_per_sec_q4": 77.0,
+    "base_toks_per_sec_q4": 54.0,
     "repeating_layers": 64,
     "context_cap": 131072
   },

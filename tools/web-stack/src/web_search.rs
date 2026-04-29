@@ -36,7 +36,7 @@ enum ProviderKind {
 }
 
 impl ProviderKind {
-    fn from_env(raw: Option<String>) -> Self {
+    fn from_config_value(raw: Option<String>) -> Self {
         match raw
             .as_deref()
             .unwrap_or("auto")
@@ -182,7 +182,7 @@ pub enum OpenAiWebSearchCompatMode {
 
 impl OpenAiWebSearchCompatMode {
     fn from_root(root: &Path) -> Self {
-        match runtime_config::env_or_config(root, "CTOX_WEB_SEARCH_OPENAI_MODE")
+        match runtime_config::get(root, "CTOX_WEB_SEARCH_OPENAI_MODE")
             .as_deref()
             .unwrap_or("ctox_primary")
             .trim()
@@ -219,23 +219,20 @@ impl SearchConfig {
     fn from_root(root: &Path) -> Self {
         Self {
             enabled: read_bool(root, "CTOX_WEB_SEARCH_ENABLED", true),
-            provider: ProviderKind::from_env(runtime_config::env_or_config(
+            provider: ProviderKind::from_config_value(runtime_config::get(
                 root,
                 "CTOX_WEB_SEARCH_PROVIDER",
             )),
-            searxng_base_url: runtime_config::env_or_config(
-                root,
-                "CTOX_WEB_SEARCH_SEARXNG_BASE_URL",
-            ),
+            searxng_base_url: runtime_config::get(root, "CTOX_WEB_SEARCH_SEARXNG_BASE_URL"),
             timeout_ms: read_u64(root, "CTOX_WEB_SEARCH_TIMEOUT_MS", 7000),
             default_top_k: read_usize(root, "CTOX_WEB_SEARCH_TOP_K", 5),
             max_top_k: read_usize(root, "CTOX_WEB_SEARCH_MAX_TOP_K", 8),
-            user_agent: runtime_config::env_or_config(root, "CTOX_WEB_SEARCH_USER_AGENT")
+            user_agent: runtime_config::get(root, "CTOX_WEB_SEARCH_USER_AGENT")
                 .unwrap_or_else(|| {
                     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36".to_string()
                 }),
-            default_language: runtime_config::env_or_config(root, "CTOX_WEB_SEARCH_LANGUAGE"),
-            default_region: runtime_config::env_or_config(root, "CTOX_WEB_SEARCH_REGION"),
+            default_language: runtime_config::get(root, "CTOX_WEB_SEARCH_LANGUAGE"),
+            default_region: runtime_config::get(root, "CTOX_WEB_SEARCH_REGION"),
             default_safe_search: read_bool(root, "CTOX_WEB_SEARCH_SAFE", true),
             cache_ttl_secs: read_u64(root, "CTOX_WEB_SEARCH_CACHE_TTL_SECS", 86_400),
             page_cache_ttl_secs: read_u64(root, "CTOX_WEB_SEARCH_PAGE_CACHE_TTL_SECS", 259_200),
@@ -754,34 +751,14 @@ pub fn run_ctox_google_bootstrap_doctor_tool(root: &Path) -> Result<Value> {
     let helper_bin = google_fetch_binary_path(root);
     let probe_script = google_bootstrap_probe_script_path(root);
     let probe_driver = probe_script.with_file_name("browser_profile_probe.mjs");
-    let reference_dir = runtime_config::env_or_config(root, "CTOX_WEB_BROWSER_REFERENCE_DIR")
+    let reference_dir = runtime_config::get(root, "CTOX_WEB_BROWSER_REFERENCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("runtime/browser/interactive-reference"));
     let playwright_ok = reference_dir.join("node_modules/playwright").exists();
 
-    let chrome_bin = if let Some(path) = runtime_config::env_or_config(root, "CTOX_WEB_CHROME_BIN")
-    {
-        Some(PathBuf::from(path))
-    } else if cfg!(target_os = "macos") {
-        [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-    } else {
-        [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-        ]
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.exists())
-    };
+    let chrome_bin = runtime_config::get(root, "CTOX_WEB_CHROME_BIN").map(PathBuf::from);
+    let chrome_user_data_dir =
+        runtime_config::get(root, "CTOX_WEB_CHROME_USER_DATA_DIR").map(PathBuf::from);
 
     let profile_path = google_bootstrap_profile_path(root);
     let profile = read_google_bootstrap_profile_file(&profile_path)
@@ -812,10 +789,6 @@ pub fn run_ctox_google_bootstrap_doctor_tool(root: &Path) -> Result<Value> {
         ready = false;
         issues.push("playwright is not installed (run `ctox web browser-prepare --install-reference --install-browser`)");
     }
-    if chrome_bin.is_none() {
-        ready = false;
-        issues.push("no Chrome/Chromium binary found (install Chrome or set CTOX_WEB_CHROME_BIN)");
-    }
     if !helper_bin.exists() {
         ready = false;
         issues.push("ctox-google-fetch helper is not built (run `cargo build --release --bin ctox-google-fetch` in tools/google-fetch)");
@@ -828,7 +801,14 @@ pub fn run_ctox_google_bootstrap_doctor_tool(root: &Path) -> Result<Value> {
         issues.push("no DISPLAY/WAYLAND_DISPLAY; live refresh is disabled — import a profile with `ctox web google-bootstrap-import`");
     }
     if profile.is_none() {
-        issues.push("no cached profile yet; first search will trigger a refresh");
+        ready = false;
+        issues.push("no cached profile; explicit google_bootstrap_native requires `ctox web google-bootstrap-import --file <path>` or configured refresh inputs");
+        if chrome_bin.is_none() {
+            issues.push("CTOX_WEB_CHROME_BIN is not configured in local CTOX runtime config");
+        }
+        if chrome_user_data_dir.is_none() {
+            issues.push("CTOX_WEB_CHROME_USER_DATA_DIR is not configured in local CTOX runtime config");
+        }
     }
 
     Ok(json!({
@@ -838,7 +818,10 @@ pub fn run_ctox_google_bootstrap_doctor_tool(root: &Path) -> Result<Value> {
         "python3_path": python3.map(|p| p.display().to_string()),
         "node_path": node.map(|p| p.display().to_string()),
         "node_version": node_version,
-        "chrome_bin": chrome_bin.map(|p| p.display().to_string()),
+        "chrome_bin": chrome_bin.as_ref().map(|p| p.display().to_string()),
+        "chrome_bin_configured": chrome_bin.is_some(),
+        "chrome_user_data_dir": chrome_user_data_dir.as_ref().map(|p| p.display().to_string()),
+        "chrome_user_data_dir_configured": chrome_user_data_dir.is_some(),
         "reference_dir": reference_dir.display().to_string(),
         "playwright_installed": playwright_ok,
         "helper_binary_path": helper_bin.display().to_string(),
@@ -1509,17 +1492,8 @@ fn resolve_effective_provider(root: &Path, provider: ProviderKind) -> ProviderKi
     if provider != ProviderKind::Auto {
         return provider;
     }
-    let profile_path = google_bootstrap_profile_path(root);
-    let profile_ready = read_google_bootstrap_profile_file(&profile_path)
-        .ok()
-        .flatten()
-        .and_then(|profile| validate_google_bootstrap_profile_fields(&profile).ok())
-        .is_some();
-    if profile_ready || !looks_headless_without_browser_session() {
-        ProviderKind::GoogleBootstrapNative
-    } else {
-        ProviderKind::DuckDuckGo
-    }
+    let _ = root;
+    ProviderKind::DuckDuckGo
 }
 
 fn duckduckgo_search(config: &SearchConfig, query: &SearchQuery) -> Result<SearchResponse> {
@@ -5411,7 +5385,7 @@ fn validate_google_bootstrap_profile_fields(profile: &GoogleBootstrapProfile) ->
 }
 
 fn google_fetch_binary_path(root: &Path) -> PathBuf {
-    if let Some(path) = runtime_config::env_or_config(root, "CTOX_WEB_GOOGLE_FETCH_BIN") {
+    if let Some(path) = runtime_config::get(root, "CTOX_WEB_GOOGLE_FETCH_BIN") {
         return PathBuf::from(path);
     }
 
@@ -5423,13 +5397,13 @@ fn google_fetch_binary_path(root: &Path) -> PathBuf {
 }
 
 fn google_bootstrap_profile_path(root: &Path) -> PathBuf {
-    runtime_config::env_or_config(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_PROFILE_PATH")
+    runtime_config::get(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_PROFILE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("runtime/google_bootstrap_native_profile.json"))
 }
 
 fn google_bootstrap_probe_script_path(root: &Path) -> PathBuf {
-    runtime_config::env_or_config(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_PROBE")
+    runtime_config::get(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_PROBE")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("tools/google-fetch/browser_profile_probe.py"))
 }
@@ -5547,7 +5521,7 @@ fn run_google_bootstrap_probe(
         ));
     }
 
-    let reference_dir = runtime_config::env_or_config(root, "CTOX_WEB_BROWSER_REFERENCE_DIR")
+    let reference_dir = runtime_config::get(root, "CTOX_WEB_BROWSER_REFERENCE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| root.join("runtime/browser/interactive-reference"));
     // We intentionally do NOT verify `node_modules/playwright` exists here.
@@ -5562,16 +5536,20 @@ fn run_google_bootstrap_probe(
         .arg(&script)
         .arg("--full-clone")
         .arg("--url")
-        .arg(&plan.url);
-    // Only macOS can safely quit+restart the user's Chrome via AppleScript.
-    // On Linux we skip the quit step and the user is expected to close Chrome
-    // manually, or to opt out via CTOX_WEB_GOOGLE_BOOTSTRAP_LEAVE_CHROME_RUNNING=1.
-    let leave_chrome_running = matches!(
-        runtime_config::env_or_config(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_LEAVE_CHROME_RUNNING")
-            .as_deref(),
+        .arg(&plan.url)
+        .arg("--reference-dir")
+        .arg(&reference_dir);
+    if let Some(chrome_bin) = runtime_config::get(root, "CTOX_WEB_CHROME_BIN") {
+        command.arg("--chrome-bin").arg(chrome_bin);
+    }
+    if let Some(user_data_dir) = runtime_config::get(root, "CTOX_WEB_CHROME_USER_DATA_DIR") {
+        command.arg("--chrome-user-data-dir").arg(user_data_dir);
+    }
+    let quit_running_chrome = matches!(
+        runtime_config::get(root, "CTOX_WEB_GOOGLE_BOOTSTRAP_QUIT_RUNNING_CHROME").as_deref(),
         Some("1" | "true" | "TRUE" | "yes"),
     );
-    if !leave_chrome_running {
+    if quit_running_chrome {
         command.arg("--quit-running-chrome");
     } else {
         command.arg("--leave-chrome-running");
@@ -5582,7 +5560,6 @@ fn run_google_bootstrap_probe(
             .arg("--wait-timeout-secs")
             .arg(wait_timeout_secs.to_string());
     }
-    command.env("CTOX_WEB_BROWSER_REFERENCE_DIR", &reference_dir);
     let output = command
         .current_dir(root)
         .stdin(Stdio::null())
@@ -6414,7 +6391,7 @@ fn normalize_domain(domain: &str) -> String {
 }
 
 fn read_bool(root: &Path, key: &str, default: bool) -> bool {
-    runtime_config::env_or_config(root, key)
+    runtime_config::get(root, key)
         .map(|value| {
             matches!(
                 value.trim().to_ascii_lowercase().as_str(),
@@ -6425,13 +6402,13 @@ fn read_bool(root: &Path, key: &str, default: bool) -> bool {
 }
 
 fn read_u64(root: &Path, key: &str, default: u64) -> u64 {
-    runtime_config::env_or_config(root, key)
+    runtime_config::get(root, key)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
 }
 
 fn read_usize(root: &Path, key: &str, default: usize) -> usize {
-    runtime_config::env_or_config(root, key)
+    runtime_config::get(root, key)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
 }
@@ -8744,26 +8721,35 @@ mod tests {
     }
 
     #[test]
-    fn parses_google_browser_provider_from_env() {
-        assert_eq!(ProviderKind::from_env(None), ProviderKind::Auto);
+    fn parses_google_browser_provider_from_config_value() {
+        assert_eq!(ProviderKind::from_config_value(None), ProviderKind::Auto);
         assert_eq!(
-            ProviderKind::from_env(Some("auto".to_string())),
+            ProviderKind::from_config_value(Some("auto".to_string())),
             ProviderKind::Auto
         );
         assert_eq!(
-            ProviderKind::from_env(Some("google_browser".to_string())),
+            ProviderKind::from_config_value(Some("google_browser".to_string())),
             ProviderKind::GoogleBrowser
         );
         assert_eq!(
-            ProviderKind::from_env(Some("google_bootstrap_native".to_string())),
+            ProviderKind::from_config_value(Some("google_bootstrap_native".to_string())),
             ProviderKind::GoogleBootstrapNative
         );
         assert_eq!(
-            ProviderKind::from_env(Some("duckduckgo".to_string())),
+            ProviderKind::from_config_value(Some("duckduckgo".to_string())),
             ProviderKind::DuckDuckGo
         );
         assert_eq!(
-            ProviderKind::from_env(Some("ddg".to_string())),
+            ProviderKind::from_config_value(Some("ddg".to_string())),
+            ProviderKind::DuckDuckGo
+        );
+    }
+
+    #[test]
+    fn auto_provider_defaults_to_duckduckgo() {
+        let root = unique_test_root("web_search_auto_provider_ddg");
+        assert_eq!(
+            resolve_effective_provider(&root, ProviderKind::Auto),
             ProviderKind::DuckDuckGo
         );
     }

@@ -5,7 +5,8 @@
 //! the matching server binary under `src/inference/models/<model>/`
 //! and the CLI args needed to spawn it.
 //!
-//! Scope today: only the Qwen3.5-27B Q4_K_M + DFlash-draft pair.
+//! Scope today: curated self-contained model servers, starting with the
+//! Qwen3.5-27B Q4_K_M + DFlash-draft pair and native Voxtral TTS.
 //! Adding a second curated model means appending one entry to
 //! [`resolve_local_model_backend`] plus any new SQLite runtime-config
 //! keys for weight/tokenizer paths.
@@ -29,6 +30,7 @@
 //! | `CTOX_QWEN35_TARGET_GGUF`        | `$HOME/dflash-ref/dflash/models/Qwen3.5-27B-Q4_K_M.gguf`         |
 //! | `CTOX_QWEN35_DRAFT_SAFETENSORS`  | `$HOME/dflash-ref/dflash/models/draft/model.safetensors`         |
 //! | `CTOX_QWEN35_TOKENIZER`          | _discovered by the server bin from the HF cache_                 |
+//! | `CTOX_QWEN35_GGML_LIB_DIR`        | `$HOME/dflash-ref/dflash/build/deps/llama.cpp/ggml/src`          |
 //!
 //! Set via either the TUI's runtime-settings page or
 //! `ctox secret set <key> <value>` (the runtime-env store persists
@@ -73,6 +75,9 @@ pub fn resolve_local_model_backend(req: LocalModelRequest<'_>) -> Option<LocalMo
             req.transport_endpoint,
         ));
     }
+    if is_voxtral_4b_tts(model) {
+        return Some(voxtral_4b_tts_backend(req.root, req.transport_endpoint));
+    }
     None
 }
 
@@ -85,6 +90,12 @@ pub fn is_qwen35_27b(model: &str) -> bool {
         || model == "Qwen/Qwen3.5-27B"
         || model.starts_with("Qwen/Qwen3.5-27B-")
         || model.starts_with("unsloth/Qwen3.5-27B")
+}
+
+pub fn is_voxtral_4b_tts(model: &str) -> bool {
+    model == "engineai/Voxtral-4B-TTS-2603"
+        || model.eq_ignore_ascii_case("engineai/voxtral-4b-tts-2603")
+        || model.eq_ignore_ascii_case("voxtral-4b-tts-2603")
 }
 
 fn qwen35_27b_q4km_dflash_backend(
@@ -126,6 +137,11 @@ fn qwen35_27b_q4km_dflash_backend(
     args.push(socket.into());
     args.push("--model-id".into());
     args.push("qwen35-27b-q4km-dflash".into());
+    args.push("--fast-rollback".into());
+    args.push("--ddtree-budget".into());
+    args.push("22".into());
+    args.push("--ddtree-temp".into());
+    args.push("0.6".into());
     // Embed the canonical request-model alias in the command line so
     // the supervisor's `socket_backed_process_matches_spec` check
     // (which does a literal `command.contains(spec.request_model)`
@@ -136,15 +152,58 @@ fn qwen35_27b_q4km_dflash_backend(
     args.push("--request-model-alias".into());
     args.push("Qwen/Qwen3.5-27B".into());
 
-    // No extra env currently. CUDA_VISIBLE_DEVICES / launch-spec env
-    // gets layered by the supervisor's shared env helper.
-    let env: Vec<(&'static str, OsString)> = Vec::new();
+    // The current hybrid binary still links ggml-cuda dynamically.
+    // Keep the runtime linker path explicit so supervisor-spawned
+    // CTOX processes work under the clean child environment.
+    let ggml_lib_dir = config_path_or(
+        root,
+        "CTOX_QWEN35_GGML_LIB_DIR",
+        default_qwen35_ggml_lib(root),
+    );
+    let ld_library_path = format!(
+        "{}:{}",
+        ggml_lib_dir.display(),
+        ggml_lib_dir.join("ggml-cuda").display()
+    );
+    let env: Vec<(&'static str, OsString)> =
+        vec![("LD_LIBRARY_PATH", OsString::from(ld_library_path))];
 
     LocalModelBackend {
         binary,
         args,
         env,
         model_id: "qwen35-27b-q4km-dflash",
+    }
+}
+
+fn voxtral_4b_tts_backend(root: &Path, transport_endpoint: Option<&str>) -> LocalModelBackend {
+    let binary = std::env::current_exe().unwrap_or_else(|_| root.join("target/release/ctox"));
+    let socket = match transport_endpoint {
+        Some(ep) => PathBuf::from(ep),
+        None => root.join("runtime/sockets/speech.sock"),
+    };
+    let model_dir = config_path_optional(root, "CTOX_VOXTRAL_TTS_MODEL_DIR")
+        .or_else(|| config_path_optional(root, "CTOX_TTS_MODEL_DIR"))
+        .or_else(|| config_path_optional(root, "CTOX_SPEECH_MODEL_DIR"));
+
+    let mut args: Vec<OsString> = Vec::new();
+    args.push("__native-voxtral-tts-service".into());
+    args.push("--transport".into());
+    args.push(socket.into());
+    args.push("--compute-target".into());
+    args.push("gpu".into());
+    if let Some(model_dir) = model_dir {
+        args.push("--model-dir".into());
+        args.push(model_dir.into());
+    }
+    args.push("--request-model-alias".into());
+    args.push("engineai/Voxtral-4B-TTS-2603".into());
+
+    LocalModelBackend {
+        binary,
+        args,
+        env: Vec::new(),
+        model_id: "voxtral-4b-tts-2603",
     }
 }
 
@@ -156,6 +215,13 @@ fn config_path_or(root: &Path, key: &str, fallback: PathBuf) -> PathBuf {
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
         .unwrap_or(fallback)
+}
+
+fn config_path_optional(root: &Path, key: &str) -> Option<PathBuf> {
+    runtime_env::env_or_config(root, key)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Home-dir resolution — uses `$HOME` purely as an OS-level POSIX
@@ -179,6 +245,10 @@ fn default_qwen35_draft(root: &Path) -> PathBuf {
     resolve_home_dir(root).join("dflash-ref/dflash/models/draft/model.safetensors")
 }
 
+fn default_qwen35_ggml_lib(root: &Path) -> PathBuf {
+    resolve_home_dir(root).join("dflash-ref/dflash/build/deps/llama.cpp/ggml/src")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +261,36 @@ mod tests {
         assert!(is_qwen35_27b("unsloth/Qwen3.5-27B-GGUF"));
         assert!(!is_qwen35_27b("Qwen/Qwen3-4B"));
         assert!(!is_qwen35_27b("anthropic/claude-sonnet-4.7"));
+    }
+
+    #[test]
+    fn voxtral_tts_aliases_resolve() {
+        assert!(is_voxtral_4b_tts("engineai/Voxtral-4B-TTS-2603"));
+        assert!(is_voxtral_4b_tts("engineai/voxtral-4b-tts-2603"));
+        assert!(is_voxtral_4b_tts("voxtral-4b-tts-2603"));
+        assert!(!is_voxtral_4b_tts("engineai/Voxtral-Mini-4B-Realtime-2602"));
+    }
+
+    #[test]
+    fn voxtral_tts_backend_assembles_hidden_service_cli() {
+        let root = Path::new("/tmp/ctoxroot");
+        let backend = resolve_local_model_backend(LocalModelRequest {
+            request_model: "engineai/Voxtral-4B-TTS-2603",
+            transport_endpoint: Some("/tmp/ctoxroot/runtime/sockets/speech.sock"),
+            root,
+        })
+        .expect("voxtral tts backend must resolve");
+        let joined: String = backend
+            .args
+            .iter()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("__native-voxtral-tts-service"));
+        assert!(joined.contains("--transport"));
+        assert!(joined.contains("speech.sock"));
+        assert!(joined.contains("--request-model-alias engineai/Voxtral-4B-TTS-2603"));
+        assert_eq!(backend.model_id, "voxtral-4b-tts-2603");
     }
 
     #[test]
@@ -213,6 +313,14 @@ mod tests {
         assert!(joined.contains("--socket"));
         assert!(joined.contains("primary_generation.sock"));
         assert!(joined.contains("--model-id qwen35-27b-q4km-dflash"));
+        assert!(joined.contains("--fast-rollback"));
+        assert!(joined.contains("--ddtree-budget 22"));
+        assert!(joined.contains("--ddtree-temp 0.6"));
+        assert!(backend
+            .env
+            .iter()
+            .any(|(key, value)| *key == "LD_LIBRARY_PATH"
+                && value.to_string_lossy().contains("ggml-cuda")));
         assert_eq!(backend.model_id, "qwen35-27b-q4km-dflash");
         assert!(backend
             .binary

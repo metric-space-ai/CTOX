@@ -22,9 +22,17 @@ Current ownership boundary:
 - the durable scrape runtime/database still stays in the wider CTOX scrape
   subsystem, so the root injects only that executor.
 
+## Default search provider
+
+`ctox_web_search` defaults to DuckDuckGo (`duckduckgo`) so normal search does
+not open Chrome, clone a browser profile, or depend on Google session cookies.
+Google search remains available by setting the local CTOX runtime config key
+`CTOX_WEB_SEARCH_PROVIDER` to `google`, `google_browser`, or
+`google_bootstrap_native`.
+
 ## Google bootstrap profile
 
-`ctox_web_search` with the default `google_bootstrap_native` provider fronts
+`ctox_web_search` with the explicit `google_bootstrap_native` provider fronts
 Google search with a cookie profile sampled from a headed Chrome session. The
 profile is persisted at `runtime/google_bootstrap_native_profile.json` with
 mode `0600` — **it holds live Google session cookies (SID, __Secure-1PSID,
@@ -39,16 +47,19 @@ token:
 - Run `ctox web google-doctor` to check pipeline readiness (Chrome binary,
   Playwright workspace, helper binary, profile freshness, DISPLAY availability).
 
-### Environment overrides
+### Runtime config keys
 
-| Variable | Purpose |
+| Key | Purpose |
 | --- | --- |
 | `CTOX_WEB_SEARCH_OPENAI_MODE` | `ctox_primary` (default) routes OpenAI `web_search` tool calls through CTOX; `passthrough` forwards them upstream unchanged. |
-| `CTOX_WEB_SEARCH_PROVIDER` | `google_bootstrap_native` (default), `google`, `google_browser`, `bing`, `searxng`, or `mock`. |
+| `CTOX_WEB_SEARCH_PROVIDER` | `duckduckgo` (default through `auto`), `google`, `google_browser`, `google_bootstrap_native`, `bing`, `searxng`, or `mock`. |
 | `CTOX_WEB_GOOGLE_BOOTSTRAP_TTL_SECS` | Proactive profile refresh window. Default `21600` (6h). |
 | `CTOX_WEB_GOOGLE_BOOTSTRAP_PROFILE_PATH` | Override persisted profile location. |
 | `CTOX_WEB_GOOGLE_BOOTSTRAP_PROBE` | Override probe script (used by tests). |
 | `CTOX_WEB_BROWSER_REFERENCE_DIR` | Directory containing `node_modules/playwright`. Defaults to `runtime/browser/interactive-reference`. |
-| `CTOX_WEB_GOOGLE_BOOTSTRAP_LEAVE_CHROME_RUNNING` | `1` to skip the auto-quit of the user's Chrome during a probe refresh. |
-| `CTOX_WEB_CHROME_BIN` | Path to the Chrome/Chromium executable (auto-discovered on macOS/Linux). |
-| `CTOX_WEB_CHROME_USER_DATA_DIR` | Path to the Chrome profile to clone (auto-discovered on macOS/Linux). |
+| `CTOX_WEB_GOOGLE_BOOTSTRAP_QUIT_RUNNING_CHROME` | `1` to explicitly allow the Google bootstrap probe to ask Chrome to quit before cloning. Default is leave running. |
+| `CTOX_WEB_CHROME_BIN` | Explicit path to the Chrome/Chromium executable for `google_bootstrap_native`; not auto-discovered. |
+| `CTOX_WEB_CHROME_USER_DATA_DIR` | Explicit path to the Chrome profile to clone for `google_bootstrap_native`; not auto-discovered. |
+
+These keys are read from CTOX's local SQLite runtime config store, not from
+global process environment variables.

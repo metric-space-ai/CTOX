@@ -42,7 +42,7 @@ fn production_turn_loop_stays_model_agnostic() {
     let production = production_source(include_str!("turn_loop.rs"));
 
     for forbidden in [
-        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
         "Qwen/Qwen3.5-",
         "google/gemma-4-",
         "nvidia/Nemotron-",

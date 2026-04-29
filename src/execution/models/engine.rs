@@ -29,7 +29,6 @@ pub enum LocalModelFamily {
     NemotronCascade2,
     Glm47Flash,
     Qwen3Embedding,
-    WhisperTranscriptionCpu,
     VoxtralTranscription,
     PiperSpeech,
     Qwen3Speech,
@@ -52,6 +51,7 @@ pub enum ChatModelFamily {
     MiniMax,
     Mistral,
     Kimi,
+    Anthropic,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -86,6 +86,7 @@ impl ComputeTarget {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuxiliaryBackendKind {
+    NativeCtox,
     MistralRs,
     Speaches,
 }
@@ -335,6 +336,11 @@ pub fn default_runtime_config(family: LocalModelFamily) -> EngineRuntimeConfig {
 }
 
 pub fn runtime_config_for_model(model: &str) -> anyhow::Result<EngineRuntimeConfig> {
+    if model_registry::is_local_chat_model(model)
+        && !model_registry::is_supported_local_chat_model(model)
+    {
+        anyhow::bail!("unsupported local chat model: {}", model.trim());
+    }
     Ok(model_profile_for_model(model)?.runtime)
 }
 
@@ -366,8 +372,12 @@ pub fn is_minimax_api_chat_model(model: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(&normalized))
 }
 
+pub fn is_azure_foundry_api_chat_model(model: &str) -> bool {
+    !model.trim().is_empty()
+}
+
 pub fn supports_local_chat_runtime(model: &str) -> bool {
-    runtime_config_for_model(model).is_ok()
+    model_registry::is_supported_local_chat_model(model)
 }
 
 pub fn is_api_chat_model(model: &str) -> bool {
@@ -382,6 +392,7 @@ pub fn api_provider_supports_model(provider: &str, model: &str) -> bool {
         "openrouter" => is_openrouter_api_chat_model(model),
         "anthropic" => is_anthropic_api_chat_model(model),
         "minimax" => is_minimax_api_chat_model(model),
+        "azure_foundry" => is_azure_foundry_api_chat_model(model),
         "openai" => is_openai_api_chat_model(model),
         _ => false,
     }
@@ -539,7 +550,7 @@ pub fn build_engine_command(
                 runtime.model.clone(),
             ]);
         }
-        LocalModelFamily::WhisperTranscriptionCpu | LocalModelFamily::VoxtralTranscription => {
+        LocalModelFamily::VoxtralTranscription => {
             command.extend([
                 "serve".to_string(),
                 "-p".to_string(),
@@ -1466,8 +1477,8 @@ mod tests {
 
     #[test]
     fn model_supports_vision_recognises_local_vision_families() {
-        // Qwen 3.6 / 3.5 chat family is marked vision-capable in the registry.
-        assert!(model_supports_vision("Qwen/Qwen3.6-35B-A3B"));
+        // Qwen 3.5 chat family is marked vision-capable in the registry.
+        assert!(model_supports_vision("Qwen/Qwen3.5-35B-A3B"));
         // Gemma 4 variant likewise.
         assert!(model_supports_vision("google/gemma-4-31B-it"));
         // Qwen3-VL-2B auxiliary itself is vision-capable.
@@ -1476,7 +1487,7 @@ mod tests {
 
     #[test]
     fn model_supports_vision_rejects_text_only_primaries() {
-        assert!(!model_supports_vision("openai/gpt-oss-20b"));
+        assert!(!model_supports_vision("openai/gpt-oss-120b"));
         assert!(!model_supports_vision("nvidia/Nemotron-Cascade-2-30B-A3B"));
         assert!(!model_supports_vision("zai-org/GLM-4.7-Flash"));
         assert!(!model_supports_vision("moonshotai/kimi-k2.5"));
@@ -1485,7 +1496,13 @@ mod tests {
 
     #[test]
     fn model_supports_vision_recognises_known_api_models() {
+        assert!(model_supports_vision("claude-opus-4-7"));
+        assert!(model_supports_vision("claude-opus-4-6"));
+        assert!(model_supports_vision("claude-sonnet-4-7"));
+        assert!(model_supports_vision("claude-sonnet-4-6"));
+        assert!(model_supports_vision("anthropic/claude-opus-4.6"));
         assert!(model_supports_vision("anthropic/claude-sonnet-4.6"));
+        assert!(model_supports_vision("gpt-5.5"));
         assert!(model_supports_vision("gpt-5.4"));
         assert!(model_supports_vision("gpt-5.4-mini"));
         assert!(model_supports_vision("MiniMax-M2.7"));
@@ -1559,13 +1576,9 @@ mod tests {
     }
 
     #[test]
-    fn gpt_oss_runtime_uses_engine_gpt_oss_startup() {
-        let deps = discover_source_layout_paths(Path::new("/tmp/ctox"));
-        let runtime = default_runtime_config(LocalModelFamily::GptOss);
-        let command = build_engine_command(&deps, &runtime);
-        assert_eq!(command[1], "serve");
-        assert!(command.iter().any(|part| part == "gpt_oss"));
-        assert!(command.iter().any(|part| part == "--max-seq-len"));
+    fn gpt_oss_is_not_a_supported_local_runtime() {
+        assert!(runtime_config_for_model("openai/gpt-oss-120b").is_err());
+        assert!(!supports_local_chat_runtime("openai/gpt-oss-120b"));
     }
 
     #[test]
@@ -1576,7 +1589,7 @@ mod tests {
         assert_eq!(command[1], "serve");
         assert_eq!(command[2], "-p");
         assert_eq!(command[4], "vision");
-        assert!(command.iter().any(|part| part == "Qwen/Qwen3.6-35B-A3B"));
+        assert!(command.iter().any(|part| part == "Qwen/Qwen3.5-27B"));
     }
 
     #[test]
@@ -1634,7 +1647,7 @@ mod tests {
         );
         assert_eq!(embedding_cpu.request_model, "Qwen/Qwen3-Embedding-0.6B");
         assert_eq!(embedding_cpu.compute_target, ComputeTarget::Cpu);
-        assert_eq!(embedding_cpu.backend_kind, AuxiliaryBackendKind::MistralRs);
+        assert_eq!(embedding_cpu.backend_kind, AuxiliaryBackendKind::NativeCtox);
         assert_eq!(embedding_cpu.gpu_reserve_mb(), 0);
 
         let stt_gpu = auxiliary_model_selection(
@@ -1648,6 +1661,16 @@ mod tests {
         assert_eq!(stt_gpu.compute_target, ComputeTarget::Gpu);
         assert_eq!(stt_gpu.backend_kind, AuxiliaryBackendKind::MistralRs);
         assert_eq!(stt_gpu.gpu_reserve_mb(), 4200);
+
+        let legacy_stt = auxiliary_model_selection(AuxiliaryRole::Stt, Some("legacy-stt-model"));
+        assert_eq!(
+            legacy_stt.choice,
+            "engineai/Voxtral-Mini-4B-Realtime-2602 [GPU]"
+        );
+        assert_eq!(
+            legacy_stt.request_model,
+            "engineai/Voxtral-Mini-4B-Realtime-2602"
+        );
 
         let tts_cpu = auxiliary_model_selection(
             AuxiliaryRole::Tts,
@@ -1685,14 +1708,12 @@ mod tests {
         assert_eq!(tts_default.choice, "engineai/Voxtral-4B-TTS-2603 [GPU]");
         assert_eq!(tts_default.request_model, "engineai/Voxtral-4B-TTS-2603");
         assert_eq!(tts_default.compute_target, ComputeTarget::Gpu);
+        assert_eq!(tts_default.backend_kind, AuxiliaryBackendKind::NativeCtox);
     }
 
     #[test]
     fn cpu_aux_models_have_native_runtime_profiles() {
-        let stt = runtime_profile_for_model("Systran/faster-whisper-small").unwrap();
-        assert_eq!(stt.family, LocalModelFamily::WhisperTranscriptionCpu);
-        assert_eq!(stt.launcher_mode, "vision");
-        assert!(stt.isq.is_none());
+        assert!(runtime_profile_for_model("legacy-stt-model").is_err());
 
         let tts = runtime_profile_for_model("speaches-ai/piper-en_US-lessac-medium").unwrap();
         assert_eq!(tts.family, LocalModelFamily::PiperSpeech);
@@ -1716,24 +1737,15 @@ mod tests {
 
     #[test]
     fn family_profiles_drive_nccl_policy() {
-        let gpt_oss = runtime_profile_for_model("openai/gpt-oss-20b").unwrap();
-        let qwen = runtime_profile_for_model("Qwen/Qwen3.6-35B-A3B").unwrap();
-        let glm = runtime_profile_for_model("zai-org/GLM-4.7-Flash").unwrap();
+        let qwen = runtime_profile_for_model("Qwen/Qwen3.5-27B").unwrap();
         let embedding = runtime_profile_for_model("Qwen/Qwen3-Embedding-0.6B").unwrap();
         let stt = runtime_profile_for_model("engineai/Voxtral-Mini-4B-Realtime-2602").unwrap();
         let tts = runtime_profile_for_model("Qwen/Qwen3-TTS-12Hz-0.6B-Base").unwrap();
         let voxtral_tts = runtime_profile_for_model("engineai/Voxtral-4B-TTS-2603").unwrap();
-        assert!(!gpt_oss.disable_nccl);
-        assert_eq!(gpt_oss.tensor_parallel_backend.as_deref(), Some("nccl"));
-        assert_eq!(gpt_oss.target_world_size, Some(2));
-        assert_eq!(gpt_oss.preferred_gpu_count, Some(2));
-        assert!(!qwen.disable_nccl);
+        assert!(qwen.disable_nccl);
         assert_eq!(qwen.tensor_parallel_backend, None);
         assert_eq!(qwen.target_world_size, None);
-        assert_eq!(qwen.preferred_gpu_count, Some(3));
-        assert!(glm.disable_nccl);
-        assert_eq!(glm.tensor_parallel_backend, None);
-        assert_eq!(glm.preferred_gpu_count, Some(3));
+        assert_eq!(qwen.preferred_gpu_count, Some(1));
         assert!(embedding.disable_nccl);
         assert_eq!(embedding.preferred_gpu_count, Some(1));
         assert_eq!(embedding.isq, None);
@@ -1766,7 +1778,7 @@ mod tests {
         assert_eq!(qwen_small.preferred_gpu_count, Some(1));
         assert_eq!(qwen_small.max_seq_len, 262_144);
 
-        let qwen_large = runtime_profile_for_model("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let qwen_large = runtime_profile_for_model("Qwen/Qwen3.5-35B-A3B").unwrap();
         assert!(qwen_large.disable_nccl);
         assert_eq!(qwen_large.target_world_size, None);
         assert_eq!(qwen_large.preferred_gpu_count, Some(3));
@@ -1807,7 +1819,7 @@ mod tests {
             TURBOQUANT3_CACHE_TYPE.to_string(),
         );
         assert_eq!(
-            resolve_model_pa_cache_type("openai/gpt-oss-20b", Some("f8e4m3"), &env_map),
+            resolve_model_pa_cache_type("Qwen/Qwen3.5-27B", Some("f8e4m3"), &env_map),
             Some("f8e4m3".to_string())
         );
     }
@@ -1820,7 +1832,7 @@ mod tests {
             "f8e4m3".to_string(),
         );
         assert_eq!(
-            resolve_model_pa_cache_type("Qwen/Qwen3.6-35B-A3B", Some("turboquant3"), &env_map),
+            resolve_model_pa_cache_type("Qwen/Qwen3.5-27B", Some("turboquant3"), &env_map),
             Some(TURBOQUANT3_CACHE_TYPE.to_string())
         );
     }
@@ -1857,7 +1869,7 @@ mod tests {
     #[test]
     fn supported_cache_override_promotes_paged_attention_from_off() {
         assert_eq!(
-            resolve_model_paged_attn("Qwen/Qwen3.6-35B-A3B", "off", Some("turboquant3")),
+            resolve_model_paged_attn("Qwen/Qwen3.5-35B-A3B", "off", Some("turboquant3")),
             "auto"
         );
     }
@@ -1888,21 +1900,26 @@ mod tests {
 
     #[test]
     fn recognizes_openai_api_chat_models() {
+        assert!(is_openai_api_chat_model("gpt-5.5"));
         assert!(is_openai_api_chat_model("gpt-5.4"));
         assert!(is_openai_api_chat_model("GPT-5.4-MINI"));
-        assert!(!is_openai_api_chat_model("openai/gpt-oss-20b"));
+        assert!(!is_openai_api_chat_model("openai/gpt-oss-120b"));
     }
 
     #[test]
     fn recognizes_anthropic_api_chat_models() {
-        assert!(is_anthropic_api_chat_model("anthropic/claude-sonnet-4.6"));
+        assert!(is_anthropic_api_chat_model("claude-opus-4-7"));
+        assert!(is_anthropic_api_chat_model("claude-opus-4-6"));
+        assert!(is_anthropic_api_chat_model("claude-sonnet-4-7"));
+        assert!(is_anthropic_api_chat_model("claude-sonnet-4-6"));
+        assert!(!is_anthropic_api_chat_model("anthropic/claude-sonnet-4.6"));
         assert_eq!(
-            default_api_provider_for_model("anthropic/claude-sonnet-4.6"),
+            default_api_provider_for_model("claude-opus-4-6"),
             "anthropic"
         );
         assert!(api_provider_supports_model(
             "anthropic",
-            "anthropic/claude-sonnet-4.6"
+            "claude-sonnet-4-7"
         ));
     }
 
@@ -1910,7 +1927,9 @@ mod tests {
     fn only_local_runtime_models_use_ctox_responses_adapter_path() {
         assert!(!uses_ctox_responses_adapter_model("gpt-5.4"));
         assert!(!uses_ctox_responses_adapter_model("gpt-5.4-nano"));
-        assert!(uses_ctox_responses_adapter_model("Qwen/Qwen3.5-4B"));
+        assert!(!uses_ctox_responses_adapter_model("openai/gpt-oss-120b"));
+        assert!(!uses_ctox_responses_adapter_model("Qwen/Qwen3.5-4B"));
+        assert!(uses_ctox_responses_adapter_model("Qwen/Qwen3.5-27B"));
         assert!(!uses_ctox_responses_adapter_model("not-a-real-model"));
     }
 
@@ -1988,20 +2007,20 @@ mod tests {
 
     #[test]
     fn detects_gpt_oss_harmony_proxy_need() {
-        let payload = serde_json::json!({"model":"openai/gpt-oss-20b"});
+        let payload = serde_json::json!({"model":"openai/gpt-oss-120b"});
         assert!(should_use_gpt_oss_harmony_proxy(&serde_json::to_vec(&payload).unwrap()).unwrap());
     }
 
     #[test]
     fn detects_streaming_request_flag() {
-        let payload = serde_json::json!({"model":"openai/gpt-oss-20b","stream":true});
+        let payload = serde_json::json!({"model":"openai/gpt-oss-120b","stream":true});
         assert!(responses_request_streams(&serde_json::to_vec(&payload).unwrap()).unwrap());
     }
 
     #[test]
     fn translates_responses_request_to_gpt_oss_chat_completions() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "instructions": "System rules",
             "input": [
                 {"role":"user","content":[{"text":"Do the thing"}]}
@@ -2013,7 +2032,7 @@ mod tests {
             rewrite_responses_to_gpt_oss_chat_completions(&serde_json::to_vec(&payload).unwrap())
                 .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(value["model"], "openai/gpt-oss-20b");
+        assert_eq!(value["model"], "openai/gpt-oss-120b");
         assert_eq!(value["max_tokens"], 333);
         assert_eq!(value["enable_thinking"], true);
         assert_eq!(value["reasoning_effort"], "low");
@@ -2026,7 +2045,7 @@ mod tests {
     #[test]
     fn exact_text_requests_keep_gpt_oss_thinking_enabled() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "input": [
                 {"role":"user","content":[{"text":"Reply with exactly OK and nothing else."}]}
             ]
@@ -2043,7 +2062,7 @@ mod tests {
     #[test]
     fn reasoning_none_disables_gpt_oss_thinking() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "input": [
                 {"role":"user","content":[{"text":"Reply with LOOP_OK and nothing else."}]}
             ],
@@ -2062,7 +2081,7 @@ mod tests {
     #[test]
     fn minimal_reasoning_keeps_gpt_oss_thinking_enabled() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "input": [
                 {"role":"user","content":[{"text":"Reply with LOOP_OK and nothing else."}]}
             ],
@@ -2079,7 +2098,7 @@ mod tests {
     #[test]
     fn short_output_budget_keeps_gpt_oss_thinking_enabled() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "input": [
                 {"role":"user","content":[{"text":"Reply with LOOP_OK."}]}
             ],
@@ -2125,15 +2144,15 @@ mod tests {
     #[test]
     fn gpt_oss_thinking_output_floor_avoids_tiny_budgets() {
         assert_eq!(
-            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-20b", 16),
+            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-120b", 16),
             128
         );
         assert_eq!(
-            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-20b", 128),
+            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-120b", 128),
             128
         );
         assert_eq!(
-            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-20b", 333),
+            ensure_gpt_oss_thinking_output_floor("openai/gpt-oss-120b", 333),
             333
         );
         assert_eq!(
@@ -2146,7 +2165,10 @@ mod tests {
     fn gpt_oss_defaults_to_the_128k_runtime_output_budget_when_unconfigured() {
         assert_eq!(gpt_oss_harmony_reasoning_cap(), "low");
         assert_eq!(gpt_oss_harmony_max_output_tokens_cap(), None);
-        assert_eq!(default_gpt_oss_output_budget("openai/gpt-oss-20b"), 131_072);
+        assert_eq!(
+            default_gpt_oss_output_budget("openai/gpt-oss-120b"),
+            131_072
+        );
     }
 
     #[test]
@@ -2266,7 +2288,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"<|start|>assistant<|channel|>final<|message|>CTOX_OK<|end|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2289,7 +2311,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"chatcmpl-123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{
                 "message":{
                     "role":"assistant",
@@ -2316,7 +2338,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"chatcmpl-123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{
                 "message":{
                     "role":"assistant",
@@ -2360,7 +2382,7 @@ mod tests {
     #[test]
     fn translates_responses_request_to_gpt_oss_completion() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "instructions": "System rules",
             "input": [
                 {"role":"user","content":[{"text":"Reply with exactly LOOP_OK and nothing else."}]}
@@ -2372,7 +2394,7 @@ mod tests {
             rewrite_responses_to_gpt_oss_completion(&serde_json::to_vec(&payload).unwrap())
                 .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(value["model"], "openai/gpt-oss-20b");
+        assert_eq!(value["model"], "openai/gpt-oss-120b");
         assert_eq!(value["temperature"], 0.0);
         assert_eq!(value["max_tokens"], 128);
         let prompt = value["prompt"].as_str().unwrap();
@@ -2384,7 +2406,7 @@ mod tests {
     #[test]
     fn translates_responses_request_to_gpt_oss_completion_without_thinking() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "instructions": "System rules",
             "input": [
                 {"role":"user","content":[{"text":"Reply with exactly LOOP_OK and nothing else."}]}
@@ -2396,7 +2418,7 @@ mod tests {
             rewrite_responses_to_gpt_oss_completion(&serde_json::to_vec(&payload).unwrap())
                 .unwrap();
         let value: Value = serde_json::from_slice(&rewritten).unwrap();
-        assert_eq!(value["model"], "openai/gpt-oss-20b");
+        assert_eq!(value["model"], "openai/gpt-oss-120b");
         assert_eq!(value["max_tokens"], 16);
         let prompt = value["prompt"].as_str().unwrap();
         assert!(prompt.contains("Reasoning: none"));
@@ -2406,7 +2428,7 @@ mod tests {
     #[test]
     fn gpt_oss_completion_rewrite_appends_harmony_stop_markers() {
         let payload = serde_json::json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "input": [
                 {"role":"user","content":[{"text":"Reply with exactly LOOP_OK and nothing else."}]}
             ],
@@ -2520,7 +2542,7 @@ mod tests {
     #[test]
     fn workspace_build_request_with_exact_marker_keeps_gpt_oss_tools() {
         let payload = json!({
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "reasoning": {"effort":"low"},
             "tool_choice": "auto",
             "tools": [
@@ -2565,7 +2587,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":">**\n**If** noise reply noise"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2585,7 +2607,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"analysis to=repo_browser.open_file code<|message|>{\"path\":\"README.md\"}<|end|><|start|>assistant<|channel|>final<|message|>CTOX_LAST_FINAL<|end|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2604,7 +2626,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"GPTOSS_OKanalysisThe user says assistantfinalGPTOSS_OK"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2625,7 +2647,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"analysis We should inspect the repo carefully. assistantfinalCTOX_RECOVEREDassistantcommentaryto=functions.exec_command{\"cmd\":\"printf nope\"}"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2644,7 +2666,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"GPTOSS_OKassistantanalysisThe user says: \"Reply with GPTOSS_OK and nothing else.\"assistantfinalGPTOSS_OKassistantcommentaryto=functions.exec_command{\"cmd\":\"printf GPTOSS_OK\"}"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2665,7 +2687,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"123",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"GPTOSS_OKassistantanalysisThe user says: \"Reply with GPTOSS_OK and nothing else.\" So we should output exactly \"GPTOSS_OK\" with no other text.assistantfinalGPTOSS_OKassistantcommentaryWe have complied.assistantanalysisWe are done.assistantfinalGPTOSS_OKassistant"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2686,7 +2708,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"456",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"<|channel|>commentary to=functions.shell_command<|constrain|>json<|message|>{\"command\":\"printf CTOX_TOOL\"}<|call|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2741,7 +2763,7 @@ mod tests {
         let payload = serde_json::json!({
             "id":"789",
             "created":42,
-            "model":"openai/gpt-oss-20b",
+            "model":"openai/gpt-oss-120b",
             "choices":[{"text":"<|channel|>final<|message|>CTOX_STREAM_OK<|end|>"}],
             "usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
         });
@@ -2759,7 +2781,7 @@ mod tests {
     fn emits_added_and_done_frames_for_web_search_calls() {
         let payload = serde_json::json!({
             "id": "resp_ws",
-            "model": "openai/gpt-oss-20b",
+            "model": "openai/gpt-oss-120b",
             "output": [{
                 "type": "web_search_call",
                 "id": "ws_1",

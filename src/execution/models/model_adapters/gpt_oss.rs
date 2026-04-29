@@ -45,7 +45,7 @@ pub fn uses_ctox_web_stack() -> bool {
 
 pub fn compact_limit(model: &str, realized_context: usize) -> usize {
     match model {
-        "openai/gpt-oss-20b" => 1_280.min(realized_context.saturating_sub(512)).max(1_024),
+        "openai/gpt-oss-120b" => 1_280.min(realized_context.saturating_sub(512)).max(1_024),
         _ => ((realized_context as f64) * 3.0 / 4.0).round() as usize,
     }
 }
@@ -127,7 +127,7 @@ pub(crate) fn rewrite_chat_request(raw: &[u8]) -> anyhow::Result<Vec<u8>> {
     let model = payload
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or("openai/gpt-oss-20b")
+        .unwrap_or("openai/gpt-oss-120b")
         .to_string();
     let instructions = payload
         .get("instructions")
@@ -257,7 +257,7 @@ pub fn rewrite_success_response(
         .get("model")
         .and_then(Value::as_str)
         .or(fallback_model)
-        .unwrap_or("openai/gpt-oss-20b")
+        .unwrap_or("openai/gpt-oss-120b")
         .to_string();
     let response_id = payload
         .get("id")
@@ -329,7 +329,7 @@ pub(crate) fn rewrite_chat_success_response(
     let payload: Value =
         serde_json::from_slice(raw).context("failed to parse GPT-OSS chat completion response")?;
     let mut builder =
-        engine::responses_turn_builder(&payload, fallback_model, "openai/gpt-oss-20b");
+        engine::responses_turn_builder(&payload, fallback_model, "openai/gpt-oss-120b");
     if let Some(choices) = payload.get("choices").and_then(Value::as_array) {
         for choice in choices {
             let message = choice.get("message").and_then(Value::as_object);
@@ -565,7 +565,7 @@ fn parse_proxy_request(raw: &[u8]) -> anyhow::Result<HarmonyProxyRequest> {
     let model = payload
         .get("model")
         .and_then(Value::as_str)
-        .unwrap_or("openai/gpt-oss-20b")
+        .unwrap_or("openai/gpt-oss-120b")
         .to_string();
     let system_prompt = payload
         .get("instructions")
@@ -652,7 +652,7 @@ fn parse_tool_spec(tool: &Value) -> Option<HarmonyToolSpec> {
 
 fn is_model_id(model_id: &str) -> bool {
     let lowered = model_id.trim().to_ascii_lowercase();
-    lowered == "gpt-oss-20b" || lowered == "openai/gpt-oss-20b" || lowered.contains("gpt-oss")
+    lowered == "gpt-oss-120b" || lowered == "openai/gpt-oss-120b" || lowered.contains("gpt-oss")
 }
 
 fn sanitize_reasoning_effort(value: &str) -> &str {

@@ -280,12 +280,12 @@ impl ApiModelProviderSpec {
     pub(crate) fn ctox_core_cli_overrides(&self) -> Vec<(String, TomlValue)> {
         vec![
             (
-                format!("model_providers.{}.base_url", self.provider_id),
-                TomlValue::String(self.base_url.clone()),
+                format!("model_providers.{}.name", self.provider_id),
+                TomlValue::String(self.name.to_string()),
             ),
             (
-                format!("model_providers.{}.api_key_env_var", self.provider_id),
-                TomlValue::String(self.env_key.to_string()),
+                format!("model_providers.{}.base_url", self.provider_id),
+                TomlValue::String(self.base_url.clone()),
             ),
             (
                 format!("model_providers.{}.wire_api", self.provider_id),
@@ -349,13 +349,17 @@ pub(crate) fn run_chat_turn_with_events_extended<F>(
 where
     F: FnMut(&str),
 {
+    emit("runtime-resolve");
     let runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root)?;
+    emit("runtime-settings");
     let operator_settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
+    emit("session-start");
     let mut owned_session = if session.is_none() {
         Some(PersistentSession::start(root, &operator_settings)?)
     } else {
         None
     };
+    emit("session-ready");
     let default_turn_timeout_secs = if runtime.state.source.is_local() {
         DEFAULT_LOCAL_CHAT_TURN_TIMEOUT_SECS
     } else {
@@ -867,6 +871,9 @@ pub fn conversation_id_for_thread_key(thread_key: Option<&str>) -> i64 {
 
 fn responses_api_base_url(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
     if trimmed.ends_with("/v1") {
         trimmed.to_string()
     } else {
@@ -905,8 +912,10 @@ pub(crate) fn resolve_api_model_provider_spec(
     let normalized = provider.to_ascii_lowercase();
     // (env_key, default_provider_for_url, wire_api)
     let (env_key, default_provider, wire_api) = match normalized.as_str() {
+        "anthropic" => ("ANTHROPIC_API_KEY", "anthropic", "anthropic_messages"),
         "openrouter" => ("OPENROUTER_API_KEY", "openrouter", "responses"),
         "minimax" => ("MINIMAX_API_KEY", "minimax", "responses"),
+        "azure_foundry" => ("AZURE_FOUNDRY_API_KEY", "azure_foundry", "responses"),
         _ => return None,
     };
     let base_url = resolved_runtime
@@ -1023,4 +1032,45 @@ fn continuity_refresh_timeout_secs(settings: &BTreeMap<String, String>) -> u64 {
         CONTINUITY_REFRESH_TIMEOUT_ENV_KEY,
         DEFAULT_CONTINUITY_REFRESH_TIMEOUT_SECS as usize,
     ) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_provider_overrides_define_core_provider_without_env_key() {
+        let spec = ApiModelProviderSpec {
+            provider_id: "ctox_core_api",
+            name: "ctox-core-api",
+            base_url: "https://contoso.cognitiveservices.azure.com/openai/v1".to_string(),
+            env_key: "AZURE_FOUNDRY_API_KEY",
+            wire_api: "responses",
+        };
+
+        let overrides = spec
+            .ctox_core_cli_overrides()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            overrides.get("model_providers.ctox_core_api.name"),
+            Some(&TomlValue::String("ctox-core-api".to_string()))
+        );
+        assert_eq!(
+            overrides.get("model_providers.ctox_core_api.base_url"),
+            Some(&TomlValue::String(
+                "https://contoso.cognitiveservices.azure.com/openai/v1".to_string()
+            ))
+        );
+        assert_eq!(
+            overrides.get("model_providers.ctox_core_api.wire_api"),
+            Some(&TomlValue::String("responses".to_string()))
+        );
+        assert_eq!(
+            overrides.get("model_providers.ctox_core_api.requires_openai_auth"),
+            Some(&TomlValue::Boolean(false))
+        );
+        assert!(!overrides.contains_key("model_providers.ctox_core_api.env_key"));
+    }
 }

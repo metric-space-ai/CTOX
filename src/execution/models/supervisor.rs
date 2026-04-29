@@ -206,11 +206,11 @@ impl ManagedBackendRole {
                     })
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| {
-                        engine::default_runtime_config(engine::LocalModelFamily::GptOss).model
+                        engine::default_runtime_config(engine::LocalModelFamily::Qwen35Vision).model
                     });
                 let fallback_runtime =
                     engine::runtime_config_for_model(&runtime).unwrap_or_else(|_| {
-                        engine::default_runtime_config(engine::LocalModelFamily::GptOss)
+                        engine::default_runtime_config(engine::LocalModelFamily::Qwen35Vision)
                     });
                 let port = runtime_state
                     .as_ref()
@@ -512,6 +512,27 @@ pub fn ensure_auxiliary_backend_ready(
     ensure_backend_process(root, role, force_restart)
 }
 
+pub fn release_auxiliary_backend(root: &Path, role: engine::AuxiliaryRole) -> Result<()> {
+    let role = match role {
+        engine::AuxiliaryRole::Embedding => ManagedBackendRole::Embedding,
+        engine::AuxiliaryRole::Stt => ManagedBackendRole::Stt,
+        engine::AuxiliaryRole::Tts => ManagedBackendRole::Tts,
+        engine::AuxiliaryRole::Vision => ManagedBackendRole::Vision,
+    };
+    let spec = role.spec(root);
+    if let Some(port) = (spec.port != 0).then_some(spec.port) {
+        let _ = stop_processes_on_port(root, port);
+    }
+    stop_process(root, backend_pid_path(root, role))?;
+    let _ = stop_duplicate_socket_backed_backend_processes(root, &spec, None);
+    release_backend_runtime_ownership(root, role);
+    if let Some(endpoint) = spec.transport_endpoint.as_deref() {
+        let transport = LocalTransport::from_ipc_endpoint_string(endpoint);
+        let _ = clear_managed_socket_file(transport);
+    }
+    Ok(())
+}
+
 pub fn ensure_auxiliary_backend_launchable(root: &Path, role: engine::AuxiliaryRole) -> Result<()> {
     let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
     let has_nonlocal_binding = resolved_runtime
@@ -528,6 +549,18 @@ pub fn ensure_auxiliary_backend_launchable(root: &Path, role: engine::AuxiliaryR
     }
 
     let binary = engine::discover_source_layout_paths(root).model_runtime_binary;
+    let selection = engine::auxiliary_model_selection(role, None);
+    if let Some(backend) =
+        super::local_model::resolve_local_model_backend(super::local_model::LocalModelRequest {
+            request_model: selection.request_model,
+            transport_endpoint: None,
+            root,
+        })
+    {
+        if backend.binary.is_file() {
+            return Ok(());
+        }
+    }
     if binary.is_file() {
         return Ok(());
     }
@@ -1209,8 +1242,8 @@ fn managed_engine_model_kind(
         "embedding" => "embedding",
         "tts" => "speech",
         // The ctox-engine exposes a single "vision" bucket for every
-        // non-text input modality — Whisper/Voxtral STT feed through the
-        // same vision pipeline kind as Qwen3-VL / Gemma4 image input.
+        // non-text input modality — Voxtral STT feeds through the same
+        // vision pipeline kind as Qwen3-VL / Gemma4 image input.
         // That's not a misnomer but an engine-side design choice.
         "stt" => "vision",
         "vision" => "vision",
@@ -1523,7 +1556,7 @@ fn build_managed_engine_launch_config(
 }
 
 fn is_qwen35_vision_request_model(model: &str) -> bool {
-    model.starts_with("Qwen/Qwen3.5-") || model.starts_with("Qwen/Qwen3.6-")
+    model.starts_with("Qwen/Qwen3.5-") || model.starts_with("Qwen/Qwen3.5-")
 }
 
 fn ctox_engine_can_serve_auxiliary_model(root: &Path, request_model: &str) -> bool {
@@ -3640,10 +3673,10 @@ mod tests {
                 version: 4,
                 source: runtime_state::InferenceSource::Local,
                 local_runtime: runtime_state::LocalRuntimeKind::Candle,
-                base_model: Some("openai/gpt-oss-20b".to_string()),
-                requested_model: Some("openai/gpt-oss-20b".to_string()),
-                active_model: Some("openai/gpt-oss-20b".to_string()),
-                engine_model: Some("openai/gpt-oss-20b".to_string()),
+                base_model: Some("openai/gpt-oss-120b".to_string()),
+                requested_model: Some("openai/gpt-oss-120b".to_string()),
+                active_model: Some("openai/gpt-oss-120b".to_string()),
+                engine_model: Some("openai/gpt-oss-120b".to_string()),
                 engine_port: Some(1234),
                 configured_context_tokens: Some(131_072),
                 realized_context_tokens: Some(131_072),
@@ -3662,10 +3695,10 @@ mod tests {
             &root,
             "CTOX_ENGINE_BINARY=/tmp/ctox-engine\nCTOX_ENGINE_LOG=/tmp/ctox-engine.log\nCTOX_CHAT_SHARE_AUXILIARY_GPUS=0\nCTOX_UNUSED_LEGACY_SETTING=1\nCTOX_SHOULD_NOT_LEAK=1\n",
         );
-        persist_chat_plan(&root, &sample_chat_plan("openai/gpt-oss-20b"));
+        persist_chat_plan(&root, &sample_chat_plan("openai/gpt-oss-120b"));
         let spec = ManagedBackendSpec {
-            display_model: "openai/gpt-oss-20b".to_string(),
-            request_model: "openai/gpt-oss-20b".to_string(),
+            display_model: "openai/gpt-oss-120b".to_string(),
+            request_model: "openai/gpt-oss-120b".to_string(),
             port: 1234,
             transport_endpoint: None,
             health_path: "/health",
@@ -3689,7 +3722,7 @@ mod tests {
         );
         assert_eq!(
             env.get("CTOX_ENGINE_MODEL"),
-            Some(&"openai/gpt-oss-20b".to_string())
+            Some(&"openai/gpt-oss-120b".to_string())
         );
         assert_eq!(env.get("CTOX_ENGINE_PORT"), Some(&"1234".to_string()));
         assert_eq!(
@@ -3762,10 +3795,10 @@ mod tests {
     #[test]
     fn managed_backend_launch_spec_captures_typed_boundary_contract() {
         let root = temp_root("launch-spec-chat");
-        persist_chat_plan(&root, &sample_chat_plan("openai/gpt-oss-20b"));
+        persist_chat_plan(&root, &sample_chat_plan("openai/gpt-oss-120b"));
         let spec = ManagedBackendSpec {
-            display_model: "openai/gpt-oss-20b".to_string(),
-            request_model: "openai/gpt-oss-20b".to_string(),
+            display_model: "openai/gpt-oss-120b".to_string(),
+            request_model: "openai/gpt-oss-120b".to_string(),
             port: 1234,
             transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health",
@@ -3785,7 +3818,7 @@ mod tests {
 
         assert_eq!(launch_spec.version, 2);
         assert_eq!(launch_spec.role, "chat");
-        assert_eq!(launch_spec.request_model, "openai/gpt-oss-20b");
+        assert_eq!(launch_spec.request_model, "openai/gpt-oss-120b");
         assert_eq!(launch_spec.port, 1234);
         assert_eq!(
             launch_spec.transport_endpoint.as_deref(),
@@ -3803,8 +3836,8 @@ mod tests {
         let launch_spec = ManagedBackendLaunchSpec {
             version: 2,
             role: "chat".to_string(),
-            display_model: "openai/gpt-oss-20b".to_string(),
-            request_model: "openai/gpt-oss-20b".to_string(),
+            display_model: "openai/gpt-oss-120b".to_string(),
+            request_model: "openai/gpt-oss-120b".to_string(),
             port: 1234,
             transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
@@ -3828,7 +3861,7 @@ mod tests {
         let rendered = render_managed_engine_runtime_config(&launch_spec);
         assert!(rendered.contains("command = \"serve\""));
         assert!(rendered.contains("transport_endpoint = \"/tmp/ctox-primary.sock\""));
-        assert!(rendered.contains("model_id = \"openai/gpt-oss-20b\""));
+        assert!(rendered.contains("model_id = \"openai/gpt-oss-120b\""));
         assert!(rendered.contains("arch = \"gpt-oss\""));
         assert!(rendered.contains("in_situ_quant = \"Q4K\""));
         assert!(rendered.contains("device_layers = [\"0:20\", \"1:16\"]"));
@@ -3896,8 +3929,8 @@ mod tests {
         let launch_spec = ManagedBackendLaunchSpec {
             version: 2,
             role: "chat".to_string(),
-            display_model: "openai/gpt-oss-20b".to_string(),
-            request_model: "openai/gpt-oss-20b".to_string(),
+            display_model: "openai/gpt-oss-120b".to_string(),
+            request_model: "openai/gpt-oss-120b".to_string(),
             port: 1234,
             transport_endpoint: Some("/tmp/ctox-primary.sock".to_string()),
             health_path: "/health".to_string(),
@@ -4456,7 +4489,7 @@ mod tests {
     #[test]
     fn managed_runtime_launcher_matcher_tracks_runtime_switch() {
         assert!(command_is_managed_runtime_launcher(
-            "/home/test/CTOX/bin/ctox runtime switch Qwen/Qwen3.6-35B-A3B quality"
+            "/home/test/CTOX/bin/ctox runtime switch Qwen/Qwen3.5-35B-A3B quality"
         ));
         assert!(!command_is_managed_runtime_launcher(
             "/home/test/CTOX/bin/ctox legacy-command"

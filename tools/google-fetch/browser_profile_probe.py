@@ -6,19 +6,13 @@ sibling `browser_profile_probe.mjs` Playwright script to reach
 google.com/search, and emits a debug envelope on stdout that the Rust
 caller parses into a GoogleBootstrapProfile.
 
-All environment discovery is overridable via environment variables or
-CLI flags so the same script runs on fresh checkouts, in CI, and across
-macOS / Linux.
-
-Environment overrides:
-  CTOX_WEB_CHROME_BIN            Path to Chrome/Chromium executable.
-  CTOX_WEB_CHROME_USER_DATA_DIR  Source user-data-dir to clone from.
-  CTOX_WEB_BROWSER_REFERENCE_DIR Directory containing `node_modules/playwright`.
+Chrome/profile inputs are explicit CLI arguments supplied by the Rust caller
+from CTOX runtime config. This probe intentionally does not read global CTOX_*
+process environment variables.
 """
 
 import argparse
 import json
-import os
 import pathlib
 import shutil
 import subprocess
@@ -34,84 +28,45 @@ DEFAULT_GOOGLE_SEARCH_URL = (
 )
 
 
-def find_chrome_executable() -> pathlib.Path:
-    override = os.environ.get("CTOX_WEB_CHROME_BIN")
-    if override:
-        path = pathlib.Path(override)
-        if not path.exists():
-            raise SystemExit(
-                f"CTOX_WEB_CHROME_BIN={override} does not exist"
-            )
+def find_chrome_executable(override: str | None) -> pathlib.Path:
+    if not override:
+        raise SystemExit(
+            "--chrome-bin is required. Set the CTOX runtime config key CTOX_WEB_CHROME_BIN "
+            "before running google-bootstrap-refresh."
+        )
+    path = pathlib.Path(override)
+    if path.exists():
         return path
-    if sys.platform == "darwin":
-        candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-        ]
-    elif sys.platform.startswith("linux"):
-        candidates = [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-        ]
-    else:
-        candidates = []
-    for candidate in candidates:
-        if pathlib.Path(candidate).exists():
-            return pathlib.Path(candidate)
-    for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"):
-        found = shutil.which(name)
-        if found:
-            return pathlib.Path(found)
     raise SystemExit(
-        "No Chrome/Chromium binary found. Install Chrome or set CTOX_WEB_CHROME_BIN."
+        f"--chrome-bin {override} does not exist"
     )
 
 
-def find_chrome_user_data_dir() -> pathlib.Path:
-    override = os.environ.get("CTOX_WEB_CHROME_USER_DATA_DIR")
-    if override:
-        path = pathlib.Path(override)
-        if not path.exists():
-            raise SystemExit(
-                f"CTOX_WEB_CHROME_USER_DATA_DIR={override} does not exist"
-            )
+def find_chrome_user_data_dir(override: str | None) -> pathlib.Path:
+    if not override:
+        raise SystemExit(
+            "--chrome-user-data-dir is required. Set the CTOX runtime config key "
+            "CTOX_WEB_CHROME_USER_DATA_DIR before running google-bootstrap-refresh."
+        )
+    path = pathlib.Path(override)
+    if path.exists():
         return path
-    home = pathlib.Path.home()
-    if sys.platform == "darwin":
-        candidates = [home / "Library/Application Support/Google/Chrome"]
-    elif sys.platform.startswith("linux"):
-        candidates = [
-            home / ".config/google-chrome",
-            home / ".config/chromium",
-            home / "snap/chromium/common/chromium",
-        ]
-    else:
-        candidates = []
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
     raise SystemExit(
-        "No Chrome user-data-dir found. Set CTOX_WEB_CHROME_USER_DATA_DIR."
+        f"--chrome-user-data-dir {override} does not exist"
     )
 
 
-def find_reference_dir() -> pathlib.Path:
-    override = os.environ.get("CTOX_WEB_BROWSER_REFERENCE_DIR")
+def find_reference_dir(override: str | None) -> pathlib.Path:
     if override:
         path = pathlib.Path(override)
-        if not (path / "node_modules" / "playwright").exists():
-            raise SystemExit(
-                f"{path}/node_modules/playwright is missing. "
-                "Run `ctox web browser-prepare --install-reference --install-browser`."
-            )
-        return path
+        if (path / "node_modules" / "playwright").exists():
+            return path
+        raise SystemExit(
+            f"{path}/node_modules/playwright is missing. "
+            "Run `ctox web browser-prepare --install-reference --install-browser`."
+        )
     raise SystemExit(
-        "CTOX_WEB_BROWSER_REFERENCE_DIR is required. "
-        "The Rust caller sets this to the Playwright workspace dir."
+        "--reference-dir is required. The Rust caller sets this to the Playwright workspace dir."
     )
 
 
@@ -257,8 +212,6 @@ def run_probe(
     script = pathlib.Path(__file__).resolve().with_name("browser_profile_probe.mjs")
     if not script.exists():
         raise SystemExit(f"probe driver missing: {script}")
-    env = os.environ.copy()
-    env["HOME"] = str(pathlib.Path.home())
     # Probe must complete within wait_timeout_secs + navigation + close overhead.
     # Previously hardcoded to 120s, which silently killed interactive unlocks
     # that asked for longer challenge windows.
@@ -277,7 +230,6 @@ def run_probe(
         capture_output=True,
         text=True,
         timeout=subprocess_timeout,
-        env=env,
     )
 
 
@@ -295,11 +247,14 @@ def main() -> None:
     parser.add_argument("--wait-timeout-secs", type=int, default=300)
     parser.add_argument("--port", type=int, default=9222)
     parser.add_argument("--url", default=DEFAULT_GOOGLE_SEARCH_URL)
+    parser.add_argument("--chrome-bin")
+    parser.add_argument("--chrome-user-data-dir")
+    parser.add_argument("--reference-dir")
     args = parser.parse_args()
 
-    chrome_bin = find_chrome_executable()
-    source_data_dir = find_chrome_user_data_dir()
-    reference_dir = find_reference_dir()
+    chrome_bin = find_chrome_executable(args.chrome_bin)
+    source_data_dir = find_chrome_user_data_dir(args.chrome_user_data_dir)
+    reference_dir = find_reference_dir(args.reference_dir)
 
     if args.quit_running_chrome and not args.leave_chrome_running:
         quit_running_chrome(chrome_bin)
@@ -324,7 +279,7 @@ def main() -> None:
         "about:blank",
     ]
     if sys.platform == "darwin" and chrome_bin.suffix == "":
-        # Launch the Chrome.app binary directly so the probe-owned process
+        # Launch the configured browser binary directly so the probe-owned process
         # does not inherit the user's running session state.
         launch_cmd = [str(chrome_bin), *chrome_args]
     else:

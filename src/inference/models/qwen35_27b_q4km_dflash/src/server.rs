@@ -51,6 +51,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info, warn};
 
 use crate::adapter::{self, AdapterCtx, StreamSink};
+use crate::driver::GenConfig;
 use crate::model::{DraftWeights, TargetCache, TargetWeights};
 use crate::tokenizer::Tokenizer;
 use crate::wire::{
@@ -73,6 +74,7 @@ pub struct Engine {
     pub backend: crate::ffi::ggml_backend_t,
     pub tokenizer: Tokenizer,
     pub model_id: String,
+    pub gen_config: GenConfig,
 }
 
 // SAFETY: the FFI pointers inside TargetWeights/DraftWeights/
@@ -106,8 +108,7 @@ pub async fn serve(engine: SharedEngine, config: ServeConfig) -> Result<()> {
         }
     }
     remove_stale_socket(sock)?;
-    let listener =
-        UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
+    let listener = UnixListener::bind(sock).with_context(|| format!("bind {}", sock.display()))?;
 
     #[cfg(unix)]
     {
@@ -123,10 +124,8 @@ pub async fn serve(engine: SharedEngine, config: ServeConfig) -> Result<()> {
         "qwen35-27b-q4km-dflash server listening"
     );
 
-    let mut sig_int =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let mut sig_term =
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut sig_int = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let mut sig_term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     loop {
         tokio::select! {
@@ -247,11 +246,10 @@ async fn handle_connection(engine: SharedEngine, stream: UnixStream) -> Result<(
             // via spawn_blocking; it buffers events into a Vec and
             // returns the buffer, which we then async-write back.
             let engine_for_task = engine.clone();
-            let frames = tokio::task::spawn_blocking(move || {
-                run_responses_turn_sync(engine_for_task, req)
-            })
-            .await
-            .context("inference task panicked")??;
+            let frames =
+                tokio::task::spawn_blocking(move || run_responses_turn_sync(engine_for_task, req))
+                    .await
+                    .context("inference task panicked")??;
 
             writer.write_all(&frames).await?;
             writer.flush().await?;
@@ -289,17 +287,13 @@ fn run_responses_turn_sync(
         // that we hold `&mut` to disjoint fields via raw ptr here.
         tokenizer: unsafe { &*tokenizer },
         model_id: &model_id,
+        gen_config: engine_ref.gen_config,
         sink: &mut sink,
     };
 
     if let Err(err) = adapter::run_turn(&mut ctx, &req) {
         error!("run_turn failed: {err:#}");
-        let _ = adapter::emit_failed(
-            &mut sink,
-            &model_id,
-            "inference_error",
-            &err.to_string(),
-        );
+        let _ = adapter::emit_failed(&mut sink, &model_id, "inference_error", &err.to_string());
     }
     Ok(sink.buf)
 }
@@ -352,6 +346,9 @@ async fn write_json_line<T: serde::Serialize, W: AsyncWriteExt + Unpin>(
 ) -> Result<()> {
     let mut buf = serde_json::to_vec(value).context("encode response frame")?;
     buf.push(b'\n');
-    writer.write_all(&buf).await.context("write response frame")?;
+    writer
+        .write_all(&buf)
+        .await
+        .context("write response frame")?;
     Ok(())
 }

@@ -20,6 +20,7 @@ use libc::SIGPIPE;
 use libc::SIG_IGN;
 use rusqlite::params;
 use rusqlite::Connection;
+use rusqlite::OptionalExtension;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -95,6 +96,7 @@ const SERVICE_LOG_RELATIVE_PATH: &str = "runtime/ctox_service.log";
 const SERVICE_SOCKET_RELATIVE_PATH: &str = "runtime/ctox_service.sock";
 const SYSTEMD_USER_UNIT_NAME: &str = "ctox.service";
 const CHANNEL_ROUTER_POLL_SECS: u64 = 8;
+const CHANNEL_SYNC_POLL_SECS: u64 = 60;
 const MISSION_WATCHER_POLL_SECS: u64 = 15;
 const CTO_OPERATING_WATCHER_POLL_SECS: u64 = 60;
 const HARNESS_AUDIT_TICK_SECS: u64 = 300;
@@ -396,6 +398,15 @@ enum CompletionReviewDisposition {
     RequeueSelfWork { work_id: String, summary: String },
 }
 
+fn completion_review_disposition_label(disposition: &CompletionReviewDisposition) -> &'static str {
+    match disposition {
+        CompletionReviewDisposition::None => "none",
+        CompletionReviewDisposition::Approved => "approved",
+        CompletionReviewDisposition::Hold { .. } => "hold",
+        CompletionReviewDisposition::RequeueSelfWork { .. } => "requeue-self-work",
+    }
+}
+
 struct ServiceExitGuard {
     pid: u32,
 }
@@ -436,14 +447,19 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     write_pid_file(root, std::process::id())?;
     let state = Arc::new(Mutex::new(SharedState::default()));
     run_boot_state_invariant_check(root, &state);
+    release_stale_service_communication_leases_on_boot(root, &state);
     push_event(&state, format!("Loop ready on {}", listen_addr));
     start_channel_router(root.to_path_buf(), state.clone());
     start_channel_syncer(root.to_path_buf());
     start_mission_watcher(root.to_path_buf(), state.clone());
     start_cto_operating_watcher(root.to_path_buf(), state.clone());
     start_harness_audit_watcher(root.to_path_buf(), state.clone());
-    // The service control plane must come up independently of backend warmup.
-    supervisor::start_backend_supervisor(root.to_path_buf());
+    // Keep the service control plane idle-cheap. Managed runtimes are started
+    // on demand by agent turns; boot-time prewarm is opt-in because a local
+    // model supervisor can consume CPU even when there is no queued work.
+    if runtime_env::config_flag(root, "CTOX_SERVICE_PREWARM_BACKENDS") {
+        supervisor::start_backend_supervisor(root.to_path_buf());
+    }
     #[cfg(unix)]
     let socket_path = service_socket_path(root);
     let mut announced_ready = false;
@@ -953,6 +969,57 @@ fn run_turn_end_state_invariant_check(
     }
 }
 
+fn release_stale_service_communication_leases_on_boot(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+) {
+    match release_stale_service_communication_leases(root) {
+        Ok(0) => {}
+        Ok(count) => push_event(
+            state,
+            format!("Released {count} stale service communication lease(s) at boot"),
+        ),
+        Err(err) => push_event(
+            state,
+            format!("Boot lease repair failed for communication routes: {err}"),
+        ),
+    }
+}
+
+fn release_stale_service_communication_leases(root: &Path) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let now = now_iso_string();
+    let updated = conn.execute(
+        r#"
+        UPDATE communication_routing_state
+        SET route_status='pending',
+            lease_owner=NULL,
+            leased_at=NULL,
+            last_error='released stale service lease during service boot',
+            updated_at=?1
+        WHERE route_status='leased'
+          AND lease_owner=?2
+          AND acked_at IS NULL
+        "#,
+        params![now, CHANNEL_ROUTER_LEASE_OWNER],
+    )?;
+    Ok(updated)
+}
+
+fn is_non_work_tui_probe(prompt: &str) -> bool {
+    let normalized = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "hello queue" | "hello" | "ping" | "healthcheck" | "health check"
+    )
+}
+
 fn run_plan_routing_repair(root: &Path, state: &Arc<Mutex<SharedState>>, phase: &str) {
     match plan::repair_stale_step_routing_state(root) {
         Ok(repaired) if repaired > 0 => {
@@ -1401,6 +1468,13 @@ fn handle_service_ipc_request(
         ServiceIpcRequest::ChatSubmit { prompt, thread_key } => {
             let prepared = prepare_chat_prompt(root, &prompt)?;
             let prompt = prepared.prompt;
+            if is_non_work_tui_probe(&prompt) {
+                push_event(&state, "Ignored non-work TUI probe".to_string());
+                return Ok(ServiceIpcResponse::Accepted(AcceptedResponse {
+                    accepted: true,
+                    status: "ignored".to_string(),
+                }));
+            }
             let suggested_skill = prepared.suggested_skill.clone();
             let workspace_root = channels::legacy_workspace_root_from_prompt(&prompt);
             let queued = {
@@ -1529,6 +1603,18 @@ fn handle_request(
                 serde_json::from_str(&body).context("failed to parse chat request json")?;
             let prepared = prepare_chat_prompt(root, &payload.prompt)?;
             let prompt = prepared.prompt;
+            if is_non_work_tui_probe(&prompt) {
+                push_event(&state, "Ignored non-work TUI probe".to_string());
+                respond_json(
+                    request,
+                    StatusCode(202),
+                    &ServiceIpcResponse::Accepted(AcceptedResponse {
+                        accepted: true,
+                        status: "ignored".to_string(),
+                    }),
+                )?;
+                return Ok(());
+            }
             let suggested_skill = prepared.suggested_skill.clone();
             let workspace_root = channels::legacy_workspace_root_from_prompt(&prompt);
             let queued = {
@@ -2319,14 +2405,31 @@ fn start_prompt_worker(
             // CTOX enqueues a rework slice with the reviewer's report as
             // input. Errors / timeouts skip the review (no slice to judge).
             let review_disposition = if let Ok(reply_text) = result.as_ref() {
-                run_completion_review(
+                push_event(
+                    &state,
+                    format!(
+                        "Completion review start for {} (reply_chars={})",
+                        job.source_label,
+                        reply_text.chars().count()
+                    ),
+                );
+                let disposition = run_completion_review(
                     &root,
                     &state,
                     &job,
                     reply_text,
                     conversation_id,
                     mission_sync_outcome.as_ref(),
-                )
+                );
+                push_event(
+                    &state,
+                    format!(
+                        "Completion review disposition for {}: {}",
+                        job.source_label,
+                        completion_review_disposition_label(&disposition)
+                    ),
+                );
+                disposition
             } else {
                 CompletionReviewDisposition::None
             };
@@ -2418,6 +2521,15 @@ fn start_prompt_worker(
                         } else {
                             true
                         };
+                        if founder_send_error.is_none() {
+                            if let Some(message_key) = founder_reply_key.as_deref() {
+                                let _ = close_open_founder_communication_self_work_for_inbound(
+                                    &root,
+                                    message_key,
+                                    "Founder communication completed after reviewed outbound send.",
+                                );
+                            }
+                        }
                         if !job.leased_message_keys.is_empty() && should_handle_messages {
                             let _ = channels::ack_leased_messages(
                                 &root,
@@ -2433,10 +2545,18 @@ fn start_prompt_worker(
                                 }
                             }
                         } else if !job.leased_message_keys.is_empty() {
+                            let held_founder_review = founder_reply_key.is_some()
+                                || proactive_founder_action.is_some()
+                                || is_founder_or_owner_email_job(&job);
+                            let retry_status = if held_founder_review {
+                                "review_rework"
+                            } else {
+                                "pending"
+                            };
                             let _ = channels::ack_leased_messages(
                                 &root,
                                 &job.leased_message_keys,
-                                "pending",
+                                retry_status,
                             );
                         }
                         if !job.leased_ticket_event_keys.is_empty() {
@@ -2512,11 +2632,18 @@ fn start_prompt_worker(
                     Err(err) => {
                         let err_text = err.to_string();
                         let compact_error = turn_loop::summarize_runtime_error(&err_text);
+                        let retry_founder_message =
+                            founder_email_worker_error_is_retryable(&job, &err_text);
                         if !job.leased_message_keys.is_empty() {
+                            let route_status = if retry_founder_message {
+                                "pending"
+                            } else {
+                                "failed"
+                            };
                             let _ = channels::ack_leased_messages(
                                 &root,
                                 &job.leased_message_keys,
-                                "failed",
+                                route_status,
                             );
                         }
                         if !job.leased_ticket_event_keys.is_empty() {
@@ -2530,7 +2657,26 @@ fn start_prompt_worker(
                             failure_reply.as_ref().map(|reply| reply.chars().count());
                         shared.last_error = Some(compact_error.clone());
                         if let Some(work_id) = job.ticket_self_work_id.as_deref() {
-                            if let Some(title) = &timeout_follow_up_outcome {
+                            if retry_founder_message {
+                                let note = format!(
+                                    "Execution slice hit retryable SQLite contention and was left pending for retry: {}",
+                                    compact_error
+                                );
+                                push_event_locked(
+                                    &mut shared,
+                                    format!(
+                                        "Retryable founder mail worker error; kept {} pending instead of failing it",
+                                        job.leased_message_keys.join(", ")
+                                    ),
+                                );
+                                let _ = tickets::append_ticket_self_work_note(
+                                    &root,
+                                    work_id,
+                                    &note,
+                                    "ctox-service",
+                                    "internal",
+                                );
+                            } else if let Some(title) = &timeout_follow_up_outcome {
                                 let note = format!(
                                     "Execution slice hit the turn time budget. Durable continuation: {}",
                                     title
@@ -2541,10 +2687,20 @@ fn start_prompt_worker(
                                 block_ticket_self_work_item(&root, work_id, &note);
                             }
                         }
-                        push_event_locked(
-                            &mut shared,
-                            format!("{} prompt failed: {compact_error}", job.source_label),
-                        );
+                        if retry_founder_message {
+                            push_event_locked(
+                                &mut shared,
+                                format!(
+                                    "{} prompt hit retryable SQLite contention and will retry: {compact_error}",
+                                    job.source_label
+                                ),
+                            );
+                        } else {
+                            push_event_locked(
+                                &mut shared,
+                                format!("{} prompt failed: {compact_error}", job.source_label),
+                            );
+                        }
                         if let Some(title) = &timeout_follow_up_outcome {
                             push_event_locked(
                                 &mut shared,
@@ -2795,6 +2951,17 @@ fn run_completion_review(
         }
     }
     if !outcome.required {
+        // Founder-visible mail is never allowed to fall through unreviewed.
+        // If the gate declines to run, hold the outbound path and force
+        // explicit rework instead of sending or immediately retrying.
+        if is_founder_or_owner_email_job(job) || proactive_founder_action.is_some() {
+            let summary =
+                "Founder communication was held because no completion review was produced.";
+            push_event(state, summary.to_string());
+            return CompletionReviewDisposition::Hold {
+                summary: summary.to_string(),
+            };
+        }
         // Heuristic decided this slice does not need review — stay quiet.
         return CompletionReviewDisposition::None;
     }
@@ -3152,6 +3319,106 @@ or prove the review wrong with stronger evidence.",
     Ok(view.title)
 }
 
+fn render_review_feedback_block(items: &[String], fallback: &str, limit: usize) -> String {
+    let mut rendered = items
+        .iter()
+        .filter_map(|item| naturalize_review_feedback_item(item))
+        .take(limit)
+        .collect::<Vec<_>>();
+    if rendered.is_empty() {
+        rendered.push(fallback.to_string());
+    }
+    rendered
+        .into_iter()
+        .map(|item| format!("- {item}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn naturalize_review_feedback_item(item: &str) -> Option<String> {
+    let trimmed = item.trim().trim_start_matches('-').trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("none") {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let mapped = if lowered == "missing_deliverable" || lowered.contains("missing deliverable") {
+        Some("Ein ausdruecklich angefordertes Ergebnis fehlt; es muss erstellt oder beschafft werden, bevor erneut geantwortet wird.")
+    } else if lowered == "unbacked_commitment" || lowered.contains("unbacked commitment") {
+        Some("Eine zugesagte Frist oder Lieferung ist nicht durch einen konkreten Termin, eine Folgeaufgabe oder ueberpruefbare Arbeit abgesichert.")
+    } else if lowered.contains("founder_communication") || lowered.contains("founder communication")
+    {
+        Some("Die Antwort erfuellt die Founder-Kommunikation nicht: aktuelle Frage, Empfaengerlogik oder Kontextbezug sind nicht sauber getroffen.")
+    } else if lowered.contains("owner_visible_claim") || lowered.contains("owner visible claim") {
+        Some("Eine Aussage an den Owner ist nicht ausreichend durch ueberpruefbare Arbeit oder sichtbare Evidenz belegt.")
+    } else if lowered.contains("closure_claim") || lowered.contains("closure claim") {
+        Some("Der Entwurf behauptet Abschluss oder Fortschritt, ohne dass der Abschluss ausreichend belegt ist.")
+    } else if lowered.contains("artifact action") {
+        None
+    } else {
+        None
+    };
+    if let Some(mapped) = mapped {
+        return Some(mapped.to_string());
+    }
+
+    let mut text = trimmed.to_string();
+    let replacements = [
+        ("NO-SEND", "nicht sendbarer Entwurf"),
+        ("no-send", "nicht sendbarer Entwurf"),
+        ("route state", "interne Zustandsmeldung"),
+        ("route_status", "interne Zustandsmeldung"),
+        ("runtime status", "interner Laufzeitstatus"),
+        ("runtime proof", "interner Laufzeitnachweis"),
+        ("claim list", "interne Behauptungsliste"),
+        ("ctox channel send", "allgemeiner Versandkanal"),
+        (
+            "founder_or_owner_outbound_email_draft",
+            "Founder- oder Owner-Mailentwurf",
+        ),
+        (
+            "reviewed founder communication path",
+            "gepruefter Founder-Mail-Pfad",
+        ),
+        ("reviewed-send-proof", "gepruefter Versandnachweis"),
+    ];
+    for (needle, replacement) in replacements {
+        text = text.replace(needle, replacement);
+    }
+
+    if looks_like_internal_label(&text) {
+        return Some(
+            "Eine erforderliche Bedingung ist nicht erfuellt; nutze die Befunde und Evidenz darunter, um die inhaltliche Nacharbeit zu erledigen."
+                .to_string(),
+        );
+    }
+
+    while text.contains("  ") {
+        text = text.replace("  ", " ");
+    }
+    Some(clip_text(&text, 280))
+}
+
+fn looks_like_internal_label(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.contains("::") || trimmed.contains("=>") {
+        return true;
+    }
+    if trimmed.contains('_') {
+        return true;
+    }
+    let codeish = [
+        "artifact",
+        "metadata",
+        "sqlite",
+        "table ",
+        "prompt",
+        "system message",
+    ];
+    let lowered = trimmed.to_ascii_lowercase();
+    codeish.iter().any(|needle| lowered.contains(needle))
+}
+
 fn enqueue_founder_communication_rework(
     root: &Path,
     job: &QueuedPrompt,
@@ -3169,68 +3436,52 @@ fn enqueue_founder_communication_rework(
         },
         outcome.verdict.as_gate_label()
     );
-    let failed_gates_block = if outcome.failed_gates.is_empty() {
-        "- none".to_string()
-    } else {
-        outcome
-            .failed_gates
-            .iter()
-            .take(6)
-            .map(|item| format!("- {}", item.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let findings_block = if outcome.semantic_findings.is_empty() {
-        "- none".to_string()
-    } else {
-        outcome
-            .semantic_findings
-            .iter()
-            .take(8)
-            .map(|item| format!("- {}", item.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let open_items_block = if outcome.open_items.is_empty() {
-        "- none".to_string()
-    } else {
-        outcome
-            .open_items
-            .iter()
-            .take(8)
-            .map(|item| format!("- {}", item.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let failed_gates_block = render_review_feedback_block(
+        &outcome.failed_gates,
+        "Die Antwort ist noch nicht sendereif; nutze Befunde und Evidenz fuer die konkrete Nacharbeit.",
+        6,
+    );
+    let findings_block = render_review_feedback_block(
+        &outcome.semantic_findings,
+        "Der Review hat keinen klaren Befundtext geliefert; pruefe den aktuellen Thread und die verlangten Ergebnisse erneut.",
+        8,
+    );
+    let open_items_block = render_review_feedback_block(
+        &outcome.open_items,
+        "Pruefe die aktuelle Founder-Mail, erledige fehlende Arbeit, und schreibe erst danach eine sendefertige Antwort.",
+        8,
+    );
+    let evidence_block = render_review_feedback_block(
+        &outcome.evidence,
+        "Keine belastbare Evidenz im Reviewtext; rekonstruiere sie aus dem aktuellen Mailthread und der Runtime-Historie, bevor du antwortest.",
+        8,
+    );
     let thread_key = job
         .thread_key
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| format!("founder-rework:{}", job.source_label));
     let prompt = format!(
-        "An external CTOX review rejected a founder or owner communication artifact.\n\n\
-Do not send any founder or owner reply yet.\n\
-Perform the required rework first. If the founder requested a concrete deliverable (for example a QR code, link set, mockups, attachment, or corrected recipients), create or gather it before drafting any new reply.\n\
-The inbound founder message must remain unanswered until the missing deliverable and mail action are correct.\n\n\
-Inbound message key: {}\n\
-Review summary: {}\n\n\
-Failed gates:\n\
+        "Der Review hat die letzte Founder-/Owner-Antwort blockiert.\n\n\
+Wichtig: Behebe zuerst den inhaltlichen Grund. Wenn ein Ergebnis fehlt, erstelle oder beschaffe es. Wenn Empfaenger, Kopie, Threadbezug oder Kontext falsch waren, korrigiere die Antwortlogik. Reines Umformulieren reicht nur dann, wenn der Review ausdruecklich nur die Form beanstandet.\n\n\
+Review-Kurzfassung: {}\n\n\
+Was nicht passt:\n\
 {}\n\n\
-Semantic findings:\n\
+Evidenz aus dem Review:\n\
 {}\n\n\
-Open items:\n\
+Was jetzt zu tun ist:\n\
 {}\n\n\
-Required behavior:\n\
-- do real work, not just rephrase the previous mail\n\
-- if recipients or cc behavior were wrong, correct the mail action itself\n\
-- if a requested deliverable is missing, create or gather it first\n\
-- after the rework is complete, allow the founder mail to be reviewed again through the reviewed founder communication path\n\
-- do not use generic `ctox channel send` for founder or owner email\n",
-        inbound_message_key,
+Weitere Befunde:\n\
+{}\n\n\
+Erwartete Ausgabe:\n\
+- Beende diesen Arbeitsschritt mit genau der E-Mail, die im bestehenden Thread an Founder oder Owner gehen soll.\n\
+- Keine internen Statusberichte, keine Arbeitsnotizen, keine Tool- oder Tabellenbegriffe in der Antwort.\n\
+- Umgehe den geprueften E-Mail-Pfad nicht; der Versand erfolgt erst nach der anschliessenden Pruefung.\n",
         summary_line,
         failed_gates_block,
-        findings_block,
+        evidence_block,
         open_items_block,
+        findings_block,
     );
     let view = create_self_work_backed_queue_task(
         root,
@@ -3269,8 +3520,16 @@ fn start_channel_syncer(root: std::path::PathBuf) {
     thread::spawn(move || loop {
         let settings = live_service_settings(&root);
         sync_configured_channels(&root, &settings);
-        thread::sleep(Duration::from_secs(CHANNEL_ROUTER_POLL_SECS));
+        thread::sleep(Duration::from_secs(channel_sync_poll_secs(&settings)));
     });
+}
+
+fn channel_sync_poll_secs(settings: &BTreeMap<String, String>) -> u64 {
+    settings
+        .get("CTOX_CHANNEL_SYNC_POLL_SECS")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|value| value.clamp(30, 900))
+        .unwrap_or(CHANNEL_SYNC_POLL_SECS)
 }
 
 fn start_mission_watcher(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
@@ -3855,6 +4114,9 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
     if runnable_queue_work_exists(root)? {
         return Ok(());
     }
+    if founder_communication_rework_backlog_active(root)? {
+        return Ok(());
+    }
 
     let db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
@@ -4028,6 +4290,16 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     }
     route_assigned_ticket_self_work(root, state)?;
     let settings = live_service_settings(root);
+    let repaired_founder_messages = repair_stalled_founder_communications(root, state, &settings)?;
+    if repaired_founder_messages > 0 {
+        push_event(
+            state,
+            format!(
+                "Repaired {} stalled founder communication(s) before routing",
+                repaired_founder_messages
+            ),
+        );
+    }
     let scheduled = schedule::emit_due_tasks(root)?;
     if scheduled.emitted_count > 0 {
         push_event(
@@ -4051,6 +4323,8 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     let mut duplicates = Vec::new();
     let mut blocked = Vec::new();
     let mut meeting_handled = Vec::new();
+    let mut meeting_passive = Vec::new();
+    let mut deferred_for_founder_rework = Vec::new();
     for message in leased {
         if let Some(reason) = blocked_inbound_reason(&message, &settings) {
             let mechanism_id = governance::mechanism_id_for_block_reason(&reason);
@@ -4088,9 +4362,26 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             duplicates.push(message.message_key.clone());
             continue;
         }
+        if message.channel == "meeting"
+            && message
+                .metadata
+                .get("source")
+                .and_then(serde_json::Value::as_str)
+                == Some("meeting_chat")
+            && !message
+                .metadata
+                .get("is_mention")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            meeting_passive.push(message.message_key.clone());
+            continue;
+        }
         // --- Meeting invitation intercept ---
-        // If this is an email containing a meeting URL, schedule the join
-        // and ack the message instead of routing it to the agent.
+        // If this is an email containing a complete, policy-allowed meeting
+        // invitation, schedule the join and ack the message instead of routing
+        // it to the agent. Blocked or incomplete invitations fall through for
+        // normal agent review.
         if message.channel == "email" {
             let body = if !message.body_text.trim().is_empty() {
                 message.body_text.trim()
@@ -4100,25 +4391,38 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             let meeting_urls =
                 crate::mission::communication_meeting_native::extract_meeting_urls(body);
             if !meeting_urls.is_empty() {
-                let result =
-                    crate::mission::communication_meeting_native::process_email_for_meetings(
-                        root,
-                        message.subject.trim(),
-                        body,
-                        &bot_name,
+                if let Some(reason) = meeting_auto_join_policy_block(&settings, &message) {
+                    push_event(
+                        state,
+                        format!(
+                            "Meeting auto-join blocked for {}: {}",
+                            display_inbound_sender(&message),
+                            reason
+                        ),
                     );
-                if let Ok(ref val) = result {
-                    if val.get("action").and_then(serde_json::Value::as_str) != Some("none") {
-                        push_event(
-                            state,
-                            format!(
-                                "Meeting detected in email from {}: {}",
-                                display_inbound_sender(&message),
-                                meeting_urls.first().unwrap_or(&String::new()),
-                            ),
+                } else {
+                    let result =
+                        crate::mission::communication_meeting_native::process_email_for_meetings(
+                            root,
+                            message.subject.trim(),
+                            body,
+                            &bot_name,
                         );
-                        meeting_handled.push(message.message_key.clone());
-                        continue;
+                    if let Ok(ref val) = result {
+                        if val.get("action").and_then(serde_json::Value::as_str)
+                            == Some("processed")
+                        {
+                            push_event(
+                                state,
+                                format!(
+                                    "Meeting detected in email from {}: {}",
+                                    display_inbound_sender(&message),
+                                    meeting_urls.first().unwrap_or(&String::new()),
+                                ),
+                            );
+                            meeting_handled.push(message.message_key.clone());
+                            continue;
+                        }
                     }
                 }
             }
@@ -4134,21 +4438,73 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
             duplicates.push(message.message_key.clone());
             continue;
         };
-        let prompt = enrich_inbound_prompt(root, &settings, &message, &prompt_body);
-        let leased_message_key = message.message_key.clone();
-        if inflight_leased_message_key(state, &leased_message_key) {
+        if message.channel == "tui" && is_non_work_tui_probe(&prompt_body) {
+            push_event(
+                state,
+                format!(
+                    "Ignored non-work TUI route from {}",
+                    display_inbound_sender(&message)
+                ),
+            );
+            meeting_passive.push(message.message_key.clone());
             continue;
         }
+        let leased_message_key = message.message_key.clone();
+        if is_founder_or_owner_inbound_message(&settings, &message) {
+            if open_founder_communication_rework_for_inbound(root, &leased_message_key)? {
+                deferred_for_founder_rework.push(leased_message_key);
+                continue;
+            }
+        }
+        let mut leased_message_keys = vec![leased_message_key.clone()];
+        let mut source_label = inbound_source_label(&settings, &message);
+        let founder_rework_inbound_key = if is_founder_communication_rework_queue_message(&message)
+        {
+            founder_rework_inbound_message_key(&message)
+        } else {
+            None
+        };
+        if founder_rework_inbound_key.is_some() {
+            if let Some(inbound_key) = founder_rework_inbound_key.as_deref() {
+                if !leased_message_keys.iter().any(|key| key == &inbound_key) {
+                    leased_message_keys.push(inbound_key.to_string());
+                }
+            }
+            if let Some(origin_source) = founder_rework_origin_source_label(&message) {
+                source_label = origin_source;
+            }
+        }
+        if leased_message_keys
+            .iter()
+            .any(|key| inflight_leased_message_key(state, key))
+        {
+            continue;
+        }
+        let prompt = if let Some(inbound_key) = founder_rework_inbound_key.as_deref() {
+            render_founder_communication_rework_execution_prompt(
+                root,
+                &message,
+                inbound_key,
+                &prompt_body,
+            )
+        } else {
+            enrich_inbound_prompt(root, &settings, &message, &prompt_body)
+        };
+        let goal = if let Some(inbound_key) = founder_rework_inbound_key.as_deref() {
+            format!("Founder communication rework for {inbound_key}")
+        } else {
+            prompt_body.clone()
+        };
         enqueue_prompt(
             root,
             state,
             QueuedPrompt {
                 preview: preview_text(&prompt),
-                source_label: inbound_source_label(&settings, &message),
-                goal: prompt_body.clone(),
+                source_label,
+                goal,
                 prompt,
                 suggested_skill: suggested_skill_from_message(&message),
-                leased_message_keys: vec![leased_message_key],
+                leased_message_keys,
                 leased_ticket_event_keys: Vec::new(),
                 thread_key: Some(execution_thread_key_for_inbound_message(
                     &settings, &message,
@@ -4175,6 +4531,12 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     }
     if !meeting_handled.is_empty() {
         let _ = channels::ack_leased_messages(root, &meeting_handled, "meeting_scheduled");
+    }
+    if !meeting_passive.is_empty() {
+        let _ = channels::ack_leased_messages(root, &meeting_passive, "handled");
+    }
+    if !deferred_for_founder_rework.is_empty() {
+        let _ = channels::ack_leased_messages(root, &deferred_for_founder_rework, "review_rework");
     }
     route_ticket_events(root, state)?;
     Ok(())
@@ -4389,6 +4751,7 @@ fn source_label_dispatch_rank(source_label: &str) -> u8 {
         || lowered == "email:owner"
         || lowered == "email:founder"
         || lowered == "email:admin"
+        || lowered == "meeting:mention"
     {
         return 4;
     }
@@ -4489,7 +4852,49 @@ fn inbound_source_label(
             _ => "email".to_string(),
         };
     }
+    if message.channel == "meeting"
+        && message
+            .metadata
+            .get("is_mention")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return "meeting:mention".to_string();
+    }
     message.channel.clone()
+}
+
+fn meeting_auto_join_policy_block(
+    settings: &BTreeMap<String, String>,
+    message: &channels::RoutedInboundMessage,
+) -> Option<String> {
+    let enabled = settings
+        .get("CTO_MEETING_AUTO_JOIN_ENABLED")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "true".to_string());
+    if matches!(enabled.as_str(), "0" | "false" | "no" | "off") {
+        return Some("auto-join disabled by CTO_MEETING_AUTO_JOIN_ENABLED".to_string());
+    }
+    let allowed = settings
+        .get("CTO_MEETING_ALLOWED_INVITE_SENDERS")
+        .map(String::as_str)
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    if allowed.is_empty() {
+        return None;
+    }
+    let sender = message.sender_address.trim().to_ascii_lowercase();
+    let sender_domain = sender.split('@').nth(1).unwrap_or("");
+    let matched = allowed.iter().any(|entry| {
+        sender == *entry
+            || sender_domain == entry.trim_start_matches('@')
+            || (entry.starts_with('@') && sender.ends_with(entry))
+    });
+    (!matched).then(|| "sender is not in CTO_MEETING_ALLOWED_INVITE_SENDERS".to_string())
 }
 
 fn isolated_founder_email_thread_key(raw_thread_key: &str, role: &str) -> String {
@@ -4559,6 +4964,32 @@ fn ticket_self_work_parent_message_key(item: &tickets::TicketSelfWorkItemView) -
     metadata_string(&item.metadata, "parent_message_key")
 }
 
+fn ticket_self_work_queue_metadata(item: &tickets::TicketSelfWorkItemView) -> Value {
+    let mut metadata = serde_json::json!({});
+    let Some(map) = metadata.as_object_mut() else {
+        return metadata;
+    };
+    for key in [
+        "inbound_message_key",
+        "dedupe_key",
+        "origin_source_label",
+        "repair_reason",
+    ] {
+        if let Some(value) = metadata_string(&item.metadata, key) {
+            map.insert(key.to_string(), Value::String(value));
+        }
+    }
+    if item.kind == FOUNDER_COMMUNICATION_REWORK_KIND {
+        if let Some(parent_key) = ticket_self_work_parent_message_key(item) {
+            map.entry("inbound_message_key".to_string())
+                .or_insert_with(|| Value::String(parent_key.clone()));
+            map.entry("origin_source_label".to_string())
+                .or_insert_with(|| Value::String("email:founder".to_string()));
+        }
+    }
+    metadata
+}
+
 fn platform_expertise_resume_prompt(item: &tickets::TicketSelfWorkItemView) -> Option<String> {
     metadata_string(&item.metadata, "resume_prompt")
 }
@@ -4584,6 +5015,757 @@ fn is_founder_or_owner_email_job(job: &QueuedPrompt) -> bool {
         job.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
     )
+}
+
+fn is_founder_or_owner_inbound_message(
+    settings: &BTreeMap<String, String>,
+    message: &channels::RoutedInboundMessage,
+) -> bool {
+    if message.channel != "email" {
+        return false;
+    }
+    let policy = channels::classify_email_sender(settings, &message.sender_address);
+    matches!(policy.role.as_str(), "owner" | "founder" | "admin")
+}
+
+fn is_founder_communication_rework_queue_message(message: &channels::RoutedInboundMessage) -> bool {
+    if message.channel != "queue" {
+        return false;
+    }
+    let kind = message
+        .metadata
+        .get("ticket_self_work_kind")
+        .and_then(Value::as_str)
+        .or_else(|| message.metadata.get("kind").and_then(Value::as_str));
+    kind == Some(FOUNDER_COMMUNICATION_REWORK_KIND)
+        || message
+            .metadata
+            .get("inbound_message_key")
+            .and_then(Value::as_str)
+            .map(|value| value.starts_with("email:"))
+            .unwrap_or(false)
+}
+
+fn founder_rework_inbound_message_key(message: &channels::RoutedInboundMessage) -> Option<String> {
+    message
+        .metadata
+        .get("inbound_message_key")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .metadata
+                .get("parent_message_key")
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| value.starts_with("email:"))
+        .map(ToOwned::to_owned)
+}
+
+fn founder_rework_origin_source_label(message: &channels::RoutedInboundMessage) -> Option<String> {
+    message
+        .metadata
+        .get("origin_source_label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| matches!(*value, "email:owner" | "email:founder" | "email:admin"))
+        .map(ToOwned::to_owned)
+}
+
+fn render_founder_communication_rework_execution_prompt(
+    root: &Path,
+    message: &channels::RoutedInboundMessage,
+    inbound_message_key: &str,
+    raw_rework_body: &str,
+) -> String {
+    let rework_body = clean_founder_rework_body_for_agent(raw_rework_body);
+    let inbound_context = load_founder_inbound_context_for_rework(root, inbound_message_key)
+        .unwrap_or_else(|| {
+            "Die urspruengliche Founder-/Owner-Mail konnte nicht direkt geladen werden. Rekonstruiere den aktuellen Thread vor der Antwort aus der Kommunikationshistorie.".to_string()
+        });
+    let title = message.subject.trim();
+    let title_line = if title.is_empty() {
+        String::new()
+    } else {
+        format!("Anlass: {title}\n\n")
+    };
+    format!(
+        "{title_line}Du bearbeitest eine blockierte Founder-/Owner-Kommunikation. \
+Vor einer Antwort musst du den aktuellen Thread und die fachliche Lage pruefen. \
+Wenn ein Ergebnis fehlt, erledige die Nacharbeit zuerst; eine reine Umformulierung reicht nicht.\n\n\
+Aktuelle Founder-/Owner-Nachricht:\n\
+{inbound_context}\n\n\
+Konkrete Nacharbeit:\n\
+{rework_body}\n\n\
+Ausgabe-Regel:\n\
+Schreibe am Ende ausschliesslich den sendefertigen E-Mail-Text fuer den bestehenden Thread. \
+Keine internen Statusberichte, keine Arbeitsnotizen, keine Host-Pfade, keine Toolnamen, keine Tabellen- oder Promptbegriffe. \
+Der gepruefte Versandpfad entscheidet danach ueber Review und Versand."
+    )
+}
+
+fn clean_founder_rework_body_for_agent(raw: &str) -> String {
+    let mut lines = Vec::new();
+    let mut dropped_wrapper = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let lowered = trimmed.to_ascii_lowercase();
+        if lowered.starts_with("bearbeite das veroeffentlichte ctox-self-work")
+            || lowered.starts_with("bearbeite das veröffentlichte ctox-self-work")
+            || lowered.starts_with("titel:")
+            || lowered.starts_with("art:")
+            || lowered.starts_with("work-id:")
+            || lowered.starts_with("remote-ticket:")
+        {
+            dropped_wrapper = true;
+            continue;
+        }
+        if dropped_wrapper && trimmed.is_empty() && lines.is_empty() {
+            continue;
+        }
+        let naturalized = trimmed
+            .replace("Review summary:", "Kurzfassung:")
+            .replace("review summary:", "Kurzfassung:")
+            .replace("Review-Kurzfassung:", "Kurzfassung:");
+        lines.push(naturalized);
+    }
+    let cleaned = lines.join("\n").trim().to_string();
+    if cleaned.is_empty() {
+        "Pruefe die blockierte Antwort, erledige die fehlende fachliche Arbeit, und formuliere danach eine sendefertige Antwort an Founder oder Owner.".to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn load_founder_inbound_context_for_rework(
+    root: &Path,
+    inbound_message_key: &str,
+) -> Option<String> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path).ok()?;
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT sender_address, subject, body_text
+            FROM communication_messages
+            WHERE message_key = ?1
+              AND channel = 'email'
+              AND direction = 'inbound'
+            LIMIT 1
+            "#,
+        )
+        .ok()?;
+    stmt.query_row(params![inbound_message_key], |row| {
+        let sender: String = row.get(0)?;
+        let subject: String = row.get(1)?;
+        let body: String = row.get(2)?;
+        Ok(format!(
+            "Von: {}\nBetreff: {}\n\n{}",
+            sender.trim(),
+            subject.trim(),
+            body.trim()
+        ))
+    })
+    .ok()
+}
+
+fn repair_stalled_founder_communications(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+    settings: &BTreeMap<String, String>,
+) -> Result<usize> {
+    let mut repaired = close_stale_founder_communication_self_work_after_reviewed_reply(root)?;
+    let candidates = channels::list_stalled_inbound_messages(root, 64)?;
+    for message in candidates {
+        if !is_founder_or_owner_inbound_message(settings, &message) {
+            continue;
+        }
+        if channels::founder_reply_sent_after_review_for_message(root, &message.message_key)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "handled",
+            )
+            .unwrap_or(0);
+            repaired += close_open_founder_communication_self_work_for_inbound(
+                root,
+                &message.message_key,
+                "Founder communication already has a reviewed sent reply; closing stale rework.",
+            )?;
+            repaired += cancel_open_founder_communication_rework_queue_for_inbound(
+                root,
+                &message.message_key,
+                "Founder communication already has an exact reviewed sent reply.",
+            )?;
+            continue;
+        }
+        if founder_thread_has_later_reviewed_send(root, &message)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "cancelled",
+            )
+            .unwrap_or(0);
+            repaired += close_open_founder_communication_self_work_for_inbound(
+                root,
+                &message.message_key,
+                "Founder communication was superseded by a later reviewed send in the same thread.",
+            )?;
+            repaired += cancel_open_founder_communication_rework_queue_for_inbound(
+                root,
+                &message.message_key,
+                "Superseded by later reviewed founder reply in the same thread.",
+            )?;
+            continue;
+        }
+        if founder_sender_has_later_reviewed_send(root, &message)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "cancelled",
+            )
+            .unwrap_or(0);
+            repaired += close_open_founder_communication_self_work_for_inbound(
+                root,
+                &message.message_key,
+                "Founder communication was superseded by a later reviewed send to the same founder/owner.",
+            )?;
+            repaired += cancel_open_founder_communication_rework_queue_for_inbound(
+                root,
+                &message.message_key,
+                "Superseded by later reviewed founder reply to the same founder/owner.",
+            )?;
+            continue;
+        }
+        if founder_thread_has_newer_founder_or_owner_inbound(root, settings, &message)? {
+            repaired += channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "cancelled",
+            )
+            .unwrap_or(0);
+            repaired += close_open_founder_communication_self_work_for_inbound(
+                root,
+                &message.message_key,
+                "Founder communication was superseded by a newer founder/owner inbound in the same thread.",
+            )?;
+            repaired += cancel_open_founder_communication_rework_queue_for_inbound(
+                root,
+                &message.message_key,
+                "Superseded by newer founder/owner inbound in the same thread.",
+            )?;
+            continue;
+        }
+        let previous_route_status = communication_route_status(root, &message.message_key)?;
+        let rework_changed = ensure_founder_communication_rework_runnable(
+            root,
+            &message,
+            "Die Founder-/Owner-Mail blieb ohne geprüften Versand in einem blockierten Routing-Zustand stehen.",
+        )?;
+        if rework_changed || previous_route_status.as_deref() != Some("review_rework") {
+            let _ = channels::ack_leased_messages(
+                root,
+                std::slice::from_ref(&message.message_key),
+                "review_rework",
+            );
+            push_event(
+                state,
+                format!(
+                    "Restored stalled founder communication {} into review rework",
+                    message.message_key
+                ),
+            );
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
+}
+
+fn founder_thread_has_later_reviewed_send(
+    root: &Path,
+    message: &channels::RoutedInboundMessage,
+) -> Result<bool> {
+    if message.thread_key.trim().is_empty() || message.external_created_at.trim().is_empty() {
+        return Ok(false);
+    }
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let exists: i64 = conn.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM communication_founder_reply_reviews
+            WHERE sent_at IS NOT NULL
+              AND sent_at > ?2
+              AND json_extract(action_json, '$.thread_key') = ?1
+            LIMIT 1
+        )
+        "#,
+        params![message.thread_key, message.external_created_at],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn founder_sender_has_later_reviewed_send(
+    root: &Path,
+    message: &channels::RoutedInboundMessage,
+) -> Result<bool> {
+    if message.sender_address.trim().is_empty() || message.external_created_at.trim().is_empty() {
+        return Ok(false);
+    }
+    let sender = message.sender_address.trim().to_ascii_lowercase();
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let exists: i64 = conn.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM communication_founder_reply_reviews r
+            WHERE r.sent_at IS NOT NULL
+              AND r.sent_at > ?1
+              AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM json_each(r.action_json, '$.to') to_addr
+                        WHERE lower(CAST(to_addr.value AS TEXT)) = ?2
+                    )
+                 OR EXISTS (
+                        SELECT 1
+                        FROM json_each(r.action_json, '$.cc') cc_addr
+                        WHERE lower(CAST(cc_addr.value AS TEXT)) = ?2
+                    )
+              )
+            LIMIT 1
+        )
+        "#,
+        params![message.external_created_at, sender],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn founder_thread_has_newer_founder_or_owner_inbound(
+    root: &Path,
+    settings: &BTreeMap<String, String>,
+    message: &channels::RoutedInboundMessage,
+) -> Result<bool> {
+    if message.thread_key.trim().is_empty() || message.external_created_at.trim().is_empty() {
+        return Ok(false);
+    }
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT sender_address
+        FROM communication_messages
+        WHERE channel = 'email'
+          AND direction = 'inbound'
+          AND thread_key = ?1
+          AND external_created_at > ?2
+        ORDER BY external_created_at DESC, observed_at DESC
+        LIMIT 16
+        "#,
+    )?;
+    let rows = statement.query_map(
+        params![message.thread_key, message.external_created_at],
+        |row| row.get::<_, String>(0),
+    )?;
+    for sender in rows {
+        let sender = sender?;
+        let policy = channels::classify_email_sender(settings, &sender);
+        if matches!(policy.role.as_str(), "owner" | "founder" | "admin") {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cancel_open_founder_communication_rework_queue_for_inbound(
+    root: &Path,
+    inbound_key: &str,
+    reason: &str,
+) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let now = now_iso_string();
+    let updated = conn.execute(
+        r#"
+        UPDATE communication_routing_state
+        SET route_status = 'cancelled',
+            lease_owner = NULL,
+            leased_at = NULL,
+            acked_at = ?3,
+            last_error = ?4,
+            updated_at = ?3
+        WHERE message_key IN (
+            SELECT m.message_key
+            FROM communication_messages m
+            LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+            WHERE m.channel = 'queue'
+              AND m.direction = 'inbound'
+              AND COALESCE(r.route_status, 'pending') IN (
+                    'pending', 'leased', 'blocked', 'failed', 'review_rework'
+              )
+              AND (
+                    json_extract(m.metadata_json, '$.parent_message_key') = ?1
+                 OR json_extract(m.metadata_json, '$.inbound_message_key') = ?1
+              )
+              AND (
+                    m.subject LIKE 'Founder communication rework:%'
+                 OR m.body_text LIKE '%Founder communication rework%'
+                 OR json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+              )
+        )
+        "#,
+        params![inbound_key, FOUNDER_COMMUNICATION_REWORK_KIND, now, reason],
+    )?;
+    Ok(updated)
+}
+
+fn close_stale_founder_communication_self_work_after_reviewed_reply(root: &Path) -> Result<usize> {
+    let items = tickets::list_ticket_self_work_items(root, Some("local"), None, 512)?;
+    let mut closed = 0usize;
+    for item in items {
+        if item.kind != FOUNDER_COMMUNICATION_REWORK_KIND {
+            continue;
+        }
+        if !matches!(
+            item.state.as_str(),
+            "open" | "published" | "queued" | "blocked" | "restored"
+        ) {
+            continue;
+        }
+        let Some(parent_key) = ticket_self_work_parent_message_key(&item) else {
+            continue;
+        };
+        if communication_route_status(root, &parent_key)?.as_deref() != Some("handled") {
+            continue;
+        }
+        if !channels::founder_reply_sent_after_review_for_message(root, &parent_key)? {
+            continue;
+        }
+        close_ticket_self_work_item(
+            root,
+            &item.work_id,
+            "Founder communication already has a reviewed sent reply; closing stale self-work.",
+        );
+        closed += 1;
+    }
+    Ok(closed)
+}
+
+fn close_open_founder_communication_self_work_for_inbound(
+    root: &Path,
+    inbound_message_key: &str,
+    note: &str,
+) -> Result<usize> {
+    let items = tickets::list_ticket_self_work_items(root, Some("local"), None, 512)?;
+    let mut closed = 0usize;
+    for item in items {
+        if item.kind != FOUNDER_COMMUNICATION_REWORK_KIND {
+            continue;
+        }
+        if !matches!(
+            item.state.as_str(),
+            "open" | "published" | "queued" | "blocked" | "restored"
+        ) {
+            continue;
+        }
+        let matches_parent = ticket_self_work_parent_message_key(&item).as_deref()
+            == Some(inbound_message_key)
+            || metadata_string(&item.metadata, "inbound_message_key").as_deref()
+                == Some(inbound_message_key);
+        if !matches_parent {
+            continue;
+        }
+        close_ticket_self_work_item(root, &item.work_id, note);
+        closed += 1;
+    }
+    Ok(closed)
+}
+
+fn communication_route_status(root: &Path, message_key: &str) -> Result<Option<String>> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    conn.query_row(
+        "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+        params![message_key],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
+fn ensure_founder_communication_rework_runnable(
+    root: &Path,
+    message: &channels::RoutedInboundMessage,
+    reason: &str,
+) -> Result<bool> {
+    if open_founder_communication_rework_for_inbound(root, &message.message_key)? {
+        let _ =
+            normalize_open_founder_communication_rework_queue_metadata(root, &message.message_key)?;
+        return release_stalled_founder_communication_rework_queue_for_inbound(
+            root,
+            &message.message_key,
+        )
+        .map(|released| released > 0);
+    }
+    if let Some(item) = find_founder_communication_rework_self_work(root, &message.message_key)? {
+        if matches!(
+            item.state.as_str(),
+            "closed" | "superseded" | "cancelled" | "handled"
+        ) {
+            create_founder_communication_repair_rework(root, message, reason)?;
+            return Ok(true);
+        }
+        if item.assigned_to.as_deref() != Some("self") {
+            let _ = tickets::assign_ticket_self_work_item(
+                root,
+                &item.work_id,
+                "self",
+                "ctox-founder-repair",
+                Some("stalled founder communication must be handled before lower-priority work"),
+            );
+        }
+        let queued = requeue_review_rejected_self_work(
+            root,
+            &item.work_id,
+            "Founder communication is stalled without a reviewed sent reply; restore the existing rework and answer the current thread after real rework.",
+        )?;
+        return Ok(queued.is_some());
+    }
+    create_founder_communication_repair_rework(root, message, reason)?;
+    Ok(true)
+}
+
+fn find_founder_communication_rework_self_work(
+    root: &Path,
+    inbound_message_key: &str,
+) -> Result<Option<tickets::TicketSelfWorkItemView>> {
+    let items = tickets::list_ticket_self_work_items(root, Some("local"), None, 512)?;
+    Ok(items.into_iter().find(|item| {
+        item.kind == FOUNDER_COMMUNICATION_REWORK_KIND
+            && metadata_string(&item.metadata, "inbound_message_key").as_deref()
+                == Some(inbound_message_key)
+    }))
+}
+
+fn create_founder_communication_repair_rework(
+    root: &Path,
+    message: &channels::RoutedInboundMessage,
+    reason: &str,
+) -> Result<channels::QueueTaskView> {
+    let title = format!(
+        "Founder communication rework: {}",
+        clip_text(
+            if message.subject.trim().is_empty() {
+                &message.message_key
+            } else {
+                message.subject.trim()
+            },
+            96,
+        )
+    );
+    let prompt = format!(
+        "{reason}\n\n\
+Urspruengliche Founder-/Owner-Mail:\n\
+Von: {}\n\
+Betreff: {}\n\n\
+{}\n\n\
+Was jetzt zu tun ist:\n\
+- Rekonstruiere den aktuellen Thread inklusive Anhängen und letzter Founder-Antworten.\n\
+- Prüfe, warum keine geprüfte Antwort gesendet wurde.\n\
+- Erledige fehlende fachliche Nacharbeit zuerst; keine reine Umformulierung.\n\
+- Antworte im bestehenden Thread konkret auf die aktuelle Nachricht.\n\n\
+Ausgabe-Regel: Schreibe am Ende ausschließlich den sendefertigen E-Mail-Text. \
+Keine internen Notizen, keine Toolnamen, keine Host-Pfade, keine Prompt- oder Source-Code-Begriffe.",
+        display_inbound_sender(message),
+        message.subject.trim(),
+        if !message.body_text.trim().is_empty() {
+            message.body_text.trim()
+        } else {
+            message.preview.trim()
+        },
+    );
+    create_self_work_backed_queue_task(
+        root,
+        DurableSelfWorkQueueRequest {
+            kind: FOUNDER_COMMUNICATION_REWORK_KIND.to_string(),
+            title,
+            prompt,
+            thread_key: isolated_founder_email_thread_key(&message.thread_key, "founder"),
+            workspace_root: message.workspace_root.clone(),
+            priority: "urgent".to_string(),
+            suggested_skill: Some("follow-up-orchestrator".to_string()),
+            parent_message_key: Some(message.message_key.clone()),
+            metadata: serde_json::json!({
+                "inbound_message_key": message.message_key.clone(),
+                "dedupe_key": format!("founder-communication-rework:{}", message.message_key),
+                "origin_source_label": "email:founder",
+                "repair_reason": reason,
+            }),
+        },
+    )
+}
+
+fn open_founder_communication_rework_for_inbound(root: &Path, inbound_key: &str) -> Result<bool> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let exists: i64 = conn.query_row(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM communication_messages m
+            LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+            WHERE m.channel = 'queue'
+              AND m.direction = 'inbound'
+              AND COALESCE(r.route_status, 'pending') IN ('pending', 'leased', 'review_rework')
+              AND (
+                    json_extract(m.metadata_json, '$.parent_message_key') = ?1
+                 OR json_extract(m.metadata_json, '$.inbound_message_key') = ?1
+              )
+              AND (
+                    m.subject LIKE 'Founder communication rework:%'
+                 OR m.body_text LIKE '%Founder communication rework%'
+                 OR json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+              )
+            LIMIT 1
+        )
+        "#,
+        params![inbound_key, FOUNDER_COMMUNICATION_REWORK_KIND],
+        |row| row.get(0),
+    )?;
+    Ok(exists != 0)
+}
+
+fn normalize_open_founder_communication_rework_queue_metadata(
+    root: &Path,
+    inbound_key: &str,
+) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT m.message_key, m.metadata_json
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = 'queue'
+          AND m.direction = 'inbound'
+          AND COALESCE(r.route_status, 'pending') IN ('pending', 'leased', 'review_rework')
+          AND (
+                json_extract(m.metadata_json, '$.parent_message_key') = ?1
+             OR json_extract(m.metadata_json, '$.inbound_message_key') = ?1
+          )
+          AND (
+                m.subject LIKE 'Founder communication rework:%'
+             OR m.body_text LIKE '%Founder communication rework%'
+             OR json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+          )
+        "#,
+    )?;
+    let rows = statement.query_map(
+        params![inbound_key, FOUNDER_COMMUNICATION_REWORK_KIND],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+
+    let tx = conn.unchecked_transaction()?;
+    let mut updated = 0usize;
+    for (message_key, raw_metadata) in rows {
+        let mut metadata =
+            serde_json::from_str::<Value>(&raw_metadata).unwrap_or_else(|_| serde_json::json!({}));
+        let Some(map) = metadata.as_object_mut() else {
+            continue;
+        };
+        let mut changed = false;
+        for (key, value) in [
+            ("inbound_message_key", inbound_key.to_string()),
+            ("parent_message_key", inbound_key.to_string()),
+            ("origin_source_label", "email:founder".to_string()),
+            ("priority", "urgent".to_string()),
+        ] {
+            if map.get(key).and_then(Value::as_str).map(str::trim) != Some(value.as_str()) {
+                map.insert(key.to_string(), Value::String(value));
+                changed = true;
+            }
+        }
+        if changed {
+            tx.execute(
+                "UPDATE communication_messages SET metadata_json = ?2 WHERE message_key = ?1",
+                params![message_key, serde_json::to_string(&metadata)?],
+            )?;
+            updated += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(updated)
+}
+
+fn release_stalled_founder_communication_rework_queue_for_inbound(
+    root: &Path,
+    inbound_key: &str,
+) -> Result<usize> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let now = now_iso_string();
+    let updated = conn.execute(
+        r#"
+        UPDATE communication_routing_state
+        SET route_status = 'pending',
+            lease_owner = NULL,
+            leased_at = NULL,
+            acked_at = NULL,
+            last_error = 'released stalled founder review-rework queue item',
+            updated_at = ?3
+        WHERE message_key = (
+            SELECT m.message_key
+            FROM communication_messages m
+            LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+            WHERE m.channel = 'queue'
+              AND m.direction = 'inbound'
+              AND COALESCE(r.route_status, 'pending') = 'review_rework'
+              AND (
+                    json_extract(m.metadata_json, '$.parent_message_key') = ?1
+                 OR json_extract(m.metadata_json, '$.inbound_message_key') = ?1
+              )
+              AND (
+                    m.subject LIKE 'Founder communication rework:%'
+                 OR m.body_text LIKE '%Founder communication rework%'
+                 OR json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?2
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM communication_messages active
+                    LEFT JOIN communication_routing_state active_r
+                      ON active_r.message_key = active.message_key
+                    WHERE active.channel = 'queue'
+                      AND active.direction = 'inbound'
+                      AND COALESCE(active_r.route_status, 'pending') IN ('pending', 'leased')
+                      AND (
+                            json_extract(active.metadata_json, '$.parent_message_key') = ?1
+                         OR json_extract(active.metadata_json, '$.inbound_message_key') = ?1
+                      )
+              )
+            ORDER BY m.observed_at DESC, m.message_key DESC
+            LIMIT 1
+        )
+        "#,
+        params![inbound_key, FOUNDER_COMMUNICATION_REWORK_KIND, now],
+    )?;
+    Ok(updated)
+}
+
+fn founder_email_worker_error_is_retryable(job: &QueuedPrompt, error: &str) -> bool {
+    if !is_founder_or_owner_email_job(job) {
+        return false;
+    }
+    let normalized = error.to_ascii_lowercase();
+    normalized.contains("database is locked")
+        || normalized.contains("database is busy")
+        || normalized.contains("sqlite_busy")
+        || normalized.contains("sqlite locked")
 }
 
 fn founder_email_reply_message_key(job: &QueuedPrompt) -> Option<&str> {
@@ -4977,6 +6159,42 @@ fn has_runnable_founder_or_owner_email(root: &Path) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+fn founder_communication_rework_backlog_active(root: &Path) -> Result<bool> {
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let active_self_work: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM ticket_self_work_items
+        WHERE kind = ?1
+          AND state IN ('open', 'published', 'queued', 'blocked', 'restored')
+        "#,
+        params![FOUNDER_COMMUNICATION_REWORK_KIND],
+        |row| row.get(0),
+    )?;
+    if active_self_work > 0 {
+        return Ok(true);
+    }
+
+    let held_queue: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*)
+        FROM communication_messages m
+        JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = 'queue'
+          AND m.direction = 'inbound'
+          AND r.route_status = 'review_rework'
+          AND (
+                json_extract(m.metadata_json, '$.ticket_self_work_kind') = ?1
+             OR m.subject LIKE 'Founder communication rework:%'
+          )
+        "#,
+        params![FOUNDER_COMMUNICATION_REWORK_KIND],
+        |row| row.get(0),
+    )?;
+    Ok(held_queue > 0)
 }
 
 fn maybe_redirect_owner_visible_work_to_strategy_setup(
@@ -5447,7 +6665,7 @@ fn merge_metadata_value(target: &mut Value, extra: Value) {
     }
 }
 
-fn render_ticket_self_work_prompt(item: &tickets::TicketSelfWorkItemView) -> String {
+fn render_ticket_self_work_prompt(root: &Path, item: &tickets::TicketSelfWorkItemView) -> String {
     let mut prompt_lines = vec![
         format!(
             "Bearbeite das veroeffentlichte CTOX-Self-Work fuer {}.",
@@ -5459,6 +6677,18 @@ fn render_ticket_self_work_prompt(item: &tickets::TicketSelfWorkItemView) -> Str
         String::new(),
         item.body_text.trim().to_string(),
     ];
+    if let Ok(notes) = recent_ticket_self_work_notes_for_prompt(root, &item.work_id, 6) {
+        if !notes.is_empty() {
+            prompt_lines.push(String::new());
+            prompt_lines.push(
+                "Aktuelle Rework- und Review-Hinweise, die du zwingend beruecksichtigen musst:"
+                    .to_string(),
+            );
+            for note in notes {
+                prompt_lines.push(format!("- {note}"));
+            }
+        }
+    }
     if let Some(locator) = item
         .remote_locator
         .as_deref()
@@ -5469,6 +6699,35 @@ fn render_ticket_self_work_prompt(item: &tickets::TicketSelfWorkItemView) -> Str
         prompt_lines.push(format!("Remote-Ticket: {}", locator));
     }
     prompt_lines.join("\n")
+}
+
+fn recent_ticket_self_work_notes_for_prompt(
+    root: &Path,
+    work_id: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = channels::open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT body_text
+        FROM ticket_self_work_notes
+        WHERE work_id = ?1
+          AND TRIM(body_text) <> ''
+        ORDER BY created_at DESC
+        LIMIT ?2
+        "#,
+    )?;
+    let rows = statement.query_map(params![work_id, limit as i64], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut notes = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    notes.reverse();
+    Ok(notes
+        .into_iter()
+        .map(|note| clip_text(note.trim(), 420))
+        .filter(|note| !note.is_empty())
+        .collect())
 }
 
 fn task_matches_scope(
@@ -5652,21 +6911,23 @@ fn queue_ticket_self_work_item(
     if runnable_thread_task_exists(root, &thread_key)? {
         return Ok(None);
     }
+    let mut extra_metadata = serde_json::json!({
+        "ticket_self_work_id": item.work_id.clone(),
+        "ticket_self_work_kind": item.kind.clone(),
+        "ticket_self_work_source_system": item.source_system.clone(),
+    });
+    merge_metadata_value(&mut extra_metadata, ticket_self_work_queue_metadata(item));
     let queue_task = channels::create_queue_task_with_metadata(
         root,
         channels::QueueTaskCreateRequest {
             title: item.title.trim().to_string(),
-            prompt: render_ticket_self_work_prompt(item),
+            prompt: render_ticket_self_work_prompt(root, item),
             thread_key: thread_key.clone(),
             workspace_root: ticket_self_work_workspace_root(item),
             priority: ticket_self_work_priority(item),
             suggested_skill: item.suggested_skill.clone(),
             parent_message_key: ticket_self_work_parent_message_key(item),
-            extra_metadata: Some(serde_json::json!({
-                "ticket_self_work_id": item.work_id.clone(),
-                "ticket_self_work_kind": item.kind.clone(),
-                "ticket_self_work_source_system": item.source_system.clone(),
-            })),
+            extra_metadata: Some(extra_metadata),
         },
     )?;
     let note = format!(
@@ -6896,6 +8157,82 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    fn upsert_test_inbound_message(
+        root: &Path,
+        message_key: &str,
+        channel: &str,
+        thread_key: &str,
+        sender_address: &str,
+        subject: &str,
+        body: &str,
+        metadata: Value,
+    ) {
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let mut conn = channels::open_channel_db(&db_path).expect("open channel db");
+        let observed_at = "2026-04-28T12:00:00Z";
+        channels::upsert_communication_message(
+            &mut conn,
+            channels::UpsertMessage {
+                message_key,
+                channel,
+                account_key: &format!("{channel}:test"),
+                thread_key,
+                remote_id: message_key,
+                direction: "inbound",
+                folder_hint: "inbox",
+                sender_display: "Test Sender",
+                sender_address,
+                recipient_addresses_json: "[]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject,
+                preview: &body[..body.len().min(120)],
+                body_text: body,
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "internal",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: observed_at,
+                observed_at,
+                metadata_json: &serde_json::to_string(&metadata).expect("metadata json"),
+            },
+        )
+        .expect("upsert message");
+        channels::refresh_thread(&mut conn, thread_key).expect("refresh thread");
+        channels::ensure_routing_rows_for_inbound(&conn).expect("routing rows");
+    }
+
+    fn route_status_for(root: &Path, message_key: &str) -> String {
+        let conn =
+            channels::open_channel_db(&root.join("runtime/ctox.sqlite3")).expect("open channel db");
+        conn.query_row(
+            "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+            params![message_key],
+            |row| row.get(0),
+        )
+        .expect("route status")
+    }
+
+    fn routed_email_message(sender_address: &str) -> channels::RoutedInboundMessage {
+        channels::RoutedInboundMessage {
+            message_key: "m1".to_string(),
+            channel: "email".to_string(),
+            account_key: "email:test".to_string(),
+            thread_key: "email-thread".to_string(),
+            sender_display: "Sender".to_string(),
+            sender_address: sender_address.to_string(),
+            subject: "Meeting".to_string(),
+            preview: "Meeting".to_string(),
+            body_text: "Join https://meet.google.com/abc-defg-hij".to_string(),
+            external_created_at: "2026-04-28T12:00:00Z".to_string(),
+            workspace_root: None,
+            metadata: json!({}),
+            preferred_reply_modality: None,
+        }
     }
 
     #[test]
@@ -8538,6 +9875,148 @@ mod tests {
     }
 
     #[test]
+    fn meeting_auto_join_policy_blocks_disabled_and_unlisted_senders() {
+        let message = routed_email_message("alice@example.com");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTO_MEETING_AUTO_JOIN_ENABLED".to_string(),
+            "false".to_string(),
+        );
+        assert!(meeting_auto_join_policy_block(&settings, &message)
+            .expect("disabled block")
+            .contains("auto-join disabled"));
+
+        settings.insert(
+            "CTO_MEETING_AUTO_JOIN_ENABLED".to_string(),
+            "true".to_string(),
+        );
+        settings.insert(
+            "CTO_MEETING_ALLOWED_INVITE_SENDERS".to_string(),
+            "scheduler@example.com,@trusted.example".to_string(),
+        );
+        assert!(meeting_auto_join_policy_block(&settings, &message)
+            .expect("sender block")
+            .contains("not in"));
+
+        let allowed_exact = routed_email_message("scheduler@example.com");
+        assert_eq!(
+            meeting_auto_join_policy_block(&settings, &allowed_exact),
+            None
+        );
+        let allowed_domain = routed_email_message("ops@trusted.example");
+        assert_eq!(
+            meeting_auto_join_policy_block(&settings, &allowed_domain),
+            None
+        );
+    }
+
+    #[test]
+    fn meeting_passive_chat_is_acknowledged_without_agent_queue() {
+        let root = temp_root("meeting-passive");
+        upsert_test_inbound_message(
+            &root,
+            "meeting-passive-1",
+            "meeting",
+            "meeting-session-passive",
+            "alice",
+            "google meeting chat",
+            "Nur ein normaler Chat.",
+            json!({
+                "source": "meeting_chat",
+                "session_id": "meeting-session-passive",
+                "is_mention": false,
+                "priority": "normal"
+            }),
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("state poisoned");
+            shared.busy = true;
+        }
+
+        route_external_messages(&root, &state).expect("route meeting chat");
+
+        let shared = state.lock().expect("state poisoned");
+        assert!(shared.pending_prompts.is_empty());
+        drop(shared);
+        assert_eq!(route_status_for(&root, "meeting-passive-1"), "handled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn non_work_tui_route_is_acknowledged_without_agent_queue() {
+        let root = temp_root("tui-non-work-route");
+        upsert_test_inbound_message(
+            &root,
+            "tui-probe-1",
+            "tui",
+            "tui/main",
+            "owner",
+            "Demo",
+            "hello queue",
+            json!({ "priority": "normal" }),
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("state poisoned");
+            shared.busy = true;
+        }
+
+        route_external_messages(&root, &state).expect("route tui probe");
+
+        let shared = state.lock().expect("state poisoned");
+        assert!(shared.pending_prompts.is_empty());
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("Ignored non-work TUI route")));
+        drop(shared);
+        assert_eq!(route_status_for(&root, "tui-probe-1"), "handled");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn meeting_mentions_are_prioritized_into_agent_queue() {
+        let root = temp_root("meeting-mention");
+        upsert_test_inbound_message(
+            &root,
+            "meeting-mention-1",
+            "meeting",
+            "meeting-session-mention",
+            "alice",
+            "google meeting chat",
+            "@CTOX bitte pruefen.",
+            json!({
+                "source": "meeting_chat",
+                "session_id": "meeting-session-mention",
+                "is_mention": true,
+                "skill": "meeting-participant",
+                "priority": "urgent"
+            }),
+        );
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = state.lock().expect("state poisoned");
+            shared.busy = true;
+        }
+
+        route_external_messages(&root, &state).expect("route meeting mention");
+
+        let shared = state.lock().expect("state poisoned");
+        assert_eq!(shared.pending_prompts.len(), 1);
+        let prompt = shared.pending_prompts.front().expect("queued mention");
+        assert_eq!(prompt.source_label, "meeting:mention");
+        assert_eq!(
+            prompt.suggested_skill.as_deref(),
+            Some("meeting-participant")
+        );
+        assert_eq!(prompt.leased_message_keys, vec!["meeting-mention-1"]);
+        drop(shared);
+        assert_eq!(route_status_for(&root, "meeting-mention-1"), "leased");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn allows_founder_email_outside_employee_domain() {
         let mut settings = BTreeMap::new();
         settings.insert(
@@ -10014,6 +11493,103 @@ mod tests {
     }
 
     #[test]
+    fn founder_email_sqlite_lock_is_retryable() {
+        let job = QueuedPrompt {
+            prompt: "Reply to founder".to_string(),
+            goal: "Founder communication".to_string(),
+            preview: "Founder mail".to_string(),
+            source_label: "email:founder".to_string(),
+            suggested_skill: None,
+            leased_message_keys: vec!["email:cto1@metric-space.ai::INBOX::95".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("<founder-thread@example.com>".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        assert!(founder_email_worker_error_is_retryable(
+            &job,
+            "database is locked"
+        ));
+    }
+
+    #[test]
+    fn non_founder_sqlite_lock_is_not_founder_retryable() {
+        let job = QueuedPrompt {
+            prompt: "Run platform work".to_string(),
+            goal: "Platform work".to_string(),
+            preview: "Queue task".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: None,
+            leased_message_keys: vec!["queue:system::abc".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+        };
+
+        assert!(!founder_email_worker_error_is_retryable(
+            &job,
+            "database is locked"
+        ));
+    }
+
+    #[test]
+    fn non_work_tui_probe_is_ignored() {
+        assert!(is_non_work_tui_probe("hello queue"));
+        assert!(is_non_work_tui_probe("  health   check  "));
+        assert!(!is_non_work_tui_probe(
+            "CTO1, beantworte die Founder-Mail sauber"
+        ));
+    }
+
+    #[test]
+    fn boot_releases_stale_service_communication_leases() {
+        let root = temp_root("boot-release-service-leases");
+        upsert_test_inbound_message(
+            &root,
+            "queue:system::stale-founder-rework",
+            "queue",
+            "founder-thread",
+            "system@local",
+            "Founder communication rework",
+            "Rework founder mail",
+            json!({
+                "origin_source_label": "email:founder",
+                "parent_message_key": "email:cto1@metric-space.ai::INBOX::96",
+            }),
+        );
+        let conn =
+            channels::open_channel_db(&root.join("runtime/ctox.sqlite3")).expect("open channel db");
+        conn.execute(
+            "UPDATE communication_routing_state SET route_status='leased', lease_owner=?2, leased_at='2026-04-28T20:00:00Z', acked_at=NULL WHERE message_key=?1",
+            params!["queue:system::stale-founder-rework", CHANNEL_ROUTER_LEASE_OWNER],
+        )
+        .expect("seed stale lease");
+
+        let repaired =
+            release_stale_service_communication_leases(&root).expect("release stale leases");
+        assert_eq!(repaired, 1);
+
+        let row = conn
+            .query_row(
+                "SELECT route_status, lease_owner, leased_at FROM communication_routing_state WHERE message_key=?1",
+                params!["queue:system::stale-founder-rework"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("route row");
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1, None);
+        assert_eq!(row.2, None);
+    }
+
+    #[test]
     fn open_founder_inbound_blocks_strategy_reroute_for_queue_work() {
         let root = temp_root("ctox-open-founder-blocks-strategy-reroute");
         let mut runtime_settings = BTreeMap::new();
@@ -10246,11 +11822,460 @@ mod tests {
         assert_eq!(tasks[0].title, title);
         assert!(tasks[0]
             .prompt
-            .contains("Do not send any founder or owner reply yet."));
+            .contains("Beende diesen Arbeitsschritt mit genau der E-Mail"));
         assert!(tasks[0]
             .prompt
             .contains("Generate or retrieve the Jami QR code."));
         assert!(tasks[0].ticket_self_work_id.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stalled_founder_email_requeues_blocked_rework() {
+        let root = temp_root("ctox-stalled-founder-repair");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &settings)
+            .expect("failed to persist owner setting");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::99";
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', '<olaf-thread@example.com>',
+                'remote-founder-99', 'inbound', 'INBOX', 'Olaf Schaefers',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]',
+                'Aw: Kunstmen Wettbewerbsdashboard: erster Entwurf',
+                'Founder asks whether founder-only belongs on the frontpage',
+                'Ist founder-only noch richtig, wenn das auf der Frontpage steht?',
+                '', '', 'normal', 'received', 0, 1,
+                '2026-04-28T12:23:00Z', '2026-04-28T12:23:00Z', '{}'
+            )"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'failed', NULL, NULL, NULL, NULL, '2026-04-28T15:46:00Z')"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert stalled founder route");
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: FOUNDER_COMMUNICATION_REWORK_KIND.to_string(),
+                title: "Founder communication rework: founder-only".to_string(),
+                body_text: "Answer Olaf after checking the screenshot.".to_string(),
+                state: "blocked".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "email-review:founder:test",
+                    "priority": "urgent",
+                    "skill": "follow-up-orchestrator",
+                    "parent_message_key": inbound_key,
+                    "inbound_message_key": inbound_key,
+                    "dedupe_key": format!("founder-communication-rework:{inbound_key}"),
+                }),
+            },
+            false,
+        )
+        .expect("failed to seed blocked rework");
+        tickets::assign_ticket_self_work_item(
+            &root,
+            &item.work_id,
+            "self",
+            "test",
+            Some("founder repair test"),
+        )
+        .expect("failed to assign blocked rework");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let repaired = repair_stalled_founder_communications(&root, &state, &settings)
+            .expect("stalled founder repair should succeed");
+        assert_eq!(repaired, 1);
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks[0].ticket_self_work_id.as_deref(),
+            Some(item.work_id.as_str())
+        );
+        assert_eq!(tasks[0].parent_message_key.as_deref(), Some(inbound_key));
+        let origin_source: String = conn
+            .query_row(
+                "SELECT json_extract(metadata_json, '$.origin_source_label') FROM communication_messages WHERE message_key = ?1",
+                rusqlite::params![tasks[0].message_key],
+                |row| row.get(0),
+            )
+            .expect("failed to load queue origin source label");
+        assert_eq!(origin_source, "email:founder");
+        let route_status: String = conn
+            .query_row(
+                "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+                rusqlite::params![inbound_key],
+                |row| row.get(0),
+            )
+            .expect("failed to reload route status");
+        assert_eq!(route_status, "review_rework");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stalled_founder_email_superseded_by_later_reviewed_thread_send_is_cancelled() {
+        let root = temp_root("ctox-stalled-founder-superseded");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &settings)
+            .expect("failed to persist owner setting");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::94";
+        let thread_key = "<founder-thread@example.com>";
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', ?2,
+                'remote-founder-94', 'inbound', 'INBOX', 'Michael Welsch',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]',
+                'Aw: Re: Visuelle Homepage',
+                'Earlier founder mail now covered by a later reviewed reply.',
+                'Earlier founder mail now covered by a later reviewed reply.',
+                '', '', 'normal', 'received', 0, 0,
+                '2026-04-27T09:01:02Z', '2026-04-27T09:01:02Z', '{}'
+            )"#,
+            rusqlite::params![inbound_key, thread_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'failed', NULL, NULL, '2026-04-27T11:55:27Z', NULL, '2026-04-27T11:55:27Z')"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert failed route");
+        conn.execute(
+            r#"INSERT INTO communication_founder_reply_reviews (
+                approval_key, inbound_message_key, action_digest, action_json, body_sha256,
+                reviewer, review_summary, approved_at, sent_at, send_result_json
+            ) VALUES (
+                'review-later-thread-send', 'email:cto1@metric-space.ai::INBOX::95',
+                'digest', ?1, 'body-sha', 'external-review',
+                'later reviewed founder reply in same thread',
+                '2026-04-27T15:39:18Z', '2026-04-27T15:39:18Z', '{}'
+            )"#,
+            rusqlite::params![serde_json::json!({
+                "thread_key": thread_key,
+                "to": ["michael.welsch@metric-space.ai"],
+                "cc": [],
+                "subject": "Re: Aw: Re: Visuelle Homepage",
+                "attachments": [],
+            })
+            .to_string()],
+        )
+        .expect("failed to seed later reviewed send");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let repaired = repair_stalled_founder_communications(&root, &state, &settings)
+            .expect("stalled founder repair should succeed");
+        assert!(repaired >= 1);
+        let route_status: String = conn
+            .query_row(
+                "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+                rusqlite::params![inbound_key],
+                |row| row.get(0),
+            )
+            .expect("failed to reload route status");
+        assert_eq!(route_status, "cancelled");
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert!(tasks.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stalled_founder_email_superseded_by_later_reviewed_sender_send_is_cancelled() {
+        let root = temp_root("ctox-stalled-founder-sender-superseded");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &settings)
+            .expect("failed to persist owner setting");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::96";
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', '<old-thread@example.com>',
+                'remote-founder-96', 'inbound', 'INBOX', 'Michael Welsch',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]',
+                'Re: Visuelle Homepage',
+                'Older founder mail covered by a later reviewed cross-thread send.',
+                'Older founder mail covered by a later reviewed cross-thread send.',
+                '', '', 'normal', 'received', 0, 0,
+                '2026-04-27T15:48:00Z', '2026-04-27T15:48:00Z', '{}'
+            )"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'review_rework', NULL, NULL, NULL, NULL, '2026-04-29T03:35:18Z')"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert review route");
+        let task = channels::create_queue_task_with_metadata(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Founder communication rework: Re: Visuelle Homepage".to_string(),
+                prompt: "Reply to stale founder mail.".to_string(),
+                thread_key: "email-review:founder:old-thread".to_string(),
+                workspace_root: None,
+                priority: "urgent".to_string(),
+                suggested_skill: Some("follow-up-orchestrator".to_string()),
+                parent_message_key: Some(inbound_key.to_string()),
+                extra_metadata: Some(serde_json::json!({
+                    "inbound_message_key": inbound_key,
+                    "ticket_self_work_kind": FOUNDER_COMMUNICATION_REWORK_KIND,
+                })),
+            },
+        )
+        .expect("failed to create stale queue task");
+        channels::ack_leased_messages(&root, std::slice::from_ref(&task.message_key), "leased")
+            .expect("failed to lease stale queue task");
+        conn.execute(
+            r#"INSERT INTO communication_founder_reply_reviews (
+                approval_key, inbound_message_key, action_digest, action_json, body_sha256,
+                reviewer, review_summary, approved_at, sent_at, send_result_json
+            ) VALUES (
+                'review-later-cross-thread-send', 'email:cto1@metric-space.ai::INBOX::99',
+                'digest-cross-thread', ?1, 'body-sha-cross-thread', 'external-review',
+                'later reviewed founder reply copied Michael on the current founder thread',
+                '2026-04-27T23:21:23Z', '2026-04-27T23:21:23Z', '{}'
+            )"#,
+            rusqlite::params![serde_json::json!({
+                "thread_key": "<current-thread@example.com>",
+                "to": ["o.schaefers@gmx.net"],
+                "cc": ["michael.welsch@metric-space.ai"],
+                "subject": "Re: Aw: Re: Visuelle Homepage",
+                "attachments": [],
+            })
+            .to_string()],
+        )
+        .expect("failed to seed later reviewed send");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let repaired = repair_stalled_founder_communications(&root, &state, &settings)
+            .expect("stalled founder repair should succeed");
+        assert!(repaired >= 1);
+        let route_status: String = conn
+            .query_row(
+                "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+                rusqlite::params![inbound_key],
+                |row| row.get(0),
+            )
+            .expect("failed to reload route status");
+        assert_eq!(route_status, "cancelled");
+        let task_status: String = conn
+            .query_row(
+                "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+                rusqlite::params![task.message_key],
+                |row| row.get(0),
+            )
+            .expect("failed to reload queue route status");
+        assert_eq!(task_status, "cancelled");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reviewed_founder_reply_closes_stale_rework_item() {
+        let root = temp_root("ctox-stale-founder-rework-close");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &settings)
+            .expect("failed to persist owner setting");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::100";
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', '<founder-thread@example.com>',
+                'remote-founder-100', 'inbound', 'INBOX', 'Michael Welsch',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]',
+                'Re: Affiliate Programm',
+                'Founder asks for affiliate correction',
+                'Bitte nicht auf der Landing Page bewerben.',
+                '', '', 'normal', 'received', 0, 0,
+                '2026-04-28T12:23:00Z', '2026-04-28T12:23:00Z', '{}'
+            )"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'handled', NULL, NULL, '2026-04-28T12:40:00Z', NULL, '2026-04-28T12:40:00Z')"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert handled route");
+        conn.execute(
+            r#"INSERT INTO communication_founder_reply_reviews (
+                approval_key, inbound_message_key, action_digest, action_json,
+                body_sha256, reviewer, review_summary, approved_at, sent_at, send_result_json
+            ) VALUES (
+                'approval-founder-100', ?1, 'digest-founder-100', '{}',
+                'body-founder-100', 'external-review', 'PASS: reviewed and sent',
+                '2026-04-28T12:39:00Z', '2026-04-28T12:39:30Z', '{"ok":true}'
+            )"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert review send proof");
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: FOUNDER_COMMUNICATION_REWORK_KIND.to_string(),
+                title: "Founder communication rework: affiliate".to_string(),
+                body_text: "Answer founder after real rework.".to_string(),
+                state: "queued".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "email-review:founder:stale-close",
+                    "priority": "urgent",
+                    "skill": "follow-up-orchestrator",
+                    "parent_message_key": inbound_key,
+                    "inbound_message_key": inbound_key,
+                }),
+            },
+            false,
+        )
+        .expect("failed to seed queued rework");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let repaired = repair_stalled_founder_communications(&root, &state, &settings)
+            .expect("stale founder cleanup should succeed");
+        assert_eq!(repaired, 1);
+        let item = tickets::load_ticket_self_work_item(&root, &item.work_id)
+            .expect("failed to reload self work")
+            .expect("self work should exist");
+        assert_eq!(item.state, "closed");
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert!(tasks.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn self_work_prompt_includes_latest_review_notes() {
+        let root = temp_root("ctox-self-work-review-notes");
+        let item = tickets::put_ticket_self_work_item(
+            &root,
+            tickets::TicketSelfWorkUpsertInput {
+                source_system: "local".to_string(),
+                kind: FOUNDER_COMMUNICATION_REWORK_KIND.to_string(),
+                title: "Founder communication rework: affiliate".to_string(),
+                body_text: "Answer Michael in the existing founder thread.".to_string(),
+                state: "queued".to_string(),
+                metadata: serde_json::json!({
+                    "thread_key": "email-review:founder:notes",
+                    "priority": "urgent",
+                    "parent_message_key": "email:cto1@metric-space.ai::INBOX::96",
+                }),
+            },
+            false,
+        )
+        .expect("failed to seed self work");
+        tickets::append_ticket_self_work_note(
+            &root,
+            &item.work_id,
+            "External review rejected the last slice: ask for a concrete affiliate decision and do not claim implementation is done.",
+            "ctox-review",
+            "internal",
+        )
+        .expect("failed to append review note");
+
+        let prompt = render_ticket_self_work_prompt(&root, &item);
+        assert!(prompt.contains("Aktuelle Rework- und Review-Hinweise"));
+        assert!(prompt.contains("ask for a concrete affiliate decision"));
+        assert!(prompt.contains("do not claim implementation is done"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn founder_rework_execution_prompt_strips_self_work_wrapper() {
+        let root = temp_root("ctox-founder-rework-clean-prompt");
+        let message = channels::RoutedInboundMessage {
+            message_key: "queue:system::abc".to_string(),
+            channel: "queue".to_string(),
+            account_key: "system".to_string(),
+            thread_key: "thread".to_string(),
+            sender_display: "system".to_string(),
+            sender_address: "system".to_string(),
+            subject: "Founder communication rework: Affiliate reply".to_string(),
+            preview: String::new(),
+            body_text: String::new(),
+            external_created_at: String::new(),
+            workspace_root: None,
+            metadata: serde_json::json!({}),
+            preferred_reply_modality: None,
+        };
+        let raw = "Bearbeite das veroeffentlichte CTOX-Self-Work fuer local.\n\
+Titel: Founder communication rework: Affiliate reply\n\
+Art: founder-communication-rework\n\
+Work-ID: self-work:local:123\n\n\
+Review summary: Die Antwort geht nicht auf Olafs Korrektur ein.\n\
+Was jetzt zu tun ist:\n\
+- Entferne bits & birds und oeffentliche Prozentversprechen.";
+
+        let prompt = render_founder_communication_rework_execution_prompt(
+            &root,
+            &message,
+            "email:cto1@metric-space.ai::INBOX::97",
+            raw,
+        );
+        assert!(!prompt.contains("CTOX-Self-Work"));
+        assert!(!prompt.contains("Work-ID:"));
+        assert!(!prompt.contains("Art:"));
+        assert!(prompt.contains("Kurzfassung: Die Antwort geht nicht auf Olafs Korrektur ein."));
+        assert!(prompt.contains("ausschliesslich den sendefertigen E-Mail-Text"));
         let _ = std::fs::remove_dir_all(root);
     }
 

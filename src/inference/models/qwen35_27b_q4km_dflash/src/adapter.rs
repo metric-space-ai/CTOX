@@ -67,6 +67,16 @@ fn render_chat_prompt(req: &ResponsesCreateRequest) -> Result<String> {
             turns.push(turn);
         }
     }
+    if !reasoning_requested(req) {
+        if let Some(last_user) = turns.iter_mut().rev().find(|turn| turn.role == "user") {
+            if !last_user.text.contains("/no_think") {
+                if !last_user.text.ends_with('\n') && !last_user.text.is_empty() {
+                    last_user.text.push('\n');
+                }
+                last_user.text.push_str("/no_think");
+            }
+        }
+    }
 
     // 3. Render with Qwen3 chat template, add the assistant-role
     //    opening tag to prompt the model to start generating.
@@ -79,7 +89,56 @@ fn render_chat_prompt(req: &ResponsesCreateRequest) -> Result<String> {
         out.push_str("<|im_end|>\n");
     }
     out.push_str("<|im_start|>assistant\n");
+    if !reasoning_requested(req) {
+        out.push_str("<think>\n\n</think>\n\n");
+    }
     Ok(out)
+}
+
+fn reasoning_requested(req: &ResponsesCreateRequest) -> bool {
+    req.reasoning
+        .as_ref()
+        .and_then(|value| value.get("effort"))
+        .and_then(Value::as_str)
+        .map(|effort| {
+            let effort = effort.trim();
+            !effort.is_empty() && !effort.eq_ignore_ascii_case("none")
+        })
+        .unwrap_or(false)
+}
+
+fn strip_think_blocks(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find("<think>") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + "<think>".len()..];
+        let Some(end) = after_start.find("</think>") else {
+            break;
+        };
+        rest = &after_start[end + "</think>".len()..];
+    }
+    out.trim_start().to_string()
+}
+
+fn truncate_at_chat_marker(text: &str) -> String {
+    let markers = [
+        "<|im_end|>",
+        "<|im_start|>",
+        "\nuser",
+        "\nsystem",
+        "\nassistant",
+    ];
+    let cut = markers
+        .iter()
+        .filter_map(|marker| text.find(marker))
+        .min()
+        .unwrap_or(text.len());
+    text[..cut].trim_end().to_string()
 }
 
 /// Try to turn one Responses input item into a chat turn.
@@ -147,6 +206,7 @@ pub struct AdapterCtx<'a, S: StreamSink + ?Sized> {
     pub backend: crate::ffi::ggml_backend_t,
     pub tokenizer: &'a Tokenizer,
     pub model_id: &'a str,
+    pub gen_config: GenConfig,
     pub sink: &'a mut S,
 }
 
@@ -222,16 +282,11 @@ pub fn run_turn<S: StreamSink>(
         })?;
     }
 
-    // 3. Drive the generation. We currently run all 3 modes via the
-    //    single `run_dflash_gen_loop`; mode selection moves to the
-    //    request surface later.
-    let cfg = GenConfig {
-        fast_rollback: false,
-        ddtree: false,
-        ddtree_budget: 64,
-        ddtree_temp: 1.0,
-        ddtree_chain_seed: true,
-    };
+    // 3. Drive generation with the server-selected decode strategy.
+    // The production server defaults this to the A6000-verified
+    // fast-rollback + DDTree mode; tests can still pass a simpler
+    // config explicitly.
+    let cfg = ctx.gen_config;
     let mut all_out: Vec<i32> = Vec::with_capacity(prompt_ids.len() + max_out);
     let stats = run_dflash_gen_loop(
         ctx.target_weights,
@@ -244,13 +299,30 @@ pub fn run_turn<S: StreamSink>(
         cfg,
     )
     .map_err(|e| anyhow!("run_dflash_gen_loop: {e}"))?;
+    tracing::info!(
+        input_tokens,
+        output_tokens = stats.n_generated,
+        prefill_s = stats.prefill_s,
+        wall_s = stats.wall_s,
+        decode_tok_s = stats.decode_tok_s,
+        draft_steps = stats.n_draft_steps,
+        accepted = stats.n_accept_sum,
+        fast_rollback = cfg.fast_rollback,
+        ddtree = cfg.ddtree,
+        ddtree_budget = cfg.ddtree_budget,
+        "qwen35-27b responses turn complete"
+    );
 
     let output_ids = &all_out[prompt_ids.len()..];
     let output_tokens = output_ids.len() as u32;
-    let full_text = ctx
+    let mut full_text = ctx
         .tokenizer
         .decode(output_ids)
         .unwrap_or_else(|_| String::new());
+    if !reasoning_requested(req) {
+        full_text = strip_think_blocks(&full_text);
+    }
+    full_text = truncate_at_chat_marker(&full_text);
 
     // 4. Emit streaming body (or non-streaming final).
     if req.stream && !full_text.is_empty() {

@@ -282,9 +282,9 @@ pub struct MoeArchInfo {
 /// cache disabled".
 pub fn resolve_moe_arch_info(canonical_model: &str) -> Option<MoeArchInfo> {
     match canonical_model {
-        // Source: https://huggingface.co/Qwen/Qwen3.6-35B-A3B/raw/main/config.json
+        // Source: https://huggingface.co/Qwen/Qwen3.5-35B-A3B/raw/main/config.json
         // Verified against the engine's `qwen3_5_moe::TextConfig` expectations.
-        "Qwen/Qwen3.6-35B-A3B" => Some(MoeArchInfo {
+        "Qwen/Qwen3.5-35B-A3B" => Some(MoeArchInfo {
             hidden_size: 2048,
             num_hidden_layers: 40,
             num_experts: 256,
@@ -446,7 +446,7 @@ pub fn auto_detect_moe_cache_capacity(
     );
     let moe_bytes = estimate_moe_weights_bytes(arch, isq_label);
     // Non-MoE weights (embeddings, lm_head, attention, norms) are ~15% of
-    // total for Qwen3.6-style A3B architectures. Subtract from budget.
+    // total for Qwen3.5-style A3B architectures. Subtract from budget.
     let non_moe_reserve_bytes = moe_bytes / 6; // ~17%
     let moe_budget = budget_bytes.saturating_sub(non_moe_reserve_bytes);
     if moe_bytes <= moe_budget {
@@ -552,7 +552,7 @@ pub fn plan_moe_cache_allocation_with_arch(
             // computed *after* us; this estimate biases toward "reserve
             // more, auto-disable cache less aggressively" so KV doesn't
             // silently squeeze out resident experts.
-            // Qwen3.6-style hybrid: full_attention_interval=4 ⇒ 10 of 40
+            // Qwen3.5-style hybrid: full_attention_interval=4 ⇒ 10 of 40
             // layers hold KV; kv_heads=2, head_dim=256 per their config.
             // We don't have those exact numbers per-model here, so estimate
             // from the routed-attention share: assume 1/4 of layers hold
@@ -1630,7 +1630,8 @@ pub fn preview_chat_preset_bundle(
     if let Some(family) = explicit_local_chat_family(env_map) {
         return best_bundle_for_family(root, family, selected_preset, Some(&hardware), env_map);
     }
-    let default_model = engine::default_runtime_config(engine::LocalModelFamily::GptOss).model;
+    let default_model =
+        engine::default_runtime_config(engine::LocalModelFamily::Qwen35Vision).model;
     let model = env_map
         .get("CTOX_CHAT_MODEL")
         .map(|value| value.trim())
@@ -1980,7 +1981,7 @@ fn reusable_persisted_chat_runtime_plan(
                 best_bundle_for_family(root, family, requested_preset, Some(&hardware), env_map)?
             } else {
                 let default_model =
-                    engine::default_runtime_config(engine::LocalModelFamily::GptOss).model;
+                    engine::default_runtime_config(engine::LocalModelFamily::Qwen35Vision).model;
                 let model = env_map
                     .get("CTOX_CHAT_MODEL")
                     .map(|value| value.trim())
@@ -2476,14 +2477,14 @@ fn select_floor_fallback_spec(specs: &[PlanSpec]) -> Option<PlanSpec> {
 }
 
 #[cfg(test)]
-fn build_gpt_oss_20b_bundle(
+fn build_gpt_oss_120b_bundle(
     selected_preset: ChatPreset,
     hardware: &HardwareProfile,
     env_map: &BTreeMap<String, String>,
 ) -> ChatPresetBundle {
     build_manifest_bundle_with_root(
         None,
-        "openai/gpt-oss-20b",
+        "openai/gpt-oss-120b",
         selected_preset,
         hardware,
         env_map,
@@ -2522,13 +2523,13 @@ fn build_qwen35_27b_bundle(
 ) -> ChatPresetBundle {
     build_manifest_bundle_with_root(
         None,
-        "Qwen/Qwen3.6-35B-A3B",
+        "Qwen/Qwen3.5-35B-A3B",
         selected_preset,
         hardware,
         env_map,
     )
-    .expect("qwen3.6-35b-a3b manifest bundle should resolve")
-    .expect("qwen3.6-35b-a3b manifest bundle should exist")
+    .expect("qwen3.5-35b-a3b manifest bundle should resolve")
+    .expect("qwen3.5-35b-a3b manifest bundle should exist")
 }
 
 #[cfg(test)]
@@ -2539,13 +2540,13 @@ fn build_qwen35_35b_a3b_bundle(
 ) -> ChatPresetBundle {
     build_manifest_bundle_with_root(
         None,
-        "Qwen/Qwen3.6-35B-A3B",
+        "Qwen/Qwen3.5-35B-A3B",
         selected_preset,
         hardware,
         env_map,
     )
-    .expect("qwen3.6-35b-a3b manifest bundle should resolve")
-    .expect("qwen3.6-35b-a3b manifest bundle should exist")
+    .expect("qwen3.5-35b-a3b manifest bundle should resolve")
+    .expect("qwen3.5-35b-a3b manifest bundle should exist")
 }
 
 #[cfg(test)]
@@ -4990,9 +4991,9 @@ fn platform_supports_backend(
 }
 
 #[cfg(test)]
-fn plan_gpt_oss_20b() -> ModelHarness {
+fn plan_gpt_oss_120b() -> ModelHarness {
     ModelHarness {
-        model: "openai/gpt-oss-20b",
+        model: "openai/gpt-oss-120b",
         sizing: EmpiricalSizingProfile {
             non_repeating_weight_mb_q4: 3_400,
             repeating_layer_weight_mb_q4: 516,
@@ -5117,7 +5118,7 @@ fn plan_qwen35_9b() -> ModelHarness {
 #[cfg(test)]
 fn plan_qwen35_27b() -> ModelHarness {
     ModelHarness {
-        model: "Qwen/Qwen3.6-35B-A3B",
+        model: "Qwen/Qwen3.5-35B-A3B",
         sizing: EmpiricalSizingProfile {
             non_repeating_weight_mb_q4: 1_660,
             repeating_layer_weight_mb_q4: 260,
@@ -5147,7 +5148,7 @@ fn plan_qwen35_27b() -> ModelHarness {
 #[cfg(test)]
 fn plan_qwen35_35b_a3b() -> ModelHarness {
     ModelHarness {
-        model: "Qwen/Qwen3.6-35B-A3B",
+        model: "Qwen/Qwen3.5-35B-A3B",
         sizing: EmpiricalSizingProfile {
             non_repeating_weight_mb_q4: 3_500,
             repeating_layer_weight_mb_q4: 450,
@@ -5444,10 +5445,10 @@ fn gemma4_31b_launch_contract() -> model_manifest::ManifestLaunchContract {
 #[cfg(test)]
 fn launch_contract_for_model(model: &str) -> model_manifest::ManifestLaunchContract {
     match model {
-        "openai/gpt-oss-20b" => gpt_oss_launch_contract(),
+        "openai/gpt-oss-120b" => gpt_oss_launch_contract(),
         "Qwen/Qwen3.5-2B" => qwen35_2b_launch_contract(),
         "Qwen/Qwen3.5-4B" => qwen35_4b_launch_contract(),
-        "Qwen/Qwen3.6-35B-A3B" => qwen35_35b_a3b_launch_contract(),
+        "Qwen/Qwen3.5-35B-A3B" => qwen35_35b_a3b_launch_contract(),
         "google/gemma-4-E2B-it" => gemma4_31b_launch_contract(),
         "google/gemma-4-E4B-it" => gemma4_31b_launch_contract(),
         "google/gemma-4-31B-it" => gemma4_31b_launch_contract(),
@@ -5466,7 +5467,7 @@ fn default_placement_profile() -> model_manifest::ManifestPlacementProfile {
 #[cfg(test)]
 fn default_gpt_oss_manifest() -> model_manifest::RuntimeModelManifest {
     let mut manifest = manifest_from_harness(
-        plan_gpt_oss_20b(),
+        plan_gpt_oss_120b(),
         default_placement_profile(),
         manifest_profile(
             model_manifest::RuntimeObjectiveLabel::Quality,
@@ -6160,11 +6161,11 @@ fn default_glm47_flash_manifest() -> model_manifest::RuntimeModelManifest {
 #[cfg(test)]
 fn default_runtime_manifest_for_model(model: &str) -> Option<model_manifest::RuntimeModelManifest> {
     Some(match model.trim() {
-        "openai/gpt-oss-20b" => default_gpt_oss_manifest(),
+        "openai/gpt-oss-120b" => default_gpt_oss_manifest(),
         "Qwen/Qwen3.5-2B" => default_qwen35_2b_manifest(),
         "Qwen/Qwen3.5-4B" => default_qwen35_4b_manifest(),
         "Qwen/Qwen3.5-9B" => default_qwen35_9b_manifest(),
-        "Qwen/Qwen3.6-35B-A3B" => default_qwen35_35b_a3b_manifest(),
+        "Qwen/Qwen3.5-35B-A3B" => default_qwen35_35b_a3b_manifest(),
         "google/gemma-4-E2B-it" => default_gemma4_e2b_manifest(),
         "google/gemma-4-E4B-it" => default_gemma4_e4b_manifest(),
         "google/gemma-4-26B-A4B-it" => default_gemma4_26b_a4b_manifest(),
@@ -6950,7 +6951,7 @@ mod tests {
     fn performance_on_four_gpus_keeps_primary_gpu_in_the_nccl_set() {
         let env_map = BTreeMap::new();
         let plan =
-            build_gpt_oss_20b_bundle(ChatPreset::Performance, &hardware(4, 24_576), &env_map)
+            build_gpt_oss_120b_bundle(ChatPreset::Performance, &hardware(4, 24_576), &env_map)
                 .selected_plan;
         assert_eq!(plan.cuda_visible_devices, "0,1,2,3");
         assert_eq!(plan.tensor_parallel_backend.as_deref(), Some("nccl"));
@@ -6964,7 +6965,7 @@ mod tests {
         let env_map = BTreeMap::new();
         let bundle = build_bundle_for_model(
             &root,
-            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
             ChatPreset::Performance,
             &hardware(4, 24_576),
             &env_map,
@@ -6993,7 +6994,7 @@ mod tests {
         let root = temp_root("runtime-no-nccl");
         persist_nccl_capability_override(
             &root,
-            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
             "startup failed",
             "ncclInvalidUsage",
         )
@@ -7001,7 +7002,7 @@ mod tests {
         let env_map = BTreeMap::new();
         let bundle = build_bundle_for_model(
             &root,
-            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
             ChatPreset::Performance,
             &hardware(4, 24_576),
             &env_map,
@@ -7055,7 +7056,7 @@ mod tests {
     fn gpt_oss_single_gpu_performance_falls_back_without_host_nccl_qualification() {
         let env_map = BTreeMap::new();
         let plan =
-            build_gpt_oss_20b_bundle(ChatPreset::Performance, &hardware(1, 24_576), &env_map)
+            build_gpt_oss_120b_bundle(ChatPreset::Performance, &hardware(1, 24_576), &env_map)
                 .selected_plan;
         assert!(plan.disable_nccl);
         assert_eq!(plan.tensor_parallel_backend, None);
@@ -7065,7 +7066,7 @@ mod tests {
     fn gpt_oss_three_gpu_performance_falls_back_to_device_layers() {
         let env_map = BTreeMap::new();
         let plan =
-            build_gpt_oss_20b_bundle(ChatPreset::Performance, &hardware(3, 24_576), &env_map)
+            build_gpt_oss_120b_bundle(ChatPreset::Performance, &hardware(3, 24_576), &env_map)
                 .selected_plan;
         assert!(plan_satisfies_context_policy(&plan), "{plan:?}");
         assert!(plan.disable_nccl, "{plan:?}");
@@ -7092,7 +7093,7 @@ mod tests {
 
     #[test]
     fn gpt_oss_launch_contract_qualifies_nccl_with_primary_anchor() {
-        let contract = launch_contract_for_model("openai/gpt-oss-20b");
+        let contract = launch_contract_for_model("openai/gpt-oss-120b");
         assert_eq!(
             contract.nccl_qualification,
             model_manifest::ManifestNcclQualification::Qualified
@@ -7316,7 +7317,7 @@ mod tests {
     fn performance_keeps_policy_floor_for_supported_models() {
         let env_map = BTreeMap::new();
         let gpt_oss =
-            build_gpt_oss_20b_bundle(ChatPreset::Performance, &hardware(3, 24_576), &env_map)
+            build_gpt_oss_120b_bundle(ChatPreset::Performance, &hardware(3, 24_576), &env_map)
                 .selected_plan;
         let qwen4 = build_qwen35_4b_bundle(ChatPreset::Performance, &hardware(1, 24_576), &env_map)
             .selected_plan;
@@ -7329,7 +7330,7 @@ mod tests {
     #[test]
     fn gpt_oss_uses_native_quantization_without_isq() {
         let env_map = BTreeMap::new();
-        let plan = build_gpt_oss_20b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
+        let plan = build_gpt_oss_120b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
             .selected_plan;
         assert_eq!(plan.quantization, "native_mxfp4");
         assert_eq!(plan.runtime_isq, None);
@@ -7353,18 +7354,18 @@ mod tests {
         std::fs::create_dir_all(unique.join("runtime")).unwrap();
         write_test_runtime_env(
             &unique,
-            "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-20b\n",
+            "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-120b\n",
         );
 
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
 
         write_test_gpu_totals(&unique, "0:24576;1:24576;2:24576");
@@ -7395,11 +7396,11 @@ mod tests {
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_LOCAL_PRESET".to_string(),
@@ -7470,18 +7471,18 @@ mod tests {
         std::fs::create_dir_all(unique.join("runtime")).unwrap();
         write_test_runtime_env(
             &unique,
-            "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-20b\n",
+            "CTOX_CHAT_SOURCE=local\nCTOX_ACTIVE_MODEL=openai/gpt-oss-120b\n",
         );
 
         let mut env_map = BTreeMap::new();
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert("CTOX_CHAT_RUNTIME_PLAN_ACTIVE".to_string(), "1".to_string());
         env_map.insert(
@@ -7499,7 +7500,7 @@ mod tests {
         );
         env_map.insert(
             "CTOX_ENGINE_REALIZED_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
 
         write_test_gpu_totals(&unique, "0:24576;1:24576;2:24576");
@@ -7579,13 +7580,13 @@ mod tests {
         let env_map = BTreeMap::new();
         let bundle = build_manifest_bundle_with_root(
             None,
-            "Qwen/Qwen3.6-35B-A3B",
+            "Qwen/Qwen3.5-35B-A3B",
             ChatPreset::Quality,
             &hardware(3, 24_576),
             &env_map,
         )
-        .expect("qwen3.6-35b-a3b manifest bundle should resolve")
-        .expect("qwen3.6-35b-a3b manifest bundle should exist");
+        .expect("qwen3.5-35b-a3b manifest bundle should resolve")
+        .expect("qwen3.5-35b-a3b manifest bundle should exist");
         let plan = bundle.selected_plan;
         assert!(plan_satisfies_context_policy(&plan), "{plan:?}");
         assert_eq!(plan.pa_cache_type.as_deref(), Some("turboquant3"));
@@ -7608,7 +7609,7 @@ mod tests {
 
     #[test]
     fn qwen35_35b_a3b_targets_requested_context_variants_on_large_hosts() {
-        let root = temp_root("qwen36-context-variants");
+        let root = temp_root("qwen35-context-variants");
         write_platform_contract(&root, 4, 81_920, false);
         for requested_context in [32_768, 65_536, 131_072, 262_144] {
             let mut env_map = BTreeMap::new();
@@ -7618,13 +7619,13 @@ mod tests {
             );
             let bundle = build_manifest_bundle_with_root(
                 Some(&root),
-                "Qwen/Qwen3.6-35B-A3B",
+                "Qwen/Qwen3.5-35B-A3B",
                 ChatPreset::Quality,
                 &hardware(4, 81_920),
                 &env_map,
             )
-            .expect("qwen3.6-35b-a3b manifest bundle should resolve")
-            .expect("qwen3.6-35b-a3b manifest bundle should exist");
+            .expect("qwen3.5-35b-a3b manifest bundle should resolve")
+            .expect("qwen3.5-35b-a3b manifest bundle should exist");
             assert_eq!(
                 bundle.selected_plan.max_seq_len, requested_context,
                 "requested_context={requested_context} bundle={bundle:#?}"
@@ -7643,13 +7644,13 @@ mod tests {
             );
             let bundle = build_manifest_bundle_with_root(
                 None,
-                "openai/gpt-oss-20b",
+                "openai/gpt-oss-120b",
                 ChatPreset::Quality,
                 &hardware(4, 81_920),
                 &env_map,
             )
-            .expect("gpt-oss-20b manifest bundle should resolve")
-            .expect("gpt-oss-20b manifest bundle should exist");
+            .expect("gpt-oss-120b manifest bundle should resolve")
+            .expect("gpt-oss-120b manifest bundle should exist");
             assert_eq!(
                 bundle.selected_plan.max_seq_len, requested_context,
                 "requested_context={requested_context} bundle={bundle:#?}"
@@ -7846,7 +7847,7 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let cases = [
             (
-                "contracts/models/runtime_manifests/gpt_oss_20b.json",
+                "contracts/models/runtime_manifests/gpt_oss_120b.json",
                 default_gpt_oss_manifest(),
             ),
             (
@@ -7858,7 +7859,7 @@ mod tests {
                 default_qwen35_9b_manifest(),
             ),
             (
-                "contracts/models/runtime_manifests/qwen3_6_35b_a3b.json",
+                "contracts/models/runtime_manifests/qwen3_5_35b_a3b.json",
                 default_qwen35_35b_a3b_manifest(),
             ),
             (
@@ -8015,7 +8016,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
     }
 
     #[test]
@@ -8045,7 +8046,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
     }
 
     #[test]
@@ -8071,7 +8072,7 @@ mod tests {
         .unwrap()
         .expect("expected qwen family performance bundle");
         assert_eq!(quality.model, performance.model);
-        assert_eq!(quality.model, "Qwen/Qwen3.6-35B-A3B");
+        assert_eq!(quality.model, "Qwen/Qwen3.5-35B-A3B");
     }
 
     #[test]
@@ -8116,7 +8117,7 @@ mod tests {
         )
         .unwrap()
         .expect("expected qwen family bundle");
-        assert_eq!(bundle.model, "Qwen/Qwen3.6-35B-A3B");
+        assert_eq!(bundle.model, "Qwen/Qwen3.5-35B-A3B");
         assert_eq!(bundle.selected_plan.cuda_visible_devices, "0,1,2");
     }
 
@@ -8164,15 +8165,15 @@ mod tests {
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_CHAT_MODEL_BASE".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_LOCAL_PRESET".to_string(),
@@ -8184,7 +8185,7 @@ mod tests {
             .expect("expected runtime plan");
         let _ = std::fs::remove_dir_all(&unique);
 
-        assert_eq!(result.model, "openai/gpt-oss-20b");
+        assert_eq!(result.model, "openai/gpt-oss-120b");
         assert!(plan_satisfies_context_policy(&result), "{result:?}");
         assert_eq!(result.max_seq_len, MIN_POLICY_CONTEXT);
     }
@@ -8371,15 +8372,15 @@ mod tests {
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_CHAT_MODEL_BASE".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_LOCAL_PRESET".to_string(),
@@ -8404,7 +8405,7 @@ mod tests {
     fn gpt_oss_three_gpu_20gb_performance_falls_back_to_device_layers() {
         let env_map = BTreeMap::new();
         let plan =
-            build_gpt_oss_20b_bundle(ChatPreset::Performance, &hardware(3, 20_480), &env_map)
+            build_gpt_oss_120b_bundle(ChatPreset::Performance, &hardware(3, 20_480), &env_map)
                 .selected_plan;
         assert!(plan_satisfies_context_policy(&plan), "{plan:?}");
         assert!(plan.disable_nccl, "{plan:?}");
@@ -8453,15 +8454,15 @@ mod tests {
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_CHAT_MODEL_BASE".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_CHAT_LOCAL_PRESET".to_string(),
@@ -8485,11 +8486,11 @@ mod tests {
     #[test]
     fn gpt_oss_explicit_128k_contract_math_is_consistent() {
         let env_map = BTreeMap::new();
-        let plan = build_gpt_oss_20b_bundle(ChatPreset::Quality, &hardware(3, 20_480), &env_map)
+        let plan = build_gpt_oss_120b_bundle(ChatPreset::Quality, &hardware(3, 20_480), &env_map)
             .selected_plan;
         let breakdown = &plan.theoretical_breakdown;
 
-        assert_eq!(plan.model, "openai/gpt-oss-20b");
+        assert_eq!(plan.model, "openai/gpt-oss-120b");
         assert_eq!(plan.max_seq_len, 131_072);
         assert_eq!(breakdown.weight_residency_mb, 15_784);
         assert_eq!(breakdown.kv_cache_mb, 15_488);
@@ -8545,7 +8546,7 @@ mod tests {
         let env_map = BTreeMap::new();
         assert!(local_model_satisfies_context_policy(
             Path::new(env!("CARGO_MANIFEST_DIR")),
-            "openai/gpt-oss-20b",
+            "openai/gpt-oss-120b",
             &env_map
         ));
     }
@@ -8591,7 +8592,7 @@ mod tests {
             "CTOX_ENGINE_PA_CACHE_TYPE_OVERRIDE".to_string(),
             "f8e4m3".to_string(),
         );
-        let plan = build_gpt_oss_20b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
+        let plan = build_gpt_oss_120b_bundle(ChatPreset::Quality, &hardware(3, 24_576), &env_map)
             .selected_plan;
         assert_eq!(plan.paged_attn, "auto");
         assert_eq!(plan.pa_cache_type.as_deref(), Some("turboquant3"));
@@ -8815,7 +8816,7 @@ mod tests {
 
     #[test]
     fn estimate_kv_cache_bytes_matches_hybrid_attention_math() {
-        // Qwen3.6 reference numbers from the model card:
+        // Qwen3.5 reference numbers from the model card:
         // 40 layers, full_attention_interval=4 ⇒ 10 KV-holding layers.
         // num_kv_heads=2, head_dim=256, BF16 KV ⇒ 16 bits per element.
         // Per full-attn layer per token: 2 (K+V) × 2 heads × 256 dim × 16 bits
@@ -8832,13 +8833,13 @@ mod tests {
     }
 
     #[test]
-    fn estimate_moe_weights_bytes_qwen3_6_at_q4k() {
-        // Qwen3.6: 256 routed experts × 40 layers × 3 matrices × (2048 × 512)
+    fn estimate_moe_weights_bytes_qwen3_5_at_q4k() {
+        // Qwen3.5: 256 routed experts × 40 layers × 3 matrices × (2048 × 512)
         // params + 40 layers × 3 × (2048 × 512) shared expert.
         // Routed params: 256 × 40 × 3 × 2048 × 512 = 32.2 Gparams.
         // Shared params: 40 × 3 × 2048 × 512 = 126 Mparams.
         // Total: ~32.3 Gparams × 0.5 bytes (Q4K) ≈ 15.05 GiB.
-        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.5-35B-A3B").unwrap();
         let bytes = estimate_moe_weights_bytes(&arch, Some("Q4K"));
         let gib = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
         assert!(
@@ -8850,7 +8851,7 @@ mod tests {
 
     #[test]
     fn auto_detect_q4k_fits_when_observed_available_is_large() {
-        // Apple Silicon M5 32 GB, Qwen3.6 at Q4K (~15 GiB MoE). When the
+        // Apple Silicon M5 32 GB, Qwen3.5 at Q4K (~15 GiB MoE). When the
         // caller passes an authoritative `observed_available_mb` showing
         // the box has plenty of free RAM (fresh boot, 28 GiB free), the
         // Q4K model fits — cache auto-disables.
@@ -8863,7 +8864,7 @@ mod tests {
             gpu0_desktop_reserve_mb: 1024,
             fingerprint: "m5".to_string(),
         };
-        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.5-35B-A3B").unwrap();
         // 5 GiB KV reserve (262k, BF16, 10 full-attn layers).
         // 28 GiB observed-available (fresh boot).
         let capacity = auto_detect_moe_cache_capacity(
@@ -8876,7 +8877,7 @@ mod tests {
         );
         assert!(
             capacity.is_none(),
-            "Q4K Qwen3.6 on 28 GiB free + 5 GiB KV reserve must fit; got Some({:?})",
+            "Q4K Qwen3.5 on 28 GiB free + 5 GiB KV reserve must fit; got Some({:?})",
             capacity
         );
     }
@@ -8895,7 +8896,7 @@ mod tests {
             gpu0_desktop_reserve_mb: 1024,
             fingerprint: "m5".to_string(),
         };
-        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.5-35B-A3B").unwrap();
         let capacity = auto_detect_moe_cache_capacity(
             &arch,
             &hw,
@@ -8906,7 +8907,7 @@ mod tests {
         );
         assert!(
             capacity.is_some(),
-            "Q4K Qwen3.6 on busy 12 GiB-free host must need cache; got None"
+            "Q4K Qwen3.5 on busy 12 GiB-free host must need cache; got None"
         );
     }
 
@@ -8923,12 +8924,12 @@ mod tests {
             gpu0_desktop_reserve_mb: 1024,
             fingerprint: "m5".to_string(),
         };
-        let arch = resolve_moe_arch_info("Qwen/Qwen3.6-35B-A3B").unwrap();
+        let arch = resolve_moe_arch_info("Qwen/Qwen3.5-35B-A3B").unwrap();
         // Heuristic fallback (no observed_available): 32 GiB × 70 % = 22.4
         // GiB - 5 GiB KV = 17.4 GiB. Non-MoE reserve = 61/6 ≈ 10 GiB.
         // moe_budget = 7.4 GiB. K = 7.4 / 0.24 (per-expert) ≈ 31.
         let capacity = auto_detect_moe_cache_capacity(&arch, &hw, true, None, 5 * 1024, None);
-        let k = capacity.expect("BF16 Qwen3.6 must require cache on 32 GiB M5");
+        let k = capacity.expect("BF16 Qwen3.5 must require cache on 32 GiB M5");
         assert!(k >= 16, "K={} below floor 2×top_k=16", k);
         assert!(k <= 256, "K={} above num_experts=256", k);
         // Envelope ±40% around predicted 31:

@@ -38,6 +38,6 @@ Useful commands:
 - Deterministic core suite:
   `cargo test --test service_surface --test durable_queue --test channels_core --test follow_up_core --test schedule_core --test governance_core --test lcm_core --test context_health_core --test plan_core --test scrape_core --test verification_core`
 - Model suitability gate:
-  `CTOX_QUALIFY_MODEL="openai/gpt-oss-20b" CTOX_QUALIFY_SCENARIOS="minimal_ctox_stability,continuity_recall" cargo test --test qualification_gate`
+  `CTOX_QUALIFY_MODEL="Qwen/Qwen3.5-27B" CTOX_QUALIFY_SCENARIOS="minimal_ctox_stability,continuity_recall" cargo test --test qualification_gate`
 
 Benchmarks stay separate under `benchmarks/` when they are intentionally kept as long-running stress or evaluation paths.

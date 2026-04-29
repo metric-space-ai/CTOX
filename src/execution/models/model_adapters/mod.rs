@@ -2,6 +2,7 @@ use crate::inference::engine;
 use anyhow::Context;
 use serde_json::Value;
 
+pub(crate) mod anthropic;
 pub(crate) mod gemma4;
 pub(crate) mod glm47;
 pub(crate) mod gpt_oss;
@@ -15,6 +16,7 @@ pub(crate) mod qwen35;
 pub enum ResponsesTransportKind {
     ChatCompletions,
     CompletionTemplate,
+    AnthropicMessages,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +29,7 @@ pub enum ResponsesModelAdapter {
     MiniMax,
     Mistral,
     Kimi,
+    Anthropic,
 }
 
 pub fn adapter_reasoning_cap_env_key() -> &'static str {
@@ -69,6 +72,7 @@ impl ResponsesModelAdapter {
             engine::ChatModelFamily::MiniMax => Some(Self::MiniMax),
             engine::ChatModelFamily::Mistral => Some(Self::Mistral),
             engine::ChatModelFamily::Kimi => Some(Self::Kimi),
+            engine::ChatModelFamily::Anthropic => Some(Self::Anthropic),
         }
     }
 
@@ -82,6 +86,7 @@ impl ResponsesModelAdapter {
             Self::MiniMax => minimax::adapter_id(),
             Self::Mistral => mistral::adapter_id(),
             Self::Kimi => kimi::adapter_id(),
+            Self::Anthropic => anthropic::adapter_id(),
         }
     }
 
@@ -95,6 +100,7 @@ impl ResponsesModelAdapter {
             Self::MiniMax => minimax::transport_kind(),
             Self::Mistral => mistral::transport_kind(),
             Self::Kimi => kimi::transport_kind(),
+            Self::Anthropic => anthropic::transport_kind(),
         }
     }
 
@@ -108,6 +114,7 @@ impl ResponsesModelAdapter {
             Self::MiniMax => minimax::upstream_path(),
             Self::Mistral => mistral::upstream_path(),
             Self::Kimi => kimi::upstream_path(),
+            Self::Anthropic => anthropic::upstream_path(),
         }
     }
 
@@ -125,7 +132,7 @@ impl ResponsesModelAdapter {
     ) -> anyhow::Result<ResolvedResponsesAdapterRoute> {
         let request_payload: Value = serde_json::from_slice(raw)
             .context("failed to parse canonical responses request for adapter routing")?;
-        let transport_kind = if remote {
+        let transport_kind = if remote && !matches!(self, Self::Anthropic) {
             // Remote API providers (OpenRouter etc.) always use standard
             // /v1/chat/completions — even GPT-OSS, which locally uses the
             // Harmony completion-template transport.
@@ -159,6 +166,7 @@ impl ResponsesModelAdapter {
             Self::MiniMax => minimax::rewrite_request(raw),
             Self::Mistral => mistral::rewrite_request(raw),
             Self::Kimi => kimi::rewrite_request(raw),
+            Self::Anthropic => anthropic::rewrite_request(raw),
         }
     }
 
@@ -197,6 +205,9 @@ impl ResponsesModelAdapter {
                 mistral::rewrite_success_response(raw, fallback_model, exact_text_override)
             }
             Self::Kimi => kimi::rewrite_success_response(raw, fallback_model, exact_text_override),
+            Self::Anthropic => {
+                anthropic::rewrite_success_response(raw, fallback_model, exact_text_override)
+            }
         }
     }
 
@@ -215,7 +226,8 @@ impl ResponsesModelAdapter {
             | Self::Glm47
             | Self::MiniMax
             | Self::Mistral
-            | Self::Kimi => Ok(None),
+            | Self::Kimi
+            | Self::Anthropic => Ok(None),
         }
     }
 }
@@ -236,6 +248,9 @@ pub fn runtime_adapter_tuning_for_local_plan(
         Some(ResponsesModelAdapter::MiniMax) => minimax::runtime_tuning(preset, max_output_tokens),
         Some(ResponsesModelAdapter::Mistral) => mistral::runtime_tuning(preset, max_output_tokens),
         Some(ResponsesModelAdapter::Kimi) => kimi::runtime_tuning(preset, max_output_tokens),
+        Some(ResponsesModelAdapter::Anthropic) => {
+            anthropic::runtime_tuning(preset, max_output_tokens)
+        }
         None => crate::inference::runtime_state::AdapterRuntimeTuning::default(),
     }
 }
@@ -324,6 +339,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::MiniMax => minimax::compact_instructions(),
             ResponsesModelAdapter::Mistral => mistral::compact_instructions(),
             ResponsesModelAdapter::Kimi => kimi::compact_instructions(),
+            ResponsesModelAdapter::Anthropic => anthropic::compact_instructions(),
         }
     }
 
@@ -339,6 +355,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::MiniMax => minimax::reasoning_effort_override(),
             ResponsesModelAdapter::Mistral => mistral::reasoning_effort_override(),
             ResponsesModelAdapter::Kimi => kimi::reasoning_effort_override(),
+            ResponsesModelAdapter::Anthropic => anthropic::reasoning_effort_override(),
         }
     }
 
@@ -352,6 +369,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::MiniMax => minimax::unified_exec_enabled(),
             ResponsesModelAdapter::Mistral => mistral::unified_exec_enabled(),
             ResponsesModelAdapter::Kimi => kimi::unified_exec_enabled(),
+            ResponsesModelAdapter::Anthropic => anthropic::unified_exec_enabled(),
         }
     }
 
@@ -365,6 +383,7 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::MiniMax => minimax::uses_ctox_web_stack(),
             ResponsesModelAdapter::Mistral => mistral::uses_ctox_web_stack(),
             ResponsesModelAdapter::Kimi => kimi::uses_ctox_web_stack(),
+            ResponsesModelAdapter::Anthropic => anthropic::uses_ctox_web_stack(),
         }
     }
 
@@ -394,6 +413,9 @@ impl LocalCodexExecPolicy {
             ResponsesModelAdapter::Kimi => {
                 kimi::compact_limit(self.model.as_str(), realized_context)
             }
+            ResponsesModelAdapter::Anthropic => {
+                anthropic::compact_limit(self.model.as_str(), realized_context)
+            }
         }
     }
 }
@@ -407,7 +429,7 @@ mod tests {
 
     #[test]
     fn gpt_oss_route_uses_completion_template_transport() {
-        let adapter = ResponsesModelAdapter::from_model("openai/gpt-oss-20b")
+        let adapter = ResponsesModelAdapter::from_model("openai/gpt-oss-120b")
             .expect("gpt-oss adapter should resolve");
         assert_eq!(adapter.id(), "gpt_oss");
         assert_eq!(
@@ -442,8 +464,31 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_route_uses_messages_transport() {
+        let request = serde_json::json!({
+            "model": "claude-opus-4-6",
+            "input": "hello",
+            "stream": false
+        });
+        let route = ResolvedResponsesAdapterRoute::resolve(
+            Some("claude-opus-4-6"),
+            &serde_json::to_vec(&request).expect("request should encode"),
+            true,
+        )
+        .expect("route resolution should succeed")
+        .expect("anthropic route should resolve");
+        let plan = route.response_plan();
+        assert_eq!(route.id(), "anthropic");
+        assert_eq!(route.upstream_path(), "/v1/messages");
+        assert_eq!(
+            plan.transport_kind(),
+            ResponsesTransportKind::AnthropicMessages
+        );
+    }
+
+    #[test]
     fn local_exec_policy_resolves_generic_compact_instructions() {
-        let policy = LocalCodexExecPolicy::resolve("openai/gpt-oss-20b")
+        let policy = LocalCodexExecPolicy::resolve("openai/gpt-oss-120b")
             .expect("gpt-oss local exec policy should resolve");
         assert!(policy
             .compact_instructions()
@@ -454,7 +499,7 @@ mod tests {
 
     #[test]
     fn local_exec_policy_keeps_model_specific_compact_limits_in_adapter_layer() {
-        let qwen = LocalCodexExecPolicy::resolve("Qwen/Qwen3.6-35B-A3B")
+        let qwen = LocalCodexExecPolicy::resolve("Qwen/Qwen3.5-35B-A3B")
             .expect("qwen local exec policy should resolve");
         let glm = LocalCodexExecPolicy::resolve("zai-org/GLM-4.7-Flash")
             .expect("glm local exec policy should resolve");

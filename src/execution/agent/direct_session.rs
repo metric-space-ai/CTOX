@@ -36,7 +36,9 @@ use ctox_protocol::user_input::UserInput;
 use ctox_utils_absolute_path::AbsolutePathBuf;
 
 use crate::context::compact::{CompactDecision, CompactMode, CompactPolicy, CompactTrigger};
+use crate::inference::engine;
 use crate::inference::runtime_kernel;
+use crate::inference::runtime_state;
 use crate::secrets;
 
 // ---------------------------------------------------------------------------
@@ -48,12 +50,14 @@ use crate::secrets;
 /// refresh calls. Solves the resource-exhaustion hang that occurred when
 /// spawning a new client per call.
 pub(crate) struct PersistentSession {
-    runtime: tokio::runtime::Runtime,
+    runtime: Option<tokio::runtime::Runtime>,
     // These are wrapped in Option so we can take() them in shutdown.
     client: Option<InProcessAppServerClient>,
     thread_id: String,
     seq: RequestIdSeq,
     cwd: PathBuf,
+    model: String,
+    model_provider: Option<String>,
     policy: CompactPolicy,
     ctx_log: ContextLogger,
     root: PathBuf,
@@ -82,7 +86,7 @@ impl PersistentSession {
             .build()
             .context("failed to start tokio runtime")?;
 
-        let (client, thread_id, cwd, seq) = rt.block_on(async {
+        let (client, thread_id, cwd, seq, model, model_provider) = rt.block_on(async {
             Self::start_client_and_thread(root, settings, base_instructions).await
         })?;
 
@@ -126,11 +130,13 @@ impl PersistentSession {
         );
 
         Ok(Self {
-            runtime: rt,
+            runtime: Some(rt),
             client: Some(client),
             thread_id,
             seq,
             cwd,
+            model,
+            model_provider,
             policy,
             ctx_log,
             root: root.to_path_buf(),
@@ -153,6 +159,8 @@ impl PersistentSession {
             .ok_or_else(|| anyhow::anyhow!("session already shut down"))?;
         let thread_id = self.thread_id.clone();
         let cwd = self.cwd.clone();
+        let model = self.model.clone();
+        let model_provider = self.model_provider.clone();
         let prompt = prompt.to_string();
         let root = self.root.clone();
 
@@ -161,11 +169,17 @@ impl PersistentSession {
             &format!("\"prompt_len\":{},\"timeout\":{:?}", prompt.len(), timeout),
         );
 
-        let result = self.runtime.block_on(async {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("session runtime already shut down"))?;
+        let result = runtime.block_on(async {
             Self::run_turn_async(
                 client,
                 &thread_id,
                 &cwd,
+                &model,
+                model_provider.as_deref(),
                 &root,
                 &prompt,
                 timeout,
@@ -181,16 +195,7 @@ impl PersistentSession {
 
     /// Shut down the client and runtime cleanly.
     pub fn shutdown(mut self) {
-        if let Some(client) = self.client.take() {
-            let tid = self.thread_id.clone();
-            let _ = self.runtime.block_on(async {
-                eprintln!(
-                    "[ctox direct-session] shutting down persistent session thread_id={}",
-                    tid
-                );
-                let _ = client.shutdown().await;
-            });
-        }
+        self.shutdown_inner("shutting down");
     }
 
     // --- Internal async helpers ---
@@ -199,28 +204,82 @@ impl PersistentSession {
         root: &Path,
         settings: &BTreeMap<String, String>,
         base_instructions: Option<&str>,
-    ) -> Result<(InProcessAppServerClient, String, PathBuf, RequestIdSeq)> {
+    ) -> Result<(
+        InProcessAppServerClient,
+        String,
+        PathBuf,
+        RequestIdSeq,
+        String,
+        Option<String>,
+    )> {
+        let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
+        let runtime_model = resolved_runtime.as_ref().and_then(|runtime| {
+            runtime
+                .state
+                .active_model
+                .clone()
+                .or_else(|| runtime.state.requested_model.clone())
+                .or_else(|| runtime.state.base_model.clone())
+        });
         let model = settings
             .get("CTOX_CHAT_MODEL")
             .or_else(|| settings.get("CODEX_MODEL"))
             .cloned()
+            .or(runtime_model)
             .unwrap_or_else(|| "gpt-5.4-mini".to_string());
+        let runtime_api_provider = resolved_runtime
+            .as_ref()
+            .filter(|runtime| !runtime.state.source.is_local())
+            .map(|runtime| {
+                runtime_state::api_provider_for_runtime_state(&runtime.state).to_string()
+            });
+        let selected_api_provider = settings
+            .get("CTOX_API_PROVIDER")
+            .map(|value| runtime_state::normalize_api_provider(value).to_string())
+            .filter(|provider| {
+                !provider.eq_ignore_ascii_case("local")
+                    && engine::api_provider_supports_model(provider, &model)
+            })
+            .or_else(|| {
+                runtime_api_provider.filter(|provider| {
+                    !provider.eq_ignore_ascii_case("local")
+                        && engine::api_provider_supports_model(provider, &model)
+                })
+            })
+            .or_else(|| {
+                let explicit_api_source = settings
+                    .get("CTOX_CHAT_SOURCE")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("api"));
+                (explicit_api_source || engine::is_api_chat_model(&model))
+                    .then(|| engine::default_api_provider_for_model(&model).to_string())
+            });
         let cwd: PathBuf = root.to_path_buf();
 
         let codex_home =
             find_codex_home().map_err(|err| anyhow::anyhow!("find_codex_home: {err}"))?;
 
-        let api_key = settings
-            .get("OPENAI_API_KEY")
-            .or_else(|| settings.get("OPENROUTER_API_KEY"))
-            .or_else(|| settings.get("ANTHROPIC_API_KEY"))
-            .or_else(|| settings.get("MINIMAX_API_KEY"))
-            .cloned()
-            .or_else(|| secrets::get_credential(root, "OPENAI_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "OPENROUTER_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "ANTHROPIC_API_KEY"))
-            .or_else(|| secrets::get_credential(root, "MINIMAX_API_KEY"))
-            .filter(|v| !v.trim().is_empty());
+        let selected_api_key_name = selected_api_provider
+            .as_deref()
+            .map(runtime_state::api_key_env_var_for_provider);
+        let api_key = match selected_api_key_name {
+            Some(key) => settings
+                .get(key)
+                .cloned()
+                .or_else(|| secrets::get_credential(root, key)),
+            None => settings
+                .get("OPENAI_API_KEY")
+                .or_else(|| settings.get("OPENROUTER_API_KEY"))
+                .or_else(|| settings.get("ANTHROPIC_API_KEY"))
+                .or_else(|| settings.get("MINIMAX_API_KEY"))
+                .or_else(|| settings.get("AZURE_FOUNDRY_API_KEY"))
+                .cloned()
+                .or_else(|| secrets::get_credential(root, "OPENAI_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "OPENROUTER_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "ANTHROPIC_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "MINIMAX_API_KEY"))
+                .or_else(|| secrets::get_credential(root, "AZURE_FOUNDRY_API_KEY")),
+        }
+        .filter(|v| !v.trim().is_empty());
         let config_cwd =
             AbsolutePathBuf::from_absolute_path(cwd.canonicalize().unwrap_or(cwd.clone()))
                 .map_err(|err| anyhow::anyhow!("cwd resolve: {err}"))?;
@@ -250,7 +309,6 @@ impl PersistentSession {
         );
 
         // Resolve model-provider BEFORE building overrides
-        let resolved_runtime = runtime_kernel::InferenceRuntimeKernel::resolve(root).ok();
         let api_provider = super::turn_loop::resolve_api_model_provider_spec(
             &model,
             settings,
@@ -282,7 +340,7 @@ impl PersistentSession {
             });
         let overrides = ConfigOverrides {
             model: Some(model.clone()),
-            model_provider: selected_provider_id,
+            model_provider: selected_provider_id.clone(),
             cwd: Some(cwd.clone()),
             approval_policy: Some(AskForApproval::Never),
             sandbox_mode: Some(SandboxMode::DangerFullAccess),
@@ -311,7 +369,7 @@ impl PersistentSession {
         }
         let config = Arc::new(
             ConfigBuilder::default()
-                .cli_overrides(cli_overrides)
+                .cli_overrides(cli_overrides.clone())
                 .harness_overrides(overrides)
                 .cloud_requirements(cloud_requirements.clone())
                 .build()
@@ -328,7 +386,7 @@ impl PersistentSession {
         let start_args = InProcessClientStartArgs {
             arg0_paths: Arg0DispatchPaths::default(),
             config,
-            cli_overrides: vec![],
+            cli_overrides: cli_overrides.clone(),
             loader_overrides: Default::default(),
             cloud_requirements,
             auth_manager: Some(auth_manager),
@@ -355,7 +413,8 @@ impl PersistentSession {
             .request_typed(ClientRequest::ThreadStart {
                 request_id: seq.next(),
                 params: ThreadStartParams {
-                    model: Some(model),
+                    model: Some(model.clone()),
+                    model_provider: selected_provider_id.clone(),
                     cwd: Some(cwd.to_string_lossy().to_string()),
                     approval_policy: Some(AskForApproval::Never.into()),
                     sandbox: Some(ctox_app_server_protocol::SandboxMode::DangerFullAccess),
@@ -370,13 +429,15 @@ impl PersistentSession {
         let thread_id = thread_resp.thread.id.clone();
         eprintln!("[ctox direct-session] thread started: {}", thread_id);
 
-        Ok((client, thread_id, cwd, seq))
+        Ok((client, thread_id, cwd, seq, model, selected_provider_id))
     }
 
     async fn run_turn_async(
         client: &mut InProcessAppServerClient,
         _old_thread_id: &str,
         cwd: &Path,
+        model: &str,
+        model_provider: Option<&str>,
         root: &Path,
         prompt: &str,
         timeout: Option<Duration>,
@@ -391,6 +452,8 @@ impl PersistentSession {
             .request_typed(ClientRequest::ThreadStart {
                 request_id: seq.next(),
                 params: ThreadStartParams {
+                    model: Some(model.to_string()),
+                    model_provider: model_provider.map(str::to_string),
                     cwd: Some(cwd.to_string_lossy().to_string()),
                     approval_policy: Some(AskForApproval::Never.into()),
                     sandbox: Some(ctox_app_server_protocol::SandboxMode::DangerFullAccess),
@@ -581,6 +644,27 @@ impl PersistentSession {
         } else {
             final_message.ok_or_else(|| anyhow::anyhow!("turn completed without assistant message"))
         }
+    }
+}
+
+impl Drop for PersistentSession {
+    fn drop(&mut self) {
+        self.shutdown_inner("dropping");
+    }
+}
+
+impl PersistentSession {
+    fn shutdown_inner(&mut self, action: &str) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
+        if let Some(client) = self.client.take() {
+            let tid = self.thread_id.clone();
+            eprintln!("[ctox direct-session] {action} persistent session thread_id={tid}");
+            client.abort_now();
+            eprintln!("[ctox direct-session] persistent session aborted thread_id={tid}");
+        }
+        runtime.shutdown_timeout(Duration::from_secs(2));
     }
 }
 

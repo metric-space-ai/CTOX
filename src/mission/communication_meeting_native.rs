@@ -6,6 +6,8 @@
 // the meeting chat, and responds when @CTOX is mentioned.
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +21,9 @@ use super::channels::{
     UpsertMessage,
 };
 use super::communication_adapters::{AdapterSyncCommandRequest, MeetingSendCommandRequest};
+use crate::inference::{engine, runtime_env, supervisor};
+
+const DEFAULT_MEETING_STT_MODEL: &str = "engineai/Voxtral-Mini-4B-Realtime-2602";
 
 // ---------------------------------------------------------------------------
 // Public adapter interface (sync / send / service_sync)
@@ -52,7 +57,7 @@ pub(crate) fn sync(
         let Ok(contents) = fs::read_to_string(&path) else {
             continue;
         };
-        let Ok(session) = serde_json::from_str::<Value>(&contents) else {
+        let Ok(mut session) = serde_json::from_str::<Value>(&contents) else {
             continue;
         };
         let status = session
@@ -67,11 +72,13 @@ pub(crate) fn sync(
         let session_id = session
             .get("session_id")
             .and_then(Value::as_str)
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         let provider = session
             .get("provider")
             .and_then(Value::as_str)
-            .unwrap_or("unknown");
+            .unwrap_or("unknown")
+            .to_string();
 
         // Read chat messages from the session JSON and ingest any not yet in SQLite
         let chat_messages = session
@@ -90,6 +97,9 @@ pub(crate) fn sync(
             if text.is_empty() {
                 continue;
             }
+            if session_value_is_own_message(&session, sender, text) {
+                continue;
+            }
 
             // Stable message_key prevents re-ingesting the same chat line
             let message_key = format!(
@@ -105,12 +115,67 @@ pub(crate) fn sync(
             };
 
             let is_mention = MeetingSession::is_mention(text);
+            if is_mention
+                && !session
+                    .get("mention_ack_sent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                let ack_text = first_mention_ack_text();
+                let _ = write_chat_command_to_session(&session, ack_text);
+                record_meeting_outbound_message(
+                    &mut conn,
+                    &session_id,
+                    &provider,
+                    ack_text,
+                    "ctox_first_mention_ack",
+                )?;
+                if let Some(object) = session.as_object_mut() {
+                    object.insert("mention_ack_sent".to_string(), Value::Bool(true));
+                    object.insert(
+                        "mention_ack_sent_at".to_string(),
+                        Value::String(now_iso_string()),
+                    );
+                }
+                let _ = fs::write(&path, serde_json::to_string_pretty(&session)?);
+            }
+            let transcript_snapshot = session_transcript_snapshot(&session, 12);
+            let chat_snapshot = session_chat_snapshot(&session, 20);
+            let body_text = if is_mention {
+                render_meeting_mention_inbound_body(
+                    &session_id,
+                    &provider,
+                    sender,
+                    text,
+                    timestamp,
+                    &transcript_snapshot,
+                    &chat_snapshot,
+                )
+            } else {
+                text.to_string()
+            };
+            let preview = clip_chars(&body_text, 120);
             let metadata = json!({
-                "provider": provider,
-                "session_id": session_id,
+                "provider": &provider,
+                "session_id": &session_id,
                 "source": "meeting_chat",
                 "is_mention": is_mention,
                 "skill": if is_mention { "meeting-participant" } else { "" },
+                "priority": if is_mention { "urgent" } else { "normal" },
+                "transcript_chunk_count": session
+                    .get("transcript_chunk_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| session
+                        .get("transcript_chunks")
+                        .and_then(Value::as_array)
+                        .map(|items| items.len() as u64)
+                        .unwrap_or(0)),
+                "chat_message_count": session
+                    .get("chat_message_count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_else(|| chat_messages.len() as u64),
+                "transcript_snapshot": transcript_snapshot,
+                "chat_snapshot": chat_snapshot,
             });
 
             upsert_communication_message(
@@ -119,7 +184,7 @@ pub(crate) fn sync(
                     message_key: &message_key,
                     channel: "meeting",
                     account_key,
-                    thread_key: session_id,
+                    thread_key: &session_id,
                     remote_id: &message_key,
                     direction: "inbound",
                     folder_hint: "chat",
@@ -129,8 +194,8 @@ pub(crate) fn sync(
                     cc_addresses_json: "[]",
                     bcc_addresses_json: "[]",
                     subject: &format!("{} meeting chat", provider),
-                    preview: &text[..text.len().min(120)],
-                    body_text: text,
+                    preview: &preview,
+                    body_text: &body_text,
                     body_html: "",
                     raw_payload_ref: "",
                     trust_level: "internal",
@@ -146,7 +211,7 @@ pub(crate) fn sync(
         }
 
         if !chat_messages.is_empty() {
-            let _ = refresh_thread(&mut conn, session_id);
+            let _ = refresh_thread(&mut conn, &session_id);
         }
     }
 
@@ -226,33 +291,430 @@ pub(crate) fn send(
     let _ = refresh_thread(&mut conn, request.session_id);
 
     // 2. Forward to Playwright process via stdin pipe
-    let stdin_path = session.get("stdin_pipe").and_then(Value::as_str);
-    if let Some(stdin_path) = stdin_path {
-        let command = json!({"action": "send_chat", "text": request.body});
-        match fs::OpenOptions::new().append(true).open(stdin_path) {
-            Ok(mut file) => {
-                let _ = writeln!(file, "{}", command);
-            }
-            Err(err) => {
-                eprintln!("[meeting] warning: could not write to stdin pipe: {err}");
-            }
-        }
-    }
+    let _ = write_chat_command_to_session(&session, request.body);
 
     Ok(
         json!({"ok": true, "status": "sent", "session_id": request.session_id, "message_key": message_key}),
     )
 }
 
+fn first_mention_ack_text() -> &'static str {
+    "Ich habe die Frage gesehen und antworte hier im Chat. Das kann einen Augenblick dauern, weil mir Echtzeit-Antworten leider noch nicht zuverlaessig moeglich sind."
+}
+
+fn write_chat_command_to_session(session: &Value, text: &str) -> Result<()> {
+    let Some(stdin_path) = session.get("stdin_pipe").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let command = json!({"action": "send_chat", "text": text});
+    match fs::OpenOptions::new().append(true).open(stdin_path) {
+        Ok(mut file) => {
+            let _ = writeln!(file, "{}", command);
+        }
+        Err(err) => {
+            eprintln!("[meeting] warning: could not write to stdin pipe: {err}");
+        }
+    }
+    Ok(())
+}
+
+fn session_value_is_own_message(session: &Value, sender: &str, text: &str) -> bool {
+    let bot_name = session
+        .get("bot_name")
+        .and_then(Value::as_str)
+        .unwrap_or("CTOX Notetaker");
+    let outbound = session
+        .get("outbound_chat_texts")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    is_own_message_text(bot_name, &outbound, sender, text)
+}
+
+fn reconcile_stale_running_session(path: &Path, mut session: Value) -> Value {
+    let is_running = session
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status == "running" || status == "joining" || status == "active");
+    if !is_running {
+        return session;
+    }
+    let pid = session
+        .get("pid")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if pid != 0 && process_is_running(pid) {
+        return session;
+    }
+    if let Some(object) = session.as_object_mut() {
+        object.insert("status".to_string(), Value::String("ended".to_string()));
+        object.insert("ended_at".to_string(), Value::String(now_iso_string()));
+        object.insert(
+            "end_reason".to_string(),
+            Value::String("process_not_running".to_string()),
+        );
+    }
+    let _ = fs::write(
+        path,
+        serde_json::to_string_pretty(&session).unwrap_or_default(),
+    );
+    session
+}
+
+fn process_is_running(pid: u64) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn record_meeting_outbound_message(
+    conn: &mut rusqlite::Connection,
+    session_id: &str,
+    provider: &str,
+    body: &str,
+    source: &str,
+) -> Result<()> {
+    let observed_at = now_iso_string();
+    let message_key = format!(
+        "meeting::{}::out::{}",
+        session_id,
+        stable_digest(&format!("{source}:{body}:{observed_at}"))
+    );
+    let metadata = json!({
+        "provider": provider,
+        "session_id": session_id,
+        "source": source,
+    });
+    upsert_communication_message(
+        conn,
+        UpsertMessage {
+            message_key: &message_key,
+            channel: "meeting",
+            account_key: "meeting:system",
+            thread_key: session_id,
+            remote_id: &message_key,
+            direction: "outbound",
+            folder_hint: "sent",
+            sender_display: "CTOX Notetaker",
+            sender_address: "ctox@local",
+            recipient_addresses_json: "[]",
+            cc_addresses_json: "[]",
+            bcc_addresses_json: "[]",
+            subject: &format!("{} meeting chat reply", provider),
+            preview: &body[..body.len().min(120)],
+            body_text: body,
+            body_html: "",
+            raw_payload_ref: "",
+            trust_level: "internal",
+            status: "sent",
+            seen: true,
+            has_attachments: false,
+            external_created_at: &observed_at,
+            observed_at: &observed_at,
+            metadata_json: &serde_json::to_string(&metadata)?,
+        },
+    )?;
+    refresh_thread(conn, session_id)?;
+    Ok(())
+}
+
+fn render_meeting_mention_inbound_body(
+    session_id: &str,
+    provider: &str,
+    sender: &str,
+    text: &str,
+    timestamp: &str,
+    transcript_snapshot: &str,
+    chat_snapshot: &str,
+) -> String {
+    let timestamp = if timestamp.trim().is_empty() {
+        "(unknown)"
+    } else {
+        timestamp
+    };
+    let transcript = if transcript_snapshot.trim().is_empty() {
+        "(Noch kein Live-Transcript verfuegbar. Falls STT offline ist, antworte nur auf Basis von Chat und explizit bekannten Kontext.)"
+    } else {
+        transcript_snapshot
+    };
+    let chat = if chat_snapshot.trim().is_empty() {
+        "(keine vorherigen Chatnachrichten)"
+    } else {
+        chat_snapshot
+    };
+    format!(
+        "@CTOX Meeting-Chat-Erwaehnung\n\
+         Provider: {provider}\n\
+         Session: {session_id}\n\
+         Sender: {sender}\n\
+         Timestamp: {timestamp}\n\
+         Nachricht: {text}\n\n\
+         Live-Transcript bisher (neueste Chunks):\n{transcript}\n\n\
+         Meeting-Chat bisher:\n{chat}\n\n\
+         Antworte kurz im Meeting-Chat. Wenn das Transcript fuer die Frage nicht ausreicht, sage das knapp und frage nach der fehlenden Information."
+    )
+}
+
+fn session_transcript_snapshot(session: &Value, max_chunks: usize) -> String {
+    if let Some(snapshot) = session_transcript_segment_snapshot(session, max_chunks) {
+        return snapshot;
+    }
+    let chunks = session
+        .get("transcript_chunks")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::trim)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let start = chunks.len().saturating_sub(max_chunks);
+    chunks[start..].join("\n")
+}
+
+fn session_transcript_segment_snapshot(session: &Value, max_segments: usize) -> Option<String> {
+    let segments = session
+        .get("transcript_segments")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter_map(render_transcript_segment_value)
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    let start = segments.len().saturating_sub(max_segments);
+    Some(segments[start..].join("\n"))
+}
+
+fn render_transcript_segment_value(segment: &Value) -> Option<String> {
+    let text = segment.get("text").and_then(Value::as_str)?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let speaker = segment
+        .get("speaker_display")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown");
+    let timestamp = segment
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("unknown");
+    let source = segment
+        .get("source")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("stt");
+    let confidence = segment
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    Some(format!(
+        "[{timestamp}] {speaker}: {text} [source={source} confidence={confidence:.2}]"
+    ))
+}
+
+fn session_chat_snapshot(session: &Value, max_messages: usize) -> String {
+    let messages = session
+        .get("chat_messages")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|message| {
+                    let sender = message
+                        .get("sender")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Unknown");
+                    let text = message.get("text").and_then(Value::as_str).unwrap_or("");
+                    if text.trim().is_empty() {
+                        return None;
+                    }
+                    let timestamp = message
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    Some(if timestamp.trim().is_empty() {
+                        format!("{sender}: {text}")
+                    } else {
+                        format!("[{timestamp}] {sender}: {text}")
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let start = messages.len().saturating_sub(max_messages);
+    messages[start..].join("\n")
+}
+
+fn clip_chars(value: &str, max_chars: usize) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(max_chars)
+        .collect()
+}
+
+struct MeetingSttRuntimeGuard {
+    root: PathBuf,
+    started_by_meeting: bool,
+    restore_values: BTreeMap<String, Option<String>>,
+    start_error: Option<String>,
+    finished: bool,
+}
+
+impl MeetingSttRuntimeGuard {
+    fn ensure_for_meeting(root: &Path) -> Self {
+        let mut guard = Self {
+            root: root.to_path_buf(),
+            started_by_meeting: false,
+            restore_values: BTreeMap::new(),
+            start_error: None,
+            finished: false,
+        };
+        if check_engine_reachable(root) {
+            return guard;
+        }
+        if let Err(err) = guard.prepare_runtime_config() {
+            guard.start_error = Some(err.to_string());
+            return guard;
+        }
+        match supervisor::ensure_auxiliary_backend_ready(root, engine::AuxiliaryRole::Stt, false) {
+            Ok(()) => {
+                if check_engine_reachable(root) {
+                    guard.started_by_meeting = true;
+                    eprintln!("[meeting] STT runtime auto-started for this meeting");
+                } else {
+                    guard.start_error = Some(
+                        "STT backend launch completed but the transcription transport is still unavailable"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(err) => {
+                guard.start_error = Some(err.to_string());
+            }
+        }
+        guard
+    }
+
+    fn prepare_runtime_config(&mut self) -> Result<()> {
+        let mut env_map = runtime_env::load_runtime_env_map(&self.root).unwrap_or_default();
+        self.set_runtime_key(
+            &mut env_map,
+            "CTOX_ENABLE_STT_BACKEND",
+            Some("1".to_string()),
+        );
+        let current_model = env_map
+            .get("CTOX_STT_MODEL")
+            .map(String::as_str)
+            .unwrap_or("");
+        if normalize_meeting_stt_model(Some(current_model)) != current_model.trim() {
+            self.set_runtime_key(
+                &mut env_map,
+                "CTOX_STT_MODEL",
+                Some(DEFAULT_MEETING_STT_MODEL.to_string()),
+            );
+        }
+        runtime_env::save_runtime_env_map(&self.root, &env_map)
+    }
+
+    fn set_runtime_key(
+        &mut self,
+        env_map: &mut BTreeMap<String, String>,
+        key: &'static str,
+        value: Option<String>,
+    ) {
+        self.restore_values
+            .entry(key.to_string())
+            .or_insert_with(|| env_map.get(key).cloned());
+        match value {
+            Some(value) => {
+                env_map.insert(key.to_string(), value);
+            }
+            None => {
+                env_map.remove(key);
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        if self.started_by_meeting {
+            if let Err(err) =
+                supervisor::release_auxiliary_backend(&self.root, engine::AuxiliaryRole::Stt)
+            {
+                eprintln!("[meeting] warning: failed to stop meeting STT runtime: {err}");
+            } else {
+                eprintln!("[meeting] STT runtime stopped after meeting");
+            }
+        }
+        if !self.restore_values.is_empty() {
+            if let Err(err) = self.restore_runtime_config() {
+                eprintln!("[meeting] warning: failed to restore STT runtime config: {err}");
+            }
+        }
+    }
+
+    fn restore_runtime_config(&self) -> Result<()> {
+        let mut env_map = runtime_env::load_runtime_env_map(&self.root).unwrap_or_default();
+        for (key, value) in &self.restore_values {
+            match value {
+                Some(value) => {
+                    env_map.insert(key.clone(), value.clone());
+                }
+                None => {
+                    env_map.remove(key);
+                }
+            }
+        }
+        runtime_env::save_runtime_env_map(&self.root, &env_map)
+    }
+}
+
+impl Drop for MeetingSttRuntimeGuard {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn is_disabled_selector(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "off" | "none" | "disabled"
+    )
+}
+
 /// Service sync — delegates to sync() with proper db_path.
 pub(crate) fn service_sync(
-    _root: &Path,
-    _settings: &BTreeMap<String, String>,
+    root: &Path,
+    settings: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
-    // Service sync is handled via the normal sync_configured_channels path
-    // which calls adapter.service_sync(). For meeting we need the db_path
-    // which is already resolved in channels.rs sync_channel().
-    Ok(None)
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let request = AdapterSyncCommandRequest {
+        db_path: &db_path,
+        passthrough_args: &[],
+        skip_flags: &[],
+    };
+    Ok(Some(sync(root, settings, &request)?))
 }
 
 // ---------------------------------------------------------------------------
@@ -317,6 +779,8 @@ pub fn handle_meeting_command(root: &Path, args: &[String]) -> Result<()> {
                     if entry.path().extension().and_then(|e| e.to_str()) == Some("json") {
                         if let Ok(contents) = fs::read_to_string(entry.path()) {
                             if let Ok(session) = serde_json::from_str::<Value>(&contents) {
+                                let session =
+                                    reconcile_stale_running_session(&entry.path(), session);
                                 sessions.push(session);
                             }
                         }
@@ -340,14 +804,24 @@ pub fn handle_meeting_command(root: &Path, args: &[String]) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
+        "simulate" => {
+            let result = simulate_meeting_session(root, &args[1..])?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
         _ => {
-            println!("usage: ctox meeting <join|schedule|cancel|status|transcript> [args]");
+            println!(
+                "usage: ctox meeting <join|schedule|cancel|status|transcript|simulate> [args]"
+            );
             println!();
             println!("  join <url> [--name <bot-name>]       Join a meeting now");
             println!("  schedule <url> --time <ISO-8601>     Schedule a future join");
             println!("  cancel <url>                         Cancel a scheduled join");
             println!("  status                               Show active/scheduled sessions");
             println!("  transcript <session_id>              Print transcript + chatlog as JSON");
+            println!(
+                "  simulate [--audio <wav>]... [--transcript <text>]... [--chat <sender:text>]..."
+            );
             Ok(())
         }
     }
@@ -358,6 +832,97 @@ fn find_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .map(String::as_str)
+}
+
+fn find_flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(idx, value)| {
+            if value == flag {
+                args.get(idx + 1).map(String::as_str)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn simulate_meeting_session(root: &Path, args: &[String]) -> Result<Value> {
+    let provider = match find_flag_value(args, "--provider")
+        .unwrap_or("google")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "google" | "meet" | "google-meet" => MeetingProvider::GoogleMeet,
+        "microsoft" | "teams" | "microsoft-teams" => MeetingProvider::MicrosoftTeams,
+        "zoom" => MeetingProvider::Zoom,
+        other => bail!("unsupported --provider `{other}`; expected google, teams, or zoom"),
+    };
+    let meeting_url = find_flag_value(args, "--url")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| match provider {
+            MeetingProvider::GoogleMeet => "https://meet.google.com/demo-meet-test".to_string(),
+            MeetingProvider::MicrosoftTeams => "https://teams.microsoft.com/meet/demo".to_string(),
+            MeetingProvider::Zoom => "https://zoom.us/j/123456789".to_string(),
+        });
+    let bot_name = find_flag_value(args, "--name").unwrap_or("CTOX Notetaker");
+    let config = MeetingSessionConfig {
+        root: root.to_path_buf(),
+        meeting_url,
+        provider,
+        bot_name: bot_name.to_string(),
+        max_duration_minutes: 60,
+        audio_chunk_seconds: 30,
+        stt_model: String::new(),
+    };
+    let mut session = MeetingSession::new(&config);
+    session.status = "ended".to_string();
+    session.ended_at = Some(now_iso_string());
+
+    for transcript in find_flag_values(args, "--transcript") {
+        let transcript = transcript.trim();
+        if !transcript.is_empty() {
+            session.push_stt_transcript(transcript.to_string(), None);
+        }
+    }
+    for chat in find_flag_values(args, "--chat") {
+        let (sender, text) = chat
+            .split_once(':')
+            .map(|(sender, text)| (sender.trim(), text.trim()))
+            .unwrap_or(("Participant", chat.trim()));
+        if !text.is_empty() {
+            session.chat_messages.push(ChatMessage {
+                sender: if sender.is_empty() {
+                    "Participant".to_string()
+                } else {
+                    sender.to_string()
+                },
+                text: text.to_string(),
+                timestamp: now_iso_string(),
+            });
+        }
+    }
+    for audio_path in find_flag_values(args, "--audio") {
+        match persist_audio_chunk(root, &session.session_id, audio_path) {
+            Some(path) => session.pending_audio_chunks.push(path),
+            None => eprintln!("[meeting] warning: could not persist fixture audio {audio_path}"),
+        }
+    }
+
+    session.save(root)?;
+    let finalization = finalize_meeting(root, &session, &config)?;
+    Ok(json!({
+        "ok": true,
+        "session_id": session.session_id,
+        "provider": session.provider,
+        "transcript_chunks": session.transcript_chunks.len(),
+        "transcript_segments": session.transcript_segments.len(),
+        "speaker_signals": session.speaker_signals.len(),
+        "chat_messages": session.chat_messages.len(),
+        "recording_artifacts": list_recording_artifacts(root, &session.session_id),
+        "finalization": finalization,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -385,6 +950,11 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     }
     let script_path = reference_dir.join(format!(".meeting-{}.mjs", session.session_id));
     fs::write(&script_path, &script)?;
+    let command_path =
+        meeting_sessions_dir(root).join(format!("{}.commands.jsonl", session.session_id));
+    fs::write(&command_path, "")?;
+    session.stdin_pipe = Some(command_path.display().to_string());
+    session.save(root)?;
 
     // Find Node.js executable
     let node = find_node_executable()?;
@@ -396,10 +966,10 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     );
     eprintln!("[meeting] Script: {}", script_path.display());
 
-    // Pre-flight: check if the STT engine is reachable. We don't abort if it
-    // isn't — audio chunks are still captured and persisted to disk, and we
-    // retry transcription at finalize time. But we warn clearly so the user
-    // knows to run `ctox start` if they want live STT.
+    // Pre-flight: start a transient STT backend when the meeting needs one.
+    // If STT was already running, leave it alone. If this call starts it only
+    // for the meeting, the guard tears it back down after finalization.
+    let mut stt_guard = MeetingSttRuntimeGuard::ensure_for_meeting(&config.root);
     let engine_reachable = check_engine_reachable(&config.root);
     session.engine_was_reachable_at_start = engine_reachable;
     if engine_reachable {
@@ -407,7 +977,9 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     } else {
         eprintln!("[meeting] WARNING: STT runtime not reachable via managed transport");
         eprintln!("[meeting] Audio chunks will still be captured and saved to disk.");
-        eprintln!("[meeting] To enable live transcription, run `ctox start` in another terminal.");
+        if let Some(reason) = stt_guard.start_error.as_deref() {
+            eprintln!("[meeting] STT auto-start failed: {reason}");
+        }
         eprintln!(
             "[meeting] Unsent chunks will be retried at meeting end if the engine becomes available."
         );
@@ -417,6 +989,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     let mut child = Command::new(&node)
         .current_dir(&reference_dir)
         .arg(&script_path)
+        .env("CTOX_MEETING_COMMAND_FILE", &command_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -443,6 +1016,8 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
 
     // Read stdout line by line (JSON-lines protocol)
     let reader = BufReader::new(stdout);
+    let mut join_failure_reason: Option<String> = None;
+    let mut last_speaker_signal: Option<SpeakerSignal> = None;
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
@@ -470,9 +1045,22 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 eprintln!("[meeting] status: {status}");
             }
             "joined" => {
-                eprintln!("[meeting] Joined meeting successfully");
+                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("");
+                if reason.is_empty() {
+                    eprintln!("[meeting] Joined meeting successfully");
+                } else {
+                    eprintln!("[meeting] Joined meeting successfully ({reason})");
+                }
                 session.status = "active".to_string();
                 session.save(root)?;
+            }
+            "join_failed" => {
+                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("");
+                eprintln!("[meeting] join verification failed: {reason}");
+                session.status = "join_failed".to_string();
+                session.ended_at = Some(now_iso_string());
+                session.save(root)?;
+                join_failure_reason = Some(reason.to_string());
             }
             "audio_chunk" => {
                 let chunk_path = event.get("path").and_then(Value::as_str).unwrap_or("");
@@ -492,12 +1080,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 ) {
                     Ok(text) if !text.is_empty() => {
                         eprintln!("[meeting] transcript: {}...", &text[..text.len().min(80)]);
-                        session.transcript_chunks.push(text);
-                        // Chunk successfully transcribed — remove the persisted
-                        // copy to save disk space.
-                        if let Some(p) = persisted_path.as_ref() {
-                            let _ = fs::remove_file(p);
-                        }
+                        session.push_stt_transcript(text, last_speaker_signal.as_ref());
                         session.save(root)?;
                     }
                     Ok(_) => {
@@ -514,6 +1097,29 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                             session.save(root)?;
                         }
                     }
+                }
+            }
+            "active_speaker" => {
+                if let Some(signal) = SpeakerSignal::from_event(&event) {
+                    eprintln!(
+                        "[meeting] active speaker [{}]: {}",
+                        signal.source, signal.speaker_display
+                    );
+                    last_speaker_signal = Some(signal.clone());
+                    session.speaker_signals.push(signal);
+                    session.save(root)?;
+                }
+            }
+            "transcript_segment" => {
+                if let Some(segment) = TranscriptSegment::from_platform_event(&event) {
+                    eprintln!(
+                        "[meeting] transcript segment [{}] {}: {}...",
+                        segment.source,
+                        segment.speaker_display,
+                        &segment.text[..segment.text.len().min(80)]
+                    );
+                    session.push_platform_transcript(segment);
+                    session.save(root)?;
                 }
             }
             "chat" => {
@@ -550,6 +1156,25 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
                 // loop's route_external_messages() will pick them up and
                 // route them to the agent with the meeting-participant skill.
                 // No extra queue task needed — the standard pipeline handles it.
+            }
+            "command_received" => {
+                let action = event.get("action").and_then(Value::as_str).unwrap_or("");
+                eprintln!("[meeting] command received: {action}");
+            }
+            "chat_sent" => {
+                let text = event.get("text").and_then(Value::as_str).unwrap_or("");
+                eprintln!("[meeting] chat sent: {}", &text[..text.len().min(80)]);
+                if !text.is_empty() {
+                    session.outbound_chat_texts.push(text.to_string());
+                    session.save(root)?;
+                }
+            }
+            "chat_send_failed" => {
+                let text = event.get("text").and_then(Value::as_str).unwrap_or("");
+                eprintln!(
+                    "[meeting] chat send failed: {}",
+                    &text[..text.len().min(80)]
+                );
             }
             "participant_count" => {
                 let count = event.get("count").and_then(Value::as_u64).unwrap_or(0);
@@ -591,6 +1216,32 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     // Clean up script file
     let _ = fs::remove_file(&script_path);
 
+    if let Some(reason) = join_failure_reason {
+        session.status = "join_failed".to_string();
+        if session.ended_at.is_none() {
+            session.ended_at = Some(now_iso_string());
+        }
+        session.save(root)?;
+        drop(stdin); // close stdin pipe
+        stt_guard.finish();
+        return Ok(json!({
+            "ok": false,
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "status": "join_failed",
+            "reason": reason,
+            "transcript_chunks": session.transcript_chunks.len(),
+            "transcript_segments": session.transcript_segments.len(),
+            "speaker_signals": session.speaker_signals.len(),
+            "chat_messages": session.chat_messages.len(),
+            "pending_audio_chunks": session.pending_audio_chunks.len(),
+            "finalization": {
+                "action": "skipped",
+                "reason": "meeting was not joined"
+            },
+        }));
+    }
+
     // Finalize
     session.status = "ended".to_string();
     if session.ended_at.is_none() {
@@ -605,6 +1256,7 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
     let finalization = finalize_meeting(root, &session, config)?;
 
     drop(stdin); // close stdin pipe
+    stt_guard.finish();
 
     Ok(json!({
         "ok": true,
@@ -612,6 +1264,8 @@ pub(crate) fn run_meeting_session(root: &Path, config: &MeetingSessionConfig) ->
         "provider": session.provider,
         "status": "finalized",
         "transcript_chunks": session.transcript_chunks.len(),
+        "transcript_segments": session.transcript_segments.len(),
+        "speaker_signals": session.speaker_signals.len(),
         "chat_messages": session.chat_messages.len(),
         "pending_audio_chunks": session.pending_audio_chunks.len(),
         "stt_retry": retry_result,
@@ -645,6 +1299,24 @@ fn finalize_meeting(
     if !chat_log.is_empty() {
         fs::write(&chat_log_path, &chat_log)?;
     }
+    let recording_artifacts = list_recording_artifacts(root, &session.session_id);
+    let artifact_manifest_path =
+        meeting_sessions_dir(root).join(format!("{}-artifacts.json", session.session_id));
+    fs::write(
+        &artifact_manifest_path,
+        serde_json::to_string_pretty(&json!({
+            "session_id": session.session_id,
+            "provider": session.provider,
+            "meeting_url": session.meeting_url,
+            "started_at": session.started_at,
+            "ended_at": session.ended_at,
+            "transcript_path": transcript_path.display().to_string(),
+            "chatlog_path": chat_log_path.display().to_string(),
+            "transcript_segment_count": session.transcript_segments.len(),
+            "speaker_signal_count": session.speaker_signals.len(),
+            "recording_artifacts": recording_artifacts,
+        }))?,
+    )?;
 
     // Build the post-meeting processing prompt
     let prompt = format!(
@@ -659,6 +1331,8 @@ fn finalize_meeting(
          - Started: {started}\n\
          - Ended: {ended}\n\
          - Total transcript chunks: {chunk_count}\n\
+         - Total structured transcript segments: {segment_count}\n\
+         - Total speaker signals: {speaker_signal_count}\n\
          - Total chat messages: {chat_count}\n\
          - Transcript file: `{transcript_path}`\n\
          \n\
@@ -678,9 +1352,17 @@ fn finalize_meeting(
          - For **open questions**: Create a follow-up queue task.\n\
          - **Always**: Send a meeting summary to the relevant communication channel.\n\
          \n\
+         ### Structured extraction contract\n\
+         \n\
+         Start by producing a compact JSON object with keys `decisions`, `action_items`, \
+         `open_questions`, `knowledge`, and `tickets_to_create`. Then perform the durable writes. \
+         Every ticket candidate must include `title`, `body`, `source_session_id`, and \
+         `dedupe_rationale`.\n\
+         \n\
          ### Quality checks\n\
          \n\
-         - STT does not attribute speakers reliably. Say \"a participant\" not \"Max\".\n\
+         - Use a participant name only when a transcript line has a platform speaker source or high confidence.\n\
+         - If the source is plain STT, unknown, or low-confidence active-speaker correlation, say \"a participant\" instead of inventing a name.\n\
          - Distinguish between decisions (confirmed) and suggestions (discussed but not confirmed).\n\
          - Check existing tickets before creating duplicates.\n\
          - The summary should be something a human who missed the meeting can act on.\n\
@@ -696,6 +1378,8 @@ fn finalize_meeting(
         started = session.started_at,
         ended = session.ended_at.as_deref().unwrap_or("unknown"),
         chunk_count = session.transcript_chunks.len(),
+        segment_count = session.transcript_segments.len(),
+        speaker_signal_count = session.speaker_signals.len(),
         chat_count = session.chat_messages.len(),
         transcript_path = transcript_path.display(),
         transcript = if transcript.is_empty() {
@@ -709,6 +1393,21 @@ fn finalize_meeting(
             &chat_log
         },
     );
+
+    let post_meeting_ticket = super::ticket_local_native::create_local_ticket(
+        root,
+        &format!("Meeting Nachbereitung: {}", session.provider),
+        &format!(
+            "Default post-meeting processing ticket for session `{}`.\n\nTranscript: {}\nChat log: {}\nArtifact manifest: {}",
+            session.session_id,
+            transcript_path.display(),
+            chat_log_path.display(),
+            artifact_manifest_path.display(),
+        ),
+        Some("open"),
+        Some("normal"),
+    )
+    .ok();
 
     // Ingest the summary as a normal inbound message in the "meeting" channel.
     // The service loop's route_external_messages() will pick it up and route
@@ -727,6 +1426,11 @@ fn finalize_meeting(
         "source": "meeting_summary",
         "skill": "meeting-participant",
         "transcript_path": transcript_path.display().to_string(),
+        "artifact_manifest_path": artifact_manifest_path.display().to_string(),
+        "recording_artifacts": recording_artifacts.clone(),
+        "transcript_segment_count": session.transcript_segments.len(),
+        "speaker_signal_count": session.speaker_signals.len(),
+        "post_meeting_ticket_id": post_meeting_ticket.as_ref().map(|ticket| ticket.ticket_id.clone()),
     });
     upsert_communication_message(
         &mut conn,
@@ -769,8 +1473,32 @@ fn finalize_meeting(
         "action": "ingested",
         "message_key": message_key,
         "transcript_path": transcript_path.display().to_string(),
+        "artifact_manifest_path": artifact_manifest_path.display().to_string(),
+        "recording_artifact_count": recording_artifacts.len(),
+        "post_meeting_ticket_id": post_meeting_ticket.as_ref().map(|ticket| ticket.ticket_id.clone()),
         "skill": "meeting-participant",
     }))
+}
+
+fn list_recording_artifacts(root: &Path, session_id: &str) -> Vec<String> {
+    let artifact_dir = meeting_sessions_dir(root).join(format!("{session_id}-audio"));
+    let Ok(entries) = fs::read_dir(&artifact_dir) else {
+        return Vec::new();
+    };
+    let mut artifacts = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| matches!(ext, "webm" | "mp4" | "wav" | "m4a" | "ogg"))
+                .unwrap_or(false)
+        })
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    artifacts.sort();
+    artifacts
 }
 
 /// At finalize time, re-check if the STT engine is reachable. If it is and we
@@ -804,8 +1532,7 @@ fn retry_pending_audio_chunks(
     for chunk_path in pending {
         match transcribe_audio_chunk(&config.root, Path::new(&chunk_path), &config.stt_model) {
             Ok(text) if !text.is_empty() => {
-                session.transcript_chunks.push(text);
-                let _ = fs::remove_file(&chunk_path);
+                session.push_stt_transcript(text, None);
                 succeeded += 1;
             }
             Ok(_) => {
@@ -934,19 +1661,19 @@ impl MeetingSessionConfig {
     ) -> Result<Self> {
         let provider = MeetingProvider::detect(meeting_url)
             .context("cannot detect meeting provider from URL")?;
-        let bot_name = runtime
-            .get("CTO_MEETING_BOT_NAME")
-            .cloned()
+        let bot_name = runtime_setting_or_env(runtime, "CTO_MEETING_BOT_NAME")
             .unwrap_or_else(|| "CTOX Notetaker".to_string());
-        let max_duration_minutes = runtime
-            .get("CTO_MEETING_MAX_DURATION_MINUTES")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(180u64);
-        let audio_chunk_seconds = runtime
-            .get("CTO_MEETING_AUDIO_CHUNK_SECONDS")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30u64);
-        let stt_model = runtime.get("CTOX_STT_MODEL").cloned().unwrap_or_default();
+        let max_duration_minutes =
+            runtime_setting_or_env(runtime, "CTO_MEETING_MAX_DURATION_MINUTES")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(180u64);
+        let audio_chunk_seconds =
+            runtime_setting_or_env(runtime, "CTO_MEETING_AUDIO_CHUNK_SECONDS")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30u64);
+        let stt_model = normalize_meeting_stt_model(
+            runtime_setting_or_env(runtime, "CTOX_STT_MODEL").as_deref(),
+        );
         Ok(Self {
             root: root.to_path_buf(),
             meeting_url: meeting_url.to_string(),
@@ -956,6 +1683,26 @@ impl MeetingSessionConfig {
             audio_chunk_seconds,
             stt_model,
         })
+    }
+}
+
+fn runtime_setting_or_env(runtime: &BTreeMap<String, String>, key: &str) -> Option<String> {
+    runtime
+        .get(key)
+        .cloned()
+        .or_else(|| std::env::var(key).ok())
+}
+
+fn normalize_meeting_stt_model(configured: Option<&str>) -> String {
+    let configured = configured.map(str::trim).unwrap_or("");
+    if configured.is_empty() || is_disabled_selector(configured) {
+        return DEFAULT_MEETING_STT_MODEL.to_string();
+    }
+    let selected = engine::auxiliary_model_selection(engine::AuxiliaryRole::Stt, Some(configured));
+    if selected.request_model == DEFAULT_MEETING_STT_MODEL {
+        selected.request_model.to_string()
+    } else {
+        DEFAULT_MEETING_STT_MODEL.to_string()
     }
 }
 
@@ -970,7 +1717,10 @@ pub(crate) struct MeetingSession {
     pub started_at: String,
     pub ended_at: Option<String>,
     pub transcript_chunks: Vec<String>,
+    pub transcript_segments: Vec<TranscriptSegment>,
+    pub speaker_signals: Vec<SpeakerSignal>,
     pub chat_messages: Vec<ChatMessage>,
+    pub outbound_chat_texts: Vec<String>,
     pub pid: Option<u32>,
     pub stdin_pipe: Option<String>,
     /// Paths of audio chunk files whose STT failed (engine offline or error).
@@ -985,6 +1735,152 @@ pub(crate) struct ChatMessage {
     pub sender: String,
     pub text: String,
     pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct TranscriptSegment {
+    pub timestamp: String,
+    pub speaker_display: String,
+    pub speaker_id: Option<String>,
+    pub source: String,
+    pub confidence: f32,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SpeakerSignal {
+    pub timestamp: String,
+    pub speaker_display: String,
+    pub speaker_id: Option<String>,
+    pub source: String,
+    pub confidence: f32,
+}
+
+impl TranscriptSegment {
+    fn from_stt_text(text: String, speaker: Option<&SpeakerSignal>) -> Self {
+        let (speaker_display, speaker_id, source, confidence) = speaker
+            .map(|signal| {
+                (
+                    signal.speaker_display.clone(),
+                    signal.speaker_id.clone(),
+                    "stt_with_active_speaker".to_string(),
+                    signal.confidence.min(0.65),
+                )
+            })
+            .unwrap_or_else(|| ("unknown".to_string(), None, "stt".to_string(), 0.25));
+        Self {
+            timestamp: now_iso_string(),
+            speaker_display,
+            speaker_id,
+            source,
+            confidence,
+            text,
+        }
+    }
+
+    fn from_platform_event(event: &Value) -> Option<Self> {
+        let text = event.get("text").and_then(Value::as_str)?.trim();
+        if text.is_empty() {
+            return None;
+        }
+        let speaker_display = sanitize_speaker_display(
+            event
+                .get("speaker")
+                .or_else(|| event.get("speaker_display"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+        );
+        Some(Self {
+            timestamp: event
+                .get("ts")
+                .or_else(|| event.get("timestamp"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(now_iso_string),
+            speaker_display,
+            speaker_id: event
+                .get("speaker_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned),
+            source: event
+                .get("source")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("platform_caption")
+                .to_string(),
+            confidence: event
+                .get("confidence")
+                .and_then(Value::as_f64)
+                .map(|value| value.clamp(0.0, 1.0) as f32)
+                .unwrap_or(0.85),
+            text: text.to_string(),
+        })
+    }
+
+    fn render_line(&self) -> String {
+        format!(
+            "[{}] {}: {} [source={} confidence={:.2}]",
+            self.timestamp, self.speaker_display, self.text, self.source, self.confidence
+        )
+    }
+}
+
+impl SpeakerSignal {
+    fn from_event(event: &Value) -> Option<Self> {
+        let speaker_display = sanitize_speaker_display(
+            event
+                .get("speaker")
+                .or_else(|| event.get("speaker_display"))
+                .and_then(Value::as_str)?,
+        );
+        if speaker_display.eq_ignore_ascii_case("unknown") {
+            return None;
+        }
+        Some(Self {
+            timestamp: event
+                .get("ts")
+                .or_else(|| event.get("timestamp"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(now_iso_string),
+            speaker_display,
+            speaker_id: event
+                .get("speaker_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(ToOwned::to_owned),
+            source: event
+                .get("source")
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("platform_active_speaker")
+                .to_string(),
+            confidence: event
+                .get("confidence")
+                .and_then(Value::as_f64)
+                .map(|value| value.clamp(0.0, 1.0) as f32)
+                .unwrap_or(0.55),
+        })
+    }
+}
+
+fn sanitize_speaker_display(value: &str) -> String {
+    let cleaned = value
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = cleaned
+        .trim_matches(|ch: char| ch == ':' || ch == '-' || ch == '|' || ch.is_whitespace())
+        .trim();
+    if cleaned.is_empty() {
+        "unknown".to_string()
+    } else {
+        cleaned.chars().take(96).collect()
+    }
 }
 
 impl MeetingSession {
@@ -1003,7 +1899,10 @@ impl MeetingSession {
             started_at: now_iso_string(),
             ended_at: None,
             transcript_chunks: Vec::new(),
+            transcript_segments: Vec::new(),
+            speaker_signals: Vec::new(),
             chat_messages: Vec::new(),
+            outbound_chat_texts: Vec::new(),
             pid: None,
             stdin_pipe: None,
             pending_audio_chunks: Vec::new(),
@@ -1021,13 +1920,18 @@ impl MeetingSession {
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "transcript_chunk_count": self.transcript_chunks.len(),
+            "transcript_segment_count": self.transcript_segments.len(),
+            "speaker_signal_count": self.speaker_signals.len(),
             "chat_message_count": self.chat_messages.len(),
             "transcript_chunks": self.transcript_chunks,
+            "transcript_segments": self.transcript_segments,
+            "speaker_signals": self.speaker_signals,
             "chat_messages": self.chat_messages.iter().map(|m| json!({
                 "sender": m.sender,
                 "text": m.text,
                 "timestamp": m.timestamp,
             })).collect::<Vec<_>>(),
+            "outbound_chat_texts": &self.outbound_chat_texts,
             "pid": self.pid,
             "stdin_pipe": self.stdin_pipe,
             "pending_audio_chunks": self.pending_audio_chunks,
@@ -1045,7 +1949,37 @@ impl MeetingSession {
 
     /// Build the full transcript from all chunks.
     pub(crate) fn full_transcript(&self) -> String {
+        if !self.transcript_segments.is_empty() {
+            let has_platform_captions = self
+                .transcript_segments
+                .iter()
+                .any(|segment| segment.source == "platform_caption");
+            return self
+                .transcript_segments
+                .iter()
+                .filter(|segment| !has_platform_captions || segment.source == "platform_caption")
+                .map(TranscriptSegment::render_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         self.transcript_chunks.join("\n")
+    }
+
+    pub(crate) fn push_stt_transcript(&mut self, text: String, speaker: Option<&SpeakerSignal>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        self.transcript_chunks.push(text.clone());
+        self.transcript_segments
+            .push(TranscriptSegment::from_stt_text(text, speaker));
+    }
+
+    pub(crate) fn push_platform_transcript(&mut self, segment: TranscriptSegment) {
+        if segment.text.trim().is_empty() {
+            return;
+        }
+        self.transcript_chunks.push(segment.text.clone());
+        self.transcript_segments.push(segment);
     }
 
     /// Build the full chat log.
@@ -1084,32 +2018,53 @@ impl MeetingSession {
     /// Check if a chat message likely originated from this bot itself.
     /// Used to prevent self-loop when the bot's own replies appear in the chat.
     pub(crate) fn is_own_message(&self, sender: &str, text: &str) -> bool {
-        let bot_name_lower = self.bot_name.to_lowercase();
-        let bot_name_lower = bot_name_lower.trim();
-        if bot_name_lower.is_empty() {
-            return false;
-        }
-        let sender_lower = sender.to_lowercase();
-        // Match if sender contains the bot name (sender field may include
-        // role suffixes like "(Host)" or be wrapped in other text)
-        if sender_lower.contains(bot_name_lower) {
+        is_own_message_text(&self.bot_name, &self.outbound_chat_texts, sender, text)
+    }
+}
+
+fn is_own_message_text(
+    bot_name: &str,
+    outbound_chat_texts: &[String],
+    sender: &str,
+    text: &str,
+) -> bool {
+    let bot_name_lower = bot_name.to_lowercase();
+    let bot_name_lower = bot_name_lower.trim();
+    if bot_name_lower.is_empty() {
+        return false;
+    }
+    let sender_lower = sender.to_lowercase();
+    // Match if sender contains the bot name (sender field may include
+    // role suffixes like "(Host)" or be wrapped in other text)
+    if sender_lower.contains(bot_name_lower) {
+        return true;
+    }
+    if matches!(
+        sender_lower.trim(),
+        "you" | "me" | "ich" | "du" | "ctox" | "ctox notetaker"
+    ) {
+        return true;
+    }
+    // Some chat scrapers misattribute and put the sender in the text;
+    // match if text starts with the bot name + colon/dash separator
+    let text_lower = text.to_lowercase();
+    if outbound_chat_texts.iter().any(|sent| {
+        let sent = sent.trim().to_lowercase();
+        !sent.is_empty() && text_lower.contains(&sent)
+    }) {
+        return true;
+    }
+    let text_trimmed = text_lower.trim_start();
+    if text_trimmed.starts_with(bot_name_lower) {
+        let after_name = &text_trimmed[bot_name_lower.len()..];
+        if after_name.starts_with(':')
+            || after_name.starts_with(" -")
+            || after_name.starts_with(" to ")
+        {
             return true;
         }
-        // Some chat scrapers misattribute and put the sender in the text;
-        // match if text starts with the bot name + colon/dash separator
-        let text_lower = text.to_lowercase();
-        let text_trimmed = text_lower.trim_start();
-        if text_trimmed.starts_with(bot_name_lower) {
-            let after_name = &text_trimmed[bot_name_lower.len()..];
-            if after_name.starts_with(':')
-                || after_name.starts_with(" -")
-                || after_name.starts_with(" to ")
-            {
-                return true;
-            }
-        }
-        false
     }
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -1145,9 +2100,132 @@ const provider = "__PROVIDER__";
 const chunkSeconds = __CHUNK_SECONDS__;
 const maxDurationMs = __MAX_DURATION_MS__;
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ctox-meeting-"));
+const commandFile = process.env.CTOX_MEETING_COMMAND_FILE || "";
+let commandFileOffset = 0;
 
 const emit = (event) => {
   process.stdout.write(JSON.stringify(event) + "\n");
+};
+
+const visibleMeetingText = async () => {
+  try {
+    return await page.evaluate(() => document.body?.innerText || "");
+  } catch { return ""; }
+};
+
+const buildZoomWebClientUrl = (url) => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "events.zoom.us") return url;
+    if (parsed.pathname.includes("/wc/")) return url;
+    const meetingId = parsed.pathname.match(/\/j\/(\d+)/)?.[1];
+    if (!meetingId) return url;
+    const webClientUrl = new URL(`https://app.zoom.us/wc/${meetingId}/join`);
+    const pwd = parsed.searchParams.get("pwd");
+    if (pwd) webClientUrl.searchParams.set("pwd", pwd);
+    return webClientUrl.toString();
+  } catch {
+    return url;
+  }
+};
+
+const verifyJoinedUi = async (timeoutMs = 30000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const state = await page.evaluate((providerName) => {
+        const text = document.body?.innerText || "";
+        const lower = text.toLowerCase();
+        const buttons = Array.from(document.querySelectorAll("button"));
+        const attrs = buttons.map((button) => [
+          button.innerText || "",
+          button.textContent || "",
+          button.getAttribute("aria-label") || "",
+          button.getAttribute("title") || "",
+        ].join(" ")).join("\n").toLowerCase();
+
+        if (providerName === "zoom") {
+          const removedHints = [
+            "you have been removed",
+            "you were removed",
+            "host removed you",
+            "meeting has ended",
+            "this meeting has been ended",
+            "no one responded to your request",
+          ];
+          if (removedHints.some((hint) => lower.includes(hint))) {
+            return { joined: false, reason: "removed_or_ended" };
+          }
+          const strongLeave = document.querySelector(
+            'button[aria-label="Leave"], button[aria-label*="Leave" i], button[title*="Leave" i], button[aria-label*="Verlassen" i]'
+          );
+          if (strongLeave) return { joined: true, reason: "zoom_leave_control_visible" };
+          const blockingHints = [
+            "please wait",
+            "waiting room",
+            "host has not joined",
+            "the host will let you in soon",
+            "we've let them know you're here",
+            "we have let them know you're here",
+            "meeting host will let you in soon",
+            "bitte warten",
+            "warteraum",
+            "host hat das meeting noch nicht gestartet",
+            "meeting passcode",
+            "meeting password",
+            "sign in to join",
+            "authenticating",
+            "not authorized",
+          ];
+          if (blockingHints.some((hint) => lower.includes(hint))) {
+            return { joined: false, reason: "waiting_lobby" };
+          }
+        }
+
+        const lobbyHints = [
+          "someone will let you in",
+          "jemand wird sie",
+          "wird sie in kuerze einlassen",
+          "wird sie in kürze einlassen",
+          "bitte warten",
+          "please wait",
+          "waiting room",
+          "warteraum",
+          "host has not joined",
+          "asking to join",
+          "request to join",
+        ];
+        if (lobbyHints.some((hint) => lower.includes(hint))) {
+          return { joined: false, reason: "waiting_lobby" };
+        }
+
+        const leaveHints = ["leave", "leave call", "verlassen", "anruf verlassen"];
+        if (leaveHints.some((hint) => attrs.includes(hint) || lower.includes(hint))) {
+          return { joined: true, reason: "leave_control_visible" };
+        }
+
+        if (providerName === "zoom") {
+          const footer = document.querySelector('#wc-footer');
+          if (footer && /participants?|teilnehmer/i.test(footer.textContent || "")) {
+            return { joined: true, reason: "zoom_footer_visible" };
+          }
+        }
+
+        const meetingChromeHints = ["participants", "teilnehmer", "people", "personen", "chat"];
+        if (meetingChromeHints.some((hint) => attrs.includes(hint))) {
+          return { joined: true, reason: "meeting_controls_visible" };
+        }
+        return { joined: false, reason: "meeting_controls_not_visible" };
+      }, provider);
+      if (state?.joined) return state;
+      if (state?.reason === "waiting_lobby") {
+        emit({ type: "status", status: "waiting_lobby", provider });
+      }
+    } catch {}
+    await page.waitForTimeout(2000);
+  }
+  const text = await visibleMeetingText();
+  return { joined: false, reason: "join_verification_timeout", bodyText: text.substring(0, 500) };
 };
 
 const { chromium } = await import("playwright");
@@ -1161,6 +2239,7 @@ const baseBrowserArgs = [
   "--disable-web-security",
   "--use-gl=angle",
   "--use-angle=swiftshader",
+  "--in-process-gpu",
   "--window-size=1280,720",
   "--auto-accept-this-tab-capture",
   "--enable-features=MediaRecorder",
@@ -1221,24 +2300,234 @@ const context = await browser.newContext({
   ignoreHTTPSErrors: true,
   userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
 });
-await context.grantPermissions(["microphone", "camera"], { origin: meetingUrl });
-const page = await context.newPage();
+for (const origin of new Set([meetingUrl, provider === "zoom" ? buildZoomWebClientUrl(meetingUrl) : meetingUrl].map((url) => {
+  try { return new URL(url).origin; } catch { return null; }
+}).filter(Boolean))) {
+  await context.grantPermissions(["microphone", "camera"], { origin }).catch(() => {});
+}
+let page = await context.newPage();
+
+const pageText = async (candidate) => {
+  try { return await candidate.evaluate(() => document.body?.innerText || ""); }
+  catch { return ""; }
+};
+
+const isLikelyMeetingPage = async (candidate) => {
+  const url = candidate.url();
+  if (provider === "google") {
+    if (url.includes("workspace.google.com/products/meet")) return false;
+    if (/https:\/\/meet\.google\.com\/[a-z0-9-]+/i.test(url)) return true;
+    const text = await pageText(candidate);
+    return /Leave call|Verlassen|Anruf verlassen|Ask to join|Join now|Teilnahme anfragen|People|Participants|Teilnehmer|Chat/i.test(text)
+      && !/KI-gestuetzte Videoanrufe|KI-gestützte Videoanrufe|Meet fuer Unternehmen testen|Meet für Unternehmen testen/i.test(text);
+  }
+  if (provider === "zoom" && /\/wc\/(join|[0-9]+)/.test(url)) return true;
+  if (provider === "microsoft" && /teams\.microsoft\.com/.test(url)) return true;
+  const text = await pageText(candidate);
+  return /Leave call|Leave|Verlassen|Anruf verlassen|Ask to join|Join now|Teilnehmen|Teilnahme anfragen|People|Participants|Teilnehmer|Chat/i.test(text);
+};
+
+const selectActiveMeetingPage = async () => {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const pages = context.pages();
+    for (let i = pages.length - 1; i >= 0; i--) {
+      const candidate = pages[i];
+      if (await isLikelyMeetingPage(candidate)) {
+        page = candidate;
+        await page.bringToFront().catch(() => {});
+        return;
+      }
+    }
+    await page.waitForTimeout(1000);
+  }
+};
+
+const dismissZoomPopups = async (targetPage, timeoutMs = 15000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let clicked = false;
+    const scopes = [targetPage, ...targetPage.frames().filter((frame) => frame !== targetPage.mainFrame())];
+    for (const scope of scopes) {
+      const selectors = [
+        'button[aria-label="close" i]',
+        'button[title="Close" i]',
+        'button:has-text("OK")',
+        'button:has-text("Got it")',
+        'button:has-text("Continue")',
+        'button:has-text("Join Audio by Computer")',
+      ];
+      for (const selector of selectors) {
+        try {
+          const button = scope.locator(selector).first();
+          if (await button.isVisible({ timeout: 500 }).catch(() => false)) {
+            await button.click({ force: true, timeout: 1000 }).catch(() => {});
+            clicked = true;
+          }
+        } catch {}
+      }
+    }
+    if (!clicked) break;
+    await targetPage.waitForTimeout(700);
+  }
+};
+
+const countLiveAudioElements = async (targetPage) => {
+  try {
+    return await targetPage.evaluate(() => {
+      return Array.from(document.querySelectorAll("audio, video")).filter((el) => {
+        try {
+          return !el.paused && el.readyState >= 2 && el.currentTime >= 0;
+        } catch { return false; }
+      }).length;
+    });
+  } catch {
+    return 0;
+  }
+};
+
+const prepareZoomAudio = async (targetPage) => {
+  await dismissZoomPopups(targetPage, 5000);
+  const scopes = () => [targetPage, ...targetPage.frames().filter((frame) => frame !== targetPage.mainFrame())];
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let clicked = false;
+    for (const scope of scopes()) {
+      const audioSelectors = [
+        'button[aria-label*="Join Audio" i]',
+        'button:has-text("Join Audio")',
+        'button:has-text("Join Audio by Computer")',
+        'button:has-text("Computer Audio")',
+        'button:has-text("Mit Computeraudio teilnehmen")',
+      ];
+      for (const selector of audioSelectors) {
+        try {
+          const button = scope.locator(selector).first();
+          if (await button.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await button.click({ force: true, timeout: 2000 });
+            clicked = true;
+            break;
+          }
+        } catch {}
+      }
+      if (clicked) break;
+    }
+    await targetPage.waitForTimeout(clicked ? 2500 : 1000);
+    if (await countLiveAudioElements(targetPage) > 0) break;
+  }
+
+  for (const scope of scopes()) {
+    try {
+      const stopVideo = scope.locator('button[aria-label*="Stop Video" i], button[title*="Stop Video" i]').first();
+      if (await stopVideo.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await stopVideo.click({ force: true }).catch(() => {});
+      }
+    } catch {}
+  }
+};
+
+const startZoomRemovalMonitor = (targetPage) => {
+  let consecutiveMisses = 0;
+  const interval = setInterval(async () => {
+    try {
+      const state = await targetPage.evaluate(() => {
+        const text = (document.body?.innerText || "").toLowerCase();
+        const removed = [
+          "you have been removed",
+          "you were removed",
+          "host removed you",
+          "meeting has ended",
+          "this meeting has been ended",
+          "no one responded to your request",
+        ].some((hint) => text.includes(hint));
+        const waiting = [
+          "please wait",
+          "waiting room",
+          "the host will let you in soon",
+          "we've let them know you're here",
+        ].some((hint) => text.includes(hint));
+        const leave = document.querySelector('button[aria-label*="Leave" i], button[title*="Leave" i]');
+        return { removed, waiting, leaveVisible: Boolean(leave) };
+      });
+      if (state.removed) {
+        clearInterval(interval);
+        await targetPage.evaluate((reason) => window.ctoxMeetingEnd?.(reason), "zoom_removed_or_ended").catch(() => {});
+        return;
+      }
+      if (state.waiting) return;
+      consecutiveMisses = state.leaveVisible ? 0 : consecutiveMisses + 1;
+      if (consecutiveMisses >= 6) {
+        clearInterval(interval);
+        await targetPage.evaluate((reason) => window.ctoxMeetingEnd?.(reason), "zoom_left_meeting").catch(() => {});
+      }
+    } catch {}
+  }, 5000);
+  return () => clearInterval(interval);
+};
+
+const enableTeamsLiveCaptions = async (targetPage) => {
+  const scopes = () => [targetPage, ...targetPage.frames().filter((frame) => frame !== targetPage.mainFrame())];
+  const tryClick = async (matchers) => {
+    for (const scope of scopes()) {
+      for (const matcher of matchers) {
+        try {
+          const button = scope.getByRole("button", { name: matcher }).first();
+          if (await button.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await button.click({ force: true });
+            await targetPage.waitForTimeout(700);
+            return true;
+          }
+        } catch {}
+      }
+    }
+    return false;
+  };
+
+  if (await tryClick([/More/i, /Weitere/i, /Mehr/i])) {
+    await tryClick([/Language and speech/i, /Sprache und Spracherkennung/i, /Speech/i]);
+    await tryClick([/Turn on live captions/i, /Live captions/i, /Untertitel aktivieren/i, /Liveuntertitel/i]);
+  }
+  await targetPage.keyboard.press(process.platform === "darwin" ? "Meta+Shift+C" : "Control+Shift+C").catch(() => {});
+};
 
 // --- Join the meeting ---
 emit({ type: "status", status: "joining", provider });
-await page.goto(meetingUrl, { waitUntil: "networkidle" });
+let navigationUrl = meetingUrl;
+if (provider === "zoom") {
+  navigationUrl = buildZoomWebClientUrl(meetingUrl);
+}
+try {
+  await page.goto(navigationUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+} catch (err) {
+  emit({ type: "warning", message: "Initial meeting navigation did not fully settle: " + err.message });
+}
 await page.waitForTimeout(5000);
+await selectActiveMeetingPage();
 
 __JOIN_SCRIPT__
+await selectActiveMeetingPage();
 
-emit({ type: "joined", provider });
+const joinedState = await verifyJoinedUi(Math.min(30000, Math.max(5000, maxDurationMs)));
+if (joinedState.joined) {
+  emit({ type: "joined", provider, reason: joinedState.reason });
+} else {
+  emit({
+    type: "join_failed",
+    provider,
+    reason: joinedState.reason || "unknown",
+    bodyText: joinedState.bodyText || "",
+  });
+  emit({ type: "finalized", temp_dir: tempDir, provider });
+  await browser.close();
+  process.exit(2);
+}
 
 // --- Recording setup (transplanted from ScreenApp reference) ---
 // Google Meet + Zoom: getDisplayMedia + MediaRecorder (in-browser tab capture)
 // Microsoft Teams: ffmpeg + X11grab + PulseAudio (out-of-process)
 let chunkIndex = 0;
-await page.exposeFunction("ctoxAudioChunk", async (base64Data) => {
-  const filePath = path.join(tempDir, `chunk_${String(chunkIndex).padStart(4, "0")}.webm`);
+await page.exposeFunction("ctoxAudioChunk", async (payload) => {
+  const base64Data = typeof payload === "string" ? payload : payload.base64;
+  const extension = typeof payload === "object" && payload.extension ? payload.extension : "webm";
+  const filePath = path.join(tempDir, `chunk_${String(chunkIndex).padStart(4, "0")}.${extension}`);
   fs.writeFileSync(filePath, Buffer.from(base64Data, "base64"));
   emit({ type: "audio_chunk", path: filePath, index: chunkIndex });
   chunkIndex++;
@@ -1246,6 +2535,7 @@ await page.exposeFunction("ctoxAudioChunk", async (base64Data) => {
 
 let meetingEnded = false;
 await page.exposeFunction("ctoxMeetingEnd", (reason) => {
+  if (meetingEnded) return;
   emit({ type: "ended", reason: reason || "meeting_end" });
   meetingEnded = true;
 });
@@ -1259,7 +2549,457 @@ page.on("console", async (msg) => {
   }
 });
 
+let stopZoomRemovalMonitor = null;
+if (provider === "zoom") {
+  await prepareZoomAudio(page).catch((err) => emit({ type: "warning", message: "Zoom audio preparation failed: " + err.message }));
+  stopZoomRemovalMonitor = startZoomRemovalMonitor(page);
+}
 if (provider === "microsoft") {
+  await enableTeamsLiveCaptions(page).catch((err) => emit({ type: "warning", message: "Teams live captions activation failed: " + err.message }));
+}
+
+// --- Live meeting observers: chat, captions, active speaker, participants ---
+// These start before recording so Teams also gets real-time chat/speaker events
+// while its ffmpeg branch blocks the main runner loop until the meeting ends.
+const visibleNode = (el) => {
+  try {
+    const rect = el.getBoundingClientRect();
+    const style = window.getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  } catch { return false; }
+};
+
+const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+const cleanSpeakerName = (value) => {
+  let name = compactText(value)
+    .replace(/\b(is speaking|speaking|active speaker|current speaker|spricht|aktueller sprecher)\b/ig, "")
+    .replace(/[:|,-]+$/g, "")
+    .trim();
+  if (!name || name.length > 96) return "";
+  return name;
+};
+
+const parseCaptionNode = (node, providerName) => {
+  const raw = compactText(node.innerText || node.textContent || "");
+  if (!raw || raw.length < 2 || raw.length > 1200) return null;
+  if (/^(chat|people|participants|teilnehmer|leave|verlassen)$/i.test(raw)) return null;
+  if (/messages? addressed to|direct messages? are private/i.test(raw)) return null;
+  const aria = node.getAttribute?.("aria-label") || "";
+  let speaker = "";
+  let text = raw;
+  const labelled = aria.match(/(?:caption|transcript|live caption).*?(?:from|by)\s+(.+?)[,:-]\s*(.+)$/i);
+  if (labelled) {
+    speaker = cleanSpeakerName(labelled[1]);
+    text = compactText(labelled[2]);
+  }
+  if (!speaker) {
+    const lines = (node.innerText || node.textContent || "").split(/\n+/).map(compactText).filter(Boolean);
+    if (lines.length >= 2 && lines[0].length <= 80 && !/[.!?]$/.test(lines[0])) {
+      speaker = cleanSpeakerName(lines[0]);
+      text = compactText(lines.slice(1).join(" "));
+    }
+  }
+  if (!speaker) {
+    const speakerNode = node.querySelector?.('[data-speaker-name], [class*="speaker" i], [class*="name" i]');
+    speaker = cleanSpeakerName(speakerNode?.textContent || "");
+    if (speaker && raw.startsWith(speaker)) text = compactText(raw.slice(speaker.length));
+  }
+  if (!text || text === speaker) return null;
+  return {
+    speaker: speaker || "unknown",
+    text,
+    source: "platform_caption",
+    confidence: speaker ? 0.9 : 0.65,
+    provider: providerName,
+    ts: new Date().toISOString(),
+  };
+};
+
+const scrapeTranscriptEntries = (providerName) => {
+  const doms = [document];
+  try {
+    const iframe = document.querySelector("iframe#webclient");
+    if (iframe?.contentDocument) doms.push(iframe.contentDocument);
+  } catch {}
+  const selectorsByProvider = {
+    google: [
+      '[aria-live="polite"]',
+      '[aria-live="assertive"]',
+      '[role="status"]',
+      '[jsname][data-ved]',
+      '[class*="caption" i]',
+    ],
+    microsoft: [
+      '[data-tid*="closed-caption" i]',
+      '[data-tid*="caption" i]',
+      '[aria-live="polite"]',
+      '[aria-live="assertive"]',
+      '[class*="caption" i]',
+      '[class*="transcript" i]',
+    ],
+    zoom: [
+      '.live-transcription-subtitle',
+      '.closed-caption',
+      '[class*="caption" i]',
+      '[class*="transcription" i]',
+      '[aria-live="polite"]',
+      '[aria-live="assertive"]',
+    ],
+  };
+  const selectors = selectorsByProvider[providerName] || selectorsByProvider.google;
+  const entries = [];
+  for (const dom of doms) {
+    for (const selector of selectors) {
+      for (const node of Array.from(dom.querySelectorAll(selector))) {
+        if (!visibleNode(node)) continue;
+        const entry = parseCaptionNode(node, providerName);
+        if (entry) entries.push(entry);
+      }
+    }
+  }
+  return entries;
+};
+
+const scrapeActiveSpeaker = (providerName) => {
+  const doms = [document];
+  try {
+    const iframe = document.querySelector("iframe#webclient");
+    if (iframe?.contentDocument) doms.push(iframe.contentDocument);
+  } catch {}
+  const selectorsByProvider = {
+    google: [
+      '[data-speaking="true"]',
+      '[aria-label*="speaking" i]',
+      '[aria-label*="spricht" i]',
+      '[class*="speaking" i]',
+      '[class*="active-speaker" i]',
+    ],
+    microsoft: [
+      '[data-tid*="active-speaker" i]',
+      '[data-tid*="speaking" i]',
+      '[aria-label*="speaking" i]',
+      '[aria-label*="spricht" i]',
+      '[class*="speaking" i]',
+    ],
+    zoom: [
+      '[aria-label*="active speaker" i]',
+      '[aria-label*="speaking" i]',
+      '[class*="active-speaker" i]',
+      '[class*="activeSpeaker" i]',
+      '[class*="is-speaking" i]',
+    ],
+  };
+  const selectors = selectorsByProvider[providerName] || selectorsByProvider.google;
+  for (const dom of doms) {
+    for (const selector of selectors) {
+      for (const node of Array.from(dom.querySelectorAll(selector))) {
+        if (!visibleNode(node)) continue;
+        const aria = node.getAttribute("aria-label") || node.getAttribute("title") || "";
+        let speaker = cleanSpeakerName(aria);
+        if (!speaker) {
+          const nameNode = node.querySelector?.('[data-self-name], [data-participant-name], [class*="name" i], [class*="display" i]');
+          speaker = cleanSpeakerName(nameNode?.textContent || "");
+        }
+        if (!speaker) {
+          const lines = (node.innerText || node.textContent || "").split(/\n+/).map(compactText).filter(Boolean);
+          speaker = cleanSpeakerName(lines.find(line => line.length <= 80) || "");
+        }
+        if (!speaker) continue;
+        return {
+          speaker,
+          speaker_id: node.getAttribute("data-participant-id") || node.getAttribute("data-user-id") || "",
+          source: "platform_active_speaker",
+          confidence: 0.6,
+          provider: providerName,
+          ts: new Date().toISOString(),
+        };
+      }
+    }
+  }
+  return null;
+};
+
+const knownChatKeys = new Set();
+const knownTranscriptKeys = new Set();
+let lastSpeakerKey = "";
+
+const installChatObservers = async () => {
+  await page.exposeFunction("ctoxObservedChatMessage", (msg) => {
+    if (!msg || !msg.text) return;
+    const sender = msg.sender || "Participant";
+    const key = `${sender}|${msg.text}`;
+    if (knownChatKeys.has(key)) return;
+    knownChatKeys.add(key);
+    emit({ type: "chat", sender, text: msg.text, ts: msg.ts || new Date().toISOString() });
+  }).catch(() => {});
+
+  await page.evaluate((providerName) => {
+    if (window.__ctoxChatObserverInstalled) return;
+    window.__ctoxChatObserverInstalled = true;
+    const compact = (value) => String(value || "").replace(/\s+/g, " ").trim();
+    const send = (sender, text) => {
+      text = compact(text);
+      if (!text || /^messages? addressed to|^direct messages? are private/i.test(text)) return;
+      window.ctoxObservedChatMessage?.({ sender: compact(sender) || "Participant", text, ts: new Date().toISOString() });
+    };
+    const scan = () => {
+      try {
+        const doms = [document];
+        try {
+          const iframe = document.querySelector("iframe#webclient");
+          if (iframe?.contentDocument) doms.push(iframe.contentDocument);
+        } catch {}
+        if (providerName === "zoom") {
+          for (const dom of doms) {
+            const roots = Array.from(dom.querySelectorAll('[id^="chat-list-item-"], .new-chat-item__container, .new-chat-message__container, [role="listitem"][class*="chat"]'));
+            for (const item of roots) {
+              const sender = item.querySelector?.('[id^="chat-msg-author"], .new-chat-item__author, .chat-item__sender, [class*="sender" i]')?.textContent || "";
+              const text = item.querySelector?.('[id^="chat-msg-text"], .new-chat-message__container__text, .chat-rtf-box__display, [class*="message__text" i]')?.textContent || "";
+              if (text) send(sender, text);
+            }
+          }
+        } else if (providerName === "microsoft") {
+          for (const dom of doms) {
+            for (const item of Array.from(dom.querySelectorAll('[data-tid="chat-pane-message"], [data-tid*="chat-message" i], [role="listitem"]'))) {
+              const sender = item.querySelector?.('[data-tid="message-author-name"], [class*="author" i], [class*="sender" i]')?.textContent || "";
+              const text = item.querySelector?.('[data-tid="message-body"], [class*="message-body" i], [class*="content" i]')?.textContent || item.textContent || "";
+              send(sender, text);
+            }
+          }
+        } else {
+          for (const dom of doms) {
+            for (const item of Array.from(dom.querySelectorAll('[data-message-id], [data-is-chat-message="true"], [role="listitem"]'))) {
+              const sender = item.querySelector?.('[data-sender-name]')?.getAttribute?.("data-sender-name")
+                || item.querySelector?.('[data-sender-name], [class*="sender" i], [class*="name" i]')?.textContent
+                || "";
+              const text = item.querySelector?.('[data-message-text], [class*="message-text" i]')?.textContent || item.textContent || "";
+              send(sender, text);
+            }
+          }
+        }
+      } catch {}
+    };
+    const observer = new MutationObserver(scan);
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+    const iframe = document.querySelector("iframe#webclient");
+    try {
+      if (iframe?.contentDocument?.body) observer.observe(iframe.contentDocument.body, { childList: true, subtree: true, characterData: true });
+    } catch {}
+    scan();
+  }, provider).catch(() => {});
+};
+
+await installChatObservers();
+
+const chatPollInterval = setInterval(async () => {
+  try {
+    const messages = await page.evaluate(() => {
+      __CHAT_SCRAPE_SCRIPT__
+    });
+    if (!Array.isArray(messages)) return;
+    for (const msg of messages) {
+      const key = `${msg.sender}|${msg.text}`;
+      if (!knownChatKeys.has(key)) {
+        knownChatKeys.add(key);
+        emit({ type: "chat", sender: msg.sender, text: msg.text, ts: msg.ts || new Date().toISOString() });
+      }
+    }
+  } catch {}
+}, 2000);
+
+const transcriptPollInterval = setInterval(async () => {
+  try {
+    const entries = await page.evaluate((providerName) => {
+      const visibleNode = (el) => {
+        try {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        } catch { return false; }
+      };
+      const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const cleanSpeakerName = (value) => {
+        let name = compactText(value)
+          .replace(/\b(is speaking|speaking|active speaker|current speaker|spricht|aktueller sprecher)\b/ig, "")
+          .replace(/[:|,-]+$/g, "")
+          .trim();
+        if (!name || name.length > 96) return "";
+        return name;
+      };
+      const parseCaptionNode = (node) => {
+        const raw = compactText(node.innerText || node.textContent || "");
+        if (!raw || raw.length < 2 || raw.length > 1200) return null;
+        if (/^(chat|people|participants|teilnehmer|leave|verlassen)$/i.test(raw)) return null;
+        if (/messages? addressed to|direct messages? are private/i.test(raw)) return null;
+        const aria = node.getAttribute?.("aria-label") || "";
+        let speaker = "";
+        let text = raw;
+        const labelled = aria.match(/(?:caption|transcript|live caption).*?(?:from|by)\s+(.+?)[,:-]\s*(.+)$/i);
+        if (labelled) {
+          speaker = cleanSpeakerName(labelled[1]);
+          text = compactText(labelled[2]);
+        }
+        if (!speaker) {
+          const lines = (node.innerText || node.textContent || "").split(/\n+/).map(compactText).filter(Boolean);
+          if (lines.length >= 2 && lines[0].length <= 80 && !/[.!?]$/.test(lines[0])) {
+            speaker = cleanSpeakerName(lines[0]);
+            text = compactText(lines.slice(1).join(" "));
+          }
+        }
+        if (!speaker) {
+          const speakerNode = node.querySelector?.('[data-speaker-name], [class*="speaker" i], [class*="name" i]');
+          speaker = cleanSpeakerName(speakerNode?.textContent || "");
+          if (speaker && raw.startsWith(speaker)) text = compactText(raw.slice(speaker.length));
+        }
+        if (!text || text === speaker) return null;
+        return {
+          speaker: speaker || "unknown",
+          text,
+          source: "platform_caption",
+          confidence: speaker ? 0.9 : 0.65,
+          provider: providerName,
+          ts: new Date().toISOString(),
+        };
+      };
+      const doms = [document];
+      try {
+        const iframe = document.querySelector("iframe#webclient");
+        if (iframe?.contentDocument) doms.push(iframe.contentDocument);
+      } catch {}
+      const selectorsByProvider = {
+        google: ['[aria-live="polite"]', '[aria-live="assertive"]', '[role="status"]', '[jsname][data-ved]', '[class*="caption" i]'],
+        microsoft: ['[data-tid*="closed-caption" i]', '[data-tid*="caption" i]', '[aria-live="polite"]', '[aria-live="assertive"]', '[class*="caption" i]', '[class*="transcript" i]'],
+        zoom: ['.live-transcription-subtitle', '.closed-caption', '[class*="caption" i]', '[class*="transcription" i]', '[aria-live="polite"]', '[aria-live="assertive"]'],
+      };
+      const selectors = selectorsByProvider[providerName] || selectorsByProvider.google;
+      const entries = [];
+      for (const dom of doms) {
+        for (const selector of selectors) {
+          for (const node of Array.from(dom.querySelectorAll(selector))) {
+            if (!visibleNode(node)) continue;
+            const entry = parseCaptionNode(node);
+            if (entry) entries.push(entry);
+          }
+        }
+      }
+      return entries;
+    }, provider);
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries) {
+      const key = `${entry.speaker}|${entry.text}`;
+      if (knownTranscriptKeys.has(key)) continue;
+      knownTranscriptKeys.add(key);
+      emit({ type: "transcript_segment", ...entry });
+    }
+  } catch {}
+}, 1500);
+
+const speakerPollInterval = setInterval(async () => {
+  try {
+    const signal = await page.evaluate((providerName) => {
+      const visibleNode = (el) => {
+        try {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+        } catch { return false; }
+      };
+      const compactText = (value) => String(value || "").replace(/\s+/g, " ").trim();
+      const cleanSpeakerName = (value) => {
+        let name = compactText(value)
+          .replace(/\b(is speaking|speaking|active speaker|current speaker|spricht|aktueller sprecher)\b/ig, "")
+          .replace(/[:|,-]+$/g, "")
+          .trim();
+        if (!name || name.length > 96) return "";
+        return name;
+      };
+      const doms = [document];
+      try {
+        const iframe = document.querySelector("iframe#webclient");
+        if (iframe?.contentDocument) doms.push(iframe.contentDocument);
+      } catch {}
+      const selectorsByProvider = {
+        google: ['[data-speaking="true"]', '[aria-label*="speaking" i]', '[aria-label*="spricht" i]', '[class*="speaking" i]', '[class*="active-speaker" i]'],
+        microsoft: ['[data-tid*="active-speaker" i]', '[data-tid*="speaking" i]', '[aria-label*="speaking" i]', '[aria-label*="spricht" i]', '[class*="speaking" i]'],
+        zoom: ['[aria-label*="active speaker" i]', '[aria-label*="speaking" i]', '[class*="active-speaker" i]', '[class*="activeSpeaker" i]', '[class*="is-speaking" i]'],
+      };
+      const selectors = selectorsByProvider[providerName] || selectorsByProvider.google;
+      for (const dom of doms) {
+        for (const selector of selectors) {
+          for (const node of Array.from(dom.querySelectorAll(selector))) {
+            if (!visibleNode(node)) continue;
+            const aria = node.getAttribute("aria-label") || node.getAttribute("title") || "";
+            let speaker = cleanSpeakerName(aria);
+            if (!speaker) {
+              const nameNode = node.querySelector?.('[data-self-name], [data-participant-name], [class*="name" i], [class*="display" i]');
+              speaker = cleanSpeakerName(nameNode?.textContent || "");
+            }
+            if (!speaker) {
+              const lines = (node.innerText || node.textContent || "").split(/\n+/).map(compactText).filter(Boolean);
+              speaker = cleanSpeakerName(lines.find(line => line.length <= 80) || "");
+            }
+            if (!speaker) continue;
+            return {
+              speaker,
+              speaker_id: node.getAttribute("data-participant-id") || node.getAttribute("data-user-id") || "",
+              source: "platform_active_speaker",
+              confidence: 0.6,
+              provider: providerName,
+              ts: new Date().toISOString(),
+            };
+          }
+        }
+      }
+      return null;
+    }, provider);
+    if (!signal?.speaker) return;
+    const key = `${signal.speaker}|${signal.source}`;
+    if (key === lastSpeakerKey) return;
+    lastSpeakerKey = key;
+    emit({ type: "active_speaker", ...signal });
+  } catch {}
+}, 1000);
+
+const participantPollInterval = setInterval(async () => {
+  try {
+    const count = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll("button"));
+      for (const btn of buttons) {
+        const text = btn.textContent || "";
+        const match = text.match(/(\d+)/);
+        if (match && (text.toLowerCase().includes("people") ||
+            text.toLowerCase().includes("participant") ||
+            btn.getAttribute("aria-label")?.toLowerCase().includes("people") ||
+            btn.getAttribute("aria-label")?.toLowerCase().includes("participant"))) {
+          return parseInt(match[1]);
+        }
+      }
+      return null;
+    });
+    if (count !== null) {
+      emit({ type: "participant_count", count });
+      if (count <= 1) {
+        await page.waitForTimeout(60000);
+        const recheck = await page.evaluate(() => {
+          const buttons = Array.from(document.querySelectorAll("button"));
+          for (const btn of buttons) {
+            const text = btn.textContent || "";
+            const match = text.match(/(\d+)/);
+            if (match && (text.toLowerCase().includes("people") || text.toLowerCase().includes("participant"))) {
+              return parseInt(match[1]);
+            }
+          }
+          return null;
+        });
+        if (recheck !== null && recheck <= 1) {
+          window.ctoxMeetingEnd?.("alone_in_meeting");
+        }
+      }
+    }
+  } catch {}
+}, 10000);
+
+if (provider === "microsoft" && process.platform !== "darwin") {
   // --- Teams: ffmpeg + PulseAudio recording ---
   // Verify PulseAudio virtual output
   const { execSync } = await import("node:child_process");
@@ -1362,7 +3102,7 @@ if (provider === "microsoft") {
     let binary = "";
     const bytes = new Uint8Array(buffer);
     for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i]);
-    await window.ctoxAudioChunk(btoa(binary));
+    await window.ctoxAudioChunk({ base64: btoa(binary), extension: "mp4" });
     fs.unlinkSync(outputPath);
   }
 
@@ -1420,8 +3160,9 @@ if (provider === "microsoft") {
     if (!hasAudio) {
       console.warn("[CTOX_AUDIO] No audio tracks captured — only video will be recorded. STT will receive video chunks (which are likely useless).");
     }
-    // Stop video tracks immediately — we only want audio for STT, video bloats chunks
-    videoTracks.forEach(t => { try { t.stop(); } catch {} });
+    // Keep video tracks so screen sharing/current-tab content is retained as
+    // a reviewable meeting artifact. STT reads the same WebM container and
+    // extracts usable audio where the backend supports it.
 
     let options = {};
     if (MediaRecorder.isTypeSupported(primaryMimeType)) {
@@ -1585,79 +3326,124 @@ if (provider === "microsoft") {
   }, { chunkMs: chunkSeconds * 1000, maxMs: maxDurationMs, primaryMimeType, fallbackMimeType, inactivityMinutes: 1 });
 }
 
-// --- Chat monitoring ---
-const knownChatKeys = new Set();
-const chatPollInterval = setInterval(async () => {
-  try {
-    const messages = await page.evaluate(() => {
-      __CHAT_SCRAPE_SCRIPT__
-    });
-    if (!Array.isArray(messages)) return;
-    for (const msg of messages) {
-      const key = `${msg.sender}|${msg.text}`;
-      if (!knownChatKeys.has(key)) {
-        knownChatKeys.add(key);
-        emit({ type: "chat", sender: msg.sender, text: msg.text, ts: msg.ts || new Date().toISOString() });
-      }
-    }
-  } catch {}
-}, 2000);
-
-// --- Participant count monitoring ---
-const participantPollInterval = setInterval(async () => {
-  try {
-    const count = await page.evaluate(() => {
-      const buttons = Array.from(document.querySelectorAll("button"));
-      for (const btn of buttons) {
-        const text = btn.textContent || "";
-        const match = text.match(/(\d+)/);
-        if (match && (text.toLowerCase().includes("people") ||
-            text.toLowerCase().includes("participant") ||
-            btn.getAttribute("aria-label")?.toLowerCase().includes("people") ||
-            btn.getAttribute("aria-label")?.toLowerCase().includes("participant"))) {
-          return parseInt(match[1]);
-        }
-      }
-      return null;
-    });
-    if (count !== null) {
-      emit({ type: "participant_count", count });
-      if (count <= 1) {
-        await page.waitForTimeout(60000);
-        const recheck = await page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll("button"));
-          for (const btn of buttons) {
-            const text = btn.textContent || "";
-            const match = text.match(/(\d+)/);
-            if (match && (text.toLowerCase().includes("people") || text.toLowerCase().includes("participant"))) {
-              return parseInt(match[1]);
-            }
-          }
-          return null;
-        });
-        if (recheck !== null && recheck <= 1) {
-          window.ctoxMeetingEnd?.("alone_in_meeting");
-        }
-      }
-    }
-  } catch {}
-}, 10000);
-
-// --- Stdin command handling ---
-const rl = readline.createInterface({ input: process.stdin });
-rl.on("line", async (line) => {
+const handleCommandLine = async (line) => {
   try {
     const cmd = JSON.parse(line);
     if (cmd.action === "send_chat") {
-      await page.evaluate(async (text) => {
+      emit({ type: "command_received", action: "send_chat" });
+      let sent = false;
+      try {
+        sent = await page.evaluate(async (text) => {
         __SEND_CHAT_SCRIPT__
-      }, cmd.text);
-      emit({ type: "chat_sent", text: cmd.text });
+        }, cmd.text);
+      } catch (err) {
+        emit({ type: "warning", message: "browser-context chat send failed: " + err.message });
+      }
+      if (!sent) {
+        sent = await sendChatViaPlaywrightFallback(cmd.text);
+      }
+      if (sent) {
+        emit({ type: "chat_sent", text: cmd.text });
+      } else {
+        emit({ type: "chat_send_failed", text: cmd.text });
+      }
     }
   } catch (err) {
     emit({ type: "error", message: err.message });
   }
-});
+};
+
+const sendChatViaPlaywrightFallback = async (text) => {
+  const scopes = () => [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+  const chatButtonMatchers = [
+    /chat/i,
+    /unterhaltung/i,
+    /conversation/i,
+    /messages/i,
+    /nachrichten/i,
+  ];
+  for (const scope of scopes()) {
+    for (const matcher of chatButtonMatchers) {
+      try {
+        const button = scope.getByRole("button", { name: matcher }).first();
+        if (await button.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await button.click({ force: true });
+          await page.waitForTimeout(1000);
+          break;
+        }
+      } catch {}
+    }
+  }
+
+  const inputSelectors = [
+    '.chat-rtf-box__editor-outer [contenteditable="true"]',
+    '.chat-rtf-box__display',
+    '.tiptap.ProseMirror',
+    '[contenteditable="true"][aria-label*="message" i]',
+    '[contenteditable="true"][data-tid*="message" i]',
+    '[data-tid="meeting-chat-input"] [contenteditable="true"]',
+    'textarea[placeholder*="message" i]',
+    'textarea[placeholder*="Type" i]',
+    'textarea[aria-label*="message" i]',
+    'textarea[aria-label*="Send" i]',
+    'input[placeholder*="message" i]',
+    'input[placeholder*="Type" i]',
+    'input[aria-label*="message" i]',
+    '[contenteditable="true"]',
+    '[role="textbox"]',
+  ];
+  for (const scope of scopes()) {
+    for (const selector of inputSelectors) {
+      try {
+        const input = scope.locator(selector).last();
+        if (!(await input.isVisible({ timeout: 1000 }).catch(() => false))) continue;
+        await input.click({ force: true });
+        const editable = await input.evaluate((el) => el.isContentEditable || el.getAttribute("role") === "textbox").catch(() => false);
+        if (editable) {
+          await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+          await page.keyboard.type(text, { delay: 10 });
+        } else {
+          try { await input.fill(text); }
+          catch {
+            await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A").catch(() => {});
+            await page.keyboard.type(text, { delay: 10 });
+          }
+        }
+        await page.keyboard.press("Enter");
+        return true;
+      } catch {}
+    }
+  }
+  return false;
+};
+
+// --- Command handling ---
+// stdin is useful for the CLI process that spawned the runner. commandFile is
+// the durable cross-process bridge used by meeting_send_chat and @CTOX acks.
+const rl = readline.createInterface({ input: process.stdin });
+rl.on("line", handleCommandLine);
+
+const commandFilePollInterval = setInterval(async () => {
+  if (!commandFile) return;
+  try {
+    if (!fs.existsSync(commandFile)) return;
+    const stat = fs.statSync(commandFile);
+    if (stat.size < commandFileOffset) commandFileOffset = 0;
+    if (stat.size === commandFileOffset) return;
+    const fd = fs.openSync(commandFile, "r");
+    try {
+      const buffer = Buffer.alloc(stat.size - commandFileOffset);
+      fs.readSync(fd, buffer, 0, buffer.length, commandFileOffset);
+      commandFileOffset = stat.size;
+      const lines = buffer.toString("utf8").split(/\r?\n/).filter(Boolean);
+      for (const commandLine of lines) await handleCommandLine(commandLine);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    emit({ type: "warning", message: "command file poll failed: " + err.message });
+  }
+}, 500);
 
 // --- Wait for meeting to end ---
 const startTime = Date.now();
@@ -1666,7 +3452,11 @@ while (!meetingEnded && (Date.now() - startTime) < maxDurationMs) {
 }
 
 clearInterval(chatPollInterval);
+clearInterval(transcriptPollInterval);
+clearInterval(speakerPollInterval);
 clearInterval(participantPollInterval);
+clearInterval(commandFilePollInterval);
+if (stopZoomRemovalMonitor) stopZoomRemovalMonitor();
 rl.close();
 
 emit({ type: "finalized", temp_dir: tempDir, provider });
@@ -1726,6 +3516,28 @@ fn build_google_meet_join_script() -> &'static str {
     r#"
 // Google Meet join flow — transplanted from ScreenApp meeting-bot reference
 try {
+  const detectPage = async () => {
+    const currentUrl = page.url();
+    if (currentUrl.startsWith("https://accounts.google.com/")) {
+      return "SIGN_IN_PAGE";
+    }
+    if (currentUrl.includes("workspace.google.com/products/meet")) {
+      return "UNSUPPORTED_PAGE";
+    }
+    if (!currentUrl.includes("meet.google.com")) {
+      return "UNSUPPORTED_PAGE";
+    }
+    return "GOOGLE_MEET_PAGE";
+  };
+
+  const initialPageStatus = await detectPage();
+  if (initialPageStatus === "SIGN_IN_PAGE") {
+    throw new Error("Meeting requires sign in");
+  }
+  if (initialPageStatus === "UNSUPPORTED_PAGE") {
+    throw new Error("Google Meet redirected to unsupported page: " + page.url());
+  }
+
   // 1. Dismiss "Continue without microphone and camera" (with retry)
   try {
     const retryClick = async (desc, fn, retries = 1, wait = 15000) => {
@@ -1739,30 +3551,34 @@ try {
     await retryClick(
       "Continue without microphone and camera",
       async () => {
-        await page.getByRole("button", { name: "Continue without microphone and camera" }).waitFor({ timeout: 30000 });
-        await page.getByRole("button", { name: "Continue without microphone and camera" }).click();
+        const button = page.getByRole("button", {
+          name: /Continue without microphone and camera|Ohne Mikrofon und Kamera fortfahren|Mikrofon und Kamera nicht verwenden/i
+        }).first();
+        await button.waitFor({ timeout: 30000 });
+        await button.click();
       }
     );
   } catch { /* may not appear */ }
 
   // 2. Verify we are on a Google Meet page (not redirected to sign-in)
-  const detectPage = async () => {
-    const currentUrl = page.url();
-    if (currentUrl.startsWith("https://accounts.google.com/")) {
-      return "SIGN_IN_PAGE";
-    }
-    if (!currentUrl.includes("meet.google.com")) {
-      return "UNSUPPORTED_PAGE";
-    }
-    return "GOOGLE_MEET_PAGE";
-  };
-
   const pageStatus = await detectPage();
   if (pageStatus === "SIGN_IN_PAGE") {
-    emit({ type: "error", message: "Meeting requires sign in" });
+    throw new Error("Meeting requires sign in");
+  }
+  if (pageStatus === "UNSUPPORTED_PAGE") {
+    throw new Error("Google Meet redirected to unsupported page: " + page.url());
   }
 
   // 3. Wait for name input and fill it (with retry)
+  const nameInputSelectors = [
+    'input[type="text"][aria-label="Your name"]',
+    'input[type="text"][aria-label*="name" i]',
+    'input[type="text"][aria-label*="Name" i]',
+    'input[type="text"][placeholder*="name" i]',
+    'input[type="text"][placeholder*="Name" i]',
+    'input[type="text"]',
+  ];
+  let filledName = false;
   try {
     const retryWait = async (desc, fn, retries = 3, wait = 15000, onError) => {
       for (let i = 0; i <= retries; i++) {
@@ -1775,7 +3591,13 @@ try {
     };
     await retryWait(
       "Name input field",
-      async () => await page.waitForSelector('input[type="text"][aria-label="Your name"]', { timeout: 10000 }),
+      async () => {
+        for (const selector of nameInputSelectors) {
+          const input = page.locator(selector).first();
+          if (await input.isVisible({ timeout: 1000 }).catch(() => false)) return;
+        }
+        throw new Error("name input not visible");
+      },
       3,
       15000
     );
@@ -1783,19 +3605,37 @@ try {
     emit({ type: "warning", message: "Name input not found: " + err.message });
   }
 
-  await page.waitForTimeout(10000);
-  await page.fill('input[type="text"][aria-label="Your name"]', botName);
-  await page.waitForTimeout(10000);
+  for (const selector of nameInputSelectors) {
+    try {
+      const input = page.locator(selector).first();
+      if (await input.isVisible({ timeout: 1000 }).catch(() => false)) {
+        await input.fill(botName);
+        filledName = true;
+        break;
+      }
+    } catch {}
+  }
+  if (filledName) {
+    await page.waitForTimeout(2000);
+  }
 
   // 4. Click join button (Ask to join / Join now / Join anyway) — with retry
   {
-    const possibleTexts = ["Ask to join", "Join now", "Join anyway"];
+    const possibleTexts = [
+      "Ask to join",
+      "Join now",
+      "Join anyway",
+      "Teilnahme anfragen",
+      "Jetzt teilnehmen",
+      "Teilnehmen",
+      "Trotzdem teilnehmen",
+    ];
     let buttonClicked = false;
     for (let attempt = 0; attempt <= 3 && !buttonClicked; attempt++) {
       for (const text of possibleTexts) {
         try {
-          const btn = page.locator("button", { hasText: new RegExp(text.toLowerCase(), "i") }).first();
-          if (await btn.count() > 0) {
+          const btn = page.locator("button", { hasText: new RegExp(text, "i") }).first();
+          if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
             await btn.click({ timeout: 5000 });
             buttonClicked = true;
             break;
@@ -1815,7 +3655,7 @@ try {
     const LOBBY_HOST_TEXT = "Please wait until a meeting host brings you";
     const REQUEST_DENIED = "Someone in the call denied your request to join";
     const REQUEST_TIMEOUT = "No one responded to your request to join the call";
-    const wanderingTime = 10 * 60 * 1000;
+    const wanderingTime = Math.min(10 * 60 * 1000, maxDurationMs);
     const lobbyResult = await new Promise((resolve) => {
       const timeout = setTimeout(() => { clearInterval(interval); resolve(false); }, wanderingTime);
       const interval = setInterval(async () => {
@@ -1828,14 +3668,23 @@ try {
           if (bodyText.includes(REQUEST_TIMEOUT)) {
             clearInterval(interval); clearTimeout(timeout); resolve(false); return;
           }
-          if (bodyText.includes(LOBBY_HOST_TEXT)) return; // still waiting
+          if (
+            bodyText.includes(LOBBY_HOST_TEXT)
+            || bodyText.includes("Jemand wird dich")
+            || bodyText.includes("Jemand wird Sie")
+            || bodyText.includes("Teilnahme anfragen")
+            || bodyText.includes("Bitte warten")
+          ) return; // still waiting
 
           // Check for People button or Leave call button
           const detected = await page.evaluate(() => {
             try {
               const peopleBtn = document.querySelector('button[aria-label^="People"]')
-                || document.querySelector('button[aria-label*="People"]');
-              const leaveBtn = document.querySelector('button[aria-label="Leave call"]');
+                || document.querySelector('button[aria-label*="People"]')
+                || document.querySelector('button[aria-label*="Teilnehmer"]');
+              const leaveBtn = document.querySelector('button[aria-label="Leave call"]')
+                || document.querySelector('button[aria-label*="Verlassen"]')
+                || document.querySelector('button[aria-label*="Anruf verlassen"]');
 
               if (!peopleBtn && !leaveBtn) return false;
 
@@ -1929,6 +3778,44 @@ fn build_teams_join_script() -> &'static str {
 // Note: Teams uses ffmpeg+PulseAudio for recording, not getDisplayMedia.
 // The browser is launched with --use-fake-ui-for-media-stream, --kiosk.
 try {
+  const teamsScopes = () => [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+  const warmUpTeamsMediaDevices = async () => {
+    try {
+      await page.evaluate(async () => {
+        if (!navigator.mediaDevices?.getUserMedia) return false;
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+        stream.getTracks().forEach((track) => track.stop());
+        return true;
+      });
+    } catch {}
+  };
+  const waitForTeamsPreJoinReadiness = async (timeoutMs = 45000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const scope of teamsScopes()) {
+        const ready = await scope.evaluate(() => {
+          const visible = (el) => {
+            try {
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+            } catch { return false; }
+          };
+          const hasName = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true'], [role='textbox']"))
+            .some((el) => visible(el) && (el.value || el.textContent || el.getAttribute("aria-label") || "").length >= 0);
+          const hasJoin = Array.from(document.querySelectorAll("button"))
+            .some((btn) => visible(btn) && /join|teilnehmen|beitreten|ask to join/i.test(btn.innerText || btn.textContent || btn.getAttribute("aria-label") || ""));
+          return hasName || hasJoin;
+        }).catch(() => false);
+        if (ready) return true;
+      }
+      await page.waitForTimeout(1000);
+    }
+    return false;
+  };
+
+  await warmUpTeamsMediaDevices();
+
   // 1. Click "Join from browser" / "Continue on this browser"
   const joinButtonSelectors = [
     'button[aria-label="Join meeting from this browser"]',
@@ -1936,28 +3823,140 @@ try {
     'button[aria-label="Join on this browser"]',
     'button:has-text("Continue on this browser")',
     'button:has-text("Join from browser")',
+    'button:has-text("In diesem Browser fortfahren")',
+    'button:has-text("In diesem Browser teilnehmen")',
   ];
   let browserBtnClicked = false;
-  for (const sel of joinButtonSelectors) {
+  const visibleTextInputInScope = async (scope) => {
     try {
-      await page.waitForSelector(sel, { timeout: 60000 });
-      await page.click(sel, { force: true });
-      browserBtnClicked = true;
-      break;
-    } catch { continue; }
+      return await scope.evaluate(() => {
+        return Array.from(document.querySelectorAll("input")).some((el) => {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          return rect.width > 80 && rect.height > 20 && style.visibility !== "hidden" && style.display !== "none";
+        });
+      });
+    } catch { return false; }
+  };
+  let alreadyOnPrejoin = false;
+  for (const scope of teamsScopes()) {
+    if (await visibleTextInputInScope(scope)) { alreadyOnPrejoin = true; break; }
   }
-  if (!browserBtnClicked) {
+  if (!alreadyOnPrejoin) {
+    for (const sel of joinButtonSelectors) {
+      try {
+        const button = page.locator(sel).first();
+        if (await button.isVisible({ timeout: 3000 }).catch(() => false)) {
+          await button.click({ force: true });
+          browserBtnClicked = true;
+          break;
+        }
+      } catch { continue; }
+    }
+  }
+  if (!browserBtnClicked && !alreadyOnPrejoin) {
     emit({ type: "warning", message: "Join from browser button not found, proceeding" });
   }
+  await waitForTeamsPreJoinReadiness();
 
-  // 2. Fill name input (Teams-specific data-tid selector)
+  // 2. Fill name input (Teams light meetings/localized variants)
   try {
-    const nameInput = page.locator('input[data-tid="prejoin-display-name-input"]');
-    await nameInput.waitFor({ state: "visible", timeout: 120000 });
-    await nameInput.fill(botName);
+    const nameInputSelectors = [
+      'input[data-tid="prejoin-display-name-input"]',
+      'input[placeholder*="name" i]',
+      'input[placeholder*="Namen" i]',
+      'input[type="text"]',
+    ];
+    let filledName = false;
+    for (const scope of teamsScopes()) {
+      for (const sel of nameInputSelectors) {
+        const nameInput = scope.locator(sel).first();
+        if (await nameInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await nameInput.fill(botName);
+          filledName = true;
+          break;
+        }
+      }
+      if (filledName) break;
+    }
+    if (!filledName) {
+      for (const scope of teamsScopes()) {
+        const filled = await scope.evaluate((name) => {
+          const candidates = Array.from(document.querySelectorAll("input, textarea, [contenteditable='true'], [role='textbox']"));
+          for (const el of candidates) {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (rect.width <= 80 || rect.height <= 20 || style.visibility === "hidden" || style.display === "none") continue;
+            el.focus();
+            if ("value" in el) el.value = name;
+            else el.textContent = name;
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          }
+          return false;
+        }, botName).catch(() => false);
+        if (filled) { filledName = true; break; }
+      }
+    }
+    if (!filledName) {
+      // Teams light-meetings sometimes renders the guest name control through
+      // a localized/translated surface that Playwright cannot see as a normal
+      // input. The prejoin layout is stable enough for this fallback.
+      await page.mouse.click(640, 200);
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+      await page.keyboard.type(botName);
+      filledName = true;
+    }
+    if (!filledName) throw new Error("no visible Teams display-name input");
     await page.waitForTimeout(1000);
   } catch (err) {
-    emit({ type: "warning", message: "Teams name input not found after 120s: " + err.message });
+    emit({ type: "warning", message: "Teams name input not found: " + err.message });
+  }
+
+  // 2b. Select computer audio so the "Join now" button becomes enabled.
+  try {
+    const audioLabels = [
+      /Computer audio/i,
+      /Computeraudio/i,
+      /Use computer audio/i,
+    ];
+    let selectedAudio = false;
+    for (const scope of teamsScopes()) {
+      for (const label of audioLabels) {
+        const option = scope.getByText(label).first();
+        if (await option.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await option.click({ force: true });
+          selectedAudio = true;
+          break;
+        }
+      }
+      if (selectedAudio) break;
+    }
+    if (!selectedAudio) {
+      for (const scope of teamsScopes()) {
+        const clicked = await scope.evaluate(() => {
+          const cards = Array.from(document.querySelectorAll("button, label, div"));
+          for (const el of cards) {
+            const text = (el.innerText || el.textContent || "").trim();
+            if (!/Computer audio|Computeraudio|Use computer audio/i.test(text)) continue;
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            if (rect.width <= 50 || rect.height <= 20 || style.visibility === "hidden" || style.display === "none") continue;
+            el.click();
+            return true;
+          }
+          return false;
+        }).catch(() => false);
+        if (clicked) {
+          selectedAudio = true;
+          break;
+        }
+      }
+    }
+    if (selectedAudio) await page.waitForTimeout(1000);
+  } catch (err) {
+    emit({ type: "warning", message: "Teams audio option not selected: " + err.message });
   }
 
   // 3. Toggle off camera and mute microphone
@@ -1995,28 +3994,54 @@ try {
 
   // 4. Click Join button (with retry)
   {
-    const possibleTexts = ["Join now", "Join", "Ask to join", "Join meeting"];
+    const possibleTexts = ["Join now", "Join", "Ask to join", "Join meeting", "Jetzt teilnehmen", "Teilnehmen"];
     let joinClicked = false;
     for (let attempt = 0; attempt <= 3 && !joinClicked; attempt++) {
-      for (const text of possibleTexts) {
-        try {
-          const btn = page.getByRole("button", { name: new RegExp(text, "i") });
-          if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
-            await btn.click(); joinClicked = true; break;
+      for (const scope of teamsScopes()) {
+        for (const text of possibleTexts) {
+          try {
+            const btn = scope.getByRole("button", { name: new RegExp(text, "i") });
+            if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await btn.click(); joinClicked = true; break;
+            }
+          } catch {}
+        }
+        if (joinClicked) break;
+      }
+      if (!joinClicked) {
+        for (const scope of teamsScopes()) {
+          const clicked = await scope.evaluate((labels) => {
+            const buttons = Array.from(document.querySelectorAll("button"));
+            for (const button of buttons) {
+              const text = (button.innerText || button.getAttribute("aria-label") || "").trim();
+              if (!labels.some((label) => text.toLowerCase().includes(label.toLowerCase()))) continue;
+              button.click();
+              return true;
+            }
+            return false;
+          }, possibleTexts).catch(() => false);
+          if (clicked) {
+            joinClicked = true;
+            break;
           }
-        } catch {}
+        }
+      }
+      if (!joinClicked && attempt === 1) {
+        await page.mouse.click(1060, 600);
+        joinClicked = true;
       }
       if (!joinClicked) await page.waitForTimeout(15000);
     }
     if (!joinClicked) emit({ type: "warning", message: "Could not find Teams join button" });
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+M" : "Control+Shift+M").catch(() => {});
   }
 
   // 5. Wait for lobby admission (Leave button appears)
   {
     const DENIED_TEXT = "Sorry, but you were denied access to the meeting";
-    const wanderingTime = 10 * 60 * 1000;
+    const wanderingTime = Math.min(10 * 60 * 1000, maxDurationMs);
     try {
-      const leaveBtn = page.getByRole("button", { name: /Leave/i });
+      const leaveBtn = page.getByRole("button", { name: /Leave|Verlassen/i });
       await leaveBtn.waitFor({ timeout: wanderingTime });
     } catch {
       const bodyText = await page.evaluate(() => document.body.innerText);
@@ -2054,7 +4079,7 @@ try {
 
 fn build_zoom_join_script() -> &'static str {
     r##"
-// Zoom join flow — transplanted from ScreenApp meeting-bot reference
+// Zoom join flow — direct web client flow with Vexa-style readiness checks.
 try {
   // Block .exe downloads
   await page.route("**/*.exe", (route) => {
@@ -2064,171 +4089,123 @@ try {
   // 1. Accept cookies
   try {
     await page.waitForTimeout(3000);
-    const acceptCookies = page.locator("button", { hasText: "Accept Cookies" });
+    const acceptCookies = page.locator("button", { hasText: /Accept Cookies|Cookies akzeptieren|Alle Cookies akzeptieren/i }).first();
     await acceptCookies.waitFor({ timeout: 5000 });
     await acceptCookies.click({ force: true });
   } catch { /* may not appear */ }
 
-  // 2. Click "Download Now" then "Join from your browser" (with retry)
-  let usingDirectWebClient = false;
-  const findJoinFromBrowser = async (retry) => {
-    if (retry >= 3) return false;
+  if (!page.url().includes("/wc/")) {
+    await page.goto(buildZoomWebClientUrl(meetingUrl), { waitUntil: "domcontentloaded", timeout: 60000 });
+  }
+  await page.waitForTimeout(5000);
+
+  const text = (await page.evaluate(() => document.body?.innerText || "").catch(() => "")).toLowerCase();
+  if (/sign in to join|only authenticated users|not authorized|meeting authentication/i.test(text)) {
+    emit({ type: "join_failed", provider, reason: "zoom_requires_authentication", bodyText: text.substring(0, 500) });
+  }
+
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      await page.waitForTimeout(5000);
-      const downloadBtn = page.getByRole("button", { name: /Download Now/i }).first();
-      if (await downloadBtn.isVisible()) await downloadBtn.click({ force: true });
-      const joinLink = page.locator("a", { hasText: "Join from your browser" }).first();
-      await joinLink.waitFor({ timeout: 5000 });
-      if (await joinLink.count() > 0) { await joinLink.click({ force: true }); return true; }
-      return await findJoinFromBrowser(retry + 1);
-    } catch { return retry < 3 ? await findJoinFromBrowser(retry + 1) : false; }
+      const allow = page.getByRole("button", { name: /Allow/i }).first();
+      if (await allow.isVisible({ timeout: 1500 }).catch(() => false)) await allow.click({ force: true });
+    } catch {}
+  }
+
+  const zoomScopes = () => [page, ...page.frames().filter((frame) => frame !== page.mainFrame())];
+  const findVisibleLocator = async (selectors, timeout = 1500) => {
+    for (const scope of zoomScopes()) {
+      for (const selector of selectors) {
+        try {
+          const locator = scope.locator(selector).first();
+          if (await locator.isVisible({ timeout }).catch(() => false)) return locator;
+        } catch {}
+      }
+    }
+    return null;
   };
 
-  let foundBrowserJoin = await findJoinFromBrowser(0);
+  const nameInput = await findVisibleLocator([
+    "#input-for-name",
+    'input[aria-label*="name" i]',
+    'input[placeholder*="name" i]',
+    'input[type="text"]',
+  ], 30000);
+  if (nameInput) {
+    await nameInput.click({ force: true });
+    await nameInput.fill("").catch(() => {});
+    await page.keyboard.type(botName, { delay: 30 });
+  } else {
+    emit({ type: "warning", message: "Zoom name input not found" });
+  }
 
-  // Wait for nav to complete after clicking Join from browser
-  if (foundBrowserJoin) {
-    for (let i = 0; i < 3; i++) {
+  const passcodeInput = await findVisibleLocator([
+    "#input-for-pwd",
+    'input[type="password"]',
+    'input[placeholder*="passcode" i]',
+    'input[aria-label*="passcode" i]',
+  ], 1000);
+  if (passcodeInput && !new URL(buildZoomWebClientUrl(meetingUrl)).searchParams.get("pwd")) {
+    emit({ type: "warning", message: "Zoom passcode field visible but no passcode was present in the meeting URL" });
+  }
+
+  const joinSelectors = [
+    "button.preview-join-button",
+    'button[type="submit"]',
+    'button:has-text("Join")',
+    'button:has-text("Beitreten")',
+  ];
+  let joinedClicked = false;
+  for (let attempt = 0; attempt < 5 && !joinedClicked; attempt++) {
+    const joinButton = await findVisibleLocator(joinSelectors, 2000);
+    if (joinButton) {
       try {
-        const link = page.locator("a", { hasText: "Join from your browser" }).first();
-        await link.waitFor({ timeout: 4000 });
-        // Still on the same page — wait more
-      } catch { break; } // link gone = navigated
-    }
-  }
-
-  // 3. Fallback: direct /wc/join/ URL
-  if (!foundBrowserJoin) {
-    usingDirectWebClient = true;
-    try {
-      const wcUrl = new URL(meetingUrl);
-      wcUrl.pathname = wcUrl.pathname.replace("/j/", "/wc/join/");
-      await page.goto(wcUrl.toString(), { waitUntil: "networkidle" });
-    } catch {
-      emit({ type: "error", message: "Cannot access Zoom web client" });
-    }
-  }
-
-  await page.waitForTimeout(10000);
-
-  // 4. Detect iframe vs app container (with bidirectional retry from reference)
-  let iframe = page;
-  {
-    const tried = [];
-    const detect = async (startWith) => {
-      if (tried.includes("app") && tried.includes("iframe")) return false;
-      tried.push(startWith);
-      try {
-        if (startWith === "app") {
-          const input = await page.waitForSelector('input[type="text"]', { timeout: 30000 });
-          const join = page.locator("button", { hasText: /Join/i });
-          await join.waitFor({ timeout: 15000 });
-          if (input && join) { iframe = page; }
-          else return await detect("iframe");
+        await joinButton.waitFor({ state: "visible", timeout: 5000 });
+        const enabled = await joinButton.evaluate((btn) => !btn.disabled && !btn.classList.contains("disabled")).catch(() => true);
+        if (enabled) {
+          joinedClicked = await joinButton.evaluate((btn) => { btn.click(); return true; }).catch(() => false);
+          if (!joinedClicked) {
+            await joinButton.click({ force: true, timeout: 3000 });
+            joinedClicked = true;
+          }
         }
-        if (startWith === "iframe") {
-          const handle = await page.waitForSelector("iframe#webclient", { timeout: 30000, state: "attached" });
-          const frame = await handle.contentFrame();
-          if (frame) { iframe = frame; }
-          else return await detect("app");
-        }
-        return true;
-      } catch {
-        return await detect(startWith === "app" ? "iframe" : "app");
-      }
-    };
-    const found = await detect(usingDirectWebClient ? "app" : "iframe");
-    if (!found) emit({ type: "error", message: "Failed to detect Zoom web client container" });
+      } catch {}
+    }
+    if (!joinedClicked) await page.waitForTimeout(2000);
   }
+  if (!joinedClicked) emit({ type: "error", message: "Zoom join button not found or disabled" });
 
-  // 5. Enter name
-  try {
-    await iframe.waitForSelector('input[type="text"]', { timeout: 60000 });
-    await page.waitForTimeout(5000);
-    await iframe.fill('input[type="text"]', botName);
+  await page.waitForTimeout(5000);
+
+  const previewStopVideo = await findVisibleLocator([
+    'button[aria-label*="Stop Video" i]',
+    'button[title*="Stop Video" i]',
+  ], 1000);
+  if (previewStopVideo) await previewStopVideo.click({ force: true }).catch(() => {});
+
+  const wanderingTime = Math.min(10 * 60 * 1000, maxDurationMs);
+  const deadline = Date.now() + wanderingTime;
+  while (Date.now() < deadline) {
+    const state = await page.evaluate(() => {
+      const body = (document.body?.innerText || "").toLowerCase();
+      const leave = document.querySelector('button[aria-label*="Leave" i], button[title*="Leave" i]');
+      const footer = document.querySelector("#wc-footer");
+      return {
+        admitted: Boolean(leave) || /participants?|teilnehmer/i.test(footer?.textContent || ""),
+        waiting: /please wait|waiting room|let you in soon|we've let them know|host has not joined/i.test(body),
+        denied: /removed|denied|no one responded|meeting has ended/i.test(body),
+        bodyText: body.substring(0, 500),
+      };
+    });
+    if (state.admitted) break;
+    if (state.denied) {
+      emit({ type: "error", message: "Zoom lobby failed", bodyText: state.bodyText });
+      break;
+    }
+    if (state.waiting) emit({ type: "status", status: "waiting_lobby", provider });
     await page.waitForTimeout(3000);
-  } catch (err) {
-    emit({ type: "warning", message: "Zoom name input not found: " + err.message });
   }
 
-  // 6. Click Join
-  try {
-    const joinBtn = iframe.locator("button", { hasText: "Join" });
-    await joinBtn.click();
-  } catch (err) {
-    emit({ type: "error", message: "Zoom join button not found: " + err.message });
-  }
-
-  // 7. Wait in waiting room — footer-based participant detection from reference
-  {
-    const DENIED = "You have been removed";
-    const wanderingTime = 10 * 60 * 1000;
-    const lobbyResult = await new Promise((resolve) => {
-      const timeout = setTimeout(() => { clearInterval(interval); resolve(false); }, wanderingTime);
-      const interval = setInterval(async () => {
-        try {
-          const footerInfo = iframe.locator("#wc-footer");
-          await footerInfo.waitFor({ state: "attached" });
-          const footerText = await footerInfo.innerText();
-          // Parse "N participants" from footer
-          const tokens1 = footerText.split("\n");
-          const tokens2 = footerText.split(" ");
-          const tokens = tokens1.length > tokens2.length ? tokens1 : tokens2;
-          const filtered = [];
-          for (const tok of tokens) {
-            if (!tok) continue;
-            if (!Number.isNaN(Number(tok.trim()))) filtered.push(tok);
-            else if (tok.trim().toLowerCase() === "participants") { filtered.push("participants"); break; }
-          }
-          const joined = filtered.join("");
-          if (joined === "participants") return;
-          const isValid = joined.match(/\d+(.*)participants/i);
-          if (!isValid) return;
-          const num = joined.match(/\d+/);
-          if (num && Number(num[0]) > 0) {
-            clearInterval(interval); clearTimeout(timeout); resolve(true);
-          }
-        } catch {}
-      }, 2000);
-    });
-    if (!lobbyResult) {
-      const bodyText = await page.evaluate(() => document.body.innerText);
-      emit({ type: "error", message: "Zoom lobby failed", bodyText: (bodyText || "").substring(0, 500) });
-    }
-  }
-
-  // 8. Dismiss device notifications (camera/mic not found)
-  try {
-    const stopWaiting = 30000;
-    const cameraFound = [];
-    const micFound = [];
-    await new Promise((res) => {
-      const t = setTimeout(() => { clearInterval(iv); res(false); }, stopWaiting);
-      const iv = setInterval(async () => {
-        try {
-          const camDiv = iframe.locator("div", { hasText: /^Cannot detect your camera/i }).first();
-          const micDiv = iframe.locator("div", { hasText: /^Cannot detect your microphone/i }).first();
-          if (await camDiv.isVisible()) { if (!cameraFound.includes("found")) cameraFound.push("found"); }
-          else { if (cameraFound.includes("found")) cameraFound.push("dismissed"); }
-          if (await micDiv.isVisible()) { if (!micFound.includes("found")) micFound.push("found"); }
-          else { if (micFound.includes("found")) micFound.push("dismissed"); }
-          if (micFound.length >= 2 && cameraFound.length >= 2) {
-            clearInterval(iv); clearTimeout(t); res(true); return;
-          }
-          const closeButtons = await iframe.getByLabel("close").all();
-          for (const btn of closeButtons) {
-            if (await btn.isVisible()) await btn.click({ timeout: 5000 });
-          }
-        } catch { clearInterval(iv); clearTimeout(t); res(false); }
-      }, 2000);
-    });
-  } catch {}
-
-  // 9. Dismiss OK button
-  try {
-    const okBtn = iframe.locator("button", { hasText: "OK" }).first();
-    if (await okBtn.isVisible()) await okBtn.click({ timeout: 5000 });
-  } catch {}
+  await dismissZoomPopups(page, 30000);
 } catch (err) {
   emit({ type: "error", message: "Zoom join error: " + err.message });
 }
@@ -2255,8 +4232,12 @@ fn build_google_meet_chat_scraper() -> &'static str {
       if (messages.length === 0) {
         const items = document.querySelectorAll('[data-is-chat-message="true"], [jsname] [role="listitem"]');
         for (const item of items) {
-          const text = item.textContent?.trim() || '';
-          if (text) messages.push({ sender: 'Participant', text, ts: new Date().toISOString() });
+          const clone = item.cloneNode(true);
+          clone.querySelectorAll('[aria-label*="Pinned" i], [aria-label*="pin" i], button, svg').forEach((node) => node.remove());
+          const lines = (clone.innerText || clone.textContent || '').split(/\n+/).map((line) => line.trim()).filter(Boolean);
+          const sender = lines.length > 1 && lines[0].length <= 80 ? lines[0] : 'Participant';
+          const text = lines.length > 1 ? lines.slice(1).join(' ') : lines.join(' ');
+          if (text) messages.push({ sender, text, ts: new Date().toISOString() });
         }
       }
       return messages;
@@ -2268,8 +4249,8 @@ fn build_teams_chat_scraper() -> &'static str {
       const messages = [];
       const chatItems = document.querySelectorAll('[data-tid="chat-pane-message"], [role="listitem"]');
       for (const el of chatItems) {
-        const senderEl = el.querySelector('[data-tid="message-author-name"]') || el.querySelector('.ui-chat__message__author');
-        const textEl = el.querySelector('[data-tid="message-body"]') || el.querySelector('.ui-chat__message__content');
+        const senderEl = el.querySelector('[data-tid="message-author-name"]') || el.querySelector('.ui-chat__message__author') || el.querySelector('[class*="author" i], [class*="sender" i]');
+        const textEl = el.querySelector('[data-tid="message-body"]') || el.querySelector('.ui-chat__message__content') || el.querySelector('[class*="message-body" i], [class*="content" i]');
         const sender = senderEl?.textContent?.trim() || 'Unknown';
         const text = textEl?.textContent?.trim() || el.textContent?.trim() || '';
         if (text) messages.push({ sender, text, ts: new Date().toISOString() });
@@ -2297,6 +4278,7 @@ fn build_zoom_chat_scraper() -> &'static str {
       const itemSelectors = [
         '[id^="chat-list-item-"]',                    // primary: stable id
         '.new-chat-item__container',                  // primary: known class
+        '.new-chat-message__container',               // current web client message node
         '[class*="chat-item-container"]',             // fallback
         '[role="listitem"][class*="chat"]',           // generic fallback
       ];
@@ -2346,6 +4328,8 @@ fn build_zoom_chat_scraper() -> &'static str {
         const textSelectors = [
           '[id^="chat-msg-text"]',
           '.new-chat-message__container__text',
+          '.chat-rtf-box__display',
+          '.new-chat-message__content',
           '.chat-message__text-content',
           '[class*="chat-message__body"]',
           '[class*="chat-msg-text"]',
@@ -2387,16 +4371,8 @@ fn build_google_meet_chat_sender() -> &'static str {
         if (chatBtn) chatBtn.click();
         await new Promise(r => setTimeout(r, 1000));
       } catch {}
-      // Find chat input and type
-      const input = document.querySelector('textarea[aria-label*="Send a message" i], input[aria-label*="Send a message" i]');
-      if (input) {
-        input.focus();
-        input.value = text;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 500));
-        // Press Enter
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      }
+      // The actual send uses the Playwright keyboard fallback so Meet receives trusted key events.
+      return false;
     "#
 }
 
@@ -2408,14 +4384,8 @@ fn build_teams_chat_sender() -> &'static str {
         if (chatBtn) chatBtn.click();
         await new Promise(r => setTimeout(r, 1000));
       } catch {}
-      const input = document.querySelector('[data-tid="meeting-chat-input"] [contenteditable="true"], textarea[placeholder*="Type" i]');
-      if (input) {
-        input.focus();
-        input.textContent = text;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 500));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      }
+      // The actual send uses the Playwright keyboard fallback so Teams receives trusted key events.
+      return false;
     "#
 }
 
@@ -2431,14 +4401,8 @@ fn build_zoom_chat_sender() -> &'static str {
         if (chatBtn) chatBtn.click();
         await new Promise(r => setTimeout(r, 1000));
       } catch {}
-      const input = dom.querySelector('textarea[placeholder*="Type" i], input[placeholder*="Type" i]');
-      if (input) {
-        input.focus();
-        input.value = text;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        await new Promise(r => setTimeout(r, 500));
-        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-      }
+      // The actual send uses the Playwright keyboard fallback so Zoom receives trusted key events.
+      return false;
     "#
 }
 
@@ -2484,14 +4448,22 @@ pub(crate) fn extract_meeting_urls(text: &str) -> Vec<String> {
                 || c == ')'
                 || c == '['
                 || c == ']'
+                || c == ','
+                || c == ';'
+                || c == '.'
         });
         if !candidate.starts_with("https://") && !candidate.starts_with("http://") {
             continue;
         }
+        let candidate = candidate.replace("&amp;", "&");
         let lower = candidate.to_lowercase();
         if MEETING_URL_PATTERNS.iter().any(|pat| lower.contains(pat)) {
             // Normalize: strip trailing fragments and tracking params
-            let clean = candidate.split('#').next().unwrap_or(candidate).to_string();
+            let clean = candidate
+                .split('#')
+                .next()
+                .unwrap_or(candidate.as_str())
+                .to_string();
             if !urls.contains(&clean) {
                 urls.push(clean);
             }
@@ -2503,28 +4475,83 @@ pub(crate) fn extract_meeting_urls(text: &str) -> Vec<String> {
 /// Parse a meeting time from ICS-style DTSTART or common date patterns.
 /// Returns ISO 8601 timestamp if found.
 pub(crate) fn extract_meeting_time_from_text(text: &str) -> Option<String> {
-    // Look for ICS DTSTART pattern: DTSTART:20260415T140000Z or DTSTART;TZID=...:20260415T140000
-    for line in text.lines() {
+    extract_ics_value(text, "DTSTART").and_then(|value| parse_ics_datetime(&value))
+}
+
+fn extract_meeting_end_time_from_text(text: &str) -> Option<String> {
+    extract_ics_value(text, "DTEND").and_then(|value| parse_ics_datetime(&value))
+}
+
+fn extract_meeting_uid_from_text(text: &str) -> Option<String> {
+    extract_ics_value(text, "UID")
+}
+
+fn extract_meeting_sequence_from_text(text: &str) -> Option<String> {
+    extract_ics_value(text, "SEQUENCE")
+}
+
+fn extract_meeting_summary_from_text(text: &str) -> Option<String> {
+    extract_ics_value(text, "SUMMARY")
+}
+
+fn extract_meeting_method_from_text(text: &str) -> Option<String> {
+    extract_ics_value(text, "METHOD").map(|value| value.to_ascii_uppercase())
+}
+
+fn extract_ics_value(text: &str, field: &str) -> Option<String> {
+    let needle = field.to_ascii_uppercase();
+    for line in unfold_ics_lines(text) {
         let trimmed = line.trim();
-        if trimmed.starts_with("DTSTART") {
-            // Extract the value after the last ':'
-            if let Some(value) = trimmed.rsplit(':').next() {
-                let value = value.trim();
-                if value.len() >= 15 {
-                    // Parse: 20260415T140000Z → 2026-04-15T14:00:00Z
-                    let year = &value[0..4];
-                    let month = &value[4..6];
-                    let day = &value[6..8];
-                    let hour = &value[9..11];
-                    let min = &value[11..13];
-                    let sec = &value[13..15];
-                    let tz = if value.ends_with('Z') { "Z" } else { "" };
-                    return Some(format!("{year}-{month}-{day}T{hour}:{min}:{sec}{tz}"));
-                }
+        let upper = trimmed.to_ascii_uppercase();
+        if upper == needle
+            || upper.starts_with(&(needle.clone() + ":"))
+            || upper.starts_with(&(needle.clone() + ";"))
+        {
+            let value = trimmed.rsplit_once(':')?.1.trim();
+            if !value.is_empty() {
+                return Some(unescape_ics_text(value));
             }
         }
     }
     None
+}
+
+fn unfold_ics_lines(text: &str) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        if raw.starts_with(' ') || raw.starts_with('\t') {
+            if let Some(last) = lines.last_mut() {
+                last.push_str(raw.trim_start());
+            }
+        } else {
+            lines.push(raw.trim_end_matches('\r').to_string());
+        }
+    }
+    lines
+}
+
+fn unescape_ics_text(value: &str) -> String {
+    value
+        .replace("\\n", "\n")
+        .replace("\\N", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+}
+
+fn parse_ics_datetime(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.len() < 15 {
+        return None;
+    }
+    let year = value.get(0..4)?;
+    let month = value.get(4..6)?;
+    let day = value.get(6..8)?;
+    let hour = value.get(9..11)?;
+    let min = value.get(11..13)?;
+    let sec = value.get(13..15)?;
+    let tz = if value.ends_with('Z') { "Z" } else { "" };
+    Some(format!("{year}-{month}-{day}T{hour}:{min}:{sec}{tz}"))
 }
 
 /// Detect whether an email body indicates a meeting cancellation.
@@ -2539,6 +4566,7 @@ pub(crate) fn is_meeting_cancellation(subject: &str, body: &str) -> bool {
         || lower_body.contains("has been cancelled")
         || lower_body.contains("meeting wurde abgesagt")
         || lower_body.contains("method:cancel")
+        || extract_meeting_method_from_text(body).as_deref() == Some("CANCEL")
 }
 
 /// Detect whether an email body indicates a meeting time change.
@@ -2575,6 +4603,19 @@ pub(crate) fn meeting_schedule_name(meeting_url: &str) -> String {
     format!("meeting-join:{}", stable_digest(meeting_url))
 }
 
+fn meeting_schedule_name_for_invitation(meeting_url: &str, uid: Option<&str>) -> String {
+    if let Some(stable_key) = uid.map(str::trim).filter(|value| !value.is_empty()) {
+        return format!("meeting-join:{}", stable_digest(stable_key));
+    }
+    meeting_schedule_name(meeting_url)
+}
+
+fn meeting_join_time(meeting_time_iso: &str) -> String {
+    DateTime::parse_from_rfc3339(meeting_time_iso)
+        .map(|dt| (dt.with_timezone(&Utc) - Duration::minutes(1)).to_rfc3339())
+        .unwrap_or_else(|_| meeting_time_iso.to_string())
+}
+
 /// Schedule a meeting join via the CTOX schedule system.
 /// Creates or updates a scheduled task that will fire at the meeting start time.
 pub(crate) fn schedule_meeting_join(
@@ -2583,15 +4624,47 @@ pub(crate) fn schedule_meeting_join(
     meeting_time_iso: &str,
     bot_name: &str,
 ) -> Result<Value> {
+    schedule_meeting_join_with_metadata(
+        root,
+        meeting_url,
+        meeting_time_iso,
+        bot_name,
+        None,
+        None,
+        None,
+    )
+}
+
+fn schedule_meeting_join_with_metadata(
+    root: &Path,
+    meeting_url: &str,
+    meeting_time_iso: &str,
+    bot_name: &str,
+    uid: Option<&str>,
+    sequence: Option<&str>,
+    summary: Option<&str>,
+) -> Result<Value> {
     let provider =
         MeetingProvider::detect(meeting_url).context("cannot detect meeting provider from URL")?;
-    let cron_expr = cron_for_meeting_time(meeting_time_iso)
+    let join_time_iso = meeting_join_time(meeting_time_iso);
+    let cron_expr = cron_for_meeting_time(&join_time_iso)
         .context("cannot parse meeting time into cron expression")?;
-    let schedule_name = meeting_schedule_name(meeting_url);
+    let schedule_name = meeting_schedule_name_for_invitation(meeting_url, uid);
     let thread_key = format!("meeting:{}", provider.as_str());
 
+    let payload = json!({
+        "url": meeting_url,
+        "bot_name": bot_name,
+        "provider": provider.as_str(),
+        "meeting_time": meeting_time_iso,
+        "join_time": join_time_iso,
+        "uid": uid,
+        "sequence": sequence,
+        "summary": summary,
+    });
     let prompt = format!(
-        "Join the {provider} meeting at {url} as \"{bot_name}\". \
+        "CTOX_MEETING_JOIN: {payload}\n\
+         Join the {provider} meeting at {url} as \"{bot_name}\". \
          Capture audio transcript and monitor chat. \
          If no other participants join within 15 minutes, leave the meeting. \
          After the meeting ends, summarize the transcript and create knowledge entries and tickets.",
@@ -2617,8 +4690,12 @@ pub(crate) fn schedule_meeting_join(
         "schedule_name": schedule_name,
         "meeting_url": meeting_url,
         "meeting_time": meeting_time_iso,
+        "join_time": join_time_iso,
         "provider": provider.as_str(),
         "bot_name": bot_name,
+        "uid": uid,
+        "sequence": sequence,
+        "summary": summary,
         "status": "scheduled",
         "created_at": now_iso_string(),
     });
@@ -2631,6 +4708,7 @@ pub(crate) fn schedule_meeting_join(
         "task_id": task.task_id,
         "meeting_url": meeting_url,
         "meeting_time": meeting_time_iso,
+        "join_time": join_time_iso,
         "provider": provider.as_str(),
         "cron_expr": task.cron_expr,
         "next_run_at": task.next_run_at,
@@ -2639,24 +4717,36 @@ pub(crate) fn schedule_meeting_join(
 
 /// Cancel a scheduled meeting join.
 pub(crate) fn cancel_meeting_join(root: &Path, meeting_url: &str) -> Result<Value> {
-    let schedule_name = meeting_schedule_name(meeting_url);
-    let session_file = meeting_sessions_dir(root).join(format!("{schedule_name}.json"));
+    cancel_meeting_join_with_uid(root, meeting_url, None)
+}
 
-    // Remove the scheduled task
-    if let Err(err) = super::schedule::remove_task(
-        root,
-        &format!(
-            "sched_{}",
-            stable_digest(&format!(
-                "{schedule_name}:meeting:{}",
-                MeetingProvider::detect(meeting_url)
-                    .map(|p| p.as_str())
-                    .unwrap_or("unknown")
-            ))
-        ),
-    ) {
-        // Task may not exist — not fatal
-        eprintln!("note: could not remove scheduled task: {err}");
+fn cancel_meeting_join_with_uid(
+    root: &Path,
+    meeting_url: &str,
+    uid: Option<&str>,
+) -> Result<Value> {
+    let schedule_name = meeting_schedule_name_for_invitation(meeting_url, uid);
+    let session_file = meeting_sessions_dir(root).join(format!("{schedule_name}.json"));
+    let provider_thread_key = MeetingProvider::detect(meeting_url)
+        .map(|provider| format!("meeting:{}", provider.as_str()));
+
+    // Remove matching scheduled tasks by persisted metadata instead of relying
+    // on reconstructing the schedule module's task-id derivation.
+    if let Ok(tasks) = super::schedule::list_tasks(root) {
+        for task in tasks {
+            let provider_matches = provider_thread_key
+                .as_deref()
+                .map(|thread_key| task.thread_key == thread_key)
+                .unwrap_or(true);
+            if task.name == schedule_name && provider_matches {
+                if let Err(err) = super::schedule::remove_task(root, &task.task_id) {
+                    eprintln!(
+                        "note: could not remove scheduled task {}: {err}",
+                        task.task_id
+                    );
+                }
+            }
+        }
     }
 
     // Update session file
@@ -2694,34 +4784,70 @@ pub(crate) fn process_email_for_meetings(
     }
 
     let mut results = Vec::new();
+    let uid = extract_meeting_uid_from_text(body);
+    let sequence = extract_meeting_sequence_from_text(body);
+    let summary = extract_meeting_summary_from_text(body);
+    let meeting_time = extract_meeting_time_from_text(body);
+    let meeting_end_time = extract_meeting_end_time_from_text(body);
 
     for url in &urls {
         if is_meeting_cancellation(subject, body) {
-            let result = cancel_meeting_join(root, url)?;
+            let result = cancel_meeting_join_with_uid(root, url, uid.as_deref())?;
             results.push(result);
             continue;
         }
 
-        let meeting_time = extract_meeting_time_from_text(body);
         if let Some(ref time) = meeting_time {
             if is_meeting_update(subject, body) {
                 // Update = cancel old + schedule new
-                let _ = cancel_meeting_join(root, url);
+                let _ = cancel_meeting_join_with_uid(root, url, uid.as_deref());
             }
-            let result = schedule_meeting_join(root, url, time, bot_name)?;
+            let mut result = schedule_meeting_join_with_metadata(
+                root,
+                url,
+                time,
+                bot_name,
+                uid.as_deref(),
+                sequence.as_deref(),
+                summary.as_deref(),
+            )?;
+            if let Some(object) = result.as_object_mut() {
+                object.insert("uid".to_string(), json!(uid));
+                object.insert("sequence".to_string(), json!(sequence));
+                object.insert("summary".to_string(), json!(summary));
+                object.insert("meeting_end_time".to_string(), json!(meeting_end_time));
+            }
             results.push(result);
         } else {
             results.push(json!({
                 "ok": false,
                 "meeting_url": url,
+                "uid": uid,
                 "reason": "meeting URL found but no start time detected",
             }));
         }
     }
 
+    let successful_results = results
+        .iter()
+        .filter(|result| {
+            result
+                .get("ok")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+        .count();
+    let action = if results.is_empty() {
+        "none"
+    } else if successful_results > 0 {
+        "processed"
+    } else {
+        "needs_review"
+    };
+
     Ok(json!({
         "ok": true,
-        "action": if results.is_empty() { "none" } else { "processed" },
+        "action": action,
         "results": results,
     }))
 }
@@ -2881,6 +5007,18 @@ fn stable_digest(input: &str) -> String {
 mod tests {
     use super::*;
 
+    fn temp_root(prefix: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-meeting-{prefix}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp root");
+        root
+    }
+
     #[test]
     fn detect_meeting_provider_from_url() {
         assert_eq!(
@@ -2930,6 +5068,32 @@ mod tests {
     }
 
     #[test]
+    fn stale_running_session_is_marked_ended() {
+        let root = temp_root("stale-session");
+        let session_path = root.join("session.json");
+        let session = json!({
+            "session_id": "meeting-test",
+            "status": "active",
+            "pid": 999999999u64,
+            "ended_at": null,
+        });
+        fs::write(
+            &session_path,
+            serde_json::to_string_pretty(&session).unwrap(),
+        )
+        .unwrap();
+
+        let reconciled = reconcile_stale_running_session(&session_path, session);
+
+        assert_eq!(reconciled["status"], "ended");
+        assert_eq!(reconciled["end_reason"], "process_not_running");
+        assert!(reconciled["ended_at"].as_str().is_some());
+        let persisted: Value =
+            serde_json::from_str(&fs::read_to_string(&session_path).unwrap()).unwrap();
+        assert_eq!(persisted["status"], "ended");
+    }
+
+    #[test]
     fn self_loop_protection_filters_bot_messages() {
         let config = MeetingSessionConfig {
             root: PathBuf::from("/tmp"),
@@ -2940,7 +5104,7 @@ mod tests {
             audio_chunk_seconds: 30,
             stt_model: String::new(),
         };
-        let session = MeetingSession::new(&config);
+        let mut session = MeetingSession::new(&config);
 
         // Sender contains bot name → own message
         assert!(session.is_own_message("CTOX Notetaker", "hello"));
@@ -2954,6 +5118,11 @@ mod tests {
         // Sender misattributed to "Participant" but text starts with bot name + colon
         assert!(session.is_own_message("Participant", "CTOX Notetaker: I heard you"));
         assert!(session.is_own_message("Participant", "CTOX Notetaker To everyone: hi"));
+        session
+            .outbound_chat_texts
+            .push("CTOX Test: Chat-Bridge aktiv.".to_string());
+        assert!(session.is_own_message("You", "You20:35CNCTOX Test: Chat-Bridge aktiv."));
+        assert!(session.is_own_message("Participant", "You20:35CNCTOX Test: Chat-Bridge aktiv."));
 
         // Text mentions bot name but doesn't start with it (real user message)
         assert!(!session.is_own_message("Michael", "Hey @CTOX Notetaker what do you think?"));
@@ -2975,6 +5144,93 @@ mod tests {
         assert_eq!(json["provider"], "google");
         assert_eq!(json["status"], "joining");
         assert_eq!(json["bot_name"], "CTOX Notetaker");
+        assert_eq!(json["transcript_segment_count"], 0);
+        assert_eq!(json["speaker_signal_count"], 0);
+    }
+
+    #[test]
+    fn meeting_runtime_defaults_to_voxtral_4b_stt() {
+        let config = MeetingSessionConfig::from_runtime(
+            Path::new("/tmp"),
+            "https://meet.google.com/abc-defg-hij",
+            &BTreeMap::new(),
+        )
+        .expect("meeting config");
+        assert_eq!(config.stt_model, DEFAULT_MEETING_STT_MODEL);
+    }
+
+    #[test]
+    fn meeting_runtime_replaces_legacy_stt_models_with_voxtral_4b() {
+        let mut runtime = BTreeMap::new();
+        runtime.insert("CTOX_STT_MODEL".to_string(), "legacy-stt-model".to_string());
+        let config = MeetingSessionConfig::from_runtime(
+            Path::new("/tmp"),
+            "https://zoom.us/j/123456789",
+            &runtime,
+        )
+        .expect("meeting config");
+        assert_eq!(config.stt_model, DEFAULT_MEETING_STT_MODEL);
+    }
+
+    #[test]
+    fn transcript_segments_render_speaker_source_and_confidence() {
+        let config = MeetingSessionConfig {
+            root: PathBuf::from("/tmp/test"),
+            meeting_url: "https://meet.google.com/abc".to_string(),
+            provider: MeetingProvider::GoogleMeet,
+            bot_name: "CTOX Notetaker".to_string(),
+            max_duration_minutes: 180,
+            audio_chunk_seconds: 30,
+            stt_model: DEFAULT_MEETING_STT_MODEL.to_string(),
+        };
+        let mut session = MeetingSession::new(&config);
+        session.push_platform_transcript(TranscriptSegment {
+            timestamp: "2026-04-28T12:00:00Z".to_string(),
+            speaker_display: "Alice".to_string(),
+            speaker_id: Some("alice-platform-id".to_string()),
+            source: "platform_caption".to_string(),
+            confidence: 0.9,
+            text: "The rollout is blocked by permissions.".to_string(),
+        });
+
+        let transcript = session.full_transcript();
+        assert!(transcript.contains("Alice: The rollout is blocked"));
+        assert!(transcript.contains("source=platform_caption"));
+        assert!(transcript.contains("confidence=0.90"));
+
+        let snapshot = session_transcript_snapshot(&session.to_json(), 12);
+        assert!(snapshot.contains("Alice: The rollout is blocked"));
+    }
+
+    #[test]
+    fn stt_segments_use_active_speaker_when_available() {
+        let config = MeetingSessionConfig {
+            root: PathBuf::from("/tmp/test"),
+            meeting_url: "https://zoom.us/j/123456".to_string(),
+            provider: MeetingProvider::Zoom,
+            bot_name: "CTOX Notetaker".to_string(),
+            max_duration_minutes: 180,
+            audio_chunk_seconds: 30,
+            stt_model: DEFAULT_MEETING_STT_MODEL.to_string(),
+        };
+        let mut session = MeetingSession::new(&config);
+        let signal = SpeakerSignal {
+            timestamp: "2026-04-28T12:00:00Z".to_string(),
+            speaker_display: "Bob".to_string(),
+            speaker_id: None,
+            source: "platform_active_speaker".to_string(),
+            confidence: 0.6,
+        };
+        session.push_stt_transcript(
+            "I can take the deployment ticket.".to_string(),
+            Some(&signal),
+        );
+        assert_eq!(
+            session.transcript_segments[0].source,
+            "stt_with_active_speaker"
+        );
+        assert_eq!(session.transcript_segments[0].speaker_display, "Bob");
+        assert!(session.full_transcript().contains("Bob: I can take"));
     }
 
     #[test]
@@ -3030,10 +5286,434 @@ mod tests {
     }
 
     #[test]
+    fn extracts_uid_sequence_summary_and_folded_ics_values() {
+        let ics = "BEGIN:VCALENDAR\nUID:meeting-123@example.com\nSEQUENCE:4\nSUMMARY:Weekly\\, Platform Review\nDTSTART;TZID=Europe/Berlin:20260415T140000\nEND:VCALENDAR\n";
+        assert_eq!(
+            extract_meeting_uid_from_text(ics).as_deref(),
+            Some("meeting-123@example.com")
+        );
+        assert_eq!(
+            extract_meeting_sequence_from_text(ics).as_deref(),
+            Some("4")
+        );
+        assert_eq!(
+            extract_meeting_summary_from_text(ics).as_deref(),
+            Some("Weekly, Platform Review")
+        );
+        assert_eq!(
+            extract_meeting_time_from_text(ics).as_deref(),
+            Some("2026-04-15T14:00:00")
+        );
+    }
+
+    #[test]
+    fn meeting_schedule_name_prefers_calendar_uid() {
+        let url_a = "https://meet.google.com/aaa-bbbb-ccc";
+        let url_b = "https://meet.google.com/xxx-yyyy-zzz";
+        assert_eq!(
+            meeting_schedule_name_for_invitation(url_a, Some("uid-1")),
+            meeting_schedule_name_for_invitation(url_b, Some("uid-1"))
+        );
+        assert_ne!(
+            meeting_schedule_name_for_invitation(url_a, None),
+            meeting_schedule_name_for_invitation(url_b, None)
+        );
+    }
+
+    #[test]
+    fn process_email_with_link_but_no_time_needs_review() {
+        let root = temp_root("no-time");
+        let _ = std::fs::remove_dir_all(&root);
+        let result = process_email_for_meetings(
+            &root,
+            "Meeting invitation",
+            "Join here: https://meet.google.com/abc-defg-hij",
+            "CTOX Notetaker",
+        )
+        .expect("meeting parse result");
+        assert_eq!(result["action"], "needs_review");
+        assert_eq!(result["results"][0]["ok"], false);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn process_email_request_schedules_join_task_with_marker_and_uid() {
+        let root = temp_root("schedule-request");
+        let body = "BEGIN:VCALENDAR\nMETHOD:REQUEST\nUID:uid-request-1@example.com\nSEQUENCE:2\nSUMMARY:Platform Review\nDTSTART:20260428T130000Z\nDTEND:20260428T133000Z\nDESCRIPTION:Join https://meet.google.com/abc-defg-hij\nEND:VCALENDAR";
+        let result = process_email_for_meetings(
+            &root,
+            "Invitation: Platform Review",
+            body,
+            "CTOX Notetaker",
+        )
+        .expect("schedule result");
+        assert_eq!(result["action"], "processed");
+        assert_eq!(result["results"][0]["action"], "scheduled");
+        assert_eq!(result["results"][0]["uid"], "uid-request-1@example.com");
+
+        let tasks = crate::mission::schedule::list_tasks(&root).expect("scheduled tasks");
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].prompt.starts_with("CTOX_MEETING_JOIN:"));
+        assert!(tasks[0]
+            .prompt
+            .contains("https://meet.google.com/abc-defg-hij"));
+        assert_eq!(tasks[0].cron_expr, "59 12 28 4 *");
+        assert_eq!(
+            result["results"][0]["join_time"],
+            "2026-04-28T12:59:00+00:00"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn process_email_cancel_removes_uid_based_schedule() {
+        let root = temp_root("schedule-cancel");
+        let request_body = "BEGIN:VCALENDAR\nMETHOD:REQUEST\nUID:uid-cancel-1@example.com\nDTSTART:20260428T130000Z\nDESCRIPTION:Join https://zoom.us/j/123456789\nEND:VCALENDAR";
+        process_email_for_meetings(&root, "Invitation: Standup", request_body, "CTOX Notetaker")
+            .expect("schedule result");
+        assert_eq!(
+            crate::mission::schedule::list_tasks(&root)
+                .expect("scheduled tasks")
+                .len(),
+            1
+        );
+
+        let cancel_body = "BEGIN:VCALENDAR\nMETHOD:CANCEL\nUID:uid-cancel-1@example.com\nDESCRIPTION:Join https://zoom.us/j/123456789\nEND:VCALENDAR";
+        let cancel = process_email_for_meetings(
+            &root,
+            "Meeting cancelled: Standup",
+            cancel_body,
+            "CTOX Notetaker",
+        )
+        .expect("cancel result");
+        assert_eq!(cancel["action"], "processed");
+        assert_eq!(cancel["results"][0]["action"], "cancelled");
+        assert!(crate::mission::schedule::list_tasks(&root)
+            .expect("scheduled tasks")
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_sends_first_mention_ack_once_and_marks_priority() {
+        let root = temp_root("mention-ack");
+        let sessions_dir = meeting_sessions_dir(&root);
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let stdin_path = sessions_dir.join("session-1.stdin");
+        std::fs::write(&stdin_path, "").expect("stdin file");
+        let session_path = sessions_dir.join("session-1.json");
+        std::fs::write(
+            &session_path,
+            serde_json::to_string_pretty(&json!({
+                "session_id": "session-1",
+                "provider": "google",
+                "status": "active",
+                "stdin_pipe": stdin_path.display().to_string(),
+                "transcript_chunks": [
+                    "Alice said the rollout is blocked by permissions.",
+                    "Bob offered to prepare the deployment ticket."
+                ],
+                "chat_messages": [{
+                    "sender": "Alice",
+                    "text": "@CTOX wie ist der Status?",
+                    "timestamp": "2026-04-28T12:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        )
+        .expect("session json");
+
+        let request = AdapterSyncCommandRequest {
+            db_path: &db_path,
+            passthrough_args: &[],
+            skip_flags: &[],
+        };
+        let first = sync(&root, &BTreeMap::new(), &request).expect("first sync");
+        let second = sync(&root, &BTreeMap::new(), &request).expect("second sync");
+        assert_eq!(first["active_sessions"], 1);
+        assert_eq!(second["active_sessions"], 1);
+
+        let stdin_contents = std::fs::read_to_string(&stdin_path).expect("stdin contents");
+        let commands = stdin_contents.lines().collect::<Vec<_>>();
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].contains("send_chat"));
+        assert!(commands[0].contains("Echtzeit-Antworten"));
+
+        let updated_session: Value =
+            serde_json::from_str(&std::fs::read_to_string(&session_path).unwrap()).unwrap();
+        assert_eq!(updated_session["mention_ack_sent"], true);
+
+        let conn = open_channel_db(&db_path).expect("channel db");
+        let mention_metadata: String = conn
+            .query_row(
+                "SELECT metadata_json FROM communication_messages WHERE channel='meeting' AND direction='inbound' AND body_text LIKE '%@CTOX%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mention metadata");
+        let mention_metadata: Value = serde_json::from_str(&mention_metadata).unwrap();
+        assert_eq!(mention_metadata["is_mention"], true);
+        assert_eq!(mention_metadata["priority"], "urgent");
+        assert_eq!(mention_metadata["transcript_chunk_count"], 2);
+        assert!(mention_metadata["transcript_snapshot"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rollout is blocked"));
+
+        let mention_body: String = conn
+            .query_row(
+                "SELECT body_text FROM communication_messages WHERE channel='meeting' AND direction='inbound' AND body_text LIKE '%@CTOX%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mention body");
+        assert!(mention_body.contains("Live-Transcript bisher"));
+        assert!(mention_body.contains("deployment ticket"));
+
+        let ack_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE metadata_json LIKE '%ctox_first_mention_ack%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("ack count");
+        assert_eq!(ack_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn service_sync_ingests_active_meeting_chat() {
+        let root = temp_root("service-sync");
+        let sessions_dir = meeting_sessions_dir(&root);
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let stdin_path = sessions_dir.join("session-service.commands.jsonl");
+        std::fs::write(&stdin_path, "").expect("stdin file");
+        std::fs::write(
+            sessions_dir.join("session-service.json"),
+            serde_json::to_string_pretty(&json!({
+                "session_id": "session-service",
+                "provider": "zoom",
+                "bot_name": "CTOX Notetaker",
+                "status": "active",
+                "stdin_pipe": stdin_path.display().to_string(),
+                "chat_messages": [{
+                    "sender": "Alice",
+                    "text": "@CTOX bitte pruefen",
+                    "timestamp": "2026-04-28T12:00:00Z"
+                }]
+            }))
+            .unwrap(),
+        )
+        .expect("session json");
+
+        let result = service_sync(&root, &BTreeMap::new())
+            .expect("service sync")
+            .expect("meeting sync result");
+        assert_eq!(result["ingested"], 1);
+
+        let conn = open_channel_db(&root.join("runtime/ctox.sqlite3")).expect("channel db");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting' AND thread_key='session-service'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("message count");
+        assert_eq!(count, 2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_filters_bot_echoes_from_session_json() {
+        let root = temp_root("sync-own-filter");
+        let sessions_dir = meeting_sessions_dir(&root);
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        std::fs::write(
+            sessions_dir.join("session-own.json"),
+            serde_json::to_string_pretty(&json!({
+                "session_id": "session-own",
+                "provider": "zoom",
+                "bot_name": "CTOX Notetaker",
+                "status": "active",
+                "outbound_chat_texts": ["Ich pruefe das."],
+                "chat_messages": [
+                    {"sender": "CTOX Notetaker", "text": "Ich pruefe das.", "timestamp": "2026-04-28T12:00:00Z"},
+                    {"sender": "Participant", "text": "You20:35CNCIch pruefe das.", "timestamp": "2026-04-28T12:00:01Z"}
+                ]
+            }))
+            .unwrap(),
+        )
+        .expect("session json");
+
+        let request = AdapterSyncCommandRequest {
+            db_path: &db_path,
+            passthrough_args: &[],
+            skip_flags: &[],
+        };
+        let result = sync(&root, &BTreeMap::new(), &request).expect("sync");
+        assert_eq!(result["active_sessions"], 1);
+        assert_eq!(result["ingested"], 0);
+        let conn = open_channel_db(&db_path).expect("channel db");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("message count");
+        assert_eq!(count, 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn send_writes_chat_command_to_session_pipe_and_records_outbound() {
+        let root = temp_root("send-chat");
+        let sessions_dir = meeting_sessions_dir(&root);
+        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let stdin_path = sessions_dir.join("session-send.stdin");
+        std::fs::write(&stdin_path, "").expect("stdin file");
+        std::fs::write(
+            sessions_dir.join("session-send.json"),
+            serde_json::to_string_pretty(&json!({
+                "session_id": "session-send",
+                "provider": "zoom",
+                "status": "active",
+                "stdin_pipe": stdin_path.display().to_string(),
+                "chat_messages": []
+            }))
+            .unwrap(),
+        )
+        .expect("session json");
+
+        let request = MeetingSendCommandRequest {
+            db_path: &db_path,
+            session_id: "session-send",
+            body: "Ich pruefe das und melde mich hier.",
+        };
+        let result = send(&root, &BTreeMap::new(), &request).expect("send result");
+        assert_eq!(result["status"], "sent");
+
+        let stdin_contents = std::fs::read_to_string(&stdin_path).expect("stdin contents");
+        let command: Value = serde_json::from_str(stdin_contents.trim()).expect("stdin json");
+        assert_eq!(command["action"], "send_chat");
+        assert_eq!(command["text"], "Ich pruefe das und melde mich hier.");
+
+        let conn = open_channel_db(&db_path).expect("channel db");
+        let outbound_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='meeting' AND direction='outbound' AND metadata_json LIKE '%ctox_reply%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("outbound count");
+        assert_eq!(outbound_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn simulate_meeting_runs_offline_post_meeting_pipeline() {
+        let root = temp_root("simulate");
+        let fixture = root.join("fixture.wav");
+        std::fs::write(&fixture, b"RIFFdemo").expect("fixture audio");
+        let args = vec![
+            "--provider".to_string(),
+            "zoom".to_string(),
+            "--audio".to_string(),
+            fixture.display().to_string(),
+            "--transcript".to_string(),
+            "A participant agreed to create a rollout ticket.".to_string(),
+            "--chat".to_string(),
+            "Alice:@CTOX bitte als Ticket aufnehmen".to_string(),
+        ];
+
+        let result = simulate_meeting_session(&root, &args).expect("simulate");
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["provider"], "zoom");
+        assert_eq!(result["transcript_chunks"], 1);
+        assert_eq!(result["chat_messages"], 1);
+        assert_eq!(
+            result["recording_artifacts"].as_array().map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(result["finalization"]["action"], "ingested");
+        let session_id = result["session_id"].as_str().expect("session id");
+        let transcript = load_meeting_transcript(&root, session_id).expect("transcript");
+        assert!(transcript["transcript"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rollout ticket"));
+        assert!(transcript["chatlog"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("@CTOX"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn finalize_meeting_writes_artifact_manifest_and_default_ticket() {
+        let root = temp_root("finalize");
+        let config = MeetingSessionConfig {
+            root: root.clone(),
+            meeting_url: "https://meet.google.com/abc-defg-hij".to_string(),
+            provider: MeetingProvider::GoogleMeet,
+            bot_name: "CTOX Notetaker".to_string(),
+            max_duration_minutes: 60,
+            audio_chunk_seconds: 30,
+            stt_model: String::new(),
+        };
+        let mut session = MeetingSession::new(&config);
+        session.session_id = "meeting-google-finalize-test".to_string();
+        session.status = "ended".to_string();
+        session.ended_at = Some("2026-04-28T12:30:00Z".to_string());
+        session
+            .transcript_chunks
+            .push("A participant agreed to create a deployment ticket.".to_string());
+        session.chat_messages.push(ChatMessage {
+            sender: "Alice".to_string(),
+            text: "Bitte als Ticket aufnehmen.".to_string(),
+            timestamp: "2026-04-28T12:10:00Z".to_string(),
+        });
+        let artifact_dir =
+            meeting_sessions_dir(&root).join(format!("{}-audio", session.session_id));
+        std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+        std::fs::write(artifact_dir.join("chunk-001.webm"), b"audio").expect("audio artifact");
+        std::fs::write(artifact_dir.join("screen-001.mp4"), b"screen").expect("screen artifact");
+
+        let result = finalize_meeting(&root, &session, &config).expect("finalize");
+        assert_eq!(result["action"], "ingested");
+        assert_eq!(result["recording_artifact_count"], 2);
+        assert!(result["post_meeting_ticket_id"].as_str().is_some());
+
+        let transcript_path =
+            meeting_sessions_dir(&root).join(format!("{}-transcript.txt", session.session_id));
+        let chatlog_path =
+            meeting_sessions_dir(&root).join(format!("{}-chatlog.txt", session.session_id));
+        let manifest_path =
+            meeting_sessions_dir(&root).join(format!("{}-artifacts.json", session.session_id));
+        assert!(transcript_path.exists());
+        assert!(chatlog_path.exists());
+        assert!(manifest_path.exists());
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(manifest_path).unwrap()).unwrap();
+        assert_eq!(
+            manifest["recording_artifacts"].as_array().map(Vec::len),
+            Some(2)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn detect_cancellation_and_update() {
         assert!(is_meeting_cancellation(
             "Meeting Canceled: Sprint Review",
             ""
+        ));
+        assert!(is_meeting_cancellation(
+            "",
+            "BEGIN:VCALENDAR\nMETHOD:CANCEL\nEND:VCALENDAR"
         ));
         assert!(is_meeting_cancellation("Abgesagt: Weekly Standup", ""));
         assert!(!is_meeting_cancellation("Meeting: Sprint Review", ""));
@@ -3089,6 +5769,43 @@ mod tests {
             script.contains("ctoxMeetingEnd"),
             "missing meeting end callback"
         );
+        assert!(
+            script.contains("verifyJoinedUi"),
+            "missing join verification gate"
+        );
+        assert!(script.contains("join_failed"), "missing join failure event");
+        assert!(
+            script.contains("CTOX_MEETING_COMMAND_FILE"),
+            "missing command file bridge"
+        );
+        assert!(
+            script.contains("commandFilePollInterval"),
+            "missing command file poller"
+        );
+        assert!(
+            script.contains("--in-process-gpu"),
+            "missing chromium in-process GPU flag"
+        );
+        assert!(
+            script.contains("installChatObservers"),
+            "missing chat mutation observer"
+        );
+        assert!(
+            script.contains("transcriptPollInterval"),
+            "missing live caption transcript observer"
+        );
+        assert!(
+            script.contains("speakerPollInterval"),
+            "missing active speaker observer"
+        );
+        assert!(
+            script.contains("platform_active_speaker"),
+            "missing platform active speaker source"
+        );
+        assert!(
+            script.contains("platform_caption"),
+            "missing platform caption source"
+        );
 
         // Verify Teams uses ffmpeg path
         let teams_config = MeetingSessionConfig {
@@ -3108,5 +5825,53 @@ mod tests {
             teams_script.contains("--kiosk"),
             "Teams should use kiosk mode"
         );
+        assert!(
+            teams_script.contains("warmUpTeamsMediaDevices"),
+            "Teams should warm up media devices"
+        );
+        assert!(
+            teams_script.contains("enableTeamsLiveCaptions"),
+            "Teams should enable live captions"
+        );
+    }
+
+    #[test]
+    fn runner_scripts_keep_provider_recording_paths() {
+        let google_config = MeetingSessionConfig {
+            root: PathBuf::from("/tmp"),
+            meeting_url: "https://meet.google.com/abc".to_string(),
+            provider: MeetingProvider::GoogleMeet,
+            bot_name: "CTOX Notetaker".to_string(),
+            max_duration_minutes: 60,
+            audio_chunk_seconds: 30,
+            stt_model: String::new(),
+        };
+        let google_script = build_meeting_runner_script(&google_config).unwrap();
+        assert!(google_script.contains("getDisplayMedia"));
+        assert!(google_script.contains("ctoxAudioChunk"));
+        assert!(google_script.contains("video: true"));
+
+        let zoom_script = build_meeting_runner_script(&MeetingSessionConfig {
+            provider: MeetingProvider::Zoom,
+            meeting_url: "https://zoom.us/j/123456".to_string(),
+            ..google_config.clone()
+        })
+        .unwrap();
+        assert!(zoom_script.contains("getDisplayMedia"));
+        assert!(zoom_script.contains("ctoxAudioChunk"));
+        assert!(zoom_script.contains("buildZoomWebClientUrl"));
+        assert!(zoom_script.contains("button.preview-join-button"));
+        assert!(zoom_script.contains("prepareZoomAudio"));
+        assert!(zoom_script.contains("startZoomRemovalMonitor"));
+
+        let teams_script = build_meeting_runner_script(&MeetingSessionConfig {
+            provider: MeetingProvider::MicrosoftTeams,
+            meeting_url: "https://teams.microsoft.com/l/meetup-join/abc".to_string(),
+            ..google_config
+        })
+        .unwrap();
+        assert!(teams_script.contains("ffmpeg"));
+        assert!(teams_script.contains(r#"extension: "mp4""#));
+        assert!(teams_script.contains("x11grab"));
     }
 }

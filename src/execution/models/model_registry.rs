@@ -1,23 +1,33 @@
 use crate::inference::engine;
 
-pub const DEFAULT_LOCAL_CHAT_FAMILY: engine::LocalModelFamily = engine::LocalModelFamily::GptOss;
+pub const DEFAULT_LOCAL_CHAT_FAMILY: engine::LocalModelFamily =
+    engine::LocalModelFamily::Qwen35Vision;
+pub const SUPPORTED_LOCAL_CHAT_MODELS: &[&str] = &["Qwen/Qwen3.5-27B"];
 
-pub const SUPPORTED_OPENAI_API_CHAT_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"];
-pub const SUPPORTED_ANTHROPIC_API_CHAT_MODELS: &[&str] = &["anthropic/claude-sonnet-4.6"];
+pub const SUPPORTED_OPENAI_API_CHAT_MODELS: &[&str] =
+    &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano"];
+pub const SUPPORTED_ANTHROPIC_API_CHAT_MODELS: &[&str] = &[
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-7",
+    "claude-sonnet-4-6",
+];
 // MiniMax Direct-API (platform.minimax.io). These are the cloud-hosted
 // variants; the `minimax/minimax-m2.7` entry lower down is the OpenRouter-
 // routed variant with the same weights.
 pub const SUPPORTED_MINIMAX_API_CHAT_MODELS: &[&str] = &["MiniMax-M2.7", "MiniMax-M2.7-highspeed"];
 pub const SUPPORTED_OPENROUTER_API_CHAT_MODELS: &[&str] = &[
-    "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
+    "anthropic/claude-opus-4.7",
+    "anthropic/claude-opus-4.6",
+    "anthropic/claude-sonnet-4.7",
     "z-ai/glm-5.1",
     "qwen/qwen3.5-9b",
     "qwen/qwen3.5-27b",
     "qwen/qwen3.5-35b-a3b",
     "qwen/qwen3.5-122b-a10b",
     "qwen/qwen3.5-397b-a17b",
-    "qwen/qwen3.6-plus",
+    "qwen/qwen3.5-plus",
     "google/gemma-4-26b-a4b-it",
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it",
@@ -31,18 +41,22 @@ pub const SUPPORTED_OPENROUTER_API_CHAT_MODELS: &[&str] = &[
 ];
 
 pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.4-nano",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-7",
+    "claude-sonnet-4-6",
     "MiniMax-M2.7",
     "MiniMax-M2.7-highspeed",
-    "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
     "Qwen/Qwen3.5-2B",
     "Qwen/Qwen3.5-4B",
     "Qwen/Qwen3.5-9B",
     "Qwen/Qwen3.5-27B",
-    "Qwen/Qwen3.6-35B-A3B",
+    "Qwen/Qwen3.5-35B-A3B",
     "google/gemma-4-E2B-it",
     "google/gemma-4-E4B-it",
     "google/gemma-4-26B-A4B-it",
@@ -50,35 +64,30 @@ pub const SUPPORTED_CHAT_MODELS: &[&str] = &[
     "nvidia/Nemotron-Cascade-2-30B-A3B",
     "zai-org/GLM-4.7-Flash",
     "z-ai/glm-5.1",
-    "qwen/qwen3.6-plus",
+    "qwen/qwen3.5-plus",
     "google/gemma-4-26b-a4b-it:free",
     "google/gemma-4-31b-it:free",
     "x-ai/grok-4.20",
     "minimax/minimax-m2.7",
     "mistralai/mistral-small-2603",
     "qwen/qwen3.5-122b-a10b",
+    "anthropic/claude-opus-4.7",
+    "anthropic/claude-opus-4.6",
+    "anthropic/claude-sonnet-4.7",
     "anthropic/claude-sonnet-4.6",
     "qwen/qwen3.5-397b-a17b",
     "moonshotai/kimi-k2.5",
 ];
 
-pub const SUPPORTED_LOCAL_CHAT_FAMILIES: &[engine::ChatModelFamily] = &[
-    engine::ChatModelFamily::GptOss,
-    engine::ChatModelFamily::Qwen35,
-    engine::ChatModelFamily::Gemma4,
-    engine::ChatModelFamily::NemotronCascade2,
-    engine::ChatModelFamily::Glm47Flash,
-];
+pub const SUPPORTED_LOCAL_CHAT_FAMILIES: &[engine::ChatModelFamily] =
+    &[engine::ChatModelFamily::Qwen35];
 
 pub const SUPPORTED_EMBEDDING_MODELS: &[&str] = &[
     "Qwen/Qwen3-Embedding-0.6B [GPU]",
     "Qwen/Qwen3-Embedding-0.6B [CPU]",
 ];
 
-pub const SUPPORTED_STT_MODELS: &[&str] = &[
-    "engineai/Voxtral-Mini-4B-Realtime-2602 [GPU]",
-    "Systran/faster-whisper-small [CPU]",
-];
+pub const SUPPORTED_STT_MODELS: &[&str] = &["engineai/Voxtral-Mini-4B-Realtime-2602 [GPU]"];
 
 pub const SUPPORTED_TTS_MODELS: &[&str] = &[
     "engineai/Voxtral-4B-TTS-2603 [GPU]",
@@ -104,9 +113,17 @@ pub const SUPPORTED_VISION_MODELS: &[&str] = &["Qwen/Qwen3-VL-2B-Instruct [GPU]"
 /// vision not guaranteed).
 pub const VISION_API_MODELS: &[&str] = &[
     // OpenAI (gpt-4o lineage)
+    "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
     // Anthropic (all Claude 3+ have vision)
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-7",
+    "claude-sonnet-4-6",
+    "anthropic/claude-opus-4.7",
+    "anthropic/claude-opus-4.6",
+    "anthropic/claude-sonnet-4.7",
     "anthropic/claude-sonnet-4.6",
     // MiniMax VL
     "MiniMax-M2.7",
@@ -220,29 +237,17 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         label: "GPT-OSS",
         selector: "gpt_oss",
         parse_aliases: &["gpt_oss", "gpt-oss", "gpt oss"],
-        variants: &["openai/gpt-oss-20b"],
-        planning_variants: &["openai/gpt-oss-20b"],
+        variants: &["openai/gpt-oss-120b"],
+        planning_variants: &["openai/gpt-oss-120b"],
         supports_vision: false,
     },
     ChatFamilyCatalogEntry {
         family: engine::ChatModelFamily::Qwen35,
         label: "Qwen 3.5",
         selector: "qwen3_5",
-        parse_aliases: &[
-            "qwen3_5", "qwen3.5", "qwen 3.5", "qwen3_6", "qwen3.6", "qwen 3.6", "qwen",
-        ],
-        variants: &[
-            "Qwen/Qwen3.6-35B-A3B",
-            "Qwen/Qwen3.5-2B",
-            "Qwen/Qwen3.5-4B",
-            "Qwen/Qwen3.5-9B",
-        ],
-        planning_variants: &[
-            "Qwen/Qwen3.6-35B-A3B",
-            "Qwen/Qwen3.5-4B",
-            "Qwen/Qwen3.5-2B",
-            "Qwen/Qwen3.5-9B",
-        ],
+        parse_aliases: &["qwen3_5", "qwen3.5", "qwen 3.5", "qwen"],
+        variants: &["Qwen/Qwen3.5-27B"],
+        planning_variants: &["Qwen/Qwen3.5-27B"],
         // Qwen3.5 family is vision-capable via the Qwen35Vision local
         // family registered in LOCAL_FAMILY_REGISTRY.
         supports_vision: true,
@@ -300,56 +305,36 @@ const CHAT_FAMILY_REGISTRY: &[ChatFamilyCatalogEntry] = &[
         planning_variants: &["zai-org/GLM-4.7-Flash"],
         supports_vision: false,
     },
+    ChatFamilyCatalogEntry {
+        family: engine::ChatModelFamily::Anthropic,
+        label: "Claude",
+        selector: "anthropic",
+        parse_aliases: &["anthropic", "claude"],
+        variants: &[
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-7",
+            "claude-sonnet-4-6",
+        ],
+        planning_variants: &[
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-4-7",
+            "claude-sonnet-4-6",
+        ],
+        supports_vision: true,
+    },
 ];
 
 const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
     LocalFamilyCatalogEntry {
-        family: engine::LocalModelFamily::GptOss,
-        parse_aliases: &["gpt_oss", "gpt-oss", "gptoss"],
-        default_model: "openai/gpt-oss-20b",
-        bridge_mode: "codex_responses_runtime",
-        default_runtime: StaticRuntimeConfig {
-            port: 1234,
-            max_seq_len: Some(131_072),
-            max_seqs: 1,
-            max_batch_size: 1,
-        },
-        default_profile: StaticFamilyProfile {
-            launcher_mode: "text",
-            arch: Some("gpt_oss"),
-            paged_attn: "auto",
-            pa_cache_type: Some("turboquant3"),
-            pa_memory_fraction: Some("0.80"),
-            pa_context_len: None,
-            max_seq_len: 131_072,
-            max_batch_size: 1,
-            max_seqs: 1,
-            isq: None,
-            tensor_parallel_backend: Some("nccl"),
-            disable_nccl: false,
-            target_world_size: Some(2),
-            preferred_gpu_count: Some(2),
-        },
-    },
-    LocalFamilyCatalogEntry {
         family: engine::LocalModelFamily::Qwen35Vision,
-        parse_aliases: &[
-            "qwen3_5",
-            "qwen3.5",
-            "qwen3-5",
-            "qwen35",
-            "qwen3_5_vision",
-            "qwen3_6",
-            "qwen3.6",
-            "qwen3-6",
-            "qwen36",
-            "qwen3_6_vision",
-        ],
-        default_model: "Qwen/Qwen3.6-35B-A3B",
+        parse_aliases: &["qwen3_5", "qwen3.5", "qwen3-5", "qwen35", "qwen3_5_vision"],
+        default_model: "Qwen/Qwen3.5-27B",
         bridge_mode: "qwen_custom_execution",
         default_runtime: StaticRuntimeConfig {
             port: 1235,
-            max_seq_len: Some(262_144),
+            max_seq_len: Some(131_072),
             max_seqs: 1,
             max_batch_size: 1,
         },
@@ -360,14 +345,14 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
             pa_cache_type: Some("turboquant3"),
             pa_memory_fraction: Some("0.80"),
             pa_context_len: None,
-            max_seq_len: 32_768,
+            max_seq_len: 131_072,
             max_batch_size: 1,
             max_seqs: 1,
             isq: Some("Q4K"),
             tensor_parallel_backend: None,
             disable_nccl: true,
             target_world_size: None,
-            preferred_gpu_count: Some(3),
+            preferred_gpu_count: Some(1),
         },
     },
     LocalFamilyCatalogEntry {
@@ -504,39 +489,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
         },
     },
     LocalFamilyCatalogEntry {
-        family: engine::LocalModelFamily::WhisperTranscriptionCpu,
-        parse_aliases: &[
-            "whisper_cpu",
-            "whisper-cpu",
-            "faster-whisper-small",
-            "faster whisper small",
-        ],
-        default_model: "Systran/faster-whisper-small",
-        bridge_mode: "transcription_server",
-        default_runtime: StaticRuntimeConfig {
-            port: 1238,
-            max_seq_len: Some(32_768),
-            max_seqs: 2,
-            max_batch_size: 2,
-        },
-        default_profile: StaticFamilyProfile {
-            launcher_mode: "vision",
-            arch: None,
-            paged_attn: "off",
-            pa_cache_type: None,
-            pa_memory_fraction: None,
-            pa_context_len: None,
-            max_seq_len: 32_768,
-            max_batch_size: 2,
-            max_seqs: 2,
-            isq: None,
-            tensor_parallel_backend: None,
-            disable_nccl: true,
-            target_world_size: None,
-            preferred_gpu_count: None,
-        },
-    },
-    LocalFamilyCatalogEntry {
         family: engine::LocalModelFamily::VoxtralTranscription,
         parse_aliases: &[
             "voxtral",
@@ -661,36 +613,6 @@ const LOCAL_FAMILY_REGISTRY: &[LocalFamilyCatalogEntry] = &[
 ];
 
 const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
-    LocalModelCatalogEntry {
-        canonical_model: "openai/gpt-oss-20b",
-        aliases: &[],
-        chat_family: Some(engine::ChatModelFamily::GptOss),
-        runtime_manifest_slug: Some("gpt_oss_20b"),
-        auxiliary_manifest_slug: None,
-        runtime: StaticRuntimeConfig {
-            port: 1234,
-            max_seq_len: Some(131_072),
-            max_seqs: 1,
-            max_batch_size: 1,
-        },
-        profile: StaticFamilyProfile {
-            launcher_mode: "text",
-            arch: Some("gpt_oss"),
-            paged_attn: "auto",
-            pa_cache_type: Some("turboquant3"),
-            pa_memory_fraction: Some("0.80"),
-            pa_context_len: None,
-            max_seq_len: 131_072,
-            max_batch_size: 1,
-            max_seqs: 1,
-            isq: None,
-            tensor_parallel_backend: Some("nccl"),
-            disable_nccl: false,
-            target_world_size: Some(2),
-            preferred_gpu_count: Some(2),
-        },
-        family: engine::LocalModelFamily::GptOss,
-    },
     LocalModelCatalogEntry {
         canonical_model: "Qwen/Qwen3.5-2B",
         aliases: &[],
@@ -819,10 +741,10 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
         family: engine::LocalModelFamily::Qwen35Vision,
     },
     LocalModelCatalogEntry {
-        canonical_model: "Qwen/Qwen3.6-35B-A3B",
-        aliases: &["Qwen3.6-35B-A3B"],
+        canonical_model: "Qwen/Qwen3.5-35B-A3B",
+        aliases: &["Qwen3.5-35B-A3B"],
         chat_family: Some(engine::ChatModelFamily::Qwen35),
-        runtime_manifest_slug: Some("qwen3_6_35b_a3b"),
+        runtime_manifest_slug: Some("qwen3_5_35b_a3b"),
         auxiliary_manifest_slug: None,
         runtime: StaticRuntimeConfig {
             port: 1235,
@@ -1095,41 +1017,6 @@ const LOCAL_MODEL_REGISTRY: &[LocalModelCatalogEntry] = &[
             preferred_gpu_count: Some(1),
         },
         family: engine::LocalModelFamily::Qwen3Embedding,
-    },
-    LocalModelCatalogEntry {
-        canonical_model: "Systran/faster-whisper-small",
-        aliases: &[
-            "systran/faster-whisper-small [cpu]",
-            "systran/faster-whisper-small (cpu)",
-            "systran/faster-whisper-small",
-            "faster-whisper-small",
-        ],
-        chat_family: None,
-        runtime_manifest_slug: None,
-        auxiliary_manifest_slug: None,
-        runtime: StaticRuntimeConfig {
-            port: 1238,
-            max_seq_len: Some(32_768),
-            max_seqs: 2,
-            max_batch_size: 2,
-        },
-        profile: StaticFamilyProfile {
-            launcher_mode: "vision",
-            arch: None,
-            paged_attn: "off",
-            pa_cache_type: None,
-            pa_memory_fraction: None,
-            pa_context_len: None,
-            max_seq_len: 32_768,
-            max_batch_size: 2,
-            max_seqs: 2,
-            isq: None,
-            tensor_parallel_backend: None,
-            disable_nccl: true,
-            target_world_size: None,
-            preferred_gpu_count: None,
-        },
-        family: engine::LocalModelFamily::WhisperTranscriptionCpu,
     },
     LocalModelCatalogEntry {
         canonical_model: "engineai/Voxtral-Mini-4B-Realtime-2602",
@@ -1439,7 +1326,7 @@ const REMOTE_CHAT_FAMILY_REGISTRY: &[RemoteChatFamilyEntry] = &[
         chat_family: engine::ChatModelFamily::Qwen35,
     },
     RemoteChatFamilyEntry {
-        model: "qwen/qwen3.6-plus",
+        model: "qwen/qwen3.5-plus",
         chat_family: engine::ChatModelFamily::Qwen35,
     },
     // GLM family
@@ -1486,7 +1373,35 @@ const REMOTE_CHAT_FAMILY_REGISTRY: &[RemoteChatFamilyEntry] = &[
         model: "google/gemma-4-31b-it:free",
         chat_family: engine::ChatModelFamily::Gemma4,
     },
-    // Anthropic via OpenRouter
+    // Anthropic direct API and OpenRouter-routed Claude aliases.
+    RemoteChatFamilyEntry {
+        model: "claude-opus-4-7",
+        chat_family: engine::ChatModelFamily::Anthropic,
+    },
+    RemoteChatFamilyEntry {
+        model: "claude-opus-4-6",
+        chat_family: engine::ChatModelFamily::Anthropic,
+    },
+    RemoteChatFamilyEntry {
+        model: "claude-sonnet-4-7",
+        chat_family: engine::ChatModelFamily::Anthropic,
+    },
+    RemoteChatFamilyEntry {
+        model: "claude-sonnet-4-6",
+        chat_family: engine::ChatModelFamily::Anthropic,
+    },
+    RemoteChatFamilyEntry {
+        model: "anthropic/claude-opus-4.7",
+        chat_family: engine::ChatModelFamily::Qwen35,
+    },
+    RemoteChatFamilyEntry {
+        model: "anthropic/claude-opus-4.6",
+        chat_family: engine::ChatModelFamily::Qwen35,
+    },
+    RemoteChatFamilyEntry {
+        model: "anthropic/claude-sonnet-4.7",
+        chat_family: engine::ChatModelFamily::Qwen35,
+    },
     RemoteChatFamilyEntry {
         model: "anthropic/claude-sonnet-4.6",
         chat_family: engine::ChatModelFamily::Qwen35,
@@ -1504,7 +1419,7 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
         choice: "Qwen/Qwen3-Embedding-0.6B [GPU]",
         request_model: "Qwen/Qwen3-Embedding-0.6B",
         aliases: &[],
-        backend_kind: engine::AuxiliaryBackendKind::MistralRs,
+        backend_kind: engine::AuxiliaryBackendKind::NativeCtox,
         compute_target: engine::ComputeTarget::Gpu,
         default_port: 1237,
         default_for_role: true,
@@ -1519,7 +1434,7 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
             "qwen3-embedding-0.6b [cpu]",
             "qwen3-embedding-0.6b (cpu)",
         ],
-        backend_kind: engine::AuxiliaryBackendKind::MistralRs,
+        backend_kind: engine::AuxiliaryBackendKind::NativeCtox,
         compute_target: engine::ComputeTarget::Cpu,
         default_port: 1237,
         default_for_role: false,
@@ -1535,20 +1450,6 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
         default_for_role: true,
     },
     AuxiliarySelectionEntry {
-        role: engine::AuxiliaryRole::Stt,
-        choice: "Systran/faster-whisper-small [CPU]",
-        request_model: "Systran/faster-whisper-small",
-        aliases: &[
-            "systran/faster-whisper-small [cpu]",
-            "systran/faster-whisper-small (cpu)",
-            "systran/faster-whisper-small",
-        ],
-        backend_kind: engine::AuxiliaryBackendKind::MistralRs,
-        compute_target: engine::ComputeTarget::Cpu,
-        default_port: 1238,
-        default_for_role: false,
-    },
-    AuxiliarySelectionEntry {
         role: engine::AuxiliaryRole::Tts,
         choice: "engineai/Voxtral-4B-TTS-2603 [GPU]",
         request_model: "engineai/Voxtral-4B-TTS-2603",
@@ -1559,7 +1460,7 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
             "voxtral-4b-tts-2603",
             "voxtral 4b tts 2603",
         ],
-        backend_kind: engine::AuxiliaryBackendKind::MistralRs,
+        backend_kind: engine::AuxiliaryBackendKind::NativeCtox,
         compute_target: engine::ComputeTarget::Gpu,
         default_port: 1239,
         default_for_role: true,
@@ -1657,8 +1558,8 @@ const AUXILIARY_SELECTION_REGISTRY: &[AuxiliarySelectionEntry] = &[
 
 const MODEL_OPS_METADATA_REGISTRY: &[ModelOpsMetadataEntry] = &[
     ModelOpsMetadataEntry {
-        canonical_model: "openai/gpt-oss-20b",
-        process_aliases: &["openai/gpt-oss-20b", "gpt-oss-20b"],
+        canonical_model: "openai/gpt-oss-120b",
+        process_aliases: &["openai/gpt-oss-120b", "gpt-oss-120b"],
         startup_wait_secs: 240,
         default_tokens_per_second: Some(90.0),
         estimated_chat_base_memory_mb: Some(18_500),
@@ -1689,19 +1590,21 @@ const MODEL_OPS_METADATA_REGISTRY: &[ModelOpsMetadataEntry] = &[
         gpu_short_label: None,
     },
     ModelOpsMetadataEntry {
-        // Qwen3.5-27B Q4_K_M + DFlash. Warm decode ~78 tok/s chain /
-        // ~88 tok/s ddtree on A6000, measured 2026-04-24.
+        // Qwen3.5-27B Q4_K_M + DFlash. Bench harness reaches 156.69
+        // decode tok/s on repetitive prompt128/gen128. Natural chat
+        // through the Responses adapter is acceptance-bound; measured
+        // 29-54 decode tok/s on A6000 depending on prompt.
         canonical_model: "Qwen/Qwen3.5-27B",
         process_aliases: &["Qwen/Qwen3.5-27B", "Qwen3.5-27B", "qwen35-27b-q4km-dflash"],
         startup_wait_secs: 240,
-        default_tokens_per_second: Some(77.0),
+        default_tokens_per_second: Some(54.0),
         // Q4_K_M weights ~16 GB + draft ~3.5 GB + KV cache + activations.
         estimated_chat_base_memory_mb: Some(22_000),
         gpu_short_label: None,
     },
     ModelOpsMetadataEntry {
-        canonical_model: "Qwen/Qwen3.6-35B-A3B",
-        process_aliases: &["Qwen/Qwen3.6-35B-A3B", "Qwen3.6-35B-A3B"],
+        canonical_model: "Qwen/Qwen3.5-35B-A3B",
+        process_aliases: &["Qwen/Qwen3.5-35B-A3B", "Qwen3.5-35B-A3B"],
         startup_wait_secs: 1_500,
         default_tokens_per_second: Some(38.0),
         estimated_chat_base_memory_mb: Some(20_500),
@@ -1766,14 +1669,6 @@ const MODEL_OPS_METADATA_REGISTRY: &[ModelOpsMetadataEntry] = &[
         default_tokens_per_second: None,
         estimated_chat_base_memory_mb: None,
         gpu_short_label: Some("embed"),
-    },
-    ModelOpsMetadataEntry {
-        canonical_model: "Systran/faster-whisper-small",
-        process_aliases: &["Systran/faster-whisper-small", "faster-whisper-small"],
-        startup_wait_secs: 120,
-        default_tokens_per_second: None,
-        estimated_chat_base_memory_mb: None,
-        gpu_short_label: Some("stt"),
     },
     ModelOpsMetadataEntry {
         canonical_model: "engineai/Voxtral-Mini-4B-Realtime-2602",
@@ -1872,6 +1767,23 @@ fn local_model_entry(model: &str) -> Option<&'static LocalModelCatalogEntry> {
                 .iter()
                 .any(|candidate| matches_candidate(trimmed, candidate))
     })
+}
+
+fn local_chat_model_is_supported(entry: &LocalModelCatalogEntry) -> bool {
+    entry.chat_family.is_none()
+        || SUPPORTED_LOCAL_CHAT_MODELS
+            .iter()
+            .any(|model| matches_candidate(entry.canonical_model, model))
+}
+
+pub fn is_local_chat_model(model: &str) -> bool {
+    local_model_entry(model).is_some_and(|entry| entry.chat_family.is_some())
+}
+
+pub fn is_supported_local_chat_model(model: &str) -> bool {
+    local_model_entry(model)
+        .filter(|entry| entry.chat_family.is_some())
+        .is_some_and(local_chat_model_is_supported)
 }
 
 fn model_ops_metadata_entry(model: &str) -> Option<&'static ModelOpsMetadataEntry> {
@@ -2058,6 +1970,7 @@ pub fn auxiliary_manifest_slug(model: &str) -> Option<&'static str> {
 pub fn supported_local_model_profiles() -> Vec<engine::LocalModelProfile> {
     LOCAL_MODEL_REGISTRY
         .iter()
+        .filter(|entry| local_chat_model_is_supported(entry))
         .map(|entry| engine::LocalModelProfile {
             runtime: materialize_runtime_config(entry.family, entry.canonical_model, entry.runtime),
             family_profile: materialize_family_profile(entry.family, entry.profile),

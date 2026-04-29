@@ -11,7 +11,7 @@ pub fn runtime_config_path(root: &Path) -> PathBuf {
     root.join(DEFAULT_RUNTIME_CONFIG_RELATIVE_PATH)
 }
 
-pub fn env_or_config(root: &Path, key: &str) -> Option<String> {
+pub fn get(root: &Path, key: &str) -> Option<String> {
     load_runtime_env_map(root)
         .ok()
         .and_then(|map| map.get(key).cloned())

@@ -1,4 +1,4 @@
-# Speculative Decoding vs Qwen3.6-35B-A3B — Status
+# Speculative Decoding vs Qwen3.5-35B-A3B — Status
 
 Wiring is complete (TOML parse, loader wrap, both models load; verified via
 `Wrapping first model's loader in SpeculativeLoader`). End-to-end
@@ -34,7 +34,7 @@ inference now runs without panicking but produces degenerate output
       loop and the post-verify rejection branch) looks complete for
       Normal cache but may have gaps for the Hybrid cache path.
 
-    - **Hybrid-cache recurrent-state rollback**: Qwen3.6 has 30 GatedDeltaNet
+    - **Hybrid-cache recurrent-state rollback**: Qwen3.5 has 30 GatedDeltaNet
       layers with per-sequence `recurrent_state` that must be snapshotted
       before the target verify pass and restored on rejection. `SpeculativePipeline::step`
       does this (`target_recurrent_snapshot`), but the draft's own
@@ -48,8 +48,8 @@ inference now runs without panicking but produces degenerate output
 
     - **Tokenizer vocab parity vs router concentration**: even if all
       state is correct, a 0.8B dense Qwen3.5 draft predicting token
-      distributions for a 35B MoE Qwen3.6 target will agree rarely enough
-      that acceptance rates are low. Proper draft is either Qwen3.6's
+      distributions for a 35B MoE Qwen3.5 target will agree rarely enough
+      that acceptance rates are low. Proper draft is either Qwen3.5's
       own smaller sibling (doesn't exist yet publicly) or a
       continuous-batching multi-request setup where target throughput
       wins on its own.

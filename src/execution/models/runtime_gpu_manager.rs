@@ -434,7 +434,7 @@ mod tests {
 
     fn sample_plan() -> ChatRuntimePlan {
         ChatRuntimePlan {
-            model: "openai/gpt-oss-20b".to_string(),
+            model: "openai/gpt-oss-120b".to_string(),
             preset: ChatPreset::Quality,
             quantization: "q4".to_string(),
             runtime_isq: None,
@@ -513,7 +513,7 @@ mod tests {
         runtime_plan::store_persisted_chat_runtime_plan(&root, Some(&sample_plan())).unwrap();
         let descriptor = RuntimeWorkloadDescriptor {
             role: BackendRole::Chat,
-            model: "openai/gpt-oss-20b".to_string(),
+            model: "openai/gpt-oss-120b".to_string(),
             port: 1234,
             health_path: "/health".to_string(),
             launcher_kind: runtime_kernel::RuntimeLauncherKind::Engine,
@@ -573,7 +573,7 @@ mod tests {
                 runtime_contract::BackendRuntimeResidency {
                     role: BackendRole::Chat,
                     phase: runtime_contract::RuntimeResidencyPhase::Starting,
-                    model: "Qwen/Qwen3.6-35B-A3B".to_string(),
+                    model: "Qwen/Qwen3.5-35B-A3B".to_string(),
                     pid: Some(33),
                     port: Some(1235),
                     health_path: Some("/health".to_string()),

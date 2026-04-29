@@ -1818,7 +1818,12 @@ fn settings_snapshot_text(app: &App, width: usize, height: usize) -> String {
         ));
     }
     match item.key {
-        "CTOX_API_PROVIDER" | "OPENAI_API_KEY" | "OPENROUTER_API_KEY" => {
+        "CTOX_API_PROVIDER"
+        | "OPENAI_API_KEY"
+        | "OPENROUTER_API_KEY"
+        | "AZURE_FOUNDRY_API_KEY"
+        | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+        | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID" => {
             append_provider_details(&mut lines, app, width);
         }
         "CTOX_CHAT_MODEL" | "CTOX_CHAT_LOCAL_PRESET" | "CTOX_CHAT_SKILL_PRESET" => {
@@ -1971,6 +1976,18 @@ fn append_provider_details(lines: &mut Vec<String>, app: &App, width: usize) {
         .find(|item| item.key == "OPENROUTER_API_KEY")
         .map(|item| !item.value.trim().is_empty())
         .unwrap_or(false);
+    let azure_token_present = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == "AZURE_FOUNDRY_API_KEY")
+        .map(|item| !item.value.trim().is_empty())
+        .unwrap_or(false);
+    let azure_deployment_present = app
+        .settings_items
+        .iter()
+        .find(|item| item.key == "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID")
+        .map(|item| !item.value.trim().is_empty())
+        .unwrap_or(false);
     lines.push(format!("local    {local_pool} models"));
     lines.push(format!(
         "openai   {}",
@@ -1992,6 +2009,14 @@ fn append_provider_details(lines: &mut Vec<String>, app: &App, width: usize) {
                 "{} models locked until token is saved",
                 engine::SUPPORTED_OPENROUTER_API_CHAT_MODELS.len()
             )
+        }
+    ));
+    lines.push(format!(
+        "foundry  {}",
+        if azure_token_present && azure_deployment_present {
+            "deployment ready".to_string()
+        } else {
+            "needs endpoint, deployment ID, and token".to_string()
         }
     ));
     lines.push(format!(
@@ -3817,8 +3842,8 @@ mod tests {
         app.page = Page::Settings;
         app.header.estimate_mode = true;
         app.header.chat_source = "local".to_string();
-        app.header.model = "Qwen/Qwen3.6-35B-A3B".to_string();
-        app.header.base_model = "Qwen/Qwen3.6-35B-A3B".to_string();
+        app.header.model = "Qwen/Qwen3.5-35B-A3B".to_string();
+        app.header.base_model = "Qwen/Qwen3.5-35B-A3B".to_string();
         app.header.gpu_cards = vec![super::super::GpuCardState {
             index: 0,
             name: "RTX A4500".to_string(),
@@ -3826,17 +3851,17 @@ mod tests {
             total_mb: 20_480,
             utilization: 0,
             allocations: vec![super::super::GpuModelUsage {
-                model: "Qwen/Qwen3.6-35B-A3B".to_string(),
-                short_label: "qwen36".to_string(),
+                model: "Qwen/Qwen3.5-35B-A3B".to_string(),
+                short_label: "qwen35".to_string(),
                 used_mb: 11_264,
             }],
         }];
 
         let text = settings_snapshot_text(&app, 80, 40);
 
-        assert!(text.contains("preview  Qwen/Qwen3.6-35B-A3B"), "{text}");
+        assert!(text.contains("preview  Qwen/Qwen3.5-35B-A3B"), "{text}");
         assert!(text.contains("local est"), "{text}");
-        assert!(text.contains("gpu0     qwen36 11264M"), "{text}");
+        assert!(text.contains("gpu0     qwen35 11264M"), "{text}");
     }
 
     #[test]
@@ -4047,7 +4072,7 @@ mod tests {
     #[test]
     fn settings_snapshot_shows_effective_cache_type_in_plan() {
         let mut app = test_app();
-        app.chat_preset_bundle = Some(test_bundle("openai/gpt-oss-20b", Some("f8e4m3")));
+        app.chat_preset_bundle = Some(test_bundle("openai/gpt-oss-120b", Some("f8e4m3")));
 
         let text = settings_snapshot_text(&app, 80, 40);
 
@@ -4061,7 +4086,7 @@ mod tests {
     #[test]
     fn settings_snapshot_uses_off_when_plan_disables_paged_attention() {
         let mut app = test_app();
-        let mut bundle = test_bundle("Qwen/Qwen3.6-35B-A3B", None);
+        let mut bundle = test_bundle("Qwen/Qwen3.5-35B-A3B", None);
         bundle.selected_plan.paged_attn = "off".to_string();
         bundle.plans[0].paged_attn = "off".to_string();
         bundle.plans[1].paged_attn = "off".to_string();

@@ -70,15 +70,20 @@ const CTOX_CTO_OPERATING_MODE_KEY: &str = "CTOX_CTO_OPERATING_MODE_PROMPT";
 const DEFAULT_COMMUNICATION_PATH: &str = "tui";
 const CHAT_PRESET_CHOICES: &[&str] = &["Quality", "Performance"];
 const CHAT_SKILL_PRESET_CHOICES: &[&str] = &["Standard", "Simple"];
-const API_PROVIDER_CHOICES: &[&str] = &["local", "openai", "anthropic", "openrouter", "minimax"];
-const LOCAL_RUNTIME_CHOICES: &[&str] = &["candle"];
-const NO_GPU_LOCAL_CHAT_MODEL_CHOICES: &[&str] = &[
-    "Qwen/Qwen3.5-4B",
-    "Qwen/Qwen3.5-2B",
-    "google/gemma-4-E4B-it",
-    "google/gemma-4-E2B-it",
+const API_PROVIDER_CHOICES: &[&str] = &[
+    "local",
+    "openai",
+    "anthropic",
+    "openrouter",
+    "minimax",
+    "azure_foundry",
 ];
-const NO_GPU_LOCAL_CHAT_FAMILY_CHOICES: &[&str] = &["Qwen 3.5", "Gemma 4"];
+const AZURE_FOUNDRY_ENDPOINT_KEY: &str = "CTOX_AZURE_FOUNDRY_ENDPOINT";
+const AZURE_FOUNDRY_DEPLOYMENT_ID_KEY: &str = "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID";
+const AZURE_FOUNDRY_TOKEN_KEY: &str = "AZURE_FOUNDRY_API_KEY";
+const LOCAL_RUNTIME_CHOICES: &[&str] = &["candle"];
+const NO_GPU_LOCAL_CHAT_MODEL_CHOICES: &[&str] = &[];
+const NO_GPU_LOCAL_CHAT_FAMILY_CHOICES: &[&str] = &[];
 const COMMUNICATION_PATH_CHOICES: &[&str] = &["tui", "email", "jami", "teams"];
 const DEFAULT_REMOTE_BRIDGE_MODE: &str = "disabled";
 const REMOTE_BRIDGE_MODE_CHOICES: &[&str] = &["disabled", "remote-webrtc"];
@@ -296,7 +301,11 @@ fn infer_api_provider(env_map: &BTreeMap<String, String>) -> String {
         }
         (Some(explicit), _) => explicit,
         (None, Some(model_provider)) => model_provider,
-        (None, None) => DEFAULT_API_PROVIDER.to_string(),
+        (None, None) => env_map
+            .get(AZURE_FOUNDRY_ENDPOINT_KEY)
+            .filter(|value| !value.trim().is_empty())
+            .map(|_| "azure_foundry".to_string())
+            .unwrap_or_else(|| DEFAULT_API_PROVIDER.to_string()),
     }
 }
 
@@ -312,6 +321,9 @@ fn supported_chat_model_choices_with_gpu(
     env_map: &BTreeMap<String, String>,
     gpu_available: bool,
 ) -> Vec<&'static str> {
+    if infer_api_provider(env_map).eq_ignore_ascii_case("azure_foundry") {
+        return Vec::new();
+    }
     let mut choices = supported_local_chat_model_choices_with_gpu(root, env_map, gpu_available);
     for model in supported_api_chat_model_choices(env_map) {
         if !choices
@@ -338,6 +350,9 @@ fn supported_api_chat_model_choices(env_map: &BTreeMap<String, String>) -> Vec<&
             || explicit_api_source
             || selected_provider_model)
     {
+        if provider.eq_ignore_ascii_case("azure_foundry") {
+            return Vec::new();
+        }
         if provider.eq_ignore_ascii_case("anthropic") {
             return engine::SUPPORTED_ANTHROPIC_API_CHAT_MODELS.to_vec();
         }
@@ -355,6 +370,9 @@ fn supported_boost_model_choices(
     root: &Path,
     env_map: &BTreeMap<String, String>,
 ) -> Vec<&'static str> {
+    if infer_api_provider(env_map).eq_ignore_ascii_case("azure_foundry") {
+        return Vec::new();
+    }
     let mut choices = supported_local_chat_model_choices(root, env_map);
     for model in supported_api_chat_model_choices(env_map) {
         if !choices
@@ -1810,6 +1828,9 @@ impl App {
                 item.key,
                 "CTOX_SERVICE_TOGGLE"
                     | "CTOX_API_PROVIDER"
+                    | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+                    | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID"
+                    | "AZURE_FOUNDRY_API_KEY"
                     | "OPENAI_API_KEY"
                     | "ANTHROPIC_API_KEY"
                     | "OPENROUTER_API_KEY"
@@ -1922,9 +1943,14 @@ impl App {
             "OPENAI_API_KEY" => api_provider.eq_ignore_ascii_case("openai"),
             "ANTHROPIC_API_KEY" => api_provider.eq_ignore_ascii_case("anthropic"),
             "OPENROUTER_API_KEY" => api_provider.eq_ignore_ascii_case("openrouter"),
+            "AZURE_FOUNDRY_API_KEY"
+            | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+            | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID" => {
+                api_provider.eq_ignore_ascii_case("azure_foundry")
+            }
             "CTOX_LOCAL_RUNTIME" => local_runtime,
             "CTOX_CHAT_MODEL_FAMILY" => false,
-            "CTOX_CHAT_MODEL" => true,
+            "CTOX_CHAT_MODEL" => !api_provider.eq_ignore_ascii_case("azure_foundry"),
             "CTOX_CHAT_LOCAL_PRESET" => !local_runtime || local_runtime_is_candle,
             "CTOX_CHAT_MODEL_MAX_CONTEXT" => local_runtime,
             "CTOX_CHAT_SKILL_PRESET" => true,
@@ -2275,6 +2301,12 @@ impl App {
             .find(|item| item.key == "CTOX_CHAT_MODEL")
             .map(|item| item.value.trim().to_string())
             .unwrap_or_default();
+        let azure_deployment_id = self
+            .settings_items
+            .iter()
+            .find(|item| item.key == AZURE_FOUNDRY_DEPLOYMENT_ID_KEY)
+            .map(|item| item.value.trim().to_string())
+            .unwrap_or_default();
         let current_source = self
             .settings_items
             .iter()
@@ -2301,6 +2333,15 @@ impl App {
             } else {
                 "local".to_string()
             };
+        }
+        if provider.eq_ignore_ascii_case("azure_foundry") && !azure_deployment_id.is_empty() {
+            if let Some(item) = self
+                .settings_items
+                .iter_mut()
+                .find(|item| item.key == "CTOX_CHAT_MODEL")
+            {
+                item.value = azure_deployment_id;
+            }
         }
     }
 
@@ -3594,6 +3635,28 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
         .and_then(|state| state.boost.model.clone())
         .or_else(|| env_map.get("CTOX_CHAT_MODEL_BOOST").cloned())
         .unwrap_or_default();
+    let azure_foundry_endpoint = env_map
+        .get(AZURE_FOUNDRY_ENDPOINT_KEY)
+        .cloned()
+        .or_else(|| {
+            current_runtime_state
+                .as_ref()
+                .filter(|state| {
+                    runtime_state::api_provider_for_runtime_state(state)
+                        .eq_ignore_ascii_case("azure_foundry")
+                })
+                .map(|state| state.upstream_base_url.clone())
+        })
+        .unwrap_or_default();
+    let azure_foundry_deployment_id = env_map
+        .get(AZURE_FOUNDRY_DEPLOYMENT_ID_KEY)
+        .cloned()
+        .or_else(|| {
+            inferred_api_provider
+                .eq_ignore_ascii_case("azure_foundry")
+                .then(|| active_model.clone())
+        })
+        .unwrap_or_default();
     let boost_minutes = env_map
         .get("CTOX_BOOST_DEFAULT_MINUTES")
         .cloned()
@@ -3651,7 +3714,43 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             saved_value: inferred_api_provider,
             secret: false,
             choices: API_PROVIDER_CHOICES.to_vec(),
-            help: "Choose whether the base model should come from the local runtime, OpenAI, Anthropic, or OpenRouter.",
+            help: "Choose whether the base model should come from the local runtime or a remote API provider.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: AZURE_FOUNDRY_ENDPOINT_KEY,
+            label: "Foundry Endpoint",
+            value: azure_foundry_endpoint.clone(),
+            saved_value: azure_foundry_endpoint,
+            secret: false,
+            choices: Vec::new(),
+            help: "Azure Foundry resource endpoint, for example https://name.openai.azure.com. CTOX appends /openai/v1 when needed.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: AZURE_FOUNDRY_DEPLOYMENT_ID_KEY,
+            label: "Deployment ID",
+            value: azure_foundry_deployment_id.clone(),
+            saved_value: azure_foundry_deployment_id,
+            secret: false,
+            choices: Vec::new(),
+            help: "Azure Foundry deployment ID. CTOX uses this as the model name for requests.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: AZURE_FOUNDRY_TOKEN_KEY,
+            label: "Foundry Token",
+            value: env_map
+                .get(AZURE_FOUNDRY_TOKEN_KEY)
+                .cloned()
+                .unwrap_or_default(),
+            saved_value: env_map
+                .get(AZURE_FOUNDRY_TOKEN_KEY)
+                .cloned()
+                .unwrap_or_default(),
+            secret: true,
+            choices: Vec::new(),
+            help: "Azure Foundry API token. Stored in the encrypted credential store.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -3953,7 +4052,7 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             .to_string(),
             secret: false,
             choices: supported_stt_model_choices(),
-            help: "Speech-to-text sidecar. GPU keeps Voxtral; CPU switches to a faster-whisper path for installations without a GPU.",
+            help: "Speech-to-text sidecar. Only Voxtral Mini 4B Realtime is supported for transcript quality; legacy CPU STT choices fall back to Voxtral.",
             kind: SettingKind::Env,
         },
         SettingItem {
@@ -4649,7 +4748,7 @@ fn settings_map_from_items(items: &[SettingItem]) -> BTreeMap<String, String> {
 fn is_secret_backed_runtime_setting(key: &str) -> bool {
     matches!(
         key,
-        "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "OPENROUTER_API_KEY"
+        "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "OPENROUTER_API_KEY" | "AZURE_FOUNDRY_API_KEY"
     )
 }
 
@@ -4688,6 +4787,9 @@ fn relevant_header_estimate_setting(key: &str) -> bool {
         "CTOX_CHAT_SOURCE"
             | "CTOX_LOCAL_RUNTIME"
             | "CTOX_API_PROVIDER"
+            | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+            | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID"
+            | "AZURE_FOUNDRY_API_KEY"
             | "OPENAI_API_KEY"
             | "ANTHROPIC_API_KEY"
             | "OPENROUTER_API_KEY"
@@ -4748,6 +4850,9 @@ fn is_model_runtime_setting(key: &str) -> bool {
         "CTOX_CHAT_SOURCE"
             | "CTOX_LOCAL_RUNTIME"
             | "CTOX_API_PROVIDER"
+            | "CTOX_AZURE_FOUNDRY_ENDPOINT"
+            | "CTOX_AZURE_FOUNDRY_DEPLOYMENT_ID"
+            | "AZURE_FOUNDRY_API_KEY"
             | "OPENAI_API_KEY"
             | "ANTHROPIC_API_KEY"
             | "OPENROUTER_API_KEY"
@@ -4764,6 +4869,44 @@ fn is_model_runtime_setting(key: &str) -> bool {
 fn normalize_runtime_model_settings(env_map: &mut BTreeMap<String, String>) {
     let api_provider = infer_api_provider(env_map);
     let local_runtime = infer_local_runtime(env_map);
+    if api_provider.eq_ignore_ascii_case("azure_foundry") {
+        if let Some(deployment_id) = env_map
+            .get(AZURE_FOUNDRY_DEPLOYMENT_ID_KEY)
+            .cloned()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                env_map
+                    .get("CTOX_CHAT_MODEL")
+                    .cloned()
+                    .filter(|value| !engine::supports_local_chat_runtime(value))
+            })
+        {
+            env_map.insert("CTOX_CHAT_MODEL".to_string(), deployment_id);
+        }
+        if let Some(base_url) = env_map
+            .get(AZURE_FOUNDRY_ENDPOINT_KEY)
+            .and_then(|endpoint| runtime_state::azure_foundry_responses_base_url(endpoint))
+            .or_else(|| {
+                env_map
+                    .get("CTOX_UPSTREAM_BASE_URL")
+                    .cloned()
+                    .filter(|value| !value.trim().is_empty())
+            })
+        {
+            env_map.insert("CTOX_UPSTREAM_BASE_URL".to_string(), base_url);
+        }
+        env_map.insert("CTOX_API_PROVIDER".to_string(), api_provider);
+        env_map.insert("CTOX_CHAT_SOURCE".to_string(), "api".to_string());
+        env_map.remove("CTOX_CHAT_LOCAL_PRESET");
+        env_map.remove("CTOX_ENGINE_MAX_SEQ_LEN");
+        env_map.remove("CTOX_ENGINE_ISQ");
+        env_map.remove("CTOX_ENGINE_DISABLE_NCCL");
+        env_map.remove("CTOX_ENGINE_CUDA_VISIBLE_DEVICES");
+        env_map.remove("CTOX_ENGINE_DEVICE_LAYERS");
+        env_map.remove("CTOX_ENGINE_MAX_SEQS");
+        runtime_plan::clear_chat_plan_env(env_map);
+        return;
+    }
     let configured_model = runtime_env::configured_chat_model_from_map(env_map);
     let explicit_api_source = env_map
         .get("CTOX_CHAT_SOURCE")
@@ -6240,11 +6383,8 @@ mod tests {
     fn supported_chat_models_follow_selected_provider_immediately() {
         let root = temp_root("supported-chat-models");
         let local_only = supported_chat_model_choices_with_gpu(&root, &BTreeMap::new(), false);
-        assert!(local_only.contains(&"Qwen/Qwen3.5-4B"));
-        assert!(local_only.contains(&"Qwen/Qwen3.5-2B"));
-        assert!(local_only.contains(&"google/gemma-4-E4B-it"));
-        assert!(local_only.contains(&"google/gemma-4-E2B-it"));
-        assert!(!local_only.contains(&"openai/gpt-oss-20b"));
+        assert!(local_only.is_empty());
+        assert!(!local_only.contains(&"openai/gpt-oss-120b"));
         assert!(!local_only.contains(&"nvidia/Nemotron-Cascade-2-30B-A3B"));
         assert!(!local_only.contains(&"zai-org/GLM-4.7-Flash"));
         assert!(!local_only.contains(&"gpt-5.4"));
@@ -6252,8 +6392,8 @@ mod tests {
         let mut openai_api = BTreeMap::new();
         openai_api.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
         openai_api.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
-        let with_openai = supported_chat_model_choices(&root, &openai_api);
-        assert!(with_openai.contains(&"openai/gpt-oss-20b"));
+        let with_openai = supported_chat_model_choices_with_gpu(&root, &openai_api, true);
+        assert!(with_openai.contains(&"gpt-5.5"));
         assert!(with_openai.contains(&"gpt-5.4-nano"));
         assert!(with_openai.contains(&"gpt-5.4-mini"));
         assert!(with_openai.contains(&"gpt-5.4"));
@@ -6262,8 +6402,25 @@ mod tests {
         anthropic_api.insert("CTOX_API_PROVIDER".to_string(), "anthropic".to_string());
         anthropic_api.insert("ANTHROPIC_API_KEY".to_string(), "sk-ant-test".to_string());
         let with_anthropic = supported_chat_model_choices_with_gpu(&root, &anthropic_api, false);
-        assert!(with_anthropic.contains(&"anthropic/claude-sonnet-4.6"));
+        assert!(with_anthropic.contains(&"claude-opus-4-7"));
+        assert!(with_anthropic.contains(&"claude-opus-4-6"));
+        assert!(with_anthropic.contains(&"claude-sonnet-4-7"));
+        assert!(with_anthropic.contains(&"claude-sonnet-4-6"));
+        assert!(!with_anthropic.contains(&"anthropic/claude-sonnet-4.6"));
         assert!(!with_anthropic.contains(&"gpt-5.4"));
+
+        let mut azure_api = BTreeMap::new();
+        azure_api.insert("CTOX_API_PROVIDER".to_string(), "azure_foundry".to_string());
+        azure_api.insert(
+            AZURE_FOUNDRY_DEPLOYMENT_ID_KEY.to_string(),
+            "company-gpt-5".to_string(),
+        );
+        azure_api.insert(
+            AZURE_FOUNDRY_TOKEN_KEY.to_string(),
+            "azure-token".to_string(),
+        );
+        let with_azure = supported_chat_model_choices_with_gpu(&root, &azure_api, true);
+        assert!(with_azure.is_empty());
     }
 
     #[test]
@@ -6366,7 +6523,8 @@ mod tests {
     fn supported_boost_models_include_api_models_when_key_is_present() {
         let root = temp_root("supported-boost-models");
         let without_key = supported_boost_model_choices(&root, &BTreeMap::new());
-        assert!(without_key.contains(&"Qwen/Qwen3.5-4B"));
+        assert!(without_key.is_empty());
+        assert!(!without_key.contains(&"Qwen/Qwen3.5-4B"));
         assert!(!without_key.contains(&"nvidia/Nemotron-Cascade-2-30B-A3B"));
         assert!(!without_key.contains(&"gpt-5.4"));
 
@@ -6374,7 +6532,7 @@ mod tests {
         env_map.insert("CTOX_API_PROVIDER".to_string(), "openai".to_string());
         env_map.insert("OPENAI_API_KEY".to_string(), "sk-test".to_string());
         let with_key = supported_boost_model_choices(&root, &env_map);
-        assert!(with_key.contains(&"openai/gpt-oss-20b"));
+        assert!(!with_key.contains(&"openai/gpt-oss-120b"));
         assert!(with_key.contains(&"gpt-5.4"));
         assert!(with_key.contains(&"gpt-5.4-mini"));
     }
@@ -6385,7 +6543,7 @@ mod tests {
         let mut env_map = BTreeMap::new();
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
@@ -6422,7 +6580,7 @@ mod tests {
         let mut env_map = BTreeMap::new();
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert("CTOX_API_PROVIDER".to_string(), "local".to_string());
         runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
@@ -6746,7 +6904,7 @@ mod tests {
         env_map.insert("CTOX_CHAT_SOURCE".to_string(), "local".to_string());
         env_map.insert(
             "CTOX_CHAT_MODEL".to_string(),
-            "openai/gpt-oss-20b".to_string(),
+            "openai/gpt-oss-120b".to_string(),
         );
         env_map.insert(
             "CTOX_EMBEDDING_MODEL".to_string(),
@@ -6772,8 +6930,8 @@ mod tests {
                 utilization: 0,
                 allocations: vec![
                     GpuModelUsage {
-                        model: "openai/gpt-oss-20b".to_string(),
-                        short_label: "gpt-oss-20b".to_string(),
+                        model: "openai/gpt-oss-120b".to_string(),
+                        short_label: "gpt-oss-120b".to_string(),
                         used_mb: 8_386,
                     },
                     GpuModelUsage {
@@ -6800,8 +6958,8 @@ mod tests {
                 total_mb: 20_480,
                 utilization: 0,
                 allocations: vec![GpuModelUsage {
-                    model: "openai/gpt-oss-20b".to_string(),
-                    short_label: "gpt-oss-20b".to_string(),
+                    model: "openai/gpt-oss-120b".to_string(),
+                    short_label: "gpt-oss-120b".to_string(),
                     used_mb: 8_386,
                 }],
             },
@@ -6835,7 +6993,7 @@ mod tests {
         assert!(app.header.gpu_target_cards.iter().all(|card| {
             card.allocations
                 .iter()
-                .all(|alloc| alloc.model != "openai/gpt-oss-20b")
+                .all(|alloc| alloc.model != "openai/gpt-oss-120b")
         }));
         let allocations = app
             .header
@@ -6982,7 +7140,7 @@ mod tests {
         );
         env_map.insert(
             "CTOX_ACTIVE_MODEL".to_string(),
-            "Qwen/Qwen3.6-35B-A3B".to_string(),
+            "Qwen/Qwen3.5-35B-A3B".to_string(),
         );
         runtime_env::save_runtime_env_map(&root, &env_map).unwrap();
 
@@ -7293,6 +7451,45 @@ mod tests {
         assert!(
             persisted.is_none(),
             "persisted={persisted:?} rows={all_rows:?}"
+        );
+    }
+
+    #[test]
+    fn save_settings_persists_azure_foundry_selection_and_secret() {
+        let root = temp_root("settings-azure-foundry");
+        let db_path = root.join("runtime/test.sqlite3");
+        let mut app = App::new(root.clone(), db_path);
+
+        for (key, value) in [
+            ("CTOX_API_PROVIDER", "azure_foundry"),
+            (
+                AZURE_FOUNDRY_ENDPOINT_KEY,
+                "https://contoso.openai.azure.com",
+            ),
+            (AZURE_FOUNDRY_DEPLOYMENT_ID_KEY, "company-gpt-5"),
+            (AZURE_FOUNDRY_TOKEN_KEY, "azure-secret-token"),
+        ] {
+            app.settings_items
+                .iter_mut()
+                .find(|item| item.key == key)
+                .unwrap()
+                .value = value.to_string();
+        }
+        app.refresh_dynamic_setting_choices();
+        app.save_settings().unwrap();
+
+        let state = runtime_state::load_or_resolve_runtime_state(&root)
+            .unwrap()
+            .clone();
+        assert_eq!(state.source, runtime_state::InferenceSource::Api);
+        assert_eq!(state.base_model.as_deref(), Some("company-gpt-5"));
+        assert_eq!(
+            state.upstream_base_url.as_str(),
+            "https://contoso.openai.azure.com/openai/v1"
+        );
+        assert_eq!(
+            secrets::get_credential(&root, AZURE_FOUNDRY_TOKEN_KEY).as_deref(),
+            Some("azure-secret-token")
         );
     }
 }

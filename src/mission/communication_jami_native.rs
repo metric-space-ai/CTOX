@@ -1,5 +1,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use git2::{Repository, Sort};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -9,6 +10,7 @@ use std::thread;
 use std::time::Duration;
 use zbus::blocking::{Connection, Proxy};
 
+use crate::inference::engine;
 use crate::mission::channels::{
     ensure_account, ensure_routing_rows_for_inbound, now_iso_string, open_channel_db, preview_text,
     record_communication_sync_run, refresh_thread, stable_digest, upsert_communication_message,
@@ -18,6 +20,8 @@ use crate::mission::communication_adapters::{
     AdapterSyncCommandRequest, JamiResolveAccountCommandRequest, JamiSendCommandRequest,
     JamiTestCommandRequest,
 };
+
+const DEFAULT_TRANSCRIPTION_MODEL: &str = "engineai/Voxtral-Mini-4B-Realtime-2602";
 
 const JAMI_DBUS_SERVICE: &str = "cx.ring.Ring";
 const JAMI_DBUS_OBJECT_PATH: &str = "/cx/ring/Ring/ConfigurationManager";
@@ -673,8 +677,8 @@ fn base_options_from_runtime(
             .unwrap_or_default(),
         transcription_model: runtime
             .get("CTOX_STT_MODEL")
-            .map(|value| value.trim().to_string())
-            .unwrap_or_default(),
+            .map(|value| normalize_transcription_model(value))
+            .unwrap_or_else(|| DEFAULT_TRANSCRIPTION_MODEL.to_string()),
         speech_model: runtime
             .get("CTOX_TTS_MODEL")
             .map(|value| value.trim().to_string())
@@ -683,6 +687,16 @@ fn base_options_from_runtime(
             .get("CTO_JAMI_TTS_VOICE")
             .map(|value| value.trim().to_string())
             .unwrap_or_default(),
+    }
+}
+
+fn normalize_transcription_model(configured: &str) -> String {
+    let selected =
+        engine::auxiliary_model_selection(engine::AuxiliaryRole::Stt, Some(configured.trim()));
+    if selected.request_model == DEFAULT_TRANSCRIPTION_MODEL {
+        selected.request_model.to_string()
+    } else {
+        DEFAULT_TRANSCRIPTION_MODEL.to_string()
     }
 }
 
@@ -1998,11 +2012,9 @@ fn store_inbound_message(
     if inbound_matches_existing_outbound(conn, inbound)? {
         return Ok(true);
     }
-    let already_known: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM communication_messages WHERE message_key = ?1",
-        [inbound.message_key.as_str()],
-        |row| row.get(0),
-    )?;
+    if existing_jami_inbound_message_key(conn, inbound)?.is_some() {
+        return Ok(true);
+    }
     let observed_at = now_iso_string();
     fs::create_dir_all(&options.raw_dir)?;
     let raw_path = options.raw_dir.join(format!(
@@ -2046,7 +2058,62 @@ fn store_inbound_message(
         },
     )?;
     refresh_thread(conn, &inbound.thread_key)?;
-    Ok(already_known > 0)
+    Ok(false)
+}
+
+fn existing_jami_inbound_message_key(
+    conn: &rusqlite::Connection,
+    inbound: &JamiInboundMessage,
+) -> Result<Option<String>> {
+    let exact = conn
+        .query_row(
+            "SELECT message_key FROM communication_messages WHERE message_key = ?1",
+            [inbound.message_key.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    if exact.is_some() {
+        return Ok(exact);
+    }
+
+    let sender_address = inbound.sender_address.trim();
+    let sender_display = inbound.sender_display.trim();
+    let body_text = inbound.body_text.trim();
+    let created_at = inbound.external_created_at.trim();
+    if body_text.is_empty() || created_at.is_empty() {
+        return Ok(None);
+    }
+
+    conn.query_row(
+        r#"
+        SELECT message_key
+        FROM communication_messages
+        WHERE channel = 'jami'
+          AND account_key = ?1
+          AND direction = 'inbound'
+          AND folder_hint = 'INBOX'
+          AND thread_key = ?2
+          AND body_text = ?3
+          AND external_created_at = ?4
+          AND (
+                (?5 <> '' AND sender_address = ?5)
+             OR (?6 <> '' AND sender_display = ?6)
+          )
+        ORDER BY observed_at DESC
+        LIMIT 1
+        "#,
+        rusqlite::params![
+            inbound.account_key,
+            inbound.thread_key,
+            body_text,
+            created_at,
+            sender_address,
+            sender_display,
+        ],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(Into::into)
 }
 
 fn require_explicit_jami_identity(options: &JamiOptions) -> Result<()> {
@@ -2572,5 +2639,141 @@ mod tests {
             )
             .expect("count inbound");
         assert_eq!(inbox_count, 0);
+    }
+
+    #[test]
+    fn jami_sync_does_not_rewrite_known_inbound_messages() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "ctox-jami-known-inbound-test-{}",
+            std::process::id()
+        ));
+        let db_path = temp_root.join("runtime/ctox.sqlite3");
+        let raw_dir = temp_root.join("runtime/communication/jami/raw");
+        let mut conn = open_channel_db(&db_path).expect("open db");
+        let options = JamiOptions {
+            root: temp_root.clone(),
+            db_path,
+            raw_dir,
+            inbox_dir: temp_root.join("runtime/communication/jami/inbox"),
+            outbox_dir: temp_root.join("runtime/communication/jami/outbox"),
+            archive_dir: temp_root.join("runtime/communication/jami/archive"),
+            account_id: "cae53c1469355a5d".to_string(),
+            username: String::new(),
+            profile_name: "CTO1".to_string(),
+            account_uri: "jami:cae53c1469355a5d".to_string(),
+            device_name: "CTO1".to_string(),
+            provider: "native".to_string(),
+            limit: 20,
+            trust_level: "owner".to_string(),
+            dbus_env_file: String::new(),
+            transcription_model: String::new(),
+            speech_model: String::new(),
+            speech_voice: String::new(),
+        };
+        let inbound = JamiInboundMessage {
+            account_key: "jami:cae".to_string(),
+            thread_key: "jami:cae::conv-1".to_string(),
+            message_key: "jami:cae::INBOX::commit-1".to_string(),
+            remote_id: "commit-1".to_string(),
+            sender_display: "Olaf".to_string(),
+            sender_address: "jami:olaf".to_string(),
+            recipients: vec!["cae53c1469355a5d".to_string()],
+            subject: "Jami conv-1".to_string(),
+            body_text: "Bitte pruefen.".to_string(),
+            preview: "Bitte pruefen.".to_string(),
+            seen: false,
+            has_attachments: false,
+            external_created_at: "2026-04-24T10:01:00Z".to_string(),
+            metadata: json!({}),
+        };
+
+        assert!(
+            !store_inbound_message(&mut conn, &options, &inbound, &json!({})).expect("first store"),
+            "first inbound should be new"
+        );
+        conn.execute(
+            "UPDATE communication_messages SET observed_at = '2000-01-01T00:00:00Z' WHERE message_key = ?1",
+            [inbound.message_key.as_str()],
+        )
+        .expect("set sentinel observed_at");
+        assert!(
+            store_inbound_message(&mut conn, &options, &inbound, &json!({})).expect("second store"),
+            "exact duplicate should be known"
+        );
+        let observed_at: String = conn
+            .query_row(
+                "SELECT observed_at FROM communication_messages WHERE message_key = ?1",
+                [inbound.message_key.as_str()],
+                |row| row.get(0),
+            )
+            .expect("load observed_at");
+        assert_eq!(observed_at, "2000-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn jami_sync_dedupes_unstable_remote_ids_by_content_signature() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "ctox-jami-content-dedupe-test-{}",
+            std::process::id()
+        ));
+        let db_path = temp_root.join("runtime/ctox.sqlite3");
+        let raw_dir = temp_root.join("runtime/communication/jami/raw");
+        let mut conn = open_channel_db(&db_path).expect("open db");
+        let options = JamiOptions {
+            root: temp_root.clone(),
+            db_path,
+            raw_dir,
+            inbox_dir: temp_root.join("runtime/communication/jami/inbox"),
+            outbox_dir: temp_root.join("runtime/communication/jami/outbox"),
+            archive_dir: temp_root.join("runtime/communication/jami/archive"),
+            account_id: "cae53c1469355a5d".to_string(),
+            username: String::new(),
+            profile_name: "CTO1".to_string(),
+            account_uri: "jami:cae53c1469355a5d".to_string(),
+            device_name: "CTO1".to_string(),
+            provider: "native".to_string(),
+            limit: 20,
+            trust_level: "owner".to_string(),
+            dbus_env_file: String::new(),
+            transcription_model: String::new(),
+            speech_model: String::new(),
+            speech_voice: String::new(),
+        };
+        let first = JamiInboundMessage {
+            account_key: "jami:cae".to_string(),
+            thread_key: "jami:cae::conv-1".to_string(),
+            message_key: "jami:cae::INBOX::commit-1".to_string(),
+            remote_id: "commit-1".to_string(),
+            sender_display: "Olaf".to_string(),
+            sender_address: "jami:olaf".to_string(),
+            recipients: vec!["cae53c1469355a5d".to_string()],
+            subject: "Jami conv-1".to_string(),
+            body_text: "Bitte pruefen.".to_string(),
+            preview: "Bitte pruefen.".to_string(),
+            seen: false,
+            has_attachments: false,
+            external_created_at: "2026-04-24T10:01:00Z".to_string(),
+            metadata: json!({}),
+        };
+        let mut second = first.clone();
+        second.message_key = "jami:cae::INBOX::commit-2".to_string();
+        second.remote_id = "commit-2".to_string();
+
+        assert!(
+            !store_inbound_message(&mut conn, &options, &first, &json!({})).expect("first store"),
+            "first inbound should be new"
+        );
+        assert!(
+            store_inbound_message(&mut conn, &options, &second, &json!({})).expect("second store"),
+            "content duplicate should be known even with a different remote id"
+        );
+        let inbox_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM communication_messages WHERE channel='jami' AND direction='inbound'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count inbound");
+        assert_eq!(inbox_count, 1);
     }
 }

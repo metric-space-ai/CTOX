@@ -1375,6 +1375,79 @@ fn create_meeting_get_transcript_tool() -> ToolSpec {
     })
 }
 
+fn create_meeting_join_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "url".to_string(),
+            JsonSchema::String {
+                description: Some("The Google Meet, Microsoft Teams, or Zoom URL to join.".to_string()),
+            },
+        ),
+        (
+            "name".to_string(),
+            JsonSchema::String {
+                description: Some("Optional visible bot display name.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "meeting_join".to_string(),
+        description:
+            "Join a Google Meet, Microsoft Teams, or Zoom meeting now as the CTOX notetaker. \
+             The meeting runner captures audio/recording artifacts, monitors chat, and finalizes \
+             the post-meeting processing flow when the meeting ends."
+                .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["url".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn create_meeting_schedule_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "url".to_string(),
+            JsonSchema::String {
+                description: Some("The Google Meet, Microsoft Teams, or Zoom URL to schedule.".to_string()),
+            },
+        ),
+        (
+            "time".to_string(),
+            JsonSchema::String {
+                description: Some("Meeting start time as an ISO-8601 timestamp.".to_string()),
+            },
+        ),
+        (
+            "name".to_string(),
+            JsonSchema::String {
+                description: Some("Optional visible bot display name.".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "meeting_schedule".to_string(),
+        description:
+            "Schedule CTOX to join a Google Meet, Microsoft Teams, or Zoom meeting at a future \
+             ISO-8601 start time."
+                .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["url".to_string(), "time".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
 fn create_channel_sync_tool() -> ToolSpec {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -3715,9 +3788,23 @@ pub(crate) fn build_specs_with_discoverable_tools(
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
+        push_tool_spec(
+            &mut builder,
+            create_meeting_join_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        push_tool_spec(
+            &mut builder,
+            create_meeting_schedule_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
         builder.register_handler("meeting_status", meeting_handler.clone());
         builder.register_handler("meeting_send_chat", meeting_handler.clone());
-        builder.register_handler("meeting_get_transcript", meeting_handler);
+        builder.register_handler("meeting_get_transcript", meeting_handler.clone());
+        builder.register_handler("meeting_join", meeting_handler.clone());
+        builder.register_handler("meeting_schedule", meeting_handler);
     }
 
     push_tool_spec(

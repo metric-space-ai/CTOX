@@ -278,7 +278,7 @@ fn resolve_primary_generation(
         .or_else(|| state.active_or_selected_model().map(ToOwned::to_owned))
         .filter(|value| !value.trim().is_empty())?;
     let runtime = engine::runtime_config_for_model(&request_model)
-        .unwrap_or_else(|_| engine::default_runtime_config(engine::LocalModelFamily::GptOss));
+        .unwrap_or_else(|_| engine::default_runtime_config(engine::LocalModelFamily::Qwen35Vision));
     let port = state.engine_port.unwrap_or(runtime.port);
     let launcher_kind = match state.local_runtime {
         runtime_state::LocalRuntimeKind::Candle => RuntimeLauncherKind::Engine,
@@ -390,10 +390,10 @@ mod tests {
                 version: 4,
                 source: runtime_state::InferenceSource::Local,
                 local_runtime: runtime_state::LocalRuntimeKind::Candle,
-                base_model: Some("openai/gpt-oss-20b".to_string()),
-                requested_model: Some("openai/gpt-oss-20b".to_string()),
-                active_model: Some("openai/gpt-oss-20b".to_string()),
-                engine_model: Some("openai/gpt-oss-20b".to_string()),
+                base_model: Some("openai/gpt-oss-120b".to_string()),
+                requested_model: Some("openai/gpt-oss-120b".to_string()),
+                active_model: Some("openai/gpt-oss-120b".to_string()),
+                engine_model: Some("openai/gpt-oss-120b".to_string()),
                 engine_port: Some(2234),
                 configured_context_tokens: Some(65_536),
                 realized_context_tokens: Some(65_536),
@@ -491,10 +491,10 @@ mod tests {
                 version: 4,
                 source: runtime_state::InferenceSource::Local,
                 local_runtime: runtime_state::LocalRuntimeKind::Candle,
-                base_model: Some("openai/gpt-oss-20b".to_string()),
-                requested_model: Some("openai/gpt-oss-20b".to_string()),
-                active_model: Some("openai/gpt-oss-20b".to_string()),
-                engine_model: Some("openai/gpt-oss-20b".to_string()),
+                base_model: Some("openai/gpt-oss-120b".to_string()),
+                requested_model: Some("openai/gpt-oss-120b".to_string()),
+                active_model: Some("openai/gpt-oss-120b".to_string()),
+                engine_model: Some("openai/gpt-oss-120b".to_string()),
                 engine_port: Some(1234),
                 configured_context_tokens: Some(131_072),
                 realized_context_tokens: Some(131_072),
@@ -510,7 +510,9 @@ mod tests {
                 },
                 transcription: runtime_state::AuxiliaryRuntimeState {
                     enabled: false,
-                    configured_model: Some("Systran/faster-whisper-small [CPU]".to_string()),
+                    configured_model: Some(
+                        "engineai/Voxtral-Mini-4B-Realtime-2602 [GPU]".to_string(),
+                    ),
                     port: Some(2238),
                     base_url: None,
                 },

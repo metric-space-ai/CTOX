@@ -73,6 +73,9 @@ First-install overrides:
 | --- | --- |
 | `--backend=<cuda\|metal\|cpu>` | Forces the local inference backend. Leave it unset unless auto-detection is wrong or you intentionally want CPU fallback. `cuda` is for NVIDIA Linux hosts, `metal` is for Apple Silicon macOS, and `cpu` is the slow fallback. |
 | `--model=<model>` | Seeds the default local model profile. Do not use this during a first install unless you know the exact model id is supported by the current build; model selection can be changed later in the TUI. |
+| `--api-provider=<provider>` | Seeds a remote provider for first boot. Most users should configure this in the TUI; currently useful for scripted Azure Foundry installs. |
+| `--azure-foundry-endpoint=<url>` | Seeds the Azure Foundry resource endpoint. CTOX appends `/openai/v1` when needed. |
+| `--azure-foundry-deployment-id=<id>` | Seeds the Azure Foundry deployment ID and uses it as the chat model. |
 
 ### Example: API model with key
 
@@ -90,6 +93,23 @@ Chat Source: api
 API Provider: openai
 Chat Model: gpt-5.4-mini
 ```
+
+Supported API provider choices are `openai`, `anthropic`, `openrouter`,
+`minimax`, and `azure_foundry`. Provider tokens should be stored through the
+TUI or `ctox secret`; normal shell exports are not the recommended
+configuration path.
+
+For Azure Foundry, choose `azure_foundry` and enter:
+
+```text
+Foundry Endpoint: https://<resource>.openai.azure.com
+Deployment ID: <deployment-id>
+Foundry Token: <token>
+```
+
+CTOX normalizes the endpoint to `/openai/v1` when needed. The Deployment ID is
+used as the request model name, which matches the Azure Foundry deployment
+model flow.
 
 Then start the daemon:
 

@@ -259,7 +259,15 @@ impl InProcessClientSender {
 pub struct InProcessClientHandle {
     client: InProcessClientSender,
     event_rx: mpsc::Receiver<InProcessServerEvent>,
-    runtime_handle: tokio::task::JoinHandle<()>,
+    runtime_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for InProcessClientHandle {
+    fn drop(&mut self) {
+        if let Some(handle) = self.runtime_handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl InProcessClientHandle {
@@ -315,16 +323,21 @@ impl InProcessClientHandle {
     ///
     /// Shutdown is bounded by internal timeouts and may abort background tasks
     /// if graceful drain does not complete in time.
-    pub async fn shutdown(self) -> IoResult<()> {
-        let mut runtime_handle = self.runtime_handle;
+    pub async fn shutdown(mut self) -> IoResult<()> {
+        let mut runtime_handle = match self.runtime_handle.take() {
+            Some(handle) => handle,
+            None => return Ok(()),
+        };
         let (done_tx, done_rx) = oneshot::channel();
 
-        if self
-            .client
-            .client_tx
-            .send(InProcessClientMessage::Shutdown { done_tx })
-            .await
-            .is_ok()
+        if timeout(
+            SHUTDOWN_TIMEOUT,
+            self.client
+                .client_tx
+                .send(InProcessClientMessage::Shutdown { done_tx }),
+        )
+        .await
+        .is_ok_and(|send_result| send_result.is_ok())
         {
             let _ = timeout(SHUTDOWN_TIMEOUT, done_rx).await;
         }
@@ -723,7 +736,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
     InProcessClientHandle {
         client: InProcessClientSender { client_tx },
         event_rx,
-        runtime_handle,
+        runtime_handle: Some(runtime_handle),
     }
 }
 

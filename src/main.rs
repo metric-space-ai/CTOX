@@ -48,6 +48,8 @@ pub mod inference {
     pub use crate::execution::models::model_adapters;
     pub use crate::execution::models::model_manifest;
     pub use crate::execution::models::model_registry;
+    pub use crate::execution::models::native_embedding;
+    pub use crate::execution::models::native_tts;
     pub use crate::execution::models::resource_state;
     pub use crate::execution::models::runtime_contract;
     pub use crate::execution::models::runtime_control;
@@ -66,6 +68,8 @@ pub mod inference {
 use crate::inference::engine;
 use crate::inference::gateway;
 use crate::inference::model_registry;
+use crate::inference::native_embedding;
+use crate::inference::native_tts;
 use crate::inference::runtime_control;
 use crate::inference::runtime_env;
 use crate::inference::runtime_plan;
@@ -107,6 +111,10 @@ ENGINE / GPU
 
 RUN / EXEC
   ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k] [--timeout <secs>]
+  ctox runtime embedding-doctor
+  ctox runtime embedding-smoke [--token-id <id>]
+  ctox runtime tts-doctor
+  ctox runtime tts-smoke [--text <text>]
 
 GOVERNANCE / MISSION
   ctox governance <subcmd>       governance decisions and audits
@@ -146,6 +154,12 @@ Full reference: https://github.com/metric-space-ai/ctox"
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = resolve_workspace_root()?;
+    if args.first().map(String::as_str) == Some("__native-qwen3-embedding-service") {
+        return handle_native_qwen3_embedding_service(&args[1..]);
+    }
+    if args.first().map(String::as_str) == Some("__native-voxtral-tts-service") {
+        return handle_native_voxtral_tts_service(&args[1..], &root);
+    }
     service::db_migration::run_if_needed(&root)
         .context("failed to consolidate legacy databases into runtime/ctox.sqlite3")?;
 
@@ -186,6 +200,38 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some("runtime") => match args.get(1).map(String::as_str) {
+            Some("embedding-doctor") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&native_embedding::doctor_json(&root))?
+                );
+                Ok(())
+            }
+            Some("embedding-smoke") => {
+                let token_id = native_embedding::parse_embedding_smoke_token_id(&args[2..])?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&native_embedding::embedding_smoke_json(
+                        &root, token_id
+                    ))?
+                );
+                Ok(())
+            }
+            Some("tts-doctor") => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&native_tts::doctor_json(&root))?
+                );
+                Ok(())
+            }
+            Some("tts-smoke") => {
+                let text = native_tts::parse_tts_smoke_text(&args[2..])?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&native_tts::tts_smoke_json(&root, &text))?
+                );
+                Ok(())
+            }
             Some("switch") => {
                 let model = args
                     .get(2)
@@ -225,7 +271,7 @@ fn main() -> anyhow::Result<()> {
                 Ok(())
             }
             _ => anyhow::bail!(
-                "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k] [--timeout <secs>]"
+                "usage: ctox runtime switch <model> <quality|performance> [--context 32k|64k|128k|256k] [--timeout <secs>] | ctox runtime embedding-doctor | ctox runtime embedding-smoke [--token-id <id>] | ctox runtime tts-doctor | ctox runtime tts-smoke [--text <text>]"
             ),
         },
         Some("boost") => match args.get(1).map(String::as_str) {
@@ -939,6 +985,42 @@ fn handle_chat(root: &Path, args: &[String]) -> anyhow::Result<()> {
         anyhow::bail!(err);
     }
     Ok(())
+}
+
+fn handle_native_qwen3_embedding_service(args: &[String]) -> anyhow::Result<()> {
+    let transport = find_flag_value(args, "--transport").context(
+        "usage: ctox __native-qwen3-embedding-service --transport <ipc-endpoint> [--compute-target gpu|cpu]",
+    )?;
+    let compute_target =
+        parse_compute_target_value(find_flag_value(args, "--compute-target").unwrap_or("gpu"))?;
+    native_embedding::serve_socket(native_embedding::NativeEmbeddingLaunch {
+        transport: inference::local_transport::LocalTransport::from_ipc_endpoint_string(transport),
+        compute_target,
+    })
+}
+
+fn handle_native_voxtral_tts_service(args: &[String], root: &Path) -> anyhow::Result<()> {
+    let transport = find_flag_value(args, "--transport").context(
+        "usage: ctox __native-voxtral-tts-service --transport <ipc-endpoint> [--compute-target gpu|cpu] [--model-dir <path>]",
+    )?;
+    let compute_target =
+        parse_compute_target_value(find_flag_value(args, "--compute-target").unwrap_or("gpu"))?;
+    let model_dir = find_flag_value(args, "--model-dir")
+        .map(PathBuf::from)
+        .or_else(|| native_tts::configured_or_default_model_dir(root));
+    native_tts::serve_socket(native_tts::NativeTtsLaunch {
+        transport: inference::local_transport::LocalTransport::from_ipc_endpoint_string(transport),
+        compute_target,
+        model_dir,
+    })
+}
+
+fn parse_compute_target_value(value: &str) -> anyhow::Result<engine::ComputeTarget> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "gpu" => Ok(engine::ComputeTarget::Gpu),
+        "cpu" => Ok(engine::ComputeTarget::Cpu),
+        other => anyhow::bail!("unsupported compute target `{other}`; expected gpu or cpu"),
+    }
 }
 
 fn build_chat_prompt(raw_prompt: &str, workspace: Option<&Path>) -> anyhow::Result<String> {

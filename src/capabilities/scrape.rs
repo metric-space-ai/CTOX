@@ -4702,7 +4702,7 @@ mod tests {
             std::io::BufRead::read_line(&mut reader, &mut request_line)?;
             assert!(request_line.contains("\"kind\":\"responses_create\""));
             assert!(request_line.contains("\"stream\":true"));
-            assert!(request_line.contains("\"model\":\"gpt-oss-20b\""));
+            assert!(request_line.contains("\"model\":\"gpt-oss-120b\""));
             assert!(request_line.contains("\"input\":\"Say hello\""));
             for line in [
                 "{\"type\":\"response.output_text.delta\",\"delta\":\"Hello\"}\n",
@@ -4718,7 +4718,7 @@ mod tests {
             path: socket_path.clone(),
         };
         let text =
-            invoke_responses_text_via_local_socket(&transport, "gpt-oss-20b", "Say hello", 5)
+            invoke_responses_text_via_local_socket(&transport, "gpt-oss-120b", "Say hello", 5)
                 .unwrap();
         assert_eq!(text, "Hello world");
         server.join().unwrap().unwrap();

@@ -327,7 +327,7 @@ fn managed_local_responses_max_output_tokens_reads_runtime_state_override() {
         supports_websockets: false,
     };
     let model_info = ModelInfo {
-        slug: "openai/gpt-oss-20b".to_string(),
+        slug: "openai/gpt-oss-120b".to_string(),
         ..Default::default()
     };
 
@@ -366,7 +366,7 @@ fn managed_local_responses_max_output_tokens_does_not_use_process_env_fallback()
         supports_websockets: false,
     };
     let model_info = ModelInfo {
-        slug: "openai/gpt-oss-20b".to_string(),
+        slug: "openai/gpt-oss-120b".to_string(),
         ..Default::default()
     };
 
@@ -423,7 +423,7 @@ fn managed_local_responses_max_output_tokens_defaults_to_realized_context_budget
         supports_websockets: false,
     };
     let model_info = ModelInfo {
-        slug: "openai/gpt-oss-20b".to_string(),
+        slug: "openai/gpt-oss-120b".to_string(),
         ..Default::default()
     };
 
@@ -441,7 +441,7 @@ fn managed_local_gpt_oss_request_preserves_explicit_none_reasoning() {
     let session = client.new_session();
     let api_provider = client.state.provider.to_api_provider(None).unwrap();
     let model_info = ModelInfo {
-        slug: "openai/gpt-oss-20b".to_string(),
+        slug: "openai/gpt-oss-120b".to_string(),
         default_reasoning_level: Some(ReasoningEffortConfig::Medium),
         supports_reasoning_summaries: false,
         ..test_model_info()

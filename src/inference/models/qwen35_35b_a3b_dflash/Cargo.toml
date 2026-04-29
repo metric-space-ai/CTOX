@@ -1,0 +1,88 @@
+[package]
+name = "ctox-qwen35-35b-a3b-dflash"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+description = "Self-contained Qwen3.5-35B-A3B (MoE) DFlash speculative-decoding model. macOS+Metal path uses byte-exact vendored kernels from llama.cpp ggml-metal + dflash-mlx. Linux CUDA not yet implemented. All kernels are vendored in-tree; no code is shared with other model crates."
+
+# Keep this crate OUT of any parent workspace. The tree sits under
+# src/inference/ physically, but src/inference/ is the OpenAI-Codex-fork
+# workspace (edition 2024, strict lints) which this port cannot live in.
+# Declaring an empty [workspace] here makes this a self-contained crate.
+[workspace]
+
+[lib]
+name = "ctox_qwen35_35b_a3b_dflash"
+path = "src/lib.rs"
+
+# CUDA bench intentionally absent — there is no published C++
+# reference for Qwen3.5-35B-A3B MoE DFlash yet.
+
+# macOS+Metal bench — byte-for-byte parity against bstnxbt/dflash-mlx.
+[[bin]]
+name = "qwen35-35b-a3b-dflash-bench-metal"
+path = "src/bin/bench_metal.rs"
+# Same pattern as the CUDA bench: on non-macOS hosts this compiles to
+# a stub main that exits 2.
+
+[features]
+default = []
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+half = { version = "2", features = ["bytemuck"] }
+bytemuck = "1"
+memmap2 = "0.9"
+libc = "0.2"
+# Data-parallel helper for the per-position top-K extract in the
+# CUDA/DDTree path. Matches the reference's `#pragma omp parallel for`.
+# Also needed on the Metal path for the draft top-K extract mirror.
+rayon = "1.10"
+# First-party parser for both the Linux bf16 draft (z-lab safetensors)
+# and the macOS target (mlx-community MLX-4bit safetensors).
+safetensors = "0.4"
+# JSON parsing for HF config.json on the macOS loader path.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Bench binary CLI.
+clap = { version = "4", features = ["derive"] }
+
+# ─── Platform-specific deps ──────────────────────────────────────────
+#
+# No runtime dispatch: the host OS picks one set. Neither is a `feature`;
+# Cargo's target-cfg dep resolution keeps the other's crates out of the
+# build graph entirely.
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Apple's `objc2` gives us the ObjC runtime + Metal bindings without
+# having to hand-roll msg_send! everywhere. `objc2-metal` exposes the
+# `MTLDevice` / `MTLCommandQueue` / `MTLComputePipelineState` surface we
+# need for the metallib we compile ourselves.
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSURL", "NSArray", "NSData"] }
+objc2-metal = { version = "0.2", features = [
+    "MTLDevice",
+    "MTLCommandQueue",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLBlitCommandEncoder",
+    "MTLComputeCommandEncoder",
+    "MTLComputePipeline",
+    "MTLBuffer",
+    "MTLLibrary",
+    "MTLResource",
+    "MTLTypes",
+    "MTLPixelFormat",
+    "MTLStageInputOutputDescriptor",
+    "MTLFunctionDescriptor",
+    "MTLFunctionConstantValues",
+    "MTLArgument",
+] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

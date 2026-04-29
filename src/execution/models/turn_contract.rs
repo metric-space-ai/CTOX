@@ -388,13 +388,12 @@ mod tests {
 
     #[test]
     fn response_builder_collects_output_and_reasoning() {
-        let response = TurnResponseBuilder::new("resp_1", "openai/gpt-oss-20b", 42, 84).with_usage(
-            TurnUsage {
+        let response = TurnResponseBuilder::new("resp_1", "openai/gpt-oss-120b", 42, 84)
+            .with_usage(TurnUsage {
                 input_tokens: 11,
                 output_tokens: 7,
                 total_tokens: 18,
-            },
-        );
+            });
         let mut response = response;
         response.push_reasoning("step one");
         response.push_message_text("CTOX_OK");

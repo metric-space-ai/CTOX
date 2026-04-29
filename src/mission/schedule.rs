@@ -9,16 +9,22 @@ use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+use std::process::Command;
+use std::process::Stdio;
 use std::time::SystemTime;
 
 use crate::channels;
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const CRON_SCAN_MINUTES: i64 = 366 * 24 * 60;
+const MEETING_JOIN_MARKER: &str = "CTOX_MEETING_JOIN:";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScheduledTaskView {
@@ -141,16 +147,32 @@ pub fn emit_due_tasks(root: &Path) -> Result<EmitDueSummary> {
             .next_run_at
             .as_deref()
             .context("due task missing next_run_at")?;
+        let is_one_shot_meeting_join = meeting_join_payload(&task.prompt).is_some();
         let run = emit_task_run_tx(root, &tx, &task, scheduled_for)?;
-        let next_run = next_run_after(&task.cron_expr, parse_rfc3339_utc(scheduled_for)?)?;
+        let (next_run, enabled) = next_task_state_after_emit(
+            is_one_shot_meeting_join,
+            &run.status,
+            &task.cron_expr,
+            scheduled_for,
+            now,
+        )?;
         let now_iso = now_iso_string();
         tx.execute(
             r#"
             UPDATE scheduled_tasks
-            SET last_run_at = ?2, next_run_at = ?3, updated_at = ?4
+            SET last_run_at = ?2,
+                next_run_at = ?3,
+                enabled = ?4,
+                updated_at = ?5
             WHERE task_id = ?1
             "#,
-            params![task.task_id, scheduled_for, next_run.as_deref(), now_iso],
+            params![
+                task.task_id,
+                scheduled_for,
+                next_run.as_deref(),
+                if enabled { 1 } else { 0 },
+                now_iso
+            ],
         )?;
         summary.emitted_count += 1;
         summary.emitted_runs.push(run);
@@ -344,6 +366,9 @@ fn emit_task_run_tx(
     task: &ScheduledTaskView,
     scheduled_for: &str,
 ) -> Result<ScheduleRunView> {
+    if let Some(payload) = meeting_join_payload(&task.prompt) {
+        return emit_meeting_join_run_tx(root, tx, task, scheduled_for, &payload);
+    }
     let run_id = format!("{}::{}", task.task_id, scheduled_for);
     let prompt = render_scheduled_prompt(task, scheduled_for);
     let message_key = channels::ingest_cron_message(
@@ -377,6 +402,136 @@ fn emit_task_run_tx(
         message_key,
         status: "emitted".to_string(),
     })
+}
+
+fn next_task_state_after_emit(
+    is_one_shot_meeting_join: bool,
+    run_status: &str,
+    cron_expr: &str,
+    scheduled_for: &str,
+    now: DateTime<Utc>,
+) -> Result<(Option<String>, bool)> {
+    if is_one_shot_meeting_join {
+        if run_status == "started" {
+            return Ok((None, false));
+        }
+        return Ok((Some((now + Duration::minutes(1)).to_rfc3339()), true));
+    }
+    Ok((
+        next_run_after(cron_expr, parse_rfc3339_utc(scheduled_for)?)?,
+        true,
+    ))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct MeetingJoinPayload {
+    url: String,
+    #[serde(default)]
+    bot_name: Option<String>,
+}
+
+fn meeting_join_payload(prompt: &str) -> Option<MeetingJoinPayload> {
+    prompt.lines().find_map(|line| {
+        let raw = line.trim().strip_prefix(MEETING_JOIN_MARKER)?.trim();
+        serde_json::from_str::<MeetingJoinPayload>(raw)
+            .ok()
+            .filter(|payload| !payload.url.trim().is_empty())
+    })
+}
+
+fn emit_meeting_join_run_tx(
+    root: &Path,
+    tx: &Transaction<'_>,
+    task: &ScheduledTaskView,
+    scheduled_for: &str,
+    payload: &MeetingJoinPayload,
+) -> Result<ScheduleRunView> {
+    let run_id = format!("{}::{}", task.task_id, scheduled_for);
+    let message_key = format!("meeting-join::{}", stable_digest(&run_id));
+    let emitted_at = now_iso_string();
+    let spawn_result = spawn_meeting_join(root, task, scheduled_for, payload);
+    let (status, error_text) = match spawn_result {
+        Ok(pid) => ("started".to_string(), format!("pid={pid}")),
+        Err(err) => ("failed".to_string(), err.to_string()),
+    };
+    tx.execute(
+        r#"
+        INSERT INTO scheduled_task_runs (
+            run_id, task_id, scheduled_for, emitted_at, message_key, status, error_text
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(run_id) DO UPDATE SET
+            emitted_at = excluded.emitted_at,
+            message_key = excluded.message_key,
+            status = excluded.status,
+            error_text = excluded.error_text
+        "#,
+        params![
+            run_id,
+            task.task_id,
+            scheduled_for,
+            emitted_at,
+            message_key,
+            status,
+            error_text
+        ],
+    )?;
+    Ok(ScheduleRunView {
+        run_id,
+        task_id: task.task_id.clone(),
+        scheduled_for: scheduled_for.to_string(),
+        emitted_at,
+        message_key,
+        status,
+    })
+}
+
+fn spawn_meeting_join(
+    root: &Path,
+    task: &ScheduledTaskView,
+    scheduled_for: &str,
+    payload: &MeetingJoinPayload,
+) -> Result<u32> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("ctox"));
+    let log_dir = root.join("runtime").join("meeting_sessions");
+    fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create meeting log dir {}", log_dir.display()))?;
+    let log_path = log_dir.join(format!(
+        "{}-join.log",
+        stable_digest(&format!("{}:{scheduled_for}", task.task_id))
+    ));
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("failed to open meeting join log {}", log_path.display()))?;
+    let stderr = log_file
+        .try_clone()
+        .context("failed to clone meeting join log handle")?;
+    let mut command = Command::new(exe);
+    command
+        .current_dir(root)
+        .env("CTOX_ROOT", root)
+        .arg("meeting")
+        .arg("join")
+        .arg(payload.url.trim())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log_file))
+        .stderr(Stdio::from(stderr));
+    if let Some(bot_name) = payload
+        .bot_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--name").arg(bot_name);
+    }
+    let child = command.spawn().with_context(|| {
+        format!(
+            "failed to spawn scheduled meeting join for {}",
+            payload.url.trim()
+        )
+    })?;
+    Ok(child.id())
 }
 
 fn render_scheduled_prompt(task: &ScheduledTaskView, scheduled_for: &str) -> String {
@@ -596,6 +751,32 @@ mod tests {
         assert_eq!(tasks.len(), 1);
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn meeting_join_payload_is_detected_from_schedule_prompt() {
+        let prompt = r#"CTOX_MEETING_JOIN: {"url":"https://meet.google.com/abc-defg-hij","bot_name":"CTOX Notetaker"}"#;
+        let payload = meeting_join_payload(prompt).expect("meeting join payload");
+        assert_eq!(payload.url, "https://meet.google.com/abc-defg-hij");
+        assert_eq!(payload.bot_name.as_deref(), Some("CTOX Notetaker"));
+    }
+
+    #[test]
+    fn meeting_one_shot_retry_state_depends_on_spawn_status() {
+        let now = DateTime::parse_from_rfc3339("2026-04-28T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (next_run, enabled) =
+            next_task_state_after_emit(true, "started", "0 12 28 4 *", "2026-04-28T12:00:00Z", now)
+                .expect("started state");
+        assert_eq!(next_run, None);
+        assert!(!enabled);
+
+        let (next_run, enabled) =
+            next_task_state_after_emit(true, "failed", "0 12 28 4 *", "2026-04-28T12:00:00Z", now)
+                .expect("failed state");
+        assert_eq!(next_run.as_deref(), Some("2026-04-28T12:01:00+00:00"));
+        assert!(enabled);
     }
 
     #[test]

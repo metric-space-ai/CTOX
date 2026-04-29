@@ -1,8 +1,8 @@
 # ctox-qwen35-27b-q4km-dflash
 
-Self-contained Rust inference crate for the **Qwen3.5-27B Q4_K_M** target
-model paired with the **z-lab DFlash** speculative-decoding block-diffusion
-draft, treated as one curated model.
+Rust inference crate for the **Qwen3.5-27B Q4_K_M** target model paired
+with the **z-lab DFlash** speculative-decoding block-diffusion draft,
+treated as one curated model.
 
 Byte-exact port of the [lucebox/dflash](https://github.com/lucebox/dflash)
 C++ reference. Every Rust module corresponds 1:1 to a `.cpp`/`.h`/`.cu`
@@ -39,15 +39,46 @@ src/inference/models/qwen35_27b_q4km_dflash/
     └── bin/bench.rs            `qwen35-27b-q4km-dflash-bench` CLI
 ```
 
+## Current Status
+
+This crate is **not yet the final CTOX bare-metal engine**. The
+end-to-end 27B CUDA path is byte-exact and fast, but it still links the
+bench/server binaries against the lucebox-built `libggml-base.so` and
+`libggml-cuda.so` for the full forward graph.
+
+What is verified today:
+
+- The end-to-end DFlash bench output is byte-identical to the C++
+  reference for the measured A6000 run.
+- The best measured CTOX mode is `--fast-rollback --ddtree
+  --ddtree-budget 22`.
+- The vendored bare-metal CUDA dispatcher port currently has standalone
+  verifiers for 15 op groups: `binbcast`, `concat`, `cpy`, `cumsum`,
+  `diag`, `fill`, `pad`, `rms_norm`, `rope`, `scale`, `softmax`,
+  `solve_tri`, `ssm_conv`, `tri`, and `unary`.
+
+What is still missing before this satisfies the CTOX architecture rule:
+
+- remove `libggml-base.so` / `libggml-cuda.so` from the link layer;
+- port the remaining hot op families into Rust launchers over vendored
+  kernels, especially quantized `mul_mat`/MMQ/MMVQ, Flash Attention,
+  GatedDeltaNet tree/persist, embedding/get-rows, diag-mask, and graph
+  allocation/execution;
+- cut `graph.rs` and `driver.rs` over from `ggml_cgraph` /
+  `ggml_backend_graph_compute` to the Rust-side CUDA graph executor.
+
 ## Self-containment
 
-Every file the crate needs for target + draft forward passes lives inside
-this directory — **no code is shared with other models**. The vendored
-`ggml-cuda/` tree (61 `.cu` files) is llama.cpp's ggml-cuda backend pinned
-to the `llama-cpp.version` commit and is consumed via the lucebox-built
-`libggml-cuda.so` at link time. The one vendored kernel authored
-outside llama.cpp — `f16_convert.cu` — sits alongside them and is
-compiled by `build.rs` via nvcc.
+Every model-specific Rust file lives inside this directory — **no code is
+shared with other models**. The vendored `ggml-cuda/` tree is pinned by
+`vendor/llama-cpp.version` and is used in two ways:
+
+- current end-to-end path: via the lucebox-built `libggml-cuda.so`;
+- migration path: selected `.cu` files are compiled by `build.rs` into
+  PTX and launched by `src/cuda_port`.
+
+The current end-to-end path is therefore self-contained at the source
+tree level, but not yet self-contained at the binary link/runtime level.
 
 Per-compute-capability optimization happens at the nvcc layer:
 `CTOX_CUDA_SM` (default `86`) is passed as `-arch=sm_XX` when compiling
@@ -79,15 +110,23 @@ GGML_LIB_DIR=<path>                                                          \
 Verifies bit-exact against the reference's `test_dflash` output via `cmp`
 on the `out.bin` file.
 
-## Performance (as of last A6000 run, before this migration)
+## Verified A6000 Run
 
-| Mode                     |   Rust |   Ref | Gap |
-|--------------------------|-------:|------:|----:|
-| chain-verify replay      |  61.40 | 62.40 | 1.6% |
-| `--fast-rollback`        |  73.54 | 74.66 | 1.5% |
-| `--ddtree --budget=22`   |  80.99 | 86.35 | 6.2% |
+Machine: NVIDIA RTX A6000, 49 GiB VRAM, driver 580.105.08.
+Prompt: `/home/metricspace/dflash-ref/dflash/tmp_prompt128.bin`
+Target: `/home/metricspace/dflash-ref/dflash/models/Qwen3.5-27B-Q4_K_M.gguf`
+Draft: `/home/metricspace/dflash-ref/dflash/models/draft/model.safetensors`
+Generation length: 128 new tokens.
 
-All three modes `cmp`-byte-identical with the C++ reference output.
+| Implementation | Mode | Prefill | Decode |
+|---|---|---:|---:|
+| C++ reference | default replay | 128 tokens in 0.42 s | 98.93 tok/s |
+| C++ reference | `--fast-rollback` | 128 tokens in 0.42 s | 141.38 tok/s |
+| C++ reference | `--fast-rollback --ddtree --ddtree-budget=22` | 128 tokens in 0.42 s | 165.81 tok/s |
+| CTOX Rust hybrid | `--fast-rollback --ddtree --ddtree-budget=22` | 128 tokens in 0.421 s | 156.69 tok/s |
+
+The CTOX Rust hybrid output was checked with `cmp` against the C++
+reference output and matched byte-for-byte for this run.
 
 ## Porting discipline
 

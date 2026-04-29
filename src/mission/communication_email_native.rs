@@ -4,7 +4,7 @@ use base64::Engine as _;
 use mailparse::{parse_mail, DispositionType, MailHeaderMap, ParsedMail};
 use native_tls::{TlsConnector, TlsStream};
 use roxmltree::Document;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -488,6 +488,10 @@ fn execute_sync(options: &EmailOptions) -> Result<Value> {
                     .collect::<Vec<_>>();
                 fetched_count = selected.len() as i64;
                 for uid in selected {
+                    let message_key = message_key_from_remote(&account_key, &options.folder, &uid);
+                    if known_communication_message(&conn, &message_key)? {
+                        continue;
+                    }
                     let fetched = imap.fetch_raw(&uid)?;
                     let parsed = parse_rfc822_message(&fetched.raw)?;
                     let sender_address = extract_address(&parsed.from_header);
@@ -496,7 +500,6 @@ fn execute_sync(options: &EmailOptions) -> Result<Value> {
                     let direction = synced_message_direction(&sender_address, &options.email);
                     let thread_key =
                         thread_key_from_email(&parsed, &format!("{account_key}::{uid}"));
-                    let message_key = message_key_from_remote(&account_key, &options.folder, &uid);
                     let observed_at = now_iso_string();
                     let raw_payload_ref = write_raw_payload(&options.raw_dir, &uid, &fetched.raw)?;
                     let technical_self_test = is_ctox_mail_self_test(
@@ -571,8 +574,9 @@ fn execute_sync(options: &EmailOptions) -> Result<Value> {
                 )?;
                 fetched_count = items.len() as i64;
                 for item in items {
-                    store_provider_message(&mut conn, options, &account_key, item)?;
-                    stored_count += 1;
+                    if store_provider_message(&mut conn, options, &account_key, item)? {
+                        stored_count += 1;
+                    }
                 }
             }
             "ews" | "owa" => {
@@ -656,9 +660,12 @@ fn store_provider_message(
     options: &EmailOptions,
     account_key: &str,
     item: MailboxMessage,
-) -> Result<()> {
-    let observed_at = now_iso_string();
+) -> Result<bool> {
     let message_key = message_key_from_remote(account_key, &item.folder_hint, &item.remote_id);
+    if known_communication_message(conn, &message_key)? {
+        return Ok(false);
+    }
+    let observed_at = now_iso_string();
     let direction = synced_message_direction(&item.sender_address, &options.email);
     upsert_communication_message(
         conn,
@@ -690,7 +697,18 @@ fn store_provider_message(
         },
     )?;
     refresh_thread(conn, &item.thread_key)?;
-    Ok(())
+    Ok(true)
+}
+
+fn known_communication_message(conn: &Connection, message_key: &str) -> Result<bool> {
+    let exists = conn
+        .query_row(
+            "SELECT 1 FROM communication_messages WHERE message_key = ?1 LIMIT 1",
+            [message_key],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+    Ok(exists.is_some())
 }
 
 fn sync_options_from_args(
@@ -1258,6 +1276,11 @@ fn collect_mail_bodies(parsed: &ParsedMail<'_>) -> Result<(String, String, bool)
         let (part_text, part_html, part_attachments) = collect_mail_bodies(part)?;
         if body_text.is_empty() && !part_text.trim().is_empty() {
             body_text = part_text;
+        } else if looks_like_calendar_text(&part_text) {
+            if !body_text.is_empty() {
+                body_text.push_str("\n\n");
+            }
+            body_text.push_str(&part_text);
         }
         if body_html.is_empty() && !part_html.trim().is_empty() {
             body_html = part_html;
@@ -1268,6 +1291,11 @@ fn collect_mail_bodies(parsed: &ParsedMail<'_>) -> Result<(String, String, bool)
         body_text = strip_html(&body_html);
     }
     Ok((body_text, body_html, has_attachments))
+}
+
+fn looks_like_calendar_text(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.contains("begin:vcalendar") || lower.contains("dtstart")
 }
 
 fn thread_key_from_email(parsed: &ParsedEmailMessage, fallback: &str) -> String {

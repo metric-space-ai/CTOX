@@ -6,6 +6,8 @@ use chrono::Utc;
 use qrcode::types::Color as QrColor;
 use qrcode::QrCode;
 use rusqlite::params;
+use rusqlite::params_from_iter;
+use rusqlite::types::Value as SqlValue;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
@@ -24,6 +26,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::mission::communication_adapters;
 use crate::mission::communication_adapters::CommunicationTransportAdapter;
 use crate::mission::communication_gateway;
+use crate::secrets;
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_TAKE_LIMIT: usize = 10;
@@ -485,7 +488,7 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
             let db_path = resolve_db_path(root, find_flag_value(args, "--db"));
             let request = parse_tui_ingest_request(args)?;
             let mut conn = open_channel_db(&db_path)?;
-            let stored = ingest_tui_message(&mut conn, request)?;
+            let stored = ingest_tui_message(root, &mut conn, request)?;
             print_json(&json!({
                 "ok": true,
                 "db_path": db_path,
@@ -691,6 +694,70 @@ pub fn lease_pending_inbound_messages(
         .collect())
 }
 
+pub fn list_stalled_inbound_messages(
+    root: &Path,
+    limit: usize,
+) -> Result<Vec<RoutedInboundMessage>> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let mut statement = conn.prepare(
+        r#"
+        SELECT
+            m.message_key,
+            m.channel,
+            m.account_key,
+            m.thread_key,
+            m.remote_id,
+            m.direction,
+            m.folder_hint,
+            m.sender_display,
+            m.sender_address,
+            m.subject,
+            m.preview,
+            m.body_text,
+            m.status,
+            m.seen,
+            m.external_created_at,
+            m.observed_at,
+            m.metadata_json,
+            COALESCE(r.route_status, 'pending'),
+            r.lease_owner,
+            r.leased_at,
+            r.acked_at,
+            COALESCE(r.updated_at, m.observed_at)
+        FROM communication_messages m
+        JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.direction = 'inbound'
+          AND m.channel IN ('email', 'jami')
+          AND r.route_status IN ('failed', 'blocked', 'review_rework')
+          AND (
+                r.acked_at IS NULL
+             OR r.route_status IN ('failed', 'review_rework')
+          )
+        ORDER BY m.external_created_at DESC, m.observed_at DESC
+        LIMIT ?1
+        "#,
+    )?;
+    let rows = statement.query_map(params![limit as i64], map_channel_message_row)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(routed_inbound_message_from_view)
+                .collect()
+        })
+}
+
+pub fn founder_reply_sent_after_review_for_message(
+    root: &Path,
+    inbound_message_key: &str,
+) -> Result<bool> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    founder_reply_sent_after_review(&conn, inbound_message_key)
+}
+
 /// Whether any inbound communication message is still pending or leased
 /// (i.e. not acked as handled/blocked). Used by the mission watchdog to
 /// avoid queuing redundant continuation tasks when real work is already
@@ -836,19 +903,18 @@ pub fn list_queue_tasks(
 ) -> Result<Vec<QueueTaskView>> {
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
-    let tasks = list_queue_tasks_from_conn(&conn, limit)?;
     if statuses.is_empty() {
-        return Ok(tasks);
+        return list_queue_tasks_from_conn(&conn, limit);
     }
     let allowed = statuses
         .iter()
         .map(|status| status.trim().to_lowercase())
         .filter(|status| !status.is_empty())
         .collect::<Vec<_>>();
-    Ok(tasks
-        .into_iter()
-        .filter(|task| allowed.iter().any(|status| status == &task.route_status))
-        .collect())
+    if allowed.is_empty() {
+        return Ok(Vec::new());
+    }
+    list_queue_tasks_from_conn_with_statuses(&conn, &allowed, limit)
 }
 
 pub fn load_queue_task(root: &Path, message_key: &str) -> Result<Option<QueueTaskView>> {
@@ -1875,6 +1941,32 @@ fn protected_recipient_policies(
 
 fn ensure_founder_outbound_body_clean(request: &ChannelSendRequest) -> Result<()> {
     let lowered = request.body.to_ascii_lowercase();
+    let first_lines = request
+        .body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    let header_preamble_hits = first_lines
+        .iter()
+        .filter(|line| {
+            let lowered = line.to_ascii_lowercase();
+            lowered.starts_with("an:")
+                || lowered.starts_with("to:")
+                || lowered.starts_with("cc:")
+                || lowered.starts_with("bcc:")
+                || lowered.starts_with("betreff:")
+                || lowered.starts_with("subject:")
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    if !header_preamble_hits.is_empty() {
+        anyhow::bail!(
+            "founder/owner outbound email failed communication review because addressing or subject headers were placed in the message body: {}",
+            header_preamble_hits.join(", ")
+        );
+    }
     let forbidden_markers = [
         "/home/",
         "queue:",
@@ -2995,7 +3087,22 @@ fn schema_state(conn: &Connection) -> Result<Value> {
     }))
 }
 
-fn ingest_tui_message(conn: &mut Connection, request: TuiIngestRequest) -> Result<Value> {
+fn ingest_tui_message(
+    root: &Path,
+    conn: &mut Connection,
+    mut request: TuiIngestRequest,
+) -> Result<Value> {
+    let sanitized = secrets::auto_intake_prompt_secrets(root, &request.body)
+        .context("failed to sanitize TUI secret-bearing input")?;
+    if sanitized.auto_ingested_secrets > 0 {
+        request.body = sanitized.sanitized_prompt;
+        request.metadata = json!({
+            "source": "ctox-channel-ingest-tui",
+            "secret_sanitized": true,
+            "auto_ingested_secrets": sanitized.auto_ingested_secrets,
+            "suggested_skill": "secret-hygiene",
+        });
+    }
     ensure_account(
         conn,
         &request.account_key,
@@ -3302,6 +3409,7 @@ fn take_messages(
                 route_status='leased',
                 lease_owner=excluded.lease_owner,
                 leased_at=excluded.leased_at,
+                acked_at=NULL,
                 updated_at=excluded.updated_at
             "#,
             params![item.message_key, lease_owner, leased_at],
@@ -3318,6 +3426,11 @@ fn take_messages(
 
 fn ack_messages(conn: &mut Connection, message_keys: &[String], status: &str) -> Result<usize> {
     let now = now_iso_string();
+    let acked_at = if matches!(status, "handled" | "cancelled") {
+        Some(now.as_str())
+    } else {
+        None
+    };
     let tx = conn.unchecked_transaction()?;
     let mut updated = 0usize;
     for message_key in message_keys {
@@ -3326,7 +3439,7 @@ fn ack_messages(conn: &mut Connection, message_keys: &[String], status: &str) ->
             INSERT INTO communication_routing_state (
                 message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
             )
-            SELECT ?1, ?2, NULL, NULL, ?3, NULL, ?3
+            SELECT ?1, ?2, NULL, NULL, ?3, NULL, ?4
             FROM communication_messages
             WHERE message_key = ?1
             ON CONFLICT(message_key) DO UPDATE SET
@@ -3336,7 +3449,7 @@ fn ack_messages(conn: &mut Connection, message_keys: &[String], status: &str) ->
                 acked_at=excluded.acked_at,
                 updated_at=excluded.updated_at
             "#,
-            params![message_key, status, now],
+            params![message_key, status, acked_at, now],
         )?;
         if routing_updates == 0 {
             continue;
@@ -3709,6 +3822,31 @@ fn map_channel_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChannelM
     })
 }
 
+fn routed_inbound_message_from_view(item: ChannelMessageView) -> RoutedInboundMessage {
+    let preferred_reply_modality = item
+        .metadata
+        .get("preferredReplyModality")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let workspace_root =
+        workspace_root_from_queue_metadata_or_prompt(&item.metadata, &item.body_text);
+    RoutedInboundMessage {
+        message_key: item.message_key,
+        channel: item.channel,
+        account_key: item.account_key,
+        thread_key: item.thread_key,
+        sender_display: item.sender_display,
+        sender_address: item.sender_address,
+        subject: item.subject,
+        preview: item.preview,
+        body_text: item.body_text,
+        external_created_at: item.external_created_at,
+        workspace_root,
+        metadata: item.metadata,
+        preferred_reply_modality,
+    }
+}
+
 fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<QueueTaskView>> {
     let mut statement = conn.prepare(
         r#"
@@ -3758,6 +3896,73 @@ fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<Que
         params![QUEUE_CHANNEL_NAME, limit as i64],
         map_channel_message_row,
     )?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?
+        .into_iter()
+        .map(queue_task_from_message)
+        .collect()
+}
+
+fn list_queue_tasks_from_conn_with_statuses(
+    conn: &Connection,
+    statuses: &[String],
+    limit: usize,
+) -> Result<Vec<QueueTaskView>> {
+    let placeholders = (0..statuses.len())
+        .map(|index| format!("?{}", index + 3))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        r#"
+        SELECT
+            m.message_key,
+            m.channel,
+            m.account_key,
+            m.thread_key,
+            m.remote_id,
+            m.direction,
+            m.folder_hint,
+            m.sender_display,
+            m.sender_address,
+            m.subject,
+            m.preview,
+            m.body_text,
+            m.status,
+            m.seen,
+            m.external_created_at,
+            m.observed_at,
+            m.metadata_json,
+            COALESCE(r.route_status, 'pending'),
+            r.lease_owner,
+            r.leased_at,
+            r.acked_at,
+            COALESCE(r.updated_at, m.observed_at)
+        FROM communication_messages m
+        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+        WHERE m.channel = ?1
+          AND m.direction = 'inbound'
+          AND lower(COALESCE(r.route_status, 'pending')) IN ({placeholders})
+        ORDER BY
+            CASE COALESCE(r.route_status, 'pending')
+                WHEN 'pending' THEN 0
+                WHEN 'leased' THEN 1
+                WHEN 'blocked' THEN 2
+                WHEN 'failed' THEN 3
+                WHEN 'handled' THEN 4
+                WHEN 'cancelled' THEN 5
+                ELSE 9
+            END ASC,
+            m.external_created_at ASC,
+            m.observed_at ASC
+        LIMIT ?2
+        "#
+    );
+    let mut values = Vec::with_capacity(statuses.len() + 2);
+    values.push(SqlValue::Text(QUEUE_CHANNEL_NAME.to_string()));
+    values.push(SqlValue::Integer(limit as i64));
+    values.extend(statuses.iter().cloned().map(SqlValue::Text));
+    let mut statement = conn.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(values), map_channel_message_row)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)?
         .into_iter()
@@ -4880,6 +5085,62 @@ mod tests {
     }
 
     #[test]
+    fn tui_ingest_sanitizes_minimax_secret_before_persisting_message() -> Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-tui-secret-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime"))?;
+        let db_path = resolve_db_path(&root, None);
+        let mut conn = open_channel_db(&db_path)?;
+        let fake_key = "sk-api-test_minimax_abcdefghijklmnopqrstuvwxyz0123456789";
+
+        let stored = ingest_tui_message(
+            &root,
+            &mut conn,
+            TuiIngestRequest {
+                account_key: "local".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                body: format!(
+                    "MiniMax API key fuer MiniMax M2.7: {fake_key}. Bitte mit Secret-Skill ablegen."
+                ),
+                subject: "MiniMax key".to_string(),
+                sender_display: "Codex".to_string(),
+                sender_address: "tui:codex".to_string(),
+                metadata: json!({"source": "test"}),
+            },
+        )?;
+        let message_key = stored
+            .get("message_key")
+            .and_then(Value::as_str)
+            .context("missing stored message key")?;
+        let (body_text, preview, metadata_json): (String, String, String) = conn.query_row(
+            "SELECT body_text, preview, metadata_json FROM communication_messages WHERE message_key = ?1",
+            [message_key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let metadata: Value = serde_json::from_str(&metadata_json)?;
+
+        assert!(!body_text.contains(fake_key));
+        assert!(!preview.contains(fake_key));
+        assert!(body_text.contains("[secret-ref:credentials/MINIMAX_API_KEY"));
+        assert_eq!(
+            secrets::read_secret_value(&root, "credentials", "MINIMAX_API_KEY")?,
+            fake_key
+        );
+        assert_eq!(
+            metadata.get("secret_sanitized").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
     fn sync_prompt_identity_persists_founder_role_titles() {
         let root = std::env::temp_dir().join(format!(
             "ctox-founder-role-sync-{}",
@@ -5184,6 +5445,32 @@ mod tests {
 
         assert!(
             error.to_string().contains("internal-language leakage"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn founder_outbound_body_rejects_address_headers_in_body() {
+        let error = ensure_founder_outbound_body_clean(&ChannelSendRequest {
+            channel: "email".to_string(),
+            account_key: "email:cto1@metric-space.ai".to_string(),
+            thread_key: "mail-thread".to_string(),
+            body: "An: founder@example.com\nCc: owner@example.com\nBetreff: Re: Test\n\nHallo zusammen,\n\nsauberer Text.".to_string(),
+            subject: "Re: Test".to_string(),
+            to: vec!["founder@example.com".to_string()],
+            cc: vec!["owner@example.com".to_string()],
+            attachments: Vec::new(),
+            sender_display: None,
+            sender_address: None,
+            send_voice: false,
+            reviewed_founder_send: true,
+        })
+        .expect_err("body header preamble should be blocked");
+
+        assert!(
+            error
+                .to_string()
+                .contains("headers were placed in the message body"),
             "unexpected error: {error}"
         );
     }
@@ -5519,6 +5806,145 @@ mod tests {
         assert_eq!(taken[0].message_key, "pending-stale-owner-1");
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn releasing_leased_message_to_pending_does_not_ack_it() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-channel-pending-release-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "pending-release-1",
+                channel: "email",
+                account_key: "email:cto1@metric-space.ai",
+                thread_key: "<pending-release@example.com>",
+                remote_id: "remote-pending-release-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Customer",
+                sender_address: "customer@example.com",
+                recipient_addresses_json: "[\"cto1@metric-space.ai\"]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Needs rework",
+                preview: "needs rework",
+                body_text: "Please rework before replying.",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "trusted",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-24T18:42:06Z",
+                observed_at: "2026-04-24T18:42:06Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("message upsert");
+        ensure_routing_rows_for_inbound(&conn).expect("routing rows");
+        let taken = take_messages(&mut conn, Some("email"), 10, "ctox-service")
+            .expect("take messages should succeed");
+        assert_eq!(taken.len(), 1);
+
+        ack_leased_messages(&root, &["pending-release-1".to_string()], "pending")
+            .expect("pending release should succeed");
+        let (route_status, acked_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT route_status, acked_at FROM communication_routing_state WHERE message_key = ?1",
+                params!["pending-release-1"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("missing routing row");
+        assert_eq!(route_status, "pending");
+        assert!(acked_at.is_none());
+
+        let taken_again = take_messages(&mut conn, Some("email"), 10, "ctox-service")
+            .expect("released pending message should be leaseable again");
+        assert_eq!(taken_again.len(), 1);
+        let acked_after_retake: Option<String> = conn
+            .query_row(
+                "SELECT acked_at FROM communication_routing_state WHERE message_key = ?1",
+                params!["pending-release-1"],
+                |row| row.get(0),
+            )
+            .expect("missing routing row after retake");
+        assert!(acked_after_retake.is_none());
+
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stalled_inbound_includes_acked_failed_messages_for_repair() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-channel-acked-failed-stalled-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let mut conn = open_channel_db(&db_path).expect("failed to open db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "acked-failed-founder-1",
+                channel: "email",
+                account_key: "email:cto1@metric-space.ai",
+                thread_key: "<acked-failed-founder@example.com>",
+                remote_id: "remote-acked-failed-founder-1",
+                direction: "inbound",
+                folder_hint: "INBOX",
+                sender_display: "Founder",
+                sender_address: "founder@example.com",
+                recipient_addresses_json: "[\"cto1@metric-space.ai\"]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Affiliate follow-up",
+                preview: "Please answer this founder follow-up.",
+                body_text: "Please answer this founder follow-up.",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "trusted",
+                status: "received",
+                seen: false,
+                has_attachments: false,
+                external_created_at: "2026-04-27T09:01:02Z",
+                observed_at: "2026-04-27T09:01:02Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("message upsert");
+        conn.execute(
+            r#"
+            INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (
+                'acked-failed-founder-1', 'failed', NULL, NULL,
+                '2026-04-27T11:55:27Z', NULL, '2026-04-27T11:55:27Z'
+            )
+            "#,
+            [],
+        )
+        .expect("failed to seed failed acked route");
+
+        let stalled =
+            list_stalled_inbound_messages(&root, 10).expect("failed to list stalled messages");
+        assert_eq!(stalled.len(), 1);
+        assert_eq!(stalled[0].message_key, "acked-failed-founder-1");
+
+        let _ = fs::remove_file(&db_path);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

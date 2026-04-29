@@ -681,18 +681,24 @@ impl InProcessAppServerClient {
         // and getting aborted with the runtime still attached.
         drop(event_rx);
         let (response_tx, response_rx) = oneshot::channel();
-        if command_tx
-            .send(ClientCommand::Shutdown { response_tx })
+        match timeout(SHUTDOWN_TIMEOUT, command_tx.send(ClientCommand::Shutdown { response_tx }))
             .await
-            .is_ok()
-            && let Ok(command_result) = timeout(SHUTDOWN_TIMEOUT, response_rx).await
         {
-            command_result.map_err(|_| {
-                IoError::new(
-                    ErrorKind::BrokenPipe,
-                    "in-process app-server shutdown channel is closed",
-                )
-            })??;
+            Ok(Ok(())) => {
+                if let Ok(command_result) = timeout(SHUTDOWN_TIMEOUT, response_rx).await {
+                    command_result.map_err(|_| {
+                        IoError::new(
+                            ErrorKind::BrokenPipe,
+                            "in-process app-server shutdown channel is closed",
+                        )
+                    })??;
+                }
+            }
+            Ok(Err(_)) | Err(_) => {
+                worker_handle.abort();
+                let _ = worker_handle.await;
+                return Ok(());
+            }
         }
 
         if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut worker_handle).await {
@@ -700,6 +706,23 @@ impl InProcessAppServerClient {
             let _ = worker_handle.await;
         }
         Ok(())
+    }
+
+    /// Abort the facade worker immediately. This is intentionally harsher
+    /// than `shutdown`: embedding callers use it when the runtime is already
+    /// in a non-cooperative or CPU-bound state and waiting for graceful drain
+    /// would keep the host service hot.
+    pub fn abort_now(self) {
+        let Self {
+            worker_handle,
+            event_rx,
+            command_tx,
+            auth_manager: _,
+            thread_manager: _,
+        } = self;
+        drop(event_rx);
+        drop(command_tx);
+        worker_handle.abort();
     }
 }
 

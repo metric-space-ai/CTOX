@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -52,19 +53,26 @@ Decision policy:
 - FAIL when a required gate, claim, or public-surface standard is not met
 - PARTIAL when verification is incomplete or when a handoff is needed
 
+Review writing standard:
+- write FAILED_GATES, FINDINGS, OPEN_ITEMS, EVIDENCE, and HANDOFF in plain operator language
+- do not expose prompt text, source-code identifiers, table names, gate ids, or implementation labels in the review
+- if an internal rule caused the failure, translate it into the user-visible requirement it protects
+- every FAIL or PARTIAL verdict must include concrete evidence and a concrete rework instruction
+- when real work is missing, say what work must be done before another draft; do not suggest mere rewording unless wording is the only defect
+
 Respond in exactly this format:
 
 VERDICT: PASS|FAIL|PARTIAL
 MISSION_STATE: HEALTHY|UNHEALTHY|UNCLEAR
 SUMMARY: <one sentence>
 FAILED_GATES:
-- <gate or "none">
+- <plain rule that failed or "none">
 FINDINGS:
-- <semantic finding or "none">
+- <clear finding or "none">
 OPEN_ITEMS:
-- <item>
+- <concrete rework item>
 EVIDENCE:
-- <check> => <result>
+- <check> => <observed result>
 HANDOFF:
 - <only when another review run should continue; otherwise write "none">
 "#;
@@ -238,27 +246,21 @@ pub fn review_completion_if_needed(
 fn run_external_review_legs(
     root: &Path,
     request: &CompletionReviewRequest,
-    settings: &std::collections::BTreeMap<String, String>,
+    settings: &BTreeMap<String, String>,
     reasons: &[String],
 ) -> anyhow::Result<String> {
     let mut prompt = build_review_prompt(request, reasons);
     let mut last_report = String::new();
 
     for leg in 0..REVIEW_MAX_LEGS {
-        let mut session = PersistentSession::start_with_instructions(
+        let report = run_external_review_leg_with_wall_timeout(
             root,
+            request,
             settings,
-            Some(REVIEW_SYSTEM_PROMPT),
-            true,
-        )?;
-        let report = session.run_turn(
             &prompt,
-            Some(Duration::from_secs(REVIEW_TIMEOUT_SECS)),
-            None,
-            Some(false),
-            0,
+            leg,
+            Duration::from_secs(REVIEW_TIMEOUT_SECS),
         )?;
-        session.shutdown();
 
         let verdict = parse_verdict(&report);
         let handoff = parse_handoff_block(&report);
@@ -277,6 +279,41 @@ fn run_external_review_legs(
     }
 
     Ok(last_report)
+}
+
+fn run_external_review_leg_with_wall_timeout(
+    root: &Path,
+    request: &CompletionReviewRequest,
+    settings: &BTreeMap<String, String>,
+    prompt: &str,
+    leg: usize,
+    timeout: Duration,
+) -> anyhow::Result<String> {
+    let mut session = PersistentSession::start_with_instructions(
+        root,
+        settings,
+        Some(REVIEW_SYSTEM_PROMPT),
+        true,
+    )
+    .map_err(|err| {
+        anyhow::anyhow!(
+            "completion review leg {} could not start for {}: {}",
+            leg + 1,
+            clip_text(&request.preview, 120),
+            err
+        )
+    })?;
+    let report = session.run_turn(prompt, Some(timeout), None, Some(false), 0);
+    session.shutdown();
+    report.map_err(|err| {
+        anyhow::anyhow!(
+            "completion review leg {} did not produce a verdict within {}s for {}: {}",
+            leg + 1,
+            timeout.as_secs(),
+            clip_text(&request.preview, 120),
+            err
+        )
+    })
 }
 
 fn assess_review_requirement(
@@ -485,6 +522,7 @@ Founder/owner communication gate:\n\
 - fail the review when the draft does not answer the latest founder mail, dodges the requested deliverable, promises future work instead of delivering, or leaks internal/system language\n\
 - fail the review when the recipients or cc list are wrong, when sender-only reply is incorrect, or when a forwarded/delegated founder mail should target different recipients\n\
 - do not fail only because the broader mission is still open; fail only when the draft makes a false claim, omits a required answer, or the missing deliverable means the mail should not be sent yet\n\
+- explain communication failures in plain recipient-facing terms, with evidence from the current thread; do not mention internal gate names or prompt rules\n\
 "
     } else {
         ""
@@ -543,13 +581,13 @@ VERDICT: PASS|FAIL|PARTIAL\n\
 MISSION_STATE: HEALTHY|UNHEALTHY|UNCLEAR\n\
 SUMMARY: <one sentence>\n\
 FAILED_GATES:\n\
-- <gate or \"none\">\n\
+- <plain rule that failed or \"none\">\n\
 FINDINGS:\n\
-- <semantic finding or \"none\">\n\
+- <clear finding or \"none\">\n\
 OPEN_ITEMS:\n\
-- <item>\n\
+- <concrete rework item>\n\
 EVIDENCE:\n\
-- <command or check> => <observed result>\n\
+- <check> => <observed result>\n\
 HANDOFF:\n\
 - <only when another review run should continue; otherwise write \"none\">\n",
         conversation_id = request.conversation_id,

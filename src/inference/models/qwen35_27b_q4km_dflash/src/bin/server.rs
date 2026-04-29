@@ -28,6 +28,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 
 use ctox_qwen35_27b_q4km_dflash as dflash;
+use dflash::driver::GenConfig;
 use dflash::ffi as sys;
 use dflash::graph::create_target_cache;
 use dflash::loader::{load_draft_safetensors, load_target_gguf};
@@ -63,6 +64,25 @@ struct Args {
     /// `max_verify_tokens` — pass 0 to use default DRAFT_BLOCK_SIZE=16.
     #[arg(long, default_value_t = 0)]
     max_verify_tokens: i32,
+    /// Use captured GatedDeltaNet intermediates to roll state back
+    /// without a replay forward. Enabled automatically when DDTree is
+    /// enabled.
+    #[arg(long)]
+    fast_rollback: bool,
+    /// Tree-structured verification. This is the A6000-verified high
+    /// throughput mode for the 27B CUDA engine and is enabled by default.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    ddtree: bool,
+    /// DDTree budget (max non-root tree nodes). 22 is the measured
+    /// best default for this 27B Q4_K_M + DFlash pair on A6000.
+    #[arg(long, default_value_t = 22)]
+    ddtree_budget: i32,
+    /// DDTree softmax temperature for the top-K extract.
+    #[arg(long, default_value_t = 0.6)]
+    ddtree_temp: f32,
+    /// Disable the defensive top-1 chain seed in DDTree construction.
+    #[arg(long)]
+    ddtree_no_chain_seed: bool,
     /// Model ID reported in health probes + Responses envelopes.
     #[arg(long, default_value = "qwen35-27b-q4km-dflash")]
     model_id: String,
@@ -98,10 +118,7 @@ fn main() -> Result<()> {
     let mut target = TargetWeights::default();
     if !load_target_gguf(&args.target, backend, &mut target) {
         unsafe { sys::ggml_backend_free(backend) };
-        return Err(anyhow!(
-            "load_target_gguf failed: {}",
-            dflash::last_error()
-        ));
+        return Err(anyhow!("load_target_gguf failed: {}", dflash::last_error()));
     }
     tracing::info!(target = ?args.target, "target loaded");
 
@@ -116,12 +133,25 @@ fn main() -> Result<()> {
     }
     tracing::info!("draft loaded");
 
-    // 4. Build target cache. Default `max_verify_tokens` = 16 (draft
-    //    block size). If DDTree opens up later we bump the cap here.
+    let gen_config = GenConfig {
+        fast_rollback: args.fast_rollback || args.ddtree,
+        ddtree: args.ddtree,
+        ddtree_budget: args.ddtree_budget,
+        ddtree_temp: args.ddtree_temp,
+        ddtree_chain_seed: !args.ddtree_no_chain_seed,
+    };
+
+    // 4. Build target cache. DDTree needs room for the flat tree:
+    //    root + budget nodes. Chain verify only needs the draft block.
     let mvt_eff = if args.max_verify_tokens > 0 {
         args.max_verify_tokens
+    } else if gen_config.ddtree {
+        std::cmp::max(
+            dflash::DFLASH27B_DRAFT_BLOCK_SIZE,
+            gen_config.ddtree_budget + 1,
+        )
     } else {
-        16
+        dflash::DFLASH27B_DRAFT_BLOCK_SIZE
     };
     let mut cache = TargetCache::default();
     if !create_target_cache(&target, args.max_ctx, mvt_eff, backend, &mut cache) {
@@ -131,7 +161,14 @@ fn main() -> Result<()> {
             dflash::last_error()
         ));
     }
-    tracing::info!(max_ctx = args.max_ctx, "target cache ready");
+    tracing::info!(
+        max_ctx = args.max_ctx,
+        max_verify_tokens = mvt_eff,
+        fast_rollback = gen_config.fast_rollback,
+        ddtree = gen_config.ddtree,
+        ddtree_budget = gen_config.ddtree_budget,
+        "target cache ready"
+    );
 
     // 5. Tokenizer.
     let tok_path = match args.tokenizer {
@@ -150,6 +187,7 @@ fn main() -> Result<()> {
         backend,
         tokenizer,
         model_id: args.model_id,
+        gen_config,
     };
     let shared = Arc::new(Mutex::new(engine));
     let rt = tokio::runtime::Builder::new_multi_thread()
