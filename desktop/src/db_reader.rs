@@ -4,6 +4,7 @@
 //! database at `<root>/runtime/ctox.sqlite3`.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use rusqlite::{Connection, OpenFlags, params};
 
 // ---------------------------------------------------------------------------
@@ -1041,6 +1042,9 @@ struct HarnessFlowWork {
 }
 
 pub fn query_harness_flow_text(root: &Path, width: usize) -> String {
+    if let Some(text) = run_harness_flow_cli(root, width) {
+        return text;
+    }
     let Some(path) = agent_db_path(root) else {
         return "Harness flow unavailable.\n\nNo runtime/ctox.sqlite3 database found.".to_string();
     };
@@ -1220,6 +1224,31 @@ pub fn query_harness_flow_text(root: &Path, width: usize) -> String {
     });
 
     render_flow_boxes(width, blocks)
+}
+
+fn run_harness_flow_cli(root: &Path, width: usize) -> Option<String> {
+    for candidate in [
+        root.join("bin/ctox"),
+        root.join("target/debug/ctox"),
+        root.join("target/release/ctox"),
+    ] {
+        if !candidate.is_file() {
+            continue;
+        }
+        let output = Command::new(&candidate)
+            .env("CTOX_ROOT", root)
+            .current_dir(root)
+            .args(["harness-flow", "--width", &width.to_string()])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let text = String::from_utf8_lossy(&output.stdout).trim_end().to_string();
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
 }
 
 fn latest_harness_flow_message(conn: &Connection) -> Option<HarnessFlowMessage> {

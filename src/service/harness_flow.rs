@@ -2,34 +2,103 @@
 // License: Apache-2.0
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use rusqlite::{params, Connection, OpenFlags};
+use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 const USAGE: &str = "Usage:
-  ctox harness-flow [--latest] [--message-key <key>] [--work-id <id>] [--width <n>]
+  ctox harness-flow [--latest] [--message-key <key>] [--work-id <id>] [--width <n>] [--json]
+  ctox harness-flow init
+  ctox harness-flow events [--message-key <key>] [--work-id <id>] [--limit <n>]
 
 Renders a human-readable harness work flow: main work stays on the left spine,
 while queue, context, review, ticket, knowledge, guard, and verification support
 processes branch off at the point where they affect the work.";
 
-#[derive(Debug, Clone)]
-struct HarnessFlow {
-    blocks: Vec<MainBlock>,
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessFlow {
+    pub schema_version: u32,
+    pub source: FlowSource,
+    pub ledger_events: Vec<HarnessFlowEvent>,
+    pub blocks: Vec<MainBlock>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FlowSource {
+    pub message_key: Option<String>,
+    pub work_id: Option<String>,
+    pub source_kind: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MainBlock {
+    pub kind: FlowBlockKind,
+    pub title: String,
+    pub lines: Vec<String>,
+    pub branches: Vec<SupportBranch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowBlockKind {
+    Task,
+    Attempt,
+    Finish,
+    Empty,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SupportBranch {
+    pub kind: FlowBranchKind,
+    pub title: String,
+    pub lines: Vec<String>,
+    pub returns_to_spine: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlowBranchKind {
+    QueuePickup,
+    Context,
+    Knowledge,
+    Review,
+    TicketBacklog,
+    TicketSource,
+    QueueReload,
+    Guard,
+    Verification,
+    HarnessLedger,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HarnessFlowEvent {
+    pub event_id: String,
+    pub chain_key: String,
+    pub event_kind: String,
+    pub title: String,
+    pub body_text: String,
+    pub message_key: Option<String>,
+    pub work_id: Option<String>,
+    pub ticket_key: Option<String>,
+    pub attempt_index: Option<i64>,
+    pub metadata_json: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone)]
-struct MainBlock {
-    title: String,
-    lines: Vec<String>,
-    branches: Vec<SupportBranch>,
-}
-
-#[derive(Debug, Clone)]
-struct SupportBranch {
-    title: String,
-    lines: Vec<String>,
-    returns_to_spine: bool,
+#[allow(dead_code)]
+pub struct RecordHarnessFlowEventRequest<'a> {
+    pub event_kind: &'a str,
+    pub title: &'a str,
+    pub body_text: &'a str,
+    pub message_key: Option<&'a str>,
+    pub work_id: Option<&'a str>,
+    pub ticket_key: Option<&'a str>,
+    pub attempt_index: Option<i64>,
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -105,14 +174,36 @@ pub fn handle_harness_flow_command(root: &Path, args: &[String]) -> Result<()> {
         println!("{USAGE}");
         return Ok(());
     }
+    match args.first().map(String::as_str) {
+        Some("init") => {
+            let conn = open_event_connection(root)?;
+            ensure_event_schema(&conn)?;
+            println!("harness flow event ledger ready");
+            return Ok(());
+        }
+        Some("events") => {
+            let message_key = parse_string_flag(&args[1..], "--message-key");
+            let work_id = parse_string_flag(&args[1..], "--work-id");
+            let limit = parse_usize_flag(&args[1..], "--limit", 50).min(500);
+            let events = load_flow_events(root, message_key, work_id, limit)?;
+            println!("{}", serde_json::to_string_pretty(&events)?);
+            return Ok(());
+        }
+        _ => {}
+    }
 
     let width = parse_usize_flag(args, "--width", 118).clamp(92, 180);
     let message_key = parse_string_flag(args, "--message-key");
     let work_id = parse_string_flag(args, "--work-id");
-    println!(
-        "{}",
-        render_selected_ascii(root, message_key, work_id, width)?
-    );
+    let flow = build_flow(root, message_key, work_id)?;
+    if args
+        .iter()
+        .any(|arg| arg == "--json" || arg == "--format=json")
+    {
+        println!("{}", serde_json::to_string_pretty(&flow)?);
+    } else {
+        println!("{}", render_ascii(&flow, width));
+    }
     Ok(())
 }
 
@@ -121,6 +212,7 @@ pub fn render_latest_ascii(root: &Path, width: usize) -> Result<String> {
     Ok(render_ascii(&flow, width.clamp(92, 180)))
 }
 
+#[allow(dead_code)]
 pub fn render_selected_ascii(
     root: &Path,
     message_key: Option<&str>,
@@ -129,6 +221,81 @@ pub fn render_selected_ascii(
 ) -> Result<String> {
     let flow = build_flow(root, message_key, work_id)?;
     Ok(render_ascii(&flow, width.clamp(92, 180)))
+}
+
+#[allow(dead_code)]
+pub fn load_latest_flow(root: &Path) -> Result<HarnessFlow> {
+    build_flow(root, None, None)
+}
+
+#[allow(dead_code)]
+pub fn load_selected_flow(
+    root: &Path,
+    message_key: Option<&str>,
+    work_id: Option<&str>,
+) -> Result<HarnessFlow> {
+    build_flow(root, message_key, work_id)
+}
+
+#[allow(dead_code)]
+pub fn init_event_ledger(root: &Path) -> Result<()> {
+    let conn = open_event_connection(root)?;
+    ensure_event_schema(&conn)
+}
+
+#[allow(dead_code)]
+pub fn record_harness_flow_event(
+    root: &Path,
+    request: RecordHarnessFlowEventRequest<'_>,
+) -> Result<HarnessFlowEvent> {
+    let conn = open_event_connection(root)?;
+    ensure_event_schema(&conn)?;
+    let created_at = Utc::now().to_rfc3339();
+    let chain_key = chain_key(request.message_key, request.work_id, request.ticket_key);
+    let metadata_json = serde_json::to_string(&request.metadata)?;
+    let event_id = event_id(
+        &chain_key,
+        request.event_kind,
+        request.title,
+        request.body_text,
+        &created_at,
+    );
+    conn.execute(
+        "INSERT INTO ctox_harness_flow_events (
+            event_id, chain_key, event_kind, title, body_text,
+            message_key, work_id, ticket_key, attempt_index, metadata_json, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            event_id,
+            chain_key,
+            request.event_kind,
+            request.title,
+            request.body_text,
+            request.message_key,
+            request.work_id,
+            request.ticket_key,
+            request.attempt_index,
+            metadata_json,
+            created_at,
+        ],
+    )?;
+    Ok(HarnessFlowEvent {
+        event_id,
+        chain_key,
+        event_kind: request.event_kind.to_string(),
+        title: request.title.to_string(),
+        body_text: request.body_text.to_string(),
+        message_key: request.message_key.map(ToOwned::to_owned),
+        work_id: request.work_id.map(ToOwned::to_owned),
+        ticket_key: request.ticket_key.map(ToOwned::to_owned),
+        attempt_index: request.attempt_index,
+        metadata_json,
+        created_at,
+    })
+}
+
+pub fn record_harness_flow_event_lossy(root: &Path, request: RecordHarnessFlowEventRequest<'_>) {
+    let _ = record_harness_flow_event(root, request);
 }
 
 fn build_flow(
@@ -163,6 +330,7 @@ fn build_flow(
     let Some(message) = seed_message else {
         let mut blocks = Vec::new();
         blocks.push(MainBlock {
+            kind: FlowBlockKind::Empty,
             title: "NO FLOW SOURCE FOUND".to_string(),
             lines: vec![
                 "No communication message or self-work item matched the request.".to_string(),
@@ -170,7 +338,16 @@ fn build_flow(
             ],
             branches: Vec::new(),
         });
-        return Ok(HarnessFlow { blocks });
+        return Ok(HarnessFlow {
+            schema_version: 1,
+            source: FlowSource {
+                message_key: message_key.map(ToOwned::to_owned),
+                work_id: work_id.map(ToOwned::to_owned),
+                source_kind: "empty".to_string(),
+            },
+            ledger_events: Vec::new(),
+            blocks,
+        });
     };
 
     let routing = load_routing(&conn, &message.message_key)?;
@@ -184,19 +361,36 @@ fn build_flow(
     let review_approval = load_founder_review_approval(&conn, &message.message_key)?;
     let proofs = load_core_proofs_for_key(&conn, &message.message_key)?;
     let violations = load_state_violations_for_key(&conn, &message.message_key)?;
+    let ledger_events = load_flow_events(
+        root,
+        Some(&message.message_key),
+        work_for_attempt_2
+            .as_ref()
+            .map(|work| work.work_id.as_str()),
+        12,
+    )
+    .unwrap_or_default();
 
     let mut blocks = Vec::new();
     blocks.push(MainBlock {
+        kind: FlowBlockKind::Task,
         title: "TASK".to_string(),
         lines: task_lines(&message),
-        branches: vec![
-            queue_pickup_branch(routing.as_ref()),
-            context_branch(&conn)?,
-            knowledge_branch(&conn)?,
-        ],
+        branches: {
+            let mut branches = vec![
+                queue_pickup_branch(routing.as_ref()),
+                context_branch(&conn)?,
+                knowledge_branch(&conn)?,
+            ];
+            if let Some(branch) = ledger_branch(&ledger_events) {
+                branches.push(branch);
+            }
+            branches
+        },
     });
 
     blocks.push(MainBlock {
+        kind: FlowBlockKind::Attempt,
         title: "ATTEMPT 1".to_string(),
         lines: attempt_lines("CTOX works on the first answer or slice.", &message, None),
         branches: attempt_one_branches(
@@ -217,6 +411,7 @@ fn build_flow(
             ));
         }
         blocks.push(MainBlock {
+            kind: FlowBlockKind::Attempt,
             title: "ATTEMPT 2".to_string(),
             lines: attempt_lines(
                 "CTOX resumes from durable rework and continues the same task.",
@@ -228,6 +423,7 @@ fn build_flow(
     }
 
     blocks.push(MainBlock {
+        kind: FlowBlockKind::Finish,
         title: "FINISH / CURRENT STATE".to_string(),
         lines: finish_lines(
             routing.as_ref(),
@@ -240,7 +436,20 @@ fn build_flow(
         ],
     });
 
-    Ok(HarnessFlow { blocks })
+    Ok(HarnessFlow {
+        schema_version: 1,
+        source: FlowSource {
+            message_key: Some(message.message_key),
+            work_id: work_for_attempt_2.map(|work| work.work_id),
+            source_kind: if work_id.is_some() {
+                "work".to_string()
+            } else {
+                "message".to_string()
+            },
+        },
+        ledger_events,
+        blocks,
+    })
 }
 
 fn task_lines(message: &MessageRow) -> Vec<String> {
@@ -293,6 +502,7 @@ fn queue_pickup_branch(routing: Option<&RoutingRow>) -> SupportBranch {
         None => vec!["No routing row found for this source yet.".to_string()],
     };
     SupportBranch {
+        kind: FlowBranchKind::QueuePickup,
         title: "QUEUE PICKUP".to_string(),
         lines,
         returns_to_spine: true,
@@ -316,6 +526,7 @@ fn context_branch(conn: &Connection) -> Result<SupportBranch> {
     lines.push(format!("Continuity docs: {} · commits: {}", docs, commits));
     lines.push("Purpose: keep the worker on the current task context.".to_string());
     Ok(SupportBranch {
+        kind: FlowBranchKind::Context,
         title: "CONTEXT".to_string(),
         lines,
         returns_to_spine: true,
@@ -342,7 +553,38 @@ fn knowledge_branch(conn: &Connection) -> Result<SupportBranch> {
         lines.push("No task-specific knowledge capture observed yet.".to_string());
     }
     Ok(SupportBranch {
+        kind: FlowBranchKind::Knowledge,
         title: "KNOWLEDGE".to_string(),
+        lines,
+        returns_to_spine: true,
+    })
+}
+
+fn ledger_branch(events: &[HarnessFlowEvent]) -> Option<SupportBranch> {
+    if events.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Durable flow events linked to this chain: {}",
+        events.len()
+    ));
+    for event in events.iter().take(4) {
+        let suffix = if event.body_text.trim().is_empty() {
+            String::new()
+        } else {
+            format!(": {}", clip(&event.body_text, 58))
+        };
+        lines.push(format!(
+            "{} · {}{}",
+            short_time(&event.created_at),
+            clip(&event.title, 42),
+            suffix
+        ));
+    }
+    Some(SupportBranch {
+        kind: FlowBranchKind::HarnessLedger,
+        title: "HARNESS LEDGER".to_string(),
         lines,
         returns_to_spine: true,
     })
@@ -395,6 +637,7 @@ fn attempt_one_branches(
         branches.push(review_blocked_branch(violations));
     } else {
         branches.push(SupportBranch {
+            kind: FlowBranchKind::Review,
             title: "REVIEW".to_string(),
             lines: vec![
                 "No persisted review result found for this source.".to_string(),
@@ -430,6 +673,7 @@ fn review_pass_branch(approval: &FounderReviewApproval) -> SupportBranch {
         lines.push(format!("Sent after review: {}", short_time(sent_at)));
     }
     SupportBranch {
+        kind: FlowBranchKind::Review,
         title: "REVIEW".to_string(),
         lines,
         returns_to_spine: true,
@@ -439,6 +683,7 @@ fn review_pass_branch(approval: &FounderReviewApproval) -> SupportBranch {
 fn review_rework_branch(related_work: &[SelfWorkRow]) -> SupportBranch {
     let first = &related_work[0];
     SupportBranch {
+        kind: FlowBranchKind::Review,
         title: "REVIEW".to_string(),
         lines: vec![
             "Result: not finished; durable rework exists.".to_string(),
@@ -471,6 +716,7 @@ fn review_blocked_branch(violations: &[StateViolationRow]) -> SupportBranch {
         ));
     }
     SupportBranch {
+        kind: FlowBranchKind::Review,
         title: "REVIEW / SEND BLOCK".to_string(),
         lines,
         returns_to_spine: false,
@@ -492,6 +738,7 @@ fn ticket_sink_branch(message: &MessageRow, related_work: &[SelfWorkRow]) -> Sup
         lines.push(format!("State: {} · kind: {}", work.state, work.kind));
     }
     SupportBranch {
+        kind: FlowBranchKind::TicketBacklog,
         title: "TICKET BACKLOG".to_string(),
         lines,
         returns_to_spine: false,
@@ -516,6 +763,7 @@ fn ticket_pickup_branch(work: &SelfWorkRow, reload_message: Option<&MessageRow>)
         lines.push("No queue reload message found for this work item.".to_string());
     }
     SupportBranch {
+        kind: FlowBranchKind::TicketSource,
         title: "SOURCE FROM TICKET BACKLOG".to_string(),
         lines,
         returns_to_spine: true,
@@ -531,6 +779,7 @@ fn queue_reload_branch(message: &MessageRow, routing: Option<&RoutingRow>) -> Su
     }
     lines.push("Effect: this backlog item can become the next worker job.".to_string());
     SupportBranch {
+        kind: FlowBranchKind::QueueReload,
         title: "QUEUE RELOAD".to_string(),
         lines,
         returns_to_spine: true,
@@ -619,6 +868,7 @@ fn guard_branch(proofs: &[CoreProofRow], violations: &[StateViolationRow]) -> Su
         lines.push(format!("Detected: {}", short_time(&violation.detected_at)));
     }
     SupportBranch {
+        kind: FlowBranchKind::Guard,
         title: "SEND / CLOSE GUARD".to_string(),
         lines,
         returns_to_spine: true,
@@ -642,6 +892,7 @@ fn verification_branch(conn: &Connection, work: Option<&SelfWorkRow>) -> Result<
         ticket_verifications
     ));
     Ok(SupportBranch {
+        kind: FlowBranchKind::Verification,
         title: "VERIFICATION".to_string(),
         lines,
         returns_to_spine: true,
@@ -952,6 +1203,131 @@ fn load_state_violations_for_key(conn: &Connection, key: &str) -> Result<Vec<Sta
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
+fn open_event_connection(root: &Path) -> Result<Connection> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    if let Some(parent) = db_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    Connection::open(&db_path).with_context(|| format!("failed to open {}", db_path.display()))
+}
+
+fn ensure_event_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ctox_harness_flow_events (
+            event_id TEXT PRIMARY KEY,
+            chain_key TEXT NOT NULL,
+            event_kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body_text TEXT NOT NULL DEFAULT '',
+            message_key TEXT,
+            work_id TEXT,
+            ticket_key TEXT,
+            attempt_index INTEGER,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS idx_ctox_harness_flow_events_chain
+           ON ctox_harness_flow_events(chain_key, created_at ASC);
+         CREATE INDEX IF NOT EXISTS idx_ctox_harness_flow_events_message
+           ON ctox_harness_flow_events(message_key, created_at ASC);
+         CREATE INDEX IF NOT EXISTS idx_ctox_harness_flow_events_work
+           ON ctox_harness_flow_events(work_id, created_at ASC);",
+    )?;
+    Ok(())
+}
+
+fn load_flow_events(
+    root: &Path,
+    message_key: Option<&str>,
+    work_id: Option<&str>,
+    limit: usize,
+) -> Result<Vec<HarnessFlowEvent>> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open {}", db_path.display()))?;
+    let has_table = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ctox_harness_flow_events'",
+            [],
+            |_| Ok(()),
+        )
+        .is_ok();
+    if !has_table {
+        return Ok(Vec::new());
+    }
+
+    let limit = limit.min(500) as i64;
+    let mut stmt = conn.prepare(
+        "SELECT event_id, chain_key, event_kind, title, body_text,
+                message_key, work_id, ticket_key, attempt_index, metadata_json, created_at
+         FROM ctox_harness_flow_events
+         WHERE (?1 IS NOT NULL AND message_key = ?1)
+            OR (?2 IS NOT NULL AND work_id = ?2)
+            OR (?1 IS NULL AND ?2 IS NULL)
+         ORDER BY created_at ASC
+         LIMIT ?3",
+    )?;
+    let rows = stmt.query_map(params![message_key, work_id, limit], |row| {
+        Ok(HarnessFlowEvent {
+            event_id: row.get(0)?,
+            chain_key: row.get(1)?,
+            event_kind: row.get(2)?,
+            title: row.get(3)?,
+            body_text: row.get(4)?,
+            message_key: row.get(5)?,
+            work_id: row.get(6)?,
+            ticket_key: row.get(7)?,
+            attempt_index: row.get(8)?,
+            metadata_json: row.get(9)?,
+            created_at: row.get(10)?,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+#[allow(dead_code)]
+fn chain_key(message_key: Option<&str>, work_id: Option<&str>, ticket_key: Option<&str>) -> String {
+    if let Some(message_key) = message_key.filter(|value| !value.trim().is_empty()) {
+        format!("message:{message_key}")
+    } else if let Some(work_id) = work_id.filter(|value| !value.trim().is_empty()) {
+        format!("work:{work_id}")
+    } else if let Some(ticket_key) = ticket_key.filter(|value| !value.trim().is_empty()) {
+        format!("ticket:{ticket_key}")
+    } else {
+        "runtime".to_string()
+    }
+}
+
+#[allow(dead_code)]
+fn event_id(chain_key: &str, kind: &str, title: &str, body_text: &str, created_at: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(chain_key.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(kind.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(title.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(body_text.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(created_at.as_bytes());
+    let digest = hasher.finalize();
+    format!("hfe-{}", hex_prefix(&digest, 12))
+}
+
+#[allow(dead_code)]
+fn hex_prefix(bytes: &[u8], len: usize) -> String {
+    bytes
+        .iter()
+        .flat_map(|byte| [byte >> 4, byte & 0x0f])
+        .take(len)
+        .map(|nibble| char::from_digit(nibble as u32, 16).unwrap_or('0'))
+        .collect()
+}
+
 fn optional_string<P: rusqlite::Params>(
     conn: &Connection,
     sql: &str,
@@ -1041,10 +1417,19 @@ mod tests {
     #[test]
     fn renderer_keeps_support_branches_off_the_main_box() {
         let flow = HarnessFlow {
+            schema_version: 1,
+            source: FlowSource {
+                message_key: Some("msg-1".to_string()),
+                work_id: None,
+                source_kind: "message".to_string(),
+            },
+            ledger_events: Vec::new(),
             blocks: vec![MainBlock {
+                kind: FlowBlockKind::Task,
                 title: "TASK".to_string(),
                 lines: vec!["Answer the message.".to_string()],
                 branches: vec![SupportBranch {
+                    kind: FlowBranchKind::Review,
                     title: "REVIEW".to_string(),
                     lines: vec!["Result: do not send.".to_string()],
                     returns_to_spine: false,
