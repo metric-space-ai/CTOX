@@ -1257,7 +1257,7 @@ pub fn list_stalled_inbound_messages(
         JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.direction = 'inbound'
           AND m.channel IN ('email', 'jami')
-          AND r.route_status IN ('failed', 'blocked', 'review_rework')
+          AND r.route_status IN ('failed', 'review_rework')
           AND (
                 r.acked_at IS NULL
              OR r.route_status IN ('failed', 'review_rework')

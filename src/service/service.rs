@@ -12851,6 +12851,62 @@ mod tests {
     }
 
     #[test]
+    fn blocked_founder_inbound_is_not_auto_restored() {
+        let root = temp_root("ctox-blocked-founder-not-restored");
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
+            "michael.welsch@metric-space.ai".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &settings)
+            .expect("failed to persist owner setting");
+        let inbound_key = "email:cto1@metric-space.ai::INBOX::100";
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
+        conn.execute(
+            r#"INSERT INTO communication_messages (
+                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
+                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
+                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
+                trust_level, status, seen, has_attachments, external_created_at, observed_at,
+                metadata_json
+            ) VALUES (
+                ?1, 'email', 'email:cto1@metric-space.ai', '<dashboard-thread@example.com>',
+                'remote-founder-100', 'inbound', 'INBOX', 'Michael Welsch',
+                'michael.welsch@metric-space.ai', '[]', '[]', '[]',
+                'AW: Kunstmen Wettbewerbsdashboard',
+                'This founder mail is intentionally paused.',
+                'This founder mail is intentionally paused.',
+                '', '', 'normal', 'received', 0, 0,
+                '2026-04-29T06:31:57Z', '2026-04-29T06:31:57Z', '{}'
+            )"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert founder inbound");
+        conn.execute(
+            r#"INSERT INTO communication_routing_state (
+                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+            ) VALUES (?1, 'blocked', NULL, NULL, NULL, 'operator paused behind newer founder mail', '2026-04-29T09:14:27Z')"#,
+            rusqlite::params![inbound_key],
+        )
+        .expect("failed to insert blocked route");
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let repaired = repair_stalled_founder_communications(&root, &state, &settings)
+            .expect("stalled founder repair should succeed");
+        assert_eq!(repaired, 0);
+        let route_status: String = conn
+            .query_row(
+                "SELECT route_status FROM communication_routing_state WHERE message_key = ?1",
+                rusqlite::params![inbound_key],
+                |row| row.get(0),
+            )
+            .expect("failed to reload route status");
+        assert_eq!(route_status, "blocked");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn stalled_founder_email_not_superseded_by_later_cross_thread_sender_send() {
         let root = temp_root("ctox-stalled-founder-cross-thread-sender-not-superseded");
         let mut settings = BTreeMap::new();
