@@ -239,9 +239,13 @@ daemon owns the work.
 ctox update status
 ctox update check
 ctox upgrade --stable
+ctox upgrade --dev
 ctox update apply --version <tag>
 ctox update rollback
 ```
+
+`ctox upgrade --dev` follows the current `main` branch as a source upgrade.
+`ctox upgrade --stable` follows the latest published release.
 
 ## Repository Layout
 

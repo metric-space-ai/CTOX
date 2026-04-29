@@ -4,9 +4,11 @@ use regex::Regex;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
+use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
 use sha2::Sha256;
+use std::cell::RefCell;
 use std::path::Path;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
@@ -69,6 +71,58 @@ pub struct MessageRecord {
     pub content: String,
     pub token_count: i64,
     pub created_at: String,
+    /// F3: structured agent outcome for assistant rows. Always `None` for
+    /// non-assistant rows (`user`, `system`, etc.). Replaces string-scraping
+    /// of `"Status: \`blocked\`"` text-status replies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_outcome: Option<String>,
+}
+
+/// F3: structured outcome of a single agent turn. Persisted on the
+/// corresponding assistant message row in `messages.agent_outcome` so that
+/// downstream consumers (mission watchdog, founder-send pipeline, status
+/// snapshots) can branch on the outcome without scraping the reply body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentOutcome {
+    /// The turn ran to completion and produced a real reply.
+    Success,
+    /// The turn hit the configured turn time budget.
+    TurnTimeout,
+    /// The turn aborted with a runtime / harness execution error.
+    ExecutionError,
+    /// The turn was aborted by the harness (e.g. mission state invariant).
+    Aborted,
+    /// The turn was cancelled before it could finish (operator stop).
+    Cancelled,
+}
+
+impl AgentOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentOutcome::Success => "Success",
+            AgentOutcome::TurnTimeout => "TurnTimeout",
+            AgentOutcome::ExecutionError => "ExecutionError",
+            AgentOutcome::Aborted => "Aborted",
+            AgentOutcome::Cancelled => "Cancelled",
+        }
+    }
+
+    /// True when this outcome represents a non-success that the watchdog
+    /// should count toward the agent-failure backoff threshold.
+    pub fn is_agent_failure(self) -> bool {
+        !matches!(self, AgentOutcome::Success)
+    }
+
+    pub fn from_token(value: &str) -> Option<Self> {
+        match value {
+            "Success" => Some(AgentOutcome::Success),
+            "TurnTimeout" => Some(AgentOutcome::TurnTimeout),
+            "ExecutionError" => Some(AgentOutcome::ExecutionError),
+            "Aborted" => Some(AgentOutcome::Aborted),
+            "Cancelled" => Some(AgentOutcome::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -297,6 +351,22 @@ pub struct MissionStateRecord {
     pub last_synced_at: String,
     pub watcher_last_triggered_at: Option<String>,
     pub watcher_trigger_count: i64,
+    /// F2: number of consecutive agent-failure outcomes for this mission.
+    /// Reset to 0 on a successful agent turn; incremented on
+    /// `AgentOutcome::TurnTimeout`, `ExecutionError`, `Aborted`.
+    #[serde(default)]
+    pub agent_failure_count: i64,
+    /// F2: structured reason set when the watchdog deferred the mission
+    /// (e.g. `agent_failure_threshold`). `None` for active missions.
+    #[serde(default)]
+    pub deferred_reason: Option<String>,
+    /// Number of consecutive rewrite-only review iterations that failed to
+    /// converge for this mission. Reset on a successful approval; bumped on
+    /// each non-converging rewrite turn. Once it crosses the configured
+    /// threshold the mission is deferred with reason
+    /// `rewrite_failure_threshold`.
+    #[serde(default)]
+    pub rewrite_failure_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -793,7 +863,10 @@ impl LcmEngine {
                 focus_head_commit_id TEXT NOT NULL,
                 last_synced_at TEXT NOT NULL,
                 watcher_last_triggered_at TEXT,
-                watcher_trigger_count INTEGER NOT NULL DEFAULT 0
+                watcher_trigger_count INTEGER NOT NULL DEFAULT 0,
+                agent_failure_count INTEGER NOT NULL DEFAULT 0,
+                deferred_reason TEXT,
+                rewrite_failure_count INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS verification_runs (
@@ -916,6 +989,28 @@ impl LcmEngine {
             "handoff_text",
             "TEXT NOT NULL DEFAULT ''",
         )?;
+        // F2: per-(conversation, mission) agent-failure tracking for the
+        // watchdog backoff. `agent_failure_count` increments on
+        // non-Success agent outcomes (timeout, panic, runtime error) and
+        // resets on success; `deferred_reason` stores the structured reason
+        // when the watchdog stops spawning continuations.
+        self.ensure_column(
+            "mission_states",
+            "agent_failure_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        self.ensure_column("mission_states", "deferred_reason", "TEXT")?;
+        // F3: structured agent outcome on assistant rows; NULL for non-assistant rows.
+        self.ensure_column("messages", "agent_outcome", "TEXT")?;
+        // Review rewrite/rework split: per-(conversation, mission)
+        // counter for consecutive non-converging rewrite-only review
+        // iterations. Trips the mission into `deferred` once the
+        // configured threshold is reached.
+        self.ensure_column(
+            "mission_states",
+            "rewrite_failure_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
         Ok(())
     }
 
@@ -947,6 +1042,21 @@ impl LcmEngine {
         role: &str,
         content: &str,
     ) -> Result<MessageRecord> {
+        self.add_message_with_outcome(conversation_id, role, content, None)
+    }
+
+    /// F3: insert an assistant turn with a structured `AgentOutcome` recorded
+    /// in `messages.agent_outcome`. Non-assistant rows always store NULL;
+    /// callers that pass an outcome for a non-assistant role are corrected
+    /// silently (and the helper logs nothing — the column column is the
+    /// authoritative state, not the role argument).
+    pub fn add_message_with_outcome(
+        &self,
+        conversation_id: i64,
+        role: &str,
+        content: &str,
+        outcome: Option<AgentOutcome>,
+    ) -> Result<MessageRecord> {
         let _ = self.continuity_init_documents(conversation_id)?;
         let now = iso_now();
         let seq = self
@@ -958,10 +1068,23 @@ impl LcmEngine {
             )
             .unwrap_or(1);
         let token_count = estimate_tokens(content) as i64;
+        let stored_outcome = if role == "assistant" {
+            outcome.map(|value| value.as_str().to_string())
+        } else {
+            None
+        };
         self.conn.execute(
-            "INSERT INTO messages (conversation_id, seq, role, content, token_count, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![conversation_id, seq, role, content, token_count, now],
+            "INSERT INTO messages (conversation_id, seq, role, content, token_count, created_at, agent_outcome)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                conversation_id,
+                seq,
+                role,
+                content,
+                token_count,
+                now,
+                stored_outcome,
+            ],
         )?;
         let message_id = self.conn.last_insert_rowid();
         self.conn.execute(
@@ -982,7 +1105,28 @@ impl LcmEngine {
             content: content.to_string(),
             token_count,
             created_at: now,
+            agent_outcome: stored_outcome,
         })
+    }
+
+    /// F3: read the most recent assistant `agent_outcome` for a conversation.
+    /// Returns `None` if there is no assistant row yet, or if the latest
+    /// assistant row predates the schema upgrade and has a NULL outcome.
+    pub fn last_agent_outcome(&self, conversation_id: i64) -> Result<Option<AgentOutcome>> {
+        let raw: Option<Option<String>> = self
+            .conn
+            .query_row(
+                "SELECT agent_outcome FROM messages
+                 WHERE conversation_id = ?1 AND role = 'assistant'
+                 ORDER BY seq DESC LIMIT 1",
+                [conversation_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .context("failed to load last agent outcome")?;
+        Ok(raw
+            .flatten()
+            .and_then(|token| AgentOutcome::from_token(&token)))
     }
 
     pub fn evaluate_compaction(
@@ -1651,8 +1795,121 @@ impl LcmEngine {
         Ok(record)
     }
 
+    /// F2: increment the per-mission agent-failure counter when an agent
+    /// turn ended with a non-success outcome (timeout, panic, runtime error).
+    /// Returns the post-increment record so the caller can decide whether
+    /// the watchdog should defer the mission.
+    pub fn increment_mission_agent_failure_count(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        record.agent_failure_count = record.agent_failure_count.saturating_add(1);
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    /// F2: reset the per-mission agent-failure counter on a successful turn.
+    /// No-op when already zero (avoids touching the row unnecessarily).
+    pub fn reset_mission_agent_failure_count(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        if record.agent_failure_count == 0 && record.deferred_reason.is_none() {
+            return Ok(record);
+        }
+        record.agent_failure_count = 0;
+        // A successful turn implicitly clears any prior deferral reason.
+        record.deferred_reason = None;
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    /// Increment the per-mission rewrite-only review failure counter when a
+    /// rewrite-class review iteration failed to converge (next reviewer
+    /// verdict is again non-PASS for the same artifact). Returns the
+    /// post-increment record so the caller can decide whether the
+    /// dispatcher should defer the mission.
+    pub fn increment_mission_rewrite_failure_count(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        record.rewrite_failure_count = record.rewrite_failure_count.saturating_add(1);
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    /// Reset the per-mission rewrite-only review failure counter on a
+    /// successful approval. No-op when already zero.
+    pub fn reset_mission_rewrite_failure_count(
+        &self,
+        conversation_id: i64,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        if record.rewrite_failure_count == 0 {
+            return Ok(record);
+        }
+        record.rewrite_failure_count = 0;
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    /// F2: defer a mission because the agent-failure threshold was hit.
+    /// Sets `mission_status = 'deferred'`, stores a structured reason, and
+    /// flips `is_open=false` / `allow_idle=true` so the watchdog stops
+    /// spawning continuation self-work for this mission.
+    pub fn defer_mission_for_reason(
+        &self,
+        conversation_id: i64,
+        reason: &str,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        record.mission_status = "deferred".to_string();
+        record.deferred_reason = Some(reason.to_string());
+        record.is_open = false;
+        record.allow_idle = true;
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
     pub fn overwrite_mission_state(&self, record: &MissionStateRecord) -> Result<()> {
         self.persist_mission_state(record)
+    }
+
+    /// P2 — explicit owner-intent path for clearing the protected
+    /// `mission_states.next_slice` / `mission_states.done_gate` fields.
+    ///
+    /// The clobber guard in `persist_mission_state_with` rejects any
+    /// automation write that would silently empty those fields. When an
+    /// operator or skill genuinely needs to clear them (e.g. a mission was
+    /// completed and the owner is retiring the slice), this method flips a
+    /// thread-local bypass for the duration of the write so the guard does
+    /// not interpret it as accidental clobbering. **Do not call this from
+    /// automation.** The harness uses the guarded path; operator/skill
+    /// callers can reach this through a dedicated entry point.
+    pub fn clear_mission_state_done_fields_with_owner_intent(
+        &self,
+        conversation_id: i64,
+        clear_next_slice: bool,
+        clear_done_gate: bool,
+    ) -> Result<MissionStateRecord> {
+        let mut record = self.mission_state(conversation_id)?;
+        if clear_next_slice {
+            record.next_slice = String::new();
+        }
+        if clear_done_gate {
+            record.done_gate = String::new();
+        }
+        let _bypass = OwnerIntentClearGuard::enter();
+        self.persist_mission_state(&record)?;
+        Ok(record)
+    }
+
+    /// Convenience method calling [`drain_pending_mission_state_clobber_events_to_governance`].
+    pub fn drain_pending_mission_state_clobber_events_to_governance(&self, root: &Path) {
+        drain_pending_mission_state_clobber_events_to_governance(root);
     }
 
     pub fn rewrite_focus_continuity_from_mission_state(
@@ -2835,7 +3092,7 @@ impl LcmEngine {
     fn get_message(&self, message_id: i64) -> Result<MessageRecord> {
         self.conn
             .query_row(
-                "SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+                "SELECT message_id, conversation_id, seq, role, content, token_count, created_at, agent_outcome
              FROM messages WHERE message_id = ?1",
                 [message_id],
                 |row| {
@@ -2847,6 +3104,7 @@ impl LcmEngine {
                         content: row.get(4)?,
                         token_count: row.get(5)?,
                         created_at: row.get(6)?,
+                        agent_outcome: row.get(7)?,
                     })
                 },
             )
@@ -2858,7 +3116,7 @@ impl LcmEngine {
         conversation_id: i64,
     ) -> Result<Vec<MessageRecord>> {
         let mut stmt = self.conn.prepare(
-            "SELECT message_id, conversation_id, seq, role, content, token_count, created_at
+            "SELECT message_id, conversation_id, seq, role, content, token_count, created_at, agent_outcome
              FROM messages WHERE conversation_id = ?1 ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map([conversation_id], |row| {
@@ -2870,6 +3128,7 @@ impl LcmEngine {
                 content: row.get(4)?,
                 token_count: row.get(5)?,
                 created_at: row.get(6)?,
+                agent_outcome: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3014,7 +3273,7 @@ impl LcmEngine {
     fn messages_for_summary(&self, summary_id: &str) -> Result<Vec<MessageRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT m.message_id, m.conversation_id, m.seq, m.role, m.content, m.token_count, m.created_at
+            SELECT m.message_id, m.conversation_id, m.seq, m.role, m.content, m.token_count, m.created_at, m.agent_outcome
             FROM summary_messages sm
             JOIN messages m ON m.message_id = sm.message_id
             WHERE sm.summary_id = ?1
@@ -3030,6 +3289,7 @@ impl LcmEngine {
                 content: row.get(4)?,
                 token_count: row.get(5)?,
                 created_at: row.get(6)?,
+                agent_outcome: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3489,6 +3749,18 @@ pub fn run_add_message(
     engine.add_message(conversation_id, role, content)
 }
 
+/// F3: convenience wrapper for the agent harness — record an assistant
+/// turn with its structured outcome in a single call.
+pub fn run_add_assistant_turn(
+    db_path: &Path,
+    conversation_id: i64,
+    content: &str,
+    outcome: AgentOutcome,
+) -> Result<MessageRecord> {
+    let engine = LcmEngine::open(db_path, LcmConfig::default())?;
+    engine.add_message_with_outcome(conversation_id, "assistant", content, Some(outcome))
+}
+
 pub fn run_compact(
     db_path: &Path,
     conversation_id: i64,
@@ -3845,7 +4117,7 @@ fn load_mission_state_with(
     conversation_id: i64,
 ) -> Result<Option<MissionStateRecord>> {
     conn.query_row(
-        "SELECT mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count FROM mission_states WHERE conversation_id = ?1",
+        "SELECT mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count FROM mission_states WHERE conversation_id = ?1",
         [conversation_id],
         |row| {
             Ok(MissionStateRecord {
@@ -3864,6 +4136,9 @@ fn load_mission_state_with(
                 last_synced_at: row.get(11)?,
                 watcher_last_triggered_at: row.get(12)?,
                 watcher_trigger_count: row.get(13)?,
+                agent_failure_count: row.get(14)?,
+                deferred_reason: row.get(15)?,
+                rewrite_failure_count: row.get(16)?,
             })
         },
     )
@@ -3874,7 +4149,7 @@ fn load_mission_state_with(
 fn load_mission_states_with(conn: &Connection, open_only: bool) -> Result<Vec<MissionStateRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT conversation_id, mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count
+            "SELECT conversation_id, mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count
              FROM mission_states
              WHERE (?1 = 0 OR is_open = 1)
              ORDER BY is_open DESC, last_synced_at DESC, conversation_id ASC",
@@ -3897,6 +4172,9 @@ fn load_mission_states_with(conn: &Connection, open_only: bool) -> Result<Vec<Mi
             last_synced_at: row.get(12)?,
             watcher_last_triggered_at: row.get(13)?,
             watcher_trigger_count: row.get(14)?,
+            agent_failure_count: row.get(15)?,
+            deferred_reason: row.get(16)?,
+            rewrite_failure_count: row.get(17)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -3904,7 +4182,164 @@ fn load_mission_states_with(conn: &Connection, open_only: bool) -> Result<Vec<Mi
         .context("failed to load mission states")
 }
 
+/// One recorded attempt to clobber a protected `mission_states` field. The
+/// guard preserved the prior non-empty value; this entry is staged on the
+/// thread-local buffer and flushed to `governance_events` after the
+/// surrounding transaction commits (governance writes open a separate
+/// connection and would deadlock against an open lcm write transaction on
+/// the same DB if emitted inline).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingMissionStateClobberAttempt {
+    pub conversation_id: i64,
+    pub field: &'static str,
+    pub previous_value: String,
+    pub attempted_value: String,
+    pub previous_value_chars: usize,
+}
+
+thread_local! {
+    /// Per-thread buffer of suppressed clobber attempts. Drained by
+    /// `LcmEngine::drain_pending_mission_state_clobber_events_to_governance`
+    /// once the surrounding lcm transaction has committed and a governance
+    /// connection can safely be opened.
+    static PENDING_MISSION_STATE_CLOBBERS: RefCell<Vec<PendingMissionStateClobberAttempt>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+fn push_pending_mission_state_clobber(attempt: PendingMissionStateClobberAttempt) {
+    PENDING_MISSION_STATE_CLOBBERS.with(|cell| cell.borrow_mut().push(attempt));
+}
+
+pub(crate) fn drain_pending_mission_state_clobbers() -> Vec<PendingMissionStateClobberAttempt> {
+    PENDING_MISSION_STATE_CLOBBERS.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+/// Drain any clobber attempts that the P2 guard suppressed during this
+/// thread's recent persist calls and publish them as
+/// `mission_state_field_clobbered_blocked` governance events. Safe to call
+/// from any post-turn / post-boot maintenance pass: a no-op when the buffer
+/// is empty. Failures are swallowed so the audit channel never breaks a
+/// successful state transition (mirrors the `let _ =
+/// governance::record_event(...)` pattern in service.rs).
+pub fn drain_pending_mission_state_clobber_events_to_governance(root: &Path) {
+    let pending = drain_pending_mission_state_clobbers();
+    for attempt in pending {
+        let _ = crate::governance::record_event(
+            root,
+            crate::governance::GovernanceEventRequest {
+                mechanism_id: "mission_state_field_clobbered_blocked",
+                conversation_id: Some(attempt.conversation_id),
+                severity: "warning",
+                reason: "mission_state_field_clobber_blocked",
+                action_taken: "preserved_prior_non_empty_field",
+                details: serde_json::json!({
+                    "field": attempt.field,
+                    "previous_value_chars": attempt.previous_value_chars,
+                    "previous_value": attempt.previous_value,
+                    "attempted_value": attempt.attempted_value,
+                }),
+                idempotence_key: None,
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn drain_pending_mission_state_clobbers_for_test(
+) -> Vec<PendingMissionStateClobberAttempt> {
+    drain_pending_mission_state_clobbers()
+}
+
+/// True when `value` is empty after trimming whitespace (`""`, `"   "`,
+/// `"\n"`, etc. all collapse to "this writer cleared the field"). Structural
+/// — no parsing, no string-matching against any sentinel.
+fn is_blank_field(value: &str) -> bool {
+    value.trim().is_empty()
+}
+
+/// Bypass key the dedicated owner-intent clearer flips before issuing a
+/// legitimate clear. Wired through a thread-local so we don't have to
+/// thread an extra parameter through every persist path.
+thread_local! {
+    static OWNER_INTENT_CLEAR_BYPASS_DEPTH: RefCell<u32> = const { RefCell::new(0) };
+}
+
+struct OwnerIntentClearGuard;
+impl OwnerIntentClearGuard {
+    fn enter() -> Self {
+        OWNER_INTENT_CLEAR_BYPASS_DEPTH.with(|cell| *cell.borrow_mut() += 1);
+        Self
+    }
+}
+impl Drop for OwnerIntentClearGuard {
+    fn drop(&mut self) {
+        OWNER_INTENT_CLEAR_BYPASS_DEPTH.with(|cell| {
+            let mut depth = cell.borrow_mut();
+            if *depth > 0 {
+                *depth -= 1;
+            }
+        });
+    }
+}
+
+fn owner_intent_clear_active() -> bool {
+    OWNER_INTENT_CLEAR_BYPASS_DEPTH.with(|cell| *cell.borrow() > 0)
+}
+
 fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) -> Result<()> {
+    // P2 — Mission-state field clobber guard.
+    //
+    // Production smoke-test (Befund C) saw `next_slice` (81 chars) and
+    // `done_gate` (289 chars) silently collapse to length 0 within ~25
+    // minutes while `mission` (217 chars) was preserved. The suspected
+    // writer is `derive_mission_state_from_continuity`, which produces
+    // empty `next_slice` / `done_gate` strings whenever the focus
+    // continuity document does not currently carry an explicit
+    // `next_slice:` / `done_gate:` line. That overwrite path is a
+    // mission-continuity-normalize pass triggered by every
+    // `continuity_apply_diff` / full-replace / string-replace / sync.
+    //
+    // We install a one-way ratchet on `next_slice` and `done_gate`: once
+    // they hold non-empty content, automation may only replace them with
+    // new non-empty content. A blank-incoming write while the prior row
+    // is non-empty preserves the prior value field-locally, and the
+    // attempted clobber is staged on a thread-local buffer that the
+    // engine flushes to `governance_events` once the surrounding
+    // transaction has committed (we cannot open a second connection
+    // against the same WAL DB while a write transaction is still open
+    // on this thread without risking a busy_timeout deadlock).
+    //
+    // Operator/skill paths that legitimately *want* to clear these
+    // fields call `clear_mission_state_done_fields_with_owner_intent`,
+    // which sets a thread-local bypass for the duration of the clear.
+    let mut effective_next_slice = record.next_slice.clone();
+    let mut effective_done_gate = record.done_gate.clone();
+    if !owner_intent_clear_active() {
+        let existing = load_mission_state_with(conn, record.conversation_id)?;
+        if let Some(existing) = existing {
+            if !is_blank_field(&existing.next_slice) && is_blank_field(&effective_next_slice) {
+                push_pending_mission_state_clobber(PendingMissionStateClobberAttempt {
+                    conversation_id: record.conversation_id,
+                    field: "next_slice",
+                    previous_value: existing.next_slice.clone(),
+                    attempted_value: effective_next_slice.clone(),
+                    previous_value_chars: existing.next_slice.chars().count(),
+                });
+                effective_next_slice = existing.next_slice;
+            }
+            if !is_blank_field(&existing.done_gate) && is_blank_field(&effective_done_gate) {
+                push_pending_mission_state_clobber(PendingMissionStateClobberAttempt {
+                    conversation_id: record.conversation_id,
+                    field: "done_gate",
+                    previous_value: existing.done_gate.clone(),
+                    attempted_value: effective_done_gate.clone(),
+                    previous_value_chars: existing.done_gate.chars().count(),
+                });
+                effective_done_gate = existing.done_gate;
+            }
+        }
+    }
+
     conn.execute(
         "INSERT INTO mission_states (
             conversation_id,
@@ -3921,8 +4356,11 @@ fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) ->
             focus_head_commit_id,
             last_synced_at,
             watcher_last_triggered_at,
-            watcher_trigger_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            watcher_trigger_count,
+            agent_failure_count,
+            deferred_reason,
+            rewrite_failure_count
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
         ON CONFLICT(conversation_id) DO UPDATE SET
             mission = excluded.mission,
             mission_status = excluded.mission_status,
@@ -3937,7 +4375,10 @@ fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) ->
             focus_head_commit_id = excluded.focus_head_commit_id,
             last_synced_at = excluded.last_synced_at,
             watcher_last_triggered_at = excluded.watcher_last_triggered_at,
-            watcher_trigger_count = excluded.watcher_trigger_count",
+            watcher_trigger_count = excluded.watcher_trigger_count,
+            agent_failure_count = excluded.agent_failure_count,
+            deferred_reason = excluded.deferred_reason,
+            rewrite_failure_count = excluded.rewrite_failure_count",
         params![
             record.conversation_id,
             record.mission,
@@ -3945,8 +4386,8 @@ fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) ->
             record.continuation_mode,
             record.trigger_intensity,
             record.blocker,
-            record.next_slice,
-            record.done_gate,
+            effective_next_slice,
+            effective_done_gate,
             record.closure_confidence,
             if record.is_open { 1 } else { 0 },
             if record.allow_idle { 1 } else { 0 },
@@ -3954,6 +4395,9 @@ fn persist_mission_state_with(conn: &Connection, record: &MissionStateRecord) ->
             record.last_synced_at,
             record.watcher_last_triggered_at,
             record.watcher_trigger_count,
+            record.agent_failure_count,
+            record.deferred_reason,
+            record.rewrite_failure_count,
         ],
     )?;
     Ok(())
@@ -4324,6 +4768,13 @@ fn derive_mission_state_from_continuity(
             .and_then(|record| record.watcher_last_triggered_at.clone()),
         watcher_trigger_count: previous
             .map(|record| record.watcher_trigger_count)
+            .unwrap_or(0),
+        agent_failure_count: previous
+            .map(|record| record.agent_failure_count)
+            .unwrap_or(0),
+        deferred_reason: previous.and_then(|record| record.deferred_reason.clone()),
+        rewrite_failure_count: previous
+            .map(|record| record.rewrite_failure_count)
             .unwrap_or(0),
     }
 }
@@ -5874,6 +6325,9 @@ mod tests {
             last_synced_at: iso_now(),
             watcher_last_triggered_at: Some("2026-04-05T23:02:04Z".to_string()),
             watcher_trigger_count: 16,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
 
         let mission = derive_mission_state_from_continuity(&continuity, Some(&previous));
@@ -5919,6 +6373,9 @@ mod tests {
             last_synced_at: iso_now(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
 
         let mission = derive_mission_state_from_continuity(&continuity, Some(&previous));
@@ -6368,5 +6825,210 @@ mod tests {
         let fallback = build_deterministic_fallback(&content, 1234);
         assert!(fallback.contains("[Truncated from 1234 tokens]"));
         assert!(std::str::from_utf8(fallback.as_bytes()).is_ok());
+    }
+
+    // F3: structured agent_outcome round-trips on assistant rows and is
+    // ignored on non-assistant rows.
+    #[test]
+    fn add_message_with_outcome_persists_for_assistant_only() -> Result<()> {
+        let db_path = temp_db();
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let _ = engine.continuity_init_documents(7)?;
+
+        // user row: outcome must be ignored.
+        let user_record =
+            engine.add_message_with_outcome(7, "user", "ping", Some(AgentOutcome::TurnTimeout))?;
+        assert!(user_record.agent_outcome.is_none());
+
+        // assistant success row.
+        let success_record = engine.add_message_with_outcome(
+            7,
+            "assistant",
+            "all done",
+            Some(AgentOutcome::Success),
+        )?;
+        assert_eq!(success_record.agent_outcome.as_deref(), Some("Success"));
+        assert_eq!(engine.last_agent_outcome(7)?, Some(AgentOutcome::Success));
+
+        // assistant timeout row supersedes the success.
+        let _ = engine.add_message_with_outcome(
+            7,
+            "assistant",
+            "(agent turn did not complete)",
+            Some(AgentOutcome::TurnTimeout),
+        )?;
+        assert_eq!(
+            engine.last_agent_outcome(7)?,
+            Some(AgentOutcome::TurnTimeout)
+        );
+
+        let _ = std::fs::remove_file(db_path);
+        Ok(())
+    }
+
+    #[test]
+    fn agent_outcome_token_round_trips() {
+        for outcome in [
+            AgentOutcome::Success,
+            AgentOutcome::TurnTimeout,
+            AgentOutcome::ExecutionError,
+            AgentOutcome::Aborted,
+            AgentOutcome::Cancelled,
+        ] {
+            let token = outcome.as_str();
+            assert_eq!(AgentOutcome::from_token(token), Some(outcome));
+        }
+        assert!(AgentOutcome::from_token("unknown").is_none());
+    }
+
+    #[test]
+    fn agent_outcome_failure_predicate_only_excludes_success() {
+        assert!(!AgentOutcome::Success.is_agent_failure());
+        assert!(AgentOutcome::TurnTimeout.is_agent_failure());
+        assert!(AgentOutcome::ExecutionError.is_agent_failure());
+        assert!(AgentOutcome::Aborted.is_agent_failure());
+        assert!(AgentOutcome::Cancelled.is_agent_failure());
+    }
+
+    /// P2 — clobber guard: a watchdog write that tries to clear
+    /// `done_gate` while the prior row carried a non-empty `done_gate`
+    /// must be silently downgraded to a no-op for that field, the prior
+    /// value preserved, and the attempt audited as a governance event.
+    /// (The reviewer-rework loop in production saw `next_slice` /
+    /// `done_gate` collapse to length 0 within ~25 minutes; this guard
+    /// is the structural fix.)
+    #[test]
+    fn mission_state_done_gate_clobber_is_blocked_and_audited() -> Result<()> {
+        // Test root layout: runtime/ctox.sqlite3 is the shared DB used
+        // by both LcmEngine and governance::record_event.
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or(0);
+        let counter = TEMP_DB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("ctox-clobber-guard-{nanos}-{counter}"));
+        std::fs::create_dir_all(root.join("runtime"))?;
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+
+        // Drain anything other tests may have leaked onto this thread.
+        let _ = drain_pending_mission_state_clobbers_for_test();
+
+        // Seed an existing mission_states row with non-empty done_gate.
+        let baseline = MissionStateRecord {
+            conversation_id: 7,
+            mission: "Founder mail covering vision and mission".to_string(),
+            mission_status: "active".to_string(),
+            continuation_mode: "continuous".to_string(),
+            trigger_intensity: "hot".to_string(),
+            blocker: "operator-set blocker".to_string(),
+            next_slice: "wait for reviewer disposition before sending".to_string(),
+            done_gate: "X".to_string(),
+            closure_confidence: "low".to_string(),
+            is_open: true,
+            allow_idle: false,
+            focus_head_commit_id: "focus-clobber".to_string(),
+            last_synced_at: iso_now(),
+            watcher_last_triggered_at: None,
+            watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
+        };
+        engine.overwrite_mission_state(&baseline)?;
+        let after_seed = engine
+            .stored_mission_state(7)?
+            .expect("seeded mission state should be visible");
+        assert_eq!(after_seed.done_gate, "X");
+        assert_eq!(
+            after_seed.next_slice,
+            "wait for reviewer disposition before sending"
+        );
+        // Drain the buffer caused by the seed write itself (none expected,
+        // but keep the test deterministic).
+        let _ = drain_pending_mission_state_clobbers_for_test();
+
+        // Watchdog-shaped write: same row, but `done_gate` empty and
+        // `next_slice` empty. The guard must preserve both prior
+        // non-empty values.
+        let watchdog_write = MissionStateRecord {
+            done_gate: String::new(),
+            next_slice: String::new(),
+            mission: "Founder mail covering vision and mission updated".to_string(),
+            ..baseline.clone()
+        };
+        engine.overwrite_mission_state(&watchdog_write)?;
+
+        let after_watchdog = engine
+            .stored_mission_state(7)?
+            .expect("mission state still present after blocked clobber");
+        assert_eq!(
+            after_watchdog.done_gate, "X",
+            "guard must preserve the prior non-empty done_gate"
+        );
+        assert_eq!(
+            after_watchdog.next_slice, "wait for reviewer disposition before sending",
+            "guard must preserve the prior non-empty next_slice"
+        );
+        // Other fields keep their existing semantics: `mission` was
+        // overwritten exactly as the writer requested.
+        assert_eq!(
+            after_watchdog.mission, "Founder mail covering vision and mission updated",
+            "guard must not interfere with non-protected fields"
+        );
+
+        // Flush the suppressed clobber attempts to governance and verify
+        // the audit event landed.
+        engine.drain_pending_mission_state_clobber_events_to_governance(&root);
+        let events = crate::governance::list_recent_events(&root, 7, 16)
+            .expect("failed to list governance events");
+        let clobber_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.mechanism_id == "mission_state_field_clobbered_blocked")
+            .collect();
+        assert_eq!(
+            clobber_events.len(),
+            2,
+            "expected exactly two clobber-blocked events (next_slice, done_gate); got {clobber_events:?}",
+        );
+        let blocked_fields: std::collections::BTreeSet<String> = clobber_events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .details
+                    .get("field")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.to_string())
+            })
+            .collect();
+        assert!(blocked_fields.contains("done_gate"));
+        assert!(blocked_fields.contains("next_slice"));
+        for event in &clobber_events {
+            assert_eq!(event.severity, "warning");
+            assert_eq!(event.action_taken, "preserved_prior_non_empty_field");
+        }
+
+        // Replacement with NEW non-empty content must succeed (the
+        // ratchet allows replace, only blocks silent clear).
+        let replacement = MissionStateRecord {
+            done_gate: "fresh non-empty done gate".to_string(),
+            next_slice: "fresh non-empty next slice".to_string(),
+            ..baseline.clone()
+        };
+        engine.overwrite_mission_state(&replacement)?;
+        let after_replace = engine.stored_mission_state(7)?.unwrap();
+        assert_eq!(after_replace.done_gate, "fresh non-empty done gate");
+        assert_eq!(after_replace.next_slice, "fresh non-empty next slice");
+
+        // Owner-intent clear bypasses the guard.
+        let cleared = engine.clear_mission_state_done_fields_with_owner_intent(7, true, true)?;
+        assert!(cleared.next_slice.is_empty());
+        assert!(cleared.done_gate.is_empty());
+        let after_owner_clear = engine.stored_mission_state(7)?.unwrap();
+        assert!(after_owner_clear.next_slice.is_empty());
+        assert!(after_owner_clear.done_gate.is_empty());
+
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 }

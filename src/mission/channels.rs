@@ -11,6 +11,7 @@ use rusqlite::types::Value as SqlValue;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
 use rusqlite::Transaction;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
 use serde_json::Value;
@@ -409,6 +410,399 @@ pub fn classify_email_sender(
     }
 }
 
+/// F4: snapshot of the founder/owner outbound pipeline for a single thread.
+/// Joins:
+/// - `mission_states`        — current mission status, agent_failure_count
+/// - `messages`              — agent attempts and their structured outcomes
+/// - `communication_founder_reply_reviews` — review and approval records
+/// - `communication_messages` (outbound rows, plus their routing state) —
+///   actual send attempts and their delivery state
+///
+/// Output is flat JSON shaped for operator consumption, intentionally
+/// avoiding internal-only field names where they would leak past CTOX.
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineStatusReport {
+    pub thread_key: Option<String>,
+    pub founder_outbound_intent: bool,
+    pub agent_attempts: Vec<PipelineAgentAttempt>,
+    pub review_runs: Vec<PipelineReviewRun>,
+    pub approval_records: Vec<PipelineApprovalRecord>,
+    pub send_attempts: Vec<PipelineSendAttempt>,
+    pub current_mission_status: String,
+    pub agent_failure_count: i64,
+    /// Iteration counter for the lightweight rewrite-only review path
+    /// (per-mission, reset on approval). Surfaced so operators can see
+    /// when a thread is bouncing in the body-fix loop versus the heavy
+    /// rework path.
+    pub rewrite_iteration_count: i64,
+    /// Iteration counter for the heavy rework path. Derived from the
+    /// stored `agent_failure_count` because rework continuations inherit
+    /// the agent-failure backoff machinery; this duplication keeps the
+    /// pipeline-status surface self-describing without changing the
+    /// underlying schema.
+    pub rework_iteration_count: i64,
+    /// Most recent disposition the dispatcher chose. One of `Approved`,
+    /// `RewriteOnly`, `RequeueSelfWork`, `None`. Computed from the latest
+    /// review run / mission status, so it stays accurate without an
+    /// extra column.
+    pub current_disposition: String,
+    pub last_error: Option<String>,
+    /// Recent governance events from the strategic-directive owner-authority
+    /// gate that touched this thread. Surfaces both permitted and blocked
+    /// inbound-mail-driven mutations so operators can see whether the
+    /// authority gate fired (and how) for the conversation. Filtered by
+    /// `details.thread_key` or `details.conversation_id` so unrelated
+    /// global authority events do not leak into the per-thread surface.
+    pub strategic_directive_authority_events: Vec<StrategicDirectiveAuthorityEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategicDirectiveAuthorityEvent {
+    pub event_id: String,
+    pub mechanism_id: String,
+    pub severity: String,
+    pub created_at: String,
+    pub sender_role: Option<String>,
+    pub sender_address: Option<String>,
+    pub directive_kind: Option<String>,
+    pub attempted_status: Option<String>,
+    pub action: Option<String>,
+    pub triggered_by_message_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineAgentAttempt {
+    pub turn_id: String,
+    pub outcome: Option<String>,
+    pub started_at: Option<String>,
+    pub ended_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineReviewRun {
+    pub approval_key: String,
+    pub inbound_message_key: String,
+    pub reviewer: String,
+    pub review_summary: String,
+    pub approved_at: String,
+    pub sent_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineApprovalRecord {
+    pub approval_key: String,
+    pub action_digest: String,
+    pub body_sha256: String,
+    pub approved_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PipelineSendAttempt {
+    pub message_key: String,
+    pub direction: String,
+    pub subject: String,
+    pub external_created_at: String,
+    pub route_status: Option<String>,
+    pub last_error: Option<String>,
+}
+
+pub(crate) fn pipeline_status(
+    root: &Path,
+    thread_key: Option<&str>,
+    limit: usize,
+) -> Result<PipelineStatusReport> {
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+
+    // Agent attempts and reviews are scoped per-conversation_id derived
+    // from the thread_key. If the operator did not supply one, we report
+    // global state without per-thread review/send rows.
+    let conversation_id = thread_key
+        .map(|key| crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(key)));
+
+    // Mission state for the conversation that owns this thread.
+    let mission_state = if let Some(conv_id) = conversation_id {
+        crate::lcm::LcmEngine::open(&db_path, crate::lcm::LcmConfig::default())
+            .ok()
+            .and_then(|engine| engine.stored_mission_state(conv_id).ok().flatten())
+    } else {
+        None
+    };
+    let (
+        current_mission_status,
+        agent_failure_count,
+        rewrite_iteration_count,
+        rework_iteration_count,
+        last_error,
+    ) = match &mission_state {
+        Some(record) => (
+            record.mission_status.clone(),
+            record.agent_failure_count,
+            record.rewrite_failure_count,
+            record.agent_failure_count,
+            record.deferred_reason.clone(),
+        ),
+        None => ("unknown".to_string(), 0, 0, 0, None),
+    };
+
+    // Agent attempts: most recent assistant rows for the conversation, in
+    // reverse-chronological order, along with their structured outcome.
+    let agent_attempts = if let Some(conv_id) = conversation_id {
+        let mut stmt = conn.prepare(
+            "SELECT message_id, agent_outcome, created_at
+             FROM messages
+             WHERE conversation_id = ?1 AND role = 'assistant'
+             ORDER BY seq DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![conv_id, limit as i64], |row| {
+            let id: i64 = row.get(0)?;
+            let outcome: Option<String> = row.get(1)?;
+            let ended: Option<String> = row.get(2)?;
+            Ok(PipelineAgentAttempt {
+                turn_id: format!("msg:{id}"),
+                outcome,
+                started_at: None,
+                ended_at: ended,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+
+    // Review and approval records keyed on the inbound message belonging
+    // to this thread. If thread_key is None, return all recent reviews.
+    let mut review_runs = Vec::new();
+    let mut approval_records = Vec::new();
+    if let Some(thread) = thread_key {
+        let mut stmt = conn.prepare(
+            "SELECT r.approval_key, r.inbound_message_key, r.action_digest, r.body_sha256,
+                    r.reviewer, r.review_summary, r.approved_at, r.sent_at
+             FROM communication_founder_reply_reviews r
+             JOIN communication_messages m ON m.message_key = r.inbound_message_key
+             WHERE m.thread_key = ?1
+             ORDER BY r.approved_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![thread, limit as i64], |row| {
+            let approval_key: String = row.get(0)?;
+            let inbound_message_key: String = row.get(1)?;
+            let action_digest: String = row.get(2)?;
+            let body_sha256: String = row.get(3)?;
+            let reviewer: String = row.get(4)?;
+            let review_summary: String = row.get(5)?;
+            let approved_at: String = row.get(6)?;
+            let sent_at: Option<String> = row.get(7)?;
+            Ok((
+                PipelineReviewRun {
+                    approval_key: approval_key.clone(),
+                    inbound_message_key,
+                    reviewer,
+                    review_summary,
+                    approved_at: approved_at.clone(),
+                    sent_at,
+                },
+                PipelineApprovalRecord {
+                    approval_key,
+                    action_digest,
+                    body_sha256,
+                    approved_at,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (review, approval) = row?;
+            review_runs.push(review);
+            approval_records.push(approval);
+        }
+    }
+
+    // Send attempts: outbound communication_messages rows for this thread.
+    let send_attempts = if let Some(thread) = thread_key {
+        let mut stmt = conn.prepare(
+            "SELECT m.message_key, m.direction, m.subject, m.external_created_at,
+                    r.route_status, r.last_error
+             FROM communication_messages m
+             LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
+             WHERE m.thread_key = ?1 AND m.direction = 'outbound'
+             ORDER BY m.external_created_at DESC, m.observed_at DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![thread, limit as i64], |row| {
+            Ok(PipelineSendAttempt {
+                message_key: row.get(0)?,
+                direction: row.get(1)?,
+                subject: row.get(2)?,
+                external_created_at: row.get(3)?,
+                route_status: row.get(4)?,
+                last_error: row.get(5)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+
+    // founder_outbound_intent is true if there's at least one approval
+    // record for this thread (a reviewed founder send was prepared).
+    let founder_outbound_intent = !approval_records.is_empty();
+
+    // The dispatcher disposition is structural (no string scraping). We
+    // derive it from the persisted state: an approval row implies the most
+    // recent disposition was `Approved`; a non-zero rewrite_failure_count
+    // implies the loop is in the lightweight rewrite path; a non-zero
+    // agent_failure_count implies the heavy rework path. Otherwise the
+    // pipeline has never produced a reviewed slice — `None`.
+    let current_disposition = if !approval_records.is_empty() {
+        "Approved".to_string()
+    } else if rewrite_iteration_count > 0 {
+        "RewriteOnly".to_string()
+    } else if rework_iteration_count > 0 {
+        "RequeueSelfWork".to_string()
+    } else {
+        "None".to_string()
+    };
+
+    // E (PR): per-thread strategic-directive authority audit trail. We
+    // pull both the `_owner_authorised` and `_blocked_non_owner_sender`
+    // events the strategy-mutation gate emits, and filter to those whose
+    // structured details reference this thread (`thread_key` or
+    // `conversation_id`). The default surface is the last `limit` such
+    // events; if no thread was supplied we leave the list empty rather
+    // than reporting global state, which matches how the surrounding
+    // pipeline fields treat an absent thread_key.
+    let strategic_directive_authority_events =
+        load_strategic_directive_authority_events(&db_path, thread_key, conversation_id, limit)?;
+
+    Ok(PipelineStatusReport {
+        thread_key: thread_key.map(ToOwned::to_owned),
+        founder_outbound_intent,
+        agent_attempts,
+        review_runs,
+        approval_records,
+        send_attempts,
+        current_mission_status,
+        agent_failure_count,
+        rewrite_iteration_count,
+        rework_iteration_count,
+        current_disposition,
+        last_error,
+        strategic_directive_authority_events,
+    })
+}
+
+fn load_strategic_directive_authority_events(
+    db_path: &Path,
+    thread_key: Option<&str>,
+    conversation_id: Option<i64>,
+    limit: usize,
+) -> Result<Vec<StrategicDirectiveAuthorityEvent>> {
+    if thread_key.is_none() && conversation_id.is_none() {
+        return Ok(Vec::new());
+    }
+    // The governance schema is created lazily by the governance module; if
+    // it does not exist yet, return an empty vec rather than erroring.
+    let conn = Connection::open(db_path).with_context(|| {
+        format!(
+            "failed to open db {} for strategic-directive authority events",
+            db_path.display()
+        )
+    })?;
+    let exists: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='governance_events'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .is_some();
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT event_id, mechanism_id, severity, details_json, created_at
+         FROM governance_events
+         WHERE mechanism_id IN (
+             'strategic_directive_mutation_owner_authorised',
+             'strategic_directive_mutation_blocked_non_owner_sender'
+         )
+         ORDER BY CAST(created_at AS INTEGER) DESC
+         LIMIT ?1",
+    )?;
+    // We pull a generous slice and filter in Rust because the structured
+    // thread/conversation match lives inside `details_json`. Clamp to a
+    // sane upper bound so this stays cheap even if the audit trail is busy.
+    let scan_limit = (limit.max(1) * 8).min(512) as i64;
+    let rows = stmt.query_map(params![scan_limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+    let mut out: Vec<StrategicDirectiveAuthorityEvent> = Vec::new();
+    for row in rows {
+        let (event_id, mechanism_id, severity, details_json, created_at) = row?;
+        let details: serde_json::Value =
+            serde_json::from_str(&details_json).unwrap_or(serde_json::Value::Null);
+        let detail_thread = details
+            .get("thread_key")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let detail_conversation = details
+            .get("conversation_id")
+            .and_then(|value| value.as_i64());
+        let matches_thread = match thread_key {
+            Some(key) => detail_thread.as_deref() == Some(key),
+            None => false,
+        };
+        let matches_conversation = match (conversation_id, detail_conversation) {
+            (Some(want), Some(got)) => want == got,
+            _ => false,
+        };
+        if !matches_thread && !matches_conversation {
+            continue;
+        }
+        out.push(StrategicDirectiveAuthorityEvent {
+            event_id,
+            mechanism_id,
+            severity,
+            created_at,
+            sender_role: details
+                .get("sender_role")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            sender_address: details
+                .get("sender_address")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            directive_kind: details
+                .get("directive_kind")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            attempted_status: details
+                .get("attempted_status")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            action: details
+                .get("action")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            triggered_by_message_key: details
+                .get("triggered_by_message_key")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+        });
+        if out.len() >= limit {
+            break;
+        }
+    }
+    Ok(out)
+}
+
 pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");
     match command {
@@ -562,9 +956,20 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 "context": context,
             }))
         }
+        "pipeline-status" => {
+            let limit = find_flag_value(args, "--limit")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_TAKE_LIMIT);
+            let thread_key = find_flag_value(args, "--thread-key");
+            let report = pipeline_status(root, thread_key, limit)?;
+            print_json(&json!({
+                "ok": true,
+                "report": report,
+            }))
+        }
         _ => {
             anyhow::bail!(
-                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--cc <addr>]... [--attach-file <path>]... [--send-voice] [--reviewed-founder-send]\n  ctox channel founder-reply --message-key <inbound-email-key> --body <text>\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]\n  ctox channel context --thread-key <key> [--db <path>] [--query <text>] [--sender <addr>] [--limit <n>]"
+                "usage:\n  ctox channel init [--db <path>]\n  ctox channel sync --channel <email|jami> [--db <path>] [adapter flags]\n  ctox channel take [--db <path>] [--channel <name>] [--limit <n>] [--lease-owner <owner>]\n  ctox channel ack [--db <path>] [--status <status>] <message-key>...\n  ctox channel send --channel <tui|email|jami> --account-key <key> --thread-key <key> --body <text> [--subject <text>] [--to <addr>]... [--cc <addr>]... [--attach-file <path>]... [--send-voice] [--reviewed-founder-send]\n  ctox channel founder-reply --message-key <inbound-email-key> --body <text>\n  ctox channel test --channel <tui|email|jami> [--db <path>] [--account-key <key>]\n  ctox channel ingest-tui --account-key <key> --thread-key <key> --body <text> [--sender-display <name>] [--sender-address <addr>] [--subject <text>]\n  ctox channel list [--db <path>] [--channel <name>] [--limit <n>]\n  ctox channel history --thread-key <key> [--db <path>] [--limit <n>]\n  ctox channel search --query <text> [--db <path>] [--channel <name>] [--sender <addr>] [--limit <n>]\n  ctox channel context --thread-key <key> [--db <path>] [--query <text>] [--sender <addr>] [--limit <n>]\n  ctox channel pipeline-status [--thread-key <key>] [--limit <n>]"
             )
         }
     }
@@ -1315,7 +1720,7 @@ pub(crate) struct FounderReplyAction {
     pub attachments: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct FounderOutboundAction {
     pub account_key: String,
     pub thread_key: String,
@@ -2743,35 +3148,9 @@ fn validate_founder_outbound_email(
         "direct outbound email to founder/owner/admin recipients is blocked without review: {}. Use a reviewed founder-send path.",
         recipient_summary
     );
-    let lowered = request.body.to_ascii_lowercase();
-    let forbidden_markers = [
-        "/home/",
-        "queue:",
-        "runtime/ctox.sqlite3",
-        "strategic direction setup",
-        "review rework",
-        "review-rework",
-        "self-work",
-        "thread_key",
-        "conversation_id",
-        "lease_owner",
-        "route_status",
-        "sqlite",
-        "host-pfad",
-        "host-pfade",
-        "vps-pfad",
-    ];
-    let hits = forbidden_markers
-        .iter()
-        .filter(|marker| lowered.contains(**marker))
-        .copied()
-        .collect::<Vec<_>>();
-    if !hits.is_empty() {
-        anyhow::bail!(
-            "founder/owner outbound email failed communication review due to internal-language leakage: {}",
-            hits.join(", ")
-        );
-    }
+    // Body-content guidance for mandantengerechte mail lives in
+    // `owner-communication/SKILL.md`. CTOX core does not scrape the body for
+    // internal vocabulary — the agent owns the wording, not the harness.
     anyhow::bail!(
         "generic channel send is disabled for founder/owner/admin outbound email: {}. Use the dedicated reviewed founder communication path instead.",
         recipient_summary
@@ -5416,7 +5795,12 @@ mod tests {
     }
 
     #[test]
-    fn founder_outbound_email_rejects_internal_language_even_with_override() {
+    fn founder_outbound_email_does_not_string_scrape_body_content() {
+        // Core no longer scrapes outbound bodies for "internal vocabulary"
+        // substrings. That guidance lives in `owner-communication/SKILL.md`.
+        // Whatever the body contains, the generic `channel send` path is
+        // still blocked for founder/owner/admin recipients — the operator
+        // must use the reviewed founder-outbound pipeline.
         let mut settings = BTreeMap::new();
         settings.insert(
             "CTOX_FOUNDER_EMAIL_ADDRESSES".to_string(),
@@ -5441,11 +5825,16 @@ mod tests {
                 reviewed_founder_send: true,
             },
         )
-        .expect_err("internal leakage should be blocked");
+        .expect_err("generic founder send should still be blocked irrespective of body content");
 
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("internal-language leakage"),
-            "unexpected error: {error}"
+            message.contains("generic channel send is disabled"),
+            "unexpected error: {message}"
+        );
+        assert!(
+            !message.contains("internal-language leakage"),
+            "core must not string-scrape outbound bodies anymore: {message}"
         );
     }
 
@@ -6378,5 +6767,185 @@ mod tests {
             .any(|item| item.message_key == "ctx-4"));
 
         let _ = fs::remove_file(&db_path);
+    }
+
+    // F4: pipeline_status returns a structured snapshot joining mission
+    // state, agent attempts, review/approval rows, and outbound sends for
+    // a given thread_key. The test seeds rows into the runtime db that
+    // `pipeline_status` will resolve via `resolve_db_path(root, None)`.
+    #[test]
+    fn pipeline_status_reports_thread_state() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-pipeline-status-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+
+        let thread_key = "pipeline-status-thread";
+
+        // Seed the channel db with one outbound message and one routing row.
+        let db_path = root.join(DEFAULT_DB_RELATIVE_PATH);
+        let mut conn = open_channel_db(&db_path).expect("open channel db");
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: "outbound-1",
+                channel: "email",
+                account_key: "email:cto1@example.com",
+                thread_key,
+                remote_id: "remote-1",
+                direction: "outbound",
+                folder_hint: "Sent",
+                sender_display: "CTOX",
+                sender_address: "cto1@example.com",
+                recipient_addresses_json: "[\"founder@example.com\"]",
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: "Founder update",
+                preview: "Update for founder.",
+                body_text: "Update for founder.",
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "trusted",
+                status: "sent",
+                seen: true,
+                has_attachments: false,
+                external_created_at: "2026-04-27T10:00:00Z",
+                observed_at: "2026-04-27T10:00:00Z",
+                metadata_json: "{}",
+            },
+        )
+        .expect("failed to upsert outbound");
+
+        // Seed an agent assistant row with structured outcome on the matching conversation_id.
+        let conversation_id =
+            crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(thread_key));
+        let engine = crate::lcm::LcmEngine::open(&db_path, crate::lcm::LcmConfig::default())
+            .expect("open lcm engine");
+        let _ = engine
+            .add_message_with_outcome(
+                conversation_id,
+                "assistant",
+                "(agent turn did not complete)",
+                Some(crate::lcm::AgentOutcome::TurnTimeout),
+            )
+            .expect("seed assistant row");
+        // Bump the failure counter to simulate one failed turn.
+        let _ = engine
+            .increment_mission_agent_failure_count(conversation_id)
+            .expect("bump failure count");
+
+        let report = pipeline_status(&root, Some(thread_key), 10).expect("pipeline status");
+        assert_eq!(report.thread_key.as_deref(), Some(thread_key));
+        assert_eq!(report.send_attempts.len(), 1);
+        assert_eq!(report.send_attempts[0].message_key, "outbound-1");
+        assert_eq!(report.agent_attempts.len(), 1);
+        assert_eq!(
+            report.agent_attempts[0].outcome.as_deref(),
+            Some("TurnTimeout")
+        );
+        assert_eq!(report.agent_failure_count, 1);
+        // No review row was seeded → no founder_outbound_intent.
+        assert!(!report.founder_outbound_intent);
+        assert_eq!(report.rewrite_iteration_count, 0);
+        assert_eq!(report.rework_iteration_count, 1);
+        assert_eq!(report.current_disposition, "RequeueSelfWork");
+        assert!(
+            report.strategic_directive_authority_events.is_empty(),
+            "no strategic-directive authority events seeded → field must be empty"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // E (PR): pipeline_status surfaces strategic-directive owner-authority
+    // governance events that match the thread, but skips events whose
+    // details reference a different thread.
+    #[test]
+    fn pipeline_status_surfaces_strategic_directive_authority_events() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-pipeline-strategy-auth-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(root.join("runtime")).expect("failed to create runtime dir");
+
+        let thread_key = "pipeline-strategy-auth-thread";
+        let conversation_id =
+            crate::execution::agent::turn_loop::conversation_id_for_thread_key(Some(thread_key));
+
+        // Seed two strategic-directive authority events: one matching this
+        // thread, one matching an unrelated thread. Only the first should
+        // surface in the report.
+        let _ = crate::governance::record_event(
+            &root,
+            crate::governance::GovernanceEventRequest {
+                mechanism_id: "strategic_directive_mutation_owner_authorised",
+                conversation_id: Some(conversation_id),
+                severity: "info",
+                reason: "test-permitted",
+                action_taken: "permitted_strategic_directive_mutation",
+                details: serde_json::json!({
+                    "triggered_by_message_key": "owner-msg-A",
+                    "sender_address": "owner@example.com",
+                    "sender_role": "owner",
+                    "directive_kind": "mission",
+                    "attempted_status": "active",
+                    "action": "set",
+                    "thread_key": thread_key,
+                    "conversation_id": conversation_id,
+                }),
+                idempotence_key: Some("test-permitted-A"),
+            },
+        )
+        .expect("record permitted event");
+        let _ = crate::governance::record_event(
+            &root,
+            crate::governance::GovernanceEventRequest {
+                mechanism_id: "strategic_directive_mutation_blocked_non_owner_sender",
+                conversation_id: None,
+                severity: "critical",
+                reason: "test-blocked-other-thread",
+                action_taken: "blocked_strategic_directive_mutation",
+                details: serde_json::json!({
+                    "triggered_by_message_key": "founder-msg-B",
+                    "sender_address": "founder@example.com",
+                    "sender_role": "founder",
+                    "directive_kind": "vision",
+                    "attempted_status": "active",
+                    "action": "set",
+                    "thread_key": "some-other-thread",
+                }),
+                idempotence_key: Some("test-blocked-B"),
+            },
+        )
+        .expect("record blocked event");
+
+        let report = pipeline_status(&root, Some(thread_key), 10).expect("pipeline status");
+        let events = &report.strategic_directive_authority_events;
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly the matching authority event in the per-thread report, got {events:#?}"
+        );
+        assert_eq!(
+            events[0].mechanism_id,
+            "strategic_directive_mutation_owner_authorised"
+        );
+        assert_eq!(events[0].sender_role.as_deref(), Some("owner"));
+        assert_eq!(events[0].directive_kind.as_deref(), Some("mission"));
+        assert_eq!(events[0].action.as_deref(), Some("set"));
+        assert_eq!(
+            events[0].triggered_by_message_key.as_deref(),
+            Some("owner-msg-A")
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

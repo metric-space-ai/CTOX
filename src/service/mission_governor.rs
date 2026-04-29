@@ -193,6 +193,9 @@ mod tests {
             last_synced_at: "2026-04-01T00:00:00Z".to_string(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         }
     }
 

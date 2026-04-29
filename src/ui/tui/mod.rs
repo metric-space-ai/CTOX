@@ -1024,6 +1024,7 @@ impl App {
                 monitor_last_check_at: None,
                 monitor_alerts: Vec::new(),
                 monitor_last_error: None,
+                last_agent_outcome: None,
             });
         let mut app = Self {
             root: root.clone(),
@@ -1657,6 +1658,7 @@ impl App {
                 monitor_last_check_at: None,
                 monitor_alerts: Vec::new(),
                 monitor_last_error: None,
+                last_agent_outcome: None,
             }
         });
         self.request_in_flight = self.service_status.running && self.service_status.busy;
@@ -1837,6 +1839,7 @@ impl App {
                     | "CTOX_CHAT_MODEL_FAMILY"
                     | "CTOX_CHAT_LOCAL_PRESET"
                     | "CTOX_CHAT_MODEL_MAX_CONTEXT"
+                    | "CTOX_CHAT_TURN_TIMEOUT_SECS"
                     | "CTOX_CHAT_SKILL_PRESET"
                     | "CTOX_REFRESH_OUTPUT_BUDGET_PCT"
                     | "CTOX_AUTONOMY_LEVEL"
@@ -2315,7 +2318,9 @@ impl App {
             .unwrap_or_else(|| DEFAULT_CHAT_SOURCE.to_string());
         let use_api_source = !provider.eq_ignore_ascii_case("local")
             && (current_source.eq_ignore_ascii_case("api")
-                || engine::api_provider_supports_model(provider, &current_model));
+                || engine::api_provider_supports_model(provider, &current_model)
+                || (provider.eq_ignore_ascii_case("azure_foundry")
+                    && !azure_deployment_id.trim().is_empty()));
         if let Some(item) = self
             .settings_items
             .iter_mut()
@@ -3899,6 +3904,22 @@ fn load_settings_items(root: &Path) -> Vec<SettingItem> {
             secret: false,
             choices: runtime_plan::supported_chat_context_choices(),
             help: "Choose the target chat context window. CTOX derives runtime planning, compaction floors, and refresh budgets from this setting.",
+            kind: SettingKind::Env,
+        },
+        SettingItem {
+            key: "CTOX_CHAT_TURN_TIMEOUT_SECS",
+            label: "Turn Timeout",
+            value: env_map
+                .get("CTOX_CHAT_TURN_TIMEOUT_SECS")
+                .cloned()
+                .unwrap_or_default(),
+            saved_value: env_map
+                .get("CTOX_CHAT_TURN_TIMEOUT_SECS")
+                .cloned()
+                .unwrap_or_default(),
+            secret: false,
+            choices: vec!["180", "300", "600", "900", "1200", "1800", "2400", "3600"],
+            help: "Maximum wall-clock seconds for a single chat turn. Empty falls back to the built-in default (900s for local Candle, 180s for remote APIs). Raise to 1800s+ for Azure-Foundry-backed owner-visible flows where reviewed-founder-send pipelines can wall-clock 10-30 minutes per turn.",
             kind: SettingKind::Env,
         },
         SettingItem {

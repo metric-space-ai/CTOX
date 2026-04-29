@@ -186,6 +186,46 @@ const DEFAULT_MECHANISMS: &[DefaultMechanism] = &[
         module_hint: "src/mission/tickets.rs",
         description: "Prevents ticket work from entering the active loop unless label binding, dry-run controls, and bundle-gated execution state are all explicit and audit-ready.",
     },
+    DefaultMechanism {
+        mechanism_id: "plan_goal_superseded_for_duplicate_slice",
+        mechanism_class: "safety",
+        autonomy: "autonomous_plan_goal_supersede",
+        prompt_visibility: "inventory_only",
+        module_hint: "src/mission/plan.rs",
+        description: "Marks an older active planned_goal as superseded when a fresh `ctox plan ingest` arrives on the same thread_key, so two competing live goals cannot both light up in a reviewer scan and produce a phantom revision mismatch.",
+    },
+    DefaultMechanism {
+        mechanism_id: "mission_state_field_clobbered_blocked",
+        mechanism_class: "safety",
+        autonomy: "autonomous_mission_state_field_ratchet",
+        prompt_visibility: "inventory_only",
+        module_hint: "src/context/lcm.rs",
+        description: "One-way ratchet on `mission_states.next_slice` and `mission_states.done_gate`: once non-empty, automation may replace them with new non-empty content but cannot silently clear them — surfaces the attempted clobber as a governance event instead.",
+    },
+    DefaultMechanism {
+        mechanism_id: "review_rewrite_threshold",
+        mechanism_class: "safety",
+        autonomy: "autonomous_review_rewrite_threshold",
+        prompt_visibility: "prompt_visible",
+        module_hint: "src/service/service.rs",
+        description: "Stops respawning lightweight rewrite-only review retries once the per-mission convergence threshold is hit; defers the mission and records a governance event so operators see why the loop stopped.",
+    },
+    DefaultMechanism {
+        mechanism_id: "strategic_directive_mutation_blocked_non_owner_sender",
+        mechanism_class: "safety",
+        autonomy: "autonomous_strategic_directive_authority_block",
+        prompt_visibility: "prompt_visible",
+        module_hint: "src/mission/strategy.rs",
+        description: "Blocks an inbound-mail-driven strategic-directive mutation (`ctox strategy set --status active` / `ctox strategy activate`) when the sender of the triggering message is not the configured owner. Owner-authored mail is the canonical authority for active vision/mission/strategy; founder/admin replies may only produce proposals; other senders cannot mutate strategy at all. Operator-direct invocations (no `--triggered-by-inbound`) are unaffected.",
+    },
+    DefaultMechanism {
+        mechanism_id: "strategic_directive_mutation_owner_authorised",
+        mechanism_class: "safety",
+        autonomy: "autonomous_strategic_directive_authority_audit",
+        prompt_visibility: "inventory_only",
+        module_hint: "src/mission/strategy.rs",
+        description: "Records a positive audit trail when an inbound-mail-driven strategic-directive mutation passes the owner-authority gate. Pairs with `strategic_directive_mutation_blocked_non_owner_sender`; together they make the authority decision visible in `ctox channel pipeline-status`.",
+    },
 ];
 
 pub fn handle_governance_command(root: &Path, args: &[String]) -> Result<()> {
@@ -759,7 +799,7 @@ mod tests {
         assert!(block.contains("why:"));
         assert!(!block.contains("Only `survival` and `safety` mechanisms"));
         assert!(
-            block.len() < 800,
+            block.len() < 1024,
             "governance block too large: {}",
             block.len()
         );

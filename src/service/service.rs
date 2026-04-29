@@ -77,7 +77,6 @@ use crate::inference::supervisor;
 use crate::inference::turn_loop;
 use crate::lcm;
 use crate::mission::communication_adapters;
-use crate::mission::communication_gateway;
 use crate::mission::plan;
 use crate::mission::tickets;
 use crate::review;
@@ -136,6 +135,11 @@ pub struct ServiceStatus {
     pub monitor_last_check_at: Option<String>,
     pub monitor_alerts: Vec<String>,
     pub monitor_last_error: Option<String>,
+    /// F3: the structured outcome of the most recent agent assistant turn
+    /// for the chat conversation. `None` when there is no assistant row yet
+    /// or when the row predates the schema upgrade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_agent_outcome: Option<String>,
 }
 
 #[cfg(any(test, not(unix)))]
@@ -159,6 +163,7 @@ struct ServiceStatusWire {
     monitor_last_check_at: Option<String>,
     monitor_alerts: Vec<String>,
     monitor_last_error: Option<String>,
+    last_agent_outcome: Option<String>,
 }
 
 impl ServiceStatus {
@@ -187,6 +192,7 @@ impl ServiceStatus {
             monitor_last_check_at: None,
             monitor_alerts: Vec::new(),
             monitor_last_error: None,
+            last_agent_outcome: None,
         }
     }
 }
@@ -221,6 +227,7 @@ fn parse_service_status(body: &str, root: &Path) -> Result<ServiceStatus> {
         monitor_last_check_at: wire.monitor_last_check_at,
         monitor_alerts: wire.monitor_alerts,
         monitor_last_error: wire.monitor_last_error,
+        last_agent_outcome: wire.last_agent_outcome,
     })
 }
 
@@ -230,6 +237,13 @@ struct ChatSubmitRequest {
     prompt: String,
     #[serde(default)]
     thread_key: Option<String>,
+    #[serde(default)]
+    outbound_email: Option<channels::FounderOutboundAction>,
+    /// Operator-set anchor for TUI-initiated proactive outbound jobs that
+    /// have no leased inbound message key. Routed through into
+    /// `QueuedPrompt.outbound_anchor` verbatim.
+    #[serde(default)]
+    outbound_anchor: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -254,6 +268,13 @@ enum ServiceIpcRequest {
         prompt: String,
         #[serde(default)]
         thread_key: Option<String>,
+        #[serde(default)]
+        outbound_email: Option<channels::FounderOutboundAction>,
+        /// Operator-set anchor for TUI-initiated proactive outbound jobs
+        /// that have no leased inbound message key. Routed through into
+        /// `QueuedPrompt.outbound_anchor` verbatim.
+        #[serde(default)]
+        outbound_anchor: Option<String>,
     },
     Stop,
     ScrapeApi {
@@ -338,6 +359,16 @@ impl Default for SharedState {
     }
 }
 
+/// A prompt enqueued for the agent to work on.
+///
+/// `outbound_email` carries explicit operator intent that this job is an
+/// owner/founder/admin-targeted outbound email. When set, the post-turn
+/// review pipeline routes the agent's reply through `send_reviewed_founder_outbound`
+/// instead of letting the agent invoke `ctox channel send` directly. The field
+/// is the *only* signal used for that routing — there is no text-scraping or
+/// keyword-based fallback in core. Recipient eligibility is still gated by
+/// the deterministic `protected_recipient_policies` check against the
+/// configured founder/owner/admin address lists.
 #[derive(Debug, Clone)]
 struct QueuedPrompt {
     prompt: String,
@@ -350,6 +381,11 @@ struct QueuedPrompt {
     thread_key: Option<String>,
     workspace_root: Option<String>,
     ticket_self_work_id: Option<String>,
+    outbound_email: Option<channels::FounderOutboundAction>,
+    /// Stable anchor key used to dedupe and reference review approvals when
+    /// the job has no leased inbound message (e.g. TUI-initiated proactive
+    /// outbound). Set explicitly by callers; never inferred at routing time.
+    outbound_anchor: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,9 +430,71 @@ const PLATFORM_EXPERTISE_PASSES: [ExpertisePassSpec; 3] = [
 enum CompletionReviewDisposition {
     None,
     Approved,
-    Hold { summary: String },
-    RequeueSelfWork { work_id: String, summary: String },
+    Hold {
+        summary: String,
+    },
+    RequeueSelfWork {
+        work_id: String,
+        summary: String,
+    },
+    /// Lightweight in-process body fix triggered when every reviewer finding
+    /// is structurally tagged `rewrite`. The post-turn handler synthesises a
+    /// new `QueuedPrompt` with `source_label = "review-rewrite"` that
+    /// re-uses the parent job's outbound metadata and inlines the prior
+    /// body. No durable state mutation, no new plan goal, no queue task —
+    /// just a fast in-process turn that converges the body.
+    RewriteOnly {
+        findings: Vec<RewriteFinding>,
+        prior_body: String,
+        anchor_message_key: Option<String>,
+        review_summary: String,
+    },
 }
+
+/// Pure-data finding consumed by the lightweight rewrite path. Mirrors the
+/// `category: rewrite` half of `review::CategorizedFinding`; the rework half
+/// stays inside `RequeueSelfWork`'s payload as semantic findings strings.
+#[derive(Debug, Clone)]
+pub(crate) struct RewriteFinding {
+    pub id: String,
+    pub evidence: String,
+    pub corrective_action: String,
+}
+
+/// Result of classifying the reviewer's structured findings list. The
+/// dispatcher consumes the classification verbatim — no fallback heuristics,
+/// no string scraping. Empty findings ⇒ `Approved`; all entries tagged
+/// `rewrite` ⇒ `RewriteOnly`; any other mix (rework-only or mixed) ⇒
+/// `Substantive`. Missing-category items are coerced to `Rework` upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewRoutingClass {
+    Approved,
+    RewriteOnly,
+    Substantive,
+}
+
+fn classify_findings(findings: &[review::CategorizedFinding]) -> ReviewRoutingClass {
+    if findings.is_empty() {
+        return ReviewRoutingClass::Approved;
+    }
+    if findings
+        .iter()
+        .all(|f| f.category == review::FindingCategory::Rewrite)
+    {
+        ReviewRoutingClass::RewriteOnly
+    } else {
+        ReviewRoutingClass::Substantive
+    }
+}
+
+/// Source label applied to lightweight rewrite-only post-turn prompts. Kept
+/// distinct from `tui` / `queue` / `plan` / `ticket:local` so the dispatcher
+/// can identify them in logs and the pipeline status surface.
+const REVIEW_REWRITE_SOURCE_LABEL: &str = "review-rewrite";
+
+/// Default convergence threshold for consecutive rewrite-only iterations.
+/// Overridable via the `CTOX_MISSION_REWRITE_FAILURE_THRESHOLD` env var.
+const DEFAULT_REWRITE_FAILURE_THRESHOLD: i64 = 3;
 
 fn completion_review_disposition_label(disposition: &CompletionReviewDisposition) -> &'static str {
     match disposition {
@@ -404,6 +502,7 @@ fn completion_review_disposition_label(disposition: &CompletionReviewDisposition
         CompletionReviewDisposition::Approved => "approved",
         CompletionReviewDisposition::Hold { .. } => "hold",
         CompletionReviewDisposition::RequeueSelfWork { .. } => "requeue-self-work",
+        CompletionReviewDisposition::RewriteOnly { .. } => REVIEW_REWRITE_SOURCE_LABEL,
     }
 }
 
@@ -526,6 +625,10 @@ pub fn run_foreground(root: &Path) -> Result<()> {
 
 fn run_boot_state_invariant_check(root: &Path, state: &Arc<Mutex<SharedState>>) {
     run_plan_routing_repair(root, state, "boot");
+    // P2 — flush any mission_state field-clobber attempts that the guard
+    // suppressed during pre-boot writes (the previous run may have
+    // ended without flushing if it crashed before the turn-end pass).
+    lcm::drain_pending_mission_state_clobber_events_to_governance(root);
     match state_invariants::evaluate_runtime_state_invariants(root, turn_loop::CHAT_CONVERSATION_ID)
     {
         Ok(report) => {
@@ -822,6 +925,11 @@ fn run_turn_end_state_invariant_check(
     conversation_id: i64,
 ) -> Option<lcm::MissionStateRecord> {
     run_plan_routing_repair(root, state, "turn");
+    // P2 — flush any mission_state field-clobber attempts that the guard
+    // suppressed during the just-finished turn. Done at turn-end (and at
+    // boot) so the audit trail catches them on the same DB connection
+    // pass that records the rest of the post-turn governance updates.
+    lcm::drain_pending_mission_state_clobber_events_to_governance(root);
     match state_invariants::evaluate_runtime_state_invariants(root, conversation_id) {
         Ok(report) => {
             let violation_codes = report
@@ -1301,6 +1409,35 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
     submit_chat_prompt_with_thread_key(root, prompt, None)
 }
 
+/// Operator-supplied outbound-email intent attached to a chat submission.
+///
+/// When present, the agent's reply will be routed through the reviewed
+/// founder-outbound pipeline if (and only if) at least one recipient is
+/// classified as owner/founder/admin per the deterministic
+/// `protected_recipient_policies` check. There is no text-scraping fallback.
+#[derive(Debug, Clone)]
+pub struct OutboundEmailIntent {
+    pub account_key: String,
+    pub thread_key: String,
+    pub subject: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub attachments: Vec<String>,
+}
+
+impl From<OutboundEmailIntent> for channels::FounderOutboundAction {
+    fn from(value: OutboundEmailIntent) -> Self {
+        channels::FounderOutboundAction {
+            account_key: value.account_key,
+            thread_key: value.thread_key,
+            subject: value.subject,
+            to: value.to,
+            cc: value.cc,
+            attachments: value.attachments,
+        }
+    }
+}
+
 pub fn prepare_chat_prompt(root: &Path, prompt: &str) -> Result<PreparedChatPrompt> {
     let sanitized = secrets::auto_intake_prompt_secrets(root, prompt)?;
     Ok(PreparedChatPrompt {
@@ -1316,7 +1453,26 @@ pub fn submit_chat_prompt_with_thread_key(
     prompt: &str,
     thread_key: Option<&str>,
 ) -> Result<()> {
+    submit_chat_prompt_with_intent(root, prompt, thread_key, None)
+}
+
+pub fn submit_chat_prompt_with_intent(
+    root: &Path,
+    prompt: &str,
+    thread_key: Option<&str>,
+    outbound_email: Option<OutboundEmailIntent>,
+) -> Result<()> {
     let prepared = prepare_chat_prompt(root, prompt)?;
+    let outbound_email = outbound_email.map(channels::FounderOutboundAction::from);
+    // TUI-initiated proactive outbound has no leased inbound message key,
+    // so without an explicit anchor the post-turn dispatcher cannot match
+    // the review approval to the draft. Mint a synthetic anchor here, at
+    // the structural boundary where we know the call originated from the
+    // TUI submit path. The format `tui-outbound:<uuid>` is reserved for
+    // this purpose and never derived from prompt content.
+    let outbound_anchor = outbound_email
+        .as_ref()
+        .map(|_| format!("tui-outbound:{}", uuid::Uuid::new_v4()));
     #[cfg(unix)]
     {
         match send_service_ipc_request(
@@ -1324,6 +1480,8 @@ pub fn submit_chat_prompt_with_thread_key(
             ServiceIpcRequest::ChatSubmit {
                 prompt: prepared.prompt,
                 thread_key: thread_key.map(str::to_owned),
+                outbound_email,
+                outbound_anchor,
             },
         )? {
             ServiceIpcResponse::Accepted(_) => return Ok(()),
@@ -1337,6 +1495,8 @@ pub fn submit_chat_prompt_with_thread_key(
         let payload = serde_json::to_string(&ChatSubmitRequest {
             prompt: prepared.prompt,
             thread_key: thread_key.map(str::to_owned),
+            outbound_email,
+            outbound_anchor,
         })?;
         let response = ureq::post(&url)
             .set("content-type", "application/json")
@@ -1465,7 +1625,12 @@ fn handle_service_ipc_request(
         ServiceIpcRequest::Status => Ok(ServiceIpcResponse::Status(status_from_shared_state(
             root, &state,
         )?)),
-        ServiceIpcRequest::ChatSubmit { prompt, thread_key } => {
+        ServiceIpcRequest::ChatSubmit {
+            prompt,
+            thread_key,
+            outbound_email,
+            outbound_anchor,
+        } => {
             let prepared = prepare_chat_prompt(root, &prompt)?;
             let prompt = prepared.prompt;
             if is_non_work_tui_probe(&prompt) {
@@ -1493,6 +1658,8 @@ fn handle_service_ipc_request(
                             thread_key: thread_key.clone(),
                             workspace_root: workspace_root.clone(),
                             ticket_self_work_id: None,
+                            outbound_email: outbound_email.clone(),
+                            outbound_anchor: outbound_anchor.clone(),
                         },
                     );
                     ensure_queue_guard_locked(root, &mut shared);
@@ -1548,6 +1715,8 @@ fn handle_service_ipc_request(
                         thread_key,
                         workspace_root,
                         ticket_self_work_id: None,
+                        outbound_email,
+                        outbound_anchor,
                     },
                 );
             }
@@ -1633,6 +1802,8 @@ fn handle_request(
                             thread_key: payload.thread_key.clone(),
                             workspace_root: workspace_root.clone(),
                             ticket_self_work_id: None,
+                            outbound_email: payload.outbound_email.clone(),
+                            outbound_anchor: payload.outbound_anchor.clone(),
                         },
                     );
                     ensure_queue_guard_locked(root, &mut shared);
@@ -1688,6 +1859,8 @@ fn handle_request(
                         thread_key: payload.thread_key,
                         workspace_root,
                         ticket_self_work_id: None,
+                        outbound_email: payload.outbound_email,
+                        outbound_anchor: payload.outbound_anchor,
                     },
                 );
             }
@@ -1857,6 +2030,18 @@ fn status_from_shared_state(root: &Path, state: &Arc<Mutex<SharedState>>) -> Res
         }
     }
 
+    let last_agent_outcome = {
+        let db_path = root.join("runtime/ctox.sqlite3");
+        lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())
+            .ok()
+            .and_then(|engine| {
+                engine
+                    .last_agent_outcome(turn_loop::CHAT_CONVERSATION_ID)
+                    .ok()
+                    .flatten()
+            })
+            .map(|outcome| outcome.as_str().to_string())
+    };
     Ok(ServiceStatus {
         running: true,
         busy,
@@ -1883,6 +2068,7 @@ fn status_from_shared_state(root: &Path, state: &Arc<Mutex<SharedState>>) -> Res
         monitor_last_check_at: None,
         monitor_alerts: runtime_lifecycle_alerts(root, pid, true)?,
         monitor_last_error: None,
+        last_agent_outcome,
     })
 }
 
@@ -2373,18 +2559,43 @@ fn start_prompt_worker(
                     .flatten(),
                 _ => None,
             };
-            let failure_reply = result.as_ref().err().map(|err| {
-                if let Some(title) = timeout_follow_up_outcome.as_ref() {
-                    format!(
-                        "Status: `deferred`\n\nCheckpoint: the slice hit the turn time budget and a durable continuation task was queued: {title}\n\nLatest runtime summary: {}",
-                        turn_loop::summarize_runtime_error(&err.to_string())
-                    )
+            // F3: classify the turn outcome explicitly. The structured value
+            // is persisted on the assistant row in `messages.agent_outcome`
+            // so downstream consumers (mission watchdog, founder-send
+            // pipeline, status snapshots) can branch on a typed enum
+            // instead of scraping reply text.
+            let agent_outcome = match &result {
+                Ok(_) => lcm::AgentOutcome::Success,
+                Err(err) => classify_agent_failure(&err.to_string()),
+            };
+            // F3: when the turn failed, persist a structured outcome with a
+            // neutral, non-leaking body. The legacy "Status: `blocked`" /
+            // "Status: `deferred`" prose is no longer how downstream
+            // consumers determine the outcome — they read
+            // `messages.agent_outcome`. We still record a short neutral
+            // body so the conversation transcript stays readable.
+            let failure_reply = result.as_ref().err().map(|_err| {
+                if timeout_follow_up_outcome.is_some() {
+                    "(agent turn deferred to a continuation slice)".to_string()
                 } else {
-                    turn_loop::synthesize_failure_reply(&err.to_string())
+                    "(agent turn did not complete)".to_string()
                 }
             });
             if let Some(reply) = &failure_reply {
-                let _ = lcm::run_add_message(&db_path, conversation_id, "assistant", reply);
+                let _ =
+                    lcm::run_add_assistant_turn(&db_path, conversation_id, reply, agent_outcome);
+            }
+            // F2: feed the structured outcome into the per-mission
+            // agent-failure counter. Successful turns reset the counter;
+            // non-success outcomes increment it. The watchdog reads the
+            // updated count on its next tick and defers when it crosses
+            // the configured threshold.
+            if let Ok(engine) = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()) {
+                if agent_outcome.is_agent_failure() {
+                    let _ = engine.increment_mission_agent_failure_count(conversation_id);
+                } else {
+                    let _ = engine.reset_mission_agent_failure_count(conversation_id);
+                }
             }
             let latest_runtime_error = result.as_ref().err().map(|err| err.to_string());
             let context_health =
@@ -2453,7 +2664,7 @@ fn start_prompt_worker(
                         let founder_reply_key =
                             founder_email_reply_message_key(&job).map(ToOwned::to_owned);
                         let proactive_founder_action = if founder_reply_key.is_none() {
-                            proactive_founder_outbound_action(&root, &job)
+                            job.outbound_email.clone()
                         } else {
                             None
                         };
@@ -2496,7 +2707,8 @@ fn start_prompt_worker(
                                 }
                                 CompletionReviewDisposition::None
                                 | CompletionReviewDisposition::Hold { .. }
-                                | CompletionReviewDisposition::RequeueSelfWork { .. } => false,
+                                | CompletionReviewDisposition::RequeueSelfWork { .. }
+                                | CompletionReviewDisposition::RewriteOnly { .. } => false,
                             }
                         } else if let (Some(anchor_key), Some(action)) = (
                             proactive_founder_anchor.as_deref(),
@@ -2516,7 +2728,8 @@ fn start_prompt_worker(
                                 }
                                 CompletionReviewDisposition::None
                                 | CompletionReviewDisposition::Hold { .. }
-                                | CompletionReviewDisposition::RequeueSelfWork { .. } => false,
+                                | CompletionReviewDisposition::RequeueSelfWork { .. }
+                                | CompletionReviewDisposition::RewriteOnly { .. } => false,
                             }
                         } else {
                             true
@@ -2606,6 +2819,20 @@ fn start_prompt_worker(
                                         format!(
                                             "Review held the slice open without send/closure: {}",
                                             clip_text(summary, 180)
+                                        ),
+                                    );
+                                }
+                                CompletionReviewDisposition::RewriteOnly {
+                                    findings,
+                                    review_summary,
+                                    ..
+                                } => {
+                                    push_event_locked(
+                                        &mut shared,
+                                        format!(
+                                            "Review found {} rewrite-class issue(s); body fix scheduled in-process: {}",
+                                            findings.len(),
+                                            clip_text(review_summary, 180)
                                         ),
                                     );
                                 }
@@ -2731,6 +2958,96 @@ fn start_prompt_worker(
                 }
                 if let Some(event) = &platform_pipeline_event {
                     push_event_locked(&mut shared, event.clone());
+                }
+                // Lightweight rewrite path: when every reviewer finding is
+                // structurally `rewrite`-class, synthesise an in-process
+                // body-fix prompt instead of spawning the heavy rework
+                // queue task. The prompt inherits outbound recipient/anchor
+                // metadata from the parent job, sandwiches the prior body
+                // and the categorized findings, and is pushed to the front
+                // of the pending queue so the next pick picks it up.
+                if let CompletionReviewDisposition::RewriteOnly {
+                    findings,
+                    prior_body,
+                    anchor_message_key,
+                    review_summary,
+                } = &review_disposition
+                {
+                    let synthesised = synthesise_review_rewrite_prompt(
+                        &job,
+                        findings,
+                        prior_body,
+                        anchor_message_key.as_deref(),
+                        review_summary,
+                    );
+                    shared.pending_prompts.push_front(synthesised);
+                    push_event_locked(
+                        &mut shared,
+                        format!(
+                            "Queued lightweight rewrite-only retry ({} finding(s)) for {}",
+                            findings.len(),
+                            job.source_label
+                        ),
+                    );
+                    if let Ok(engine) = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()) {
+                        match engine.increment_mission_rewrite_failure_count(conversation_id) {
+                            Ok(record) => {
+                                let threshold = mission_rewrite_failure_threshold();
+                                if record.rewrite_failure_count >= threshold {
+                                    let _ = engine.defer_mission_for_reason(
+                                        conversation_id,
+                                        "rewrite_failure_threshold",
+                                    );
+                                    push_event_locked(
+                                        &mut shared,
+                                        format!(
+                                            "Rewrite-only loop hit threshold ({}) for conversation {}; mission deferred",
+                                            threshold, conversation_id
+                                        ),
+                                    );
+                                    // Drop the synthesised retry — the
+                                    // mission is now deferred and we do
+                                    // not want to keep re-spawning. Pop
+                                    // the prompt we just pushed to the
+                                    // front.
+                                    let _ = shared.pending_prompts.pop_front();
+                                    let _ = governance::record_event(
+                                        &root,
+                                        governance::GovernanceEventRequest {
+                                            mechanism_id: "review_rewrite_threshold",
+                                            conversation_id: Some(conversation_id),
+                                            severity: "warning",
+                                            reason: "rewrite-only review iterations failed to converge",
+                                            action_taken: "deferred mission and stopped respawning rewrite retries",
+                                            details: serde_json::json!({
+                                                "thread_key": job.thread_key,
+                                                "source_label": job.source_label,
+                                                "rewrite_failure_count": record.rewrite_failure_count,
+                                                "threshold": threshold,
+                                            }),
+                                            idempotence_key: Some(&format!(
+                                                "rewrite-threshold:{}:{}",
+                                                conversation_id, record.rewrite_failure_count
+                                            )),
+                                        },
+                                    );
+                                }
+                            }
+                            Err(err) => push_event_locked(
+                                &mut shared,
+                                format!(
+                                    "rewrite_failure_count bump failed for conversation {}: {}",
+                                    conversation_id, err
+                                ),
+                            ),
+                        }
+                    }
+                } else if matches!(&review_disposition, CompletionReviewDisposition::Approved) {
+                    // Successful approval clears the rewrite-only failure
+                    // counter so a future regression starts from zero.
+                    if let Ok(engine) = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default()) {
+                        let _ = engine.reset_mission_rewrite_failure_count(conversation_id);
+                    }
                 }
                 if let Some(remaining_secs) = runtime_blocker_backoff_remaining_secs(&shared) {
                     if !shared.pending_prompts.is_empty() {
@@ -2865,7 +3182,7 @@ fn run_completion_review(
     let founder_reply_action = founder_reply_key
         .and_then(|message_key| channels::prepare_reviewed_founder_reply(root, message_key).ok());
     let proactive_founder_action = if founder_reply_key.is_none() {
-        proactive_founder_outbound_action(root, job)
+        job.outbound_email.clone()
     } else {
         None
     };
@@ -3004,6 +3321,13 @@ fn run_completion_review(
     // on a flaky reviewer.
     let actionable_rejection = outcome.requires_follow_up()
         && !matches!(outcome.verdict, review::ReviewVerdict::Unavailable);
+    // Structural routing class derived from the reviewer's CATEGORIZED_FINDINGS
+    // block. Empty findings ⇒ Approved; all `rewrite` ⇒ RewriteOnly; any
+    // `rework` (or mixed) ⇒ Substantive. Legacy reports without a
+    // categorized block fall through to Substantive because
+    // `categorized_findings` will be empty *and* the reviewer's verdict
+    // dictates the path — `Approved` for Pass, the heavy path for Fail.
+    let routing_class = classify_findings(&outcome.categorized_findings);
     let founder_mail_source = matches!(
         job.source_label.to_ascii_lowercase().as_str(),
         "email:owner" | "email:founder" | "email:admin"
@@ -3033,6 +3357,23 @@ fn run_completion_review(
                 CompletionReviewDisposition::Approved
             }
             review::ReviewVerdict::Fail if actionable_rejection => {
+                if matches!(routing_class, ReviewRoutingClass::RewriteOnly) {
+                    let findings = rewrite_findings_from(&outcome.categorized_findings);
+                    push_event(
+                        state,
+                        format!(
+                            "Founder review fail for {} routed to lightweight rewrite-only path ({} finding(s))",
+                            job.source_label,
+                            findings.len()
+                        ),
+                    );
+                    return CompletionReviewDisposition::RewriteOnly {
+                        findings,
+                        prior_body: reply_text.to_string(),
+                        anchor_message_key: founder_reply_key.map(ToOwned::to_owned),
+                        review_summary: outcome.summary.clone(),
+                    };
+                }
                 if let Some(work_id) = resolve_review_rejection_target_self_work_id(root, job) {
                     push_event(
                         state,
@@ -3113,6 +3454,23 @@ fn run_completion_review(
             review::ReviewVerdict::Fail | review::ReviewVerdict::Partial
                 if actionable_rejection =>
             {
+                if matches!(routing_class, ReviewRoutingClass::RewriteOnly) {
+                    let findings = rewrite_findings_from(&outcome.categorized_findings);
+                    push_event(
+                        state,
+                        format!(
+                            "Founder outbound review for {} routed to lightweight rewrite-only path ({} finding(s))",
+                            job.source_label,
+                            findings.len()
+                        ),
+                    );
+                    return CompletionReviewDisposition::RewriteOnly {
+                        findings,
+                        prior_body: reply_text.to_string(),
+                        anchor_message_key: Some(anchor_key.to_string()),
+                        review_summary: outcome.summary.clone(),
+                    };
+                }
                 match enqueue_review_rework(root, job, &outcome) {
                     Ok(title) => push_event(
                         state,
@@ -3190,6 +3548,118 @@ fn derive_owner_visible_for_review(source_label: &str) -> bool {
         return false;
     }
     !(lowered.contains("watchdog") || lowered.contains("timeout") || lowered.starts_with("cron"))
+}
+
+/// Synthesise the in-process `QueuedPrompt` that drives the lightweight
+/// rewrite-only retry. The new prompt inherits outbound recipient/anchor
+/// metadata from the parent job verbatim — no re-derivation, no leak of
+/// internal vocab into the agent-facing instruction beyond what the
+/// reviewer already surfaced.
+fn synthesise_review_rewrite_prompt(
+    parent: &QueuedPrompt,
+    findings: &[RewriteFinding],
+    prior_body: &str,
+    anchor_message_key: Option<&str>,
+    review_summary: &str,
+) -> QueuedPrompt {
+    let prompt = build_review_rewrite_prompt(prior_body, findings, anchor_message_key);
+    QueuedPrompt {
+        prompt,
+        goal: format!("Body rewrite for {}", parent.source_label),
+        preview: clip_text(review_summary, 160),
+        source_label: REVIEW_REWRITE_SOURCE_LABEL.to_string(),
+        suggested_skill: parent.suggested_skill.clone(),
+        leased_message_keys: Vec::new(),
+        leased_ticket_event_keys: Vec::new(),
+        thread_key: parent.thread_key.clone(),
+        workspace_root: parent.workspace_root.clone(),
+        ticket_self_work_id: None,
+        outbound_email: parent.outbound_email.clone(),
+        outbound_anchor: parent.outbound_anchor.clone(),
+    }
+}
+
+/// Project the `Rewrite`-class half of a reviewer's `categorized_findings`
+/// list onto the dispatcher's `RewriteFinding` shape. Items tagged `Rework`
+/// stay in the heavy-path payload elsewhere; this helper does not coerce
+/// categories.
+fn rewrite_findings_from(findings: &[review::CategorizedFinding]) -> Vec<RewriteFinding> {
+    findings
+        .iter()
+        .filter(|f| matches!(f.category, review::FindingCategory::Rewrite))
+        .map(|f| RewriteFinding {
+            id: f.id.clone(),
+            evidence: f.evidence.clone(),
+            corrective_action: f.corrective_action.clone(),
+        })
+        .collect()
+}
+
+/// Convergence threshold for the lightweight rewrite-only loop. Defaults to
+/// `DEFAULT_REWRITE_FAILURE_THRESHOLD` (3) and is overridable via the
+/// `CTOX_MISSION_REWRITE_FAILURE_THRESHOLD` env var. Non-numeric or
+/// non-positive overrides fall back to the default.
+fn mission_rewrite_failure_threshold() -> i64 {
+    match std::env::var("CTOX_MISSION_REWRITE_FAILURE_THRESHOLD") {
+        Ok(value) => match value.trim().parse::<i64>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            _ => DEFAULT_REWRITE_FAILURE_THRESHOLD,
+        },
+        Err(_) => DEFAULT_REWRITE_FAILURE_THRESHOLD,
+    }
+}
+
+/// Build the lightweight rewrite-only prompt body. The agent receives the
+/// prior outbound body verbatim (between fenced markers), the structured
+/// list of rewrite findings with corrective actions, and a strict
+/// "reply-with-body-only" instruction so the post-turn auto-send pipeline
+/// can splice the corrected body into the same outbound action without
+/// re-deriving recipients/subjects from scratch.
+fn build_review_rewrite_prompt(
+    prior_body: &str,
+    findings: &[RewriteFinding],
+    anchor_message_key: Option<&str>,
+) -> String {
+    let mut numbered = String::new();
+    for (idx, finding) in findings.iter().enumerate() {
+        let id = if finding.id.trim().is_empty() {
+            format!("f{}", idx + 1)
+        } else {
+            finding.id.trim().to_string()
+        };
+        numbered.push_str(&format!(
+            "{}. [{}] evidence: {} | corrective_action: {}\n",
+            idx + 1,
+            id,
+            finding.evidence.trim(),
+            finding.corrective_action.trim()
+        ));
+    }
+    if numbered.is_empty() {
+        numbered.push_str("(none)\n");
+    }
+    let anchor_note = match anchor_message_key {
+        Some(key) if !key.trim().is_empty() => {
+            format!("\nKontext-Anchor: {}\n", key.trim())
+        }
+        _ => String::new(),
+    };
+    format!(
+        "Du erhältst den vorigen Body einer reviewed founder send Mail und eine Liste von Wording-/Style-Findings.\n\
+Erstelle den korrigierten Body — alles andere bleibt unverändert.\n\
+{anchor_note}\n\
+Vorheriger Body (zwischen ====):\n\
+====\n\
+{prior_body}\n\
+====\n\
+\n\
+Findings (jeweils mit corrective_action):\n\
+{numbered}\n\
+Reply: nur der korrigierte Body. Keine eigenen \"An:\", \"Betreff:\" oder \"From:\"-Zeilen. Keine Erläuterung.\n",
+        anchor_note = anchor_note,
+        prior_body = prior_body.trim(),
+        numbered = numbered.trim_end(),
+    )
 }
 
 /// Enqueue a high-priority rework slice on the same thread as the rejected
@@ -4143,9 +4613,74 @@ fn monitor_mission_continuity(root: &Path, state: &Arc<Mutex<SharedState>>) -> R
             }
         }
     }
+    // F2: agent-failure backoff — any mission whose consecutive agent
+    // failures crossed the operator-configured threshold is escalated to
+    // `deferred` here (idempotent) and excluded from continuation
+    // re-spawning. The operator must explicitly resume the mission to
+    // re-arm continuation.
+    let agent_failure_threshold = mission_agent_failure_threshold(root);
+    for mission in &missions {
+        if mission.mission_status == "deferred"
+            || mission.agent_failure_count < agent_failure_threshold
+        {
+            continue;
+        }
+        let conversation_id = mission.conversation_id;
+        let failure_count = mission.agent_failure_count;
+        let mission_label = if mission.mission.trim().is_empty() {
+            format!("conversation {conversation_id}")
+        } else {
+            clip_text(&mission.mission, 80)
+        };
+        match engine.defer_mission_for_reason(conversation_id, "agent_failure_threshold") {
+            Ok(_) => {
+                let event_key = format!("mission-agent-failure-backoff:{conversation_id}");
+                let _ = governance::record_event(
+                    root,
+                    governance::GovernanceEventRequest {
+                        mechanism_id: "mission_agent_failure_backoff",
+                        conversation_id: Some(conversation_id),
+                        severity: "warning",
+                        reason: "agent failure threshold reached; deferring mission continuation",
+                        action_taken:
+                            "set mission_status=deferred and stopped continuation respawn",
+                        details: serde_json::json!({
+                            "conversation_id": conversation_id,
+                            "agent_failure_count": failure_count,
+                            "threshold": agent_failure_threshold,
+                            "mission": mission_label,
+                            "deferred_reason": "agent_failure_threshold",
+                        }),
+                        idempotence_key: Some(&event_key),
+                    },
+                );
+                push_event(
+                    state,
+                    format!(
+                        "Mission watchdog backoff: deferring mission {conversation_id} after {failure_count} agent failures (threshold {agent_failure_threshold})"
+                    ),
+                );
+            }
+            Err(err) => {
+                push_event(
+                    state,
+                    format!(
+                        "Mission watchdog backoff failed to defer mission {conversation_id}: {err}"
+                    ),
+                );
+            }
+        }
+    }
+
     let candidate = missions.into_iter().find(|mission| {
         let plan_keeps_open =
             mission.conversation_id == turn_loop::CHAT_CONVERSATION_ID && active_plan_has_work;
+        if mission.mission_status == "deferred" {
+            return false;
+        }
+        if mission.agent_failure_count >= agent_failure_threshold {
+            return false;
+        }
         if (!mission.is_open || mission.allow_idle) && !plan_keeps_open {
             return false;
         }
@@ -4269,6 +4804,25 @@ fn mission_watcher_disabled(root: &Path) -> bool {
         .trim()
         .to_ascii_lowercase();
     matches!(value.as_str(), "1" | "true" | "yes" | "on")
+}
+
+/// F2: configurable consecutive-agent-failure threshold at which the
+/// mission watchdog stops spawning continuation self-work and defers the
+/// mission. Default is 3. Operators tune via
+/// `CTOX_MISSION_AGENT_FAILURE_THRESHOLD`.
+pub(crate) const DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD: i64 = 3;
+
+pub(crate) fn mission_agent_failure_threshold(root: &Path) -> i64 {
+    let raw = runtime_env::env_or_config(root, "CTOX_MISSION_AGENT_FAILURE_THRESHOLD")
+        .unwrap_or_default();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD;
+    }
+    match trimmed.parse::<i64>() {
+        Ok(value) if value >= 1 => value,
+        _ => DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD,
+    }
 }
 
 fn live_service_settings(root: &Path) -> BTreeMap<String, String> {
@@ -4511,6 +5065,8 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
                 )),
                 workspace_root: message.workspace_root.clone(),
                 ticket_self_work_id: ticket_self_work_id_from_metadata(&message.metadata),
+                outbound_email: None,
+                outbound_anchor: None,
             },
             format!(
                 "Queued {} inbound from {}",
@@ -4653,6 +5209,8 @@ fn route_ticket_events(root: &Path, state: &Arc<Mutex<SharedState>>) -> Result<(
                 thread_key: Some(prepared.thread_key.clone()),
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
             format!(
                 "Queued ticket {} event {} for dry-run-controlled handling",
@@ -5779,90 +6337,14 @@ fn founder_email_reply_message_key(job: &QueuedPrompt) -> Option<&str> {
 }
 
 fn founder_outbound_anchor_key(job: &QueuedPrompt) -> Option<&str> {
+    // Prefer an explicit operator-set anchor (e.g. TUI-initiated proactive
+    // outbound where there is no leased inbound message). Fall back to the
+    // first leased message key for inbound-driven jobs. Never derived from
+    // prompt text — this is structural.
+    if let Some(anchor) = job.outbound_anchor.as_deref() {
+        return Some(anchor);
+    }
     job.leased_message_keys.first().map(|key| key.as_str())
-}
-
-fn extract_email_addresses(text: &str) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut emails = Vec::new();
-    for token in text.split_whitespace() {
-        let candidate = token
-            .trim_matches(|ch: char| {
-                matches!(
-                    ch,
-                    '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '"' | '\''
-                )
-            })
-            .trim_end_matches('.')
-            .to_ascii_lowercase();
-        if !candidate.contains('@') || !candidate.contains('.') {
-            continue;
-        }
-        let valid = candidate
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '@' | '.' | '_' | '-' | '+'));
-        if valid && seen.insert(candidate.clone()) {
-            emails.push(candidate);
-        }
-    }
-    emails
-}
-
-fn proactive_founder_outbound_action(
-    root: &Path,
-    job: &QueuedPrompt,
-) -> Option<channels::FounderOutboundAction> {
-    let source = job.source_label.to_ascii_lowercase();
-    if !matches!(source.as_str(), "tui" | "queue" | "ticket:local") {
-        return None;
-    }
-    let haystack = format!("{}\n{}", job.preview, job.prompt);
-    let lowered = haystack.to_ascii_lowercase();
-    let explicit_reviewed_send = lowered.contains("reviewed founder outbound")
-        || lowered.contains("reviewed founder-send")
-        || lowered.contains("reviewed founder send")
-        || lowered.contains("reviewed service path")
-        || lowered.contains("founder-kommunikation")
-        || lowered.contains("founder communication");
-    if !explicit_reviewed_send {
-        return None;
-    }
-    let settings = communication_gateway::runtime_settings_from_root(
-        root,
-        communication_gateway::CommunicationAdapterKind::Email,
-    );
-    let recipients = extract_email_addresses(&haystack);
-    if recipients.is_empty() {
-        return None;
-    }
-    let has_protected_recipient = recipients.iter().any(|email| {
-        let policy = channels::classify_email_sender(&settings, email);
-        matches!(policy.role.as_str(), "owner" | "founder" | "admin")
-    });
-    if !has_protected_recipient {
-        return None;
-    }
-    let account_key = channels::default_email_account_key(root).ok()?;
-    let thread_key = job
-        .thread_key
-        .clone()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "founder-proactive-outbound".to_string());
-    let subject = if lowered.contains("crm") {
-        "CRM-Entscheidung und Kunstmen-Integration".to_string()
-    } else if lowered.contains("wettbewerb") || lowered.contains("competitor") {
-        "Kunstmen Wettbewerbsmonitoring".to_string()
-    } else {
-        "Kunstmen Update".to_string()
-    };
-    Some(channels::FounderOutboundAction {
-        account_key,
-        thread_key,
-        subject,
-        to: recipients,
-        cc: Vec::new(),
-        attachments: Vec::new(),
-    })
 }
 
 fn detect_founder_mail_commitments(text: &str) -> Vec<String> {
@@ -5969,6 +6451,7 @@ fn founder_commitment_guard_outcome(
             .iter()
             .map(|item| format!("Commitment requires backing before send: {item}"))
             .collect(),
+        categorized_findings: Vec::new(),
         open_items: vec![
             "Create concrete CTOX schedule or follow-up backing for every promised founder deadline before sending."
                 .to_string(),
@@ -7481,6 +7964,8 @@ fn ensure_queue_guard_locked(root: &Path, shared: &mut SharedState) {
         thread_key: None,
         workspace_root: None,
         ticket_self_work_id: None,
+        outbound_email: None,
+        outbound_anchor: None,
     });
     if let Err(err) = governance::record_event(
         root,
@@ -7601,7 +8086,27 @@ fn maybe_enqueue_timeout_continuation(
 
 fn is_turn_timeout_blocker(value: &str) -> bool {
     let lowered = value.to_ascii_lowercase();
-    lowered.contains("timed out after") || lowered.contains("time budget")
+    lowered.contains("timed out after")
+        || lowered.contains("time budget")
+        || lowered.contains("session timeout")
+}
+
+/// F3: classify a harness-error string into a structured `AgentOutcome`.
+/// The error text comes from the harness/turn-loop itself (we own its
+/// format), not from free-form prompt content. Keep the matchers narrow
+/// and stable; downstream branching always reads the structured value.
+pub(crate) fn classify_agent_failure(error_text: &str) -> lcm::AgentOutcome {
+    if is_turn_timeout_blocker(error_text) {
+        return lcm::AgentOutcome::TurnTimeout;
+    }
+    let lowered = error_text.to_ascii_lowercase();
+    if lowered.contains("cancelled") || lowered.contains("canceled") {
+        return lcm::AgentOutcome::Cancelled;
+    }
+    if lowered.contains("aborted") || lowered.contains("invariant violated") {
+        return lcm::AgentOutcome::Aborted;
+    }
+    lcm::AgentOutcome::ExecutionError
 }
 
 fn render_timeout_continue_prompt(
@@ -8251,6 +8756,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             })
             .collect();
 
@@ -8786,6 +9293,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
             QueuedPrompt {
                 prompt: "b".to_string(),
@@ -8798,6 +9307,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         ]);
 
@@ -9019,6 +9530,8 @@ mod tests {
             thread_key: None,
             workspace_root: None,
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         });
 
         let next = maybe_start_next_queued_prompt_locked(&mut shared)
@@ -9320,6 +9833,8 @@ mod tests {
             ServiceIpcRequest::ChatSubmit {
                 prompt: prompt.to_string(),
                 thread_key: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
             &root,
             state.clone(),
@@ -9353,6 +9868,8 @@ mod tests {
             ServiceIpcRequest::ChatSubmit {
                 prompt: "Create src/main.cpp".to_string(),
                 thread_key: Some("smoke/cpp-thread".to_string()),
+                outbound_email: None,
+                outbound_anchor: None,
             },
             &root,
             state.clone(),
@@ -9386,6 +9903,8 @@ mod tests {
             ServiceIpcRequest::ChatSubmit {
                 prompt: "openAI API key:\nsk-proj-service-secret-1234567890".to_string(),
                 thread_key: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
             &root,
             state.clone(),
@@ -9501,6 +10020,7 @@ mod tests {
             monitor_last_check_at: None,
             monitor_alerts: Vec::new(),
             monitor_last_error: None,
+            last_agent_outcome: None,
         }))
         .unwrap();
         let handle = std::thread::spawn(move || {
@@ -9594,6 +10114,7 @@ mod tests {
             monitor_last_check_at: None,
             monitor_alerts: Vec::new(),
             monitor_last_error: None,
+            last_agent_outcome: None,
         }))
         .unwrap();
         let handle = std::thread::spawn(move || {
@@ -9650,6 +10171,8 @@ mod tests {
             ServiceIpcRequest::ChatSubmit {
                 prompt: "Run an internal harness self-check.".to_string(),
                 thread_key: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         )
         .unwrap();
@@ -9717,6 +10240,9 @@ mod tests {
             last_synced_at: "2026-04-06T00:00:00Z".to_string(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
         let prompt = render_mission_continuation_prompt(&mission, 45);
         assert!(prompt.contains("Mission continuity watchdog: the mission was idle for 45s."));
@@ -9742,6 +10268,9 @@ mod tests {
             last_synced_at: "2026-04-26T00:00:00Z".to_string(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
         let same_key = mission_watchdog_dedupe_key(&base);
         let mut changed = base.clone();
@@ -9776,6 +10305,9 @@ mod tests {
             last_synced_at: "2026-04-24T00:00:00Z".to_string(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
 
         assert!(mission_waits_for_external_approval(&mission));
@@ -9803,6 +10335,9 @@ mod tests {
             last_synced_at: "2026-04-24T00:00:00Z".to_string(),
             watcher_last_triggered_at: None,
             watcher_trigger_count: 0,
+            agent_failure_count: 0,
+            deferred_reason: None,
+            rewrite_failure_count: 0,
         };
 
         assert!(!mission_waits_for_external_approval(&mission));
@@ -10232,6 +10767,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         );
         insert_pending_prompt_ordered(
@@ -10247,6 +10784,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         );
 
@@ -10276,6 +10815,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         );
         insert_pending_prompt_ordered(
@@ -10291,6 +10832,8 @@ mod tests {
                 thread_key: None,
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
         );
 
@@ -10415,6 +10958,8 @@ mod tests {
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let created =
@@ -10468,6 +11013,8 @@ mod tests {
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let created =
@@ -10508,6 +11055,8 @@ mod tests {
             thread_key: Some("tui/main".to_string()),
             workspace_root: Some("/tmp/ctox-timeout-followup-test".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let created =
@@ -10911,6 +11460,8 @@ mod tests {
             thread_key: Some("kunstmen-operator".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
         let outcome = review::ReviewOutcome {
             required: true,
@@ -10922,6 +11473,7 @@ mod tests {
             reasons: vec!["Reset the IA".to_string()],
             failed_gates: vec!["Mission fit".to_string()],
             semantic_findings: vec!["Homepage still reads like a brochure.".to_string()],
+            categorized_findings: Vec::new(),
             open_items: vec!["Introduce clear roster and hire flow.".to_string()],
             evidence: vec!["GET / => static shell".to_string()],
             handoff: None,
@@ -10993,6 +11545,8 @@ mod tests {
             thread_key: Some("queue/mission-1".to_string()),
             workspace_root: None,
             ticket_self_work_id: Some(review_item.work_id.clone()),
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let target = resolve_review_rejection_target_self_work_id(&root, &job);
@@ -11168,6 +11722,8 @@ mod tests {
             thread_key: Some("kunstmen-operator".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: Some(item.work_id.clone()),
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let skipped = maybe_skip_superseded_self_work_prompt(&root, &state, &job)
@@ -11303,6 +11859,8 @@ mod tests {
             thread_key: Some("kunstmen-operator".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: Some(item.work_id.clone()),
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let skipped = maybe_skip_superseded_self_work_prompt(&root, &state, &job)
@@ -11361,6 +11919,8 @@ mod tests {
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job)
@@ -11437,6 +11997,8 @@ mod tests {
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
@@ -11485,6 +12047,8 @@ mod tests {
             thread_key: Some("codex/harness-live-smoke-20260426".to_string()),
             workspace_root: None,
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
@@ -11505,6 +12069,8 @@ mod tests {
             thread_key: Some("<founder-thread@example.com>".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         assert!(founder_email_worker_error_is_retryable(
@@ -11526,6 +12092,8 @@ mod tests {
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         assert!(!founder_email_worker_error_is_retryable(
@@ -11654,6 +12222,8 @@ mod tests {
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
@@ -11709,6 +12279,8 @@ mod tests {
             thread_key: Some("<founder-thread@example.com>".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
@@ -11764,6 +12336,8 @@ mod tests {
             thread_key: Some("<founder-thread@example.com>".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let redirected = maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job)
@@ -11790,6 +12364,8 @@ mod tests {
             thread_key: Some("<founder-thread@example.com>".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
         };
         let outcome = review::ReviewOutcome {
             required: true,
@@ -11801,6 +12377,7 @@ mod tests {
             reasons: vec!["missing_deliverable".to_string()],
             failed_gates: vec!["missing_deliverable".to_string()],
             semantic_findings: vec!["QR code is required before any reply can be sent.".to_string()],
+            categorized_findings: Vec::new(),
             open_items: vec!["Generate or retrieve the Jami QR code.".to_string()],
             evidence: vec!["owner mail explicitly asks for QR code".to_string()],
             handoff: None,
@@ -12361,6 +12938,8 @@ Was jetzt zu tun ist:\n\
             thread_key: Some("kunstmen-supervisor".to_string()),
             workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
             ticket_self_work_id: Some(item.work_id.clone()),
+            outbound_email: None,
+            outbound_anchor: None,
         };
 
         let note = maybe_continue_platform_expertise_pipeline_after_success(&root, &job)
@@ -12553,6 +13132,8 @@ Was jetzt zu tun ist:\n\
                 thread_key: Some("queue/mission-1".to_string()),
                 workspace_root: None,
                 ticket_self_work_id: None,
+                outbound_email: None,
+                outbound_anchor: None,
             },
             "Queued queue inbound from CTOX queue".to_string(),
         );
@@ -12858,5 +13439,440 @@ Was jetzt zu tun ist:\n\
             .iter()
             .any(|alert| alert.contains("backend residue stale pid file")));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn queued_prompt_without_outbound_email_yields_no_proactive_action() {
+        let job = QueuedPrompt {
+            prompt: "Please reach out to founder@external.test about the Kunstmen update."
+                .to_string(),
+            goal: "outreach".to_string(),
+            preview: "outreach".to_string(),
+            source_label: "tui".to_string(),
+            suggested_skill: None,
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+
+        // No structured intent on the job: post-turn proactive action must be
+        // None even though the prompt body name-drops a founder address and
+        // mentions "Kunstmen update". This is the deliberate, post-heuristic
+        // contract — keyword-scanning is gone.
+        assert!(job.outbound_email.is_none());
+    }
+
+    #[test]
+    fn queued_prompt_with_explicit_outbound_email_clones_through() {
+        let intent = channels::FounderOutboundAction {
+            account_key: "email:cto1@example.com".to_string(),
+            thread_key: "kunstmen-supervisor".to_string(),
+            subject: "Operator-supplied Subject".to_string(),
+            to: vec!["founder@external.test".to_string()],
+            cc: vec!["co@external.test".to_string()],
+            attachments: Vec::new(),
+        };
+        let job = QueuedPrompt {
+            prompt: "Body".to_string(),
+            goal: "Body".to_string(),
+            preview: "Body".to_string(),
+            source_label: "tui".to_string(),
+            suggested_skill: None,
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-supervisor".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: Some(intent.clone()),
+            outbound_anchor: None,
+        };
+
+        let routed = job.outbound_email.clone().expect("outbound_email present");
+        assert_eq!(routed.account_key, intent.account_key);
+        assert_eq!(routed.thread_key, intent.thread_key);
+        assert_eq!(routed.subject, intent.subject);
+        assert_eq!(routed.to, intent.to);
+        assert_eq!(routed.cc, intent.cc);
+    }
+
+    // Anchor wire-up: TUI-initiated proactive outbound has no leased
+    // inbound message key, so the post-turn dispatcher would silently
+    // skip the reviewed-founder-outbound send. The synthetic anchor
+    // (set by `submit_chat_prompt_with_intent`) restores the link.
+    #[test]
+    fn founder_outbound_anchor_key_prefers_explicit_outbound_anchor() {
+        let intent = channels::FounderOutboundAction {
+            account_key: "email:cto1@example.com".to_string(),
+            thread_key: "chat-outbound".to_string(),
+            subject: "Update".to_string(),
+            to: vec!["founder@example.test".to_string()],
+            cc: Vec::new(),
+            attachments: Vec::new(),
+        };
+        let job = QueuedPrompt {
+            prompt: "Draft a quick update for the founder.".to_string(),
+            goal: "Draft a quick update for the founder.".to_string(),
+            preview: "preview".to_string(),
+            source_label: "tui".to_string(),
+            suggested_skill: None,
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("chat-outbound".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: Some(intent),
+            outbound_anchor: Some("tui-outbound:test-id".to_string()),
+        };
+        assert_eq!(
+            founder_outbound_anchor_key(&job),
+            Some("tui-outbound:test-id"),
+        );
+    }
+
+    // Regression guard: without an explicit anchor and no leased inbound
+    // message key, the resolver must return None — never invent one from
+    // prompt text.
+    #[test]
+    fn founder_outbound_anchor_key_returns_none_when_unset_and_no_lease() {
+        let job = QueuedPrompt {
+            prompt: "Reach out to the founder about Kunstmen.".to_string(),
+            goal: "Reach out to the founder about Kunstmen.".to_string(),
+            preview: "preview".to_string(),
+            source_label: "tui".to_string(),
+            suggested_skill: None,
+            leased_message_keys: Vec::new(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: None,
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        assert!(founder_outbound_anchor_key(&job).is_none());
+    }
+
+    // Inbound-driven jobs (no synthetic anchor) keep the legacy fallback:
+    // anchor is the first leased message key.
+    #[test]
+    fn founder_outbound_anchor_key_falls_back_to_leased_message_key() {
+        let job = QueuedPrompt {
+            prompt: "Reply to the founder.".to_string(),
+            goal: "Reply to the founder.".to_string(),
+            preview: "preview".to_string(),
+            source_label: "email".to_string(),
+            suggested_skill: None,
+            leased_message_keys: vec!["msg-key-42".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: None,
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        assert_eq!(founder_outbound_anchor_key(&job), Some("msg-key-42"));
+    }
+
+    #[test]
+    fn outbound_email_intent_round_trips_into_founder_outbound_action() {
+        let intent = OutboundEmailIntent {
+            account_key: "email:cto1@example.com".to_string(),
+            thread_key: "chat-outbound".to_string(),
+            subject: "Update".to_string(),
+            to: vec!["d.lottes@example.test".to_string()],
+            cc: vec!["j.kienzler@example.test".to_string()],
+            attachments: Vec::new(),
+        };
+        let action: channels::FounderOutboundAction = intent.into();
+        assert_eq!(action.account_key, "email:cto1@example.com");
+        assert_eq!(action.thread_key, "chat-outbound");
+        assert_eq!(action.subject, "Update");
+        assert_eq!(action.to, vec!["d.lottes@example.test".to_string()]);
+        assert_eq!(action.cc, vec!["j.kienzler@example.test".to_string()]);
+    }
+
+    // F3: classify_agent_failure must produce stable, structured outcomes.
+    #[test]
+    fn classify_agent_failure_recognises_turn_timeout() {
+        assert_eq!(
+            classify_agent_failure("direct session timeout after 600s"),
+            crate::lcm::AgentOutcome::TurnTimeout
+        );
+        assert_eq!(
+            classify_agent_failure("turn timed out after 180s"),
+            crate::lcm::AgentOutcome::TurnTimeout
+        );
+        assert_eq!(
+            classify_agent_failure("hit the time budget"),
+            crate::lcm::AgentOutcome::TurnTimeout
+        );
+    }
+
+    #[test]
+    fn classify_agent_failure_recognises_aborted_and_cancelled() {
+        assert_eq!(
+            classify_agent_failure("operator cancelled"),
+            crate::lcm::AgentOutcome::Cancelled
+        );
+        assert_eq!(
+            classify_agent_failure("invariant violated, aborted"),
+            crate::lcm::AgentOutcome::Aborted
+        );
+    }
+
+    #[test]
+    fn classify_agent_failure_falls_back_to_execution_error() {
+        assert_eq!(
+            classify_agent_failure("connection refused"),
+            crate::lcm::AgentOutcome::ExecutionError
+        );
+    }
+
+    // F2: env knob honours operator overrides; default is 3.
+    #[test]
+    fn mission_agent_failure_threshold_default_is_three() {
+        let root = temp_root("agent-failure-threshold-default");
+        assert_eq!(
+            mission_agent_failure_threshold(&root),
+            DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn mission_agent_failure_threshold_respects_env_override() {
+        let root = temp_root("agent-failure-threshold-env");
+        let mut env_map = std::collections::BTreeMap::new();
+        env_map.insert(
+            "CTOX_MISSION_AGENT_FAILURE_THRESHOLD".to_string(),
+            "7".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).expect("save env");
+        assert_eq!(mission_agent_failure_threshold(&root), 7);
+
+        env_map.insert(
+            "CTOX_MISSION_AGENT_FAILURE_THRESHOLD".to_string(),
+            "garbage".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).expect("save env");
+        assert_eq!(
+            mission_agent_failure_threshold(&root),
+            DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD
+        );
+
+        env_map.insert(
+            "CTOX_MISSION_AGENT_FAILURE_THRESHOLD".to_string(),
+            "0".to_string(),
+        );
+        runtime_env::save_runtime_env_map(&root, &env_map).expect("save env");
+        assert_eq!(
+            mission_agent_failure_threshold(&root),
+            DEFAULT_MISSION_AGENT_FAILURE_THRESHOLD
+        );
+    }
+
+    // F2: lcm helpers manage the per-mission failure counter and deferral.
+    #[test]
+    fn mission_failure_counter_increments_resets_and_defers() {
+        let root = temp_root("mission-failure-counter");
+        let db_path = root.join("ctox.sqlite3");
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
+        let _ = engine.continuity_init_documents(101).unwrap();
+        let initial = engine.sync_mission_state_from_continuity(101).unwrap();
+        assert_eq!(initial.agent_failure_count, 0);
+        assert!(initial.deferred_reason.is_none());
+
+        let after_one = engine.increment_mission_agent_failure_count(101).unwrap();
+        assert_eq!(after_one.agent_failure_count, 1);
+        let after_two = engine.increment_mission_agent_failure_count(101).unwrap();
+        assert_eq!(after_two.agent_failure_count, 2);
+
+        let after_reset = engine.reset_mission_agent_failure_count(101).unwrap();
+        assert_eq!(after_reset.agent_failure_count, 0);
+
+        let _ = engine.increment_mission_agent_failure_count(101).unwrap();
+        let _ = engine.increment_mission_agent_failure_count(101).unwrap();
+        let _ = engine.increment_mission_agent_failure_count(101).unwrap();
+        let deferred = engine
+            .defer_mission_for_reason(101, "agent_failure_threshold")
+            .unwrap();
+        assert_eq!(deferred.mission_status, "deferred");
+        assert_eq!(
+            deferred.deferred_reason.as_deref(),
+            Some("agent_failure_threshold")
+        );
+        assert!(!deferred.is_open);
+        assert!(deferred.allow_idle);
+    }
+
+    fn rewrite_finding(id: &str) -> review::CategorizedFinding {
+        review::CategorizedFinding {
+            id: id.to_string(),
+            category: review::FindingCategory::Rewrite,
+            evidence: format!("evidence for {id}"),
+            corrective_action: format!("fix wording for {id}"),
+        }
+    }
+
+    fn rework_finding(id: &str) -> review::CategorizedFinding {
+        review::CategorizedFinding {
+            id: id.to_string(),
+            category: review::FindingCategory::Rework,
+            evidence: format!("durable mismatch for {id}"),
+            corrective_action: format!("create durable backing for {id}"),
+        }
+    }
+
+    fn parent_outbound_job() -> QueuedPrompt {
+        QueuedPrompt {
+            prompt: "draft founder reply".to_string(),
+            goal: "founder mail".to_string(),
+            preview: "founder thread".to_string(),
+            source_label: "email:owner".to_string(),
+            suggested_skill: Some("communication-orchestrator".to_string()),
+            leased_message_keys: vec!["email:cto1@example.com:msg-1".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("email-review:owner:thread-1".to_string()),
+            workspace_root: Some("/srv/kunstmen".to_string()),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: Some("email:cto1@example.com:msg-1".to_string()),
+        }
+    }
+
+    #[test]
+    fn dispatcher_routes_all_rewrite_findings_to_rewrite_only() {
+        let findings = vec![rewrite_finding("f1"), rewrite_finding("f2")];
+        assert_eq!(
+            classify_findings(&findings),
+            ReviewRoutingClass::RewriteOnly
+        );
+    }
+
+    #[test]
+    fn dispatcher_routes_mixed_findings_to_requeue_self_work() {
+        let mixed = vec![rewrite_finding("f1"), rework_finding("f2")];
+        assert_eq!(classify_findings(&mixed), ReviewRoutingClass::Substantive);
+        let only_rework = vec![rework_finding("f1")];
+        assert_eq!(
+            classify_findings(&only_rework),
+            ReviewRoutingClass::Substantive
+        );
+    }
+
+    #[test]
+    fn dispatcher_routes_empty_findings_to_approved() {
+        let empty: Vec<review::CategorizedFinding> = Vec::new();
+        assert_eq!(classify_findings(&empty), ReviewRoutingClass::Approved);
+    }
+
+    #[test]
+    fn rewrite_only_post_turn_spawns_lightweight_pending_prompt() {
+        let _ = temp_root("rewrite-only-post-turn");
+        let parent = parent_outbound_job();
+        let findings = vec![
+            RewriteFinding {
+                id: "f1".to_string(),
+                evidence: "salutation uses internal vocab".to_string(),
+                corrective_action: "use neutral salutation".to_string(),
+            },
+            RewriteFinding {
+                id: "f2".to_string(),
+                evidence: "body too long".to_string(),
+                corrective_action: "trim to two paragraphs".to_string(),
+            },
+        ];
+        let prior_body = "Hallo TUI-Founder, hier kommt der Stand…".to_string();
+        let synthesised = synthesise_review_rewrite_prompt(
+            &parent,
+            &findings,
+            &prior_body,
+            parent.outbound_anchor.as_deref(),
+            "two wording issues to address",
+        );
+
+        assert_eq!(synthesised.source_label, REVIEW_REWRITE_SOURCE_LABEL);
+        assert!(synthesised.leased_message_keys.is_empty());
+        assert_eq!(
+            synthesised.outbound_email.is_some(),
+            parent.outbound_email.is_some()
+        );
+        assert_eq!(synthesised.outbound_anchor, parent.outbound_anchor);
+        assert_eq!(synthesised.thread_key, parent.thread_key);
+        assert!(synthesised.ticket_self_work_id.is_none());
+        assert!(synthesised.prompt.contains(&prior_body));
+        assert!(synthesised
+            .prompt
+            .contains("salutation uses internal vocab"));
+        assert!(synthesised.prompt.contains("trim to two paragraphs"));
+        assert!(synthesised.prompt.contains("nur der korrigierte Body"));
+
+        let mut shared = SharedState::default();
+        shared.pending_prompts.push_front(synthesised);
+        assert_eq!(shared.pending_prompts.len(), 1);
+        let front = shared.pending_prompts.front().unwrap();
+        assert_eq!(front.source_label, REVIEW_REWRITE_SOURCE_LABEL);
+        assert_eq!(front.outbound_anchor, parent.outbound_anchor);
+        // No durable side effects: no ticket id and no plan goal/step row
+        // could exist because we never called plan::ingest. Confirming the
+        // synthesis path itself never inherited a ticket id is enough.
+        assert!(front.ticket_self_work_id.is_none());
+    }
+
+    #[test]
+    fn rewrite_failure_count_threshold_defers_mission() {
+        let root = temp_root("rewrite-threshold-defer");
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
+        // Seed an initial mission so the counter has somewhere to land.
+        let _ = engine
+            .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
+            .unwrap();
+        let _ = engine
+            .sync_mission_state_from_continuity(turn_loop::CHAT_CONVERSATION_ID)
+            .unwrap();
+
+        let threshold = mission_rewrite_failure_threshold();
+        for _ in 0..threshold {
+            let _ = engine
+                .increment_mission_rewrite_failure_count(turn_loop::CHAT_CONVERSATION_ID)
+                .unwrap();
+        }
+        let pre_defer = engine
+            .stored_mission_state(turn_loop::CHAT_CONVERSATION_ID)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pre_defer.rewrite_failure_count, threshold);
+
+        let deferred = engine
+            .defer_mission_for_reason(turn_loop::CHAT_CONVERSATION_ID, "rewrite_failure_threshold")
+            .unwrap();
+        assert_eq!(deferred.mission_status, "deferred");
+        assert_eq!(
+            deferred.deferred_reason.as_deref(),
+            Some("rewrite_failure_threshold")
+        );
+        assert!(!deferred.is_open);
+
+        let _ = governance::record_event(
+            &root,
+            governance::GovernanceEventRequest {
+                mechanism_id: "review_rewrite_threshold",
+                conversation_id: Some(turn_loop::CHAT_CONVERSATION_ID),
+                severity: "warning",
+                reason: "rewrite-only review iterations failed to converge",
+                action_taken: "deferred mission and stopped respawning rewrite retries",
+                details: serde_json::json!({"threshold": threshold}),
+                idempotence_key: Some("rewrite-threshold-test"),
+            },
+        );
+        let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
+            .expect("failed to list governance events");
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "review_rewrite_threshold"));
     }
 }

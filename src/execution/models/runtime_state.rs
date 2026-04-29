@@ -230,7 +230,7 @@ pub fn normalize_api_provider(provider: &str) -> &'static str {
         API_PROVIDER_ANTHROPIC => API_PROVIDER_ANTHROPIC,
         API_PROVIDER_OPENROUTER => API_PROVIDER_OPENROUTER,
         API_PROVIDER_MINIMAX => API_PROVIDER_MINIMAX,
-        API_PROVIDER_AZURE_FOUNDRY | "azure-foundry" | "azure" | "azure_openai" => {
+        API_PROVIDER_AZURE_FOUNDRY | "azure" | "azure-foundry" | "azure_openai" => {
             API_PROVIDER_AZURE_FOUNDRY
         }
         API_PROVIDER_OPENAI => API_PROVIDER_OPENAI,
@@ -245,7 +245,7 @@ pub fn azure_foundry_responses_base_url(endpoint: &str) -> Option<String> {
         return None;
     }
     let lower = trimmed.to_ascii_lowercase();
-    if lower.ends_with("/openai/v1") || lower.contains("/openai/v1?") {
+    if lower.ends_with("/openai/v1") {
         Some(trimmed.to_string())
     } else if lower.ends_with("/openai") {
         Some(format!("{trimmed}/v1"))
@@ -290,6 +290,7 @@ pub fn api_provider_for_upstream_base_url(upstream_base_url: &str) -> &'static s
     if trimmed.is_empty() {
         return API_PROVIDER_LOCAL;
     }
+    let lower = trimmed.to_ascii_lowercase();
     if is_azure_foundry_upstream(trimmed) {
         API_PROVIDER_AZURE_FOUNDRY
     } else if trimmed.starts_with(DEFAULT_OPENROUTER_RESPONSES_BASE_URL) {
@@ -298,6 +299,11 @@ pub fn api_provider_for_upstream_base_url(upstream_base_url: &str) -> &'static s
         API_PROVIDER_ANTHROPIC
     } else if trimmed.starts_with(DEFAULT_MINIMAX_RESPONSES_BASE_URL) {
         API_PROVIDER_MINIMAX
+    } else if (lower.contains(".openai.azure.com")
+        || lower.contains(".cognitiveservices.azure.com"))
+        && lower.contains("/openai/v1")
+    {
+        API_PROVIDER_AZURE_FOUNDRY
     } else {
         API_PROVIDER_OPENAI
     }
@@ -336,6 +342,7 @@ pub fn infer_api_provider_from_env_map(env_map: &BTreeMap<String, String>) -> St
             .map(|value| api_provider_for_upstream_base_url(&value).to_string())
             .or_else(|| {
                 env_string(env_map, "CTOX_AZURE_FOUNDRY_ENDPOINT")
+                    .filter(|value| !value.trim().is_empty())
                     .map(|_| API_PROVIDER_AZURE_FOUNDRY.to_string())
             })
             .unwrap_or_else(|| API_PROVIDER_LOCAL.to_string()),
@@ -826,8 +833,13 @@ fn migrate_runtime_state(root: &Path, state: &mut InferenceRuntimeState) -> Resu
     if state.version < 6 {
         if state.source == InferenceSource::Api && state.upstream_base_url.trim().is_empty() {
             let provider = infer_api_provider_from_env_map(&env_map);
-            state.upstream_base_url =
-                default_api_upstream_base_url_for_provider(&provider).to_string();
+            state.upstream_base_url = if provider.eq_ignore_ascii_case(API_PROVIDER_AZURE_FOUNDRY) {
+                env_string(&env_map, "CTOX_AZURE_FOUNDRY_ENDPOINT")
+                    .and_then(|endpoint| azure_foundry_responses_base_url(&endpoint))
+                    .unwrap_or_default()
+            } else {
+                default_api_upstream_base_url_for_provider(&provider).to_string()
+            };
         }
         state.version = 6;
         migrated = true;
@@ -843,8 +855,13 @@ fn migrate_runtime_state(root: &Path, state: &mut InferenceRuntimeState) -> Resu
                 local_upstream_base_url(state.engine_port.unwrap_or(DEFAULT_LOCAL_ENGINE_PORT));
         } else if state.upstream_base_url.trim().is_empty() {
             let provider = infer_api_provider_from_env_map(&env_map);
-            state.upstream_base_url =
-                default_api_upstream_base_url_for_provider(&provider).to_string();
+            state.upstream_base_url = if provider.eq_ignore_ascii_case(API_PROVIDER_AZURE_FOUNDRY) {
+                env_string(&env_map, "CTOX_AZURE_FOUNDRY_ENDPOINT")
+                    .and_then(|endpoint| azure_foundry_responses_base_url(&endpoint))
+                    .unwrap_or_default()
+            } else {
+                default_api_upstream_base_url_for_provider(&provider).to_string()
+            };
         }
         state.version = 8;
         migrated = true;
