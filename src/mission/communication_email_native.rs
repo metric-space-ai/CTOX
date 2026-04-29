@@ -490,13 +490,7 @@ fn execute_sync(options: &EmailOptions) -> Result<Value> {
                 let mut imap = ImapClient::connect(options)?;
                 imap.login(&options.email, &options.password)?;
                 imap.select(&options.folder)?;
-                let mut uids = imap.search_all_uids()?;
-                uids.sort();
-                let selected = uids
-                    .into_iter()
-                    .rev()
-                    .take(options.limit)
-                    .collect::<Vec<_>>();
+                let selected = latest_imap_uids(imap.search_all_uids()?, options.limit);
                 fetched_count = selected.len() as i64;
                 for uid in selected {
                     let message_key = message_key_from_remote(&account_key, &options.folder, &uid);
@@ -1176,9 +1170,7 @@ fn verify_imap_inbox_delivery(
     imap.login(&options.email, &options.password)?;
     imap.select("INBOX")?;
     for attempt in 0..attempts {
-        let mut uids = imap.search_all_uids()?;
-        uids.sort();
-        for uid in uids.into_iter().rev().take(25) {
+        for uid in latest_imap_uids(imap.search_all_uids()?, 25) {
             let fetched = imap.fetch_raw(&uid)?;
             let parsed = parse_rfc822_message(&fetched.raw)?;
             if parsed.message_id.trim() != message_id.trim() {
@@ -2071,6 +2063,19 @@ impl ImapClient {
 
 fn imap_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn latest_imap_uids(mut uids: Vec<String>, limit: usize) -> Vec<String> {
+    uids.sort_by(|left, right| {
+        let left_num = left.parse::<u64>();
+        let right_num = right.parse::<u64>();
+        match (left_num, right_num) {
+            (Ok(left_num), Ok(right_num)) => right_num.cmp(&left_num),
+            _ => right.cmp(left),
+        }
+    });
+    uids.truncate(limit);
+    uids
 }
 
 enum SmtpStream {
@@ -3576,7 +3581,8 @@ fn acquire_graph_access_token(options: &EmailOptions) -> Result<String> {
 mod tests {
     use super::{
         acquire_graph_access_token, effective_graph_password, effective_graph_username,
-        extract_address, require_provider_credentials, synced_message_direction, EmailOptions,
+        extract_address, latest_imap_uids, require_provider_credentials, synced_message_direction,
+        EmailOptions,
     };
     use std::path::PathBuf;
 
@@ -3652,6 +3658,21 @@ mod tests {
             extract_address("CTO1 <cto1@metric-space.ai>"),
             "cto1@metric-space.ai"
         );
+    }
+
+    #[test]
+    fn latest_imap_uids_sorts_numeric_uids_not_lexicographic_strings() {
+        let selected = latest_imap_uids(
+            vec![
+                "98".to_string(),
+                "99".to_string(),
+                "100".to_string(),
+                "101".to_string(),
+                "9".to_string(),
+            ],
+            3,
+        );
+        assert_eq!(selected, vec!["101", "100", "99"]);
     }
 
     #[test]
