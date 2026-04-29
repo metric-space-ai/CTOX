@@ -106,6 +106,7 @@ fn default_local_chat_family_label() -> &'static str {
 }
 const COMMUNICATION_REFRESH_INTERVAL_BACKGROUND: Duration = Duration::from_secs(5);
 const SKILL_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
+const HARNESS_FLOW_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const GPU_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_secs(2);
 const GPU_REFRESH_INTERVAL_SETTINGS: Duration = Duration::from_secs(4);
 const PROXY_REFRESH_INTERVAL_ACTIVE: Duration = Duration::from_millis(700);
@@ -431,6 +432,7 @@ enum SettingsView {
     Paths,
     Update,
     HarnessMining,
+    HarnessFlow,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -800,6 +802,9 @@ struct App {
     last_chat_refresh_at: Option<Instant>,
     last_communication_refresh_at: Option<Instant>,
     last_skill_catalog_refresh_at: Option<Instant>,
+    harness_flow_text: String,
+    harness_flow_scroll: u16,
+    last_harness_flow_refresh_at: Option<Instant>,
     /// Images the user has attached to the next chat submission. Populated
     /// by the `/image <path>` slash-command and by file-path drag-and-drop
     /// pastes. On submit, each pending image becomes a
@@ -926,13 +931,24 @@ pub fn run_tui_smoke(root: &Path, page_name: &str, width: u16, height: u16) -> R
     let _ = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
 
     let mut app = App::new(root.to_path_buf(), db_path);
+    let mut skip_initial_refresh = false;
     match page_name {
         "chat" => app.page = Page::Chat,
         "skills" => app.page = Page::Skills,
         "settings" => app.page = Page::Settings,
-        other => anyhow::bail!("unknown page: {other} (expected chat, skills, settings)"),
+        "harness-flow" | "settings-harness-flow" => {
+            app.page = Page::Settings;
+            app.switch_settings_view(SettingsView::HarnessFlow);
+            app.refresh_harness_flow();
+            skip_initial_refresh = true;
+        }
+        other => {
+            anyhow::bail!("unknown page: {other} (expected chat, skills, settings, harness-flow)")
+        }
     }
-    app.refresh()?;
+    if !skip_initial_refresh {
+        app.refresh()?;
+    }
 
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).context("failed to create test terminal")?;
@@ -1074,6 +1090,9 @@ impl App {
             last_chat_refresh_at: None,
             last_communication_refresh_at: None,
             last_skill_catalog_refresh_at: None,
+            harness_flow_text: String::new(),
+            harness_flow_scroll: 0,
+            last_harness_flow_refresh_at: None,
             pending_images: Vec::new(),
         };
         if let Some(first) = app.visible_setting_indices().first().copied() {
@@ -1263,7 +1282,7 @@ impl App {
                         self.switch_settings_view(SettingsView::Model);
                     }
                     Page::Settings => {
-                        if self.settings_view == SettingsView::Update {
+                        if self.settings_view == SettingsView::HarnessFlow {
                             self.page = Page::Chat;
                             self.switch_settings_view(SettingsView::Model);
                         } else {
@@ -1278,7 +1297,7 @@ impl App {
                 match self.page {
                     Page::Chat => {
                         self.page = Page::Settings;
-                        self.switch_settings_view(SettingsView::Update);
+                        self.switch_settings_view(SettingsView::HarnessFlow);
                     }
                     Page::Skills => self.page = Page::Chat,
                     Page::Settings => {
@@ -1323,6 +1342,9 @@ impl App {
         }
         if self.settings_view == SettingsView::Secrets {
             return self.handle_secrets_key(key_event);
+        }
+        if self.settings_view == SettingsView::HarnessFlow {
+            return self.handle_harness_flow_key(key_event);
         }
         if self.settings_menu_open {
             match key_event.code {
@@ -1903,6 +1925,7 @@ impl App {
             ),
             SettingsView::Update => false,
             SettingsView::HarnessMining => false,
+            SettingsView::HarnessFlow => false,
         }
     }
 
@@ -2098,6 +2121,9 @@ impl App {
         }
         if view == SettingsView::Update {
             self.refresh_update_view_info();
+        } else if view == SettingsView::HarnessFlow {
+            self.harness_flow_scroll = 0;
+            self.refresh_harness_flow();
         }
     }
 
@@ -2387,6 +2413,7 @@ impl App {
         {
             self.refresh_skill_catalog();
         }
+        self.refresh_harness_flow_if_due();
         self.refresh_gpu_cards();
         self.refresh_runtime_telemetry_if_due();
         self.refresh_header();
@@ -2430,6 +2457,29 @@ impl App {
         }
     }
 
+    fn refresh_harness_flow_if_due(&mut self) {
+        if self.page != Page::Settings || self.settings_view != SettingsView::HarnessFlow {
+            return;
+        }
+        if !refresh_due(
+            &mut self.last_harness_flow_refresh_at,
+            HARNESS_FLOW_REFRESH_INTERVAL,
+        ) {
+            return;
+        }
+        self.refresh_harness_flow();
+    }
+
+    fn refresh_harness_flow(&mut self) {
+        self.harness_flow_text = match service::harness_flow::render_latest_ascii(&self.root, 132) {
+            Ok(text) => text,
+            Err(err) => format!(
+                "Harness flow unavailable.\n\n{}",
+                summarize_inline(&err.to_string(), 140)
+            ),
+        };
+    }
+
     fn move_skills_selection(&mut self, delta: isize) {
         if self.skill_catalog.is_empty() {
             self.skills_selected = 0;
@@ -2441,6 +2491,36 @@ impl App {
             (self.skills_selected + delta as usize).min(self.skill_catalog.len().saturating_sub(1))
         };
         self.skills_selected = next;
+    }
+
+    fn handle_harness_flow_key(&mut self, key_event: KeyEvent) -> Result<()> {
+        match key_event.code {
+            KeyCode::Up => self.harness_flow_scroll = self.harness_flow_scroll.saturating_sub(1),
+            KeyCode::Down => self.harness_flow_scroll = self.harness_flow_scroll.saturating_add(1),
+            KeyCode::PageUp => {
+                self.harness_flow_scroll = self.harness_flow_scroll.saturating_sub(10);
+            }
+            KeyCode::PageDown => {
+                self.harness_flow_scroll = self.harness_flow_scroll.saturating_add(10);
+            }
+            KeyCode::Home => self.harness_flow_scroll = 0,
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                self.last_harness_flow_refresh_at = None;
+                self.refresh_harness_flow();
+            }
+            KeyCode::Char('[') => {
+                self.switch_settings_view(previous_settings_view(self.settings_view))
+            }
+            KeyCode::Char(']') => self.switch_settings_view(next_settings_view(self.settings_view)),
+            KeyCode::Left if key_event.modifiers.contains(KeyModifiers::ALT) => {
+                self.switch_settings_view(previous_settings_view(self.settings_view));
+            }
+            KeyCode::Right if key_event.modifiers.contains(KeyModifiers::ALT) => {
+                self.switch_settings_view(next_settings_view(self.settings_view));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn refresh_gpu_cards(&mut self) {
@@ -5962,12 +6042,13 @@ fn overlay_load_observation_gpu_cards(
 
 fn previous_settings_view(view: SettingsView) -> SettingsView {
     match view {
-        SettingsView::Model => SettingsView::HarnessMining,
+        SettingsView::Model => SettingsView::HarnessFlow,
         SettingsView::Communication => SettingsView::Model,
         SettingsView::Secrets => SettingsView::Communication,
         SettingsView::Paths => SettingsView::Secrets,
         SettingsView::Update => SettingsView::Paths,
         SettingsView::HarnessMining => SettingsView::Update,
+        SettingsView::HarnessFlow => SettingsView::HarnessMining,
     }
 }
 
@@ -5978,7 +6059,8 @@ fn next_settings_view(view: SettingsView) -> SettingsView {
         SettingsView::Secrets => SettingsView::Paths,
         SettingsView::Paths => SettingsView::Update,
         SettingsView::Update => SettingsView::HarnessMining,
-        SettingsView::HarnessMining => SettingsView::Model,
+        SettingsView::HarnessMining => SettingsView::HarnessFlow,
+        SettingsView::HarnessFlow => SettingsView::Model,
     }
 }
 
@@ -6685,13 +6767,28 @@ mod tests {
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
             .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::Update);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::HarnessMining);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(app.page, Page::Settings);
+        assert_eq!(app.settings_view, SettingsView::HarnessFlow);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
         assert_eq!(app.page, Page::Chat);
         assert_eq!(app.settings_view, SettingsView::Model);
 
         app.handle_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))
             .unwrap();
         assert_eq!(app.page, Page::Settings);
-        assert_eq!(app.settings_view, SettingsView::Update);
+        assert_eq!(app.settings_view, SettingsView::HarnessFlow);
     }
 
     #[test]

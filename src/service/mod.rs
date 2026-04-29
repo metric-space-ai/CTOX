@@ -5,6 +5,7 @@ pub mod core_state_machine;
 pub mod core_transition_guard;
 pub mod db_migration;
 pub mod governance;
+pub mod harness_flow;
 pub mod harness_mining;
 pub mod mission_governor;
 pub mod process_mining;

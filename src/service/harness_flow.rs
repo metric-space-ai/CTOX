@@ -1,0 +1,1059 @@
+// Origin: CTOX
+// License: Apache-2.0
+
+use anyhow::{Context, Result};
+use rusqlite::{params, Connection, OpenFlags};
+use serde_json::Value;
+use std::path::Path;
+
+const USAGE: &str = "Usage:
+  ctox harness-flow [--latest] [--message-key <key>] [--work-id <id>] [--width <n>]
+
+Renders a human-readable harness work flow: main work stays on the left spine,
+while queue, context, review, ticket, knowledge, guard, and verification support
+processes branch off at the point where they affect the work.";
+
+#[derive(Debug, Clone)]
+struct HarnessFlow {
+    blocks: Vec<MainBlock>,
+}
+
+#[derive(Debug, Clone)]
+struct MainBlock {
+    title: String,
+    lines: Vec<String>,
+    branches: Vec<SupportBranch>,
+}
+
+#[derive(Debug, Clone)]
+struct SupportBranch {
+    title: String,
+    lines: Vec<String>,
+    returns_to_spine: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MessageRow {
+    message_key: String,
+    channel: String,
+    direction: String,
+    thread_key: String,
+    subject: String,
+    preview: String,
+    body_text: String,
+    sender_display: String,
+    observed_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct RoutingRow {
+    route_status: String,
+    lease_owner: Option<String>,
+    leased_at: Option<String>,
+    acked_at: Option<String>,
+    last_error: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct SelfWorkRow {
+    work_id: String,
+    kind: String,
+    title: String,
+    body_text: String,
+    state: String,
+    metadata_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct FounderReviewApproval {
+    approval_key: String,
+    review_summary: String,
+    body_sha256: String,
+    reviewer: String,
+    approved_at: String,
+    sent_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CoreProofRow {
+    accepted: bool,
+    entity_type: String,
+    from_state: String,
+    to_state: String,
+    core_event: String,
+    violation_codes_json: String,
+    proof_id: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct StateViolationRow {
+    severity: String,
+    violation_code: String,
+    message: String,
+    detected_at: String,
+}
+
+pub fn handle_harness_flow_command(root: &Path, args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "help"))
+    {
+        println!("{USAGE}");
+        return Ok(());
+    }
+
+    let width = parse_usize_flag(args, "--width", 118).clamp(92, 180);
+    let message_key = parse_string_flag(args, "--message-key");
+    let work_id = parse_string_flag(args, "--work-id");
+    println!(
+        "{}",
+        render_selected_ascii(root, message_key, work_id, width)?
+    );
+    Ok(())
+}
+
+pub fn render_latest_ascii(root: &Path, width: usize) -> Result<String> {
+    let flow = build_flow(root, None, None)?;
+    Ok(render_ascii(&flow, width.clamp(92, 180)))
+}
+
+pub fn render_selected_ascii(
+    root: &Path,
+    message_key: Option<&str>,
+    work_id: Option<&str>,
+    width: usize,
+) -> Result<String> {
+    let flow = build_flow(root, message_key, work_id)?;
+    Ok(render_ascii(&flow, width.clamp(92, 180)))
+}
+
+fn build_flow(
+    root: &Path,
+    message_key: Option<&str>,
+    work_id: Option<&str>,
+) -> Result<HarnessFlow> {
+    let db_path = root.join("runtime").join("ctox.sqlite3");
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .with_context(|| format!("failed to open {}", db_path.display()))?;
+
+    let seed_work = match work_id {
+        Some(id) => load_self_work(&conn, id)?,
+        None => None,
+    };
+    let seed_message = match message_key {
+        Some(key) => load_message(&conn, key)?,
+        None => {
+            if let Some(work) = seed_work.as_ref() {
+                parent_message_key(&work.metadata_json)
+                    .as_deref()
+                    .and_then(|key| load_message(&conn, key).ok().flatten())
+            } else {
+                latest_message(&conn)?
+            }
+        }
+    };
+
+    let Some(message) = seed_message else {
+        let mut blocks = Vec::new();
+        blocks.push(MainBlock {
+            title: "NO FLOW SOURCE FOUND".to_string(),
+            lines: vec![
+                "No communication message or self-work item matched the request.".to_string(),
+                "Try --message-key <key> or --work-id <id>.".to_string(),
+            ],
+            branches: Vec::new(),
+        });
+        return Ok(HarnessFlow { blocks });
+    };
+
+    let routing = load_routing(&conn, &message.message_key)?;
+    let related_work = load_related_self_work(&conn, &message.message_key)?;
+    let work_for_attempt_2 = seed_work.or_else(|| related_work.first().cloned());
+    let reload_message = work_for_attempt_2.as_ref().and_then(|work| {
+        load_queue_message_for_work(&conn, &work.work_id)
+            .ok()
+            .flatten()
+    });
+    let review_approval = load_founder_review_approval(&conn, &message.message_key)?;
+    let proofs = load_core_proofs_for_key(&conn, &message.message_key)?;
+    let violations = load_state_violations_for_key(&conn, &message.message_key)?;
+
+    let mut blocks = Vec::new();
+    blocks.push(MainBlock {
+        title: "TASK".to_string(),
+        lines: task_lines(&message),
+        branches: vec![
+            queue_pickup_branch(routing.as_ref()),
+            context_branch(&conn)?,
+            knowledge_branch(&conn)?,
+        ],
+    });
+
+    blocks.push(MainBlock {
+        title: "ATTEMPT 1".to_string(),
+        lines: attempt_lines("CTOX works on the first answer or slice.", &message, None),
+        branches: attempt_one_branches(
+            &message,
+            related_work.as_slice(),
+            review_approval.as_ref(),
+            violations.as_slice(),
+        ),
+    });
+
+    if let Some(work) = work_for_attempt_2.as_ref() {
+        let mut branches = Vec::new();
+        branches.push(ticket_pickup_branch(work, reload_message.as_ref()));
+        if let Some(reload) = reload_message.as_ref() {
+            branches.push(queue_reload_branch(
+                reload,
+                load_routing(&conn, &reload.message_key)?.as_ref(),
+            ));
+        }
+        blocks.push(MainBlock {
+            title: "ATTEMPT 2".to_string(),
+            lines: attempt_lines(
+                "CTOX resumes from durable rework and continues the same task.",
+                reload_message.as_ref().unwrap_or(&message),
+                Some(work),
+            ),
+            branches,
+        });
+    }
+
+    blocks.push(MainBlock {
+        title: "FINISH / CURRENT STATE".to_string(),
+        lines: finish_lines(
+            routing.as_ref(),
+            work_for_attempt_2.as_ref(),
+            review_approval.as_ref(),
+        ),
+        branches: vec![
+            guard_branch(proofs.as_slice(), violations.as_slice()),
+            verification_branch(&conn, work_for_attempt_2.as_ref())?,
+        ],
+    });
+
+    Ok(HarnessFlow { blocks })
+}
+
+fn task_lines(message: &MessageRow) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "{} from {}",
+        sentence_case(&message.direction),
+        non_empty(&message.sender_display, "unknown sender")
+    ));
+    lines.push(format!(
+        "Subject: {}",
+        clip(non_empty(&message.subject, "(no subject)"), 82)
+    ));
+    let preview = first_non_empty(&[&message.preview, &message.body_text]).unwrap_or("");
+    if !preview.trim().is_empty() {
+        lines.push(format!("What CTOX has to handle: {}", clip(preview, 82)));
+    }
+    lines.push(format!(
+        "Source: {} · thread {} · observed {}",
+        message.channel,
+        clip(&message.thread_key, 38),
+        short_time(&message.observed_at)
+    ));
+    lines
+}
+
+fn queue_pickup_branch(routing: Option<&RoutingRow>) -> SupportBranch {
+    let lines = match routing {
+        Some(row) => {
+            let mut lines = Vec::new();
+            lines.push(format!("Current queue state: {}", row.route_status));
+            if let Some(owner) = row.lease_owner.as_deref().filter(|s| !s.is_empty()) {
+                lines.push(format!("Leased by: {}", owner));
+            }
+            if let Some(leased_at) = row.leased_at.as_deref().filter(|s| !s.is_empty()) {
+                lines.push(format!("Lease time: {}", short_time(leased_at)));
+            }
+            if let Some(acked_at) = row.acked_at.as_deref().filter(|s| !s.is_empty()) {
+                lines.push(format!("Acknowledged: {}", short_time(acked_at)));
+            }
+            if let Some(error) = row.last_error.as_deref().filter(|s| !s.is_empty()) {
+                lines.push(format!("Queue error: {}", clip(error, 72)));
+            }
+            lines.push(format!(
+                "Last queue update: {}",
+                short_time(&row.updated_at)
+            ));
+            lines
+        }
+        None => vec!["No routing row found for this source yet.".to_string()],
+    };
+    SupportBranch {
+        title: "QUEUE PICKUP".to_string(),
+        lines,
+        returns_to_spine: true,
+    }
+}
+
+fn context_branch(conn: &Connection) -> Result<SupportBranch> {
+    let mission = optional_string(
+        conn,
+        "SELECT mission FROM mission_states ORDER BY last_synced_at DESC LIMIT 1",
+        [],
+    )?;
+    let docs = optional_count(conn, "SELECT COUNT(*) FROM continuity_documents")?;
+    let commits = optional_count(conn, "SELECT COUNT(*) FROM continuity_commits")?;
+    let mut lines = Vec::new();
+    if let Some(mission) = mission.filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("Current mission: {}", clip(&mission, 76)));
+    } else {
+        lines.push("No active mission text found.".to_string());
+    }
+    lines.push(format!("Continuity docs: {} · commits: {}", docs, commits));
+    lines.push("Purpose: keep the worker on the current task context.".to_string());
+    Ok(SupportBranch {
+        title: "CONTEXT".to_string(),
+        lines,
+        returns_to_spine: true,
+    })
+}
+
+fn knowledge_branch(conn: &Connection) -> Result<SupportBranch> {
+    let loads = optional_count(conn, "SELECT COUNT(*) FROM ticket_knowledge_loads")?;
+    let entries = optional_count(conn, "SELECT COUNT(*) FROM ticket_knowledge_entries")?;
+    let skills = optional_count(conn, "SELECT COUNT(*) FROM knowledge_main_skills")?;
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Loaded knowledge runs: {} · entries: {} · main skills: {}",
+        loads, entries, skills
+    ));
+    let latest = optional_string(
+        conn,
+        "SELECT title FROM ticket_knowledge_entries ORDER BY updated_at DESC LIMIT 1",
+        [],
+    )?;
+    if let Some(title) = latest.filter(|s| !s.trim().is_empty()) {
+        lines.push(format!("Latest captured lesson: {}", clip(&title, 72)));
+    } else {
+        lines.push("No task-specific knowledge capture observed yet.".to_string());
+    }
+    Ok(SupportBranch {
+        title: "KNOWLEDGE".to_string(),
+        lines,
+        returns_to_spine: true,
+    })
+}
+
+fn attempt_lines(intro: &str, message: &MessageRow, work: Option<&SelfWorkRow>) -> Vec<String> {
+    let mut lines = vec![intro.to_string()];
+    if let Some(work) = work {
+        lines.push(format!(
+            "Picked up: {} ({})",
+            clip(&work.title, 70),
+            work.kind
+        ));
+        lines.push(format!(
+            "Backlog state: {} · updated {}",
+            work.state,
+            short_time(&work.updated_at)
+        ));
+        if !work.body_text.trim().is_empty() {
+            lines.push(format!("Needed work: {}", clip(&work.body_text, 82)));
+        }
+    } else {
+        lines.push(format!(
+            "Input: {}",
+            clip(
+                first_non_empty(&[&message.preview, &message.body_text]).unwrap_or(""),
+                82
+            )
+        ));
+    }
+    lines.push(
+        "Work metrics: not instrumented yet (files/line deltas need a turn diff ledger)."
+            .to_string(),
+    );
+    lines
+}
+
+fn attempt_one_branches(
+    message: &MessageRow,
+    related_work: &[SelfWorkRow],
+    approval: Option<&FounderReviewApproval>,
+    violations: &[StateViolationRow],
+) -> Vec<SupportBranch> {
+    let mut branches = Vec::new();
+    if let Some(approval) = approval {
+        branches.push(review_pass_branch(approval));
+    } else if !related_work.is_empty() {
+        branches.push(review_rework_branch(related_work));
+    } else if !violations.is_empty() {
+        branches.push(review_blocked_branch(violations));
+    } else {
+        branches.push(SupportBranch {
+            title: "REVIEW".to_string(),
+            lines: vec![
+                "No persisted review result found for this source.".to_string(),
+                "If a review happened, the flow needs that outcome captured durably.".to_string(),
+            ],
+            returns_to_spine: true,
+        });
+    }
+
+    if !related_work.is_empty() {
+        branches.push(ticket_sink_branch(message, related_work));
+    }
+    branches
+}
+
+fn review_pass_branch(approval: &FounderReviewApproval) -> SupportBranch {
+    let mut lines = Vec::new();
+    lines.push("Result: send allowed.".to_string());
+    lines.push(format!(
+        "Review summary: {}",
+        clip(&approval.review_summary, 76)
+    ));
+    lines.push(format!(
+        "Reviewer: {} · approved {}",
+        approval.reviewer,
+        short_time(&approval.approved_at)
+    ));
+    lines.push(format!(
+        "Approved body hash: {}",
+        clip(&approval.body_sha256, 28)
+    ));
+    if let Some(sent_at) = approval.sent_at.as_deref().filter(|s| !s.is_empty()) {
+        lines.push(format!("Sent after review: {}", short_time(sent_at)));
+    }
+    SupportBranch {
+        title: "REVIEW".to_string(),
+        lines,
+        returns_to_spine: true,
+    }
+}
+
+fn review_rework_branch(related_work: &[SelfWorkRow]) -> SupportBranch {
+    let first = &related_work[0];
+    SupportBranch {
+        title: "REVIEW".to_string(),
+        lines: vec![
+            "Result: not finished; durable rework exists.".to_string(),
+            format!("Rework item: {}", clip(&first.title, 76)),
+            format!("Reason/work requested: {}", clip(&first.body_text, 76)),
+        ],
+        returns_to_spine: false,
+    }
+}
+
+fn review_blocked_branch(violations: &[StateViolationRow]) -> SupportBranch {
+    let mut lines = Vec::new();
+    lines.push("Result: blocked by harness guard.".to_string());
+    let mut seen_codes = Vec::<&str>::new();
+    for violation in violations {
+        if seen_codes
+            .iter()
+            .any(|code| *code == violation.violation_code)
+        {
+            continue;
+        }
+        seen_codes.push(&violation.violation_code);
+        if seen_codes.len() > 3 {
+            break;
+        }
+        lines.push(format!(
+            "{}: {}",
+            violation.violation_code,
+            clip(&violation.message, 68)
+        ));
+    }
+    SupportBranch {
+        title: "REVIEW / SEND BLOCK".to_string(),
+        lines,
+        returns_to_spine: false,
+    }
+}
+
+fn ticket_sink_branch(message: &MessageRow, related_work: &[SelfWorkRow]) -> SupportBranch {
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "Original source: {}",
+        clip(&message.message_key, 62)
+    ));
+    for work in related_work.iter().take(3) {
+        lines.push(format!(
+            "Created: {} · {}",
+            clip(&work.work_id, 18),
+            clip(&work.title, 52)
+        ));
+        lines.push(format!("State: {} · kind: {}", work.state, work.kind));
+    }
+    SupportBranch {
+        title: "TICKET BACKLOG".to_string(),
+        lines,
+        returns_to_spine: false,
+    }
+}
+
+fn ticket_pickup_branch(work: &SelfWorkRow, reload_message: Option<&MessageRow>) -> SupportBranch {
+    let mut lines = Vec::new();
+    lines.push(format!("Picked up work item: {}", clip(&work.work_id, 48)));
+    lines.push(format!("Title: {}", clip(&work.title, 74)));
+    lines.push(format!(
+        "State: {} · created {}",
+        work.state,
+        short_time(&work.created_at)
+    ));
+    if let Some(message) = reload_message {
+        lines.push(format!(
+            "Re-entered queue as: {}",
+            clip(&message.message_key, 58)
+        ));
+    } else {
+        lines.push("No queue reload message found for this work item.".to_string());
+    }
+    SupportBranch {
+        title: "SOURCE FROM TICKET BACKLOG".to_string(),
+        lines,
+        returns_to_spine: true,
+    }
+}
+
+fn queue_reload_branch(message: &MessageRow, routing: Option<&RoutingRow>) -> SupportBranch {
+    let mut lines = Vec::new();
+    lines.push(format!("Queue source: {}", clip(&message.message_key, 62)));
+    lines.push(format!("Thread: {}", clip(&message.thread_key, 70)));
+    if let Some(routing) = routing {
+        lines.push(format!("Reload status: {}", routing.route_status));
+    }
+    lines.push("Effect: this backlog item can become the next worker job.".to_string());
+    SupportBranch {
+        title: "QUEUE RELOAD".to_string(),
+        lines,
+        returns_to_spine: true,
+    }
+}
+
+fn finish_lines(
+    routing: Option<&RoutingRow>,
+    work: Option<&SelfWorkRow>,
+    approval: Option<&FounderReviewApproval>,
+) -> Vec<String> {
+    let mut lines = Vec::new();
+    match routing {
+        Some(row) if row.route_status == "handled" => {
+            lines.push("Original queue job is handled.".to_string())
+        }
+        Some(row) => lines.push(format!("Original queue state: {}", row.route_status)),
+        None => lines.push("Original queue state: unknown".to_string()),
+    }
+    if let Some(work) = work {
+        lines.push(format!(
+            "Backlog item {} is currently {}.",
+            clip(&work.work_id, 24),
+            work.state
+        ));
+    }
+    if let Some(approval) = approval {
+        lines.push(format!(
+            "Latest review approval: {}",
+            clip(&approval.approval_key, 54)
+        ));
+    }
+    if work.is_none() && approval.is_none() {
+        lines.push("No ticket/self-work close or review approval is linked yet.".to_string());
+    }
+    lines
+}
+
+fn guard_branch(proofs: &[CoreProofRow], violations: &[StateViolationRow]) -> SupportBranch {
+    let mut lines = Vec::new();
+    if proofs.is_empty() && violations.is_empty() {
+        lines.push("No core transition proof or violation found for this source.".to_string());
+    }
+    for proof in proofs.iter().take(3) {
+        lines.push(format!(
+            "{} {} -> {} ({})",
+            if proof.accepted {
+                "Accepted:"
+            } else {
+                "Rejected:"
+            },
+            proof.from_state,
+            proof.to_state,
+            proof.core_event
+        ));
+        lines.push(format!(
+            "{} · {} · proof {}",
+            proof.entity_type,
+            short_time(&proof.updated_at),
+            clip(&proof.proof_id, 24)
+        ));
+        if !proof.accepted {
+            lines.push(format!(
+                "Violations: {}",
+                clip(&proof.violation_codes_json, 70)
+            ));
+        }
+    }
+    let mut seen_codes = Vec::<&str>::new();
+    for violation in violations.iter() {
+        if seen_codes
+            .iter()
+            .any(|code| *code == violation.violation_code)
+        {
+            continue;
+        }
+        seen_codes.push(&violation.violation_code);
+        if seen_codes.len() > 3 {
+            break;
+        }
+        lines.push(format!(
+            "{} violation: {}",
+            violation.severity,
+            clip(&violation.violation_code, 58)
+        ));
+        lines.push(format!("Detected: {}", short_time(&violation.detected_at)));
+    }
+    SupportBranch {
+        title: "SEND / CLOSE GUARD".to_string(),
+        lines,
+        returns_to_spine: true,
+    }
+}
+
+fn verification_branch(conn: &Connection, work: Option<&SelfWorkRow>) -> Result<SupportBranch> {
+    let count = optional_count(conn, "SELECT COUNT(*) FROM verification_runs")?;
+    let mut lines = vec![format!("Verification runs in runtime: {}", count)];
+    if let Some(work) = work {
+        let matching = optional_count_with_param(
+            conn,
+            "SELECT COUNT(*) FROM verification_runs WHERE goal LIKE '%' || ?1 || '%'",
+            &work.work_id,
+        )?;
+        lines.push(format!("Runs mentioning this work item: {}", matching));
+    }
+    let ticket_verifications = optional_count(conn, "SELECT COUNT(*) FROM ticket_verifications")?;
+    lines.push(format!(
+        "Ticket verification records: {}",
+        ticket_verifications
+    ));
+    Ok(SupportBranch {
+        title: "VERIFICATION".to_string(),
+        lines,
+        returns_to_spine: true,
+    })
+}
+
+fn render_ascii(flow: &HarnessFlow, width: usize) -> String {
+    let main_width = (width * 54 / 100).clamp(50, 82);
+    let branch_width = width.saturating_sub(main_width + 8).clamp(34, 86);
+    let mut out = String::new();
+
+    for (index, block) in flow.blocks.iter().enumerate() {
+        render_box(&mut out, "", main_width, &block.title, &block.lines);
+        for branch in &block.branches {
+            let stem_pad = " ".repeat(main_width / 2);
+            out.push_str(&format!("{stem_pad}│\n"));
+            render_branch_box(
+                &mut out,
+                &stem_pad,
+                branch_width,
+                &branch.title,
+                &branch.lines,
+            );
+            if branch.returns_to_spine {
+                out.push_str(&format!("{stem_pad}│\n"));
+            }
+        }
+        if index + 1 < flow.blocks.len() {
+            out.push_str(&format!(
+                "{}│\n{}▼\n",
+                " ".repeat(main_width / 2),
+                " ".repeat(main_width / 2)
+            ));
+        }
+    }
+
+    out.trim_end().to_string()
+}
+
+fn render_box(out: &mut String, prefix: &str, width: usize, title: &str, lines: &[String]) {
+    let inner = width.saturating_sub(2);
+    out.push_str(prefix);
+    out.push('┌');
+    out.push_str(&"─".repeat(inner));
+    out.push_str("┐\n");
+    render_box_line(out, prefix, inner, title);
+    for line in lines {
+        for wrapped in wrap_line(line, inner.saturating_sub(2)) {
+            render_box_line(out, prefix, inner, &format!("  {wrapped}"));
+        }
+    }
+    out.push_str(prefix);
+    out.push('└');
+    out.push_str(&"─".repeat(inner));
+    out.push_str("┘\n");
+}
+
+fn render_branch_box(
+    out: &mut String,
+    stem_pad: &str,
+    width: usize,
+    title: &str,
+    lines: &[String],
+) {
+    let mut rendered = String::new();
+    render_box(&mut rendered, "", width, title, lines);
+    for (idx, line) in rendered.lines().enumerate() {
+        out.push_str(stem_pad);
+        if idx == 0 {
+            out.push_str("├──►");
+        } else {
+            out.push_str("│   ");
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+}
+
+fn render_box_line(out: &mut String, prefix: &str, inner: usize, text: &str) {
+    let clipped = clip(text, inner);
+    out.push_str(prefix);
+    out.push('│');
+    out.push_str(&clipped);
+    out.push_str(&" ".repeat(inner.saturating_sub(clipped.chars().count())));
+    out.push_str("│\n");
+}
+
+fn wrap_line(text: &str, width: usize) -> Vec<String> {
+    if text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let next_len =
+            current.chars().count() + if current.is_empty() { 0 } else { 1 } + word.chars().count();
+        if next_len > width && !current.is_empty() {
+            lines.push(current);
+            current = word.to_string();
+        } else {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        vec![clip(text, width)]
+    } else {
+        lines
+    }
+}
+
+fn load_message(conn: &Connection, key: &str) -> Result<Option<MessageRow>> {
+    query_message(
+        conn,
+        "SELECT message_key, channel, direction, thread_key, subject, preview, body_text,
+                sender_display, observed_at
+         FROM communication_messages WHERE message_key = ?1",
+        params![key],
+    )
+}
+
+fn latest_message(conn: &Connection) -> Result<Option<MessageRow>> {
+    query_message(
+        conn,
+        "SELECT message_key, channel, direction, thread_key, subject, preview, body_text,
+                sender_display, observed_at
+         FROM communication_messages ORDER BY observed_at DESC LIMIT 1",
+        [],
+    )
+}
+
+fn query_message<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Option<MessageRow>> {
+    Ok(conn
+        .query_row(sql, params, |row| {
+            Ok(MessageRow {
+                message_key: row.get(0)?,
+                channel: row.get(1)?,
+                direction: row.get(2)?,
+                thread_key: row.get(3)?,
+                subject: row.get(4)?,
+                preview: row.get(5)?,
+                body_text: row.get(6)?,
+                sender_display: row.get(7)?,
+                observed_at: row.get(8)?,
+            })
+        })
+        .ok())
+}
+
+fn load_routing(conn: &Connection, key: &str) -> Result<Option<RoutingRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT route_status, lease_owner, leased_at, acked_at, last_error, updated_at
+             FROM communication_routing_state WHERE message_key = ?1",
+            params![key],
+            |row| {
+                Ok(RoutingRow {
+                    route_status: row.get(0)?,
+                    lease_owner: row.get(1)?,
+                    leased_at: row.get(2)?,
+                    acked_at: row.get(3)?,
+                    last_error: row.get(4)?,
+                    updated_at: row.get(5)?,
+                })
+            },
+        )
+        .ok())
+}
+
+fn load_self_work(conn: &Connection, work_id: &str) -> Result<Option<SelfWorkRow>> {
+    query_self_work(
+        conn,
+        "SELECT work_id, kind, title, body_text, state, metadata_json, created_at, updated_at
+         FROM ticket_self_work_items WHERE work_id = ?1",
+        params![work_id],
+    )
+}
+
+fn load_related_self_work(conn: &Connection, message_key: &str) -> Result<Vec<SelfWorkRow>> {
+    let mut stmt = match conn.prepare(
+        "SELECT work_id, kind, title, body_text, state, metadata_json, created_at, updated_at
+         FROM ticket_self_work_items
+         WHERE json_extract(metadata_json, '$.parent_message_key') = ?1
+            OR json_extract(metadata_json, '$.inbound_message_key') = ?1
+            OR metadata_json LIKE '%' || ?1 || '%'
+         ORDER BY created_at ASC LIMIT 8",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let rows = stmt.query_map(params![message_key], map_self_work)?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+fn query_self_work<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Option<SelfWorkRow>> {
+    Ok(conn.query_row(sql, params, map_self_work).ok())
+}
+
+fn map_self_work(row: &rusqlite::Row<'_>) -> rusqlite::Result<SelfWorkRow> {
+    Ok(SelfWorkRow {
+        work_id: row.get(0)?,
+        kind: row.get(1)?,
+        title: row.get(2)?,
+        body_text: row.get(3)?,
+        state: row.get(4)?,
+        metadata_json: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn load_queue_message_for_work(conn: &Connection, work_id: &str) -> Result<Option<MessageRow>> {
+    query_message(
+        conn,
+        "SELECT message_key, channel, direction, thread_key, subject, preview, body_text,
+                sender_display, observed_at
+         FROM communication_messages
+         WHERE json_extract(metadata_json, '$.ticket_self_work_id') = ?1
+            OR metadata_json LIKE '%' || ?1 || '%'
+         ORDER BY observed_at ASC LIMIT 1",
+        params![work_id],
+    )
+}
+
+fn load_founder_review_approval(
+    conn: &Connection,
+    key: &str,
+) -> Result<Option<FounderReviewApproval>> {
+    Ok(conn
+        .query_row(
+            "SELECT approval_key, review_summary, body_sha256, reviewer, approved_at, sent_at
+             FROM communication_founder_reply_reviews
+             WHERE inbound_message_key = ?1
+             ORDER BY approved_at DESC LIMIT 1",
+            params![key],
+            |row| {
+                Ok(FounderReviewApproval {
+                    approval_key: row.get(0)?,
+                    review_summary: row.get(1)?,
+                    body_sha256: row.get(2)?,
+                    reviewer: row.get(3)?,
+                    approved_at: row.get(4)?,
+                    sent_at: row.get(5)?,
+                })
+            },
+        )
+        .ok())
+}
+
+fn load_core_proofs_for_key(conn: &Connection, key: &str) -> Result<Vec<CoreProofRow>> {
+    let mut stmt = match conn.prepare(
+        "SELECT accepted, entity_type, from_state, to_state, core_event,
+                violation_codes_json, proof_id, updated_at
+         FROM ctox_core_transition_proofs
+         WHERE entity_id LIKE '%' || ?1 || '%'
+         ORDER BY updated_at DESC LIMIT 8",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let rows = stmt.query_map(params![key], |row| {
+        Ok(CoreProofRow {
+            accepted: row.get::<_, i64>(0)? != 0,
+            entity_type: row.get(1)?,
+            from_state: row.get(2)?,
+            to_state: row.get(3)?,
+            core_event: row.get(4)?,
+            violation_codes_json: row.get(5)?,
+            proof_id: row.get(6)?,
+            updated_at: row.get(7)?,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+fn load_state_violations_for_key(conn: &Connection, key: &str) -> Result<Vec<StateViolationRow>> {
+    let mut stmt = match conn.prepare(
+        "SELECT severity, violation_code, message, detected_at
+         FROM ctox_pm_state_violations
+         WHERE case_id LIKE '%' || ?1 || '%'
+            OR evidence_json LIKE '%' || ?1 || '%'
+         ORDER BY detected_at DESC LIMIT 8",
+    ) {
+        Ok(stmt) => stmt,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let rows = stmt.query_map(params![key], |row| {
+        Ok(StateViolationRow {
+            severity: row.get(0)?,
+            violation_code: row.get(1)?,
+            message: row.get(2)?,
+            detected_at: row.get(3)?,
+        })
+    })?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+fn optional_string<P: rusqlite::Params>(
+    conn: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Option<String>> {
+    Ok(conn.query_row(sql, params, |row| row.get(0)).ok())
+}
+
+fn optional_count(conn: &Connection, sql: &str) -> Result<i64> {
+    Ok(conn.query_row(sql, [], |row| row.get(0)).unwrap_or(0))
+}
+
+fn optional_count_with_param(conn: &Connection, sql: &str, param: &str) -> Result<i64> {
+    Ok(conn
+        .query_row(sql, params![param], |row| row.get(0))
+        .unwrap_or(0))
+}
+
+fn parent_message_key(metadata: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(metadata).ok()?;
+    ["parent_message_key", "inbound_message_key"]
+        .iter()
+        .find_map(|key| value.get(*key)?.as_str().map(ToOwned::to_owned))
+}
+
+fn parse_string_flag<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter().enumerate().find_map(|(idx, arg)| {
+        if arg == name {
+            args.get(idx + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix(&format!("{name}="))
+        }
+    })
+}
+
+fn parse_usize_flag(args: &[String], name: &str, default: usize) -> usize {
+    parse_string_flag(args, name)
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
+fn first_non_empty<'a>(values: &[&'a str]) -> Option<&'a str> {
+    values
+        .iter()
+        .copied()
+        .find(|value| !value.trim().is_empty())
+}
+
+fn non_empty<'a>(value: &'a str, fallback: &'a str) -> &'a str {
+    if value.trim().is_empty() {
+        fallback
+    } else {
+        value
+    }
+}
+
+fn sentence_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn short_time(value: &str) -> String {
+    value
+        .split('T')
+        .nth(1)
+        .map(|time| time.trim_end_matches('Z').to_string())
+        .unwrap_or_else(|| value.to_string())
+}
+
+fn clip(value: &str, max: usize) -> String {
+    let cleaned = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.chars().count() <= max {
+        cleaned
+    } else {
+        let take = max.saturating_sub(3);
+        format!("{}...", cleaned.chars().take(take).collect::<String>())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn renderer_keeps_support_branches_off_the_main_box() {
+        let flow = HarnessFlow {
+            blocks: vec![MainBlock {
+                title: "TASK".to_string(),
+                lines: vec!["Answer the message.".to_string()],
+                branches: vec![SupportBranch {
+                    title: "REVIEW".to_string(),
+                    lines: vec!["Result: do not send.".to_string()],
+                    returns_to_spine: false,
+                }],
+            }],
+        };
+        let rendered = render_ascii(&flow, 110);
+        assert!(rendered.contains("TASK"));
+        assert!(rendered.contains("REVIEW"));
+        assert!(rendered.contains("├──►"));
+    }
+}

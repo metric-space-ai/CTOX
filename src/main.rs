@@ -132,6 +132,7 @@ GOVERNANCE / MISSION
   ctox secret <subcmd>           credential storage
   ctox state-invariants [--conversation-id <id>]
   ctox turn status|end           inspect or close the current CLI turn ledger
+  ctox harness-flow              render the current harness work flow as ASCII
   ctox process-mining <subcmd>   SQLite mutation event log and transition mining
   ctox harness-mining <subcmd>   forensic + conformance mining of the agent harness
                                  (stuck-cases, variants, sojourn, conformance,
@@ -350,6 +351,7 @@ fn main() -> anyhow::Result<()> {
         }
         Some("tui") => tui::run_tui(&root),
         Some("turn") => service::turn_ledger::handle_turn_command(&root, &args[1..]),
+        Some("harness-flow") => service::harness_flow::handle_harness_flow_command(&root, &args[1..]),
         Some("process-mining") => {
             service::process_mining::handle_process_mining_command(&root, &args[1..])
         }

@@ -276,6 +276,10 @@ fn render_settings(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
         render_settings_harness_mining(frame, app, outer[1]);
         return;
     }
+    if app.settings_view == SettingsView::HarnessFlow {
+        render_settings_harness_flow(frame, app, outer[1]);
+        return;
+    }
     if app.settings_view == SettingsView::Secrets {
         render_secrets(frame, app, outer[1]);
         return;
@@ -585,6 +589,29 @@ fn render_settings_harness_mining(frame: &mut Frame, app: &App, area: ratatui::l
     );
 }
 
+fn render_settings_harness_flow(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let text = if app.harness_flow_text.trim().is_empty() {
+        "Loading harness flow...".to_string()
+    } else {
+        app.harness_flow_text.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(text)
+            .block(
+                pane_block().borders(Borders::TOP).title(Span::styled(
+                    " harness flow ",
+                    Style::default()
+                        .fg(Color::LightCyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+            )
+            .style(Style::default().fg(Color::White))
+            .scroll((app.harness_flow_scroll, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn harness_status_line(snap: &crate::service::harness_mining::UiSnapshot) -> Line<'static> {
     let healthy = snap.conformance_ok && !snap.drift_detected && snap.stuck_case_count == 0;
     if healthy {
@@ -881,6 +908,10 @@ fn render_settings_narrow(frame: &mut Frame, app: &App, area: ratatui::layout::R
     }
     if app.settings_view == SettingsView::HarnessMining {
         render_settings_harness_mining(frame, app, outer[1]);
+        return;
+    }
+    if app.settings_view == SettingsView::HarnessFlow {
+        render_settings_harness_flow(frame, app, outer[1]);
         return;
     }
     if app.settings_view == SettingsView::Secrets {
@@ -2622,6 +2653,7 @@ fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout
         SettingsView::Paths => 3,
         SettingsView::Update => 4,
         SettingsView::HarnessMining => 5,
+        SettingsView::HarnessFlow => 6,
     };
     let titles = [
         "Model",
@@ -2630,6 +2662,7 @@ fn render_settings_view_tabs(frame: &mut Frame, app: &App, area: ratatui::layout
         "Paths",
         "Update",
         "Harness",
+        "Flow",
     ]
     .into_iter()
     .map(Line::from)
