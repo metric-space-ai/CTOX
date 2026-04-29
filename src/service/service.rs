@@ -3658,8 +3658,19 @@ fn run_completion_review(
                 ),
             }
         }
+        return CompletionReviewDisposition::Hold {
+            summary: outcome.summary.clone(),
+        };
     }
-    CompletionReviewDisposition::Approved
+    match outcome.verdict {
+        review::ReviewVerdict::Pass => CompletionReviewDisposition::Approved,
+        review::ReviewVerdict::Skipped => CompletionReviewDisposition::None,
+        review::ReviewVerdict::Fail
+        | review::ReviewVerdict::Partial
+        | review::ReviewVerdict::Unavailable => CompletionReviewDisposition::Hold {
+            summary: outcome.summary.clone(),
+        },
+    }
 }
 
 /// Background-driven slices (watchdog, timeout continuation, queue-pressure

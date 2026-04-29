@@ -227,7 +227,7 @@ impl ReviewOutcome {
     }
 
     pub fn requires_follow_up(&self) -> bool {
-        self.required && matches!(self.verdict, ReviewVerdict::Fail)
+        self.required && matches!(self.verdict, ReviewVerdict::Fail | ReviewVerdict::Partial)
     }
 
     pub fn canonical_report(&self) -> String {
@@ -1140,6 +1140,7 @@ mod tests {
         let outcome = parse_review_report(3, vec![], "SUMMARY: Looked okay overall.");
         assert_eq!(outcome.verdict, ReviewVerdict::Partial);
         assert!(outcome.summary.contains("stays open"));
+        assert!(outcome.requires_follow_up());
     }
 
     #[test]

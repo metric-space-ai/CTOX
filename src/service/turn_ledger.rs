@@ -17,6 +17,7 @@ pub struct CliCommandLedger {
     db_path: std::path::PathBuf,
     turn_id: String,
     command_id: String,
+    auto_end_implicit_turn: bool,
 }
 
 impl CliCommandLedger {
@@ -29,7 +30,7 @@ impl CliCommandLedger {
         ensure_turn_ledger_schema(&conn)?;
         crate::service::process_mining::ensure_process_mining_schema(&conn, &db_path)?;
 
-        let turn_id = resolve_or_create_turn_id(&mut conn, args)?;
+        let (turn_id, auto_end_implicit_turn) = resolve_or_create_turn_id(&mut conn, args)?;
         let command_id = new_id("cmd", args);
         let command_name = args
             .first()
@@ -83,6 +84,7 @@ impl CliCommandLedger {
             db_path,
             turn_id,
             command_id,
+            auto_end_implicit_turn,
         })
     }
 
@@ -125,6 +127,26 @@ impl CliCommandLedger {
             &self.db_path,
             &self.command_id,
         )?;
+        if self.auto_end_implicit_turn {
+            let terminal_status = if result.is_ok() { "done" } else { "invalid" };
+            let terminal_reason = if result.is_ok() {
+                "implicit CLI command completed"
+            } else {
+                "implicit CLI command failed"
+            };
+            conn.execute(
+                r#"
+                UPDATE ctox_turns
+                SET status = 'terminal',
+                    ended_at = ?1,
+                    terminal_status = ?2,
+                    terminal_reason = ?3,
+                    updated_at = ?1
+                WHERE turn_id = ?4
+                "#,
+                params![finished_at, terminal_status, terminal_reason, self.turn_id],
+            )?;
+        }
 
         Ok(())
     }
@@ -193,15 +215,15 @@ pub fn ensure_turn_ledger_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn resolve_or_create_turn_id(conn: &mut Connection, args: &[String]) -> Result<String> {
+fn resolve_or_create_turn_id(conn: &mut Connection, args: &[String]) -> Result<(String, bool)> {
     if let Some(turn_id) = env_value("CTOX_TURN_ID").or_else(|| env_value("CODEX_TURN_ID")) {
         ensure_turn_row(conn, &turn_id, "env")?;
-        return Ok(turn_id);
+        return Ok((turn_id, false));
     }
 
     let turn_id = new_id("implicit-turn", args);
     ensure_turn_row(conn, &turn_id, "implicit_cli_command")?;
-    Ok(turn_id)
+    Ok((turn_id, true))
 }
 
 fn ensure_turn_row(conn: &mut Connection, turn_id: &str, source: &str) -> Result<()> {
@@ -442,9 +464,11 @@ fn short_sha256_hex(input: &str) -> String {
 mod tests {
     use super::*;
     use std::fs;
+    use std::sync::{Mutex, OnceLock};
 
     #[test]
     fn command_ledger_records_successful_cli_call() {
+        let _env_guard = clear_turn_env_for_test();
         let root = unique_test_dir("success");
         let args = vec!["status".to_string()];
         let mut ledger = CliCommandLedger::start(&root, &args).expect("start ledger");
@@ -454,11 +478,16 @@ mod tests {
         ledger.finish(&Ok(())).expect("finish ledger");
 
         let conn = Connection::open(crate::paths::core_db(&root)).expect("open db");
-        let status: String = conn
+        let (status, terminal_status): (String, String) = conn
             .query_row(
-                "SELECT status FROM ctox_turn_commands WHERE command_id = ?1",
+                r#"
+                SELECT c.status, t.terminal_status
+                FROM ctox_turn_commands c
+                JOIN ctox_turns t ON t.turn_id = c.turn_id
+                WHERE c.command_id = ?1
+                "#,
                 [command_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .expect("command row");
         let command_count: i64 = conn
@@ -470,12 +499,14 @@ mod tests {
             .expect("turn row");
 
         assert_eq!(status, "succeeded");
+        assert_eq!(terminal_status, "done");
         assert_eq!(command_count, 1);
         cleanup_test_dir(&root);
     }
 
     #[test]
     fn command_ledger_records_failed_cli_call() {
+        let _env_guard = clear_turn_env_for_test();
         let root = unique_test_dir("failed");
         let args = vec!["queue".to_string(), "unknown".to_string()];
         let mut ledger = CliCommandLedger::start(&root, &args).expect("start ledger");
@@ -485,17 +516,81 @@ mod tests {
         ledger.finish(&Err(error)).expect("finish ledger");
 
         let conn = Connection::open(crate::paths::core_db(&root)).expect("open db");
-        let (status, exit_code): (String, i64) = conn
+        let (status, exit_code, terminal_status): (String, i64, String) = conn
             .query_row(
-                "SELECT status, exit_code FROM ctox_turn_commands WHERE command_id = ?1",
+                r#"
+                SELECT c.status, c.exit_code, t.terminal_status
+                FROM ctox_turn_commands c
+                JOIN ctox_turns t ON t.turn_id = c.turn_id
+                WHERE c.command_id = ?1
+                "#,
                 [command_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("command row");
 
         assert_eq!(status, "failed");
         assert_eq!(exit_code, 1);
+        assert_eq!(terminal_status, "invalid");
         cleanup_test_dir(&root);
+    }
+
+    #[test]
+    fn env_turn_stays_active_until_terminal_command() {
+        let _env_guard = clear_turn_env_for_test();
+        let root = unique_test_dir("env-active");
+        let args = vec!["status".to_string()];
+        std::env::set_var("CTOX_TURN_ID", "turn-explicit-test");
+        let mut ledger = CliCommandLedger::start(&root, &args).expect("start ledger");
+        ledger.finish(&Ok(())).expect("finish ledger");
+        std::env::remove_var("CTOX_TURN_ID");
+
+        let conn = Connection::open(crate::paths::core_db(&root)).expect("open db");
+        let (status, terminal_status): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, terminal_status FROM ctox_turns WHERE turn_id = ?1",
+                ["turn-explicit-test"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("turn row");
+
+        assert_eq!(status, "active");
+        assert_eq!(terminal_status, None);
+        cleanup_test_dir(&root);
+    }
+
+    struct TurnEnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        ctox_turn_id: Option<String>,
+        codex_turn_id: Option<String>,
+    }
+
+    impl Drop for TurnEnvGuard {
+        fn drop(&mut self) {
+            restore_env("CTOX_TURN_ID", self.ctox_turn_id.as_deref());
+            restore_env("CODEX_TURN_ID", self.codex_turn_id.as_deref());
+        }
+    }
+
+    fn clear_turn_env_for_test() -> TurnEnvGuard {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let lock = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let guard = TurnEnvGuard {
+            _lock: lock,
+            ctox_turn_id: std::env::var("CTOX_TURN_ID").ok(),
+            codex_turn_id: std::env::var("CODEX_TURN_ID").ok(),
+        };
+        std::env::remove_var("CTOX_TURN_ID");
+        std::env::remove_var("CODEX_TURN_ID");
+        guard
+    }
+
+    fn restore_env(key: &str, value: Option<&str>) {
+        if let Some(value) = value {
+            std::env::set_var(key, value);
+        } else {
+            std::env::remove_var(key);
+        }
     }
 
     #[test]

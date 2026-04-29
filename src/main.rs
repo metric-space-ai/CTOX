@@ -168,8 +168,18 @@ fn main() -> anyhow::Result<()> {
     service::db_migration::run_if_needed(&root)
         .context("failed to consolidate legacy databases into runtime/ctox.sqlite3")?;
 
+    let mut cli_ledger = service::turn_ledger::CliCommandLedger::start(&root, &args)
+        .context("failed to start CTOX CLI turn ledger")?;
+    let result = dispatch_command(&root, &args);
+    cli_ledger
+        .finish(&result)
+        .context("failed to finish CTOX CLI turn ledger")?;
+    result
+}
+
+fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
-        None => tui::run_tui(&root),
+        None => tui::run_tui(root),
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             Ok(())
@@ -326,37 +336,37 @@ fn main() -> anyhow::Result<()> {
                 );
                 std::env::set_var("CTOX_AUTONOMY_LEVEL", "progressive");
             }
-            service::run_foreground(&root)
+            service::run_foreground(root)
         }
         Some("version") => {
-            let version = version_info(&root)?;
+            let version = version_info(root)?;
             println!("{}", serde_json::to_string_pretty(&version)?);
             Ok(())
         }
-        Some("chat") => handle_chat(&root, &args[1..]),
+        Some("chat") => handle_chat(root, &args[1..]),
         Some("start") => {
-            println!("{}", service::start_background(&root)?);
+            println!("{}", service::start_background(root)?);
             Ok(())
         }
         Some("stop") => {
-            println!("{}", service::stop_background(&root)?);
+            println!("{}", service::stop_background(root)?);
             Ok(())
         }
         Some("status") => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&service::service_status_snapshot(&root)?)?
+                serde_json::to_string_pretty(&service::service_status_snapshot(root)?)?
             );
             Ok(())
         }
-        Some("tui") => tui::run_tui(&root),
-        Some("turn") => service::turn_ledger::handle_turn_command(&root, &args[1..]),
-        Some("harness-flow") => service::harness_flow::handle_harness_flow_command(&root, &args[1..]),
+        Some("tui") => tui::run_tui(root),
+        Some("turn") => service::turn_ledger::handle_turn_command(root, &args[1..]),
+        Some("harness-flow") => service::harness_flow::handle_harness_flow_command(root, &args[1..]),
         Some("process-mining") => {
-            service::process_mining::handle_process_mining_command(&root, &args[1..])
+            service::process_mining::handle_process_mining_command(root, &args[1..])
         }
         Some("harness-mining") => {
-            service::harness_mining::handle_harness_mining_command(&root, &args[1..])
+            service::harness_mining::handle_harness_mining_command(root, &args[1..])
         }
         Some("tui-smoke") => {
             let page = args.get(1).map(String::as_str).unwrap_or("chat");
