@@ -28,6 +28,10 @@ use crate::mission::communication_adapters;
 use crate::mission::communication_adapters::CommunicationTransportAdapter;
 use crate::mission::communication_gateway;
 use crate::secrets;
+use crate::service::core_state_machine::{
+    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
+};
+use crate::service::core_transition_guard::enforce_core_transition;
 use crate::service::harness_flow::{
     record_harness_flow_event_lossy, RecordHarnessFlowEventRequest,
 };
@@ -3086,6 +3090,12 @@ pub fn send_reviewed_founder_reply(
         &request.body,
         &request.attachments,
     )?;
+    enforce_reviewed_founder_send_core_transition(
+        &conn,
+        &format!("founder-reply:{inbound_message_key}"),
+        &approval_key,
+        &request,
+    )?;
     let send_result = send_email_message(root, &conn, &db_path, &request)?;
     mark_founder_reply_review_sent(&conn, &approval_key, &send_result)?;
     Ok(send_result)
@@ -3132,9 +3142,86 @@ pub(crate) fn send_reviewed_founder_outbound(
         &request.body,
     )?;
     ensure_founder_outbound_body_clean(&request)?;
+    enforce_reviewed_founder_send_core_transition(
+        &conn,
+        &format!("founder-outbound:{anchor_message_key}"),
+        &approval_key,
+        &request,
+    )?;
     let send_result = send_email_message(root, &conn, &db_path, &request)?;
     mark_founder_reply_review_sent(&conn, &approval_key, &send_result)?;
     Ok(send_result)
+}
+
+fn enforce_reviewed_founder_send_core_transition(
+    conn: &Connection,
+    entity_id: &str,
+    approval_key: &str,
+    request: &ChannelSendRequest,
+) -> Result<()> {
+    let body_sha256 = sha256_hex(request.body.trim().as_bytes());
+    let recipient_set_sha256 = founder_send_recipient_set_sha256(request);
+    let mut metadata = BTreeMap::new();
+    metadata.insert("protected_party".to_string(), "founder".to_string());
+    metadata.insert("thread_key".to_string(), request.thread_key.clone());
+    metadata.insert("subject".to_string(), request.subject.clone());
+    metadata.insert("account_key".to_string(), request.account_key.clone());
+
+    enforce_core_transition(
+        conn,
+        &CoreTransitionRequest {
+            entity_type: CoreEntityType::FounderCommunication,
+            entity_id: entity_id.to_string(),
+            lane: RuntimeLane::P0FounderCommunication,
+            from_state: CoreState::Approved,
+            to_state: CoreState::Sending,
+            event: CoreEvent::Send,
+            actor: "ctox-reviewed-founder-send".to_string(),
+            evidence: CoreEvidenceRefs {
+                review_audit_key: Some(approval_key.to_string()),
+                approved_body_sha256: Some(body_sha256.clone()),
+                outgoing_body_sha256: Some(body_sha256),
+                approved_recipient_set_sha256: Some(recipient_set_sha256.clone()),
+                outgoing_recipient_set_sha256: Some(recipient_set_sha256),
+                ..CoreEvidenceRefs::default()
+            },
+            metadata,
+        },
+    )?;
+    Ok(())
+}
+
+fn founder_send_recipient_set_sha256(request: &ChannelSendRequest) -> String {
+    let mut to = request
+        .to
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut cc = request
+        .cc
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    let mut attachments = request
+        .attachments
+        .iter()
+        .map(|value| value.trim().to_string())
+        .collect::<Vec<_>>();
+    to.sort();
+    cc.sort();
+    attachments.sort();
+    let payload = json!({
+        "to": to,
+        "cc": cc,
+        "subject": request.subject.trim(),
+        "attachments": attachments,
+    })
+    .to_string();
+    sha256_hex(payload.as_bytes())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn test_channel(
@@ -6451,6 +6538,50 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reviewed_founder_send_writes_core_transition_proof() {
+        let db_path = unique_test_db_path("ctox-founder-core-proof");
+        let conn = open_channel_db(&db_path).expect("failed to open db");
+        let request = ChannelSendRequest {
+            channel: "email".to_string(),
+            account_key: "email:cto1@metric-space.ai".to_string(),
+            thread_key: "mail-thread".to_string(),
+            body: "Hi Michael,\n\nDer Status ist belegt.".to_string(),
+            subject: "Re: Status".to_string(),
+            to: vec!["michael.welsch@metric-space.ai".to_string()],
+            cc: vec!["o.schaefers@gmx.net".to_string()],
+            attachments: Vec::new(),
+            sender_display: None,
+            sender_address: None,
+            send_voice: false,
+            reviewed_founder_send: true,
+        };
+
+        enforce_reviewed_founder_send_core_transition(
+            &conn,
+            "founder-reply:email:cto1@metric-space.ai::INBOX::proof",
+            "founder-review:proof",
+            &request,
+        )
+        .expect("reviewed founder send should write an accepted proof");
+
+        let accepted: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ctox_core_transition_proofs
+                 WHERE entity_type = 'FounderCommunication'
+                   AND lane = 'P0FounderCommunication'
+                   AND from_state = 'Approved'
+                   AND to_state = 'Sending'
+                   AND accepted = 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("failed to count proofs");
+        assert_eq!(accepted, 1);
+
+        let _ = std::fs::remove_file(&db_path);
     }
 
     #[test]
