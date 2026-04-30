@@ -6729,6 +6729,9 @@ fn is_owner_visible_strategic_job(job: &QueuedPrompt) -> bool {
     if is_internal_harness_or_forensics_job(job) {
         return false;
     }
+    if is_bounded_stateful_product_execution_job(job) {
+        return false;
+    }
     let haystack = format!(
         "{}\n{}\n{}\n{}\n{}",
         job.prompt,
@@ -6748,6 +6751,14 @@ fn is_owner_visible_strategic_job(job: &QueuedPrompt) -> bool {
         || haystack.contains("founder")
         || haystack.contains("buyer")
         || haystack.contains("customer")
+}
+
+fn is_bounded_stateful_product_execution_job(job: &QueuedPrompt) -> bool {
+    job.workspace_root.is_some()
+        && job.suggested_skill.as_deref() == Some("stateful-product-from-scratch")
+        && !job.leased_message_keys.iter().any(|key| {
+            key.starts_with("email:") || key.starts_with("jami:") || key.starts_with("meeting:")
+        })
 }
 
 fn is_internal_harness_or_forensics_job(job: &QueuedPrompt) -> bool {
@@ -12520,6 +12531,55 @@ mod tests {
         assert!(items[0]
             .body_text
             .contains("--thread-key kunstmen-supervisor"));
+    }
+
+    #[test]
+    fn scoped_stateful_product_execution_does_not_reroute_to_strategy_setup() {
+        let root = temp_root("ctox-scoped-stateful-product-no-strategy-reroute");
+        let queue_task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "CRM P0 slice: ship tasks workflow under /internal/crm".to_string(),
+                prompt: "Work only in /home/ubuntu/workspace/kunstmen. Next smallest coherent slice: make Tasks a real founder-usable workflow under /internal/crm with create/edit/delete/status changes linked to CRM records."
+                    .to_string(),
+                thread_key: "kunstmen-crm-p0".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("stateful-product-from-scratch".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to seed scoped CRM queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let job = QueuedPrompt {
+            prompt: queue_task.prompt.clone(),
+            goal: queue_task.title.clone(),
+            preview: queue_task.title.clone(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("stateful-product-from-scratch".to_string()),
+            leased_message_keys: vec![queue_task.message_key.clone()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("kunstmen-crm-p0".to_string()),
+            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+
+        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
+            .expect("strategy evaluation should succeed");
+        assert!(!redirected);
+
+        let tasks =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to list queue tasks");
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "CRM P0 slice: ship tasks workflow under /internal/crm");
+
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert!(items.is_empty());
     }
 
     #[test]
