@@ -491,79 +491,6 @@ fn classify_findings(findings: &[review::CategorizedFinding]) -> ReviewRoutingCl
     }
 }
 
-fn review_outcome_is_terminal_no_send(outcome: &review::ReviewOutcome) -> bool {
-    let mut text = outcome.summary.to_ascii_lowercase();
-    for value in outcome
-        .failed_gates
-        .iter()
-        .chain(outcome.semantic_findings.iter())
-        .chain(outcome.open_items.iter())
-        .chain(outcome.evidence.iter())
-    {
-        text.push('\n');
-        text.push_str(&value.to_ascii_lowercase());
-    }
-    for finding in &outcome.categorized_findings {
-        text.push('\n');
-        text.push_str(&finding.evidence.to_ascii_lowercase());
-        text.push('\n');
-        text.push_str(&finding.corrective_action.to_ascii_lowercase());
-    }
-
-    let says_no_send = contains_any(
-        &text,
-        &[
-            "no-send",
-            "no send",
-            "do not send",
-            "nicht senden",
-            "keine weitere founder-mail",
-            "keine weitere mail",
-            "no further founder",
-            "no founder reply",
-            "no immediate founder reply",
-            "should not be sent",
-            "sollte nicht gesendet",
-        ],
-    );
-    let says_wait = contains_any(
-        &text,
-        &[
-            "wait mode",
-            "wait until",
-            "warte",
-            "warten",
-            "until the founders provide",
-            "until marco",
-            "until michael",
-            "until olaf",
-            "await",
-            "konkrete inputs",
-            "technical inputs",
-            "crm/tool",
-            "sync scope",
-        ],
-    );
-    let says_missing_work = contains_any(
-        &text,
-        &[
-            "missing deliverable",
-            "missing required",
-            "fehlende fachliche arbeit",
-            "must be done before",
-            "muss erledigt werden",
-            "send a corrected",
-            "respond directly",
-        ],
-    );
-
-    says_no_send && says_wait && !says_missing_work
-}
-
-fn contains_any(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().any(|needle| haystack.contains(needle))
-}
-
 /// Source label applied to lightweight rewrite-only post-turn prompts. Kept
 /// distinct from `tui` / `queue` / `plan` / `ticket:local` so the dispatcher
 /// can identify them in logs and the pipeline status surface.
@@ -2559,26 +2486,6 @@ fn start_prompt_worker(
                 );
             }
         }
-        match maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job) {
-            Ok(true) => {
-                eprintln!(
-                    "ctox prompt worker rerouted-to-strategy source={} preview={}",
-                    job.source_label,
-                    clip_text(&job.preview, 120)
-                );
-                return;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                push_event(
-                    &state,
-                    format!(
-                        "Failed to evaluate strategic direction routing for {}: {}",
-                        job.source_label, err
-                    ),
-                );
-            }
-        }
         match maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job) {
             Ok(true) => {
                 eprintln!(
@@ -3469,11 +3376,11 @@ fn run_completion_review(
                 CompletionReviewDisposition::Approved
             }
             review::ReviewVerdict::Fail if actionable_rejection => {
-                if review_outcome_is_terminal_no_send(&outcome) {
+                if outcome.disposition == review::ReviewDisposition::NoSend {
                     push_event(
                         state,
                         format!(
-                            "Founder review closed {} without sending because the correct action is to wait: {}",
+                            "Founder review closed {} without sending because the reviewer set DISPOSITION: NO_SEND: {}",
                             job.source_label,
                             clip_text(&outcome.summary, 180)
                         ),
@@ -6708,194 +6615,8 @@ fn founder_commitment_guard_outcome(
                 .collect()
         },
         handoff: None,
+        disposition: review::ReviewDisposition::Send,
     })
-}
-
-fn is_owner_visible_strategic_job(job: &QueuedPrompt) -> bool {
-    if !derive_owner_visible_for_review(&job.source_label) {
-        return false;
-    }
-    if is_founder_or_owner_email_job(job) {
-        return false;
-    }
-    if is_internal_harness_or_forensics_job(job) {
-        return false;
-    }
-    if is_bounded_stateful_product_execution_job(job) {
-        return false;
-    }
-    let haystack = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        job.prompt,
-        job.goal,
-        job.preview,
-        job.thread_key.clone().unwrap_or_default(),
-        job.workspace_root.clone().unwrap_or_default()
-    )
-    .to_ascii_lowercase();
-    haystack.contains("homepage")
-        || haystack.contains("landing")
-        || haystack.contains("website")
-        || haystack.contains("product")
-        || haystack.contains("platform")
-        || haystack.contains("marketplace")
-        || haystack.contains("public")
-        || haystack.contains("founder")
-        || haystack.contains("buyer")
-        || haystack.contains("customer")
-}
-
-fn is_bounded_stateful_product_execution_job(job: &QueuedPrompt) -> bool {
-    job.workspace_root.is_some()
-        && job.suggested_skill.as_deref() == Some("stateful-product-from-scratch")
-        && !job.leased_message_keys.iter().any(|key| {
-            key.starts_with("email:") || key.starts_with("jami:") || key.starts_with("meeting:")
-        })
-}
-
-fn is_internal_harness_or_forensics_job(job: &QueuedPrompt) -> bool {
-    let thread_key = job
-        .thread_key
-        .as_deref()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    if thread_key.starts_with("codex/")
-        || thread_key.starts_with("internal/")
-        || thread_key.contains("harness")
-        || thread_key.contains("process-mining")
-    {
-        return true;
-    }
-    let haystack = format!("{}\n{}\n{}", job.prompt, job.goal, job.preview).to_ascii_lowercase();
-    (haystack.contains("harness-smoke") || haystack.contains("process-mining"))
-        && (haystack.contains("keine externe kommunikation")
-            || haystack.contains("no external communication"))
-}
-
-fn queue_strategy_direction_pass(
-    root: &Path,
-    thread_key: &str,
-    workspace_root: Option<&str>,
-    resume_prompt: &str,
-    resume_goal: &str,
-    resume_preview: &str,
-    resume_skill: Option<&str>,
-) -> Result<channels::QueueTaskView> {
-    let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key));
-    create_self_work_backed_queue_task(
-        root,
-        DurableSelfWorkQueueRequest {
-            kind: STRATEGIC_DIRECTION_KIND.to_string(),
-            title: "Strategic direction setup".to_string(),
-            prompt: format!(
-                "Before further strategic or owner-visible execution, establish canonical runtime direction in SQLite.\n\n\
-Required outputs:\n\
-- create or revise an active Vision record in SQLite-backed runtime state\n\
-- create or revise an active Mission record in SQLite-backed runtime state\n\
-- if founder or CEO guidance changed the direction, persist that revision with the decision reason\n\
-- do not treat markdown files or chat text as canonical knowledge\n\
-\n\
-Required strategy scope for every strategy command in this slice:\n\
-- `--conversation-id {}`\n\
-- `--thread-key {}`\n\
-- Never write global directives without these scope flags.\n\
-\n\
-Use `ctox strategy show --conversation-id {} --thread-key {}` first.\n\
-When creating or revising canonical direction, use `ctox strategy set --conversation-id {} --thread-key {}` or `ctox strategy propose --conversation-id {} --thread-key {}`.\n\
-The authoritative Vision and Mission must live in runtime SQLite state before implementation continues.\n\
-\n\
-After direction is canonical, the deferred execution target is:\n{}",
-                conversation_id,
-                thread_key,
-                conversation_id,
-                thread_key,
-                conversation_id,
-                thread_key,
-                conversation_id,
-                thread_key,
-                resume_prompt
-            ),
-            thread_key: thread_key.to_string(),
-            workspace_root: workspace_root.map(ToOwned::to_owned),
-            priority: "urgent".to_string(),
-            suggested_skill: Some(
-                resume_skill
-                    .filter(|value| !value.trim().is_empty())
-                    .unwrap_or("plan-orchestrator")
-                    .to_string(),
-            ),
-            parent_message_key: None,
-            metadata: serde_json::json!({
-                "thread_key": thread_key,
-                "workspace_root": workspace_root,
-                "priority": "urgent",
-                "skill": resume_skill,
-                "resume_prompt": resume_prompt,
-                "resume_goal": resume_goal,
-                "resume_preview": resume_preview,
-                "resume_skill": resume_skill,
-                "dedupe_key": format!("strategy-direction:{}", thread_key),
-            }),
-        },
-    )
-}
-
-fn cancel_runnable_thread_tasks_for_strategy(
-    root: &Path,
-    thread_key: &str,
-    except_message_keys: &[String],
-) -> Result<usize> {
-    let tasks =
-        channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 128)?;
-    let note = "Cancelled because canonical Vision and Mission must be established in SQLite before strategic work on this thread can continue.";
-    let mut cancelled = 0usize;
-    for task in tasks.into_iter().filter(|task| {
-        task.thread_key == thread_key
-            && !except_message_keys
-                .iter()
-                .any(|key| key == &task.message_key)
-    }) {
-        channels::update_queue_task(
-            root,
-            channels::QueueTaskUpdateRequest {
-                message_key: task.message_key.clone(),
-                route_status: Some("cancelled".to_string()),
-                status_note: Some(note.to_string()),
-                ..Default::default()
-            },
-        )?;
-        if let Some(work_id) = task.ticket_self_work_id.as_deref() {
-            supersede_ticket_self_work_item(root, work_id, note);
-        }
-        cancelled += 1;
-    }
-    Ok(cancelled)
-}
-
-fn has_runnable_founder_or_owner_email(root: &Path) -> Result<bool> {
-    let settings = live_service_settings(root);
-    let db_path = root.join("runtime/ctox.sqlite3");
-    let conn = channels::open_channel_db(&db_path)?;
-    let mut statement = conn.prepare(
-        r#"
-        SELECT m.sender_address
-        FROM communication_messages m
-        LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
-        WHERE m.channel = 'email'
-          AND m.direction = 'inbound'
-          AND COALESCE(r.route_status, 'pending') IN ('pending', 'leased')
-        "#,
-    )?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-    for sender in rows {
-        let sender = sender?;
-        let role = channels::classify_email_sender(&settings, &sender).role;
-        if matches!(role.as_str(), "owner" | "founder" | "admin") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn founder_communication_rework_backlog_active(root: &Path) -> Result<bool> {
@@ -6932,92 +6653,6 @@ fn founder_communication_rework_backlog_active(root: &Path) -> Result<bool> {
         |row| row.get(0),
     )?;
     Ok(held_queue > 0)
-}
-
-fn maybe_redirect_owner_visible_work_to_strategy_setup(
-    root: &Path,
-    state: &Arc<Mutex<SharedState>>,
-    job: &QueuedPrompt,
-) -> Result<bool> {
-    if !is_owner_visible_strategic_job(job) {
-        return Ok(false);
-    }
-    if has_runnable_founder_or_owner_email(root)? {
-        return Ok(false);
-    }
-    let current_item = job.ticket_self_work_id.as_deref().and_then(|work_id| {
-        tickets::load_ticket_self_work_item(root, work_id)
-            .ok()
-            .flatten()
-    });
-    if current_item.as_ref().map(|item| item.kind.as_str()) == Some(STRATEGIC_DIRECTION_KIND) {
-        return Ok(false);
-    }
-    let thread_key = job
-        .thread_key
-        .clone()
-        .unwrap_or_else(|| default_follow_up_thread_key(&job.goal));
-    let conversation_id = turn_loop::conversation_id_for_thread_key(Some(thread_key.as_str()));
-    let db_path = root.join("runtime/ctox.sqlite3");
-    let engine = lcm::LcmEngine::open(&db_path, lcm::LcmConfig::default())?;
-    let strategy = engine.active_strategy_snapshot(conversation_id, Some(thread_key.as_str()))?;
-    if strategy.active_vision.is_some() && strategy.active_mission.is_some() {
-        return Ok(false);
-    }
-    let cancelled_thread_tasks =
-        cancel_runnable_thread_tasks_for_strategy(root, &thread_key, &job.leased_message_keys)?;
-    if !job.leased_message_keys.is_empty() {
-        let _ = channels::ack_leased_messages(root, &job.leased_message_keys, "cancelled");
-    }
-    if !job.leased_ticket_event_keys.is_empty() {
-        let _ = tickets::ack_leased_ticket_events(root, &job.leased_ticket_event_keys, "blocked");
-    }
-    if let Some(work_id) = job.ticket_self_work_id.as_deref() {
-        supersede_ticket_self_work_item(
-            root,
-            work_id,
-            "Closed without execution because canonical Vision and Mission must be established in SQLite before strategic work continues.",
-        );
-    }
-    let created = queue_strategy_direction_pass(
-        root,
-        &thread_key,
-        job.workspace_root.as_deref(),
-        &job.prompt,
-        &job.goal,
-        &job.preview,
-        job.suggested_skill.as_deref(),
-    )?;
-    let mut next_prompt = None;
-    {
-        let mut shared = lock_shared_state(state);
-        shared.busy = false;
-        shared.current_goal_preview = None;
-        shared.active_source_label = None;
-        shared.last_completed_at = Some(now_iso_string());
-        shared.last_progress_epoch_secs = current_epoch_secs();
-        shared.last_reply_chars = None;
-        shared.last_error = None;
-        release_leased_keys_locked(
-            &mut shared,
-            &job.leased_message_keys,
-            &job.leased_ticket_event_keys,
-        );
-        push_event_locked(
-            &mut shared,
-            format!(
-                "Rerouted strategic work to canonical direction setup: {} (cancelled {} competing runnable task(s) on the thread)",
-                created.title, cancelled_thread_tasks
-            ),
-        );
-        if runtime_blocker_backoff_remaining_secs(&shared).is_none() {
-            next_prompt = maybe_start_next_queued_prompt_locked(&mut shared);
-        }
-    }
-    if let Some(queued) = next_prompt {
-        start_prompt_worker(root.to_path_buf(), state.clone(), queued);
-    }
-    Ok(true)
 }
 
 fn is_owner_visible_platform_reset_job(job: &QueuedPrompt) -> bool {
@@ -9093,23 +8728,20 @@ mod tests {
     }
 
     #[test]
-    fn review_no_send_wait_is_terminal() {
+    fn review_no_send_disposition_is_terminal() {
         let mut outcome = review_outcome_for_no_send_test(
             "Do not send a founder reply yet. The CRM thread is in wait mode until Marco provides the CRM/tool and sync scope.",
         );
         outcome.failed_gates.push(
             "No-send: wait until the founders provide concrete technical inputs.".to_string(),
         );
-        outcome.evidence.push(
-            "Michael's latest thread says CTO1 should support technically after the decision."
-                .to_string(),
-        );
+        outcome.disposition = review::ReviewDisposition::NoSend;
 
-        assert!(review_outcome_is_terminal_no_send(&outcome));
+        assert_eq!(outcome.disposition, review::ReviewDisposition::NoSend);
     }
 
     #[test]
-    fn review_missing_founder_work_is_not_terminal_no_send() {
+    fn review_missing_founder_work_keeps_send_disposition() {
         let mut outcome = review_outcome_for_no_send_test(
             "Do not send the current mail because missing deliverables must be done before contacting the founders.",
         );
@@ -9117,8 +8749,9 @@ mod tests {
             "Missing required dashboard link and evidence; send a corrected reply after rework."
                 .to_string(),
         );
-
-        assert!(!review_outcome_is_terminal_no_send(&outcome));
+        // Reviewer did NOT emit DISPOSITION: NO_SEND, so default is Send and
+        // the dispatcher must run the rework path instead of closing the slice.
+        assert_eq!(outcome.disposition, review::ReviewDisposition::Send);
     }
 
     fn upsert_test_inbound_message(
@@ -12077,6 +11710,7 @@ mod tests {
             open_items: vec!["Introduce clear roster and hire flow.".to_string()],
             evidence: vec!["GET / => static shell".to_string()],
             handoff: None,
+            disposition: review::ReviewDisposition::Send,
         };
 
         let err = enqueue_review_rework(&root, &job, &outcome).expect_err("should suppress");
@@ -12141,6 +11775,7 @@ mod tests {
             open_items: vec!["Persist the missing closure evidence.".to_string()],
             evidence: vec!["review artifact".to_string()],
             handoff: None,
+            disposition: review::ReviewDisposition::Send,
         };
 
         let disposition =
@@ -12617,178 +12252,77 @@ mod tests {
         );
     }
 
+    /// PR #16 eviction guard: a TUI operator prompt that contains keywords
+    /// the old `is_owner_visible_strategic_job` heuristic used to scrape
+    /// (`founder`, `homepage`, etc.) must NOT be rerouted into a synthetic
+    /// `Strategic direction setup` task by the service core. Strategy passes
+    /// are now agent-driven via the plan-orchestrator skill — the core only
+    /// dispatches the prompt verbatim.
     #[test]
-    fn missing_strategy_reroutes_owner_visible_work_into_strategic_direction_pass() {
-        let root = temp_root("ctox-strategy-reroute");
-        let queue_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Kunstmen platform homepage reset".to_string(),
-                prompt: "Reset kunstmen.com so it behaves like a platform.".to_string(),
-                thread_key: "kunstmen-supervisor".to_string(),
-                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-                priority: "urgent".to_string(),
-                suggested_skill: Some("follow-up-orchestrator".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to seed active queue task");
-        let stale_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Repair Stripe runtime and rerun Kunstmen live gates".to_string(),
-                prompt: "Legacy Stripe recheck that should be superseded by strategy setup."
-                    .to_string(),
-                thread_key: "kunstmen-supervisor".to_string(),
-                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-                priority: "high".to_string(),
-                suggested_skill: Some("service-deployment".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to seed stale competing queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = lock_shared_state(&state);
-            shared.busy = true;
-            shared.current_goal_preview = Some("Kunstmen platform homepage reset".to_string());
-            shared.active_source_label = Some("queue".to_string());
-            track_leased_keys_locked(
-                &mut shared,
-                std::slice::from_ref(&queue_task.message_key),
-                &[],
-            );
-        }
-        let job = QueuedPrompt {
-            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
-                .to_string(),
-            goal: "Kunstmen platform homepage reset".to_string(),
-            preview: "Kunstmen platform homepage reset".to_string(),
-            source_label: "queue".to_string(),
-            suggested_skill: Some("follow-up-orchestrator".to_string()),
-            leased_message_keys: vec![queue_task.message_key.clone()],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("kunstmen-supervisor".to_string()),
-            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-            ticket_self_work_id: None,
-            outbound_email: None,
-            outbound_anchor: None,
-        };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("strategy reroute should succeed");
-        assert!(redirected);
-
-        let stale = channels::load_queue_task(&root, &stale_task.message_key)
-            .expect("failed to reload stale queue task")
-            .expect("missing stale queue task");
-        assert_eq!(stale.route_status, "cancelled");
-
-        let tasks =
-            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
-                .expect("failed to list queue tasks");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "Strategic direction setup");
-
-        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
-            .expect("failed to list self-work");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].kind, STRATEGIC_DIRECTION_KIND);
-        assert_eq!(
-            items[0].suggested_skill.as_deref(),
-            Some("follow-up-orchestrator")
-        );
-        assert!(items[0]
-            .body_text
-            .contains("Use `ctox strategy show --conversation-id"));
-        assert!(items[0]
-            .body_text
-            .contains("--thread-key kunstmen-supervisor"));
-    }
-
-    #[test]
-    fn scoped_stateful_product_execution_does_not_reroute_to_strategy_setup() {
-        let root = temp_root("ctox-scoped-stateful-product-no-strategy-reroute");
-        let queue_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "CRM P0 slice: ship tasks workflow under /internal/crm".to_string(),
-                prompt: "Work only in /home/ubuntu/workspace/kunstmen. Next smallest coherent slice: make Tasks a real founder-usable workflow under /internal/crm with create/edit/delete/status changes linked to CRM records."
-                    .to_string(),
-                thread_key: "kunstmen-crm-p0".to_string(),
-                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-                priority: "urgent".to_string(),
-                suggested_skill: Some("stateful-product-from-scratch".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to seed scoped CRM queue task");
+    fn evicted_strategic_heuristic_does_not_intercept_tui_operator_prompt() {
+        let root = temp_root("ctox-evicted-strategic-heuristic-tui");
         let state = Arc::new(Mutex::new(SharedState::default()));
         let job = QueuedPrompt {
-            prompt: queue_task.prompt.clone(),
-            goal: queue_task.title.clone(),
-            preview: queue_task.title.clone(),
-            source_label: "queue".to_string(),
-            suggested_skill: Some("stateful-product-from-scratch".to_string()),
-            leased_message_keys: vec![queue_task.message_key.clone()],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("kunstmen-crm-p0".to_string()),
-            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-            ticket_self_work_id: None,
-            outbound_email: None,
-            outbound_anchor: None,
-        };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("strategy evaluation should succeed");
-        assert!(!redirected);
-
-        let tasks =
-            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
-                .expect("failed to list queue tasks");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(
-            tasks[0].title,
-            "CRM P0 slice: ship tasks workflow under /internal/crm"
-        );
-
-        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
-            .expect("failed to list self-work");
-        assert!(items.is_empty());
-    }
-
-    #[test]
-    fn proactive_founder_outbound_does_not_reroute_to_strategy_setup() {
-        let root = temp_root("ctox-proactive-founder-outbound-no-strategy-reroute");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        let job = QueuedPrompt {
-            prompt: "Write the honest Kunstmen CRM interim update for the founders.".to_string(),
-            goal: "Kunstmen CRM founder interim mail".to_string(),
-            preview: "Founder outbound mail about Kunstmen CRM".to_string(),
+            prompt: "Schreibe jetzt die Tag-Proposal-Mail an Julia (TO j.kienzler@remcapital.de) zum Founder-Onboarding mit homepage-Link.".to_string(),
+            goal: "Founder onboarding mail".to_string(),
+            preview: "Tag proposal mail to Julia".to_string(),
             source_label: "tui".to_string(),
             suggested_skill: None,
             leased_message_keys: Vec::new(),
             leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("chat-outbound".to_string()),
+            thread_key: Some("tui-operator".to_string()),
             workspace_root: None,
             ticket_self_work_id: None,
-            outbound_email: Some(channels::FounderOutboundAction {
-                account_key: "email:cto1@example.test".to_string(),
-                thread_key: "chat-outbound".to_string(),
-                subject: "Kunstmen CRM: ehrlicher Zwischenstand".to_string(),
-                to: vec!["founder@example.test".to_string()],
-                cc: Vec::new(),
-                attachments: Vec::new(),
-            }),
-            outbound_anchor: Some("tui-outbound:test".to_string()),
+            outbound_email: None,
+            outbound_anchor: None,
         };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("proactive founder outbound should not fail reroute check");
+        // The platform-reroute path is now the only remaining auto-reroute
+        // and it must also not fire for a non-Kunstmen TUI prompt.
+        let redirected = maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job)
+            .expect("platform reroute check should succeed");
         assert!(!redirected);
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert!(
+            items.is_empty(),
+            "core must not auto-create any self-work for a TUI operator prompt; agent drives strategy via skills"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// PR #16 eviction guard: an internal harness/forensics prompt
+    /// (`thread_key=codex/...`, `process-mining`) used to be intercepted by
+    /// the deleted `is_internal_harness_or_forensics_job` heuristic to skip
+    /// the strategy reroute. After eviction the harness path is just a
+    /// regular queue job — the core does not branch on string content.
+    #[test]
+    fn evicted_harness_heuristic_does_not_intercept_internal_smoke_job() {
+        let root = temp_root("ctox-evicted-harness-heuristic");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let job = QueuedPrompt {
+            prompt: "Interner CTOX-Harness-Smoke-Test. Keine externe Kommunikation. Pruefe Process-Mining-Selbstdiagnose.".to_string(),
+            goal: "Process-mining harness smoke".to_string(),
+            preview: "Codex harness smoke: process mining and no external communication".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: None,
+            leased_message_keys: vec!["queue:system::smoke".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("codex/harness-live-smoke-20260426".to_string()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        let redirected = maybe_redirect_platform_work_to_expertise_passes(&root, &state, &job)
+            .expect("platform reroute check should succeed");
+        assert!(!redirected);
+        let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
+            .expect("failed to list self-work");
+        assert!(
+            items.is_empty(),
+            "core must not synthesise self-work for an internal harness job"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -12839,30 +12373,6 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].kind, STRATEGIC_DIRECTION_KIND);
         let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn internal_harness_smoke_does_not_reroute_to_strategy_setup() {
-        let root = temp_root("ctox-internal-harness-smoke-no-strategy-reroute");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        let job = QueuedPrompt {
-            prompt: "Interner CTOX-Harness-Smoke-Test. Keine externe Kommunikation. Pruefe Process-Mining-Selbstdiagnose und Founder review warnings.".to_string(),
-            goal: "Process-mining harness smoke".to_string(),
-            preview: "Codex harness smoke: process mining and no external communication".to_string(),
-            source_label: "queue".to_string(),
-            suggested_skill: None,
-            leased_message_keys: vec!["queue:system::smoke".to_string()],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("codex/harness-live-smoke-20260426".to_string()),
-            workspace_root: None,
-            ticket_self_work_id: None,
-            outbound_email: None,
-            outbound_anchor: None,
-        };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("internal harness smoke should not fail reroute check");
-        assert!(!redirected);
     }
 
     #[test]
@@ -12967,143 +12477,6 @@ mod tests {
     }
 
     #[test]
-    fn open_founder_inbound_blocks_strategy_reroute_for_queue_work() {
-        let root = temp_root("ctox-open-founder-blocks-strategy-reroute");
-        let mut runtime_settings = BTreeMap::new();
-        runtime_settings.insert(
-            "CTOX_OWNER_EMAIL_ADDRESS".to_string(),
-            "michael.welsch@metric-space.ai".to_string(),
-        );
-        runtime_env::save_runtime_env_map(&root, &runtime_settings)
-            .expect("failed to persist owner setting");
-        let db_path = root.join("runtime/ctox.sqlite3");
-        let conn = channels::open_channel_db(&db_path).expect("failed to open channel db");
-        conn.execute(
-            r#"INSERT INTO communication_messages (
-                message_key, channel, account_key, thread_key, remote_id, direction, folder_hint,
-                sender_display, sender_address, recipient_addresses_json, cc_addresses_json,
-                bcc_addresses_json, subject, preview, body_text, body_html, raw_payload_ref,
-                trust_level, status, seen, has_attachments, external_created_at, observed_at,
-                metadata_json
-            ) VALUES (
-                ?1, 'email', 'email:cto1@metric-space.ai', '<founder-thread@example.com>',
-                'remote-founder-1', 'inbound', 'INBOX', 'Michael Welsch',
-                'michael.welsch@metric-space.ai', '[]', '[]', '[]', 'Founder input',
-                'Founder input', 'Please answer me before doing anything else.', '', '',
-                'normal', 'received', 0, 0, '2026-04-24T18:55:00Z', '2026-04-24T18:55:00Z', '{}'
-            )"#,
-            rusqlite::params!["email:cto1@metric-space.ai::INBOX::91"],
-        )
-        .expect("failed to insert founder inbound");
-        conn.execute(
-            r#"INSERT INTO communication_routing_state (
-                message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
-            ) VALUES (?1, 'pending', NULL, NULL, NULL, NULL, '2026-04-24T18:55:00Z')"#,
-            rusqlite::params!["email:cto1@metric-space.ai::INBOX::91"],
-        )
-        .expect("failed to insert founder routing state");
-
-        let queue_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Platform homepage work".to_string(),
-                prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
-                    .to_string(),
-                thread_key: "kunstmen-supervisor".to_string(),
-                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-                priority: "urgent".to_string(),
-                suggested_skill: Some("follow-up-orchestrator".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to seed queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        let job = QueuedPrompt {
-            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
-                .to_string(),
-            goal: "Kunstmen platform homepage reset".to_string(),
-            preview: "Kunstmen platform homepage reset".to_string(),
-            source_label: "queue".to_string(),
-            suggested_skill: Some("follow-up-orchestrator".to_string()),
-            leased_message_keys: vec![queue_task.message_key.clone()],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("kunstmen-supervisor".to_string()),
-            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-            ticket_self_work_id: None,
-            outbound_email: None,
-            outbound_anchor: None,
-        };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("strategy evaluation should succeed");
-        assert!(!redirected);
-
-        let tasks =
-            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
-                .expect("failed to list queue tasks");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "Platform homepage work");
-    }
-
-    #[test]
-    fn founder_email_thread_is_not_rerouted_into_strategy_setup() {
-        let root = temp_root("ctox-founder-email-no-strategy-reroute");
-        let queue_task = channels::create_queue_task(
-            &root,
-            channels::QueueTaskCreateRequest {
-                title: "Founder inbound".to_string(),
-                prompt: "[E-Mail eingegangen]\nSender: founder@example.com\nBetreff: Homepage\nPlease fix the public platform flow and answer me clearly."
-                    .to_string(),
-                thread_key: "<founder-thread@example.com>".to_string(),
-                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-                priority: "urgent".to_string(),
-                suggested_skill: Some("frontend-skill".to_string()),
-                parent_message_key: None,
-                extra_metadata: None,
-            },
-        )
-        .expect("failed to seed founder queue task");
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = lock_shared_state(&state);
-            shared.busy = true;
-            shared.current_goal_preview = Some("Founder inbound".to_string());
-            shared.active_source_label = Some("email:founder".to_string());
-            track_leased_keys_locked(
-                &mut shared,
-                std::slice::from_ref(&queue_task.message_key),
-                &[],
-            );
-        }
-        let job = QueuedPrompt {
-            prompt: "[E-Mail eingegangen]\nSender: founder@example.com\nBetreff: Homepage\nPlease fix the public platform flow and answer me clearly."
-                .to_string(),
-            goal: "Reply to founder".to_string(),
-            preview: "Founder mail about homepage".to_string(),
-            source_label: "email:founder".to_string(),
-            suggested_skill: Some("frontend-skill".to_string()),
-            leased_message_keys: vec![queue_task.message_key.clone()],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("<founder-thread@example.com>".to_string()),
-            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-            ticket_self_work_id: None,
-            outbound_email: None,
-            outbound_anchor: None,
-        };
-
-        let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
-            .expect("strategy evaluation should succeed");
-        assert!(!redirected);
-
-        let tasks =
-            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
-                .expect("failed to list queue tasks");
-        assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].title, "Founder inbound");
-    }
-
-    #[test]
     fn founder_email_thread_is_not_rerouted_into_platform_passes() {
         let root = temp_root("ctox-founder-email-no-platform-reroute");
         let queue_task = channels::create_queue_task(
@@ -13190,6 +12563,7 @@ mod tests {
             open_items: vec!["Generate or retrieve the Jami QR code.".to_string()],
             evidence: vec!["owner mail explicitly asks for QR code".to_string()],
             handoff: None,
+            disposition: review::ReviewDisposition::Send,
         };
 
         let title = enqueue_founder_communication_rework(
