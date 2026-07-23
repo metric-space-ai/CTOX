@@ -20,7 +20,7 @@
 // Mount contract (v5, skill `business-os-app-module-development`):
 //   - mount(ctx) returns a cleanup function that detaches every collection.$
 //     subscription and DOM listener opened during the mount.
-//   - All reads go through `resolveCollection(name)` on the `ctx.db.collection`
+//   - All reads go through `resolveCollection(name)` on the `ctx.db.collection(name)`
 //     facade. Mutations go through `ctx.commandBus.dispatch(...)`; native
 //     handlers in `src/core/business_os/invoices.rs` own GoBD-immutability. The
 //     command flows and collection schemas are unchanged from the prior IA.
