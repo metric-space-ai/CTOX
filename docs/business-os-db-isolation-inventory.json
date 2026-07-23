@@ -1,6 +1,6 @@
 {
   "schema_version": "business-os-db-isolation-inventory-v1",
-  "updated_at": "2026-07-15",
+  "updated_at": "2026-07-22",
   "owner": "business-os-platform",
   "purpose": "Phase 13A inventory plus Phase 13D drift guard for packaged/core module data-isolation migration, unscoped facade exceptions, and tested scoped system/internal module exceptions.",
   "modules": {
@@ -8,10 +8,10 @@
       "title": "Penetration Testing",
       "manifest_path": "src/apps/business-os/modules/appsec-pentest/module.json",
       "source_path": "src/apps/business-os/modules/appsec-pentest",
-      "install_scope": "store",
-      "distribution": "catalog-module",
-      "default_installed": false,
-      "classification": "catalog-user-module",
+      "install_scope": "core",
+      "distribution": "system-module",
+      "default_installed": true,
+      "classification": "system-control-module",
       "isolation_status": "system-scoped-exception-tested",
       "owner": "business-os-platform",
       "review_by": "2026-07-31",
@@ -27,12 +27,13 @@
         "appsec_assessments",
         "appsec_coverage",
         "appsec_findings",
+        "appsec_investigations",
         "appsec_pipeline_stages",
         "appsec_runs",
         "appsec_scanner_inventory",
         "business_commands"
       ],
-      "notes": "Scoped system exception: Deployment Audit resolves durable AppSec projections and business_commands through the scoped system facade. The module uses Business OS guarded subscriptions plus command dispatch only; scanner execution, state sync, and active-scan approval mutations stay server-side."
+      "notes": "Scoped system exception: the core AppSec workbench resolves durable AppSec projections (including appsec_investigations) and business_commands through the scoped system facade. The module uses Business OS guarded subscriptions plus command dispatch only; scanner execution, state sync, and active-scan approval mutations stay server-side."
     },
     "app-store": {
       "title": "App Store",
@@ -203,7 +204,7 @@
       "notes": "Scoped internal exception: Creator now resolves business_module_catalog and business_commands through the scoped system facade, while generated apps continue to use guarded data grants. Browser/Rust dynamic-app smoke denies the registered foreign ctox_runtime_settings collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
     },
     "credentials": {
-      "title": "Zugangsdaten",
+      "title": "Credentials",
       "manifest_path": "src/apps/business-os/modules/credentials/module.json",
       "source_path": "src/apps/business-os/modules/credentials",
       "install_scope": "core",
@@ -309,7 +310,7 @@
       "notes": "Scoped system exception: Desktop resolves business_commands, desktop_icons and desktop_layout through the scoped system facade. Browser/Rust dynamic-app smoke denies the registered foreign business_module_catalog collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
     },
     "documents": {
-      "title": "CTOX Documents",
+      "title": "Dokumente",
       "manifest_path": "src/apps/business-os/modules/documents/module.json",
       "source_path": "src/apps/business-os/modules/documents",
       "install_scope": "store",
@@ -383,6 +384,25 @@
         "uses_cached_db_handle": false
       },
       "notes": "ATS catalog module: Intake resolves applications only through ctx.db.collection(name) without guarded property fallback. Candidate intake actions stay on the command bus and permission-checked data facade."
+    },
+    "importer": {
+      "title": "App Importer",
+      "manifest_path": "src/apps/business-os/modules/importer/module.json",
+      "source_path": "src/apps/business-os/modules/importer",
+      "install_scope": "core",
+      "distribution": "system-module",
+      "default_installed": true,
+      "classification": "system-control-module",
+      "isolation_status": "guarded-facade-migrated",
+      "owner": "business-os-platform",
+      "review_by": "2026-07-31",
+      "db_access": {
+        "uses_raw_db": false,
+        "uses_collection_property_access": false,
+        "uses_collections_proxy": false,
+        "uses_cached_db_handle": false
+      },
+      "notes": "Core system module: App Importer touches no Business OS DB facade at all; transcode, review, and install flows run through shell-provided services and command dispatch, so there is no raw/property/proxy/cache access to classify."
     },
     "interviews": {
       "title": "Interviews",
@@ -572,9 +592,9 @@
       "title": "Web Research",
       "manifest_path": "src/apps/business-os/modules/research/module.json",
       "source_path": "src/apps/business-os/modules/research",
-      "install_scope": "store",
+      "install_scope": "internal",
       "distribution": "catalog-module",
-      "default_installed": false,
+      "default_installed": true,
       "classification": "catalog-user-module",
       "isolation_status": "guarded-facade-migrated",
       "owner": "business-os-platform",
