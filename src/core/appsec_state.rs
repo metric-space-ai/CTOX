@@ -36,6 +36,7 @@ pub fn project_cli_result(root: &Path, forwarded_args: &[String], output: &Value
     let coverage_count = project_coverage(&conn, &state_dir, now)?;
     let pipeline_stage_count = project_pipeline_stages(&conn, &state_dir, now)?;
     let artifact_count = project_artifacts(&conn, &state_dir, output, now)?;
+    let exploit_count = project_exploit_artifacts(&conn, &state_dir, now)?;
     let inventory_count = project_scanner_inventory(&conn, &state_dir, now)?;
     let approval_count = project_approvals(&conn, &state_dir, now)?;
 
@@ -43,6 +44,7 @@ pub fn project_cli_result(root: &Path, forwarded_args: &[String], output: &Value
         "appsec_assessments": assessment_count,
         "appsec_runs": run_count,
         "appsec_artifacts": artifact_count,
+        "appsec_exploits": exploit_count,
         "appsec_findings": finding_count,
         "appsec_investigations": investigation_count,
         "appsec_coverage": coverage_count,
@@ -790,6 +792,130 @@ fn project_artifacts(
         count += 1;
     }
     Ok(count)
+}
+
+/// Project `<state>/exploits/` (written by `audit run`) into appsec_artifacts
+/// with explicit exploit kinds so the browser app can list verified exploit
+/// scripts without a new collection. Runs after project_artifacts so the
+/// precise exploit kinds win over the generic path-derived kind for
+/// `index.json`.
+fn project_exploit_artifacts(conn: &Connection, state_dir: &Path, now: u128) -> Result<usize> {
+    let exploits_dir = state_dir.join("exploits");
+    if !exploits_dir.is_dir() {
+        return Ok(0);
+    }
+    let index_path = exploits_dir.join("index.json");
+    let index = read_json_optional(&index_path)?.unwrap_or(Value::Null);
+    let index_version = index
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut count = 0;
+    let exploits = index
+        .get("exploits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for entry in &exploits {
+        let Some(script) = entry.get("script").and_then(Value::as_str) else {
+            continue;
+        };
+        let script_path = PathBuf::from(script);
+        // Only project scripts inside the state-bound exploits directory.
+        if !script_path.is_file() || !script_path.starts_with(&exploits_dir) {
+            continue;
+        }
+        let bytes = fs::read(&script_path)
+            .with_context(|| format!("failed to read {}", script_path.display()))?;
+        let metadata = json!({
+            "relative_path": relative_path(state_dir, &script_path),
+            "source": "ctox-appsec-exploit-index",
+            "finding_id": entry.get("finding_id").cloned().unwrap_or(Value::Null),
+            "title": entry.get("title").cloned().unwrap_or(Value::Null),
+            "severity": entry.get("severity").cloned().unwrap_or(Value::Null),
+            "cwe": entry.get("cwe").cloned().unwrap_or(Value::Null),
+            "cvss_score": entry.get("cvss_score").cloned().unwrap_or(Value::Null),
+            "target": entry.get("target").cloned().unwrap_or(Value::Null),
+            "verification_status": entry.pointer("/verification/status").cloned().unwrap_or(Value::Null),
+            "content_policy": "executable-python-proof; read text only via ctox.appsec.exploit.get; scripts never contain credentials",
+        });
+        upsert_appsec_artifact(
+            conn,
+            &script_path,
+            state_dir,
+            "exploit-script",
+            index_version.as_deref(),
+            &bytes,
+            &metadata,
+            now,
+        )?;
+        count += 1;
+    }
+    for name in ["index.json", "index.md"] {
+        let path = exploits_dir.join(name);
+        if !path.is_file() {
+            continue;
+        }
+        let bytes =
+            fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
+        let metadata = json!({
+            "relative_path": relative_path(state_dir, &path),
+            "source": "ctox-appsec-exploit-index",
+            "exploit_count": exploits.len(),
+            "content_policy": "exploit index metadata; regenerate via audit run, never hand-edit",
+        });
+        upsert_appsec_artifact(
+            conn,
+            &path,
+            state_dir,
+            "exploit-index",
+            index_version.as_deref(),
+            &bytes,
+            &metadata,
+            now,
+        )?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_appsec_artifact(
+    conn: &Connection,
+    path: &Path,
+    state_dir: &Path,
+    kind: &str,
+    version: Option<&str>,
+    bytes: &[u8],
+    metadata: &Value,
+    now: u128,
+) -> Result<()> {
+    conn.execute(
+        r#"
+        INSERT INTO appsec_artifacts
+            (artifact_path, state_dir, kind, version, sha256, size_bytes, metadata_json, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(artifact_path) DO UPDATE SET
+            state_dir=excluded.state_dir,
+            kind=excluded.kind,
+            version=excluded.version,
+            sha256=excluded.sha256,
+            size_bytes=excluded.size_bytes,
+            metadata_json=excluded.metadata_json,
+            updated_at=excluded.updated_at
+        "#,
+        params![
+            path_json(path),
+            path_json(state_dir),
+            kind,
+            version,
+            hex_sha256(bytes),
+            bytes.len() as i64,
+            compact_json(metadata),
+            now.to_string(),
+        ],
+    )?;
+    Ok(())
 }
 
 fn list_issue_bundle_files(state_dir: &Path) -> Result<Vec<PathBuf>> {
@@ -1822,6 +1948,100 @@ fn value_to_string(value: &Value) -> String {
 mod tests {
     use super::*;
     use rusqlite::OptionalExtension;
+
+    #[test]
+    fn projects_audit_run_exploits_as_typed_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("runtime/appsec/default");
+        let exploits_dir = state.join("exploits");
+        fs::create_dir_all(&exploits_dir).unwrap();
+        let script = "#!/usr/bin/env python3\nprint('bounded proof')\n";
+        fs::write(exploits_dir.join("exploit_F-001.py"), script).unwrap();
+        fs::write(exploits_dir.join("index.md"), "# Exploits\n").unwrap();
+        fs::write(
+            exploits_dir.join("index.json"),
+            serde_json::to_string_pretty(&json!({
+                "version": "ctox.appsec_pentest.exploit_index.v1",
+                "generated_at": "1784756437937",
+                "exploits": [{
+                    "finding_id": "F-001",
+                    "title": "Reflected XSS",
+                    "severity": "high",
+                    "cwe": "CWE-79",
+                    "target": "https://example.test",
+                    "script": path_json(&exploits_dir.join("exploit_F-001.py")),
+                    "script_sha256": hex_sha256(script.as_bytes()),
+                    "verification": {"status": "still-reproduces"},
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let args = vec![
+            "ctox-appsec".to_string(),
+            "--state-dir".to_string(),
+            path_json(&state),
+            "audit".to_string(),
+            "run".to_string(),
+        ];
+        let projection = project_cli_result(
+            root.path(),
+            &args,
+            &json!({"ok": true, "command": "audit run"}),
+        )
+        .unwrap();
+        // exploit script + index.json + index.md
+        assert_eq!(
+            projection
+                .pointer("/counts/appsec_exploits")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+
+        let conn = Connection::open(crate::paths::core_db(root.path())).unwrap();
+        let (kind, version, sha256, metadata_json): (String, Option<String>, String, String) = conn
+            .query_row(
+                "SELECT kind, version, sha256, metadata_json FROM appsec_artifacts WHERE artifact_path LIKE '%exploit_F-001.py'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "exploit-script");
+        assert_eq!(
+            version.as_deref(),
+            Some("ctox.appsec_pentest.exploit_index.v1")
+        );
+        assert_eq!(sha256, hex_sha256(script.as_bytes()));
+        let metadata: Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(
+            metadata.get("finding_id").and_then(Value::as_str),
+            Some("F-001")
+        );
+        assert_eq!(
+            metadata.get("severity").and_then(Value::as_str),
+            Some("high")
+        );
+        assert_eq!(
+            metadata.get("verification_status").and_then(Value::as_str),
+            Some("still-reproduces")
+        );
+        assert!(metadata
+            .get("content_policy")
+            .and_then(Value::as_str)
+            .is_some_and(|policy| policy.contains("exploit.get")));
+
+        let index_kinds: Vec<String> = conn
+            .prepare(
+                "SELECT kind FROM appsec_artifacts WHERE artifact_path LIKE '%exploits/index.%' ORDER BY artifact_path",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(index_kinds, ["exploit-index", "exploit-index"]);
+    }
 
     #[test]
     fn projects_appsec_file_state_into_core_sqlite_tables() {

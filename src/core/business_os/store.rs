@@ -40896,6 +40896,7 @@ fn appsec_business_command_requires_data_write(command_type: &str) -> bool {
         "ctox.appsec.assessment.create"
             | "ctox.appsec.assessment.run"
             | "ctox.appsec.assessment.archive"
+            | "ctox.appsec.audit.run"
             | "ctox.appsec.lab.create"
             | "ctox.appsec.lab.run"
             | "ctox.appsec.report.export"
@@ -41141,6 +41142,58 @@ fn handle_appsec_business_command(
                 }
             }
             args.push("--json".to_string());
+        }
+        "ctox.appsec.audit.run" => {
+            args.extend(["audit", "run"].map(str::to_string));
+            let profile = appsec_payload_string(&command.payload, "profile")
+                .unwrap_or_else(|| "standard".to_string());
+            anyhow::ensure!(
+                matches!(profile.as_str(), "standard" | "full"),
+                "ctox.appsec.audit.run payload.profile must be standard or full"
+            );
+            args.extend(["--profile".to_string(), profile]);
+
+            let mut target_count = 0usize;
+            if let Some(url) = appsec_payload_string(&command.payload, "url") {
+                args.extend(["--url".to_string(), url]);
+                target_count += 1;
+            }
+            if let Some(source_path) = appsec_payload_string(&command.payload, "source_path")
+                .or_else(|| appsec_payload_string(&command.payload, "source"))
+            {
+                let source_path = workspace_bound_path(root, &source_path, "source_path")?;
+                args.extend(["--source".to_string(), source_path.display().to_string()]);
+                target_count += 1;
+            }
+            anyhow::ensure!(
+                target_count > 0,
+                "ctox.appsec.audit.run requires payload.url or payload.source"
+            );
+
+            let active = command.payload.get("active").and_then(Value::as_bool) == Some(true);
+            if active {
+                let approval_id = appsec_payload_string(&command.payload, "approval_id")
+                    .context("ctox.appsec.audit.run active testing requires payload.approval_id")?;
+                args.extend([
+                    "--active".to_string(),
+                    "--approval-id".to_string(),
+                    approval_id,
+                ]);
+                if let Some(wordlist) = appsec_payload_string(&command.payload, "wordlist") {
+                    let wordlist = workspace_bound_path(root, &wordlist, "wordlist")?;
+                    args.extend(["--wordlist".to_string(), wordlist.display().to_string()]);
+                }
+            }
+            if let Some(timeout) = appsec_payload_u64(&command.payload, "timeout_seconds") {
+                args.extend(["--timeout".to_string(), timeout.to_string()]);
+            }
+            args.push("--json".to_string());
+        }
+        "ctox.appsec.exploit.list" => {
+            return appsec_exploit_list(root, &command.payload);
+        }
+        "ctox.appsec.exploit.get" => {
+            return appsec_exploit_get(root, &command.payload);
         }
         "ctox.appsec.lab.create" => {
             args.extend(["lab", "create"].map(str::to_string));
@@ -41658,6 +41711,110 @@ fn push_appsec_state_dir_arg(
         args.extend(["--state-dir".to_string(), state_dir.display().to_string()]);
     }
     Ok(())
+}
+
+fn appsec_exploit_state_dir(root: &Path, payload: &Value) -> anyhow::Result<PathBuf> {
+    if let Some(state_dir) = appsec_payload_string(payload, "state_dir") {
+        return workspace_bound_path(root, &state_dir, "state_dir");
+    }
+    Ok(root.join("runtime/appsec/default"))
+}
+
+/// DataRead: list the verified exploit index entries of the bound state dir.
+fn appsec_exploit_list(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+    let state_dir = appsec_exploit_state_dir(root, payload)?;
+    let index_path = state_dir.join("exploits").join("index.json");
+    let index = if index_path.is_file() {
+        let raw = fs::read_to_string(&index_path)
+            .with_context(|| format!("failed to read {}", index_path.display()))?;
+        serde_json::from_str::<Value>(&raw)
+            .with_context(|| format!("invalid JSON in {}", index_path.display()))?
+    } else {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "command": "ctox.appsec.exploit.list",
+            "state_dir": state_dir.display().to_string(),
+            "exploits": [],
+            "note": "no exploit index present for this state dir; run ctox.appsec.audit.run first",
+        }));
+    };
+    let exploits = index
+        .get("exploits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|entry| {
+            serde_json::json!({
+                "finding_id": entry.get("finding_id").cloned().unwrap_or(Value::Null),
+                "title": entry.get("title").cloned().unwrap_or(Value::Null),
+                "severity": entry.get("severity").cloned().unwrap_or(Value::Null),
+                "cwe": entry.get("cwe").cloned().unwrap_or(Value::Null),
+                "cvss_score": entry.get("cvss_score").cloned().unwrap_or(Value::Null),
+                "target": entry.get("target").cloned().unwrap_or(Value::Null),
+                "verification_status": entry.pointer("/verification/status").cloned().unwrap_or(Value::Null),
+                "script_name": entry
+                    .get("script")
+                    .and_then(Value::as_str)
+                    .and_then(|script| Path::new(script).file_name().map(|name| name.to_string_lossy().to_string())),
+                "script_sha256": entry.get("script_sha256").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "ctox.appsec.exploit.list",
+        "state_dir": state_dir.display().to_string(),
+        "version": index.get("version").cloned().unwrap_or(Value::Null),
+        "generated_at": index.get("generated_at").cloned().unwrap_or(Value::Null),
+        "exploits": exploits,
+    }))
+}
+
+/// DataRead: return the text of ONE exploit script from the bound state
+/// dir's exploits/ directory. Path safety: plain `.py` file names only, the
+/// canonicalized path must stay inside the canonicalized exploits directory.
+fn appsec_exploit_get(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+    let state_dir = appsec_exploit_state_dir(root, payload)?;
+    let name = appsec_payload_string(payload, "name")
+        .or_else(|| appsec_payload_string(payload, "script_name"))
+        .or_else(|| appsec_payload_string(payload, "script"))
+        .context("ctox.appsec.exploit.get payload.name is required")?;
+    let name_path = Path::new(&name);
+    anyhow::ensure!(
+        name_path.components().count() == 1
+            && matches!(name_path.components().next(), Some(Component::Normal(_)))
+            && name.ends_with(".py"),
+        "ctox.appsec.exploit.get payload.name must be a plain .py file name inside the exploits directory"
+    );
+    let exploits_dir = state_dir.join("exploits");
+    let canonical_dir = fs::canonicalize(&exploits_dir).with_context(|| {
+        format!(
+            "no exploits directory for this state dir: {}",
+            exploits_dir.display()
+        )
+    })?;
+    let canonical_path = fs::canonicalize(exploits_dir.join(&name))
+        .with_context(|| format!("exploit script not found: {name}"))?;
+    anyhow::ensure!(
+        canonical_path.starts_with(&canonical_dir),
+        "ctox.appsec.exploit.get payload.name must stay inside the exploits directory"
+    );
+    let bytes = fs::read(&canonical_path)
+        .with_context(|| format!("failed to read {}", canonical_path.display()))?;
+    let content = String::from_utf8(bytes)
+        .with_context(|| format!("exploit script is not UTF-8 text: {name}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "ctox.appsec.exploit.get",
+        "state_dir": state_dir.display().to_string(),
+        "name": name,
+        "sha256": format!("{:x}", hasher.finalize()),
+        "size_bytes": content.len(),
+        "content": content,
+    }))
 }
 
 fn push_appsec_assessment_definition_args(
@@ -43935,6 +44092,177 @@ mod tests {
                 "{command_type}: {error:#}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn appsec_audit_run_is_a_write_command_with_bounded_active_gates() -> anyhow::Result<()> {
+        assert!(appsec_business_command_requires_data_write(
+            "ctox.appsec.audit.run"
+        ));
+        assert!(!appsec_business_command_requires_data_write(
+            "ctox.appsec.exploit.list"
+        ));
+        assert!(!appsec_business_command_requires_data_write(
+            "ctox.appsec.exploit.get"
+        ));
+        let root = tempdir()?;
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_audit_run".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.audit.run".into(),
+            record_id: Some("runtime/appsec/test".into()),
+            payload: serde_json::json!({
+                "state_dir": "runtime/appsec/test",
+                "url": "https://example.test",
+                "profile": "standard",
+                "active": true
+            }),
+            client_context: Value::Null,
+        };
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("active audit run must require a durable approval id");
+        assert!(error.to_string().contains("payload.approval_id"));
+
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/test",
+            "url": "https://example.test",
+            "profile": "deep"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("unsupported audit run profile must be rejected before execution");
+        assert!(error.to_string().contains("payload.profile"));
+
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/test",
+            "profile": "standard"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("audit run without any target must be rejected");
+        assert!(error.to_string().contains("payload.url"));
+
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/test",
+            "source": "../outside-repo"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("source path traversal must be rejected");
+        assert!(error.to_string().contains("parent-directory"));
+        Ok(())
+    }
+
+    #[test]
+    fn appsec_exploit_list_and_get_read_only_state_dir_exploits() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let state = root.path().join("runtime/appsec/test");
+        let exploits_dir = state.join("exploits");
+        fs::create_dir_all(&exploits_dir)?;
+        let script = "#!/usr/bin/env python3\nprint('bounded proof')\n";
+        fs::write(exploits_dir.join("exploit_F-001.py"), script)?;
+        fs::write(
+            exploits_dir.join("index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "ctox.appsec_pentest.exploit_index.v1",
+                "generated_at": "1784756437937",
+                "exploits": [{
+                    "finding_id": "F-001",
+                    "title": "Reflected XSS",
+                    "severity": "high",
+                    "cwe": "CWE-79",
+                    "cvss_score": 7.1,
+                    "target": "https://example.test",
+                    "script": exploits_dir.join("exploit_F-001.py").display().to_string(),
+                    "script_sha256": "abc",
+                    "verification": {"status": "still-reproduces"},
+                }],
+            }))?,
+        )?;
+
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_exploit_list".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.exploit.list".into(),
+            record_id: None,
+            payload: serde_json::json!({"state_dir": "runtime/appsec/test"}),
+            client_context: Value::Null,
+        };
+        let list = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(list.get("ok").and_then(Value::as_bool), Some(true));
+        let entries = list
+            .get("exploits")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].get("finding_id").and_then(Value::as_str),
+            Some("F-001")
+        );
+        assert_eq!(
+            entries[0].get("script_name").and_then(Value::as_str),
+            Some("exploit_F-001.py")
+        );
+        assert_eq!(
+            entries[0]
+                .get("verification_status")
+                .and_then(Value::as_str),
+            Some("still-reproduces")
+        );
+
+        command.command_type = "ctox.appsec.exploit.get".into();
+        command.id = Some("cmd_appsec_exploit_get".into());
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/test",
+            "name": "exploit_F-001.py"
+        });
+        let got = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(got.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(got.get("content").and_then(Value::as_str), Some(script));
+        let expected_sha = {
+            let mut hasher = Sha256::new();
+            hasher.update(script.as_bytes());
+            format!("{:x}", hasher.finalize())
+        };
+        assert_eq!(
+            got.get("sha256").and_then(Value::as_str),
+            Some(expected_sha.as_str())
+        );
+
+        // Traversal and non-.py names are rejected before any file read.
+        for bad_name in ["../secret.py", "..", "nested/exploit.py", "notes.txt"] {
+            command.payload = serde_json::json!({
+                "state_dir": "runtime/appsec/test",
+                "name": bad_name
+            });
+            let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+                .expect_err("unsafe exploit name must be rejected");
+            assert!(
+                error.to_string().contains("plain .py file name"),
+                "{bad_name}: {error:#}"
+            );
+        }
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/test",
+            "name": "exploit_F-999.py"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("missing exploit script must fail");
+        assert!(error.to_string().contains("not found"));
+
+        // An empty state dir yields an honest empty list, not an error.
+        command.command_type = "ctox.appsec.exploit.list".into();
+        command.payload = serde_json::json!({"state_dir": "runtime/appsec/empty"});
+        let empty = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(empty.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            empty
+                .get("exploits")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
         Ok(())
     }
 
