@@ -40897,6 +40897,7 @@ fn appsec_business_command_requires_data_write(command_type: &str) -> bool {
             | "ctox.appsec.assessment.run"
             | "ctox.appsec.assessment.archive"
             | "ctox.appsec.audit.run"
+            | "ctox.appsec.exploit.verify"
             | "ctox.appsec.lab.create"
             | "ctox.appsec.lab.run"
             | "ctox.appsec.report.export"
@@ -41194,6 +41195,9 @@ fn handle_appsec_business_command(
         }
         "ctox.appsec.exploit.get" => {
             return appsec_exploit_get(root, &command.payload);
+        }
+        "ctox.appsec.exploit.verify" => {
+            return appsec_exploit_verify(root, &command.payload);
         }
         "ctox.appsec.lab.create" => {
             args.extend(["lab", "create"].map(str::to_string));
@@ -41814,6 +41818,248 @@ fn appsec_exploit_get(root: &Path, payload: &Value) -> anyhow::Result<Value> {
         "sha256": format!("{:x}", hasher.finalize()),
         "size_bytes": content.len(),
         "content": content,
+    }))
+}
+
+/// Build the shared CLI args for one `exploit verify` run. The caller has
+/// already validated `expect` and the confirm/approval gate.
+fn appsec_exploit_verify_cli_args(
+    root: &Path,
+    payload: &Value,
+    finding_id: &str,
+) -> anyhow::Result<Vec<String>> {
+    let mut args = Vec::new();
+    push_appsec_state_dir_arg(root, payload, &mut args)?;
+    args.extend(["exploit", "verify", "--id", finding_id, "--execute"].map(str::to_string));
+    if let Some(expect) = appsec_payload_string(payload, "expect") {
+        args.extend(["--expect".to_string(), expect]);
+    }
+    if payload.get("confirm_active").and_then(Value::as_bool) == Some(true) {
+        args.push("--confirm-active".to_string());
+    }
+    if payload.get("confirm_non_get").and_then(Value::as_bool) == Some(true) {
+        args.push("--confirm-non-get".to_string());
+    }
+    if let Some(timeout) = appsec_payload_u64(payload, "timeout_seconds") {
+        args.extend(["--timeout".to_string(), timeout.to_string()]);
+    }
+    args.push("--json".to_string());
+    Ok(args)
+}
+
+/// Map one projected `exploit verify` CLI result onto the compact business
+/// entry shape. Returns the verification status plus the JSON entry.
+fn appsec_exploit_verify_entry(
+    finding_id: &str,
+    script_name: &str,
+    output: &Value,
+) -> (String, Value) {
+    let status = output
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("execution-failed")
+        .to_string();
+    let exit_code = output
+        .pointer("/verification_record/exit_code")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let mut entry = serde_json::json!({
+        "finding_id": finding_id,
+        "script_name": script_name,
+        "status": status,
+        "exit_code": exit_code,
+    });
+    if let Some(expectation) = output.get("expectation").filter(|value| !value.is_null()) {
+        entry["expectation"] = serde_json::json!({
+            "expected": expectation.get("expected").cloned().unwrap_or(Value::Null),
+            "met": expectation.get("met").cloned().unwrap_or(Value::Null),
+        });
+    }
+    if let Some(error) = output.get("error").and_then(Value::as_str) {
+        entry["error"] = Value::String(error.to_string());
+    }
+    (status, entry)
+}
+
+/// DataWrite: re-execute ONE exploit (`payload.name` = script_name from
+/// ctox.appsec.exploit.list) or ALL exploits of the bound state dir's index
+/// and report the verification status (still vulnerable vs fixed). Execution
+/// goes through the projected command machinery like ctox.appsec.audit.run.
+fn appsec_exploit_verify(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+    // Validate everything before any CLI execution.
+    if let Some(expect) = appsec_payload_string(payload, "expect") {
+        anyhow::ensure!(
+            matches!(expect.as_str(), "vulnerable" | "fixed"),
+            "ctox.appsec.exploit.verify payload.expect must be vulnerable or fixed"
+        );
+    }
+    let confirm_active = payload.get("confirm_active").and_then(Value::as_bool) == Some(true);
+    let confirm_non_get = payload.get("confirm_non_get").and_then(Value::as_bool) == Some(true);
+    if confirm_active || confirm_non_get {
+        appsec_payload_string(payload, "approval_id").context(
+            "ctox.appsec.exploit.verify confirm_active/confirm_non_get requires payload.approval_id",
+        )?;
+    }
+
+    let state_dir = appsec_exploit_state_dir(root, payload)?;
+    let index_path = state_dir.join("exploits").join("index.json");
+    let index = if index_path.is_file() {
+        let raw = fs::read_to_string(&index_path)
+            .with_context(|| format!("failed to read {}", index_path.display()))?;
+        serde_json::from_str::<Value>(&raw)
+            .with_context(|| format!("invalid JSON in {}", index_path.display()))?
+    } else {
+        Value::Null
+    };
+    let entries = index
+        .get("exploits")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let script_name_of = |entry: &Value| {
+        entry
+            .get("script")
+            .and_then(Value::as_str)
+            .and_then(|script| {
+                Path::new(script)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+    };
+
+    if let Some(name) = appsec_payload_string(payload, "name") {
+        let name_path = Path::new(&name);
+        anyhow::ensure!(
+            name_path.components().count() == 1
+                && matches!(name_path.components().next(), Some(Component::Normal(_)))
+                && name.ends_with(".py"),
+            "ctox.appsec.exploit.verify payload.name must be a plain .py file name inside the exploits directory"
+        );
+        let entry = entries
+            .iter()
+            .find(|entry| script_name_of(entry).as_deref() == Some(name.as_str()))
+            .ok_or_else(|| {
+                anyhow::anyhow!("ctox.appsec.exploit.verify unknown exploit script name: {name}")
+            })?;
+        let finding_id = entry
+            .get("finding_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ctox.appsec.exploit.verify index entry for {name} has no finding_id"
+                )
+            })?;
+        let args = appsec_exploit_verify_cli_args(root, payload, finding_id)?;
+        let output = crate::run_projected_appsec_command(root, &args)?;
+        if output.get("status").and_then(Value::as_str).is_none() {
+            let error = output
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("exploit verify did not produce a verification record");
+            anyhow::bail!("ctox.appsec.exploit.verify failed for {name}: {error}");
+        }
+        let (status, entry) = appsec_exploit_verify_entry(finding_id, &name, &output);
+        // ok means the proof script executed and produced a usable verdict;
+        // the verdict itself (still vulnerable vs fixed) lives in status.
+        let executed = matches!(
+            status.as_str(),
+            "still-reproduces" | "fixed-or-not-reproducible" | "setup-or-inconclusive"
+        );
+        let mut result = serde_json::json!({
+            "ok": executed,
+            "command": "ctox.appsec.exploit.verify",
+            "state_dir": state_dir.display().to_string(),
+            "finding_id": finding_id,
+            "script_name": name,
+            "status": status,
+            "exit_code": entry.get("exit_code").cloned().unwrap_or(Value::Null),
+            "duration_ms": output
+                .pointer("/verification_record/duration_ms")
+                .cloned()
+                .unwrap_or(Value::Null),
+        });
+        if let Some(expectation) = entry.get("expectation") {
+            result["expectation"] = expectation.clone();
+        }
+        return Ok(result);
+    }
+
+    // No name: verify every exploit of the index.
+    if entries.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "command": "ctox.appsec.exploit.verify",
+            "state_dir": state_dir.display().to_string(),
+            "results": [],
+            "summary": {
+                "verified": 0,
+                "still_reproduces": 0,
+                "fixed": 0,
+                "inconclusive": 0,
+                "failed": 0,
+            },
+            "note": "no exploit index present for this state dir; run ctox.appsec.audit.run first",
+        }));
+    }
+    let mut results = Vec::new();
+    let mut still_reproduces = 0u64;
+    let mut fixed = 0u64;
+    let mut inconclusive = 0u64;
+    let mut failed = 0u64;
+    for entry in &entries {
+        let finding_id = entry
+            .get("finding_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let script_name = script_name_of(entry).unwrap_or_default();
+        let verified_entry = if finding_id.is_empty() {
+            let mut item = serde_json::json!({
+                "finding_id": Value::Null,
+                "script_name": script_name,
+                "status": "execution-failed",
+                "exit_code": Value::Null,
+            });
+            item["error"] = Value::String("index entry has no finding_id".to_string());
+            item
+        } else {
+            match appsec_exploit_verify_cli_args(root, payload, &finding_id)
+                .and_then(|args| crate::run_projected_appsec_command(root, &args))
+            {
+                Ok(output) => appsec_exploit_verify_entry(&finding_id, &script_name, &output).1,
+                Err(err) => {
+                    let mut item = serde_json::json!({
+                        "finding_id": finding_id,
+                        "script_name": script_name,
+                        "status": "execution-failed",
+                        "exit_code": Value::Null,
+                    });
+                    item["error"] = Value::String(format!("{err:#}"));
+                    item
+                }
+            }
+        };
+        match verified_entry.get("status").and_then(Value::as_str) {
+            Some("still-reproduces") => still_reproduces += 1,
+            Some("fixed-or-not-reproducible") => fixed += 1,
+            Some("setup-or-inconclusive") => inconclusive += 1,
+            _ => failed += 1,
+        }
+        results.push(verified_entry);
+    }
+    let verified = results.len() as u64;
+    Ok(serde_json::json!({
+        "ok": true,
+        "command": "ctox.appsec.exploit.verify",
+        "state_dir": state_dir.display().to_string(),
+        "results": results,
+        "summary": {
+            "verified": verified,
+            "still_reproduces": still_reproduces,
+            "fixed": fixed,
+            "inconclusive": inconclusive,
+            "failed": failed,
+        },
     }))
 }
 
@@ -44263,6 +44509,401 @@ mod tests {
                 .map(Vec::len),
             Some(0)
         );
+        Ok(())
+    }
+
+    /// Bounded proof script accepted by the pentest bundle validator. The
+    /// doc/comment lines carry the required marker needles. `reproduces`
+    /// drives the verdict; with --expect the script maps to the
+    /// expectation_exit convention (0 = expectation met, 2 = mismatch),
+    /// without it 2 = still-reproduces, 0 = fixed.
+    fn appsec_verify_reproduce_script(reproduces: bool) -> String {
+        let python_literal = if reproduces { "True" } else { "False" };
+        format!(
+            "#!/usr/bin/env python3\n\"\"\"Bounded proof replay.\n\nExit codes: 0=fixed or denied, 1=setup/inconclusive, 2=impact confirmed.\nSCRIPT_MODE=generic_http_replay; CONFIRM_NON_GET=1 gates state-changing probes.\n\"\"\"\nimport sys\n\n\ndef main() -> int:\n    expect = None\n    argv = sys.argv[1:]\n    if \"--expect\" in argv:\n        expect = argv[argv.index(\"--expect\") + 1]\n    reproduces = {python_literal}\n    if expect is not None:\n        met = (expect == \"vulnerable\") == reproduces\n        return 0 if met else 2\n    # return 2 while the impact reproduces; return 0 once fixed.\n    return 2 if reproduces else 0\n\n\nif __name__ == \"__main__\":\n    sys.exit(main())\n"
+        )
+    }
+
+    /// Write a minimal but valid pentest state dir for exploit verify tests:
+    /// findings.json, one issue bundle per finding whose proof script knows
+    /// whether the impact still reproduces, plus the exploit index used by
+    /// the business command.
+    fn write_appsec_verify_state(
+        root: &Path,
+        state_name: &str,
+        specs: &[(&str, &str, bool)],
+    ) -> anyhow::Result<PathBuf> {
+        let state = root.join("runtime/appsec").join(state_name);
+        let exploits_dir = state.join("exploits");
+        fs::create_dir_all(&exploits_dir)?;
+        let mut findings = Vec::new();
+        let mut index_entries = Vec::new();
+        for (finding_id, title, reproduces) in specs {
+            findings.push(serde_json::json!({
+                "id": finding_id,
+                "title": title,
+                "severity": "high",
+                "category": "xss",
+                "status": "open",
+                "target": "https://example.test",
+                "endpoint": "https://example.test/search?q=x",
+                "method": "GET",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+            }));
+            let bundle_name = format!(
+                "{}-{}",
+                finding_id.to_ascii_lowercase(),
+                title.to_ascii_lowercase().replace(' ', "-")
+            );
+            let bundle_dir = state.join("reports/issue-bundles").join(&bundle_name);
+            fs::create_dir_all(&bundle_dir)?;
+            fs::write(
+                bundle_dir.join("finding.json"),
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"id": finding_id, "title": title}),
+                )?,
+            )?;
+            fs::write(
+                bundle_dir.join("evidence-manifest.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "version": "ctox.appsec_pentest.finding_evidence_manifest.v1",
+                    "finding_id": finding_id,
+                    "evidence": [],
+                }))?,
+            )?;
+            fs::write(
+                bundle_dir.join("github-issue.md"),
+                format!("# {finding_id}\n\n## Proof Script\n\nRun reproduce.py.\n\n## Fix Verification\n\n- pentest exploit verify --id {finding_id} --execute --expect vulnerable\n- pentest exploit verify --id {finding_id} --execute --expect fixed\n"),
+            )?;
+            fs::write(bundle_dir.join("README.md"), "bundle\n")?;
+            fs::write(bundle_dir.join("requirements.txt"), "")?;
+            fs::write(
+                bundle_dir.join("reproduce.py"),
+                appsec_verify_reproduce_script(*reproduces),
+            )?;
+            let script_name = format!("exploit_{finding_id}.py");
+            fs::write(
+                exploits_dir.join(&script_name),
+                appsec_verify_reproduce_script(*reproduces),
+            )?;
+            index_entries.push(serde_json::json!({
+                "finding_id": finding_id,
+                "title": title,
+                "severity": "high",
+                "script": exploits_dir.join(&script_name).display().to_string(),
+                "script_sha256": "abc",
+            }));
+        }
+        fs::write(
+            state.join("findings.json"),
+            serde_json::to_string_pretty(&Value::Array(findings))?,
+        )?;
+        fs::write(
+            exploits_dir.join("index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "ctox.appsec_pentest.exploit_index.v1",
+                "generated_at": "1784756437937",
+                "exploits": index_entries,
+            }))?,
+        )?;
+        Ok(state)
+    }
+
+    #[test]
+    fn appsec_exploit_verify_is_a_write_command_with_expect_and_confirm_gates() -> anyhow::Result<()>
+    {
+        assert!(appsec_business_command_requires_data_write(
+            "ctox.appsec.exploit.verify"
+        ));
+
+        let root = tempdir()?;
+        write_appsec_verify_state(
+            root.path(),
+            "verify-gates",
+            &[("F-001", "Reflected XSS", true)],
+        )?;
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_exploit_verify".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.exploit.verify".into(),
+            record_id: None,
+            payload: serde_json::json!({"state_dir": "runtime/appsec/verify-gates"}),
+            client_context: Value::Null,
+        };
+
+        // Invalid expect values are rejected before any CLI execution.
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/verify-gates",
+            "expect": "pwned"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("invalid expect must fail before execution");
+        assert!(error.to_string().contains("payload.expect"), "{error:#}");
+
+        // Active/non-GET confirms require an approval id, same gate as audit.run.
+        for confirm in ["confirm_active", "confirm_non_get"] {
+            command.payload = serde_json::json!({
+                "state_dir": "runtime/appsec/verify-gates",
+                confirm: true
+            });
+            let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+                .expect_err("confirm without approval must fail");
+            assert!(
+                error.to_string().contains("payload.approval_id"),
+                "{confirm}: {error:#}"
+            );
+        }
+
+        // Traversal and non-.py names are rejected before any CLI execution.
+        for bad_name in ["../secret.py", "..", "nested/exploit.py", "notes.txt"] {
+            command.payload = serde_json::json!({
+                "state_dir": "runtime/appsec/verify-gates",
+                "name": bad_name
+            });
+            let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+                .expect_err("unsafe exploit name must be rejected");
+            assert!(
+                error.to_string().contains("plain .py file name"),
+                "{bad_name}: {error:#}"
+            );
+        }
+
+        // Unknown script names fail honestly against the index.
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/verify-gates",
+            "name": "exploit_F-999.py"
+        });
+        let error = handle_appsec_business_command(root.path(), &chef_session(), &command)
+            .expect_err("unknown exploit name must fail");
+        assert!(
+            error.to_string().contains("unknown exploit script name"),
+            "{error:#}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn appsec_exploit_verify_runs_one_script_by_name() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let state = write_appsec_verify_state(
+            root.path(),
+            "verify-one",
+            &[("F-001", "Reflected XSS", true)],
+        )?;
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_exploit_verify".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.exploit.verify".into(),
+            record_id: None,
+            payload: serde_json::json!({
+                "state_dir": "runtime/appsec/verify-one",
+                "name": "exploit_F-001.py"
+            }),
+            client_context: Value::Null,
+        };
+
+        // The proof still reproduces: exit 2 maps to still-reproduces and the
+        // run counts as executed even though the CLI marks it not-ok.
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("finding_id").and_then(Value::as_str),
+            Some("F-001")
+        );
+        assert_eq!(
+            result.get("script_name").and_then(Value::as_str),
+            Some("exploit_F-001.py")
+        );
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("still-reproduces")
+        );
+        assert_eq!(result.get("exit_code").and_then(Value::as_i64), Some(2));
+        assert!(result.get("duration_ms").and_then(Value::as_u64).is_some());
+        assert!(result.get("expectation").is_none());
+
+        // With expect vulnerable the expectation block reports expected/met.
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/verify-one",
+            "name": "exploit_F-001.py",
+            "expect": "vulnerable"
+        });
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result
+                .pointer("/expectation/expected")
+                .and_then(Value::as_str),
+            Some("vulnerable")
+        );
+        assert_eq!(
+            result.pointer("/expectation/met").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        // Confirms pass through once an approval id is present.
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/verify-one",
+            "name": "exploit_F-001.py",
+            "confirm_active": true,
+            "approval_id": "apr-test-1"
+        });
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("still-reproduces")
+        );
+
+        // After the fix the same script reports fixed-or-not-reproducible.
+        fs::write(
+            state.join("reports/issue-bundles/f-001-reflected-xss/reproduce.py"),
+            appsec_verify_reproduce_script(false),
+        )?;
+        command.payload = serde_json::json!({
+            "state_dir": "runtime/appsec/verify-one",
+            "name": "exploit_F-001.py",
+            "expect": "fixed"
+        });
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.get("status").and_then(Value::as_str),
+            Some("fixed-or-not-reproducible")
+        );
+        assert_eq!(result.get("exit_code").and_then(Value::as_i64), Some(0));
+        assert_eq!(
+            result.pointer("/expectation/met").and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn appsec_exploit_verify_all_aggregates_index_results() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        write_appsec_verify_state(
+            root.path(),
+            "verify-all",
+            &[
+                ("F-001", "Reflected XSS", true),
+                ("F-002", "SQL Injection", false),
+            ],
+        )?;
+        let mut command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_appsec_exploit_verify".into()),
+            module: APPSEC_MODULE_ID.into(),
+            command_type: "ctox.appsec.exploit.verify".into(),
+            record_id: None,
+            payload: serde_json::json!({"state_dir": "runtime/appsec/verify-all"}),
+            client_context: Value::Null,
+        };
+
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        let results = result
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].get("finding_id").and_then(Value::as_str),
+            Some("F-001")
+        );
+        assert_eq!(
+            results[0].get("script_name").and_then(Value::as_str),
+            Some("exploit_F-001.py")
+        );
+        assert_eq!(
+            results[0].get("status").and_then(Value::as_str),
+            Some("still-reproduces")
+        );
+        assert_eq!(results[0].get("exit_code").and_then(Value::as_i64), Some(2));
+        assert_eq!(
+            results[1].get("status").and_then(Value::as_str),
+            Some("fixed-or-not-reproducible")
+        );
+        assert_eq!(results[1].get("exit_code").and_then(Value::as_i64), Some(0));
+        let summary = result.get("summary").cloned().unwrap_or(Value::Null);
+        assert_eq!(summary.get("verified").and_then(Value::as_u64), Some(2));
+        assert_eq!(
+            summary.get("still_reproduces").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(summary.get("fixed").and_then(Value::as_u64), Some(1));
+        assert_eq!(summary.get("inconclusive").and_then(Value::as_u64), Some(0));
+        assert_eq!(summary.get("failed").and_then(Value::as_u64), Some(0));
+
+        // An index entry whose finding is gone degrades to a failed entry
+        // instead of aborting the whole run.
+        let state = root.path().join("runtime/appsec/verify-all");
+        let exploits_dir = state.join("exploits");
+        fs::write(
+            exploits_dir.join("exploit_F-999.py"),
+            appsec_verify_reproduce_script(true),
+        )?;
+        fs::write(
+            exploits_dir.join("index.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "ctox.appsec_pentest.exploit_index.v1",
+                "generated_at": "1784756437937",
+                "exploits": [
+                    {
+                        "finding_id": "F-001",
+                        "title": "Reflected XSS",
+                        "script": exploits_dir.join("exploit_F-001.py").display().to_string(),
+                    },
+                    {
+                        "finding_id": "F-002",
+                        "title": "SQL Injection",
+                        "script": exploits_dir.join("exploit_F-002.py").display().to_string(),
+                    },
+                    {
+                        "finding_id": "F-999",
+                        "title": "Ghost",
+                        "script": exploits_dir.join("exploit_F-999.py").display().to_string(),
+                    },
+                ],
+            }))?,
+        )?;
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        let results = result
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[2].get("status").and_then(Value::as_str),
+            Some("execution-failed")
+        );
+        assert!(results[2].get("error").and_then(Value::as_str).is_some());
+        let summary = result.get("summary").cloned().unwrap_or(Value::Null);
+        assert_eq!(summary.get("verified").and_then(Value::as_u64), Some(3));
+        assert_eq!(summary.get("failed").and_then(Value::as_u64), Some(1));
+
+        // A state dir without any index verifies nothing but stays honest.
+        command.payload = serde_json::json!({"state_dir": "runtime/appsec/verify-none"});
+        let result = handle_appsec_business_command(root.path(), &chef_session(), &command)?;
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result
+                .get("results")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            result.pointer("/summary/verified").and_then(Value::as_u64),
+            Some(0)
+        );
+        assert!(result.get("note").and_then(Value::as_str).is_some());
         Ok(())
     }
 
