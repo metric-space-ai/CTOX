@@ -6200,6 +6200,8 @@ fn start_prompt_worker(
                         if is_systematic_research_job(&job) {
                             let required_depth =
                                 required_systematic_research_depth(&job).as_str();
+                            let research_coverage =
+                                required_systematic_research_coverage(&job);
                             let skill_dir = systematic_research_skill_dir
                                 .as_ref()
                                 .expect("systematic research skill must be materialized");
@@ -6207,7 +6209,10 @@ fn start_prompt_worker(
                                 skill_dir.join("references/evidence_integrity.md");
                             let evidence_guard = skill_dir.join("scripts/evidence_guard.py");
                             prompt.push_str(&format!(
-                                "\n\nServer-bound research attempt:\nResearch Attempt ID: {command_turn_id}\nRequested Discovery Depth: {required_depth}\nThe complete read-only Systematic Research skill package is materialized inside this task workspace at {}.\nBefore creating or repairing validation/evidence-manifest.json, read the exact contract at {}. Run `python3 {} validation/evidence-manifest.json` yourself before completion. The manifest must use top-level `schema_version: \"ctox.research.evidence.v2\"`, `run_id`, `research_run_id`, `research_command_id`, the exact current `research_attempt_id`, `as_of`, and non-empty `sources` and `evidence` arrays plus `claims`, `data_files`, and `knowledge` exactly as that contract defines. A top-level `schema` or `manifest_version` is not a substitute for `schema_version`.\nWrite the exact attempt ID to research_attempt_id in validation/evidence-manifest.json. Discovery is agentic: interleave typed ctox_web_search, ctox_scholarly_search, ctox_deep_research, and ctox_web_read calls freely; ctox_deep_research is one optional broad discovery round, never the required first move and never the entire workflow. Before completion, this durable research run must contain at least one successful typed discovery call (ctox_web_search, ctox_scholarly_search, or ctox_deep_research) bound to this Research Run ID, Research Command ID, and workspace in the durable harness rollout; a ctox_deep_research sweep must persist its research workspace inside the task workspace. When you run a ctox_deep_research sweep, pass the requested discovery depth as its depth argument and never downgrade it because of token pressure, provider rate limits, an existing standard-depth workspace, or a retry. Reuse immutable receipts already produced by the same Research Run ID, Research Command ID, and workspace across bounded correction attempts; do not repeat discovery solely because the reviewer requested a manifest repair. Every manifest evidence item must be bound to the exact server-side Web Stack receipt generated for its canonical URL in this research attempt; changing IDs, URLs, hashes, or receipt fields by hand is invalid.\nBefore completion, create these exact native-writeback files inside the task workspace: `dashboard/knowledge/source_candidates.csv`, `dashboard/knowledge/source_catalog.csv`, `dashboard/knowledge/evidence_points.csv`, `dashboard/knowledge/evaluation_matrix.csv`, `dashboard/knowledge/semantic_graph_nodes.csv`, and `dashboard/knowledge/semantic_graph_edges.csv`. Also create `dashboard/knowledge/<table_key>.csv` for every additional table named by `writeback_contract.dashboard_tables` in the Business OS command, including `measured_load_points.csv` and `derived_bearing_loads.csv` when requested. Every required CSV must contain at least one data row and the exact `research_run_id` and `research_command_id` columns on every row. Source-catalog and measured/derived rows must carry `source_id`, `canonical_url`, and `snapshot_hash` matching admitted manifest evidence; evidence-point rows must additionally carry the exact validated `claim_id`, `evidence_id`, `snapshot_id`, and `quote`. Header-only placeholders are invalid. `source_candidates.csv` must preserve every deduplicated discovery candidate from every search round, including rejected candidates and their rejection reason; do not replace the complete discovery ledger with a short selection. `measured_load_points.csv` is exclusively for direct row-based operating measurements: it requires auditable `source_row_ref`, `measurement_kind`, `is_derived=false`, positive machine-readable `rpm`, `propeller_size`, `prop_diameter_in`, `prop_pitch_in`, an axial force channel in N, and `torque_Nm` as a consistently present column. Generic fact/value rows, test-rig metadata, motor KV, voltage, capacities, counts, and assumptions belong in `evidence_points.csv`, never in measured load points. `derived_bearing_loads.csv` is exclusively for calculated physical loads or moments in N or N m with `source_row_ref`, a non-empty `derivation_method`, explicit assumptions, and validated claim lineage; axis or direction counts are not loads. Verify that all required paths exist and audit the table semantics before reporting completion.\nDo not call the sandboxed `ctox` CLI for Knowledge writeback. After the evidence guard and independent review pass, the native research.systematic.run command imports the validated dashboard/knowledge CSV outputs into Knowledge and projects them over RxDB/WebRTC. Do not spawn or delegate to child agents. CTOX validates original-content receipts, hashes, data integrity, claim lineage, table semantics, and every required CSV before its independent service-owned completion-review gate. Completion rejects any other attempt ID, manifest path or schema, shallower depth, no-workspace run, missing evidence, missing CSV, header-only CSV, mismatched row lineage, or semantically invalid measurement/load tables.",
+                                "\n\nServer-bound research attempt:\nResearch Attempt ID: {command_turn_id}\nRequested Discovery Depth: {required_depth}\nMinimum Discovery Rounds: {}\nMinimum Scholarly Rounds: {}\nTarget Verified Sources: {}\nThe complete read-only Systematic Research skill package is materialized inside this task workspace at {}.\nBefore creating or repairing validation/evidence-manifest.json, read the exact contract at {}. Run `python3 {} validation/evidence-manifest.json` yourself before completion. The manifest must use top-level `schema_version: \"ctox.research.evidence.v2\"`, `run_id`, `research_run_id`, `research_command_id`, the exact current `research_attempt_id`, `as_of`, and non-empty `sources` and `evidence` arrays plus `claims`, `data_files`, and `knowledge` exactly as that contract defines. A top-level `schema` or `manifest_version` is not a substitute for `schema_version`.\nWrite the exact attempt ID to research_attempt_id in validation/evidence-manifest.json. Discovery is agentic: interleave typed ctox_web_search, ctox_scholarly_search, ctox_deep_research, and ctox_web_read calls freely; ctox_deep_research is one optional broad discovery round, never the required first move and never the entire workflow. Before completion, this durable research run must satisfy every server-bound round, scholarly, source-count, depth, run, command, and workspace requirement recorded above. A ctox_deep_research sweep must persist its research workspace inside the task workspace. When you run a ctox_deep_research sweep, pass the requested discovery depth as its depth argument and never downgrade it because of token pressure, provider rate limits, an existing standard-depth workspace, or a retry. Reuse immutable receipts already produced by the same Research Run ID, Research Command ID, and workspace across bounded correction attempts; do not repeat discovery solely because the reviewer requested a manifest repair. Every manifest evidence item must be bound to the exact server-side Web Stack receipt generated for its canonical URL in this research attempt; changing IDs, URLs, hashes, or receipt fields by hand is invalid.\nBefore completion, create these exact native-writeback files inside the task workspace: `dashboard/knowledge/source_candidates.csv`, `dashboard/knowledge/source_catalog.csv`, `dashboard/knowledge/evidence_points.csv`, `dashboard/knowledge/evaluation_matrix.csv`, `dashboard/knowledge/semantic_graph_nodes.csv`, and `dashboard/knowledge/semantic_graph_edges.csv`. Also create `dashboard/knowledge/<table_key>.csv` for every additional table named by `writeback_contract.dashboard_tables` in the Business OS command, including `measured_load_points.csv` and `derived_bearing_loads.csv` when requested. Every required CSV must contain at least one data row and the exact `research_run_id` and `research_command_id` columns on every row. Source-catalog and measured/derived rows must carry `source_id`, `canonical_url`, and `snapshot_hash` matching admitted manifest evidence; evidence-point rows must additionally carry the exact validated `claim_id`, `evidence_id`, `snapshot_id`, and `quote`. Header-only placeholders are invalid. `source_candidates.csv` must preserve every deduplicated discovery candidate from every search round, including rejected candidates and their rejection reason; do not replace the complete discovery ledger with a short selection. `measured_load_points.csv` is exclusively for direct row-based operating measurements: it requires auditable `source_row_ref`, `measurement_kind`, `is_derived=false`, positive machine-readable `rpm`, `propeller_size`, `prop_diameter_in`, `prop_pitch_in`, an axial force channel in N, and `torque_Nm` as a consistently present column. Generic fact/value rows, test-rig metadata, motor KV, voltage, capacities, counts, and assumptions belong in `evidence_points.csv`, never in measured load points. `derived_bearing_loads.csv` is exclusively for calculated physical loads or moments in N or N m with `source_row_ref`, a non-empty `derivation_method`, explicit assumptions, and validated claim lineage; axis or direction counts are not loads. Verify that all required paths exist and audit the table semantics before reporting completion.\nDo not call the sandboxed `ctox` CLI for Knowledge writeback. After the evidence guard and independent review pass, the native research.systematic.run command imports the validated dashboard/knowledge CSV outputs into Knowledge and projects them over RxDB/WebRTC. Do not spawn or delegate to child agents. CTOX validates original-content receipts, hashes, data integrity, claim lineage, table semantics, and every required CSV before its independent service-owned completion-review gate. Completion rejects any other attempt ID, manifest path or schema, shallower depth, insufficient discovery coverage, missing evidence, missing CSV, header-only CSV, mismatched row lineage, or semantically invalid measurement/load tables.",
+                                research_coverage.minimum_discovery_rounds,
+                                research_coverage.minimum_scholarly_rounds,
+                                research_coverage.target_verified_sources,
                                 skill_dir.display(),
                                 evidence_contract.display(),
                                 evidence_guard.display(),
@@ -11456,6 +11461,64 @@ fn required_systematic_research_depth(job: &QueuedPrompt) -> SystematicResearchD
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SystematicResearchCoverage {
+    minimum_discovery_rounds: usize,
+    minimum_scholarly_rounds: usize,
+    target_verified_sources: usize,
+}
+
+fn systematic_research_numeric_requirement(
+    prompt: &str,
+    label: &str,
+    json_key: &str,
+) -> Option<usize> {
+    prompt
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix(label)
+                .map(str::trim)
+                .and_then(|value| value.parse::<usize>().ok())
+        })
+        .or_else(|| {
+            let prefix = format!("\"{json_key}\":");
+            prompt.lines().find_map(|line| {
+                line.trim()
+                    .strip_prefix(&prefix)
+                    .map(str::trim)
+                    .map(|value| value.trim_end_matches(',').trim())
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+        })
+}
+
+fn required_systematic_research_coverage(job: &QueuedPrompt) -> SystematicResearchCoverage {
+    SystematicResearchCoverage {
+        minimum_discovery_rounds: systematic_research_numeric_requirement(
+            &job.prompt,
+            "Minimum Discovery Rounds:",
+            "minimum_discovery_rounds",
+        )
+        .unwrap_or(1)
+        .clamp(1, 24),
+        minimum_scholarly_rounds: systematic_research_numeric_requirement(
+            &job.prompt,
+            "Minimum Scholarly Rounds:",
+            "minimum_scholarly_rounds",
+        )
+        .unwrap_or(0)
+        .clamp(0, 12),
+        target_verified_sources: systematic_research_numeric_requirement(
+            &job.prompt,
+            "Target Verified Sources:",
+            "target_verified_sources",
+        )
+        .unwrap_or(1)
+        .clamp(1, 300),
+    }
+}
+
 /// Typed discovery tools that satisfy the systematic-research discovery
 /// receipt. `ctox_deep_research` is one optional broad discovery round, never
 /// the required first move or the entire workflow: the agent may interleave
@@ -11729,6 +11792,137 @@ fn validate_systematic_research_discovery_receipt_from_conn(
             observed_calls.join(", ")
         }
     )
+}
+
+fn validate_systematic_research_discovery_coverage(
+    job: &QueuedPrompt,
+    discovery_receipt: &Value,
+    research_started_at: u64,
+) -> Result<Value> {
+    let coverage = required_systematic_research_coverage(job);
+    let (expected_run_id, expected_command_id) = systematic_research_binding(job)?;
+    let expected_workspace = job
+        .workspace_root
+        .as_deref()
+        .map(Path::new)
+        .and_then(|path| path.canonicalize().ok())
+        .context("systematic research discovery coverage requires a canonical workspace")?;
+    let rollout_path = discovery_receipt
+        .get("rollout_path")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .context("systematic research discovery receipt is missing rollout_path")?;
+    let file = std::fs::File::open(&rollout_path)
+        .with_context(|| format!("open harness rollout {}", rollout_path.display()))?;
+
+    let mut run_bound = false;
+    let mut command_bound = false;
+    let mut workspace_bound = false;
+    let mut calls = BTreeMap::<String, String>::new();
+    let mut completed_call_ids = HashSet::<String>::new();
+    let mut tool_types = HashSet::<String>::new();
+    let mut scholarly_rounds = 0usize;
+    let mut successful_rounds = 0usize;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(timestamp) = value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(|timestamp| DateTime::parse_from_rfc3339(timestamp).ok())
+            .and_then(|timestamp| u64::try_from(timestamp.timestamp()).ok())
+        else {
+            continue;
+        };
+        if timestamp < research_started_at {
+            continue;
+        }
+        let payload = value.get("payload").unwrap_or(&Value::Null);
+        if payload.get("type").and_then(Value::as_str) == Some("task_started") {
+            run_bound = false;
+            command_bound = false;
+            workspace_bound = false;
+            calls.clear();
+        }
+        if line.contains(expected_run_id) {
+            run_bound = true;
+        }
+        if line.contains(expected_command_id) {
+            command_bound = true;
+        }
+        if value.get("type").and_then(Value::as_str) == Some("turn_context") {
+            workspace_bound = payload
+                .get("cwd")
+                .and_then(Value::as_str)
+                .and_then(|cwd| Path::new(cwd).canonicalize().ok())
+                .is_some_and(|cwd| cwd == expected_workspace);
+        }
+        match payload.get("type").and_then(Value::as_str) {
+            Some("function_call") if run_bound && command_bound && workspace_bound => {
+                let Some(tool) = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(name))
+                else {
+                    continue;
+                };
+                let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                calls.insert(call_id.to_string(), tool.to_string());
+            }
+            Some("function_call_output") if run_bound && command_bound && workspace_bound => {
+                let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(tool) = calls.get(call_id) else {
+                    continue;
+                };
+                let output_ok = payload
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                    .and_then(|output| output.get("ok").and_then(Value::as_bool))
+                    == Some(true);
+                if output_ok && completed_call_ids.insert(call_id.to_string()) {
+                    successful_rounds = successful_rounds.saturating_add(1);
+                    tool_types.insert(tool.clone());
+                    if tool == "ctox_scholarly_search" {
+                        scholarly_rounds = scholarly_rounds.saturating_add(1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    anyhow::ensure!(
+        successful_rounds >= coverage.minimum_discovery_rounds,
+        "systematic research requires at least {} successful typed discovery rounds; found {}",
+        coverage.minimum_discovery_rounds,
+        successful_rounds
+    );
+    anyhow::ensure!(
+        scholarly_rounds >= coverage.minimum_scholarly_rounds,
+        "systematic research requires at least {} successful scholarly rounds; found {}",
+        coverage.minimum_scholarly_rounds,
+        scholarly_rounds
+    );
+    anyhow::ensure!(
+        coverage.minimum_discovery_rounds < 3 || tool_types.len() >= 2,
+        "systematic research requires at least two discovery tool types; found {:?}",
+        tool_types
+    );
+    Ok(serde_json::json!({
+        "status": "pass",
+        "successful_rounds": successful_rounds,
+        "scholarly_rounds": scholarly_rounds,
+        "tool_types": tool_types,
+        "minimum_discovery_rounds": coverage.minimum_discovery_rounds,
+        "minimum_scholarly_rounds": coverage.minimum_scholarly_rounds,
+    }))
 }
 
 fn systematic_research_validation_receipt_path(job: &QueuedPrompt) -> Option<PathBuf> {
@@ -12342,8 +12536,25 @@ fn validate_systematic_research_workspace(
                 manifest.display()
             );
         }
+        let coverage = required_systematic_research_coverage(job);
+        let verified_source_count = manifest_value
+            .get("sources")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            verified_source_count >= coverage.target_verified_sources,
+            "systematic research target requires at least {} verified sources in the evidence manifest; found {}",
+            coverage.target_verified_sources,
+            verified_source_count
+        );
         let discovery_receipt =
             validate_systematic_research_discovery_receipt(job, &workspace, research_started_at)?;
+        let discovery_coverage = validate_systematic_research_discovery_coverage(
+            job,
+            &discovery_receipt,
+            research_started_at,
+        )?;
         validate_systematic_research_typed_web_read_receipts(
             job,
             &workspace,
@@ -12382,6 +12593,9 @@ fn validate_systematic_research_workspace(
             "manifest_sha256": format!("{:x}", sha2::Sha256::digest(&manifest_bytes)),
             "validator_output": stdout,
             "discovery_receipt": discovery_receipt,
+            "discovery_coverage": discovery_coverage,
+            "verified_source_count": verified_source_count,
+            "target_verified_sources": coverage.target_verified_sources,
         }));
     }
 
@@ -15479,15 +15693,13 @@ fn failed_worker_route_status(
     retry_worker_message: bool,
 ) -> &'static str {
     // Worker/runtime failures are not review findings. Only the review gate or
-    // validator may produce ReworkRequired/review_rework. Threshold exhaustion
-    // is a terminal model/runtime failure; retryable and timeout slices return
-    // to pending through the normal main-work queue.
-    if agent_failure_threshold_hit {
+    // validator may produce ReworkRequired/review_rework. A positively
+    // classified timeout or transient API failure keeps the durable item open
+    // even when an older mission failure counter is already at its threshold.
+    if timeout_worker_message || retry_worker_message {
+        "pending"
+    } else if agent_failure_threshold_hit {
         "failed"
-    } else if timeout_worker_message {
-        "pending"
-    } else if retry_worker_message {
-        "pending"
     } else {
         "failed"
     }
@@ -31660,7 +31872,7 @@ Business OS command:
         // Anti-stuck threshold exhaustion is terminal failure, not review
         // rework. Review rework requires a review/validator witness.
         assert_eq!(failed_worker_route_status(true, false, false), "failed");
-        assert_eq!(failed_worker_route_status(true, true, true), "failed");
+        assert_eq!(failed_worker_route_status(true, true, true), "pending");
         // Pure timeout / runtime retry signal stays on the queue.
         assert_eq!(failed_worker_route_status(false, true, false), "pending");
         assert_eq!(failed_worker_route_status(false, true, true), "pending");

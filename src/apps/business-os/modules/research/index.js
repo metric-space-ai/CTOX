@@ -3679,11 +3679,33 @@ async function runSelectedResearch() {
     ...sourceUrlsFromRows(candidateRows),
     ...sourceUrlsFromRows((state.sourceModels || []).map((source) => source.row)),
   ])];
+  const targetVerifiedSources = Math.max(
+    100,
+    Number(task?.payload?.target_verified_sources || 0),
+    verifiedSourceUrls.length,
+  );
+  const minimumCandidateSources = Math.max(
+    targetVerifiedSources * 2,
+    Number(task?.payload?.minimum_candidate_sources || 0),
+  );
+  const minimumDiscoveryRounds = Math.max(
+    6,
+    Number(task?.payload?.minimum_discovery_rounds || 0),
+  );
+  const minimumScholarlyRounds = Math.max(
+    2,
+    Number(task?.payload?.minimum_scholarly_rounds || 0),
+  );
   const instruction = [
     `Führe systematic-research für das Business-OS Web Research Dashboard "${task.title}" fort.`,
     `Research Task ID: ${task.id}`,
     `Research Run ID: ${researchRunId}`,
     `Research Command ID: ${commandId}`,
+    'Requested Discovery Depth: exhaustive',
+    `Target Verified Sources: ${targetVerifiedSources}`,
+    `Minimum Candidate Sources: ${minimumCandidateSources}`,
+    `Minimum Discovery Rounds: ${minimumDiscoveryRounds}`,
+    `Minimum Scholarly Rounds: ${minimumScholarlyRounds}`,
     `Knowledge domain: ${task.knowledge_domain}`,
     `Discovery candidates: ctox knowledge data describe --domain ${task.knowledge_domain} --key ${task.candidate_catalog_key || 'source_candidates'}`,
     `Verified source registry: ctox knowledge data describe --domain ${task.knowledge_domain} --key ${task.source_catalog_key || 'source_catalog'}`,
@@ -3727,11 +3749,16 @@ async function runSelectedResearch() {
     web_stack_plan: {
       strategy: 'agentic_iterative_systematic_research',
       seed_query: task.prompt || task.title,
+      depth: 'exhaustive',
+      target_verified_sources: targetVerifiedSources,
+      minimum_candidate_sources: minimumCandidateSources,
+      minimum_discovery_rounds: minimumDiscoveryRounds,
+      minimum_scholarly_rounds: minimumScholarlyRounds,
       exclude_urls: excludedSourceUrls,
       verified_source_urls: verifiedSourceUrls,
       available_rounds: [
         'ctox web scholarly search --query <paper facet> --with-oa-pdf --only-doi',
-        'ctox web deep-research --query <broad or gap facet> --depth standard --max-sources 24 --exclude-url <repeat for every web_stack_plan.exclude_urls entry>',
+        `ctox web deep-research --query <broad or gap facet> --depth exhaustive --max-sources ${Math.min(300, minimumCandidateSources)} --exclude-url <repeat for every web_stack_plan.exclude_urls entry>`,
         'ctox web search --query <focused source or official-domain facet>',
         'ctox web read --url <canonical-candidate-url> --query <precise evidence intent>',
         'browser/scrape for interactive or structured source extraction',
