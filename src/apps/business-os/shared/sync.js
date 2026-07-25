@@ -2794,6 +2794,11 @@ function isDemandOnlyPullCollection(collection) {
     // delay a new command behind thousands of old records.
     || collection === 'business_commands'
     || collection === 'ctox_queue_tasks'
+    // Knowledge table documents embed dataframe rows and can grow far beyond
+    // the WebRTC transfer ceiling as research accumulates. Research and
+    // Knowledge hydrate bounded domain/table chunks through query demand
+    // loading, so an eager full pull only starves those foreground reads.
+    || collection === 'knowledge_tables'
   ) {
     return true;
   }

@@ -50,6 +50,7 @@ assert.equal(isDemandOnlyPullCollection('user_notifications'), true, 'thread not
 assert.equal(isDemandOnlyPullCollection('ctox_task_approval_requests'), true, 'approval records hydrate through bounded demand queries');
 assert.equal(isDemandOnlyPullCollection('business_commands'), true, 'command history hydrates by command id while new commands still push');
 assert.equal(isDemandOnlyPullCollection('ctox_queue_tasks'), true, 'queue history hydrates by linked task id');
+assert.equal(isDemandOnlyPullCollection('knowledge_tables'), true, 'knowledge table rows hydrate through bounded domain and chunk queries');
 assert.equal(isDemandOnlyPullCollection('desktop_files'), false, 'desktop file metadata still pulls normally');
 
 assert.equal(isModuleDemandOnlyCollection('desktop_file_chunks'), true, 'desktop chunks are module demand-only');
