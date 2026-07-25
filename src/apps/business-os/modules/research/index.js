@@ -725,11 +725,14 @@ async function refreshAllNow({ seed = false, retryEmptyKnowledge = true, mountTo
   state.diagnostics.reloadFinishedAt = 0;
   state.diagnostics.reloadCount += 1;
   setStatus(state.t('loadingKnowledge', 'Knowledge wird geladen...'));
-  const knowledgeBases = await loadKnowledgeBases({ retryEmpty: retryEmptyKnowledge });
-  if (mountToken && state.mountToken !== mountToken) return;
-  state.knowledgeBases = knowledgeBases;
   await loadLocalState({ mountToken });
   if (mountToken && state.mountToken !== mountToken) return;
+  const knowledgeBases = await loadKnowledgeBases({
+    retryEmpty: retryEmptyKnowledge,
+    domains: activeResearchDomains(),
+  });
+  if (mountToken && state.mountToken !== mountToken) return;
+  state.knowledgeBases = knowledgeBases;
   if (seed) await ensureTasksFromKnowledgeBases();
   if (mountToken && state.mountToken !== mountToken) return;
   if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
@@ -826,11 +829,11 @@ function scheduleKnowledgeRefresh(delay = 120) {
     if (sequence !== state.refreshSequences.knowledge) return;
     state.knowledgeRefreshTimer = null;
     if (!mountToken || state.mountToken !== mountToken) return;
-    const knowledgeBases = await loadKnowledgeBases();
-    if (state.mountToken !== mountToken) return;
-    state.knowledgeBases = knowledgeBases;
     await loadLocalState({ mountToken });
     if (state.mountToken !== mountToken) return;
+    const knowledgeBases = await loadKnowledgeBases({ domains: activeResearchDomains() });
+    if (state.mountToken !== mountToken) return;
+    state.knowledgeBases = knowledgeBases;
     await ensureTasksFromKnowledgeBases();
     if (state.mountToken !== mountToken) return;
     if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
@@ -898,9 +901,15 @@ async function ensureTasksFromKnowledgeBases() {
   }
 }
 
-async function loadKnowledgeBases({ retryEmpty = true } = {}) {
-  const tables = await loadKnowledgeTables({ retryEmpty });
+async function loadKnowledgeBases({ retryEmpty = true, domains = [] } = {}) {
+  const tables = await loadKnowledgeTables({ retryEmpty, domains });
   return knowledgeBasesFromTables(tables);
+}
+
+function activeResearchDomains() {
+  return [...new Set(state.tasks
+    .map((task) => String(task?.knowledge_domain || '').trim())
+    .filter(Boolean))];
 }
 
 function knowledgeBasesFromTables(tables = []) {
@@ -992,17 +1001,106 @@ function mergeKnowledgeTableChunks(tables = []) {
   });
 }
 
-async function loadKnowledgeTables({ retryEmpty = true } = {}) {
+async function loadKnowledgeTables({ retryEmpty = true, domains = [] } = {}) {
   const collection = readableCollection('knowledge_tables');
-  const first = await findAll(collection, 'knowledge_tables');
+  const first = await loadKnowledgeTableChunks(collection, domains);
   if (first.length || !collection?.find) return first;
   if (!retryEmpty || !shouldRetryEmptyKnowledgeTables()) return first;
   for (const delay of KNOWLEDGE_TABLE_EMPTY_RETRY_DELAYS_MS) {
     await sleep(delay);
-    const retry = await findAll(collection, 'knowledge_tables');
+    const retry = await loadKnowledgeTableChunks(collection, domains);
     if (retry.length) return retry;
   }
   return first;
+}
+
+async function loadKnowledgeTableChunks(collection, domains = []) {
+  if (!collection?.find) return [];
+  const normalizedDomains = [...new Set((domains || [])
+    .map((domain) => String(domain || '').trim())
+    .filter(Boolean))];
+  const selectors = normalizedDomains.length
+    ? normalizedDomains.map((domain) => ({ domain, chunk_index: 0 }))
+    : [{ chunk_index: 0 }];
+  const baseDocuments = [];
+  for (const selector of selectors) {
+    const docs = await findBySelector(collection, selector, 'knowledge_tables');
+    baseDocuments.push(...docs);
+  }
+  const bases = [...new Map(baseDocuments.map((document) => [document.id, document])).values()];
+  const chunkIds = knowledgeTableChunkDocumentIds(bases);
+  const chunks = [];
+  for (let offset = 0; offset < chunkIds.length; offset += 3) {
+    const batch = chunkIds.slice(offset, offset + 3);
+    const loaded = await Promise.all(batch.map((id) => findOneDocument(collection, id, 'knowledge_tables')));
+    chunks.push(...loaded.filter(Boolean));
+  }
+  const documents = [...bases, ...chunks];
+  markCollectionDiagnostic('knowledge_tables', 'read', 'ok', `${documents.length} chunk rows`);
+  return documents;
+}
+
+function knowledgeTableChunkDocumentIds(baseDocuments = []) {
+  return baseDocuments.flatMap((document) => {
+    const source = document?.payload && typeof document.payload === 'object'
+      ? document.payload
+      : document;
+    const logicalId = String(
+      source?.logical_table_id
+      || document?.logical_table_id
+      || source?.id
+      || document?.id
+      || '',
+    ).trim();
+    const chunkCount = Math.max(1, Number(source?.chunk_count ?? document?.chunk_count ?? 1) || 1);
+    if (!logicalId || chunkCount <= 1) return [];
+    return Array.from(
+      { length: chunkCount - 1 },
+      (_, index) => `${logicalId}:chunk:${String(index + 1).padStart(4, '0')}`,
+    );
+  });
+}
+
+async function findBySelector(collection, selector, collectionName = '') {
+  try {
+    const docs = await withTimeout(
+      collection.find({ selector }).exec(),
+      COLLECTION_READ_TIMEOUT_MS,
+      'collection read timed out',
+    );
+    return docs.map(toJson);
+  } catch (error) {
+    if (collectionName) {
+      markCollectionDiagnostic(
+        collectionName,
+        'read',
+        isBusinessOsPermissionDenied(error) ? 'denied' : 'failed',
+        isBusinessOsPermissionDenied(error) ? state.t('collectionLocked', 'Keine Datenfreigabe') : errorMessage(error),
+      );
+    }
+    return [];
+  }
+}
+
+async function findOneDocument(collection, id, collectionName = '') {
+  try {
+    const doc = await withTimeout(
+      collection.findOne(id).exec(),
+      COLLECTION_READ_TIMEOUT_MS,
+      'collection read timed out',
+    );
+    return doc ? toJson(doc) : null;
+  } catch (error) {
+    if (collectionName) {
+      markCollectionDiagnostic(
+        collectionName,
+        'read',
+        isBusinessOsPermissionDenied(error) ? 'denied' : 'failed',
+        isBusinessOsPermissionDenied(error) ? state.t('collectionLocked', 'Keine Datenfreigabe') : errorMessage(error),
+      );
+    }
+    return null;
+  }
 }
 
 function shouldRetryEmptyKnowledgeTables() {
@@ -5451,6 +5549,7 @@ export const __researchTestHooks = {
   aggregateMeasurements,
   hasVerifiedEvidence: () => evidenceRankedSources().length > 0,
   knowledgeBasesFromTables,
+  knowledgeTableChunkDocumentIds,
   mergeKnowledgeTableChunks,
   knowledgeLineageForPayload,
   knowledgeRefreshPayload,

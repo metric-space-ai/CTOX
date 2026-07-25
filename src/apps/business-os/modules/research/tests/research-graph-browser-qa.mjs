@@ -124,7 +124,19 @@ const html = `<!doctype html>
         quote: 'Verified research finding about ' + clusters[index % clusters.length][fact + 1],
         confidence: 0.91,
       })));
-      const table = (key, rows) => ({ id: 'table_' + key, domain: 'competitive_ai_research', table_key: key, title: key, description: 'Research evidence table', rows, row_count: rows.length, ...(lineageReady ? { knowledge_version_id: 'knowledge-v-qa', knowledge_version: { version_id: 'knowledge-v-qa', status: 'current' } } : {}) });
+      const table = (key, rows) => ({
+        id: 'table_' + key,
+        logical_table_id: 'table_' + key,
+        domain: 'competitive_ai_research',
+        table_key: key,
+        title: key,
+        description: 'Research evidence table',
+        rows,
+        row_count: rows.length,
+        chunk_index: 0,
+        chunk_count: 1,
+        ...(lineageReady ? { knowledge_version_id: 'knowledge-v-qa', knowledge_version: { version_id: 'knowledge-v-qa', status: 'current' } } : {}),
+      });
       const store = {
         research_tasks: [{
           id: 'research_semantic_graph',

@@ -621,6 +621,27 @@ test('knowledge base grouping merges replicated table chunks in row order', () =
   assert.deepEqual(grouped[0].tables[0].rows.map((row) => row.source_row), [0, 1, 2]);
 });
 
+test('knowledge table loader derives bounded follow-up reads from base chunks', () => {
+  assert.deepEqual(hooks.knowledgeTableChunkDocumentIds([
+    {
+      id: 'table:sources',
+      payload: {
+        logical_table_id: 'table:sources',
+        chunk_index: 0,
+        chunk_count: 3,
+      },
+    },
+    {
+      id: 'table:single',
+      chunk_index: 0,
+      chunk_count: 1,
+    },
+  ]), [
+    'table:sources:chunk:0001',
+    'table:sources:chunk:0002',
+  ]);
+});
+
 test('empty knowledge read retries only when knowledge_tables sync is live', () => {
   const previousWindow = globalThis.window;
   try {
