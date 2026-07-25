@@ -733,6 +733,56 @@ fn project_runs(conn: &Connection, state_dir: &Path, now: u128) -> Result<usize>
     Ok(count)
 }
 
+/// Metadata for a projected state artifact. Crafting sessions additionally
+/// carry their provenance core (target, classes, result, iteration
+/// accounting, evidence hashes, budget) so reviewers can read the session
+/// summary without opening the full session.json file.
+fn state_artifact_metadata(
+    state_dir: &Path,
+    path: &Path,
+    kind: &str,
+    parsed: Option<&Value>,
+) -> Value {
+    let is_crafting_session = kind == "crafting"
+        && path.file_name().and_then(|name| name.to_str()) == Some("session.json");
+    let Some(session) = parsed.filter(|_| is_crafting_session) else {
+        return json!({
+            "relative_path": relative_path(state_dir, path),
+            "source": "ctox-appsec-state",
+        });
+    };
+    let iterations = session
+        .get("iterations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let discarded_count = iterations
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.get("outcome").and_then(Value::as_str),
+                Some("refuted" | "filtered")
+            )
+        })
+        .count();
+    json!({
+        "relative_path": relative_path(state_dir, path),
+        "source": "ctox-appsec-state",
+        "session_id": session.get("session_id").cloned().unwrap_or(Value::Null),
+        "target": session.pointer("/target/url").cloned().unwrap_or(Value::Null),
+        "classes": session.get("class").cloned().unwrap_or(Value::Null),
+        "result": session.pointer("/result/status").cloned().unwrap_or(Value::Null),
+        "iterations": iterations.len(),
+        "discarded_count": discarded_count,
+        "profile_sha256": session.pointer("/profile_ref/sha256").cloned().unwrap_or(Value::Null),
+        "candidates_sha256": session.pointer("/candidates_ref/sha256").cloned().unwrap_or(Value::Null),
+        "budget": {
+            "max": session.pointer("/budget/max_requests").cloned().unwrap_or(Value::Null),
+            "used": session.get("requests_used").cloned().unwrap_or(Value::Null),
+        },
+    })
+}
+
 fn project_artifacts(
     conn: &Connection,
     state_dir: &Path,
@@ -752,18 +802,15 @@ fn project_artifacts(
         let bytes =
             fs::read(&path).with_context(|| format!("failed to read {}", path.display()))?;
         let sha256 = hex_sha256(&bytes);
-        let version = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("version")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            });
-        let metadata = json!({
-            "relative_path": relative_path(state_dir, &path),
-            "source": "ctox-appsec-state",
+        let parsed = serde_json::from_slice::<Value>(&bytes).ok();
+        let version = parsed.as_ref().and_then(|value| {
+            value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
         });
+        let kind = artifact_kind(state_dir, &path);
+        let metadata = state_artifact_metadata(state_dir, &path, &kind, parsed.as_ref());
         conn.execute(
             r#"
             INSERT INTO appsec_artifacts
@@ -781,7 +828,7 @@ fn project_artifacts(
             params![
                 path_json(&path),
                 path_json(state_dir),
-                artifact_kind(state_dir, &path),
+                kind,
                 version,
                 sha256,
                 bytes.len() as i64,
@@ -837,6 +884,8 @@ fn project_exploit_artifacts(conn: &Connection, state_dir: &Path, now: u128) -> 
             "cvss_score": entry.get("cvss_score").cloned().unwrap_or(Value::Null),
             "target": entry.get("target").cloned().unwrap_or(Value::Null),
             "verification_status": entry.pointer("/verification/status").cloned().unwrap_or(Value::Null),
+            "origin": entry.get("origin").cloned().unwrap_or(Value::Null),
+            "craft": entry.get("craft").cloned().unwrap_or(Value::Null),
             "content_policy": "executable-python-proof; read text only via ctox.appsec.exploit.get; scripts never contain credentials",
         });
         upsert_appsec_artifact(
@@ -1972,6 +2021,13 @@ mod tests {
                     "script": path_json(&exploits_dir.join("exploit_F-001.py")),
                     "script_sha256": hex_sha256(script.as_bytes()),
                     "verification": {"status": "still-reproduces"},
+                    "origin": "crafted",
+                    "craft": {
+                        "session_id": "session-1",
+                        "session": path_json(&state.join("crafting/session-1/session.json")),
+                        "iterations": 1,
+                        "requests_used": 3,
+                    },
                 }],
             }))
             .unwrap(),
@@ -2026,6 +2082,22 @@ mod tests {
             metadata.get("verification_status").and_then(Value::as_str),
             Some("still-reproduces")
         );
+        assert_eq!(
+            metadata.get("origin").and_then(Value::as_str),
+            Some("crafted")
+        );
+        assert_eq!(
+            metadata
+                .pointer("/craft/session_id")
+                .and_then(Value::as_str),
+            Some("session-1")
+        );
+        assert_eq!(
+            metadata
+                .pointer("/craft/requests_used")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
         assert!(metadata
             .get("content_policy")
             .and_then(Value::as_str)
@@ -2041,6 +2113,98 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .unwrap();
         assert_eq!(index_kinds, ["exploit-index", "exploit-index"]);
+    }
+
+    #[test]
+    fn projects_crafting_session_provenance_core_into_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("runtime/appsec/default");
+        let session_dir = state.join("crafting/session-1");
+        fs::create_dir_all(&session_dir).unwrap();
+        fs::write(
+            session_dir.join("session.json"),
+            serde_json::to_string_pretty(&json!({
+                "version": "ctox.appsec_pentest.crafting_session.v1",
+                "session_id": "session-1",
+                "started": "2026-07-22T00:00:00Z",
+                "finished": "2026-07-22T00:00:05Z",
+                "target": {"url": "https://example.test/search", "param": "q", "method": "GET"},
+                "class": "xss,sqli",
+                "budget": {"max_requests": 24, "max_duration_s": 60, "max_payloads": 12},
+                "approval_ref": Value::Null,
+                "profile_ref": {"path": "/artifacts/context-profile-1.json", "sha256": "a".repeat(64)},
+                "candidates_ref": {"path": "/artifacts/candidates-1.json", "sha256": "b".repeat(64)},
+                "iterations": [
+                    {"candidate_id": "sqli-baseline", "class": "sqli", "payload": "canary", "outcome": "baseline"},
+                    {"candidate_id": "xss-1", "class": "xss", "payload": "<svg onload=1>", "outcome": "success"},
+                    {"candidate_id": "sqli-1", "class": "sqli", "payload": "' OR 1=1--", "outcome": "refuted"},
+                    {"candidate_id": "sqli-2", "class": "sqli", "payload": "\" OR 1=1--", "outcome": "filtered"},
+                ],
+                "result": {"status": "crafted", "reason": "validated candidate found"},
+                "requests_used": 4,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let args = vec![
+            "ctox-appsec".to_string(),
+            "--state-dir".to_string(),
+            path_json(&state),
+            "audit".to_string(),
+            "run".to_string(),
+        ];
+        project_cli_result(
+            root.path(),
+            &args,
+            &json!({"ok": true, "command": "audit run"}),
+        )
+        .unwrap();
+
+        let conn = Connection::open(crate::paths::core_db(root.path())).unwrap();
+        let (kind, metadata_json): (String, String) = conn
+            .query_row(
+                "SELECT kind, metadata_json FROM appsec_artifacts WHERE artifact_path LIKE '%crafting/session-1/session.json'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind, "crafting");
+        let metadata: Value = serde_json::from_str(&metadata_json).unwrap();
+        assert_eq!(
+            metadata.get("session_id").and_then(Value::as_str),
+            Some("session-1")
+        );
+        assert_eq!(
+            metadata.get("target").and_then(Value::as_str),
+            Some("https://example.test/search")
+        );
+        assert_eq!(
+            metadata.get("classes").and_then(Value::as_str),
+            Some("xss,sqli")
+        );
+        assert_eq!(
+            metadata.get("result").and_then(Value::as_str),
+            Some("crafted")
+        );
+        assert_eq!(metadata.get("iterations").and_then(Value::as_u64), Some(4));
+        assert_eq!(
+            metadata.get("discarded_count").and_then(Value::as_u64),
+            Some(2)
+        );
+        let profile_sha256 = "a".repeat(64);
+        assert_eq!(
+            metadata.get("profile_sha256").and_then(Value::as_str),
+            Some(profile_sha256.as_str())
+        );
+        assert_eq!(
+            metadata.pointer("/budget/max").and_then(Value::as_u64),
+            Some(24)
+        );
+        assert_eq!(
+            metadata.pointer("/budget/used").and_then(Value::as_u64),
+            Some(4)
+        );
     }
 
     #[test]

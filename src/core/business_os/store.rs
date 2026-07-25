@@ -41757,6 +41757,8 @@ fn appsec_exploit_list(root: &Path, payload: &Value) -> anyhow::Result<Value> {
                 "cvss_score": entry.get("cvss_score").cloned().unwrap_or(Value::Null),
                 "target": entry.get("target").cloned().unwrap_or(Value::Null),
                 "verification_status": entry.pointer("/verification/status").cloned().unwrap_or(Value::Null),
+                "origin": entry.get("origin").cloned().unwrap_or(Value::Null),
+                "craft": entry.get("craft").cloned().unwrap_or(Value::Null),
                 "script_name": entry
                     .get("script")
                     .and_then(Value::as_str)
@@ -44421,6 +44423,13 @@ mod tests {
                     "script": exploits_dir.join("exploit_F-001.py").display().to_string(),
                     "script_sha256": "abc",
                     "verification": {"status": "still-reproduces"},
+                    "origin": "crafted",
+                    "craft": {
+                        "session_id": "session-1",
+                        "session": "/state/crafting/session-1/session.json",
+                        "iterations": 1,
+                        "requests_used": 3,
+                    },
                 }],
             }))?,
         )?;
@@ -44455,6 +44464,18 @@ mod tests {
                 .get("verification_status")
                 .and_then(Value::as_str),
             Some("still-reproduces")
+        );
+        assert_eq!(
+            entries[0].get("origin").and_then(Value::as_str),
+            Some("crafted")
+        );
+        assert_eq!(
+            entries[0].pointer("/craft/session_id").and_then(Value::as_str),
+            Some("session-1")
+        );
+        assert_eq!(
+            entries[0].pointer("/craft/iterations").and_then(Value::as_u64),
+            Some(1)
         );
 
         command.command_type = "ctox.appsec.exploit.get".into();
