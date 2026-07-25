@@ -39968,7 +39968,12 @@ fn command_prompt(
             &required_skill_names,
         );
     }
-    let payload_preview_value = sanitize_command_prompt_preview(command.payload.clone());
+    let mut payload_preview_value = command.payload.clone();
+    if let Some(payload) = payload_preview_value.as_object_mut() {
+        payload.remove("instruction");
+        payload.remove("prompt");
+    }
+    let payload_preview_value = sanitize_command_prompt_preview(payload_preview_value);
     let context_preview_value =
         sanitize_command_prompt_preview(business_command_client_context_value(command));
     let payload = prompt_json_preview(
@@ -54161,6 +54166,31 @@ mod tests {
         assert!(!prompt.contains("capability_token"));
         assert!(!prompt.contains("access_token"));
         assert!(!prompt.contains("api_key"));
+    }
+
+    #[test]
+    fn business_command_prompt_does_not_duplicate_instruction_in_payload_preview() {
+        let instruction = "Research verified UAV bearing sources.";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_research_prompt_once".to_owned()),
+            module: "research".to_owned(),
+            command_type: "research.systematic.run".to_owned(),
+            record_id: Some("uav_bearings".to_owned()),
+            payload: serde_json::json!({
+                "instruction": instruction,
+                "prompt": instruction,
+                "research_run_id": "run-1",
+                "knowledge_domain": "uav_bearings"
+            }),
+            client_context: serde_json::json!({"source": "web-research"}),
+        };
+
+        let prompt = command_prompt("cmd_research_prompt_once", &command, &[], None);
+        assert_eq!(prompt.matches(instruction).count(), 1);
+        assert!(prompt.contains("\"research_run_id\": \"run-1\""));
+        assert!(!prompt.contains("\"instruction\""));
+        assert!(!prompt.contains("\"prompt\""));
     }
 
     #[test]

@@ -6208,14 +6208,17 @@ fn start_prompt_worker(
                             let evidence_contract =
                                 skill_dir.join("references/evidence_integrity.md");
                             let evidence_guard = skill_dir.join("scripts/evidence_guard.py");
+                            let dashboard_builder =
+                                skill_dir.join("scripts/dashboard_knowledge_build.py");
                             prompt.push_str(&format!(
-                                "\n\nServer-bound research attempt:\nResearch Attempt ID: {command_turn_id}\nRequested Discovery Depth: {required_depth}\nMinimum Discovery Rounds: {}\nMinimum Scholarly Rounds: {}\nTarget Verified Sources: {}\nThe complete read-only Systematic Research skill package is materialized inside this task workspace at {}.\nBefore creating or repairing validation/evidence-manifest.json, read the exact contract at {}. Run `python3 {} validation/evidence-manifest.json` yourself before completion. The manifest must use top-level `schema_version: \"ctox.research.evidence.v2\"`, `run_id`, `research_run_id`, `research_command_id`, the exact current `research_attempt_id`, `as_of`, and non-empty `sources` and `evidence` arrays plus `claims`, `data_files`, and `knowledge` exactly as that contract defines. A top-level `schema` or `manifest_version` is not a substitute for `schema_version`.\nWrite the exact attempt ID to research_attempt_id in validation/evidence-manifest.json. Discovery is agentic: interleave typed ctox_web_search, ctox_scholarly_search, ctox_deep_research, and ctox_web_read calls freely; ctox_deep_research is one optional broad discovery round, never the required first move and never the entire workflow. Before completion, this durable research run must satisfy every server-bound round, scholarly, source-count, depth, run, command, and workspace requirement recorded above. A ctox_deep_research sweep must persist its research workspace inside the task workspace. When you run a ctox_deep_research sweep, pass the requested discovery depth as its depth argument and never downgrade it because of token pressure, provider rate limits, an existing standard-depth workspace, or a retry. Reuse immutable receipts already produced by the same Research Run ID, Research Command ID, and workspace across bounded correction attempts; do not repeat discovery solely because the reviewer requested a manifest repair. Every manifest evidence item must be bound to the exact server-side Web Stack receipt generated for its canonical URL in this research attempt; changing IDs, URLs, hashes, or receipt fields by hand is invalid.\nBefore completion, create these exact native-writeback files inside the task workspace: `dashboard/knowledge/source_candidates.csv`, `dashboard/knowledge/source_catalog.csv`, `dashboard/knowledge/evidence_points.csv`, `dashboard/knowledge/evaluation_matrix.csv`, `dashboard/knowledge/semantic_graph_nodes.csv`, and `dashboard/knowledge/semantic_graph_edges.csv`. Also create `dashboard/knowledge/<table_key>.csv` for every additional table named by `writeback_contract.dashboard_tables` in the Business OS command, including `measured_load_points.csv` and `derived_bearing_loads.csv` when requested. Every required CSV must contain at least one data row and the exact `research_run_id` and `research_command_id` columns on every row. Source-catalog and measured/derived rows must carry `source_id`, `canonical_url`, and `snapshot_hash` matching admitted manifest evidence; evidence-point rows must additionally carry the exact validated `claim_id`, `evidence_id`, `snapshot_id`, and `quote`. Header-only placeholders are invalid. `source_candidates.csv` must preserve every deduplicated discovery candidate from every search round, including rejected candidates and their rejection reason; do not replace the complete discovery ledger with a short selection. `measured_load_points.csv` is exclusively for direct row-based operating measurements: it requires auditable `source_row_ref`, `measurement_kind`, `is_derived=false`, positive machine-readable `rpm`, `propeller_size`, `prop_diameter_in`, `prop_pitch_in`, an axial force channel in N, and `torque_Nm` as a consistently present column. Generic fact/value rows, test-rig metadata, motor KV, voltage, capacities, counts, and assumptions belong in `evidence_points.csv`, never in measured load points. `derived_bearing_loads.csv` is exclusively for calculated physical loads or moments in N or N m with `source_row_ref`, a non-empty `derivation_method`, explicit assumptions, and validated claim lineage; axis or direction counts are not loads. Verify that all required paths exist and audit the table semantics before reporting completion.\nDo not call the sandboxed `ctox` CLI for Knowledge writeback. After the evidence guard and independent review pass, the native research.systematic.run command imports the validated dashboard/knowledge CSV outputs into Knowledge and projects them over RxDB/WebRTC. Do not spawn or delegate to child agents. CTOX validates original-content receipts, hashes, data integrity, claim lineage, table semantics, and every required CSV before its independent service-owned completion-review gate. Completion rejects any other attempt ID, manifest path or schema, shallower depth, insufficient discovery coverage, missing evidence, missing CSV, header-only CSV, mismatched row lineage, or semantically invalid measurement/load tables.",
+                                "\n\nSystematic Research execution contract:\n- attempt_id: {command_turn_id}\n- required_depth: {required_depth}\n- minimum_discovery_rounds: {}\n- minimum_scholarly_rounds: {}\n- target_verified_sources: {}\n- skill: {}\n- evidence_contract: {}\n- evidence_guard: {}\n- deterministic_dashboard_builder: {}\n\nRun a free, iterative Web Stack investigation. Use orthogonal ctox_web_search and ctox_scholarly_search facets, follow citations, use ctox_deep_research only as one discovery surface, carry the canonical exclude list forward, and admit evidence only after a successful typed ctox_web_read of original content. Stop only after two complete rounds add no eligible source.\n\nPersist the exact Evidence v2 manifest at `validation/evidence-manifest.json`, bound to the current run, command, workspace and attempt. Run the evidence guard before completion. Use the deterministic dashboard builder for candidate, source-catalog and physical-data tables; do not hand-author builder-owned CSVs. Build claim/evaluation/semantic-graph rows only from guard-eligible evidence and retain exact Claim -> Evidence -> Snapshot -> Source lineage. The native service validates and imports the outputs after independent review. Never write Business OS databases directly and never spawn child agents.",
                                 research_coverage.minimum_discovery_rounds,
                                 research_coverage.minimum_scholarly_rounds,
                                 research_coverage.target_verified_sources,
                                 skill_dir.display(),
                                 evidence_contract.display(),
                                 evidence_guard.display(),
+                                dashboard_builder.display(),
                             ));
                             if job.prompt.contains(
                                 "evidence receipt artifacts were not emitted by typed ctox_web_read calls",
@@ -9427,11 +9430,56 @@ fn attach_typed_business_command_context(
         },
     );
     execution_prompt.push_str(
-        "\n\nCanonical Business OS command context (resolved from the durable core aggregate at lease time; this block, not mutable prompt prose, owns identity, payload, dependencies and routing):\n```json\n",
+        "\n\nCanonical Business OS command binding (resolved from the durable aggregate at lease time; the full payload remains server-side):\n```json\n",
     );
-    execution_prompt.push_str(&serde_json::to_string_pretty(&context)?);
+    execution_prompt.push_str(&serde_json::to_string_pretty(
+        &compact_business_command_context_for_prompt(&context),
+    )?);
     execution_prompt.push_str("\n```\n");
     Ok(execution_prompt)
+}
+
+fn compact_business_command_context_for_prompt(context: &Value) -> Value {
+    let command = context.get("command").unwrap_or(&Value::Null);
+    let payload = command.get("payload").unwrap_or(&Value::Null);
+    let client_context = command.get("client_context").unwrap_or(&Value::Null);
+    let first = |path: &[&str]| {
+        path.iter()
+            .fold(Some(command), |value, key| value?.get(*key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let payload_or_context = |key: &str| {
+        payload
+            .get(key)
+            .or_else(|| client_context.get(key))
+            .cloned()
+            .unwrap_or(Value::Null)
+    };
+    let dashboard_tables = payload
+        .pointer("/writeback_contract/dashboard_tables")
+        .and_then(Value::as_object)
+        .map(|tables| {
+            Value::Array(
+                tables
+                    .keys()
+                    .map(|key| Value::String(key.clone()))
+                    .collect(),
+            )
+        })
+        .unwrap_or(Value::Array(Vec::new()));
+    serde_json::json!({
+        "command_id": first(&["command_id"]),
+        "module": first(&["module"]),
+        "command_type": first(&["command_type"]),
+        "record_id": first(&["record_id"]),
+        "payload_hash": first(&["payload_hash"]),
+        "attempt": first(&["attempt"]),
+        "projection_version": first(&["projection_version"]),
+        "research_run_id": payload_or_context("research_run_id"),
+        "knowledge_domain": payload_or_context("knowledge_domain"),
+        "dashboard_tables": dashboard_tables,
+    })
 }
 
 fn persist_typed_business_command_result(
@@ -25620,6 +25668,53 @@ mod tests {
     static TICKET_SYNC_DUE_GATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static DURABLE_STATUS_SNAPSHOT_CACHE_TEST_LOCK: std::sync::Mutex<()> =
         std::sync::Mutex::new(());
+
+    #[test]
+    fn canonical_business_command_prompt_context_is_compact_and_non_redundant() {
+        let repeated_instruction = "search bearings ".repeat(20_000);
+        let context = json!({
+            "command": {
+                "command_id": "cmd-research-1",
+                "module": "research",
+                "command_type": "research.systematic.run",
+                "record_id": "dashboard-1",
+                "payload_hash": "sha256:abc",
+                "attempt": 2,
+                "projection_version": 7,
+                "payload": {
+                    "instruction": repeated_instruction,
+                    "research_run_id": "run-1",
+                    "knowledge_domain": "uav_bearings",
+                    "required_skills": ["systematic-research"],
+                    "web_stack_plan": {
+                        "required_depth": "exhaustive",
+                        "minimum_discovery_rounds": 8
+                    },
+                    "writeback_contract": {
+                        "dashboard_tables": {
+                            "source_catalog": {"columns": ["source_id"]},
+                            "measured_load_points": {"columns": ["rpm"]}
+                        }
+                    }
+                },
+                "client_context": {
+                    "prompt": repeated_instruction
+                }
+            },
+            "authorization": {
+                "capability_token": "must-not-reach-model"
+            }
+        });
+
+        let compact = compact_business_command_context_for_prompt(&context);
+        let serialized = serde_json::to_string(&compact).expect("compact context serializes");
+        assert!(serialized.len() < 2_000);
+        assert!(serialized.contains("cmd-research-1"));
+        assert!(serialized.contains("run-1"));
+        assert!(serialized.contains("source_catalog"));
+        assert!(!serialized.contains("search bearings"));
+        assert!(!serialized.contains("capability_token"));
+    }
 
     #[test]
     fn knowledge_projection_classifies_mutations_without_refreshing_reads() {

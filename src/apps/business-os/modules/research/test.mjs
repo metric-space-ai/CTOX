@@ -151,7 +151,6 @@ test('systematic research pins every write to one immutable run and command', ()
   assert.match(researchSource, /const researchRunId = `research_run_\$\{crypto\.randomUUID\(\)\}`/);
   assert.match(researchSource, /research_run_id: researchRunId/);
   assert.match(researchSource, /research_command_id: commandId/);
-  assert.match(researchSource, /jede in diesem Lauf erzeugte oder aktualisierte Knowledge-Zeile research_run_id=/);
   assert.match(researchSource, /row_lineage_required/);
 
   const targetedStart = researchSource.indexOf('async function dispatchTargetedGraphResearch');
@@ -190,10 +189,19 @@ test('systematic research command context references knowledge tables without em
 test('systematic research keeps discovery candidates out of the verified source registry', () => {
   assert.match(researchSource, /source_candidates:\s*\{\s*title: 'Discovery Candidates'/);
   assert.match(researchSource, /source_catalog:\s*\{\s*title: 'Verified Source Registry'/);
-  assert.match(researchSource, /Schreibe jede Discovery-Runde vollständig nach source_candidates/);
-  assert.match(researchSource, /Promoviere ausschließlich Quellen, die evidence_guard\.py bestanden haben, nach source_catalog/);
+  assert.match(researchSource, /Behandle Discovery nur als Kandidatenmenge/);
+  assert.match(researchSource, /vom Evidence-Gate zugelassenen Originalquellen/);
   assert.match(researchSource, /source_candidates: task\.candidate_catalog_key \|\| 'source_candidates'/);
   assert.doesNotMatch(researchSource, /Schreibe jede Discovery-Runde sofort nach source_catalog/);
+});
+
+test('systematic research app delegates workflow policy to the system skill', () => {
+  assert.match(researchSource, /mit dem System-Skill systematic-research/);
+  assert.match(researchSource, /ctox_scholarly_search/);
+  assert.match(researchSource, /ctox_web_read/);
+  assert.doesNotMatch(researchSource, /ctox web scholarly search --query/);
+  assert.doesNotMatch(researchSource, /ctox knowledge data describe --domain/);
+  assert.doesNotMatch(researchSource, /Die UI-Evidence-Gate-Felder/);
 });
 
 test('knowledge refresh contract preserves living research lineage and source provenance', () => {
