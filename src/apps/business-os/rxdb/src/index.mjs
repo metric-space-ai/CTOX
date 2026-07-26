@@ -50,6 +50,7 @@ export {
 export {
   ACTIVE_COLLECTIONS_METHOD,
   DEFAULT_QUERY_META_BUDGET_BYTES,
+  KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES,
   getConnectionHandlerSimplePeer,
   remoteSupportsQueryFetch,
   replicateWebRTC,

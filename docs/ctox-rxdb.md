@@ -176,6 +176,10 @@ through `collectionStartQueue` (500 ms spacing). Key mechanics, all in
   wedged and recycled.
 - *Suspend/resume:* `suspendCollections`/`resumeCollections` park bridges as
   `paused` without tearing the runtime down.
+- *Demand-cache budgets:* ordinary collections retain a 6 MiB LRU working
+  set. `knowledge_tables` retains 16 MiB so one complete chunked logical table
+  can be assembled without evicting chunk zero mid-read. The shared browser
+  ceiling remains 512 MiB.
 - *Checkpoint handshake evidence:* a peer only counts as protocol-ready when
   it advertises `ctox-peer-session-v1`, `ctox-checkpoint-epoch-v1`, and an
   `advertised` checkpoint with a non-empty `epoch`

@@ -760,6 +760,8 @@ test('research graph releases its WebGL context when the surface is remounted', 
   assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.forceContextLoss\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.domElement\?\.remove\?\.\(\)/);
+  assert.match(researchGraphSource, /WEBGL_lose_context/);
+  assert.match(researchGraphSource, /loseContext\?\.\(\)/);
 });
 
 test('research module catalog grants knowledge and document collections', async () => {

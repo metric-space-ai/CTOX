@@ -9,9 +9,24 @@
 //     Age-swept by time-since-progress; a transfer that keeps advancing resets.
 
 import { CtoxWebRtcNativePeer } from '../dist/ctox-rxdb-js.mjs';
+import {
+  DEFAULT_QUERY_META_BUDGET_BYTES,
+  KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES,
+  replicationWebRtcTestInternals,
+} from '../src/replication-webrtc.mjs';
 import { webrtcNativeTestInternals } from '../src/webrtc-native.mjs';
 
 const { recordReceivedFrame } = webrtcNativeTestInternals;
+const { queryMetaBudgetBytesForCollection } = replicationWebRtcTestInternals;
+
+assert(
+  queryMetaBudgetBytesForCollection('knowledge_tables') === KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES,
+  'chunked knowledge tables retain one complete logical table',
+);
+assert(
+  queryMetaBudgetBytesForCollection('research_tasks') === DEFAULT_QUERY_META_BUDGET_BYTES,
+  'ordinary collections keep the bounded default cache budget',
+);
 
 function newPeer() {
   // Constructor does NOT open a socket (connect() does), so this is inert.

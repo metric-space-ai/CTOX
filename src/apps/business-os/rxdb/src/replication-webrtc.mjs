@@ -68,6 +68,7 @@ export const ACTIVE_COLLECTIONS_METHOD = 'rxdb.activeCollections';
 // replication. 128 MiB is a sane ceiling for a peer-driven cache.
 export const GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 export const DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
+export const KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 
 const BROWSER_CAPABILITIES = [
@@ -170,6 +171,7 @@ export const replicationWebRtcTestInternals = Object.freeze({
   shouldAttachQueryDemandLoader,
   shouldAttachFileDemandLoader,
   shouldPersistFetchedFileChunks,
+  queryMetaBudgetBytesForCollection,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -1734,20 +1736,17 @@ class CtoxWebRtcReplicationState {
       schedulerKey: this.collection.storageCollection?.databaseName || this.topic,
       primaryDelete,
     });
-    // Phase 4: set a memory budget so eviction ACTUALLY RUNS. Without this the
-    // budget defaults to 0 and `evictDocuments` short-circuits (the cache grows
-    // unbounded from real-time replication). 128 MiB is a sane per-collection
-    // ceiling for a peer-driven cache; LRU document-access entries are evicted
-    // (and removed from the primary store via `primaryDelete`) once the working
-    // set exceeds it.
-    try { await this.demandSidecar.setBudgetBytes(DEFAULT_QUERY_META_BUDGET_BYTES); } catch {}
+    // The budget must hold one complete logical table. Otherwise LRU eviction
+    // can remove chunk zero while the remaining chunks are still being read.
+    const queryMetaBudgetBytes = queryMetaBudgetBytesForCollection(this.collection.name);
+    try { await this.demandSidecar.setBudgetBytes(queryMetaBudgetBytes); } catch {}
     // Run cache eviction periodically in production. 30 s is conservative
     // for a peer-driven cache that grows from real-time replication.
     try {
       this.demandSidecar.startEvictionScheduler({
         intervalMs: 30_000,
         globalBudgetBytes: GLOBAL_QUERY_META_BUDGET_BYTES,
-        shareBudgetBytes: DEFAULT_QUERY_META_BUDGET_BYTES,
+        shareBudgetBytes: queryMetaBudgetBytes,
       });
     } catch {}
 
@@ -2362,6 +2361,12 @@ function shouldAttachQueryDemandLoader(collectionName = '') {
 
 function shouldAttachFileDemandLoader(collectionName = '') {
   return String(collectionName || '') !== 'desktop_file_chunks';
+}
+
+function queryMetaBudgetBytesForCollection(collectionName = '') {
+  return String(collectionName || '') === 'knowledge_tables'
+    ? KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES
+    : DEFAULT_QUERY_META_BUDGET_BYTES;
 }
 
 function replicationValueAtPath(obj, path) {

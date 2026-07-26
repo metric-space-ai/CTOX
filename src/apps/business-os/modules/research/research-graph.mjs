@@ -504,6 +504,9 @@ function assertWebGlSupport() {
     || canvas.getContext('webgl', { failIfMajorPerformanceCaveat: true })
     || canvas.getContext('webgl');
   if (!context) throw new Error('WebGL ist auf diesem Gerät nicht verfügbar.');
+  context.getExtension?.('WEBGL_lose_context')?.loseContext?.();
+  canvas.width = 0;
+  canvas.height = 0;
 }
 
 function normalizeProjection(value) {

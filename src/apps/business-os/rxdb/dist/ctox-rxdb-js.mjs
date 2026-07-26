@@ -8602,6 +8602,7 @@ function randomTabId() {
 var ACTIVE_COLLECTIONS_METHOD = "rxdb.activeCollections";
 var GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 var DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
+var KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 var LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 var BROWSER_CAPABILITIES = [
   "ctox-rxdb-browser-v1",
@@ -8679,6 +8680,7 @@ var replicationWebRtcTestInternals = Object.freeze({
   shouldAttachQueryDemandLoader,
   shouldAttachFileDemandLoader,
   shouldPersistFetchedFileChunks,
+  queryMetaBudgetBytesForCollection,
   // SYNC-12: read-permission digest change-detector for checkpoint reuse.
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
@@ -10015,15 +10017,16 @@ var CtoxWebRtcReplicationState = class {
       schedulerKey: this.collection.storageCollection?.databaseName || this.topic,
       primaryDelete
     });
+    const queryMetaBudgetBytes = queryMetaBudgetBytesForCollection(this.collection.name);
     try {
-      await this.demandSidecar.setBudgetBytes(DEFAULT_QUERY_META_BUDGET_BYTES);
+      await this.demandSidecar.setBudgetBytes(queryMetaBudgetBytes);
     } catch {
     }
     try {
       this.demandSidecar.startEvictionScheduler({
         intervalMs: 3e4,
         globalBudgetBytes: GLOBAL_QUERY_META_BUDGET_BYTES,
-        shareBudgetBytes: DEFAULT_QUERY_META_BUDGET_BYTES
+        shareBudgetBytes: queryMetaBudgetBytes
       });
     } catch {
     }
@@ -10527,6 +10530,9 @@ function shouldAttachQueryDemandLoader(collectionName = "") {
 }
 function shouldAttachFileDemandLoader(collectionName = "") {
   return String(collectionName || "") !== "desktop_file_chunks";
+}
+function queryMetaBudgetBytesForCollection(collectionName = "") {
+  return String(collectionName || "") === "knowledge_tables" ? KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES : DEFAULT_QUERY_META_BUDGET_BYTES;
 }
 function replicationValueAtPath(obj, path) {
   if (!path || path === "id") return obj?.id;
@@ -11944,6 +11950,7 @@ export {
   DEFAULT_QUERY_META_BUDGET_BYTES,
   DEFAULT_WINDOW_LIMIT,
   FILE_CHUNK_PRESENCE_KEY,
+  KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES,
   OBSERVABLE_DEBOUNCE_MS,
   PRESENCE_NOTIFY_DEBOUNCE_MS,
   QueryMetaStorage,
