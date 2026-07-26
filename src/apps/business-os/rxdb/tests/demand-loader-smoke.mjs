@@ -24,6 +24,12 @@ function makeFakeStorageCollection() {
       if (Number.isFinite(query.limit)) all = all.slice(0, query.limit);
       return all;
     },
+    async findDocumentsById(ids) {
+      return Object.fromEntries(ids.filter((id) => docs.has(id)).map((id) => [id, docs.get(id)]));
+    },
+    evict(id) {
+      docs.delete(id);
+    },
   };
 }
 
@@ -67,6 +73,15 @@ assert(status.queryFetchInFlight === 0, 'in-flight back to zero');
 const r2 = await loader.resolveQuery({ selector: { status: 'open' } });
 assert(r2.length === 5, 'second resolve same length');
 assert(fetchCount === 1, 'second resolve must hit cache');
+
+// A completed query-window is only a cache hit while all referenced primary
+// documents still exist. LRU eviction may remove individual documents while
+// leaving the sidecar window metadata behind; the next read must re-fetch.
+storageCollection.evict('doc-0');
+const r3 = await loader.resolveQuery({ selector: { status: 'open' } });
+assert(r3.length === 5, 'evicted query-window member is re-materialized');
+assert(fetchCount === 2, `evicted member triggers one new fetch (got ${fetchCount})`);
+assert(status.queryFetchEvictedWindowMissCount === 1, 'evicted window miss is diagnosed');
 
 // Demand-only command history stays bounded, but lifecycle projections must
 // not become permanent cache hits after the first pending result.

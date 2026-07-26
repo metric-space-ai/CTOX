@@ -7096,8 +7096,17 @@ function createQueryDemandLoader({
         const fingerprint = await queryFingerprint(fingerprintInput);
         const sidecarKey = [collectionName, fingerprint, normalizedWindow.offset, normalizedWindow.limit];
         const cached = await sidecar.getQueryWindow(sidecarKey);
+        const cachedDocumentsAvailable = await queryWindowDocumentsAvailable(
+          storageCollection,
+          cached?.documentIds
+        );
+        if (cached && (cached.complete || cached.everCompleted) && !cachedDocumentsAvailable) {
+          await sidecar.invalidateQueryWindow(sidecarKey);
+          cached.complete = false;
+          bumpStatus(status, "queryFetchEvictedWindowMissCount");
+        }
         const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
-        if (cached && cached.complete) {
+        if (cached && cached.complete && cachedDocumentsAvailable) {
           if (query?.requireRevision && cached.authoritativeRevision !== query.requireRevision) {
           } else if (!controlPlaneWindowStale) {
             await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
@@ -7183,7 +7192,7 @@ function createQueryDemandLoader({
           await multiTabBroker.waitForRemote?.(dedupKey, 5e3);
           if (multiTabBroker.closed) return readLocalDocuments(storageCollection, query, normalizedWindow);
           const materialized = await sidecar.getQueryWindow(sidecarKey);
-          if (materialized?.complete) {
+          if (materialized?.complete && await queryWindowDocumentsAvailable(storageCollection, materialized.documentIds)) {
             bumpStatus(status, "queryFetchDedupHitCount");
             return readLocalDocuments(storageCollection, query, normalizedWindow);
           }
@@ -7212,7 +7221,7 @@ function createQueryDemandLoader({
           coordinatedByFingerprint.set(dedupKey, job);
           return job;
         };
-        if (cached?.everCompleted && !query?.requireRevision) {
+        if (cached?.everCompleted && cachedDocumentsAvailable && !query?.requireRevision) {
           if (controlPlaneWindowStale) {
             return coordinatedFetchJob();
           }
@@ -7380,6 +7389,12 @@ async function readLocalDocuments(storageCollection, query, window2) {
   }
   const docs = await storageCollection.allDocuments();
   return applyQueryToDocs(docs, query, window2);
+}
+async function queryWindowDocumentsAvailable(storageCollection, documentIds) {
+  if (!Array.isArray(documentIds) || documentIds.length === 0) return true;
+  if (typeof storageCollection.findDocumentsById !== "function") return true;
+  const documents = await storageCollection.findDocumentsById(documentIds);
+  return documentIds.every((id) => Boolean(documents?.[String(id)]));
 }
 async function materializeChunks(storageCollection, documents, replicationOrigin = null) {
   if (!documents.length) return;
