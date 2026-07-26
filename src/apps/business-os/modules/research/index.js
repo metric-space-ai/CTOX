@@ -5081,7 +5081,10 @@ function sleep(ms) {
 }
 
 function toJson(doc) {
-  return typeof doc?.toJSON === 'function' ? doc.toJSON() : { ...(doc || {}) };
+  const value = typeof doc?.toJSON === 'function' ? doc.toJSON() : doc;
+  if (!value || typeof value !== 'object') return value;
+  if (typeof structuredClone === 'function') return structuredClone(value);
+  return JSON.parse(JSON.stringify(value));
 }
 
 function firstArray(...values) {
@@ -5733,6 +5736,7 @@ export const __researchTestHooks = {
   metricPropellerLength,
   shouldRetryEmptyKnowledgeTables,
   tangentialEquivalentForce,
+  toJson,
   validateChunkSequence,
   validateResearchTaskInput,
   validateSelectedResearchTask,

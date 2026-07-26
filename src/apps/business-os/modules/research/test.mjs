@@ -672,6 +672,25 @@ test('knowledge table loader derives bounded follow-up reads from base chunks', 
   ]);
 });
 
+test('RxDB documents are detached before chunk cache eviction mutates live values', () => {
+  const liveValue = {
+    id: 'table:candidates',
+    payload: {
+      logical_table_id: 'table:candidates',
+      chunk_index: 0,
+      chunk_count: 2,
+      rows: [{ candidate_id: 'candidate-1' }],
+    },
+  };
+  const snapshot = hooks.toJson({ toJSON: () => liveValue });
+
+  liveValue.payload.rows.length = 0;
+  liveValue.payload.chunk_count = 0;
+
+  assert.equal(snapshot.payload.chunk_count, 2);
+  assert.deepEqual(snapshot.payload.rows, [{ candidate_id: 'candidate-1' }]);
+});
+
 test('empty knowledge read retries only when knowledge_tables sync is live', () => {
   const previousWindow = globalThis.window;
   try {
