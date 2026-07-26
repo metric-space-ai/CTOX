@@ -92,6 +92,14 @@ const RESEARCH_TABLE_CONTRACT = Object.freeze({
       'evidence_eligible',
       'evidence_rejection_reason',
       'review_status',
+      'discovery_round',
+      'discovery_method',
+      'seed_source_id',
+      'seed_identifier',
+      'citation_hop',
+      'citation_direction',
+      'relation_type',
+      'discovery_paths_json',
     ],
   },
   source_catalog: {
@@ -2770,6 +2778,9 @@ function getSearchCluster(source) {
 }
 
 function discoveryGraph(task) {
+  const persisted = persistedCitationDiscoveryGraph(task);
+  if (persisted) return persisted;
+
   const base = knowledgeBaseForTask(task);
   const nodes = [];
   const edges = [];
@@ -2893,6 +2904,117 @@ function discoveryGraph(task) {
       edges.push({ from: id, to: measureId, kind: 'measurement' });
     }
   });
+  return { nodes, edges, nodeById: new Map(nodes.map((node) => [node.id, node])) };
+}
+
+function persistedCitationDiscoveryGraph(task) {
+  const rows = Array.isArray(state.candidateRows) ? state.candidateRows : [];
+  const candidates = rows.map((row, index) => {
+    const rawPaths = firstString(row, ['discovery_paths_json']);
+    let paths = [];
+    if (rawPaths) {
+      try {
+        const parsed = JSON.parse(rawPaths);
+        if (Array.isArray(parsed)) paths = parsed.filter((item) => item && typeof item === 'object');
+      } catch {
+        paths = [];
+      }
+    }
+    if (!paths.length && firstString(row, ['discovery_round', 'seed_source_id', 'citation_hop', 'citation_direction', 'relation_type'])) {
+      paths = [{
+        round: firstString(row, ['discovery_round']),
+        method: firstString(row, ['discovery_method']),
+        seed_source_id: firstString(row, ['seed_source_id']),
+        seed_identifier: firstString(row, ['seed_identifier']),
+        hop: firstString(row, ['citation_hop']) || '0',
+        direction: firstString(row, ['citation_direction']) || 'seed',
+        relation_type: firstString(row, ['relation_type']) || 'search_seed',
+      }];
+    }
+    if (!paths.length) return null;
+    const key = firstString(row, ['candidate_key', 'source_id', 'doi', 'canonical_url', 'url']) || `candidate-${index}`;
+    const canonicalUrl = firstString(row, ['canonical_url', 'url', 'source_url']);
+    const source = state.sourceModels.find((item) => (
+      item.id === firstString(row, ['source_id'])
+      || (canonicalUrl && [item.canonicalUrl, item.url].includes(canonicalUrl))
+    ));
+    return {
+      row,
+      key,
+      title: firstString(row, ['title', 'source_title', 'name']) || key,
+      source,
+      paths,
+      hop: Math.max(0, ...paths.map((path) => Number(path.hop) || 0)),
+      admitted: /admitted|eligible|verified/.test(firstString(row, ['verification_state', 'verification_status']).toLowerCase()),
+    };
+  }).filter(Boolean);
+  if (!candidates.length) return null;
+
+  const visibleLimit = clampNumber(state.graph.visibleLimit || 60, 20, 100);
+  const visible = candidates
+    .sort((a, b) => Number(b.admitted) - Number(a.admitted) || a.hop - b.hop || a.title.localeCompare(b.title))
+    .slice(0, visibleLimit);
+  const visibleKeys = new Set(visible.map((candidate) => candidate.key));
+  const sourceKeyToCandidate = new Map();
+  for (const candidate of visible) {
+    for (const value of [
+      candidate.key,
+      firstString(candidate.row, ['source_id']),
+      firstString(candidate.row, ['doi', 'doi_or_stable_id']),
+    ]) {
+      if (value) sourceKeyToCandidate.set(value, candidate);
+    }
+  }
+
+  const nodes = [{
+    id: 'knowledge',
+    kind: 'knowledge',
+    label: task.title,
+    title: task.knowledge_domain || task.title,
+    meta: `${candidates.length} Kandidaten · ${visible.length} sichtbar`,
+    x: 8,
+    y: 50,
+  }];
+  const edges = [];
+  const byHop = new Map();
+  for (const candidate of visible) {
+    const hop = Math.min(4, candidate.hop);
+    const bucket = byHop.get(hop) || [];
+    bucket.push(candidate);
+    byHop.set(hop, bucket);
+  }
+  const nodeIdByKey = new Map();
+  for (const [hop, bucket] of [...byHop.entries()].sort(([a], [b]) => a - b)) {
+    bucket.forEach((candidate, index) => {
+      const nodeId = `candidate_${nodes.length}`;
+      nodeIdByKey.set(candidate.key, nodeId);
+      nodes.push({
+        id: nodeId,
+        kind: candidate.admitted ? 'source-strong' : 'source',
+        label: shortLabel(candidate.title),
+        title: candidate.title,
+        meta: `Hop ${candidate.hop} · ${candidate.paths.length} Pfad${candidate.paths.length === 1 ? '' : 'e'}`,
+        sourceId: candidate.source?.id || '',
+        x: 24 + hop * 17,
+        y: 8 + ((index + 1) * 84) / (bucket.length + 1),
+      });
+    });
+  }
+  for (const candidate of visible) {
+    const to = nodeIdByKey.get(candidate.key);
+    for (const path of candidate.paths) {
+      const seedKey = String(path.seed_source_id || path.seed_identifier || '').trim();
+      const seedCandidate = sourceKeyToCandidate.get(seedKey);
+      const from = seedCandidate && visibleKeys.has(seedCandidate.key)
+        ? nodeIdByKey.get(seedCandidate.key)
+        : 'knowledge';
+      if (!from || !to || from === to) continue;
+      const kind = String(path.direction || path.relation_type || 'seed').toLowerCase();
+      if (!edges.some((edge) => edge.from === from && edge.to === to && edge.kind === kind)) {
+        edges.push({ from, to, kind });
+      }
+    }
+  }
   return { nodes, edges, nodeById: new Map(nodes.map((node) => [node.id, node])) };
 }
 

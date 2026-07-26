@@ -388,6 +388,58 @@ class CandidateInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "candidate_jsonl_invalid"):
                 builder.iter_discovery_rows([directory])
 
+    def test_canonical_candidate_preserves_every_citation_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            (directory / "candidate_sources.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "title": "Shared paper",
+                                "url": "https://example.edu/paper",
+                                "doi": "10.1234/shared",
+                                "round_id": "R2",
+                                "method": "reference_list",
+                                "seed_source_id": "SRC-A",
+                                "seed_identifier": "10.1234/a",
+                                "hop": 1,
+                                "direction": "backward",
+                                "relation": "cites",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "title": "Shared paper",
+                                "url": "https://example.edu/paper",
+                                "doi": "10.1234/shared",
+                                "round_id": "R3",
+                                "method": "cited_by",
+                                "seed_source_id": "SRC-B",
+                                "seed_identifier": "10.1234/b",
+                                "hop": 2,
+                                "direction": "forward",
+                                "relation": "cited_by",
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            rows = builder.build_source_candidates(
+                research_run_id="run-1",
+                research_command_id="cmd-1",
+                discovery_dirs=[directory],
+                admitted_urls=set(),
+            )
+            self.assertEqual(len(rows), 1)
+            paths = json.loads(rows[0]["discovery_paths_json"])
+            self.assertEqual(len(paths), 2)
+            self.assertEqual({path["seed_source_id"] for path in paths}, {"SRC-A", "SRC-B"})
+            self.assertEqual({path["direction"] for path in paths}, {"backward", "forward"})
+            self.assertEqual(rows[0]["discovery_rounds"], "R2|R3")
+
 
 class BuilderCliTests(unittest.TestCase):
     def _binding(self, root: Path, member: Path) -> Path:

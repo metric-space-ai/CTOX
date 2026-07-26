@@ -691,6 +691,16 @@ test('research and knowledge events use independent refresh timers', () => {
   assert.match(researchSource, /Anzeige auf \$\{ROW_LIMIT/);
 });
 
+test('discovery graph prefers persisted citation paths over inferred tag clusters', () => {
+  assert.match(researchSource, /function persistedCitationDiscoveryGraph/);
+  assert.match(researchSource, /discovery_paths_json/);
+  assert.match(researchSource, /seed_source_id/);
+  assert.match(researchSource, /citation_hop/);
+  assert.match(researchSource, /citation_direction/);
+  assert.match(researchSource, /const persisted = persistedCitationDiscoveryGraph\(task\);[\s\S]*?if \(persisted\) return persisted/);
+  assert.match(researchSource, /state\.graph\.visibleLimit \|\| 60/);
+});
+
 test('research module catalog grants knowledge and document collections', async () => {
   const moduleJson = JSON.parse(await readFile(new URL('./module.json', import.meta.url), 'utf8'));
   const registryJson = JSON.parse(await readFile(new URL('../registry.json', import.meta.url), 'utf8'));

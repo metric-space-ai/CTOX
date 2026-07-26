@@ -114,7 +114,15 @@ SOURCE_CANDIDATES_HEADERS = [
     "source_class",
     "verification_state",
     "rejection_reason",
+    "discovery_round",
     "discovery_rounds",
+    "discovery_method",
+    "seed_source_id",
+    "seed_identifier",
+    "citation_hop",
+    "citation_direction",
+    "relation_type",
+    "discovery_paths_json",
     "content_hash",
 ]
 
@@ -712,16 +720,46 @@ def build_source_candidates(
 
     merged: dict[str, dict[str, str]] = {}
     for row in iter_discovery_rows(discovery_dirs):
+        path = {
+            "round": str(
+                row.get("discovery_round")
+                or row.get("round_id")
+                or row.get("_discovery_round")
+                or ""
+            ).strip(),
+            "method": str(row.get("discovery_method") or row.get("method") or "").strip(),
+            "seed_source_id": str(row.get("seed_source_id") or "").strip(),
+            "seed_identifier": str(
+                row.get("seed_identifier")
+                or row.get("discovery_seed_identifier")
+                or ""
+            ).strip(),
+            "hop": str(row.get("citation_hop") or row.get("hop") or "0").strip(),
+            "direction": str(
+                row.get("citation_direction")
+                or row.get("direction")
+                or ("seed" if not row.get("seed_source_id") else "backward")
+            ).strip(),
+            "relation_type": str(
+                row.get("relation_type")
+                or row.get("relation")
+                or ("search_seed" if not row.get("seed_source_id") else "cites")
+            ).strip(),
+        }
         key = candidate_key(row)
         if not key:
             key = f"content:{candidate_content_hash(row)}"
         existing = merged.get(key)
         if existing is None:
             row["candidate_key"] = key
-            row["_rounds"] = {row.get("_discovery_round", "")}
+            row["_rounds"] = {path["round"]}
+            row["_discovery_paths"] = {json.dumps(path, sort_keys=True, separators=(",", ":"))}
             merged[key] = row
         else:
-            existing["_rounds"].add(row.get("_discovery_round", ""))
+            existing["_rounds"].add(path["round"])
+            existing["_discovery_paths"].add(
+                json.dumps(path, sort_keys=True, separators=(",", ":"))
+            )
             # Prefer the most informative state: rejected > candidate > screened.
             rank = {"rejected": 2, "candidate": 1, "screened": 0}
             if rank.get(row.get("verification_state", ""), 0) > rank.get(
@@ -729,10 +767,16 @@ def build_source_candidates(
             ):
                 row["candidate_key"] = key
                 row["_rounds"] = existing["_rounds"]
+                row["_discovery_paths"] = existing["_discovery_paths"]
                 merged[key] = row
 
     out: list[dict[str, str]] = []
     for row in merged.values():
+        paths = [
+            json.loads(value)
+            for value in sorted(row["_discovery_paths"])
+        ]
+        primary_path = paths[0] if paths else {}
         url_key = canonical_url_key(row.get("url") or "")
         state = row.get("verification_state") or "candidate"
         rejection_reason = (
@@ -764,7 +808,17 @@ def build_source_candidates(
                 "source_class": str(row.get("source_class") or row.get("focus") or "").strip(),
                 "verification_state": state,
                 "rejection_reason": rejection_reason,
+                "discovery_round": str(primary_path.get("round") or ""),
                 "discovery_rounds": "|".join(sorted(r for r in row["_rounds"] if r)),
+                "discovery_method": str(primary_path.get("method") or ""),
+                "seed_source_id": str(primary_path.get("seed_source_id") or ""),
+                "seed_identifier": str(primary_path.get("seed_identifier") or ""),
+                "citation_hop": str(primary_path.get("hop") or "0"),
+                "citation_direction": str(primary_path.get("direction") or "seed"),
+                "relation_type": str(primary_path.get("relation_type") or "search_seed"),
+                "discovery_paths_json": json.dumps(
+                    paths, sort_keys=True, separators=(",", ":")
+                ),
                 "content_hash": candidate_content_hash(row),
             }
         )
