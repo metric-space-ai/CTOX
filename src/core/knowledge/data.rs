@@ -179,10 +179,18 @@ fn has_matching_managed_snapshot(root: &Path, row: &Map<String, Value>) -> bool 
     let Ok(path) = Path::new(raw_path).canonicalize() else {
         return false;
     };
-    let managed_roots = ["research", "imports"]
+    let mut managed_roots = ["research", "imports"]
         .into_iter()
         .filter_map(|directory| root.join(directory).canonicalize().ok())
         .collect::<Vec<_>>();
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        managed_roots.extend(["research", "imports"].into_iter().filter_map(|directory| {
+            home.join(".local/share/ctox")
+                .join(directory)
+                .canonicalize()
+                .ok()
+        }));
+    }
     if managed_roots.is_empty()
         || !managed_roots
             .iter()
