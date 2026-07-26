@@ -15,6 +15,7 @@ import { queryFingerprint } from './query-fingerprint.mjs';
 
 export const DEFAULT_WINDOW_LIMIT = 200;
 const CONTROL_PLANE_QUERY_REVALIDATE_MS = 1000;
+const EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5000;
 
 export function createQueryDemandLoader({
   storageCollection,
@@ -86,7 +87,14 @@ export function createQueryDemandLoader({
       const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName)
         && cached
         && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
-      if (cached && cached.complete && cachedDocumentsAvailable) {
+      // An empty response can be authoritative at fetch time and still become
+      // stale without a local document change to invalidate it. This happens
+      // during projection/startup races: the browser queries before the native
+      // peer has materialized a table, then otherwise caches "empty" forever.
+      const emptyWindowStale = cached
+        && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0)
+        && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
+      if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale) {
         // V1.5 production hardening: authoritative-revision check. If the
         // caller supplies `requireRevision` (e.g. from a change-bulk that
         // touched a doc in the window), we re-verify with the server when
@@ -232,7 +240,12 @@ export function createQueryDemandLoader({
       // event, so reactive queries re-render on arrival. This turns repeat
       // module loads from a WebRTC round-trip into an IndexedDB read.
       // An explicit requireRevision keeps strict await semantics.
-      if (cached?.everCompleted && cachedDocumentsAvailable && !query?.requireRevision) {
+      if (
+        cached?.everCompleted
+        && cachedDocumentsAvailable
+        && !emptyWindowStale
+        && !query?.requireRevision
+      ) {
         if (controlPlaneWindowStale) {
           // Commands and queue tasks are demand-only to avoid replaying the
           // complete historical ledger. Their records are mutable lifecycle

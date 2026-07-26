@@ -13,6 +13,7 @@ import csv
 import hashlib
 import json
 import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any
 
@@ -61,8 +62,11 @@ def normalize_row(
         raise NormalizeError(f"{source_id}:not_evidence_eligible")
     try:
         http_status = int(row.get("http_status") or "")
-        relevance = int(float(row.get("evidence_relevance_score") or ""))
-    except ValueError as exc:
+        relevance_original = Decimal(str(row.get("evidence_relevance_score") or ""))
+        relevance = int(
+            relevance_original.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+    except (InvalidOperation, ValueError) as exc:
         raise NormalizeError(f"{source_id}:invalid_numeric_audit_field") from exc
     if http_status < 200 or http_status >= 300 or http_status == 204:
         raise NormalizeError(f"{source_id}:http_status_not_usable")
@@ -99,6 +103,8 @@ def normalize_row(
             "content_extracted": True,
             "actual_full_text_or_data": True,
             "evidence_relevance_score": relevance,
+            "evidence_relevance_score_original": str(relevance_original),
+            "evidence_relevance_scale_original": "external_audit_0_100",
             "http_status": http_status,
             "evidence_eligible": True,
             "evidence_rejection_reason": "",

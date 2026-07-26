@@ -83,6 +83,41 @@ assert(r3.length === 5, 'evicted query-window member is re-materialized');
 assert(fetchCount === 2, `evicted member triggers one new fetch (got ${fetchCount})`);
 assert(status.queryFetchEvictedWindowMissCount === 1, 'evicted window miss is diagnosed');
 
+// Empty windows are not permanent. A native projection can appear after an
+// initially authoritative empty response without producing a local document
+// event that could invalidate the sidecar entry.
+{
+  let emptyNow = 2_000;
+  let emptyFetches = 0;
+  const emptyStorage = makeFakeStorageCollection();
+  const emptySidecar = createSidecarWithMemoryBackend({
+    databaseName: 'empty-window-sidecar',
+    clock: () => emptyNow,
+  });
+  const emptyLoader = createQueryDemandLoader({
+    storageCollection: emptyStorage,
+    sidecar: emptySidecar,
+    collectionName: 'knowledge_tables',
+    schemaVersion: 1,
+    clock: () => emptyNow,
+    requestQueryFetch: async () => {
+      emptyFetches += 1;
+      return {
+        documents: emptyFetches === 1 ? [] : [{ id: 'projected-table-1', domain: 'research' }],
+        authoritativeRevision: `empty-rev-${emptyFetches}`,
+      };
+    },
+  });
+  const initiallyEmpty = await emptyLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(initiallyEmpty.length === 0, 'first empty projection query remains empty');
+  await emptyLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(emptyFetches === 1, 'fresh empty window avoids a hot refetch loop');
+  emptyNow += 5_001;
+  const projected = await emptyLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(emptyFetches === 2, 'stale empty window is revalidated over WebRTC');
+  assert(projected[0]?.id === 'projected-table-1', 'revalidation materializes the later projection');
+}
+
 // Demand-only command history stays bounded, but lifecycle projections must
 // not become permanent cache hits after the first pending result.
 {

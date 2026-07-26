@@ -888,7 +888,7 @@ async function ensureTasksFromKnowledgeBases() {
       candidate_catalog_key: tableKey(base, ['source_candidates']) || 'source_candidates',
       source_catalog_key: tableKey(base, ['source_catalog', 'sources', 'curated_sources']) || 'source_catalog',
       curated_table_key: tableKey(base, ['evaluation_matrix', 'load_data_library', 'curated_sources', 'source_library']) || 'evaluation_matrix',
-      measurements_table_key: tableKey(base, ['evidence_points', 'measured_load_points', 'measurements']) || 'evidence_points',
+      measurements_table_key: defaultMeasurementsTableKey(base),
       x_axis: defaultAxisPairForTask(base).x,
       y_axis: defaultAxisPairForTask(base).y,
       payload: {
@@ -3843,7 +3843,7 @@ async function createTaskFromForm(form) {
     candidate_catalog_key: current?.candidate_catalog_key || tableKey(base, ['source_candidates']) || 'source_candidates',
     source_catalog_key: current?.source_catalog_key || tableKey(base, ['source_catalog', 'sources', 'curated_sources']) || 'source_catalog',
     curated_table_key: current?.curated_table_key || tableKey(base, ['evaluation_matrix', 'load_data_library', 'curated_sources', 'source_library']) || 'evaluation_matrix',
-    measurements_table_key: current?.measurements_table_key || tableKey(base, ['evidence_points', 'measured_load_points', 'measurements']) || 'evidence_points',
+    measurements_table_key: current?.measurements_table_key || defaultMeasurementsTableKey(base),
     x_axis: safeAxis(current?.x_axis || axisPair.x, { payload: { scoring_dimensions: scoringDimensions } }, axisPair.x),
     y_axis: safeAxis(current?.y_axis || axisPair.y, { payload: { scoring_dimensions: scoringDimensions } }, axisPair.y),
     payload: {
@@ -4680,6 +4680,10 @@ function firstTableMatching(base, pattern) {
 
 function tableKey(base, keys) {
   return keys.map((key) => tableForKey(base, key)?.table_key).find(Boolean) || '';
+}
+
+function defaultMeasurementsTableKey(base) {
+  return tableKey(base, ['measured_load_points', 'measurements']) || 'measured_load_points';
 }
 
 function scoringDimensionsForTask(task) {
@@ -5667,6 +5671,7 @@ export const __researchTestHooks = {
   diagnosticRows,
   disabledTabButton,
   evidenceGate,
+  defaultMeasurementsTableKey,
   eligibleGraphFocusSourceIds,
   filterGraphRowsForEvidence,
   filterMeasurementRowsForEvidence,

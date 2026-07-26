@@ -60,10 +60,6 @@ function reporterCopy() {
     };
 }
 
-function shouldEnableIdleAnimation() {
-  return !globalThis.ctoxBusinessOsDesktop;
-}
-
 function interpolateAngle(current, target, step) {
   let diff = (target - current) % 360;
   if (diff < -180) diff += 360;
@@ -386,8 +382,6 @@ export function initBusinessReporter({
   document.body.append(button);
 
   fabButton = button;
-  if (!shouldEnableIdleAnimation()) return;
-
   if (!shouldEnableIdleAnimation()) return;
 
   const handleActivity = (event) => {

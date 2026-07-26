@@ -7047,6 +7047,7 @@ function canonicalizeWindow(window2) {
 // src/apps/business-os/rxdb/src/query-demand-loader.mjs
 var DEFAULT_WINDOW_LIMIT = 200;
 var CONTROL_PLANE_QUERY_REVALIDATE_MS = 1e3;
+var EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5e3;
 function createQueryDemandLoader({
   storageCollection,
   sidecar,
@@ -7106,7 +7107,8 @@ function createQueryDemandLoader({
           bumpStatus(status, "queryFetchEvictedWindowMissCount");
         }
         const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
-        if (cached && cached.complete && cachedDocumentsAvailable) {
+        const emptyWindowStale = cached && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0) && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
+        if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale) {
           if (query?.requireRevision && cached.authoritativeRevision !== query.requireRevision) {
           } else if (!controlPlaneWindowStale) {
             await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
@@ -7221,7 +7223,7 @@ function createQueryDemandLoader({
           coordinatedByFingerprint.set(dedupKey, job);
           return job;
         };
-        if (cached?.everCompleted && cachedDocumentsAvailable && !query?.requireRevision) {
+        if (cached?.everCompleted && cachedDocumentsAvailable && !emptyWindowStale && !query?.requireRevision) {
           if (controlPlaneWindowStale) {
             return coordinatedFetchJob();
           }

@@ -24,7 +24,7 @@ class NormalizeVerifiedSourceCatalogTests(unittest.TestCase):
                     "canonical_url": "https://example.test/source.pdf",
                     "requested_url": "https://example.test/source",
                     "http_status": "200",
-                    "evidence_relevance_score": "9",
+                    "evidence_relevance_score": "81.8",
                     "verification_status": "verified_original_read",
                     "evidence_eligible": "true",
                     "rejection_reason": "",
@@ -38,6 +38,8 @@ class NormalizeVerifiedSourceCatalogTests(unittest.TestCase):
             )
             self.assertEqual(row["verification_status"], "verified")
             self.assertEqual(row["verification_status_original"], "verified_original_read")
+            self.assertEqual(row["evidence_relevance_score"], 82)
+            self.assertEqual(row["evidence_relevance_score_original"], "81.8")
             self.assertEqual(row["snapshot_hash"], f"sha256:{digest}")
             self.assertTrue(row["evidence_eligible"])
             self.assertEqual(row["content_scope"], "full_text")

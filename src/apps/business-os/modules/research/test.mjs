@@ -46,6 +46,18 @@ test('measurement semantics never fall back to legacy radial load and retain zer
   assert.equal(measurements.get('source-1').maxRpm, 0);
 });
 
+test('research tasks keep evidence and direct measurements in separate tables', () => {
+  const base = {
+    tables: [
+      { table_key: 'evidence_points' },
+      { table_key: 'measured_load_points' },
+    ],
+  };
+
+  assert.equal(hooks.defaultMeasurementsTableKey(base), 'measured_load_points');
+  assert.equal(hooks.defaultMeasurementsTableKey({ tables: [{ table_key: 'evidence_points' }] }), 'measured_load_points');
+});
+
 test('measurement rows require individually matching source snapshot lineage', () => {
   const source = {
     id: 'source-1',
