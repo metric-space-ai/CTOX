@@ -220,6 +220,7 @@ export function createResearchGraph(host, options = {}) {
       disposed = true;
       resizeObserver.disconnect();
       document.removeEventListener('visibilitychange', visibilityHandler);
+      graph.pauseAnimation?.();
       if (focusFrame) window.cancelAnimationFrame(focusFrame);
       for (const timer of cameraFitTimers) window.clearTimeout(timer);
       cameraFitTimers.clear();
@@ -229,7 +230,16 @@ export function createResearchGraph(host, options = {}) {
         material.dispose?.();
       }
       haloMaterials.clear();
+      const renderer = graph.renderer?.();
+      graph.controls?.()?.dispose?.();
       graph._destructor?.();
+      renderer?.renderLists?.dispose?.();
+      renderer?.dispose?.();
+      // Three.js keeps the underlying browser context alive after dispose().
+      // Explicitly release it because Business OS remounts this surface when
+      // authoritative research projections change.
+      renderer?.forceContextLoss?.();
+      renderer?.domElement?.remove?.();
       host.replaceChildren();
     },
     graph,

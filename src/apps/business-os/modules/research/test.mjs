@@ -21,6 +21,7 @@ async function importBrowserBundle(relativePath) {
 
 const { __researchTestHooks: hooks } = await importBrowserBundle('./index.js');
 const researchSource = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+const researchGraphSource = await readFile(new URL('./research-graph.mjs', import.meta.url), 'utf8');
 
 const bases = [
   { domain: 'research/vendor-ai-agents', title: 'Vendor AI Agents' },
@@ -733,6 +734,13 @@ test('discovery graph prefers persisted citation paths over inferred tag cluster
   assert.match(researchSource, /citation_direction/);
   assert.match(researchSource, /const persisted = persistedCitationDiscoveryGraph\(task\);[\s\S]*?if \(persisted\) return persisted/);
   assert.match(researchSource, /state\.graph\.visibleLimit \|\| 60/);
+});
+
+test('research graph releases its WebGL context when the surface is remounted', () => {
+  assert.match(researchGraphSource, /graph\.pauseAnimation\?\.\(\)/);
+  assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
+  assert.match(researchGraphSource, /renderer\?\.forceContextLoss\?\.\(\)/);
+  assert.match(researchGraphSource, /renderer\?\.domElement\?\.remove\?\.\(\)/);
 });
 
 test('research module catalog grants knowledge and document collections', async () => {
