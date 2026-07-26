@@ -713,8 +713,11 @@ test('initial research loading cannot masquerade as an empty knowledge base', ()
 test('research and knowledge events use independent refresh timers', () => {
   assert.match(researchSource, /researchRefreshTimer: null/);
   assert.match(researchSource, /knowledgeRefreshTimer: null/);
+  assert.match(researchSource, /knowledgeRefreshInFlight: false/);
   assert.match(researchSource, /function scheduleLocalRefresh[\s\S]*?state\.researchRefreshTimer/);
   assert.match(researchSource, /function scheduleKnowledgeRefresh[\s\S]*?state\.knowledgeRefreshTimer/);
+  assert.match(researchSource, /if \(state\.knowledgeRefreshInFlight\) return/);
+  assert.match(researchSource, /const active = knowledgeTableLoads\.get\(key\);[\s\S]*?if \(active\) return active/);
   assert.doesNotMatch(researchSource, /state\.refreshTimer/);
   assert.match(researchSource, /rowLimitWarnings/);
   assert.match(researchSource, /Anzeige auf \$\{ROW_LIMIT/);

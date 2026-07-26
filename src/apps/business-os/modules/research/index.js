@@ -399,6 +399,7 @@ const state = {
   graphProjectionCache: new Map(),
   graphSurface: null,
   graphMountToken: 0,
+  knowledgeRefreshInFlight: false,
   selectedGraphNodeId: '',
   graph: {
     dimensions: 3,
@@ -837,20 +838,30 @@ function scheduleKnowledgeRefresh(delay = 120) {
     if (sequence !== state.refreshSequences.knowledge) return;
     state.knowledgeRefreshTimer = null;
     if (!mountToken || state.mountToken !== mountToken) return;
-    await loadLocalState({ mountToken });
-    if (state.mountToken !== mountToken) return;
-    const knowledgeBases = await loadKnowledgeBases({ domains: activeResearchDomains() });
-    if (state.mountToken !== mountToken) return;
-    state.knowledgeBases = knowledgeBases;
-    await ensureTasksFromKnowledgeBases();
-    if (state.mountToken !== mountToken) return;
-    if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
-      state.selectedTaskId = state.tasks[0]?.id || '';
+    // Demand-loading knowledge chunks writes them into IndexedDB and emits the
+    // same collection stream that schedules this refresh. Ignore those
+    // self-generated events while a complete snapshot is being assembled;
+    // otherwise overlapping loads can publish an evicted, partial snapshot.
+    if (state.knowledgeRefreshInFlight) return;
+    state.knowledgeRefreshInFlight = true;
+    try {
+      await loadLocalState({ mountToken });
+      if (state.mountToken !== mountToken) return;
+      const knowledgeBases = await loadKnowledgeBases({ domains: activeResearchDomains() });
+      if (state.mountToken !== mountToken) return;
+      state.knowledgeBases = knowledgeBases;
+      await ensureTasksFromKnowledgeBases();
+      if (state.mountToken !== mountToken) return;
+      if (!state.selectedTaskId || !state.tasks.some((task) => task.id === state.selectedTaskId)) {
+        state.selectedTaskId = state.tasks[0]?.id || '';
+      }
+      await loadDashboardData();
+      if (state.mountToken !== mountToken) return;
+      render();
+      refreshOpenTaskDialogDomainOptions();
+    } finally {
+      state.knowledgeRefreshInFlight = false;
     }
-    await loadDashboardData();
-    if (state.mountToken !== mountToken) return;
-    render();
-    refreshOpenTaskDialogDomainOptions();
   }, delay);
 }
 
@@ -1009,7 +1020,26 @@ function mergeKnowledgeTableChunks(tables = []) {
   });
 }
 
-async function loadKnowledgeTables({ retryEmpty = true, domains = [] } = {}) {
+const knowledgeTableLoads = new Map();
+
+async function loadKnowledgeTables(options = {}) {
+  const domains = [...new Set((options.domains || [])
+    .map((domain) => String(domain || '').trim())
+    .filter(Boolean))]
+    .sort();
+  const key = JSON.stringify(domains);
+  const active = knowledgeTableLoads.get(key);
+  if (active) return active;
+  const load = loadKnowledgeTablesOnce({ ...options, domains });
+  knowledgeTableLoads.set(key, load);
+  try {
+    return await load;
+  } finally {
+    if (knowledgeTableLoads.get(key) === load) knowledgeTableLoads.delete(key);
+  }
+}
+
+async function loadKnowledgeTablesOnce({ retryEmpty = true, domains = [] } = {}) {
   const collection = readableCollection('knowledge_tables');
   const first = await loadKnowledgeTableChunks(collection, domains);
   if (first.length || !collection?.find) return first;
