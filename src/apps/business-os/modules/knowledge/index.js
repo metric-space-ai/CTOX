@@ -2,6 +2,7 @@ import { loadModuleMessages } from '../../shared/i18n.js';
 
 const KNOWLEDGE_RENDER_DEBOUNCE_MS = 80;
 const KNOWLEDGE_SYNC_START_WAIT_MS = 1500;
+const KNOWLEDGE_INITIAL_RETRY_DELAYS_MS = Object.freeze([750, 1500, 3000, 5000, 8000]);
 const KNOWLEDGE_OPEN_TARGET_KEY = 'ctox.businessOs.knowledge.openId';
 const KNOWLEDGE_OPEN_DOMAIN_KEY = 'ctox.businessOs.knowledge.openDomain';
 const KNOWLEDGE_DATA_COLLECTIONS = Object.freeze([
@@ -80,6 +81,8 @@ const state = {
   contextMenu: null,
   localSubscriptionCleanup: null,
   syncWarmupPromise: null,
+  initialRetryTimer: null,
+  initialRetryAttempt: 0,
   refreshInFlight: false,
   refreshPending: false,
   missingCollections: [],
@@ -90,6 +93,8 @@ const els = {};
 
 export async function mount(ctx) {
   await ensureStyles();
+  cancelInitialKnowledgeRetry();
+  state.initialRetryAttempt = 0;
   state.ctx = ctx;
   state.lang = ctx.locale === 'en' ? 'en' : 'de';
   state.messages = await loadModuleMessages(import.meta.url, state.lang, labels);
@@ -117,6 +122,7 @@ export async function mount(ctx) {
     window.removeEventListener('keydown', handleContextEscape);
     state.localSubscriptionCleanup?.();
     state.localSubscriptionCleanup = null;
+    cancelInitialKnowledgeRetry();
     state.contextMenu?.remove();
     state.contextMenu = null;
   };
@@ -329,6 +335,32 @@ async function refreshKnowledgeFromLocal(options = {}) {
   renderRunbooks();
   if (state.selectedId) await selectKnowledge(state.selectedId);
   else renderEmptyKnowledgeSelection();
+  if (state.items.length || state.runbooks.length || state.tables.length) {
+    cancelInitialKnowledgeRetry();
+    state.initialRetryAttempt = 0;
+  } else if (options.initial || options.initialRetry) {
+    scheduleInitialKnowledgeRetry(state.ctx);
+  }
+}
+
+function scheduleInitialKnowledgeRetry(ctx) {
+  if (!ctx || state.initialRetryTimer || state.initialRetryAttempt >= KNOWLEDGE_INITIAL_RETRY_DELAYS_MS.length) return;
+  const delayMs = KNOWLEDGE_INITIAL_RETRY_DELAYS_MS[state.initialRetryAttempt];
+  state.initialRetryAttempt += 1;
+  state.initialRetryTimer = window.setTimeout(() => {
+    state.initialRetryTimer = null;
+    if (state.ctx !== ctx) return;
+    loadKnowledgeFromLocal({ initialRetry: true }).catch((error) => {
+      if (state.ctx !== ctx) return;
+      state.loadError = error?.message || String(error);
+      renderKnowledgeList();
+    });
+  }, delayMs);
+}
+
+function cancelInitialKnowledgeRetry() {
+  if (state.initialRetryTimer) window.clearTimeout(state.initialRetryTimer);
+  state.initialRetryTimer = null;
 }
 
 function applyKnowledgeRecords({ items = [], runbooks = [], tables = [] }) {
