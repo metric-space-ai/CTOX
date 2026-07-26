@@ -297,9 +297,16 @@ class CandidateInventoryTests(unittest.TestCase):
             self.assertEqual(len(keys), len(set(keys)))
 
     def test_rejected_candidates_are_never_promoted_to_source_catalog(self) -> None:
+        digest = "a" * 64
         manifest = {
             "sources": [
-                {"source_id": "src-1", "canonical_url": "https://example.edu/admitted"},
+                {
+                    "source_id": "src-1",
+                    "canonical_url": "https://example.edu/admitted",
+                    "title": "Admitted source",
+                    "source_type": "article",
+                    "source_tier": "primary",
+                },
                 {"source_id": "src-2", "canonical_url": "https://aggregator.example/1"},
             ],
             "evidence": [
@@ -307,9 +314,18 @@ class CandidateInventoryTests(unittest.TestCase):
                     "evidence_id": "ev-1",
                     "source_id": "src-1",
                     "evidence_status": "eligible",
-                    "snapshot_sha256": "abc",
+                    "snapshot_sha256": digest,
                     "snapshot_id": "snap-1",
                     "relevance_score": 9,
+                    "canonical_url": "https://example.edu/admitted",
+                    "url_role": "original_content",
+                    "content_scope": "full_text",
+                    "http_status": 200,
+                    "snapshot": {"path": "snapshots/src-1.pdf"},
+                    "retrieval_receipt": {
+                        "request_url": "https://example.edu/admitted",
+                        "checked_at": "2026-07-26T00:00:00Z",
+                    },
                 },
                 {
                     "evidence_id": "ev-2",
@@ -328,6 +344,9 @@ class CandidateInventoryTests(unittest.TestCase):
         )
         self.assertEqual([row["source_id"] for row in catalog], ["src-1"])
         self.assertNotIn("aggregator.example", json.dumps(catalog))
+        self.assertEqual(catalog[0]["verification_status"], "verified")
+        self.assertEqual(catalog[0]["snapshot_hash"], f"sha256:{digest}")
+        self.assertTrue(catalog[0]["evidence_eligible"])
 
     def test_jsonl_inventories_are_loaded_and_deduplicated_with_csv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

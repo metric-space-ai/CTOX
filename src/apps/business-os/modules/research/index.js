@@ -1431,17 +1431,17 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
     const id = sourceId(row);
     if (id) curatedBySource.set(id, row);
   }
-  const raw = (sourceRows.length ? sourceRows : curatedRows).filter((row) => firstString(row, ['source_id']));
+  const raw = (sourceRows.length ? sourceRows : curatedRows).filter((row) => sourceModelId(row));
   const initialModels = raw.map((row) => {
-    const id = firstString(row, ['source_id']);
+    const id = sourceModelId(row);
     const gate = evidenceGate(row);
     return { id, row, evidenceEligible: gate.eligible };
   });
   const measurementAgg = aggregateMeasurements(measurementRows || [], initialModels);
   return raw.map((row, index) => {
-    const id = firstString(row, ['source_id']);
+    const id = sourceModelId(row);
     const title = firstString(row, ['title', 'source_title', 'name']) || `Source ${index + 1}`;
-    const sourceClass = firstString(row, ['source_class', 'type', 'bucket', 'record_type']) || 'source';
+    const sourceClass = firstString(row, ['source_class', 'source_type', 'type', 'bucket', 'record_type']) || 'source';
     const note = firstString(row, ['contribution_note', 'contribution', 'summary', 'relevance_to_bearing_design', 'use']) || '';
     const curated = curatedBySource.get(id);
     const agg = measurementAgg.get(id) || null;
@@ -1455,7 +1455,7 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
       rank: index + 1,
       title,
       subtitle: sourceClass,
-      url: firstString(row, ['source_url', 'url', 'direct_url', 'doi']) || '',
+      url: firstString(row, ['source_url', 'url', 'requested_url', 'pdf_url', 'direct_url', 'doi']) || '',
       canonicalUrl: firstString(row, ['canonical_url']) || '',
       sourceClass,
       note,
@@ -5070,6 +5070,10 @@ function parseObject(value) {
 
 function sourceId(row) {
   return firstString(row, ['source_id', 'id', 'record_id', 'source_key']);
+}
+
+function sourceModelId(row) {
+  return sourceId(row) || firstString(row, ['candidate_id', 'candidate_key']);
 }
 
 function booleanField(row, key) {

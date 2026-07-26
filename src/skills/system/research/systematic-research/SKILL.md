@@ -259,6 +259,13 @@ manifest is `validation/evidence-manifest.json`.
 Use `scripts/dashboard_knowledge_build.py` for builder-owned dashboard tables.
 Do not hand-author them and do not write Business OS databases directly.
 
+Persist semantic graph nodes only as `topic`, `concept`, `source`, `evidence`,
+or `measurement`. Persist edges only as `supports`, `measures`,
+`derived_from`, `part_of`, `contradicts`, `correlates_with`, or `co_occurs`.
+A claim is an `evidence` node; its thematic edge is `claim -> topic` with
+`relation_type=part_of`. Every node and edge carries admitted source IDs and
+claim/evidence provenance.
+
 ## Durable Output Modes
 
 Choose one or combine them:

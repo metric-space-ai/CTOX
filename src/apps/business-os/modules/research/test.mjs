@@ -127,6 +127,23 @@ test('evidence gate accepts receipt-bound original data files', () => {
   assert.equal(gate.status, 'verified');
 });
 
+test('discovery candidates retain candidate ids without becoming evidence', () => {
+  const models = hooks.buildSourceModels({}, [{
+    candidate_id: 'CAND-0001',
+    candidate_key: 'doi:10.1234/example',
+    title: 'Candidate paper',
+    source_type: 'article',
+    requested_url: 'https://example.test/candidate.pdf',
+    verification_state: 'rejected',
+    rejection_reason: 'http_404',
+  }], [], []);
+
+  assert.equal(models.length, 1);
+  assert.equal(models[0].id, 'CAND-0001');
+  assert.equal(models[0].url, 'https://example.test/candidate.pdf');
+  assert.equal(models[0].evidenceEligible, false);
+});
+
 test('create task preserves selected local knowledge domain ids', () => {
   const knowledgeBases = [{ domain: 'drone_bearing_design', title: 'Drone Bearing Design' }];
 

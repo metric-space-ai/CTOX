@@ -130,11 +130,28 @@ SOURCE_CATALOG_HEADERS = [
     "research_run_id",
     "research_command_id",
     "source_id",
+    "title",
+    "source_url",
+    "source_type",
+    "source_tier",
     "canonical_url",
+    "verification_status",
+    "transport_verified",
+    "content_extracted",
+    "actual_full_text_or_data",
+    "evidence_relevance_score",
+    "http_status",
+    "evidence_eligible",
+    "evidence_rejection_reason",
     "snapshot_hash",
-    "evidence_id",
     "snapshot_id",
-    "relevance_score",
+    "snapshot_path",
+    "evidence_id",
+    "claim_id",
+    "retrieved_at",
+    "url_role",
+    "content_scope",
+    "source_receipt_id",
 ]
 
 ENOLA_HEADER_REPAIR_RULE = "enola_missing_delimiter_between_bracketed_columns"
@@ -847,6 +864,14 @@ def build_source_catalog(
         source_id = str(item.get("source_id") or "")
         if source_id:
             evidence_by_source[source_id] = item
+    claim_by_evidence: dict[str, str] = {}
+    for claim in manifest.get("claims", []):
+        if not isinstance(claim, dict):
+            continue
+        evidence_id = str(claim.get("evidence_id") or "")
+        claim_id = str(claim.get("claim_id") or "")
+        if evidence_id and claim_id:
+            claim_by_evidence.setdefault(evidence_id, claim_id)
     rows: list[dict[str, str]] = []
     for source in manifest.get("sources", []):
         if not isinstance(source, dict):
@@ -855,16 +880,64 @@ def build_source_catalog(
         item = evidence_by_source.get(source_id)
         if not source_id or item is None:
             continue
+        canonical_url = str(item.get("canonical_url") or source.get("canonical_url") or "")
+        snapshot = item.get("snapshot") if isinstance(item.get("snapshot"), dict) else {}
+        retrieval = (
+            item.get("retrieval_receipt")
+            if isinstance(item.get("retrieval_receipt"), dict)
+            else {}
+        )
+        evidence_id = str(item.get("evidence_id") or "")
+        snapshot_hash = normalized_sha256(
+            item.get("snapshot_sha256"), f"source_catalog:{source_id}:snapshot_sha256"
+        )
+        relevance_score = item.get("relevance_score")
+        if (
+            not isinstance(relevance_score, int)
+            or isinstance(relevance_score, bool)
+            or relevance_score < 8
+        ):
+            raise BuildError(f"source_catalog:{source_id}:relevance_score_invalid")
+        http_status = item.get("http_status")
+        if (
+            not isinstance(http_status, int)
+            or isinstance(http_status, bool)
+            or http_status < 200
+            or http_status >= 300
+            or http_status == 204
+        ):
+            raise BuildError(f"source_catalog:{source_id}:http_status_invalid")
+        url_role = str(item.get("url_role") or "")
+        content_scope = str(item.get("content_scope") or "")
+        if not canonical_url or not snapshot.get("path") or not retrieval.get("checked_at"):
+            raise BuildError(f"source_catalog:{source_id}:receipt_lineage_incomplete")
         rows.append(
             {
                 "research_run_id": research_run_id,
                 "research_command_id": research_command_id,
                 "source_id": source_id,
-                "canonical_url": str(source.get("canonical_url") or ""),
-                "snapshot_hash": str(item.get("snapshot_sha256") or ""),
-                "evidence_id": str(item.get("evidence_id") or ""),
+                "title": str(source.get("title") or ""),
+                "source_url": str(retrieval.get("request_url") or canonical_url),
+                "source_type": str(source.get("source_type") or "primary_source"),
+                "source_tier": str(source.get("source_tier") or "primary"),
+                "canonical_url": canonical_url,
+                "verification_status": "verified",
+                "transport_verified": True,
+                "content_extracted": True,
+                "actual_full_text_or_data": True,
+                "evidence_relevance_score": relevance_score,
+                "http_status": http_status,
+                "evidence_eligible": True,
+                "evidence_rejection_reason": "",
+                "snapshot_hash": f"sha256:{snapshot_hash}",
                 "snapshot_id": str(item.get("snapshot_id") or ""),
-                "relevance_score": str(item.get("relevance_score") or ""),
+                "snapshot_path": str(snapshot.get("path") or ""),
+                "evidence_id": evidence_id,
+                "claim_id": claim_by_evidence.get(evidence_id, ""),
+                "retrieved_at": str(retrieval.get("checked_at") or ""),
+                "url_role": url_role,
+                "content_scope": content_scope,
+                "source_receipt_id": f"receipt:{evidence_id}",
             }
         )
     rows.sort(key=lambda item: item["source_id"])
