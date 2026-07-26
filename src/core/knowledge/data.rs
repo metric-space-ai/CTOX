@@ -152,16 +152,55 @@ pub(super) fn normalize_evidence_rows_with_server_receipts(
                 .context("evidence knowledge rows must be JSON objects")?;
             if object.get("evidence_eligible") == Some(&Value::Bool(true))
                 && !has_matching_server_web_receipt(root, entries, &object)
+                && !has_matching_managed_snapshot(root, &object)
             {
                 object.insert("evidence_eligible".to_string(), Value::Bool(false));
                 object.insert(
                     "evidence_rejection_reason".to_string(),
-                    Value::String("missing_server_web_receipt".to_string()),
+                    Value::String("missing_server_evidence_receipt".to_string()),
                 );
             }
             Ok(Value::Object(object))
         })
         .collect()
+}
+
+fn has_matching_managed_snapshot(root: &Path, row: &Map<String, Value>) -> bool {
+    let Some(raw_path) = row.get("snapshot_path").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(expected_hash) = row
+        .get("snapshot_hash")
+        .and_then(Value::as_str)
+        .and_then(normalized_sha256)
+    else {
+        return false;
+    };
+    let Ok(path) = Path::new(raw_path).canonicalize() else {
+        return false;
+    };
+    let managed_roots = ["research", "imports"]
+        .into_iter()
+        .filter_map(|directory| root.join(directory).canonicalize().ok())
+        .collect::<Vec<_>>();
+    if managed_roots.is_empty()
+        || !managed_roots
+            .iter()
+            .any(|managed_root| path.starts_with(managed_root))
+    {
+        return false;
+    }
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    if row
+        .get("content_size_bytes")
+        .and_then(Value::as_u64)
+        .is_some_and(|expected| expected != bytes.len() as u64)
+    {
+        return false;
+    }
+    format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(expected_hash)
 }
 
 fn has_matching_server_web_receipt(
@@ -2310,7 +2349,7 @@ mod tests {
         assert_eq!(missing[0]["evidence_eligible"], json!(false));
         assert_eq!(
             missing[0]["evidence_rejection_reason"],
-            json!("missing_server_web_receipt")
+            json!("missing_server_evidence_receipt")
         );
 
         let cache_path = root.join("runtime/web_search_page_cache.json");
@@ -2359,7 +2398,54 @@ mod tests {
         assert_eq!(rejected[0]["evidence_eligible"], json!(false));
         assert_eq!(
             rejected[0]["evidence_rejection_reason"],
-            json!("missing_server_web_receipt")
+            json!("missing_server_evidence_receipt")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn imported_evidence_accepts_untampered_managed_research_snapshot() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let snapshot_dir = root.join("research/baseline/snapshots");
+        fs::create_dir_all(&snapshot_dir)?;
+        let body = b"verified external baseline source";
+        let digest = format!("{:x}", Sha256::digest(body));
+        let snapshot_path = snapshot_dir.join("source.pdf");
+        fs::write(&snapshot_path, body)?;
+        let row = json!({
+            "source_id": "src-managed-1",
+            "canonical_url": "https://publisher.example/source.pdf",
+            "source_type": "paper",
+            "verification_status": "verified",
+            "transport_verified": true,
+            "content_extracted": true,
+            "actual_full_text_or_data": true,
+            "evidence_relevance_score": 9,
+            "metadata_only": false,
+            "http_status": 200,
+            "snapshot_hash": format!("sha256:{digest}"),
+            "snapshot_path": snapshot_path,
+            "content_size_bytes": body.len(),
+            "source_tier": "primary",
+            "research_run_id": "run-1"
+        });
+
+        let admitted = normalize_evidence_rows_with_server_receipts(
+            root,
+            "source_catalog",
+            vec![row.clone()],
+        )?;
+        assert_eq!(admitted[0]["evidence_eligible"], json!(true));
+        assert!(admitted[0].get("evidence_rejection_reason").is_none());
+
+        fs::write(&snapshot_path, b"tampered")?;
+        let rejected =
+            normalize_evidence_rows_with_server_receipts(root, "source_catalog", vec![row])?;
+        assert_eq!(rejected[0]["evidence_eligible"], json!(false));
+        assert_eq!(
+            rejected[0]["evidence_rejection_reason"],
+            json!("missing_server_evidence_receipt")
         );
         Ok(())
     }
