@@ -778,6 +778,12 @@ async function loadLocalState({ mountToken = null } = {}) {
 }
 
 function wireRealtime() {
+  const knowledgeLifecycleCollections = new Set([
+    'research_tasks',
+    'research_runs',
+    'business_commands',
+    'ctox_queue_tasks',
+  ]);
   const collections = [
     ['research_tasks', readableCollection('research_tasks')],
     ['research_runs', readableCollection('research_runs')],
@@ -786,12 +792,13 @@ function wireRealtime() {
     ['ctox_queue_tasks', readableCollection('ctox_queue_tasks')],
     ['documents', readableCollection('documents')],
   ].filter(([, collection]) => collection);
-  for (const [, collection] of collections) {
-    const subscription = collection.$?.subscribe?.(() => scheduleLocalRefresh(80));
+  for (const [name, collection] of collections) {
+    const subscription = collection.$?.subscribe?.(() => {
+      scheduleLocalRefresh(80);
+      if (knowledgeLifecycleCollections.has(name)) scheduleKnowledgeRefresh(250);
+    });
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
   }
-  const knowledgeSubscription = readableCollection('knowledge_tables')?.$?.subscribe?.(() => scheduleKnowledgeRefresh(120));
-  if (knowledgeSubscription?.unsubscribe) state.cleanup.push(() => knowledgeSubscription.unsubscribe());
 }
 
 function wireSyncDiagnosticsRefresh() {
