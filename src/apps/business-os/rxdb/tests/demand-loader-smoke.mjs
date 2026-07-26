@@ -118,6 +118,53 @@ assert(status.queryFetchEvictedWindowMissCount === 1, 'evicted window miss is di
   assert(projected[0]?.id === 'projected-table-1', 'revalidation materializes the later projection');
 }
 
+// A non-empty membership window can also become stale when a newly projected
+// table was not part of its original documentIds. No document-ID invalidation
+// can catch that addition, so knowledge table directories use bounded SWR.
+{
+  let membershipNow = 3_000;
+  let membershipFetches = 0;
+  const membershipStorage = makeFakeStorageCollection();
+  const membershipSidecar = createSidecarWithMemoryBackend({
+    databaseName: 'mutable-membership-sidecar',
+    clock: () => membershipNow,
+  });
+  const membershipLoader = createQueryDemandLoader({
+    storageCollection: membershipStorage,
+    sidecar: membershipSidecar,
+    collectionName: 'knowledge_tables',
+    schemaVersion: 1,
+    clock: () => membershipNow,
+    requestQueryFetch: async () => {
+      membershipFetches += 1;
+      if (membershipFetches > 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      return {
+        documents: membershipFetches === 1
+          ? [{ id: 'table-a', domain: 'research' }]
+          : [
+              { id: 'table-a', domain: 'research' },
+              { id: 'table-b', domain: 'research' },
+            ],
+        authoritativeRevision: `membership-rev-${membershipFetches}`,
+      };
+    },
+  });
+  const originalMembership = await membershipLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(originalMembership.length === 1, 'initial non-empty membership is materialized');
+  membershipNow += 5_001;
+  const staleMembership = await membershipLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(staleMembership.length === 1, 'stale membership is served without blocking');
+  await waitFor(() => membershipFetches === 2 && membershipLoader.inflightSize() === 0);
+  const refreshedMembership = await membershipLoader.resolveQuery({ selector: { domain: 'research' } });
+  assert(refreshedMembership.length === 2, 'background revalidation adds the new table member');
+  assert(
+    refreshedMembership.some((document) => document.id === 'table-b'),
+    'newly projected table is visible after membership revalidation',
+  );
+}
+
 // Demand-only command history stays bounded, but lifecycle projections must
 // not become permanent cache hits after the first pending result.
 {
@@ -243,4 +290,12 @@ console.log('ctox-rxdb-js demand loader smoke OK');
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
+}
+
+async function waitFor(predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error('timed out waiting for background revalidation');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }

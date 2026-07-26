@@ -16,6 +16,7 @@ import { queryFingerprint } from './query-fingerprint.mjs';
 export const DEFAULT_WINDOW_LIMIT = 200;
 const CONTROL_PLANE_QUERY_REVALIDATE_MS = 1000;
 const EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5000;
+const MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS = 5000;
 
 export function createQueryDemandLoader({
   storageCollection,
@@ -94,7 +95,24 @@ export function createQueryDemandLoader({
       const emptyWindowStale = cached
         && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0)
         && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
-      if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale) {
+      // A change event can invalidate only windows that already reference the
+      // changed document. Newly projected knowledge tables are absent from an
+      // older non-empty membership list, so no local event can identify that
+      // window as stale. Revalidate this small table-directory query with SWR
+      // semantics; table chunks themselves remain demand-loaded by ID.
+      const mutableMembershipWindowStale = isMutableMembershipCollection(collectionName)
+        && cached
+        && Array.isArray(cached.documentIds)
+        && cached.documentIds.length > 0
+        && clock() - Number(cached.updatedAt || cached.createdAt || 0)
+          >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
+      if (
+        cached
+        && cached.complete
+        && cachedDocumentsAvailable
+        && !emptyWindowStale
+        && !mutableMembershipWindowStale
+      ) {
         // V1.5 production hardening: authoritative-revision check. If the
         // caller supplies `requireRevision` (e.g. from a change-bulk that
         // touched a doc in the window), we re-verify with the server when
@@ -380,6 +398,10 @@ export function createQueryDemandLoader({
 
 function isControlPlaneStatusCollection(collectionName) {
   return collectionName === 'business_commands' || collectionName === 'ctox_queue_tasks';
+}
+
+function isMutableMembershipCollection(collectionName) {
+  return collectionName === 'knowledge_tables';
 }
 
 async function invalidateByScanningQueryWindows(sidecar, collectionName, changedDocumentIds) {

@@ -7048,6 +7048,7 @@ function canonicalizeWindow(window2) {
 var DEFAULT_WINDOW_LIMIT = 200;
 var CONTROL_PLANE_QUERY_REVALIDATE_MS = 1e3;
 var EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5e3;
+var MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS = 5e3;
 function createQueryDemandLoader({
   storageCollection,
   sidecar,
@@ -7108,7 +7109,8 @@ function createQueryDemandLoader({
         }
         const controlPlaneWindowStale = isControlPlaneStatusCollection(collectionName) && cached && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= CONTROL_PLANE_QUERY_REVALIDATE_MS;
         const emptyWindowStale = cached && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0) && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
-        if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale) {
+        const mutableMembershipWindowStale = isMutableMembershipCollection(collectionName) && cached && Array.isArray(cached.documentIds) && cached.documentIds.length > 0 && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
+        if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale && !mutableMembershipWindowStale) {
           if (query?.requireRevision && cached.authoritativeRevision !== query.requireRevision) {
           } else if (!controlPlaneWindowStale) {
             await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
@@ -7336,6 +7338,9 @@ function createQueryDemandLoader({
 }
 function isControlPlaneStatusCollection(collectionName) {
   return collectionName === "business_commands" || collectionName === "ctox_queue_tasks";
+}
+function isMutableMembershipCollection(collectionName) {
+  return collectionName === "knowledge_tables";
 }
 async function invalidateByScanningQueryWindows(sidecar, collectionName, changedDocumentIds) {
   const all = await sidecar.backend.scanQueryWindows();
