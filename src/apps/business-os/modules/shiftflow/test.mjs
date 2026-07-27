@@ -8,6 +8,8 @@ const {
   getWeekBoundsMs,
   applyShiftListSelection,
   collectPlanningConflicts,
+  dataDrivenEmptyHtml,
+  setShiftflowReadinessForTests,
 } = hooks;
 
 const tests = [];
@@ -170,6 +172,29 @@ test('conflict collection preserves overlap, rest, daily and assignment rules', 
   const conflicts = collectPlanningConflicts(shifts, [{ id: 'emp-1', name: 'Alex', weekly_target_hours: 40 }], monday);
   assert.ok(conflicts.some((entry) => entry.type === 'overlap'));
   assert.ok(conflicts.some((entry) => entry.type === 'daily_hours'));
+});
+
+test('data-driven empties render the syncing shell only while the source collection is unready', () => {
+  const emptyHtml = '<div class="ctox-empty">Keine Schichten für diese Ansicht.</div>';
+
+  // Empty source + unready collection ⇒ syncing shell, not "no data".
+  setShiftflowReadinessForTests('planning_shifts', { collection: 'planning_shifts', state: 'catching-up', ready: false, syncing: true, updatedAt: null });
+  const syncing = dataDrivenEmptyHtml('planning_shifts', 0, emptyHtml);
+  assert.match(syncing, /class="ctox-syncing"/);
+  assert.match(syncing, /role="status"/);
+  assert.doesNotMatch(syncing, /ctox-empty/);
+
+  // Empty source + live collection ⇒ canonical empty state.
+  setShiftflowReadinessForTests('planning_shifts', { collection: 'planning_shifts', state: 'live', ready: true, syncing: false, updatedAt: 1 });
+  assert.equal(dataDrivenEmptyHtml('planning_shifts', 0, emptyHtml), emptyHtml);
+
+  // Non-empty source ⇒ filter/selection empty keeps its markup even when unready.
+  setShiftflowReadinessForTests('planning_shifts', { collection: 'planning_shifts', state: 'catching-up', ready: false, syncing: true, updatedAt: null });
+  assert.equal(dataDrivenEmptyHtml('planning_shifts', 3, emptyHtml), emptyHtml);
+
+  // No readiness snapshot (older shell/test harness) ⇒ previous behavior.
+  setShiftflowReadinessForTests('planning_shifts', null);
+  assert.equal(dataDrivenEmptyHtml('planning_shifts', 0, emptyHtml), emptyHtml);
 });
 
 let passed = 0;

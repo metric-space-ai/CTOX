@@ -174,5 +174,6 @@
   "shiftImportDenied": "Shifts cannot be imported with the current permissions.",
   "shiftImportDone": "Imported {0} shifts.",
   "aiGenerateSuccessPlain": "A Monday-to-Friday schedule draft was created.",
-  "conflictCountResult": "Found {0} conflicts."
+  "conflictCountResult": "Found {0} conflicts.",
+  "syncingData": "Syncing data."
 }

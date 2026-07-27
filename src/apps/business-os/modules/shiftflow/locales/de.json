@@ -174,5 +174,6 @@
   "shiftImportDenied": "Schichten können mit den aktuellen Rechten nicht importiert werden.",
   "shiftImportDone": "{0} Schichten importiert.",
   "aiGenerateSuccessPlain": "Dienstplanentwurf für Montag bis Freitag wurde angelegt.",
-  "conflictCountResult": "{0} Konflikte gefunden."
+  "conflictCountResult": "{0} Konflikte gefunden.",
+  "syncingData": "Daten werden synchronisiert."
 }

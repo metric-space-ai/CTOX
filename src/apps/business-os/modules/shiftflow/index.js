@@ -16,6 +16,13 @@ const SEED_WRITE_COLLECTIONS = Object.freeze([
   'planning_shifts',
   'planning_time_records',
 ]);
+// Collections whose replication readiness gates the data-driven empty states.
+const READINESS_COLLECTIONS = Object.freeze([
+  'planning_employees',
+  'planning_projects',
+  'planning_shifts',
+  'planning_time_records',
+]);
 
 let activeSubscriptions = [];
 let currentWeekStart = getMondayOfCurrentWeek();
@@ -31,6 +38,7 @@ let latestProjects = [];
 let latestShifts = [];
 let latestTimeRecords = [];
 let latestConflicts = [];
+let latestReadiness = {};
 let lang = 'de';
 let t = (key, fallback) => fallback ?? key;
 
@@ -150,9 +158,13 @@ export async function mount(ctx) {
   latestShifts = [];
   latestTimeRecords = [];
   latestConflicts = [];
+  latestReadiness = {};
 
   // Setup reactive RxDB subscriptions
   setupSubscriptions(ctx, els);
+
+  // Setup collection-readiness subscriptions (sync-state hints for empty states)
+  setupReadinessSubscriptions(ctx, els);
 
   // Bind Event Listeners
   bindEventListeners(ctx, els);
@@ -184,6 +196,7 @@ export async function mount(ctx) {
     disposed = true;
     activeSubscriptions.forEach(sub => sub.unsubscribe?.());
     activeSubscriptions = [];
+    latestReadiness = {};
     ctx.host.replaceChildren();
     delete ctx.host.dataset.shiftflowModule;
   };
@@ -746,6 +759,34 @@ function setupSubscriptions(ctx, els) {
   }));
 }
 
+// Readiness is a render hint: while a replicated collection has not finished
+// its initial sync, an empty source must paint the syncing shell instead of a
+// "no data" empty state. The shell emits an immediate snapshot and re-emits
+// only on state changes; cleanup rides the existing activeSubscriptions idiom.
+function setupReadinessSubscriptions(ctx, els) {
+  const subscribe = ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return;
+  const refresh = () => refreshPlanningSurfaces(els, ctx);
+  READINESS_COLLECTIONS.filter((name) => canReadCollection(ctx, name)).forEach((name) => {
+    const unsubscribe = subscribe.call(ctx.sync, name, (snapshot) => {
+      latestReadiness[name] = snapshot || null;
+      refresh();
+    });
+    activeSubscriptions.push({ unsubscribe: typeof unsubscribe === 'function' ? unsubscribe : () => {} });
+  });
+}
+
+// Gate for data-driven empty branches: only when the unfiltered source of a
+// replicated collection is empty AND that collection is not ready yet does the
+// syncing shell replace the empty state. Filter- and selection-derived empties
+// (source has rows) keep their existing markup.
+function dataDrivenEmptyHtml(collectionName, sourceLength, emptyHtml) {
+  if (sourceLength === 0 && latestReadiness[collectionName]?.ready === false) {
+    return `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(t('syncingData', 'Daten werden synchronisiert.'))}</div>`;
+  }
+  return emptyHtml;
+}
+
 function refreshPlanningSurfaces(els, ctx) {
   renderShiftList(els);
   renderSchedulerGrid(latestEmployees, latestProjects, latestShifts, els, ctx);
@@ -799,7 +840,7 @@ function renderShiftList(els) {
   els.shiftList.classList.toggle('is-cards', shiftListState.view !== 'list');
   els.shiftList.classList.toggle('is-list', shiftListState.view === 'list');
   els.shiftList.innerHTML = records.map((shift) => renderShiftListItem(shift)).join('')
-    || `<div class="ctox-empty">${escapeHtml(t('noShiftsForView', 'Keine Schichten für diese Ansicht.'))}</div>`;
+    || dataDrivenEmptyHtml('planning_shifts', latestShifts.length, `<div class="ctox-empty">${escapeHtml(t('noShiftsForView', 'Keine Schichten für diese Ansicht.'))}</div>`);
   if (previousScrollTop && els.shiftList.parentElement) els.shiftList.parentElement.scrollTop = previousScrollTop;
   renderShiftListCountsAndFooter(els.leftPane, records.length);
 }
@@ -1092,7 +1133,8 @@ function renderSchedulerGrid(employees, projects, shifts, els, ctx) {
       `;
     }).join('');
 
-    els.schedulerGridBody.innerHTML = rows;
+    els.schedulerGridBody.innerHTML = rows
+      || dataDrivenEmptyHtml('planning_employees', employees.length, '');
 
   } else {
     // 2. Project-Centric Timeline View
@@ -1175,7 +1217,8 @@ function renderSchedulerGrid(employees, projects, shifts, els, ctx) {
       `;
     }).join('');
 
-    els.schedulerGridBody.innerHTML = rows || `<div class="ctox-empty">${escapeHtml(t('noActiveProjects', 'Keine aktiven Projekte vorhanden.'))}</div>`;
+    els.schedulerGridBody.innerHTML = rows
+      || dataDrivenEmptyHtml('planning_projects', projects.length, `<div class="ctox-empty">${escapeHtml(t('noActiveProjects', 'Keine aktiven Projekte vorhanden.'))}</div>`);
   }
 
   // Bind click & double-click handlers on shift cards
@@ -1301,11 +1344,13 @@ function renderTimesheets(employees, projects, shifts, records, els, ctx) {
   const pendingRecords = records.filter(rec => rec.approval_status === 'pending' && rec.end_time !== null);
 
   if (pendingRecords.length === 0) {
-    els.timesheetsList.innerHTML = `
-      <div class="ctox-empty">
+    els.timesheetsList.innerHTML = dataDrivenEmptyHtml(
+      'planning_time_records',
+      records.length,
+      `<div class="ctox-empty">
         ${t('allTimesheetsApproved', 'Alle eingereichten Stundenzettel wurden freigegeben! 🎉')}
-      </div>
-    `;
+      </div>`,
+    );
     els.approveAllTimesheetsBtn.style.display = 'none';
     return;
   }
@@ -1533,7 +1578,7 @@ function renderBillingAggregation(employees, projects, records, els, ctx) {
   els.billingAggregationBody.innerHTML = rowsHtml || `
     <tr>
       <td colspan="8">
-        <div class="ctox-empty">Keine freigegebenen Zeiterfassungen im gewählten Zeitraum vorhanden.</div>
+        ${dataDrivenEmptyHtml('planning_time_records', records.length, '<div class="ctox-empty">Keine freigegebenen Zeiterfassungen im gewählten Zeitraum vorhanden.</div>')}
       </td>
     </tr>
   `;
@@ -1872,7 +1917,7 @@ async function openEmployeeDetailsInspector(empId, employees, els, ctx) {
 
         <p class="shiftflow-inspector-hint">${t('quickAssignInstructions', 'Klicke auf einen Tag, um den Mitarbeiter direkt für das Projekt einzuteilen (8:00 - 16:00 Uhr):')}</p>
         <div class="shiftflow-quick-assign">
-          ${activeProjects.length === 0 ? `<div class="ctox-empty">${t('noActiveProjects', 'Keine aktiven Projekte vorhanden.')}</div>` : activeProjects.map(proj => {
+          ${activeProjects.length === 0 ? dataDrivenEmptyHtml('planning_projects', latestProjects.length, `<div class="ctox-empty">${t('noActiveProjects', 'Keine aktiven Projekte vorhanden.')}</div>`) : activeProjects.map(proj => {
             const weekdays = lang === 'en'
               ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
               : ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
@@ -2746,7 +2791,7 @@ function renderConflicts(conflicts, els) {
         <div>${conflict.message}</div>
       </article>
     `;
-  }).join('') : `<div class="ctox-empty">${t('noConflictsDetected', 'Keine aktiven Konflikte erkannt. Der Dienstplan erfüllt alle Vorgaben.')}</div>`;
+  }).join('') : dataDrivenEmptyHtml('planning_shifts', latestShifts.length, `<div class="ctox-empty">${t('noConflictsDetected', 'Keine aktiven Konflikte erkannt. Der Dienstplan erfüllt alle Vorgaben.')}</div>`);
 }
 
 async function runConflictsAnalysis(ctx, els) {
@@ -2861,10 +2906,17 @@ function applyStaticLabels(root, t) {
 // data-context-record-* trio; Shiftflow does not dispatch shell events or own a
 // context menu.
 
+function setShiftflowReadinessForTests(name, snapshot) {
+  if (snapshot) latestReadiness[name] = snapshot;
+  else delete latestReadiness[name];
+}
+
 export const __shiftflowTestHooks = {
   filterShiftflowEmployeesForPlanner,
   getShiftflowPressedState,
   getWeekBoundsMs,
   applyShiftListSelection,
   collectPlanningConflicts,
+  dataDrivenEmptyHtml,
+  setShiftflowReadinessForTests,
 };
