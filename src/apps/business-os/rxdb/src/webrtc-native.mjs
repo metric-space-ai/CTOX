@@ -48,6 +48,12 @@ const FRAME_ACK_TIMEOUT_MS = 30_000;
 // generous multiple of the frame-ack timeout so a slow-but-live transfer that
 // keeps landing frames (each resets `lastProgressAt`) is never discarded.
 const STALLED_INCOMING_TRANSFER_TIMEOUT_MS = FRAME_ACK_TIMEOUT_MS * 3;
+// Reserve aggregate receive capacity when a `start` frame is admitted. The
+// per-transfer wire ceiling is 8 MiB; four full-size transfers (32 MiB total)
+// and at most eight concurrent transfers keep browser memory bounded while
+// preserving normal multiplexed traffic headroom.
+const MAX_INCOMING_FRAME_TRANSFERS = 8;
+const MAX_INCOMING_FRAME_BUFFERED_BYTES = MAX_TRANSFER_BYTES * 4;
 const FRAME_RESUME_TIMEOUT_MS = 1_000;
 const COMPLETED_FRAME_ACK_TTL_MS = 60_000;
 // TODO(rxdb-webrtc-multiplexing): the real fix is to multiplex every
@@ -193,6 +199,10 @@ export class CtoxWebRtcNativePeer {
       maxInlineFrameBytes: MAX_INLINE_FRAME_BYTES,
       maxChunkChars: MAX_CHUNK_CHARS,
       maxTransferBytes: MAX_TRANSFER_BYTES,
+      maxIncomingFrameTransfers: MAX_INCOMING_FRAME_TRANSFERS,
+      maxIncomingFrameBufferedBytes: MAX_INCOMING_FRAME_BUFFERED_BYTES,
+      incomingFrameBufferedBytes: 0,
+      incomingFrameReservedBytes: 0,
       ackWindow: FRAME_ACK_WINDOW,
       sendBufferHighWater: SEND_BUFFER_HIGH_WATER,
       sendBufferLowWater: SEND_BUFFER_LOW_WATER,
@@ -692,8 +702,10 @@ export class CtoxWebRtcNativePeer {
         // A joined broadcast proves the server ACCEPTED our join — only now
         // reset the reconnect backoff. Resetting on socket-open degenerated
         // into a 1s-interval storm when the server accepted the socket and
-        // then rejected the join (e.g. control-plane errors).
+        // then rejected the join (e.g. control-plane errors). It also proves
+        // any control-plane rejection retained from an older socket is stale.
         this.signalingReconnectDelayMs = SIGNALING_RECONNECT_BASE_MS;
+        this.lastControlPlaneError = null;
       }
       const descriptors = signalingPeerDescriptors(message);
       const previousMetadata = new Map(this.peerMetadata);
@@ -923,6 +935,8 @@ export class CtoxWebRtcNativePeer {
       localCandidateTypes: {},
       remoteCandidateTypes: {},
       handshakeTimer: null,
+      inboundFrameChain: Promise.resolve(),
+      inboundFrameGeneration: 0,
       forceInitiator: this.forceInitiatorPeers.has(remotePeerId),
     };
     this.connections.set(remotePeerId, connection);
@@ -1125,6 +1139,8 @@ export class CtoxWebRtcNativePeer {
 
   attachChannel(connection, channel) {
     connection.channel = channel;
+    connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
+    connection.inboundFrameChain = Promise.resolve();
     channel.onopen = () => {
       if (connection.handshakeTimer) {
         clearTimeout(connection.handshakeTimer);
@@ -1143,7 +1159,7 @@ export class CtoxWebRtcNativePeer {
       } catch {
         // Binary and text payloads are valid for future chunk streaming.
       }
-      this.handleDataChannelFrame(connection.remotePeerId, payload);
+      this.enqueueInboundDataChannelFrame(connection, channel, payload);
     };
     channel.onerror = () => {
       connection.lastError = { code: 'ctox_data_channel_error', peerId: connection.remotePeerId };
@@ -1154,6 +1170,43 @@ export class CtoxWebRtcNativePeer {
       this.recordConnectionEvent(connection, 'datachannel-close', { readyState: channel.readyState || 'closed' });
       this.removeConnection(connection.remotePeerId, 'channel-close');
     };
+  }
+
+  enqueueInboundDataChannelFrame(connection, channel, payload) {
+    if (
+      this.closed
+      || this.connections.get(connection.remotePeerId) !== connection
+      || connection.channel !== channel
+    ) {
+      return Promise.resolve();
+    }
+    const generation = Number(connection.inboundFrameGeneration || 0);
+    const previous = connection.inboundFrameChain || Promise.resolve();
+    const current = previous.then(async () => {
+      if (
+        this.closed
+        || this.connections.get(connection.remotePeerId) !== connection
+        || connection.channel !== channel
+        || Number(connection.inboundFrameGeneration || 0) !== generation
+      ) return;
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
+    });
+    connection.inboundFrameChain = current.catch((error) => {
+      // Keep the per-connection queue fulfilled after a bad frame so all later
+      // frames still run. Teardown/new-channel generations suppress stale work.
+      if (
+        this.connections.get(connection.remotePeerId) !== connection
+        || connection.channel !== channel
+        || Number(connection.inboundFrameGeneration || 0) !== generation
+      ) return;
+      connection.lastError = {
+        code: 'ctox_webrtc_inbound_frame_failed',
+        peerId: connection.remotePeerId,
+        message: error?.message || String(error),
+      };
+      this.events.emit('error', connection.lastError);
+    });
+    return connection.inboundFrameChain;
   }
 
   async handleDataChannelFrame(peerId, payload) {
@@ -1248,7 +1301,14 @@ export class CtoxWebRtcNativePeer {
       const transferId = String(payload.transferId || '');
       const totalFrames = Number(payload.totalFrames || 0);
       const totalBytes = Number(payload.totalBytes || 0);
-      if (!transferId || totalFrames < 1 || totalFrames > 100_000 || totalBytes > MAX_TRANSFER_BYTES) {
+      if (
+        !transferId
+        || totalFrames < 1
+        || totalFrames > 100_000
+        || !Number.isFinite(totalBytes)
+        || totalBytes < 0
+        || totalBytes > MAX_TRANSFER_BYTES
+      ) {
         this.events.emit('error', {
           code: 'ctox_webrtc_frame_start_invalid',
           peerId,
@@ -1257,10 +1317,35 @@ export class CtoxWebRtcNativePeer {
         });
         return;
       }
+      // Reclaim stale reservations before admission, then reserve the declared
+      // transfer size. Excluding the same transfer id preserves retry semantics:
+      // a repeated `start` replaces its prior attempt instead of double-counting.
+      this.sweepStalledIncomingTransfers();
+      const replacing = this.incomingFrames.has(transferId);
+      const incomingTransfers = this.incomingFrames.size - (replacing ? 1 : 0);
+      const reservedBytes = this.incomingFrameReservedBytes(transferId);
+      if (
+        incomingTransfers + 1 > MAX_INCOMING_FRAME_TRANSFERS
+        || reservedBytes + totalBytes > MAX_INCOMING_FRAME_BUFFERED_BYTES
+      ) {
+        this.recordTransportStatus({ rejectedFrames: this.transportStats.rejectedFrames + 1 });
+        this.events.emit('error', {
+          code: 'ctox_webrtc_incoming_transfer_budget_exceeded',
+          peerId,
+          transferId,
+          requestedBytes: totalBytes,
+          incomingTransfers,
+          reservedBytes,
+          maxTransfers: MAX_INCOMING_FRAME_TRANSFERS,
+          maxBufferedBytes: MAX_INCOMING_FRAME_BUFFERED_BYTES,
+        });
+        return;
+      }
       this.incomingFrames.set(transferId, {
         peerId,
         totalFrames,
         totalBytes,
+        bufferedBytes: 0,
         received: new Map(),
         createdAt: Date.now(),
         // M3: advanced on every genuinely-new frame (see recordReceivedFrame);
@@ -1273,9 +1358,10 @@ export class CtoxWebRtcNativePeer {
       });
       this.completedFrameAcks.delete(transferId);
       this.cleanupCompletedFrameAcks();
-      this.sweepStalledIncomingTransfers();
       this.recordTransportStatus({
         incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
         completedAckCacheSize: this.completedFrameAcks.size,
       });
       return;
@@ -1359,8 +1445,34 @@ export class CtoxWebRtcNativePeer {
       });
       return;
     }
-    const contiguousSeq = recordReceivedFrame(entry, seq, String(payload.data || ''));
+    const chunkData = String(payload.data || '');
+    const previousChunkBytes = entry.received.has(seq)
+      ? encodedSize(entry.received.get(seq) || '')
+      : 0;
+    const nextBufferedBytes = Number(entry.bufferedBytes || 0) - previousChunkBytes + encodedSize(chunkData);
+    if (nextBufferedBytes > entry.totalBytes) {
+      this.incomingFrames.delete(transferId);
+      this.recordTransportStatus({
+        rejectedFrames: this.transportStats.rejectedFrames + 1,
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
+      });
+      this.events.emit('error', {
+        code: 'ctox_webrtc_frame_buffer_exceeds_declared_size',
+        peerId,
+        transferId,
+        bufferedBytes: nextBufferedBytes,
+        declaredBytes: entry.totalBytes,
+      });
+      return;
+    }
+    entry.bufferedBytes = nextBufferedBytes;
+    const contiguousSeq = recordReceivedFrame(entry, seq, chunkData);
     if (entry.received.size !== entry.totalFrames) {
+      this.recordTransportStatus({
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      });
       if (contiguousSeq >= entry.nextAckSeq && contiguousSeq < entry.totalFrames - 1) {
         this.send(peerId, {
           ctoxFrame: CTOX_FRAME_PROTOCOL,
@@ -1381,6 +1493,11 @@ export class CtoxWebRtcNativePeer {
       text += entry.received.get(index) || '';
     }
     if (entry.totalBytes && encodedSize(text) !== entry.totalBytes) {
+      this.recordTransportStatus({
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
+      });
       this.events.emit('error', {
         code: 'ctox_webrtc_frame_size_mismatch',
         peerId,
@@ -1408,6 +1525,8 @@ export class CtoxWebRtcNativePeer {
     this.sweepStalledIncomingTransfers();
     this.recordTransportStatus({
       incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
     });
     try {
@@ -1517,6 +1636,9 @@ export class CtoxWebRtcNativePeer {
     if (!connection) return;
     this.connections.delete(peerId);
     this.connectionRequests.delete(peerId);
+    connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
+    connection.inboundFrameChain = null;
+    if (connection.channel) connection.channel.onmessage = null;
     if (connection.handshakeTimer) {
       clearTimeout(connection.handshakeTimer);
       connection.handshakeTimer = null;
@@ -1651,6 +1773,11 @@ export class CtoxWebRtcNativePeer {
     for (const [transferId, entry] of [...this.incomingFrames.entries()]) {
       if (entry.peerId === peerId) this.incomingFrames.delete(transferId);
     }
+    this.recordTransportStatus({
+      incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
+    });
   }
 
   rejectAllPending(error) {
@@ -1683,6 +1810,8 @@ export class CtoxWebRtcNativePeer {
     this.recordTransportStatus({
       pendingAcks: 0,
       incomingTransfers: 0,
+      incomingFrameBufferedBytes: 0,
+      incomingFrameReservedBytes: 0,
       completedAckCacheSize: 0,
       priorityQueueDepth: 0,
       highPriorityQueueDepth: 0,
@@ -1700,6 +1829,8 @@ export class CtoxWebRtcNativePeer {
       pendingAcks: this.pendingFrameAcks.size,
       pendingRequests: this.pending.size,
       incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
       connectionCount: this.connections.size,
       rtcConnectionPool: rtcPeerConnectionPoolCounters(),
@@ -1843,6 +1974,23 @@ export class CtoxWebRtcNativePeer {
     });
   }
 
+  incomingFrameReservedBytes(excludeTransferId = '') {
+    let total = 0;
+    for (const [transferId, entry] of this.incomingFrames.entries()) {
+      if (excludeTransferId && transferId === excludeTransferId) continue;
+      total += Math.max(0, Number(entry?.totalBytes || 0));
+    }
+    return total;
+  }
+
+  incomingFrameBufferedBytes() {
+    let total = 0;
+    for (const entry of this.incomingFrames.values()) {
+      total += Math.max(0, Number(entry?.bufferedBytes || 0));
+    }
+    return total;
+  }
+
   cleanupCompletedFrameAcks() {
     const now = Date.now();
     for (const [transferId, completed] of [...this.completedFrameAcks.entries()]) {
@@ -1876,7 +2024,11 @@ export class CtoxWebRtcNativePeer {
       });
     }
     if (swept > 0) {
-      this.recordTransportStatus({ incomingTransfers: this.incomingFrames.size });
+      this.recordTransportStatus({
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
+      });
     }
     return swept;
   }
@@ -2588,6 +2740,8 @@ export const webrtcNativeTestInternals = Object.freeze({
   utf8ByteLength,
   recordReceivedFrame,
   MAX_SERIALIZED_FRAME_BYTES,
+  MAX_INCOMING_FRAME_TRANSFERS,
+  MAX_INCOMING_FRAME_BUFFERED_BYTES,
 });
 
 // JSON-escaped UTF-8 byte length of one code point, matching Rust

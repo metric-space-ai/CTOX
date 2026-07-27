@@ -3894,6 +3894,8 @@ var FAIR_SEND_SCHEDULE = ["high", "high", "high", "high", "normal", "normal", "l
 var MAX_SERIALIZED_FRAME_BYTES = 16384;
 var FRAME_ACK_TIMEOUT_MS = 3e4;
 var STALLED_INCOMING_TRANSFER_TIMEOUT_MS = FRAME_ACK_TIMEOUT_MS * 3;
+var MAX_INCOMING_FRAME_TRANSFERS = 8;
+var MAX_INCOMING_FRAME_BUFFERED_BYTES = MAX_TRANSFER_BYTES * 4;
 var FRAME_RESUME_TIMEOUT_MS = 1e3;
 var COMPLETED_FRAME_ACK_TTL_MS = 6e4;
 var MAX_GLOBAL_RTC_PEER_CONNECTIONS = 64;
@@ -3998,6 +4000,10 @@ var CtoxWebRtcNativePeer = class {
       maxInlineFrameBytes: MAX_INLINE_FRAME_BYTES,
       maxChunkChars: MAX_CHUNK_CHARS,
       maxTransferBytes: MAX_TRANSFER_BYTES,
+      maxIncomingFrameTransfers: MAX_INCOMING_FRAME_TRANSFERS,
+      maxIncomingFrameBufferedBytes: MAX_INCOMING_FRAME_BUFFERED_BYTES,
+      incomingFrameBufferedBytes: 0,
+      incomingFrameReservedBytes: 0,
       ackWindow: FRAME_ACK_WINDOW,
       sendBufferHighWater: SEND_BUFFER_HIGH_WATER,
       sendBufferLowWater: SEND_BUFFER_LOW_WATER,
@@ -4463,6 +4469,7 @@ var CtoxWebRtcNativePeer = class {
       }
       if (message.type === "joined") {
         this.signalingReconnectDelayMs = SIGNALING_RECONNECT_BASE_MS;
+        this.lastControlPlaneError = null;
       }
       const descriptors = signalingPeerDescriptors(message);
       const previousMetadata = new Map(this.peerMetadata);
@@ -4662,6 +4669,8 @@ var CtoxWebRtcNativePeer = class {
       localCandidateTypes: {},
       remoteCandidateTypes: {},
       handshakeTimer: null,
+      inboundFrameChain: Promise.resolve(),
+      inboundFrameGeneration: 0,
       forceInitiator: this.forceInitiatorPeers.has(remotePeerId)
     };
     this.connections.set(remotePeerId, connection);
@@ -4851,6 +4860,8 @@ var CtoxWebRtcNativePeer = class {
   }
   attachChannel(connection, channel) {
     connection.channel = channel;
+    connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
+    connection.inboundFrameChain = Promise.resolve();
     channel.onopen = () => {
       if (connection.handshakeTimer) {
         clearTimeout(connection.handshakeTimer);
@@ -4868,7 +4879,7 @@ var CtoxWebRtcNativePeer = class {
         payload = JSON.parse(event.data);
       } catch {
       }
-      this.handleDataChannelFrame(connection.remotePeerId, payload);
+      this.enqueueInboundDataChannelFrame(connection, channel, payload);
     };
     channel.onerror = () => {
       connection.lastError = { code: "ctox_data_channel_error", peerId: connection.remotePeerId };
@@ -4879,6 +4890,27 @@ var CtoxWebRtcNativePeer = class {
       this.recordConnectionEvent(connection, "datachannel-close", { readyState: channel.readyState || "closed" });
       this.removeConnection(connection.remotePeerId, "channel-close");
     };
+  }
+  enqueueInboundDataChannelFrame(connection, channel, payload) {
+    if (this.closed || this.connections.get(connection.remotePeerId) !== connection || connection.channel !== channel) {
+      return Promise.resolve();
+    }
+    const generation = Number(connection.inboundFrameGeneration || 0);
+    const previous = connection.inboundFrameChain || Promise.resolve();
+    const current = previous.then(async () => {
+      if (this.closed || this.connections.get(connection.remotePeerId) !== connection || connection.channel !== channel || Number(connection.inboundFrameGeneration || 0) !== generation) return;
+      await this.handleDataChannelFrame(connection.remotePeerId, payload);
+    });
+    connection.inboundFrameChain = current.catch((error) => {
+      if (this.connections.get(connection.remotePeerId) !== connection || connection.channel !== channel || Number(connection.inboundFrameGeneration || 0) !== generation) return;
+      connection.lastError = {
+        code: "ctox_webrtc_inbound_frame_failed",
+        peerId: connection.remotePeerId,
+        message: error?.message || String(error)
+      };
+      this.events.emit("error", connection.lastError);
+    });
+    return connection.inboundFrameChain;
   }
   async handleDataChannelFrame(peerId, payload) {
     if (this.closed) return;
@@ -4959,7 +4991,7 @@ var CtoxWebRtcNativePeer = class {
       const transferId2 = String(payload.transferId || "");
       const totalFrames = Number(payload.totalFrames || 0);
       const totalBytes = Number(payload.totalBytes || 0);
-      if (!transferId2 || totalFrames < 1 || totalFrames > 1e5 || totalBytes > MAX_TRANSFER_BYTES) {
+      if (!transferId2 || totalFrames < 1 || totalFrames > 1e5 || !Number.isFinite(totalBytes) || totalBytes < 0 || totalBytes > MAX_TRANSFER_BYTES) {
         this.events.emit("error", {
           code: "ctox_webrtc_frame_start_invalid",
           peerId,
@@ -4968,10 +5000,29 @@ var CtoxWebRtcNativePeer = class {
         });
         return;
       }
+      this.sweepStalledIncomingTransfers();
+      const replacing = this.incomingFrames.has(transferId2);
+      const incomingTransfers = this.incomingFrames.size - (replacing ? 1 : 0);
+      const reservedBytes = this.incomingFrameReservedBytes(transferId2);
+      if (incomingTransfers + 1 > MAX_INCOMING_FRAME_TRANSFERS || reservedBytes + totalBytes > MAX_INCOMING_FRAME_BUFFERED_BYTES) {
+        this.recordTransportStatus({ rejectedFrames: this.transportStats.rejectedFrames + 1 });
+        this.events.emit("error", {
+          code: "ctox_webrtc_incoming_transfer_budget_exceeded",
+          peerId,
+          transferId: transferId2,
+          requestedBytes: totalBytes,
+          incomingTransfers,
+          reservedBytes,
+          maxTransfers: MAX_INCOMING_FRAME_TRANSFERS,
+          maxBufferedBytes: MAX_INCOMING_FRAME_BUFFERED_BYTES
+        });
+        return;
+      }
       this.incomingFrames.set(transferId2, {
         peerId,
         totalFrames,
         totalBytes,
+        bufferedBytes: 0,
         received: /* @__PURE__ */ new Map(),
         createdAt: Date.now(),
         // M3: advanced on every genuinely-new frame (see recordReceivedFrame);
@@ -4984,9 +5035,10 @@ var CtoxWebRtcNativePeer = class {
       });
       this.completedFrameAcks.delete(transferId2);
       this.cleanupCompletedFrameAcks();
-      this.sweepStalledIncomingTransfers();
       this.recordTransportStatus({
         incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
         completedAckCacheSize: this.completedFrameAcks.size
       });
       return;
@@ -5065,8 +5117,32 @@ var CtoxWebRtcNativePeer = class {
       });
       return;
     }
-    const contiguousSeq = recordReceivedFrame(entry, seq, String(payload.data || ""));
+    const chunkData = String(payload.data || "");
+    const previousChunkBytes = entry.received.has(seq) ? encodedSize(entry.received.get(seq) || "") : 0;
+    const nextBufferedBytes = Number(entry.bufferedBytes || 0) - previousChunkBytes + encodedSize(chunkData);
+    if (nextBufferedBytes > entry.totalBytes) {
+      this.incomingFrames.delete(transferId);
+      this.recordTransportStatus({
+        rejectedFrames: this.transportStats.rejectedFrames + 1,
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes()
+      });
+      this.events.emit("error", {
+        code: "ctox_webrtc_frame_buffer_exceeds_declared_size",
+        peerId,
+        transferId,
+        bufferedBytes: nextBufferedBytes,
+        declaredBytes: entry.totalBytes
+      });
+      return;
+    }
+    entry.bufferedBytes = nextBufferedBytes;
+    const contiguousSeq = recordReceivedFrame(entry, seq, chunkData);
     if (entry.received.size !== entry.totalFrames) {
+      this.recordTransportStatus({
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes()
+      });
       if (contiguousSeq >= entry.nextAckSeq && contiguousSeq < entry.totalFrames - 1) {
         this.send(peerId, {
           ctoxFrame: CTOX_FRAME_PROTOCOL,
@@ -5086,6 +5162,11 @@ var CtoxWebRtcNativePeer = class {
       text += entry.received.get(index) || "";
     }
     if (entry.totalBytes && encodedSize(text) !== entry.totalBytes) {
+      this.recordTransportStatus({
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes()
+      });
       this.events.emit("error", {
         code: "ctox_webrtc_frame_size_mismatch",
         peerId,
@@ -5113,6 +5194,8 @@ var CtoxWebRtcNativePeer = class {
     this.sweepStalledIncomingTransfers();
     this.recordTransportStatus({
       incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size
     });
     try {
@@ -5213,6 +5296,9 @@ var CtoxWebRtcNativePeer = class {
     if (!connection) return;
     this.connections.delete(peerId);
     this.connectionRequests.delete(peerId);
+    connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
+    connection.inboundFrameChain = null;
+    if (connection.channel) connection.channel.onmessage = null;
     if (connection.handshakeTimer) {
       clearTimeout(connection.handshakeTimer);
       connection.handshakeTimer = null;
@@ -5339,6 +5425,11 @@ var CtoxWebRtcNativePeer = class {
     for (const [transferId, entry] of [...this.incomingFrames.entries()]) {
       if (entry.peerId === peerId) this.incomingFrames.delete(transferId);
     }
+    this.recordTransportStatus({
+      incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes()
+    });
   }
   rejectAllPending(error) {
     for (const [id, pending] of [...this.pending.entries()]) {
@@ -5370,6 +5461,8 @@ var CtoxWebRtcNativePeer = class {
     this.recordTransportStatus({
       pendingAcks: 0,
       incomingTransfers: 0,
+      incomingFrameBufferedBytes: 0,
+      incomingFrameReservedBytes: 0,
       completedAckCacheSize: 0,
       priorityQueueDepth: 0,
       highPriorityQueueDepth: 0,
@@ -5386,6 +5479,8 @@ var CtoxWebRtcNativePeer = class {
       pendingAcks: this.pendingFrameAcks.size,
       pendingRequests: this.pending.size,
       incomingTransfers: this.incomingFrames.size,
+      incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+      incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
       connectionCount: this.connections.size,
       rtcConnectionPool: rtcPeerConnectionPoolCounters()
@@ -5518,6 +5613,21 @@ var CtoxWebRtcNativePeer = class {
       oldestQueuedAgeMs: oldestQueuedAtMs > 0 ? Math.max(0, Date.now() - oldestQueuedAtMs) : 0
     });
   }
+  incomingFrameReservedBytes(excludeTransferId = "") {
+    let total = 0;
+    for (const [transferId, entry] of this.incomingFrames.entries()) {
+      if (excludeTransferId && transferId === excludeTransferId) continue;
+      total += Math.max(0, Number(entry?.totalBytes || 0));
+    }
+    return total;
+  }
+  incomingFrameBufferedBytes() {
+    let total = 0;
+    for (const entry of this.incomingFrames.values()) {
+      total += Math.max(0, Number(entry?.bufferedBytes || 0));
+    }
+    return total;
+  }
   cleanupCompletedFrameAcks() {
     const now = Date.now();
     for (const [transferId, completed] of [...this.completedFrameAcks.entries()]) {
@@ -5550,7 +5660,11 @@ var CtoxWebRtcNativePeer = class {
       });
     }
     if (swept > 0) {
-      this.recordTransportStatus({ incomingTransfers: this.incomingFrames.size });
+      this.recordTransportStatus({
+        incomingTransfers: this.incomingFrames.size,
+        incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
+        incomingFrameReservedBytes: this.incomingFrameReservedBytes()
+      });
     }
     return swept;
   }
@@ -6145,7 +6259,9 @@ var webrtcNativeTestInternals = Object.freeze({
   encodedSize,
   utf8ByteLength,
   recordReceivedFrame,
-  MAX_SERIALIZED_FRAME_BYTES
+  MAX_SERIALIZED_FRAME_BYTES,
+  MAX_INCOMING_FRAME_TRANSFERS,
+  MAX_INCOMING_FRAME_BUFFERED_BYTES
 });
 function jsonEscapedCharLen(ch) {
   const code = ch.codePointAt(0);
