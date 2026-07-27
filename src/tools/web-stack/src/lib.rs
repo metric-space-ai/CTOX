@@ -75,6 +75,10 @@ pub use surface::handle_web_command;
 #[cfg(feature = "full")]
 pub use surface::WebScrapeRequest;
 #[cfg(feature = "full")]
+pub use person_research::merge_person_research_source_records;
+#[cfg(feature = "full")]
+pub use person_research::persist_person_research_workspace;
+#[cfg(feature = "full")]
 pub use unlock::handle_unlock_command;
 #[cfg(feature = "full")]
 pub use unlock_report::generate_acceptance_report;
