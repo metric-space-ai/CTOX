@@ -98,6 +98,21 @@ test('credentials: record list renders selector rows from a stub doc array', asy
   assert.match(empty, /ctox-empty/, 'empty state renders the kit empty class');
 });
 
+test('credentials: empty list follows collection readiness (syncing vs empty)', async () => {
+  const mod = await import('../index.js');
+  const now = 1_781_990_000_000;
+  const syncing = mod.renderRecordList([], { view: 'cards', nowMs: now, readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncing, /ctox-syncing/, 'unready collection renders the syncing shell');
+  assert.ok(!/ctox-empty/.test(syncing), 'no empty state while the collection is not ready');
+  assert.match(syncing, /role="status"/, 'syncing shell is a polite status region');
+  const ready = mod.renderRecordList([], { view: 'cards', nowMs: now, readiness: { ready: true, state: 'live' } });
+  assert.match(ready, /ctox-empty/, 'ready + empty renders the plain empty state');
+  // Rows always win, even when the collection is still catching up.
+  const rows = [{ id: 'c1', subject_id: 'cand-1', credential_type: 'g25', verified: false }];
+  const withRows = mod.renderRecordList(rows, { view: 'cards', nowMs: now, readiness: { ready: false, state: 'catching-up' } });
+  assert.match(withRows, /data-context-record-id="c1"/, 'rows win over the syncing shell');
+});
+
 test('credentials: band + counts derive from the derived credential status', async () => {
   const mod = await import('../index.js');
   const now = 1_781_990_000_000;

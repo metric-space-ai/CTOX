@@ -9,5 +9,6 @@
   "bandAll": "Alle",
   "bandValid": "Gültig",
   "bandExpiring": "Ablaufend",
-  "bandCritical": "Kritisch"
+  "bandCritical": "Kritisch",
+  "syncing": "Daten werden synchronisiert."
 }

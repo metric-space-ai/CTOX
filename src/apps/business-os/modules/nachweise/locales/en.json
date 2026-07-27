@@ -9,5 +9,6 @@
   "bandAll": "All",
   "bandValid": "Valid",
   "bandExpiring": "Expiring",
-  "bandCritical": "Critical"
+  "bandCritical": "Critical",
+  "syncing": "Syncing data."
 }

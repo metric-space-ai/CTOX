@@ -4,6 +4,7 @@ import {
   daysUntilExpiry,
   isDeploymentBlocking,
 } from './core/credential.js';
+import { renderListOrState } from '../../shared/list-state.js';
 
 const MOD_BUILD = '20260721-nachweise-ia';
 const MODULE_ID = 'nachweise';
@@ -42,6 +43,7 @@ const COPY = {
     expiredAgo: 'abgelaufen vor', daysRemaining: 'noch', days: 'Tage', noExpiry: 'kein Ablauf', verifiedBy: 'verifiziert von',
     deploymentCheck: 'Einsatz prüfen', deploymentBlocking: 'Einsatz blockierend', credential: 'Nachweis',
     statusValid: 'gültig', statusExpiring: 'läuft ab', statusExpired: 'abgelaufen', statusNotYetValid: 'noch nicht gültig', statusUnverified: 'nicht verifiziert',
+    syncing: 'Daten werden synchronisiert.',
   },
   en: {
     title: 'Credentials', kicker: 'ATS', listTitle: 'Credentials', newTitle: 'New credential',
@@ -66,6 +68,7 @@ const COPY = {
     expiredAgo: 'expired', daysRemaining: 'expires in', days: 'days', noExpiry: 'no expiry', verifiedBy: 'verified by',
     deploymentCheck: 'Check deployment', deploymentBlocking: 'Blocks deployment', credential: 'Credential',
     statusValid: 'valid', statusExpiring: 'expiring', statusExpired: 'expired', statusNotYetValid: 'not yet valid', statusUnverified: 'unverified',
+    syncing: 'Syncing data.',
   },
 };
 let text = COPY.de;
@@ -159,13 +162,20 @@ export function credentialRow(r, opts = {}) {
     + '</div>';
 }
 
-// The list body markup (shards or compact rows), or the empty state.
+// The list body markup (shards or compact rows), or the empty/sync state.
+// Rows always win; the kit syncing shell shows only when the caller passes a
+// readiness snapshot with ready === false (unfiltered source empty, initial
+// replication pending). Filter/search empties and absent readiness APIs keep
+// the plain empty copy.
 export function renderRecordList(rows, opts = {}) {
   const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) {
-    return '<div class="ctox-empty"><strong>' + esc(opts.emptyText || text.empty) + '</strong></div>';
-  }
-  return list.map((r) => credentialRow(r, { view: opts.view, nowMs: opts.nowMs, selected: r.id && r.id === opts.selectedId })).join('');
+  return renderListOrState(list, opts.readiness || null, {
+    renderRows: (rs) => rs
+      .map((r) => credentialRow(r, { view: opts.view, nowMs: opts.nowMs, selected: r.id && r.id === opts.selectedId }))
+      .join(''),
+    empty: opts.emptyText || text.empty,
+    syncing: opts.syncingText || text.syncing,
+  });
 }
 
 // Read-only detail card for the selected credential (auto-reveal target).
@@ -269,8 +279,20 @@ export async function mount(ctx) {
   let rowsCache = [];
   let selectedId = null;
   let userCollapsed = false;
+  // Collection readiness snapshot for the record list (shell-owned sync
+  // contract); null when the shell exposes no readiness API → the previous
+  // empty-state behaviour.
+  let credReadiness = readCredentialsReadiness();
   const nowMs = () => Date.now();
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
+
+  // Shell-owned readiness for the primary collection; absent API (older
+  // shells, tests) reads as null.
+  function readCredentialsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    if (typeof read !== 'function') return null;
+    try { return read.call(ctx.sync, PRIMARY) || null; } catch { return null; }
+  }
 
   // Gate result → kit callout state (base.css .ctox-callout modifiers).
   const GATE_KINDS = { ok: 'is-success', block: 'is-danger', offline: 'is-warning' };
@@ -329,7 +351,13 @@ export async function mount(ctx) {
     const filtered = filterRows(rowsCache, g, now);
     if (listEl) {
       const emptyText = rowsCache.length ? text.emptyFiltered : text.empty;
-      listEl.innerHTML = renderRecordList(filtered, { view: g.view, selectedId, nowMs: now, emptyText });
+      listEl.innerHTML = renderRecordList(filtered, {
+        view: g.view, selectedId, nowMs: now, emptyText,
+        // Gate only the data-driven empty (unfiltered source empty); filter
+        // empties keep the plain copy.
+        readiness: rowsCache.length ? null : credReadiness,
+        syncingText: text.syncing,
+      });
     }
     writeCounts(countsFor(rowsCache, now));
     const scope = { all: text.bandAll, valid: text.bandValid, expiring: text.bandExpiring, critical: text.bandCritical }[g.band] || text.bandAll;
@@ -644,16 +672,30 @@ export async function mount(ctx) {
   rail?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
 
   let subscription = null;
+  let readinessUnsubscribe = null;
   const col = collection();
   if (col?.find) {
     try { subscription = col.find({ selector: {} }).$?.subscribe?.(() => { load().then(render).catch(() => {}); }); }
     catch { /* live sync optional */ }
+  }
+  // Re-render the record list when the collection flips its replication state
+  // so the empty list swaps between the syncing shell and the real empty
+  // state without waiting for data changes.
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    try {
+      const un = ctx.sync.subscribeCollectionReadiness(PRIMARY, (snapshot) => {
+        credReadiness = snapshot || null;
+        render();
+      });
+      if (typeof un === 'function') readinessUnsubscribe = un;
+    } catch { /* readiness optional */ }
   }
   await load();
   render();
 
   return () => {
     try { subscription?.unsubscribe?.(); } catch {}
+    try { readinessUnsubscribe?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     gateFormEl?.removeEventListener('submit', onGateCheck);
     signoffFormEl?.removeEventListener('submit', onSignoff);
