@@ -8745,9 +8745,10 @@ var replicationWebRtcTestInternals = Object.freeze({
   decodeCapabilityTokenClaims,
   readPermissionDigestFromCapabilityToken,
   readPermissionDigestMatches,
-  // Lazy accessor (class is declared below): lets the activation-catch-up
-  // smoke drive the real SharedRoomPeer registry wiring without a network.
-  getSharedRoomPeerClass: () => SharedRoomPeer
+  // Lazy accessors (classes are declared below): let smoke tests drive the
+  // real state machines without opening a network connection.
+  getSharedRoomPeerClass: () => SharedRoomPeer,
+  getReplicationStateClass: () => CtoxWebRtcReplicationState
 });
 function isTransientSharedPeerError(error) {
   const message = String(error?.message || error || "");
@@ -9768,6 +9769,10 @@ var CtoxWebRtcReplicationState = class {
         this.requestTimeoutMsFor("masterWrite"),
         this.collection.name
       );
+      const terminalRejection = terminalPushRejection(conflicts);
+      if (terminalRejection) {
+        throw terminalPushRejectionError(terminalRejection, this.collection.name);
+      }
       const conflictMap = documentsByPrimaryPath(conflicts, this.collection.schema.primaryPath);
       if (!conflictMap.size) {
         rows = [];
@@ -9872,7 +9877,15 @@ var CtoxWebRtcReplicationState = class {
       let record = null;
       try {
         record = await storage.getStoredRecord?.(id);
-      } catch {
+      } catch (cause) {
+        const error = fieldMergePersistenceError({
+          cause,
+          collection: this.collection.name,
+          documentId: id,
+          operation: "read-merge-base"
+        });
+        this.error$.next(error);
+        throw error;
       }
       const { merged, requiresManualResolution, conflictFields } = threeWayMergeDocuments(
         record?.base,
@@ -9887,11 +9900,19 @@ var CtoxWebRtcReplicationState = class {
         error.fields = conflictFields;
         throw error;
       }
-      if (storage.mergeStats) storage.mergeStats.pushConflictMerges += 1;
       try {
         await storage.bulkWrite([merged], { baseById: { [id]: row.assumedMasterState } });
-      } catch {
+      } catch (cause) {
+        const error = fieldMergePersistenceError({
+          cause,
+          collection: this.collection.name,
+          documentId: id,
+          operation: "write-merged-document"
+        });
+        this.error$.next(error);
+        throw error;
       }
+      if (storage.mergeStats) storage.mergeStats.pushConflictMerges += 1;
       mergedRows.push({ newDocumentState: merged, assumedMasterState: row.assumedMasterState });
     }
     return mergedRows;
@@ -10084,17 +10105,45 @@ var CtoxWebRtcReplicationState = class {
       primaryDelete
     });
     const queryMetaBudgetBytes = queryMetaBudgetBytesForCollection(this.collection.name);
+    let demandCacheSafetyOperation = "setBudgetBytes";
     try {
       await this.demandSidecar.setBudgetBytes(queryMetaBudgetBytes);
-    } catch {
-    }
-    try {
+      demandCacheSafetyOperation = "startEvictionScheduler";
       this.demandSidecar.startEvictionScheduler({
         intervalMs: 3e4,
         globalBudgetBytes: GLOBAL_QUERY_META_BUDGET_BYTES,
         shareBudgetBytes: queryMetaBudgetBytes
       });
-    } catch {
+    } catch (cause) {
+      const error = demandCacheSafetyError({
+        cause,
+        collection: this.collection.name,
+        operation: demandCacheSafetyOperation
+      });
+      this.demandLoaderActive = false;
+      this.demandStatus.queryDemandLoadingActive = false;
+      this.demandStatus.code = error.code;
+      if (typeof this.collection.setDemandLoader === "function") {
+        this.collection.setDemandLoader(null);
+      }
+      try {
+        this.demandSidecar?.stopEvictionScheduler?.();
+      } catch {
+      }
+      try {
+        await this.demandSidecar?.close?.();
+      } catch (cleanupError) {
+        this.error$.next(cleanupError);
+      }
+      try {
+        this.multiTabBroker?.close?.();
+      } catch {
+      }
+      this.demandSidecar = null;
+      this.multiTabBroker = null;
+      this.error$.next(error);
+      this.publishTransportStatus();
+      return null;
     }
     const demandReplicationOrigin = () => this.replicationOriginForPeer(this.activeRemotePeerId) || { role: "ctox_instance", peerId: this.activeRemotePeerId || "", sessionId: "", collection: this.collection.name };
     this.demandLoader = queryDemandEnabled ? createQueryDemandLoader({
@@ -10530,6 +10579,44 @@ function terminalPushRejection(result) {
     collection: String(result.collection || ""),
     message: message || code || "terminal replication rejection"
   };
+}
+function terminalPushRejectionError(rejection, collection) {
+  const collectionName = rejection?.collection || collection || "";
+  const error = new Error(
+    `Terminal masterWrite rejection${collectionName ? ` for ${collectionName}` : ""}: ${rejection?.message || "replication push rejected"}`
+  );
+  error.code = "ctox_replication_push_rejected";
+  error.phase = "replication-io";
+  error.direction = "push";
+  error.terminal = true;
+  error.collection = collectionName;
+  error.rejectionKind = rejection?.kind || "";
+  error.rejectionCode = rejection?.code || "";
+  return error;
+}
+function fieldMergePersistenceError({ cause, collection, documentId: documentId3, operation }) {
+  const error = new Error(
+    `Field-merge persistence ${operation} failed for ${collection}/${documentId3}: ${cause?.message || cause || "unknown error"}`
+  );
+  error.code = "ctox_field_merge_persistence_failed";
+  error.phase = "replication-io";
+  error.direction = "push";
+  error.collection = collection;
+  error.documentId = documentId3;
+  error.operation = operation;
+  error.cause = cause;
+  return error;
+}
+function demandCacheSafetyError({ cause, collection, operation }) {
+  const error = new Error(
+    `Demand-cache safety ${operation} failed for ${collection}: ${cause?.message || cause || "unknown error"}`
+  );
+  error.code = "ctox_demand_cache_safety_failed";
+  error.phase = "demand-loading";
+  error.collection = collection;
+  error.operation = operation;
+  error.cause = cause;
+  return error;
 }
 function changeEventHasOnlyReplicationOriginWrites(event) {
   const docs = Object.values(event?.success || {});
