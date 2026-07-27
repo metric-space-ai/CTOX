@@ -16,7 +16,7 @@ use parking_lot::Mutex;
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::Notify;
+use tokio::sync::{mpsc, Notify};
 
 use crate::plugins::utils::utils_string::random_token;
 use crate::rx_error::{new_rx_error, RxError, RxResult};
@@ -44,6 +44,8 @@ const SQLITE_EXTERNAL_POLL_FILE_CHUNK_LIMIT: u64 = 2;
 const SQLITE_EXTERNAL_POLL_DEFAULT_LIMIT: u64 = 50;
 const SQLITE_EXTERNAL_POLL_MAX_BATCHES_PER_WAKE: usize = 32;
 const SQLITE_EXTERNAL_POLL_SAFETY_INTERVAL: Duration = Duration::from_secs(60);
+const SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE: Duration = Duration::from_millis(25);
+const SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_MAX: Duration = Duration::from_secs(5);
 const SQLITE_QUERY_FALLBACK_SCAN_LIMIT: u64 = 4096;
 const SQLITE_QUERY_FALLBACK_TOO_BROAD: &str = "SQLITE_QUERY_FALLBACK_TOO_BROAD";
 const SQLITE_QUERY_STREAM_UNSUPPORTED: &str = "SQLITE_QUERY_STREAM_UNSUPPORTED";
@@ -138,6 +140,7 @@ static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
 static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_MAX: AtomicU64 = AtomicU64::new(0);
 static SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_MAX: AtomicU64 = AtomicU64::new(0);
 static SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS: AtomicU64 = AtomicU64::new(0);
+static SQLITE_EXTERNAL_POLL_DRAIN_FAILURES: AtomicU64 = AtomicU64::new(0);
 // Per-database wakeup counter for the external write poll. Global counters
 // are shared across parallel tests, so the idle-budget guard keys on the
 // database path to observe ONLY its own poll thread.
@@ -155,6 +158,8 @@ static SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_BY_TABLE: OnceLock<StdMutex<HashMap<St
 static SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS_BY_TABLE: OnceLock<
     StdMutex<HashMap<String, u64>>,
 > = OnceLock::new();
+static SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
+    OnceLock::new();
 #[cfg(test)]
 static CHANGED_DOCUMENTS_SINCE_TABLE_CALLS: OnceLock<StdMutex<HashMap<String, usize>>> =
     OnceLock::new();
@@ -166,6 +171,34 @@ static CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS: AtomicUsize = AtomicUsize::new(
 static QUERY_WRITER_FALLBACKS: AtomicUsize = AtomicUsize::new(0);
 #[cfg(test)]
 static TEST_EXTERNAL_POLL_SAFETY_INTERVAL_MS: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static TEST_QUERY_STREAM_ROW_DELAY_MS_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
+    OnceLock::new();
+
+#[cfg(test)]
+fn set_test_query_stream_row_delay_ms(table_name: &str, delay_ms: u64) {
+    let mut delays = TEST_QUERY_STREAM_ROW_DELAY_MS_BY_TABLE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap();
+    if delay_ms == 0 {
+        delays.remove(table_name);
+    } else {
+        delays.insert(table_name.to_string(), delay_ms);
+    }
+}
+
+#[cfg(test)]
+fn test_query_stream_row_delay(table_name: &str) -> Duration {
+    let delay_ms = TEST_QUERY_STREAM_ROW_DELAY_MS_BY_TABLE
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .unwrap()
+        .get(table_name)
+        .copied()
+        .unwrap_or(0);
+    Duration::from_millis(delay_ms)
+}
 
 #[cfg(test)]
 fn reset_changed_documents_since_table_call_count(table_name: &str) {
@@ -449,6 +482,10 @@ pub fn sqlite_runtime_counters_snapshot() -> Value {
         "external_poll_drain_budget_exhaustions",
         SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS
     );
+    counter!(
+        "external_poll_drain_failures",
+        SQLITE_EXTERNAL_POLL_DRAIN_FAILURES
+    );
     out.insert(
         "external_poll_wakeups_by_database".to_string(),
         snapshot_counter_map(&SQLITE_EXTERNAL_POLL_WAKEUPS_BY_DATABASE),
@@ -472,6 +509,10 @@ pub fn sqlite_runtime_counters_snapshot() -> Value {
     out.insert(
         "external_poll_drain_budget_exhaustions_by_table".to_string(),
         snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS_BY_TABLE),
+    );
+    out.insert(
+        "external_poll_drain_failures_by_table".to_string(),
+        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE),
     );
     Value::Object(out)
 }
@@ -744,6 +785,11 @@ fn record_sqlite_external_poll_drain(
             table_name,
         );
     }
+}
+
+fn record_sqlite_external_poll_drain_failure(table_name: &str) {
+    SQLITE_EXTERNAL_POLL_DRAIN_FAILURES.fetch_add(1, Ordering::Relaxed);
+    increment_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE, table_name);
 }
 
 fn record_sqlite_writer_lock_wait(elapsed: Duration) {
@@ -1345,9 +1391,12 @@ fn start_external_write_poll(
     let safety_interval = external_poll_safety_interval_for_path(&database_path);
     tokio::spawn(async move {
         let mut seen_generation = 0;
+        let mut consecutive_failures = 0u32;
+        let mut retry_failed_drain = false;
         loop {
             let mut safety_poll = false;
-            if notifier.generation.load(Ordering::SeqCst) == seen_generation {
+            if !retry_failed_drain && notifier.generation.load(Ordering::SeqCst) == seen_generation
+            {
                 if let Some(safety_interval) = safety_interval {
                     tokio::select! {
                         _ = tokio::time::sleep(safety_interval) => {
@@ -1372,10 +1421,9 @@ fn start_external_write_poll(
                 break;
             }
             let current_generation = notifier.generation.load(Ordering::SeqCst);
-            if current_generation == seen_generation && !safety_poll {
+            if current_generation == seen_generation && !safety_poll && !retry_failed_drain {
                 continue;
             }
-            seen_generation = current_generation;
             // FIX 1: run the per-table poll query off the tokio worker thread.
             // Each instance spawns one of these loops; doing the blocking
             // rusqlite read directly on a worker (1-2 on a small VPS) is what
@@ -1410,8 +1458,39 @@ fn start_external_write_poll(
                 )
             })
             .await;
-            let Ok(Ok(drain)) = result else {
-                continue;
+            // A broken table or connection must remain observable without
+            // turning repeated notifications into a hot retry loop.
+            let drain = match result {
+                Ok(Ok(drain)) => {
+                    seen_generation = current_generation;
+                    consecutive_failures = 0;
+                    retry_failed_drain = false;
+                    drain
+                }
+                Ok(Err(err)) => {
+                    retry_failed_drain = true;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    record_sqlite_external_poll_drain_failure(&table_name);
+                    let backoff = external_poll_failure_backoff(consecutive_failures);
+                    eprintln!(
+                        "[ctox][sqlite] external change-feed drain failed for table {} (consecutive failures: {}, retry backoff: {:?}): {:?}",
+                        table_name, consecutive_failures, backoff, err
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
+                Err(err) => {
+                    retry_failed_drain = true;
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    record_sqlite_external_poll_drain_failure(&table_name);
+                    let backoff = external_poll_failure_backoff(consecutive_failures);
+                    eprintln!(
+                        "[ctox][sqlite] external change-feed blocking task failed for table {} (consecutive failures: {}, retry backoff: {:?}): {}",
+                        table_name, consecutive_failures, backoff, err
+                    );
+                    tokio::time::sleep(backoff).await;
+                    continue;
+                }
             };
             if drain.batches.is_empty() {
                 *checkpoint.lock() = drain.checkpoint;
@@ -1473,6 +1552,17 @@ fn external_poll_safety_interval() -> Duration {
     SQLITE_EXTERNAL_POLL_SAFETY_INTERVAL
 }
 
+fn external_poll_failure_backoff(consecutive_failures: u32) -> Duration {
+    if consecutive_failures == 0 {
+        return Duration::ZERO;
+    }
+    let exponent = consecutive_failures.saturating_sub(1).min(31);
+    SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE
+        .checked_mul(1u32 << exponent)
+        .unwrap_or(SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_MAX)
+        .min(SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_MAX)
+}
+
 fn sqlite_path_is_in_memory(path: &Path) -> bool {
     path.to_string_lossy() == ":memory:"
 }
@@ -1488,6 +1578,18 @@ fn open_read_only_connection_for_path(path: &Path) -> RxResult<rusqlite::Connect
     conn.busy_timeout(std::time::Duration::from_secs(10))
         .map_err(super::types::sqlite_error)?;
     Ok(conn)
+}
+
+fn open_dedicated_read_only_connection_for_path(path: &Path) -> RxResult<rusqlite::Connection> {
+    if sqlite_path_is_in_memory(path) {
+        return Err(new_rx_error(
+            "SQLITE_QUERY",
+            Some(json!({
+                "message": "in-memory SQLite does not support concurrent readers; use file-backed storage in production"
+            })),
+        ));
+    }
+    open_read_only_connection_for_path(path)
 }
 
 fn cached_read_only_connection_for_path(
@@ -1919,10 +2021,62 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
         chunk_size: usize,
         on_batch: &mut (dyn FnMut(Vec<Value>) -> Result<bool, RxError> + Send),
     ) -> Result<(), RxError> {
-        // V1.5: route through the inherent bounded-memory cursor path so
-        // the dispatcher actually gets streaming semantics instead of
-        // materializing the whole result in RAM.
-        self.query_stream(prepared_query, chunk_size, |batch| on_batch(batch))
+        self.ensure_open("query_stream")?;
+        SQLITE_QUERY_STREAM_CALLS.fetch_add(1, Ordering::Relaxed);
+
+        let database_path = self.database_path.clone();
+        let table_name = self.table_name.clone();
+        let collection_name = self.collection_name.clone();
+        let primary_path = self.primary_path.clone();
+        let prepared_query = prepared_query.clone();
+        // The cursor can outlive many async scheduling quanta. Keeping it on
+        // Tokio's blocking pool prevents a slow consumer or large result set
+        // from starving replication timers on small runtimes.
+        let (batch_sender, mut batch_receiver) = mpsc::channel::<Vec<Value>>(1);
+        let (decision_sender, decision_receiver) = std::sync::mpsc::channel::<bool>();
+        let stream_task = tokio::task::spawn_blocking(move || {
+            query_stream_on_dedicated_connection(
+                &database_path,
+                &table_name,
+                &collection_name,
+                &primary_path,
+                &prepared_query,
+                chunk_size,
+                |batch| {
+                    if batch_sender.blocking_send(batch).is_err() {
+                        return Ok(false);
+                    }
+                    Ok(decision_receiver.recv().unwrap_or(false))
+                },
+            )
+        });
+
+        let mut callback_error = None;
+        while let Some(batch) = batch_receiver.recv().await {
+            match on_batch(batch) {
+                Ok(true) => {
+                    if decision_sender.send(true).is_err() {
+                        break;
+                    }
+                }
+                Ok(false) => {
+                    let _ = decision_sender.send(false);
+                    batch_receiver.close();
+                    break;
+                }
+                Err(err) => {
+                    callback_error = Some(err);
+                    let _ = decision_sender.send(false);
+                    batch_receiver.close();
+                    break;
+                }
+            }
+        }
+        let stream_result = stream_task.await.map_err(join_error)?;
+        if let Some(err) = callback_error {
+            return Err(err);
+        }
+        stream_result
     }
 
     fn query_stream_into_blocking(
@@ -2205,6 +2359,71 @@ impl Drop for RxStorageInstanceSqlite {
     }
 }
 
+fn query_stream_on_dedicated_connection<F>(
+    database_path: &Path,
+    table_name: &str,
+    collection_name: &str,
+    primary_path: &str,
+    prepared_query: &Value,
+    chunk_size: usize,
+    mut visit: F,
+) -> RxResult<()>
+where
+    F: FnMut(Vec<Value>) -> RxResult<bool>,
+{
+    let query: FilledMangoQuery =
+        serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null))
+            .map_err(|err| {
+                new_rx_error(
+                    "SQLITE_QUERY",
+                    Some(json!({ "message": format!("invalid prepared query: {err}") })),
+                )
+            })?;
+    // A stream deliberately does not borrow the cached point-read connection:
+    // its cursor stays open across callbacks and must not serialize unrelated reads.
+    let read_conn = match open_dedicated_read_only_connection_for_path(database_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
+            return Err(err);
+        }
+    };
+
+    if let Some(compiled) = compile_query_sql(table_name, primary_path, &query) {
+        let chunk = chunk_size.max(1);
+        let mut batch = Vec::with_capacity(chunk);
+        let mut keep_streaming = true;
+        for_each_document_with_compiled_sql(&read_conn, &compiled, |doc| {
+            SQLITE_QUERY_STREAM_RESULTS.fetch_add(1, Ordering::Relaxed);
+            #[cfg(test)]
+            std::thread::sleep(test_query_stream_row_delay(table_name));
+            batch.push(doc);
+            if batch.len() >= chunk {
+                let emit = std::mem::take(&mut batch);
+                keep_streaming = visit(emit)?;
+                if !keep_streaming {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if keep_streaming && !batch.is_empty() && !visit(batch)? {
+            return Ok(());
+        }
+        return Ok(());
+    }
+
+    SQLITE_QUERY_STREAM_UNSUPPORTED_CALLS.fetch_add(1, Ordering::Relaxed);
+    Err(new_rx_error(
+        SQLITE_QUERY_STREAM_UNSUPPORTED,
+        Some(json!({
+            "message": "query_stream requires a SQL-compilable Mango query; refusing Rust matcher fallback on the WebRTC query-fetch hot path",
+            "collection": collection_name,
+            "table": table_name,
+        })),
+    ))
+}
+
 impl RxStorageInstanceSqlite {
     /// V1.5 streaming query for the WebRTC `rxdb.query.fetch` handler. Yields
     /// matching documents in batches sized by `chunk_size`. The visitor
@@ -2219,76 +2438,29 @@ impl RxStorageInstanceSqlite {
         &self,
         prepared_query: &Value,
         chunk_size: usize,
-        mut visit: F,
+        visit: F,
     ) -> RxResult<()>
     where
         F: FnMut(Vec<Value>) -> RxResult<bool>,
     {
         self.ensure_open("query_stream")?;
         SQLITE_QUERY_STREAM_CALLS.fetch_add(1, Ordering::Relaxed);
-        let query: FilledMangoQuery =
-            serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null))
-                .map_err(|err| {
-                    new_rx_error(
-                        "SQLITE_QUERY",
-                        Some(json!({ "message": format!("invalid prepared query: {err}") })),
-                    )
-                })?;
-        // V1.5 production-hardening: use the instance's cached read-only
-        // connection for this stream. The shared write-connection stays free
-        // for other peers, replication, and same-process writes. WAL mode
-        // (set in `RxStorageSqlite::connection`) makes concurrent readers cheap.
-        let read_conn = match self.open_read_only_connection() {
-            Ok(conn) => conn,
-            Err(err) => {
-                SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
-                return Err(err);
-            }
-        };
-        let read_conn = read_conn.lock();
-
-        if let Some(compiled) = compile_query_sql(&self.table_name, &self.primary_path, &query) {
-            let chunk = chunk_size.max(1);
-            let mut batch = Vec::with_capacity(chunk);
-            let mut keep_streaming = true;
-            for_each_document_with_compiled_sql(&read_conn, &compiled, |doc| {
-                SQLITE_QUERY_STREAM_RESULTS.fetch_add(1, Ordering::Relaxed);
-                batch.push(doc);
-                if batch.len() >= chunk {
-                    let emit = std::mem::take(&mut batch);
-                    keep_streaming = visit(emit)?;
-                    if !keep_streaming {
-                        return Ok(false);
-                    }
-                }
-                Ok(true)
-            })?;
-            if keep_streaming && !batch.is_empty() {
-                if !visit(batch)? {
-                    return Ok(());
-                }
-            }
-            return Ok(());
-        }
-
-        SQLITE_QUERY_STREAM_UNSUPPORTED_CALLS.fetch_add(1, Ordering::Relaxed);
-        Err(new_rx_error(
-            SQLITE_QUERY_STREAM_UNSUPPORTED,
-            Some(json!({
-                "message": "query_stream requires a SQL-compilable Mango query; refusing Rust matcher fallback on the WebRTC query-fetch hot path",
-                "collection": self.collection_name,
-                "table": self.table_name,
-            })),
-        ))
+        query_stream_on_dedicated_connection(
+            &self.database_path,
+            &self.table_name,
+            &self.collection_name,
+            &self.primary_path,
+            prepared_query,
+            chunk_size,
+            visit,
+        )
     }
 
     fn open_read_only_connection(&self) -> RxResult<SharedSqliteConnection> {
         let path = &self.database_path;
         // SQLite supports `:memory:` only for the connection that created
-        // it. Memory DBs are used in tests where we don't run concurrent
-        // streams against the same instance, so falling back to the shared
-        // connection is acceptable. For file-backed DBs, WAL mode gives us
-        // a real concurrent reader.
+        // it, so point reads retain the legacy writer fallback there. For
+        // file-backed DBs, WAL mode gives us a real concurrent reader.
         if sqlite_path_is_in_memory(path) {
             return Err(new_rx_error(
                 "SQLITE_QUERY",
@@ -2605,6 +2777,14 @@ mod tests {
     impl Drop for ExternalPollSafetyIntervalReset {
         fn drop(&mut self) {
             set_test_external_poll_safety_interval_ms(0);
+        }
+    }
+
+    struct QueryStreamRowDelayReset(String);
+
+    impl Drop for QueryStreamRowDelayReset {
+        fn drop(&mut self) {
+            set_test_query_stream_row_delay_ms(&self.0, 0);
         }
     }
 
@@ -3873,6 +4053,142 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn query_stream_cursor_does_not_block_the_async_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
+            database_path: dir.path().join("ctox.sqlite3"),
+        });
+        let schema = test_schema();
+        let mut creation_params = params(schema.clone());
+        creation_params.collection_name = "sync_a_stream_worker".to_string();
+        let instance = create_storage_instance(&storage, creation_params)
+            .await
+            .unwrap();
+        instance
+            .bulk_write(
+                vec![BulkWriteRow {
+                    previous: None,
+                    document: doc("doc-00", "1-a", 0, false, 0.0),
+                }],
+                "seed",
+            )
+            .await
+            .unwrap();
+        let prepared = prepare_query(
+            &schema,
+            normalize_mango_query(
+                &schema,
+                MangoQuery {
+                    selector: Some(json!({})),
+                    sort: None,
+                    index: None,
+                    limit: None,
+                    skip: None,
+                },
+            ),
+        )
+        .unwrap();
+
+        set_test_query_stream_row_delay_ms(&instance.table_name, 250);
+        let _delay_reset = QueryStreamRowDelayReset(instance.table_name.clone());
+        let started = tokio::time::Instant::now();
+        let mut streamed_ids = Vec::new();
+        let mut on_batch = |batch: Vec<Value>| {
+            streamed_ids.extend(
+                batch
+                    .iter()
+                    .filter_map(|doc| doc.get("id").and_then(Value::as_str).map(str::to_owned)),
+            );
+            Ok(false)
+        };
+        let (stream_result, timer_elapsed) = tokio::join!(
+            instance.query_stream_into(&prepared, 1, &mut on_batch),
+            async {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                started.elapsed()
+            }
+        );
+
+        stream_result.unwrap();
+        assert_eq!(streamed_ids, vec!["doc-00".to_string()]);
+        assert!(
+            timer_elapsed < Duration::from_millis(180),
+            "the async timer ran after {timer_elapsed:?}, so the SQLite cursor blocked its worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_stream_uses_dedicated_reader_while_point_read_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
+            database_path: dir.path().join("ctox.sqlite3"),
+        });
+        let mut schema = test_schema();
+        schema.indexes = vec![vec!["id".to_string()]];
+        let instance = create_storage_instance(&storage, params(schema.clone()))
+            .await
+            .unwrap();
+        let rows = (0..20)
+            .map(|idx| BulkWriteRow {
+                previous: None,
+                document: doc(&format!("doc-{idx:02}"), "1-a", idx, false, idx as f64),
+            })
+            .collect();
+        instance.bulk_write(rows, "seed").await.unwrap();
+
+        let mut sort = HashMap::new();
+        sort.insert("id".to_string(), "asc".to_string());
+        let prepared = prepare_query(
+            &schema,
+            normalize_mango_query(
+                &schema,
+                MangoQuery {
+                    selector: Some(json!({})),
+                    sort: Some(vec![sort]),
+                    index: None,
+                    limit: None,
+                    skip: None,
+                },
+            ),
+        )
+        .unwrap();
+
+        let read_instance = Arc::clone(&instance);
+        let mut batches = 0usize;
+        instance
+            .query_stream_into(&prepared, 1, &mut |batch| {
+                batches += 1;
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0]["id"], "doc-00");
+
+                let read_instance = Arc::clone(&read_instance);
+                let point_read = std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap();
+                    runtime.block_on(async move {
+                        tokio::time::timeout(
+                            Duration::from_millis(750),
+                            read_instance.find_documents_by_id(&["doc-19".to_string()], false),
+                        )
+                        .await
+                    })
+                })
+                .join()
+                .expect("point-read thread must not panic")
+                .expect("point read must not wait for the open stream cursor")
+                .expect("point read must succeed");
+                assert_eq!(point_read.len(), 1);
+                assert_eq!(point_read[0]["id"], "doc-19");
+                Ok(false)
+            })
+            .await
+            .unwrap();
+        assert_eq!(batches, 1);
+    }
+
+    #[tokio::test]
     async fn changed_documents_since_uses_lwt_then_id_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
         let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
@@ -4310,6 +4626,89 @@ mod tests {
             status["epoch"].as_str().unwrap(),
             sha256_hex(live_epoch_input.as_bytes()),
             "live epoch must be sha256 of the fixture's epochInputTemplate substitution"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_change_feed_failures_are_counted_and_backed_off() {
+        assert_eq!(
+            external_poll_failure_backoff(1),
+            SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE
+        );
+        assert_eq!(
+            external_poll_failure_backoff(2),
+            SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE * 2
+        );
+        assert_eq!(
+            external_poll_failure_backoff(u32::MAX),
+            SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_MAX
+        );
+
+        let storage = get_rx_storage_sqlite(RxStorageSqliteSettings {
+            database_path: std::path::PathBuf::from(":memory:"),
+        });
+        let mut creation_params = params(test_schema());
+        creation_params.collection_name = "sync_a_change_feed_failure".to_string();
+        let instance = create_storage_instance(&storage, creation_params)
+            .await
+            .unwrap();
+        let failures_before = runtime_counter_map_value(
+            "external_poll_drain_failures_by_table",
+            &instance.table_name,
+        );
+
+        {
+            let conn = instance.connection.lock();
+            conn.execute(
+                &format!("DROP TABLE {}", quote_identifier(&instance.table_name)),
+                [],
+            )
+            .unwrap();
+        }
+        instance.external_notifier.signal();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime_counter_map_value(
+                "external_poll_drain_failures_by_table",
+                &instance.table_name,
+            ) < failures_before + 1
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("first failed change-feed drain must be counted");
+
+        tokio::time::sleep(SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE / 2).await;
+        assert_eq!(
+            runtime_counter_map_value(
+                "external_poll_drain_failures_by_table",
+                &instance.table_name,
+            ),
+            failures_before + 1,
+            "the first failed drain must not retry before its backoff expires"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while runtime_counter_map_value(
+                "external_poll_drain_failures_by_table",
+                &instance.table_name,
+            ) < failures_before + 2
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("failed change-feed drain must retry after backoff");
+
+        tokio::time::sleep(SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_BASE).await;
+        assert_eq!(
+            runtime_counter_map_value(
+                "external_poll_drain_failures_by_table",
+                &instance.table_name,
+            ),
+            failures_before + 2,
+            "the second failed drain must use the doubled backoff"
         );
     }
 
