@@ -6210,14 +6210,22 @@ fn start_prompt_worker(
                             let evidence_guard = skill_dir.join("scripts/evidence_guard.py");
                             let dashboard_builder =
                                 skill_dir.join("scripts/dashboard_knowledge_build.py");
+                            let evidence_manifest = workspace_root
+                                .map(|workspace| {
+                                    workspace.join("validation/evidence-manifest.json")
+                                })
+                                .expect(
+                                    "systematic research requires a typed workspace root",
+                                );
                             prompt.push_str(&format!(
-                                "\n\nSystematic Research execution contract:\n- attempt_id: {command_turn_id}\n- required_depth: {required_depth}\n- minimum_discovery_rounds: {}\n- minimum_scholarly_rounds: {}\n- target_verified_sources: {}\n- skill: {}\n- evidence_contract: {}\n- evidence_guard: {}\n- deterministic_dashboard_builder: {}\n\nRun a free, iterative Web Stack investigation. Use orthogonal ctox_web_search and ctox_scholarly_search facets, follow citations, use ctox_deep_research only as one discovery surface, carry the canonical exclude list forward, and admit evidence only after a successful typed ctox_web_read of original content. Stop only after two complete rounds add no eligible source.\n\nPersist the exact Evidence v2 manifest at `validation/evidence-manifest.json`, bound to the current run, command, workspace and attempt. Run the evidence guard before completion. Use the deterministic dashboard builder for candidate, source-catalog and physical-data tables; do not hand-author builder-owned CSVs. Build claim/evaluation/semantic-graph rows only from guard-eligible evidence and retain exact Claim -> Evidence -> Snapshot -> Source lineage. The native service validates and imports the outputs after independent review. Never write Business OS databases directly and never spawn child agents.",
+                                "\n\nSystematic Research execution contract:\n- attempt_id: {command_turn_id}\n- required_depth: {required_depth}\n- minimum_discovery_rounds: {}\n- minimum_scholarly_rounds: {}\n- target_verified_sources: {}\n- skill: {}\n- evidence_contract: {}\n- evidence_guard: {}\n- evidence_manifest: {}\n- deterministic_dashboard_builder: {}\n\nRun a free, iterative Web Stack investigation. Use orthogonal ctox_web_search and ctox_scholarly_search facets, follow citations, use ctox_deep_research only as one discovery surface, carry the canonical exclude list forward, and admit evidence only after a successful typed ctox_web_read of original content. Stop only after two complete rounds add no eligible source.\n\nPersist the exact Evidence v2 manifest at the absolute `evidence_manifest` path above, bound to the current run, command, workspace and attempt. Do not create a nested `research/validation` directory. Run the evidence guard before completion. Use the deterministic dashboard builder for candidate, source-catalog and physical-data tables; do not hand-author builder-owned CSVs. Build claim/evaluation/semantic-graph rows only from guard-eligible evidence and retain exact Claim -> Evidence -> Snapshot -> Source lineage. The native service validates and imports the outputs after independent review. Never write Business OS databases directly and never spawn child agents.",
                                 research_coverage.minimum_discovery_rounds,
                                 research_coverage.minimum_scholarly_rounds,
                                 research_coverage.target_verified_sources,
                                 skill_dir.display(),
                                 evidence_contract.display(),
                                 evidence_guard.display(),
+                                evidence_manifest.display(),
                                 dashboard_builder.display(),
                             ));
                             if job.prompt.contains(

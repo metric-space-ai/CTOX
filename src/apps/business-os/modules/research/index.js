@@ -3929,9 +3929,11 @@ async function runSelectedResearch() {
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
   const candidateRows = candidateTable ? await fetchTableRows(candidateTable.id) : [];
   const knowledgeTableRefs = compactKnowledgeTableReferences(base?.tables || []);
-  const verifiedSourceUrls = sourceUrlsFromRows((state.sourceModels || [])
-    .filter((source) => source.evidenceEligible)
-    .map((source) => source.row));
+  const verifiedSourceModels = (state.sourceModels || [])
+    .filter((source) => source.evidenceEligible);
+  const verifiedSourceUrls = [...new Set(sourceUrlsFromRows(
+    verifiedSourceModels.map((source) => source.row),
+  ))];
   const excludedSourceUrls = [...new Set([
     ...sourceUrlsFromRows(candidateRows),
     ...sourceUrlsFromRows((state.sourceModels || []).map((source) => source.row)),
@@ -3939,7 +3941,6 @@ async function runSelectedResearch() {
   const targetVerifiedSources = Math.max(
     100,
     Number(task?.payload?.target_verified_sources || 0),
-    verifiedSourceUrls.length,
   );
   const minimumCandidateSources = Math.max(
     targetVerifiedSources * 2,
@@ -3970,7 +3971,7 @@ async function runSelectedResearch() {
     `Scoring-Modell:\n${scoringDimensions.map((axis) => `- ${axis.id}: ${axis.label}; weight=${axis.weight || scoringWeights(scoringDimensions)[axis.id] || 1}`).join('\n')}`,
     `Portfolio axes: x=${normalizedAxisPair(task).x}, y=${normalizedAxisPair(task).y}`,
     '',
-    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceUrls.length}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
+    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceModels.length}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
     'Arbeite iterativ mit den typisierten Web-Stack-Werkzeugen, folge bei wissenschaftlichen Quellen den Referenzen und führe zwei orthogonale Nulltreffer-Runden durch. Behandle Discovery nur als Kandidatenmenge. Evidence, Knowledge, Graph und Reports dürfen ausschließlich aus gelesenen, gesnapshotpten und vom Evidence-Gate zugelassenen Originalquellen entstehen.',
     'Nutze die vom System materialisierte Skill-Anleitung und den serverseitigen Writeback-Vertrag. Erzeuge keine parallelen Tabellen, schreibe nicht direkt in Business-OS-Datenbanken und starte keine Child Agents.',
   ].filter(Boolean).join('\n');

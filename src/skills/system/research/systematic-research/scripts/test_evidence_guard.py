@@ -140,6 +140,15 @@ class EvidenceGuardTests(unittest.TestCase):
     def test_valid_manifest_passes(self) -> None:
         validate_manifest(self.manifest, self.base)
 
+    def test_server_receipt_absolute_extracted_text_path_passes_within_workspace(self) -> None:
+        artifact = self.manifest["evidence"][0]["retrieval_receipt"]["receipt_artifact"]
+        receipt_path = self.base / artifact["path"]
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["extracted_text_path"] = str(self.content.resolve())
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        artifact["sha256"] = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+        validate_manifest(self.manifest, self.base)
+
     def test_manifest_cannot_inflate_receipt_relevance_score(self) -> None:
         self.manifest["evidence"][0]["relevance_score"] = 10
         with self.assertRaisesRegex(

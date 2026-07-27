@@ -119,6 +119,7 @@ struct BlockDecision {
     #[serde(alias = "bucket")]
     destination: String,
     reason: String,
+    #[serde(default)]
     revised_text: String,
 }
 
@@ -1929,6 +1930,17 @@ mod tests {
 
         assert_eq!(structured_json_payload(fenced), plain);
         assert_eq!(structured_json_payload(plain), plain);
+    }
+
+    #[test]
+    fn block_decision_defaults_omitted_revised_text() {
+        let response: DecisionStageResponse = serde_json::from_str(
+            r#"{"summary":"kept","decisions":[{"id":"B01","action":"keep","destination":"story","reason":"still relevant"}]}"#,
+        )
+        .expect("decision response");
+
+        assert_eq!(response.decisions.len(), 1);
+        assert!(response.decisions[0].revised_text.is_empty());
     }
 
     #[test]

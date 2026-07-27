@@ -112,6 +112,19 @@ def resolve_path(base_dir: Path, raw: Any) -> Path:
     return resolved
 
 
+def resolve_server_receipt_path(base_dir: Path, raw: Any) -> Path:
+    if not isinstance(raw, str) or not raw.strip():
+        raise GuardError("missing_path")
+    workspace = base_dir.resolve()
+    path = Path(raw)
+    resolved = path.resolve() if path.is_absolute() else (workspace / path).resolve()
+    try:
+        resolved.relative_to(workspace)
+    except ValueError as exc:
+        raise GuardError("path_escapes_workspace") from exc
+    return resolved
+
+
 def require_dict(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise GuardError(f"{label}_must_be_object")
@@ -423,7 +436,10 @@ def validate_manifest(manifest: dict[str, Any], base_dir: Path) -> None:
                 raise GuardError("extracted_text_byte_count_mismatch")
             # The server-written v3 receipt is authoritative for which
             # artifact is the extracted text; the manifest must match it.
-            if persisted_receipt.get("extracted_text_path") != extracted_text.get("path"):
+            receipt_text_path = resolve_server_receipt_path(
+                base_dir, persisted_receipt.get("extracted_text_path")
+            )
+            if receipt_text_path != text_path:
                 raise GuardError("retrieval_receipt_artifact_extracted_text_path_mismatch")
             if normalized_sha256(
                 persisted_receipt.get("extracted_text_sha256"),
