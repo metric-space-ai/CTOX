@@ -4110,23 +4110,52 @@ function sourceUrlsFromRows(rows = []) {
     .filter((url) => /^https?:\/\//i.test(url));
 }
 
-function sourceModelIdentity(source) {
+function normalizedSourceIdentityUrl(value) {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return '';
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    if (url.pathname !== '/') url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch {
+    return raw.replace(/#.*$/, '').replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+function sourceModelIdentities(source) {
   const row = source?.row || {};
-  const id = String(source?.id || sourceId(row) || '').trim();
-  if (id) return `id:${id}`;
-  const canonicalUrl = firstString(row, ['canonical_url', 'source_url', 'url', 'direct_url', 'doi'])
+  const identities = [];
+  for (const value of [
+    firstString(row, ['canonical_url']),
+    firstString(row, ['source_url', 'url', 'direct_url']),
+  ]) {
+    const url = normalizedSourceIdentityUrl(value);
+    if (url) identities.push(`url:${url}`);
+  }
+  const doi = firstString(row, ['doi'])
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
     .trim()
-    .replace(/\/+$/, '')
     .toLowerCase();
-  return canonicalUrl ? `url:${canonicalUrl}` : '';
+  if (doi) identities.push(`doi:${doi}`);
+  const contentHash = firstString(row, ['content_hash', 'snapshot_hash', 'snapshot_sha256'])
+    .replace(/^sha256:/i, '')
+    .trim()
+    .toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(contentHash)) identities.push(`sha256:${contentHash}`);
+  const id = String(sourceId(row) || source?.id || '').trim();
+  if (id) identities.push(`id:${id}`);
+  return [...new Set(identities)];
 }
 
 function uniqueSourceModels(sourceModels = []) {
   const seen = new Set();
   return (sourceModels || []).filter((source, index) => {
-    const identity = sourceModelIdentity(source) || `anonymous:${index}`;
-    if (seen.has(identity)) return false;
-    seen.add(identity);
+    const identities = sourceModelIdentities(source);
+    if (identities.some((identity) => seen.has(identity))) return false;
+    for (const identity of identities.length ? identities : [`anonymous:${index}`]) seen.add(identity);
     return true;
   });
 }

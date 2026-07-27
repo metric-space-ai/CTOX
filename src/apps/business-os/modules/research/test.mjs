@@ -564,7 +564,12 @@ test('research launch deduplicates projected sources and repairs a legacy inflat
   };
   const duplicateProjection = {
     ...source,
-    row: { ...source.row },
+    id: 'projection-copy-1',
+    row: {
+      ...source.row,
+      source_id: 'projection-copy-1',
+      canonical_url: 'https://EXAMPLE.test/source-1/#projection',
+    },
   };
   const unique = hooks.uniqueSourceModels([source, duplicateProjection]);
 
