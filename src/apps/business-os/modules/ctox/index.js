@@ -1,5 +1,6 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js';
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { renderListOrState } from '../../shared/list-state.js';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -17,6 +18,10 @@ const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approve
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
 const CTOX_STYLE_BUILD = '20260721-reference-flow-pins1';
+// Replicated collections whose rows feed the task list (via
+// mergeBundleWithCommands). The data-driven empty branch is gated on their
+// combined readiness so an initial sync never reads as "no work".
+const TASK_SOURCE_COLLECTIONS = ['ctox_queue_tasks', 'business_commands', 'ctox_bug_reports'];
 
 const labels = {
   de: {
@@ -123,6 +128,7 @@ const labels = {
     chatNotReady: 'Chat ist noch nicht bereit.',
     openChat: 'Öffne Chat...',
     noWorkHere: 'Hier liegt gerade keine Arbeit.',
+    syncingTasks: 'Tasks werden synchronisiert.',
     noRecentWork: 'Noch keine aktuelle Arbeit erfasst.',
     noMetrics: 'keine Live-Tokenmetriken',
     routing: 'Routing',
@@ -300,6 +306,7 @@ const labels = {
     chatNotReady: 'Chat is not ready yet.',
     openChat: 'Opening chat...',
     noWorkHere: 'No work here right now.',
+    syncingTasks: 'Syncing tasks.',
     noRecentWork: 'No recent work recorded yet.',
     noMetrics: 'no live token metrics',
     routing: 'Routing',
@@ -505,6 +512,7 @@ export async function mount(ctx) {
     liveTicker: null,
     refreshTimer: null,
     localSubscriptionCleanup: null,
+    readinessCleanup: null,
     refreshInFlight: false,
     disposed: false,
     focusTaskOpenDrawer: false,
@@ -529,6 +537,7 @@ export async function mount(ctx) {
   renderLoading(state);
   startLiveTicker(state);
   state.localSubscriptionCleanup = wireLocalRealtime(state);
+  state.readinessCleanup = wireTaskSourceReadiness(state);
   // A cold RxDB/WebRTC lease must not block the OS window from becoming
   // operable. Hydrate in the background while the compact loading workspace is
   // already visible, then let the normal refresh interval take over.
@@ -546,6 +555,7 @@ export async function mount(ctx) {
     window.clearInterval(state.liveTicker);
     window.clearInterval(state.refreshTimer);
     state.localSubscriptionCleanup?.();
+    state.readinessCleanup?.();
     state.layoutResizeCleanup?.();
     if (harness) delete harness.__ctoxState;
     teardownShellMessages();
@@ -1096,8 +1106,53 @@ function taskListInner(tasks, state, options = {}) {
   if (options.loading) return '<div class="ctox-loading-list" aria-hidden="true"><span></span><span></span><span></span></div>';
   const cards = state.taskViewMode !== 'list';
   const visibleTasks = filterAndSortTasks(tasks, state);
-  if (!visibleTasks.length) return `<div class="ctox-empty"><span>${escapeHtml(t.noWorkHere)}</span></div>`;
+  if (!visibleTasks.length) {
+    // Filter-empty (rows exist, the current filter hides them) stays a plain
+    // empty; only the data-driven empty (replicated sources have no rows at
+    // all) is gated on the collections' initial-sync readiness.
+    if (tasks.length) return `<div class="ctox-empty"><span>${escapeHtml(t.noWorkHere)}</span></div>`;
+    return renderListOrState([], taskSourceReadiness(state), {
+      empty: t.noWorkHere,
+      syncing: t.syncingTasks,
+    });
+  }
   return visibleTasks.map((task) => (cards ? taskCardMarkup(task, state) : compactTaskFlowRow(task, state))).join('');
+}
+
+// Combined readiness of the replicated collections backing the task list. The
+// list counts as unready while ANY source still waits for its initial sync
+// (never-synced / catching-up / offline-pending all surface ready === false).
+function taskSourceReadiness(state) {
+  const read = state.ctx?.sync?.collectionReadiness;
+  if (typeof read !== 'function') return null;
+  const snapshots = [];
+  for (const name of TASK_SOURCE_COLLECTIONS) {
+    try {
+      const snapshot = read.call(state.ctx.sync, name);
+      if (snapshot) snapshots.push(snapshot);
+    } catch {}
+  }
+  if (!snapshots.length) return null;
+  return snapshots.find((snapshot) => snapshot.ready === false) || snapshots[0];
+}
+
+// Re-render the list content (never the chrome) when a backing collection
+// flips its readiness state, so the syncing shell resolves to rows or the
+// honest empty state without waiting for the next poll tick.
+function wireTaskSourceReadiness(state) {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribes = TASK_SOURCE_COLLECTIONS
+    .map((name) => subscribe.call(state.ctx.sync, name, () => {
+      if (state.disposed) return;
+      renderTaskList(state);
+    }))
+    .filter((unsubscribe) => typeof unsubscribe === 'function');
+  return () => {
+    for (const unsubscribe of unsubscribes) {
+      try { unsubscribe(); } catch {}
+    }
+  };
 }
 
 function taskColumnMarkup(tasks, state, options = {}) {

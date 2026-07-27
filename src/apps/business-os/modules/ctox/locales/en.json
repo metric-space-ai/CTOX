@@ -77,6 +77,7 @@
   "chatNotReady": "Chat is not ready yet.",
   "openChat": "Opening chat...",
   "noWorkHere": "No work here right now.",
+  "syncingTasks": "Syncing tasks.",
   "noRecentWork": "No recent work recorded yet.",
   "noMetrics": "no live token metrics",
   "routing": "Routing",

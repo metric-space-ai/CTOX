@@ -41,6 +41,7 @@ const {
   safeTaskDisplayText,
   setFlowZoom,
   taskColumnMarkup,
+  taskListInner,
   taskPipelineStage,
   taskSteps,
   timelinePanel,
@@ -229,6 +230,57 @@ test('Data refresh re-renders only the list content, never the search input node
   // Counts + footer flowed through the null-guarded (no grammar handle) fallback.
   assert.equal(countAll.textContent, ' (0)');
   assert.equal(footer.textContent, '0 entries · All');
+});
+
+test('Task list empty-state follows collection readiness of the backing sources', () => {
+  const base = {
+    ctx: { ...noopActionIcon },
+    lang: 'en',
+    taskSearch: '',
+    taskViewMode: 'cards',
+    taskPrimaryView: 'all',
+    taskSourceFilter: 'all',
+    taskPinFilter: 'all',
+    taskSort: 'updated',
+    taskSortDirection: 'desc',
+    pinnedTaskIds: new Set(),
+  };
+  const withReadiness = (snapshot) => ({
+    ...base,
+    ctx: {
+      ...base.ctx,
+      sync: { collectionReadiness: (name) => ({ collection: name, updatedAt: 0, ...snapshot }) },
+    },
+  });
+  const unready = withReadiness({ state: 'catching-up', ready: false, syncing: true });
+  const ready = withReadiness({ state: 'live', ready: true, syncing: false });
+
+  // Data-driven empty + any source not yet initially synced ⇒ syncing shell.
+  const syncingHtml = taskListInner([], unready);
+  assert.match(syncingHtml, /class="ctox-syncing"/);
+  assert.match(syncingHtml, /role="status"/);
+  assert.doesNotMatch(syncingHtml, /ctox-empty/);
+
+  // Data-driven empty + all sources live ⇒ honest empty.
+  const emptyHtml = taskListInner([], ready);
+  assert.match(emptyHtml, /class="ctox-empty"/);
+  assert.doesNotMatch(emptyHtml, /ctox-syncing/);
+
+  // No readiness API at all (legacy shell) ⇒ falls back to the plain empty.
+  assert.match(taskListInner([], base), /class="ctox-empty"/);
+
+  // Filter-empty (rows exist, the filter hides them) is NOT gated: even with
+  // an unready source it stays the plain empty.
+  const hidden = {
+    id: 'task-hidden-1',
+    taskId: 'task-hidden-1',
+    title: 'Queued review work',
+    status: 'queued',
+    timestamp: new Date().toISOString(),
+  };
+  const filteredHtml = taskListInner([hidden], { ...unready, taskSearch: 'no-such-match' });
+  assert.match(filteredHtml, /class="ctox-empty"/);
+  assert.doesNotMatch(filteredHtml, /ctox-syncing/);
 });
 
 test('Selecting a task is an in-place class flip across the existing rows', () => {
