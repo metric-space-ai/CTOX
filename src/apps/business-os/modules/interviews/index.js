@@ -1,5 +1,6 @@
 import { isMeetingState, isNoShow } from './core/scheduling.js';
 import { scoreScorecard, isScorecardComplete } from './core/scorecard.js';
+import { renderListOrState } from '../../shared/list-state.js';
 
 const MOD_BUILD = '20260721-ia1';
 const MODULE_ID = 'interviews';
@@ -33,6 +34,7 @@ const COPY = {
     stateRescheduled: 'Verschoben', stateCompleted: 'Stattgefunden', stateNoShow: 'No-Show', stateCancelled: 'Abgesagt',
     viewAll: 'Alle', viewOpen: 'Offen', viewDone: 'Erledigt', collapseLabel: 'Einklappen',
     createKicker: 'Neuer Termin', importDone: 'Import abgeschlossen.', importFailed: 'Import fehlgeschlagen',
+    syncingData: 'Daten werden synchronisiert.',
   },
   en: {
     candidatePlaceholder: 'Candidate ID', vacancyPlaceholder: 'Vacancy ID',
@@ -54,6 +56,7 @@ const COPY = {
     stateRescheduled: 'Rescheduled', stateCompleted: 'Attended', stateNoShow: 'No-show', stateCancelled: 'Cancelled',
     viewAll: 'All', viewOpen: 'Open', viewDone: 'Done', collapseLabel: 'Collapse',
     createKicker: 'New meeting', importDone: 'Import complete.', importFailed: 'Import failed',
+    syncingData: 'Syncing data.',
   },
 };
 
@@ -86,8 +89,19 @@ export async function mount(ctx) {
   // Latest loaded record snapshots (kept for grammar-only re-renders).
   let meetings = [];
   let scorecards = [];
+  // Collection readiness snapshot for the primary record list (shell-owned
+  // sync contract); null when the shell exposes no readiness API.
+  let meetingReadiness = readMeetingsReadiness();
 
   const collection = (name) => { try { return ctx.db?.collection?.(name) || null; } catch { return null; } };
+
+  // Shell-owned readiness for the primary collection; absent API (older
+  // shells, tests) reads as null → the previous empty-state behaviour.
+  function readMeetingsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    if (typeof read !== 'function') return null;
+    try { return read.call(ctx.sync, PRIMARY) || null; } catch { return null; }
+  }
 
   // Gate results render in the kit callout; kinds map onto its state variants.
   const GATE_KINDS = { ok: 'is-success', block: 'is-danger', offline: 'is-warning' };
@@ -133,9 +147,11 @@ export async function mount(ctx) {
     writeCounts(counts);
     if (listEl) {
       listEl.classList.toggle('is-compact', grammar.view === 'list');
-      listEl.innerHTML = visible.length
-        ? visible.map((r) => meetingShard(r, { t, locale, nowMs: now, selectedId: ui.selectedId })).join('')
-        : '<div class="ctox-empty">' + esc(t('entriesEmpty')) + '</div>';
+      listEl.innerHTML = meetingListBody(visible, {
+        sourceEmpty: meetings.length === 0,
+        readiness: meetingReadiness,
+        t, locale, nowMs: now, selectedId: ui.selectedId,
+      });
     }
     writeFooter(
       visible.length + ' ' + t('meetings') + ' · ' + bandLabel(grammar.band, t)
@@ -412,6 +428,18 @@ export async function mount(ctx) {
     const col = collection(name);
     if (col?.find) { try { const s = col.find({ selector: {} }).$?.subscribe?.(() => { render().catch(() => {}); }); if (s) subs.push(s); } catch {} }
   }
+  // Re-render the record list when the primary collection flips its
+  // replication state so the empty list swaps between the syncing shell and
+  // the real empty state without waiting for data changes.
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    try {
+      const unsubscribe = ctx.sync.subscribeCollectionReadiness(PRIMARY, (snapshot) => {
+        meetingReadiness = snapshot || null;
+        renderList();
+      });
+      if (typeof unsubscribe === 'function') subs.push({ unsubscribe });
+    } catch {}
+  }
   await render();
 
   return () => {
@@ -457,6 +485,19 @@ export function partitionMeetings(rows, { search = '', status = 'all', band = 'a
     ? scoped.filter((r) => meetingBand(effectiveState(r, nowMs)) === band)
     : scoped;
   return { visible, counts };
+}
+
+// Record-list body via the canonical list-state helper: rows always win;
+// the kit syncing shell shows only when the UNFILTERED source is empty and
+// its collection has not finished initial replication (ready === false).
+// Filter/search empties (source holds rows) and missing readiness APIs keep
+// the plain empty copy.
+export function meetingListBody(visible, { sourceEmpty = false, readiness = null, t = (k) => k, locale = 'de', nowMs = 0, selectedId = null } = {}) {
+  return renderListOrState(visible, sourceEmpty ? readiness : null, {
+    renderRows: (rows) => rows.map((r) => meetingShard(r, { t, locale, nowMs, selectedId })).join(''),
+    empty: t('entriesEmpty'),
+    syncing: t('syncingData'),
+  });
 }
 
 // A shard is a pure selector: title (candidate → vacancy) + ONE muted meta line.

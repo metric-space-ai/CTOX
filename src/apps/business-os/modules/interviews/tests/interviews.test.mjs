@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-import { partitionMeetings, meetingShard, isWorkbenchRevealed, meetingBand } from '../index.js';
+import { partitionMeetings, meetingShard, meetingListBody, isWorkbenchRevealed, meetingBand } from '../index.js';
 
 const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => readFileSync(resolve(moduleRoot, rel), 'utf8');
@@ -114,6 +114,30 @@ test('interviews: partitionMeetings derives band counts and honours filters', ()
   const statusFiltered = partitionMeetings(rows, { band: 'all', status: 'completed', nowMs: now });
   assert.equal(statusFiltered.counts.all, 1);
   assert.equal(statusFiltered.visible[0].id, 'c');
+});
+
+test('interviews: list body gates the data-driven empty on collection readiness', () => {
+  const t = (k) => k;
+  // Empty unfiltered source + still syncing → kit syncing shell.
+  const syncing = meetingListBody([], { sourceEmpty: true, readiness: { ready: false, state: 'catching-up' }, t });
+  assert.match(syncing, /ctox-syncing/);
+  assert.match(syncing, /syncingData/);
+  // Empty unfiltered source + live → plain empty copy.
+  const empty = meetingListBody([], { sourceEmpty: true, readiness: { ready: true, state: 'live' }, t });
+  assert.match(empty, /ctox-empty/);
+  assert.match(empty, /entriesEmpty/);
+  // No readiness API (null) → previous empty-state behaviour.
+  assert.match(meetingListBody([], { sourceEmpty: true, readiness: null, t }), /ctox-empty/);
+  // Filter empties (source holds rows) are never gated on readiness.
+  const filtered = meetingListBody([], { sourceEmpty: false, readiness: { ready: false, state: 'catching-up' }, t });
+  assert.match(filtered, /ctox-empty/);
+  // Rows always win, even while the collection is still syncing.
+  const now = 1_700_000_000_000;
+  const rows = meetingListBody(
+    [{ id: 'imeet_1', candidate_id: 'cand-a', state: 'proposed' }],
+    { sourceEmpty: false, readiness: { ready: false }, t, nowMs: now },
+  );
+  assert.match(rows, /data-ats-select="imeet_1"/);
 });
 
 test('interviews: auto-reveal follows selection / create / collapse', () => {
