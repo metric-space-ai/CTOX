@@ -53,6 +53,7 @@ const labels = {
     entries: 'Einträge',
     empty_all: 'Keine Zugangsdaten konfiguriert.',
     empty_filtered: 'Kein Eintrag passt zum Filter.',
+    syncing: 'Daten werden synchronisiert.',
     confirm_delete: '{name} wirklich entfernen?',
     saved: '{name} gespeichert',
     deleted: '{name} entfernt',
@@ -103,6 +104,7 @@ const labels = {
     entries: 'entries',
     empty_all: 'No credentials configured.',
     empty_filtered: 'No entry matches the filter.',
+    syncing: 'Syncing data.',
     confirm_delete: 'Remove {name}?',
     saved: '{name} saved',
     deleted: '{name} removed',
@@ -211,10 +213,16 @@ export function credentialRow(entry, opts = {}) {
     + '</div>';
 }
 
-// The list body markup (shards or compact rows), or the empty state.
+// The list body markup (shards or compact rows), or the empty state. When the
+// caller passes a collection readiness snapshot (data-driven empty only — the
+// unfiltered replicated source is empty) and it reports `ready === false`, the
+// well shows the canonical syncing shell instead of claiming "no data".
 export function renderRecordList(rows, opts = {}) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) {
+    if (opts.readiness && opts.readiness.ready === false) {
+      return '<div class="ctox-syncing" role="status" aria-live="polite">' + esc(opts.syncingText || tr('syncing')) + '</div>';
+    }
     return '<div class="ctox-empty"><strong>' + esc(opts.emptyText || tr('empty_all')) + '</strong></div>';
   }
   return list.map((e) => credentialRow(e, { view: opts.view, selected: e.name && e.name === opts.selectedName })).join('');
@@ -345,6 +353,11 @@ export async function mount(ctx) {
   let userCollapsed = false;
   let refreshing = false;
   let refreshQueued = false;
+  // Canonical collection readiness for the module's backing collection. The
+  // credential list is a command-bus round trip, but the command docs live in
+  // (and the outcome arrives over) the replicated business_commands bridge —
+  // so its readiness gates the data-driven empty state. Render-hint only.
+  let listReadiness = null;
 
   const collection = () => { try { return ctx.db?.collection?.('business_commands') || null; } catch { return null; } };
 
@@ -413,8 +426,17 @@ export async function mount(ctx) {
     const g = readGrammar();
     const filtered = filterRows(rowsCache, g);
     if (listEl) {
-      const emptyText = rowsCache.length ? t('empty_filtered') : t('empty_all');
-      listEl.innerHTML = renderRecordList(filtered, { view: g.view, selectedName, emptyText });
+      const dataEmpty = !rowsCache.length;
+      const emptyText = dataEmpty ? t('empty_all') : t('empty_filtered');
+      listEl.innerHTML = renderRecordList(filtered, {
+        view: g.view,
+        selectedName,
+        emptyText,
+        // Readiness gates ONLY the data-driven empty; a filter empty means the
+        // data exists and must keep rendering the plain ctox-empty.
+        readiness: dataEmpty ? listReadiness : null,
+        syncingText: t('syncing'),
+      });
     }
     writeCounts(countsFor(rowsCache));
     const scope = { all: t('bandAll'), set: t('bandSet'), open: t('bandOpen') }[g.band] || t('bandAll');
@@ -625,6 +647,21 @@ export async function mount(ctx) {
   formEl?.addEventListener('submit', onSubmit);
   rail?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
 
+  // Readiness: the shell emits an immediate snapshot and re-emits only on
+  // state changes; each change re-renders so the syncing shell resolves to
+  // the real empty/data state once business_commands is live.
+  let readinessUnsubscribe = null;
+  const subscribeReadiness = ctx.sync?.subscribeCollectionReadiness;
+  if (typeof subscribeReadiness === 'function') {
+    try {
+      const unsub = subscribeReadiness.call(ctx.sync, 'business_commands', (snapshot) => {
+        listReadiness = snapshot;
+        render();
+      });
+      readinessUnsubscribe = typeof unsub === 'function' ? unsub : null;
+    } catch { /* readiness is a render hint; absence must never block mount */ }
+  }
+
   // Reactive: re-list when a ctox.secret.put/delete command lands in the shared
   // business_commands collection (own writes + peer writes). The selector
   // excludes ctox.secret.list so our own listing never re-triggers a refresh.
@@ -651,6 +688,7 @@ export async function mount(ctx) {
 
   return () => {
     try { subscription?.unsubscribe?.(); } catch {}
+    try { readinessUnsubscribe?.(); } catch {}
     listEl?.removeEventListener('click', onListClick);
     listEl?.removeEventListener('keydown', onListKey);
     root?.removeEventListener('click', onAction);
