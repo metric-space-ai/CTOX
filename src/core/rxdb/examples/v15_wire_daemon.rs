@@ -239,17 +239,32 @@ async fn main() {
     query_registry.register(Arc::clone(&collection));
     let file_registry = Arc::new(FileFetchRegistry::new(8));
     file_registry.set_auth_check(Arc::new(|_peer_identity, collection| collection == "demo"));
-    file_registry.register_source(
+    file_registry.register_stream_source(
         "demo",
-        Arc::new(|_c, file_id, _r| {
-            // Synthetic file: 800 KB of "FILE:<id>:..." pattern. Range support
-            // omitted for this test; daemon callers ask for whole file.
+        Arc::new(|_c, file_id, _r, emit| {
+            // Synthetic file: the same >=800 KB "FILE:<id>:..." byte stream as
+            // the former buffer source, emitted incrementally. Range support is
+            // omitted; daemon callers ask for the whole file.
             let pattern = format!("FILE:{}:", file_id);
-            let mut buf = Vec::with_capacity(800 * 1024);
-            while buf.len() < 800 * 1024 {
-                buf.extend_from_slice(pattern.as_bytes());
+            let pattern = pattern.as_bytes();
+            let target_bytes: usize = 800 * 1024;
+            let total_bytes = target_bytes.div_ceil(pattern.len()) * pattern.len();
+            let source_chunk_bytes = 256 * 1024;
+            let mut produced = 0usize;
+            while produced < total_bytes {
+                let chunk_len = source_chunk_bytes.min(total_bytes - produced);
+                let mut chunk = Vec::with_capacity(chunk_len);
+                while chunk.len() < chunk_len {
+                    let pattern_offset = (produced + chunk.len()) % pattern.len();
+                    let take = (pattern.len() - pattern_offset).min(chunk_len - chunk.len());
+                    chunk.extend_from_slice(&pattern[pattern_offset..pattern_offset + take]);
+                }
+                if !emit(&chunk)? {
+                    break;
+                }
+                produced += chunk.len();
             }
-            Ok(buf)
+            Ok(())
         }),
     );
 

@@ -12,7 +12,7 @@
 //! observes it between chunks and emits a final chunk with
 //! `{ complete: true, cancelled: true }` then stops.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -120,6 +120,156 @@ pub const QUERY_FETCH_ERROR_REMOTE: &str = "REMOTE_ERROR";
 const QUERY_FETCH_STREAM_UNSUPPORTED_STORAGE_CODE: &str = "SQLITE_QUERY_STREAM_UNSUPPORTED";
 const QUERY_FETCH_STREAM_UNSUPPORTED_DISPATCH_CODE: &str = "QUERY_FETCH_STREAM_UNSUPPORTED";
 
+/// Shared in-flight request core for query and file fetch handlers. Keys are
+/// peer-scoped so identical browser request IDs cannot cancel each other.
+pub(super) struct FetchInflight {
+    entries: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    count: AtomicU64,
+    max: u64,
+}
+
+impl FetchInflight {
+    pub(super) fn new(max: u64) -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+            count: AtomicU64::new(0),
+            max,
+        }
+    }
+
+    pub(super) fn cancel(&self, peer_identity: &str, request_id: &str) -> bool {
+        let key = fetch_inflight_key(peer_identity, request_id);
+        if let Some(flag) = self.entries.lock().get(&key) {
+            flag.store(true, Ordering::SeqCst);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn try_acquire(
+        &self,
+        peer_identity: &str,
+        request_id: &str,
+    ) -> Option<Arc<AtomicBool>> {
+        let key = fetch_inflight_key(peer_identity, request_id);
+        let mut entries = self.entries.lock();
+        if entries.len() as u64 >= self.max || entries.contains_key(&key) {
+            return None;
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        entries.insert(key, Arc::clone(&flag));
+        self.count.store(entries.len() as u64, Ordering::SeqCst);
+        Some(flag)
+    }
+
+    pub(super) fn release(&self, peer_identity: &str, request_id: &str) {
+        let key = fetch_inflight_key(peer_identity, request_id);
+        let mut entries = self.entries.lock();
+        entries.remove(&key);
+        self.count.store(entries.len() as u64, Ordering::SeqCst);
+    }
+
+    pub(super) fn load(&self, ordering: Ordering) -> u64 {
+        self.count.load(ordering)
+    }
+
+    pub(super) fn max(&self) -> u64 {
+        self.max
+    }
+}
+
+fn fetch_inflight_key(peer_identity: &str, request_id: &str) -> String {
+    format!("{peer_identity}\u{1f}{request_id}")
+}
+
+pub(super) async fn send_fetch_response<H: WebRTCConnectionHandler>(
+    handler: &H,
+    peer: &H::Peer,
+    id: &str,
+    result: Value,
+    error: Option<String>,
+) {
+    let response = WebRTCResponse {
+        id: id.to_string(),
+        result,
+        error,
+        collection: None,
+    };
+    let _ = handler
+        .send(peer, WebRTCWireFrame::Response(response))
+        .await;
+}
+
+pub(super) async fn send_fetch_accepted<H: WebRTCConnectionHandler>(
+    handler: &H,
+    peer: &H::Peer,
+    message_id: &str,
+    request_id: &str,
+) {
+    send_fetch_response(
+        handler,
+        peer,
+        message_id,
+        json!({ "accepted": true, "requestId": request_id }),
+        None,
+    )
+    .await;
+}
+
+pub(super) async fn send_fetch_message<H: WebRTCConnectionHandler>(
+    handler: &H,
+    peer: &H::Peer,
+    id: String,
+    method: &str,
+    payload: Value,
+    collection: Option<String>,
+) {
+    let frame = WebRTCMessage {
+        id,
+        method: method.to_string(),
+        params: vec![payload],
+        collection,
+    };
+    let _ = handler.send(peer, WebRTCWireFrame::Message(frame)).await;
+}
+
+pub(super) async fn send_fetch_error_frame<H: WebRTCConnectionHandler>(
+    handler: &H,
+    peer: &H::Peer,
+    ack_id: &str,
+    request_id: &str,
+    error_method: &str,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) {
+    if !ack_id.is_empty() {
+        send_fetch_response(
+            handler,
+            peer,
+            ack_id,
+            Value::Null,
+            Some(format!("{code}: {message}")),
+        )
+        .await;
+    }
+    send_fetch_message(
+        handler,
+        peer,
+        format!("{request_id}-error"),
+        error_method,
+        json!({
+            "requestId": request_id,
+            "code": code,
+            "message": message,
+            "retryable": retryable,
+        }),
+        None,
+    )
+    .await;
+}
+
 /// Per-peer rate-limit token bucket. This intentionally does not mirror the
 /// concurrent stream limit: a browser startup may legitimately open many
 /// short demand-load windows, while only a few streams run at the same time.
@@ -197,15 +347,12 @@ fn sweep_stale_rate_buckets(map: &mut HashMap<String, PeerRateBucket>, ttl: Dura
     map.retain(|_, bucket| bucket.last_access.elapsed() < ttl);
 }
 
-/// Registry of V1.5-eligible collections. The business-os layer registers
-/// each opted-in collection; everything else is answered with
-/// `QUERY_NOT_SUPPORTED`. The default scope is `business_records`,
-/// `communication_messages`, `communication_threads`.
+/// Registry of V1.5-eligible collections. It is fail-closed: the business-os
+/// layer must register every eligible collection explicitly, and there are no
+/// default collections. Everything else is answered with `QUERY_NOT_SUPPORTED`.
 pub struct QueryFetchRegistry {
     inner: Mutex<HashMap<String, Arc<RxCollection>>>,
-    inflight: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    inflight_count: AtomicU64,
-    max_inflight: u64,
+    inflight: FetchInflight,
     peer_rate_buckets: Mutex<HashMap<String, PeerRateBucket>>,
     rate_sweep_counter: AtomicU64,
     rate_burst: u32,
@@ -225,9 +372,7 @@ impl QueryFetchRegistry {
         let stream_based_burst = (max_inflight as u32).saturating_mul(RATE_BUCKET_BURST_MULTIPLIER);
         Self {
             inner: Mutex::new(HashMap::new()),
-            inflight: Mutex::new(HashMap::new()),
-            inflight_count: AtomicU64::new(0),
-            max_inflight,
+            inflight: FetchInflight::new(max_inflight),
             peer_rate_buckets: Mutex::new(HashMap::new()),
             rate_sweep_counter: AtomicU64::new(0),
             rate_burst: stream_based_burst.max(RATE_BUCKET_MIN_BURST),
@@ -296,51 +441,28 @@ impl QueryFetchRegistry {
     }
 
     pub fn cancel(&self, peer_identity: &str, request_id: &str) -> bool {
-        let key = inflight_key(peer_identity, request_id);
-        if let Some(flag) = self.inflight.lock().get(&key) {
-            flag.store(true, Ordering::SeqCst);
-            true
-        } else {
-            false
-        }
+        self.inflight.cancel(peer_identity, request_id)
     }
 
     pub fn count_inflight(&self) -> u64 {
-        self.inflight_count.load(Ordering::SeqCst)
+        self.inflight.load(Ordering::SeqCst)
     }
 
     pub fn max_inflight(&self) -> u64 {
-        self.max_inflight
+        self.inflight.max()
     }
 
     fn try_acquire(&self, peer_identity: &str, request_id: &str) -> Option<Arc<AtomicBool>> {
-        let key = inflight_key(peer_identity, request_id);
-        let mut inflight = self.inflight.lock();
-        if inflight.len() as u64 >= self.max_inflight || inflight.contains_key(&key) {
-            return None;
-        }
-        let flag = Arc::new(AtomicBool::new(false));
-        inflight.insert(key, Arc::clone(&flag));
-        self.inflight_count
-            .store(inflight.len() as u64, Ordering::SeqCst);
-        Some(flag)
+        self.inflight.try_acquire(peer_identity, request_id)
     }
 
     fn release(&self, peer_identity: &str, request_id: &str) {
-        let key = inflight_key(peer_identity, request_id);
-        let mut inflight = self.inflight.lock();
-        inflight.remove(&key);
-        self.inflight_count
-            .store(inflight.len() as u64, Ordering::SeqCst);
+        self.inflight.release(peer_identity, request_id);
     }
 }
 
 fn collection_key(collection_name: &str) -> String {
     collection_name.to_string()
-}
-
-fn inflight_key(peer_identity: &str, request_id: &str) -> String {
-    format!("{peer_identity}\u{1f}{request_id}")
 }
 
 /// Parses a raw `WebRTCMessage` into a typed `QueryFetchRequest`. Returns
@@ -405,13 +527,14 @@ pub async fn run_query_fetch<H: WebRTCConnectionHandler + 'static>(
     let request = match parse_query_fetch_request(&message) {
         Ok(r) => r,
         Err(err) => {
-            let ack = WebRTCResponse {
-                id: message.id.clone(),
-                result: Value::Null,
-                error: Some(err.to_string()),
-                collection: None,
-            };
-            let _ = handler.send(&peer, WebRTCWireFrame::Response(ack)).await;
+            send_fetch_response(
+                handler.as_ref(),
+                &peer,
+                &message.id,
+                Value::Null,
+                Some(err.to_string()),
+            )
+            .await;
             return Err(err);
         }
     };
@@ -482,13 +605,7 @@ pub async fn run_query_fetch<H: WebRTCConnectionHandler + 'static>(
 
     // Immediate ack for the original request id so the JS-side request map
     // resolves. The browser then awaits chunk frames via its own router.
-    let ack = WebRTCResponse {
-        id: message.id.clone(),
-        result: json!({ "accepted": true, "requestId": request.request_id }),
-        error: None,
-        collection: None,
-    };
-    let _ = handler.send(&peer, WebRTCWireFrame::Response(ack)).await;
+    send_fetch_accepted(handler.as_ref(), &peer, &message.id, &request.request_id).await;
 
     let document_filter = handler.document_filter_for_peer(&peer, &request.collection_name);
     let outcome = stream_chunks(
@@ -680,9 +797,27 @@ async fn stream_chunks<H: WebRTCConnectionHandler + 'static>(
 }
 
 #[derive(Debug)]
+struct SerializedQueryDocument {
+    value: Value,
+    json: Vec<u8>,
+}
+
+impl SerializedQueryDocument {
+    fn new(value: Value) -> RxResult<Self> {
+        let json = serde_json::to_vec(&value).map_err(|err| {
+            new_rx_error(
+                "QUERY_FETCH_SERIALIZE",
+                Some(json!({ "message": format!("serialize query document: {err}") })),
+            )
+        })?;
+        Ok(Self { value, json })
+    }
+}
+
+#[derive(Debug)]
 struct QueryFetchFrame {
     sequence: u32,
-    documents: Vec<Value>,
+    documents: Vec<SerializedQueryDocument>,
     complete: bool,
     cancelled: bool,
 }
@@ -701,7 +836,7 @@ fn produce_query_fetch_frames(
     frame_tx: mpsc::Sender<QueryFetchFrame>,
 ) -> RxResult<()> {
     let mut sequence: u32 = 0;
-    let mut pending: Vec<Value> = Vec::new();
+    let mut pending: VecDeque<SerializedQueryDocument> = VecDeque::new();
     let mut any_emitted = false;
 
     let storage_result = collection
@@ -715,7 +850,7 @@ fn produce_query_fetch_frames(
                 timeout_seen.store(true, Ordering::SeqCst);
                 return Ok(false);
             }
-            let projected: Vec<Value> = batch
+            let projected = batch
                 .into_iter()
                 .filter(|doc| {
                     document_filter
@@ -724,7 +859,8 @@ fn produce_query_fetch_frames(
                         .unwrap_or(true)
                 })
                 .map(|doc| apply_query_fetch_projection(doc, &projection))
-                .collect();
+                .map(SerializedQueryDocument::new)
+                .collect::<RxResult<Vec<_>>>()?;
             pending.extend(projected);
             while pending.len() >= max_doc_chunk {
                 let Some(chunk_docs) =
@@ -829,30 +965,30 @@ fn apply_query_fetch_projection(doc: Value, projection: &Option<Vec<String>>) ->
 }
 
 fn pop_query_fetch_chunk(
-    pending: &mut Vec<Value>,
+    pending: &mut VecDeque<SerializedQueryDocument>,
     max_doc_chunk: usize,
     max_byte_chunk: usize,
-) -> Option<Vec<Value>> {
-    let mut chunk_docs: Vec<Value> = Vec::new();
+) -> Option<Vec<SerializedQueryDocument>> {
+    let mut take_count = 0usize;
     let mut chunk_bytes: usize = 64;
-    while let Some(doc) = pending.first() {
-        if chunk_docs.len() >= max_doc_chunk {
+    for doc in pending.iter() {
+        if take_count >= max_doc_chunk {
             break;
         }
-        let doc_bytes = doc.to_string().len();
-        if !chunk_docs.is_empty() && chunk_bytes + doc_bytes > max_byte_chunk {
+        let doc_bytes = doc.json.len();
+        if take_count > 0 && chunk_bytes + doc_bytes > max_byte_chunk {
             break;
         }
         chunk_bytes += doc_bytes + 1;
-        chunk_docs.push(pending.remove(0));
+        take_count += 1;
         if chunk_bytes >= max_byte_chunk {
             break;
         }
     }
-    if chunk_docs.is_empty() {
+    if take_count == 0 {
         None
     } else {
-        Some(chunk_docs)
+        Some(pending.drain(..take_count).collect())
     }
 }
 
@@ -966,12 +1102,12 @@ async fn send_chunk<H: WebRTCConnectionHandler>(
     peer: &H::Peer,
     request: &QueryFetchRequest,
     sequence: u32,
-    documents: Vec<Value>,
+    documents: Vec<SerializedQueryDocument>,
     complete: bool,
     revision: &str,
     cancelled: bool,
 ) {
-    let chunk = build_chunk(
+    let chunk = build_chunk_from_serialized(
         request.request_id.clone(),
         sequence,
         documents,
@@ -979,13 +1115,15 @@ async fn send_chunk<H: WebRTCConnectionHandler>(
         Some(revision.to_string()),
         cancelled,
     );
-    let frame = WebRTCMessage {
-        id: format!("{}-c{}", request.request_id, sequence),
-        method: CTOX_QUERY_RPC_CHUNK.to_string(),
-        params: vec![serde_json::to_value(chunk).unwrap_or(Value::Null)],
-        collection: Some(request.collection_name.clone()),
-    };
-    let _ = handler.send(peer, WebRTCWireFrame::Message(frame)).await;
+    send_fetch_message(
+        handler,
+        peer,
+        format!("{}-c{}", request.request_id, sequence),
+        CTOX_QUERY_RPC_CHUNK,
+        serde_json::to_value(chunk).unwrap_or(Value::Null),
+        Some(request.collection_name.clone()),
+    )
+    .await;
 }
 
 /// Decode a chunk's documents regardless of whether the envelope carries them
@@ -1042,7 +1180,32 @@ pub fn build_chunk(
     authoritative_revision: Option<String>,
     cancelled: bool,
 ) -> QueryFetchChunk {
-    let payload = serde_json::to_vec(&documents).unwrap_or_default();
+    let documents = documents
+        .into_iter()
+        .map(|value| {
+            let json = serde_json::to_vec(&value).unwrap_or_else(|_| b"null".to_vec());
+            SerializedQueryDocument { value, json }
+        })
+        .collect();
+    build_chunk_from_serialized(
+        request_id,
+        sequence,
+        documents,
+        complete,
+        authoritative_revision,
+        cancelled,
+    )
+}
+
+fn build_chunk_from_serialized(
+    request_id: String,
+    sequence: u32,
+    documents: Vec<SerializedQueryDocument>,
+    complete: bool,
+    authoritative_revision: Option<String>,
+    cancelled: bool,
+) -> QueryFetchChunk {
+    let payload = serialized_document_array(&documents);
     let mut chunk = QueryFetchChunk {
         request_id,
         sequence,
@@ -1069,8 +1232,30 @@ pub fn build_chunk(
             }
         }
     }
-    chunk.documents = documents;
+    chunk.documents = documents
+        .into_iter()
+        .map(|document| document.value)
+        .collect();
     chunk
+}
+
+fn serialized_document_array(documents: &[SerializedQueryDocument]) -> Vec<u8> {
+    let payload_len = documents
+        .iter()
+        .map(|document| document.json.len())
+        .sum::<usize>()
+        .saturating_add(documents.len().saturating_sub(1))
+        .saturating_add(2);
+    let mut payload = Vec::with_capacity(payload_len);
+    payload.push(b'[');
+    for (index, document) in documents.iter().enumerate() {
+        if index > 0 {
+            payload.push(b',');
+        }
+        payload.extend_from_slice(&document.json);
+    }
+    payload.push(b']');
+    payload
 }
 
 async fn send_error<H: WebRTCConnectionHandler>(
@@ -1082,28 +1267,17 @@ async fn send_error<H: WebRTCConnectionHandler>(
     message: &str,
     retryable: bool,
 ) {
-    if !ack_id.is_empty() {
-        let ack = WebRTCResponse {
-            id: ack_id.to_string(),
-            result: Value::Null,
-            error: Some(format!("{code}: {message}")),
-            collection: None,
-        };
-        let _ = handler.send(peer, WebRTCWireFrame::Response(ack)).await;
-    }
-    let frame = WebRTCMessage {
-        id: format!("{}-error", request_id),
-        method: CTOX_QUERY_RPC_ERROR.to_string(),
-        params: vec![serde_json::to_value(QueryFetchError {
-            request_id: request_id.to_string(),
-            code: code.to_string(),
-            message: message.to_string(),
-            retryable,
-        })
-        .unwrap_or(Value::Null)],
-        collection: None,
-    };
-    let _ = handler.send(peer, WebRTCWireFrame::Message(frame)).await;
+    send_fetch_error_frame(
+        handler,
+        peer,
+        ack_id,
+        request_id,
+        CTOX_QUERY_RPC_ERROR,
+        code,
+        message,
+        retryable,
+    )
+    .await;
 }
 
 /// Convenience: returns `true` when `method` is one of the V1.5 RPC names.
@@ -2267,6 +2441,43 @@ mod tests {
             total_chunks >= 4,
             "all chunks must still be emitted after backpressure resolves"
         );
+    }
+
+    #[test]
+    fn chunks_5000_documents_without_loss_or_reordering() {
+        let expected = (0..5000)
+            .map(|index| json!({ "id": format!("perf-{index:04}"), "value": index }))
+            .collect::<Vec<_>>();
+        let mut pending = expected
+            .iter()
+            .cloned()
+            .map(SerializedQueryDocument::new)
+            .collect::<RxResult<VecDeque<_>>>()
+            .expect("serialize perf-smoke documents");
+        let mut decoded = Vec::with_capacity(expected.len());
+        let mut sequence = 0u32;
+
+        while !pending.is_empty() {
+            let documents = pop_query_fetch_chunk(
+                &mut pending,
+                CTOX_QUERY_MAX_DOCUMENTS_PER_CHUNK as usize,
+                CTOX_QUERY_MAX_BYTES_PER_CHUNK as usize,
+            )
+            .expect("non-empty pending queue must produce a chunk");
+            let chunk = build_chunk_from_serialized(
+                "perf-5000".to_string(),
+                sequence,
+                documents,
+                pending.is_empty(),
+                None,
+                false,
+            );
+            decoded.extend(decode_chunk_documents(&chunk).expect("decode perf-smoke chunk"));
+            sequence += 1;
+        }
+
+        assert_eq!(decoded.len(), 5000, "every document must be chunked once");
+        assert_eq!(decoded, expected, "chunking must preserve document order");
     }
 
     #[tokio::test]
