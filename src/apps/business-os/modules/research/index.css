@@ -1577,6 +1577,20 @@
   color: currentColor;
 }
 
+@container business-app-window (max-width: 1350px) {
+  .research-tabs-container {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .research-view-toggle {
+    justify-self: end;
+  }
+
+  .research-counted-tab {
+    font-size: 10px;
+  }
+}
+
 /* Icon-only view-switch tabs can be narrower than text tabs. */
 .research-view-toggle .ctox-pane-tab {
   min-width: 32px;
