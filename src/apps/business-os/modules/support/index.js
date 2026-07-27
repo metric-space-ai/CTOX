@@ -203,6 +203,9 @@ const state = {
   // explicit selection: visible = hasSelection && !contextCollapsed.
   contextCollapsed: true,
   loading: false,
+  // Snapshot of the primary collection's replication readiness; a render hint
+  // only — it gates the data-driven empty state of the queue list.
+  conversationReadiness: null,
   renderTimer: null,
   cleanup: null,
   conversationOverrides: new Map(),
@@ -226,6 +229,7 @@ export async function mount(ctx) {
   const messages = await loadModuleMessages(import.meta.url, state.lang, labels);
   state.t = (key, fallback) => messages[key] ?? fallback ?? key;
   state.loading = true;
+  state.conversationReadiness = null;
   state.selectedId = '';
   state.queue = 'open';
   state.viewMode = 'cards';
@@ -247,6 +251,11 @@ export async function mount(ctx) {
   // Seed the module's mirror of the grammar state from the DOM defaults before
   // the shell wires the pane and fires its first change event.
   seedGrammarState();
+  // Collection readiness is a render hint only: while the primary conversation
+  // projection has not finished its initial replication, the data-driven empty
+  // state of the queue shows a syncing shell instead of "no conversations".
+  state.conversationReadiness = readConversationReadiness();
+  const stopReadiness = wireConversationReadiness();
   render();
   let disposed = false;
   let collectionStartCleanup = null;
@@ -266,6 +275,7 @@ export async function mount(ctx) {
     });
   return () => {
     disposed = true;
+    stopReadiness();
     collectionStartCleanup?.();
     state.cleanup?.();
     if (state.renderTimer) window.clearTimeout(state.renderTimer);
@@ -396,6 +406,24 @@ function wireRealtime() {
   });
 }
 
+function readConversationReadiness() {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function'
+    ? read.call(state.ctx.sync, PRIMARY_COLLECTION)
+    : null;
+}
+
+function wireConversationReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribe = subscribe.call(state.ctx.sync, PRIMARY_COLLECTION, (snapshot) => {
+    if (!state.ctx) return;
+    state.conversationReadiness = snapshot;
+    render();
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+}
+
 function scheduleRefresh() {
   const mountContext = state.ctx;
   if (!mountContext || state.renderTimer) return;
@@ -447,12 +475,32 @@ function render() {
 // Rebuild the conversation well. Called on data / grammar changes (intentional
 // resets — the shell's scroll guard clears its offsets on the grammar-change
 // event); NOT called on selection, which is an in-place flip.
+// Data-driven empty decision for the queue list. The list itself is filtered
+// (band / tray / search), so collection readiness gates the empty copy ONLY
+// when the unfiltered source — the support_conversations projection — is
+// empty. Filter empties (source non-empty, no match) keep the plain empty
+// markup; rows always win. Pure so it is unit-testable.
+function resolveConversationListState({ loading = false, sourceCount = 0, readiness = null } = {}) {
+  if (loading && !Number(sourceCount)) return 'loading';
+  if (Number(sourceCount) > 0) return 'content';
+  return readiness?.ready === false ? 'syncing' : 'empty';
+}
+
 function renderConversationList() {
   const container = rootEl().querySelector('[data-support-list]');
   if (!container) return;
   container.classList.toggle('is-list-view', state.viewMode === 'list');
-  if (state.loading && !state.data.support_conversations?.length) {
+  const listState = resolveConversationListState({
+    loading: state.loading,
+    sourceCount: state.data.support_conversations?.length || 0,
+    readiness: state.conversationReadiness,
+  });
+  if (listState === 'loading') {
     container.innerHTML = renderEmptyState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', ''));
+    return;
+  }
+  if (listState === 'syncing') {
+    container.innerHTML = renderSyncingState(state.t('loadingTitle', 'Support wird synchronisiert'), state.t('loadingBody', ''));
     return;
   }
   const rows = visibleConversations();
@@ -1451,6 +1499,15 @@ function renderEmptyState(title, body) {
   `;
 }
 
+function renderSyncingState(title, body) {
+  return `
+    <div class="ctox-syncing" role="status" aria-live="polite">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(body)}</span>
+    </div>
+  `;
+}
+
 function rootEl() {
   return state.ctx.host.querySelector('[data-support-root]');
 }
@@ -1519,4 +1576,5 @@ export const __supportTestHooks = {
   computeContextVisible,
   buildSupportExport,
   parseSupportImport,
+  resolveConversationListState,
 };

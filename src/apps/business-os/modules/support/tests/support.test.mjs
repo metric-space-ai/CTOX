@@ -253,4 +253,23 @@ test('auto-reveal: context visible only with a selection that is not collapsed',
   assert.match(indexJs, /contextCollapsed:\s*true/);
 });
 
+test('queue list gates the data-driven empty state on collection readiness', () => {
+  // leer + unready ⇒ syncing shell, never "no conversations"
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 0, readiness: { ready: false, state: 'catching-up' } }), 'syncing');
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 0, readiness: { ready: false, state: 'offline-pending' } }), 'syncing');
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 0, readiness: { ready: false, state: 'never-synced' } }), 'syncing');
+  // leer + ready ⇒ plain empty
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 0, readiness: { ready: true, state: 'live' } }), 'empty');
+  // readiness unavailable (legacy ctx) ⇒ unchanged legacy behaviour
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 0, readiness: null }), 'empty');
+  // source has rows (filter/search empties included) ⇒ content, never syncing
+  assert.equal(hooks.resolveConversationListState({ loading: false, sourceCount: 2, readiness: { ready: false } }), 'content');
+  // initial load with no local rows keeps the module's loading state
+  assert.equal(hooks.resolveConversationListState({ loading: true, sourceCount: 0, readiness: null }), 'loading');
+  // the syncing branch renders the canonical kit shell markup
+  assert.match(indexJs, /<div class="ctox-syncing" role="status" aria-live="polite">/);
+  assert.match(indexJs, /subscribeCollectionReadiness/);
+  assert.match(indexJs, /collectionReadiness/);
+});
+
 console.log('support module phase-0 smoke OK');
