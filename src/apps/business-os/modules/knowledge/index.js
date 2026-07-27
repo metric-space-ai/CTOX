@@ -24,6 +24,7 @@ const labels = {
     noVisibleItems: 'Keine Knowledge-Einträge in dieser Ansicht.',
     syncUnavailable: 'Knowledge Store ist noch nicht verbunden.',
     noRunbooks: 'Keine Runbooks vorhanden.',
+    noResources: 'Keine verifizierten Quellen zugeordnet.',
     tableUnavailable: 'Für diesen Eintrag ist keine Tabelle verfügbar.',
     dataIncomplete: 'Daten unvollständig',
     dataIncompleteHint: 'Die Tabelle wird erst angezeigt, wenn alle Daten-Chunks konsistent und vollständig repliziert wurden.',
@@ -44,6 +45,7 @@ const labels = {
     noVisibleItems: 'No knowledge entries in this view.',
     syncUnavailable: 'Knowledge store is not connected yet.',
     noRunbooks: 'No runbooks available.',
+    noResources: 'No verified sources assigned.',
     tableUnavailable: 'This item has no table.',
     dataIncomplete: 'Incomplete data',
     dataIncompleteHint: 'The table is shown only after all data chunks are replicated consistently and completely.',
@@ -66,6 +68,7 @@ const state = {
   selectedSkillbookId: '',
   selectedTableId: '',
   selectedRunbookId: '',
+  selectedResourceId: '',
   activeTab: 'skill',
   tableOffset: 0,
   tableLimit: 120,
@@ -182,6 +185,9 @@ function bindElements(root) {
   els.selectedTitle = root.querySelector('[data-selected-title]');
   els.markdownView = root.querySelector('[data-markdown-view]');
   els.markdownEditor = root.querySelector('[data-markdown-editor]');
+  els.skillbookSwitcher = root.querySelector('[data-skillbook-switcher]');
+  els.resourceSwitcher = root.querySelector('[data-resource-switcher]');
+  els.resourceView = root.querySelector('[data-resource-view]');
   els.skillStatus = root.querySelector('[data-skill-status]');
   els.tableHost = root.querySelector('[data-dataframe-host]');
   els.tableSwitcher = root.querySelector('[data-table-switcher]');
@@ -579,6 +585,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
   const tableItems = allItems.filter((item) => item.kind === 'dataframe');
   const skillbookItems = allItems.filter((item) => item.kind === 'skillbook');
   const skillItems = allItems.filter((item) => item.kind === 'skill');
+  const resourceItems = allItems.filter((item) => item.kind === 'resource');
   const used = new Set();
 
   const makeGroup = (config) => {
@@ -608,6 +615,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     ...skillItems.filter(isDroneBearingKnowledge),
     ...skillbookItems.filter(isDroneBearingKnowledge),
     ...runbookItems.filter(isDroneBearingKnowledge),
+    ...resourceItems.filter(isDroneBearingKnowledge),
     ...tableItems.filter((item) => {
       const table = tableForItem(item, tables);
       return isDroneBearingKnowledge(item) || isDroneBearingTable(table);
@@ -637,13 +645,14 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     });
     const relatedTables = tableItems.filter((item) => tokenOverlap(skillbook, item) >= 2);
     const relatedSkills = skillItems.filter((item) => tokenOverlap(skillbook, item) >= 2);
+    const relatedResources = resourceItems.filter((item) => item.skillbook_id === bareKnowledgeId(skillbook.id));
     groups.push(makeGroup({
       id: `bundle/${base}`,
       title: skillbook.title || titleFromSlug(base),
       domainLabel: domainLabelFor(skillbook),
       domain: base,
       summary: skillbook.summary || '',
-      entries: [skillbook, ...relatedSkills, ...relatedRunbooks, ...relatedTables],
+      entries: [skillbook, ...relatedSkills, ...relatedRunbooks, ...relatedResources, ...relatedTables],
       primaryItemId: skillbook.id,
     }));
   }
@@ -883,16 +892,16 @@ function activeGroup() {
 }
 
 function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookForGroup(group)) {
-  if (!group) return { skillbook: null, entries: [], skill: null, runbookItems: [], runbooks: [], tables: [] };
+  if (!group) return { skillbook: null, entries: [], skill: null, runbookItems: [], runbooks: [], resources: [], tables: [] };
   const skillbookEntry = typeof skillbook === 'string' ? group.entries.find((entry) => entry.id === skillbook) : skillbook;
   const allSkillbooks = skillbooksForGroup(group);
   const scopedEntries = !skillbookEntry || allSkillbooks.length <= 1
     ? group.entries
     : group.entries.filter((entry) => entry.id === skillbookEntry.id || relatedToSkillbook(skillbookEntry, entry));
   const entries = scopedEntries.length ? scopedEntries : group.entries;
-  const skill = entries.find((entry) => entry.kind === 'skill')
-    || group.entries.find((entry) => entry.kind === 'skill' && (!skillbookEntry || tokenOverlap(skillbookEntry, entry) >= 1))
-    || skillbookEntry
+  const skill = skillbookEntry
+    || entries.find((entry) => entry.kind === 'skill')
+    || group.entries.find((entry) => entry.kind === 'skill')
     || group.entries.find((entry) => ['skillbook', 'skill'].includes(entry.kind))
     || group.entries[0]
     || null;
@@ -909,12 +918,14 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
     return !skillbookEntry || allSkillbooks.length <= 1 || relatedToSkillbook(skillbookEntry, runbook);
   });
   const tables = entries.filter((entry) => entry.has_table);
-  return { skillbook: skillbookEntry || null, entries, skill, runbookItems, runbooks, tables };
+  const resources = entries.filter((entry) => entry.kind === 'resource');
+  return { skillbook: skillbookEntry || null, entries, skill, runbookItems, runbooks, resources, tables };
 }
 
 function relatedToSkillbook(skillbook, entry) {
   if (!skillbook || !entry) return true;
   if (entry.id === skillbook.id) return true;
+  if (entry.skillbook_id && entry.skillbook_id === bareKnowledgeId(skillbook.id)) return true;
   const base = normaliseName(bareId(skillbook.id).replace(/-skillbook$/, ''));
   const haystack = `${entry.id || ''} ${entry.title || ''} ${entry.subtitle || ''} ${entry.summary || ''} ${entry.description || ''} ${entry.problem_domain || ''}`.toLowerCase();
   return haystack.includes(base.replaceAll('-', '_')) || haystack.includes(base) || tokenOverlap(skillbook, entry) >= 2;
@@ -1199,7 +1210,7 @@ function setTab(tab) {
     syncKnowledgeTabControls();
     return;
   }
-  state.activeTab = ['skill', 'runbooks', 'data'].includes(nextTab) ? nextTab : 'skill';
+  state.activeTab = ['skill', 'runbooks', 'resources', 'data'].includes(nextTab) ? nextTab : 'skill';
   state.editing = false;
   els.markdownEditor.hidden = true;
   els.markdownView.hidden = false;
@@ -1226,6 +1237,7 @@ function updateViewCounts() {
   const counts = {
     skill: context.skill ? 1 : 0,
     runbooks: context.runbooks.length,
+    resources: context.resources.length,
     data: context.tables.length,
   };
   const pg = pane.__ctoxPaneGrammar;
@@ -1254,6 +1266,7 @@ async function renderActiveTab() {
   }
   if (state.activeTab === 'skill') {
     const context = skillbookContext();
+    renderSkillbookSwitcher();
     if (context.skill?.id && state.selectedId !== context.skill.id) {
       await selectKnowledge(context.skill.id);
       return;
@@ -1265,10 +1278,31 @@ async function renderActiveTab() {
     await renderRunbookWorkspace();
     return;
   }
+  if (state.activeTab === 'resources') {
+    await renderResourceWorkspace();
+    return;
+  }
   if (state.activeTab === 'data') {
     renderTableSwitcher();
     await renderTable();
   }
+}
+
+function renderSkillbookSwitcher() {
+  if (!els.skillbookSwitcher) return;
+  const group = activeGroup();
+  const skillbooks = skillbooksForGroup(group);
+  els.skillbookSwitcher.hidden = skillbooks.length <= 1;
+  els.skillbookSwitcher.replaceChildren(...skillbooks.map((skillbook) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    const active = skillbook.id === (state.selectedSkillbookId || firstSkillbookForGroup(group)?.id);
+    button.className = `ctox-chip${active ? ' is-active' : ''}`;
+    button.setAttribute('aria-selected', String(active));
+    button.textContent = skillbook.title || titleFromSlug(bareId(skillbook.id));
+    button.addEventListener('click', () => selectSkillbook(group, skillbook));
+    return button;
+  }));
 }
 
 function syncKnowledgeTabControls() {
@@ -1287,7 +1321,7 @@ function syncKnowledgeTabControls() {
 }
 
 function isKnowledgeTabDisabled(tab, selectedId = state.selectedId) {
-  return ['runbooks', 'data'].includes(tab) && !selectedId;
+  return ['runbooks', 'resources', 'data'].includes(tab) && !selectedId;
 }
 
 function hasKnowledgeSelection() {
@@ -1351,6 +1385,40 @@ async function renderRunbookWorkspace() {
     : runbookDetailsHtml(runbook);
   fillRunbookForm(runbook);
   syncRunbookEditControls(state.editing);
+}
+
+async function renderResourceWorkspace() {
+  const copy = state.messages || labels[state.lang];
+  const context = skillbookContext();
+  const resources = context.resources;
+  els.selectedKind.textContent = 'Quellen';
+  els.selectedTitle.textContent = context.skillbook?.title || activeGroup()?.title || 'Knowledge';
+  if (!resources.length) {
+    els.resourceSwitcher.hidden = true;
+    els.resourceView.innerHTML = `<div class="ctox-empty"><strong>${escapeHtml(copy.noResources)}</strong></div>`;
+    return;
+  }
+  if (!resources.some((resource) => resource.id === state.selectedResourceId)) {
+    state.selectedResourceId = resources[0].id;
+  }
+  els.resourceSwitcher.hidden = resources.length <= 1;
+  els.resourceSwitcher.replaceChildren(...resources.map((resource) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    const active = resource.id === state.selectedResourceId;
+    button.className = `ctox-chip${active ? ' is-active' : ''}`;
+    button.setAttribute('aria-selected', String(active));
+    button.textContent = resource.title || resource.source_id || resource.id;
+    button.title = resource.title || resource.id;
+    button.addEventListener('click', () => {
+      state.selectedResourceId = resource.id;
+      renderResourceWorkspace();
+    });
+    return button;
+  }));
+  const resource = resources.find((entry) => entry.id === state.selectedResourceId) || resources[0];
+  const doc = await loadKnowledgeDocument(resource.id);
+  els.resourceView.innerHTML = markdownToHtml(doc.markdown || '');
 }
 
 function runbookDetailsHtml(runbook) {

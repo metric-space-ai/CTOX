@@ -2272,6 +2272,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let skill_id: String = row.get(0)?;
+                let markdown = skill_markdown(root, &skill_id)?;
                 let title: String = row.get(1)?;
                 let class_name: String = row.get(2)?;
                 let state: String = row.get(3)?;
@@ -2286,6 +2287,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "title": title,
                     "subtitle": format!("{class_name} · {state} · {cluster}"),
                     "summary": summary,
+                    "markdown": markdown,
                     "source_path": source_path,
                     "updated_at": updated_at,
                     "file_count": file_count,
@@ -2305,6 +2307,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
+                let markdown = skillbook_markdown(root, &id)?;
                 let title: String = row.get(1)?;
                 let status: String = row.get(2)?;
                 let summary: String = row.get(3)?;
@@ -2318,6 +2321,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "title": title,
                     "subtitle": format!("Skillbook · {status}"),
                     "summary": summary,
+                    "markdown": markdown,
                     "linked_runbook_ids": linked_runbook_ids,
                     "linked_runbooks_json": linked_runbooks_json,
                     "updated_at": updated_at,
@@ -2338,6 +2342,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
+                let markdown = runbook_markdown(root, &id)?;
                 let skillbook_id: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let status: String = row.get(3)?;
@@ -2352,6 +2357,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "title": title,
                     "status": status,
                     "summary": summary,
+                    "markdown": markdown,
                     "problem_domain": domain,
                     "updated_at": updated_at
                 });
@@ -2363,6 +2369,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "title": runbook["title"],
                     "subtitle": format!("Runbook · {} · {}", runbook["status"].as_str().unwrap_or(""), runbook["problem_domain"].as_str().unwrap_or("")),
                     "summary": runbook["summary"],
+                    "markdown": runbook["markdown"],
                     "problem_domain": runbook["problem_domain"],
                     "updated_at": runbook["updated_at"],
                     "file_count": 1,
@@ -2383,6 +2390,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let id: String = row.get(0)?;
+                let markdown = knowledge_resource_markdown(root, &id)?;
                 let skillbook_id: String = row.get(1)?;
                 let title: String = row.get(2)?;
                 let kind: String = row.get(3)?;
@@ -2399,6 +2407,7 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "title": title,
                     "subtitle": format!("Resource · {role}"),
                     "summary": canonical_url,
+                    "markdown": markdown,
                     "canonical_url": canonical_url,
                     "evidence_eligible": evidence_eligible,
                     "updated_at": updated_at,
@@ -2616,7 +2625,8 @@ fn skillbook_markdown(root: &Path, skillbook_id: &str) -> anyhow::Result<String>
     let conn = open_ctox_sqlite(root)?;
     let mut stmt = conn.prepare(
         "SELECT title, version, status, summary, mission, runtime_policy, answer_contract,
-                workflow_backbone_json, routing_taxonomy_json, linked_runbooks_json, updated_at
+                workflow_backbone_json, routing_taxonomy_json, linked_runbooks_json,
+                non_negotiable_rules_json, updated_at
            FROM knowledge_skillbooks WHERE skillbook_id = ?1",
     )?;
     let row = stmt.query_row([skillbook_id], |row| {
@@ -2632,11 +2642,12 @@ fn skillbook_markdown(root: &Path, skillbook_id: &str) -> anyhow::Result<String>
             row.get::<_, String>(8)?,
             row.get::<_, String>(9)?,
             row.get::<_, String>(10)?,
+            row.get::<_, String>(11)?,
         ))
     })?;
     Ok(format!(
-        "# {}\n\n{}\n\n- Version: `{}`\n- Status: `{}`\n- Aktualisiert: `{}`\n\n## Mission\n\n{}\n\n## Runtime Policy\n\n{}\n\n## Answer Contract\n\n{}\n\n## Workflow Backbone\n\n```json\n{}\n```\n\n## Routing Taxonomy\n\n```json\n{}\n```\n\n## Linked Runbooks\n\n```json\n{}\n```",
-        row.0, row.3, row.1, row.2, row.10, row.4, row.5, row.6, row.7, row.8, row.9
+        "# {}\n\n{}\n\n- Version: `{}`\n- Status: `{}`\n- Aktualisiert: `{}`\n\n## Mission\n\n{}\n\n## Runtime Policy\n\n{}\n\n## Answer Contract\n\n{}\n\n## Non-Negotiable Rules\n\n```json\n{}\n```\n\n## Workflow Backbone\n\n```json\n{}\n```\n\n## Routing Taxonomy\n\n```json\n{}\n```\n\n## Linked Runbooks\n\n```json\n{}\n```",
+        row.0, row.3, row.1, row.2, row.11, row.4, row.5, row.6, row.10, row.7, row.8, row.9
     ))
 }
 

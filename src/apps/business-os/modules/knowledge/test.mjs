@@ -366,7 +366,10 @@ test('pane chrome follows the canonical data-pg-* grammar contract', async () =>
   // The counted band keeps ≥2 real views with zeros rendered by the grammar.
   assert.match(html, /data-pg-band="skill"/);
   assert.match(html, /data-pg-band="runbooks"/);
+  assert.match(html, /data-pg-band="resources"/);
   assert.match(html, /data-pg-band="data"/);
+  assert.match(html, /data-skillbook-switcher/);
+  assert.match(html, /data-resource-switcher/);
   // Per-pane one-line footers; no module-wide app floor.
   assert.doesNotMatch(html, /knowledge-footer/);
   assert.doesNotMatch(css, /\.knowledge-footer\b/);

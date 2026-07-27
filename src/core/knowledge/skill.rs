@@ -32,6 +32,7 @@ pub(super) fn handle_command(root: &Path, args: &[String]) -> Result<()> {
         Some("query") => query(root, rest),
         Some("set") => set(root, rest),
         Some("import-bundle") => import_bundle(root, rest),
+        Some("import-resources") => import_resources(root, rest),
         Some("resolve") => resolve(root, rest),
         Some("compose-reply") => compose_reply(root, rest),
         Some("review-note") => review_note(root, rest),
@@ -72,6 +73,7 @@ fn available_verbs() -> serde_json::Value {
         // ticket-binding + bundle import (whole bundle on disk)
         {"verb": "set",           "args": "--system <name> --skill <name> [--archetype <value>] [--status <active|inactive>] [--origin <value>] [--artifact-path <path>] [--notes <text>]"},
         {"verb": "import-bundle", "args": "--system <name> --bundle-dir <path> [--embedding-model <model>] [--skip-embeddings]"},
+        {"verb": "import-resources", "args": "--skillbook <skillbook_id> --file <resources.jsonl> [--replace]"},
         // ticket-resolution surfaces
         {"verb": "resolve",       "args": "(--ticket-key <key> | --case-id <id>) [--top-k <n>]"},
         {"verb": "compose-reply", "args": "(--ticket-key <key> | --case-id <id>) [--send-policy <suggestion|draft|send>] [--subject <text>] [--body-only]"},
@@ -141,6 +143,18 @@ fn import_bundle(root: &Path, args: &[String]) -> Result<()> {
         bundle_dir,
         find_flag(args, "--embedding-model"),
         flag_present(args, "--skip-embeddings"),
+    )?;
+    super::print_json(&result)
+}
+
+fn import_resources(root: &Path, args: &[String]) -> Result<()> {
+    let skillbook = required(args, "--skillbook", USAGE_IMPORT_RESOURCES)?;
+    let file = required(args, "--file", USAGE_IMPORT_RESOURCES)?;
+    let result = tickets::import_ticket_source_skill_resources(
+        root,
+        skillbook,
+        file,
+        flag_present(args, "--replace"),
     )?;
     super::print_json(&result)
 }
@@ -349,6 +363,7 @@ const USAGE_SHOW: &str = "ctox knowledge skill show --system <name>";
 const USAGE_QUERY: &str = "ctox knowledge skill query --system <name> --query <text> [--top-k <n>]";
 const USAGE_SET: &str = "ctox knowledge skill set --system <name> --skill <name> [--archetype <value>] [--status <active|inactive>] [--origin <value>] [--artifact-path <path>] [--notes <text>]";
 const USAGE_IMPORT_BUNDLE: &str = "ctox knowledge skill import-bundle --system <name> --bundle-dir <path> [--embedding-model <model>] [--skip-embeddings]";
+const USAGE_IMPORT_RESOURCES: &str = "ctox knowledge skill import-resources --skillbook <skillbook_id> --file <resources.jsonl> [--replace]";
 const USAGE_REVIEW_NOTE: &str =
     "ctox knowledge skill review-note --ticket-key <key> --body <text> [--top-k <n>]";
 const USAGE_NEW: &str = "ctox knowledge skill new --id <main_skill_id> --title <text> --primary-channel <text> --entry-action <text> [--resolver-contract <json>] [--execution-contract <json>] [--resolve-flow <step,...>] [--writeback-flow <step,...>] [--linked-skillbooks <id,...>] [--linked-runbooks <id,...>]";

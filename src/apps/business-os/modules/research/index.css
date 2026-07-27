@@ -19,6 +19,16 @@
   --research-right-width: 300px;
   grid-template-columns: var(--research-left-width) 6px minmax(0, 1fr) 6px var(--research-right-width);
   position: relative;
+  min-width: 0;
+}
+
+.research-left,
+.research-center,
+.research-right,
+.research-workbench,
+.research-sources-shards-wrapper,
+.research-source-card {
+  min-width: 0;
 }
 
 .research-map-hint {
@@ -55,6 +65,18 @@
   justify-content: space-between;
   gap: 8px;
   padding: 2px 3px;
+}
+
+.research-context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.research-context-actions > * {
+  flex: 1 1 120px;
+  min-width: 0;
+  text-align: center;
 }
 
 .research-section-head.flush {
@@ -168,6 +190,15 @@
   padding: 12px;
 }
 
+.research-center-header .ctox-pane-title {
+  display: -webkit-box;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .research-graph-shell {
   min-height: 460px;
   overflow: hidden;
@@ -199,6 +230,12 @@
 .research-graph-canvas {
   cursor: grab;
   touch-action: none;
+  transition: right 160ms ease;
+}
+
+.research-graph-stage.has-insights .research-graph-canvas {
+  right: 316px;
+  width: auto !important;
 }
 
 .research-graph-canvas:active {
@@ -309,13 +346,14 @@
 
 .research-graph-rail {
   position: absolute;
-  top: 50%;
   right: 12px;
+  bottom: 12px;
   z-index: 6;
-  display: grid;
-  justify-items: center;
+  display: flex;
+  align-items: center;
   gap: 5px;
-  transform: translateY(-50%);
+  max-width: calc(100% - 24px);
+  overflow-x: auto;
   padding: 3px;
   border: 1px solid rgba(43, 53, 64, 0.75);
   border-radius: 6px;
@@ -416,11 +454,12 @@
 
 .research-graph-insights {
   position: absolute;
-  right: 70px;
-  bottom: 14px;
+  top: 60px;
+  right: 12px;
+  bottom: 58px;
   z-index: 5;
-  width: min(300px, 34%);
-  max-height: 230px;
+  width: 292px;
+  max-height: none;
   overflow: auto;
   border: 1px solid #2a3339;
   border-radius: 7px;
@@ -1370,8 +1409,22 @@
   }
 
   .research-graph-meta {
-    right: 66px;
+    right: 14px;
     max-width: none;
+  }
+
+  .research-center-header .research-map-hint {
+    display: none;
+  }
+
+  .research-tabs-container .ctox-pane-tabs {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+
+  .research-tabs-container .ctox-pane-tabs > button {
+    flex: 1 1 112px;
+    white-space: normal;
   }
 
   .research-graph-meta > div > span,
@@ -1381,7 +1434,7 @@
 
   .research-graph-search {
     top: 52px;
-    right: 68px;
+    right: 14px;
     left: 14px;
     width: auto;
   }
@@ -1412,10 +1465,10 @@
   }
 
   .research-graph-insights {
-    right: 62px;
-    bottom: 52px;
-    width: min(230px, 66%);
-    max-height: 150px;
+    inset: auto 8px 54px;
+    height: 170px;
+    width: auto;
+    max-height: none;
   }
 
   .research-graph-actions span {
@@ -1429,14 +1482,21 @@
   }
 
   .research-graph-rail {
-    top: 138px;
-    right: 4px;
-    left: 4px;
+    top: auto;
+    right: 8px;
+    bottom: 8px;
+    left: auto;
     display: flex;
-    justify-content: flex-end;
     transform: none;
     gap: 2px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+  }
+
+  .research-graph-stage.has-insights .research-graph-canvas {
+    right: 0;
+    bottom: 232px;
+    width: 100% !important;
+    height: auto !important;
   }
 }
 
@@ -1473,6 +1533,12 @@
   border-bottom: 1px solid var(--research-line);
   padding: 8px;
   background: var(--research-surface);
+  min-width: 0;
+}
+
+.research-tabs-container > .ctox-pane-tabs:first-child {
+  min-width: 0;
+  overflow-x: auto;
 }
 
 /* Icon-only view-switch tabs can be narrower than text tabs. */
@@ -1500,7 +1566,7 @@
 .research-sources-shards-toolbar .ctox-input {
   flex: 1 1 220px;
   width: auto;
-  min-width: 220px;
+  min-width: min(220px, 100%);
 }
 
 .research-sources-shards-filters {
@@ -1518,7 +1584,7 @@
 
 .research-sources-shards-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
   gap: 14px;
 }
 

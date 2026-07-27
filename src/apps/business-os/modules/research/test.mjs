@@ -157,6 +157,58 @@ test('discovery candidates retain candidate ids without becoming evidence', () =
   assert.equal(models[0].evidenceEligible, false);
 });
 
+test('audited source tiers control visible grades and ranking order', () => {
+  const verified = {
+    verification_status: 'verified',
+    transport_verified: true,
+    content_extracted: true,
+    actual_full_text_or_data: true,
+    evidence_eligible: true,
+    http_status: 200,
+    snapshot_hash: `sha256:${'a'.repeat(64)}`,
+    retrieved_at: '2026-07-27T00:00:00Z',
+    url_role: 'original_content',
+    content_scope: 'full_text',
+    evidence_relevance_score: 9,
+  };
+  const models = hooks.buildSourceModels({}, [
+    {
+      ...verified,
+      source_id: 'source-b',
+      evidence_id: 'evidence-b',
+      snapshot_id: 'snapshot-b',
+      snapshot_path: '/snapshots/source-b.pdf',
+      canonical_url: 'https://example.test/source-b',
+      source_tier: 'B - verified',
+    },
+    {
+      ...verified,
+      source_id: 'source-a',
+      evidence_id: 'evidence-a',
+      snapshot_id: 'snapshot-a',
+      snapshot_path: '/snapshots/source-a.pdf',
+      canonical_url: 'https://example.test/source-a',
+      source_tier: 'A',
+    },
+  ], [], []);
+
+  assert.deepEqual(models.map((model) => model.id), ['source-a', 'source-b']);
+  assert.deepEqual(models.map((model) => model.grade), ['A', 'B']);
+  assert.equal(hooks.sourceTierGrade({ source_tier: 'C - supplementary' }), 'C');
+});
+
+test('research task history collapses into one visible domain lineage', () => {
+  const tasks = hooks.collapseResearchTaskLineages([
+    { id: 'task-old', knowledge_domain: 'drone_bearing_design', updated_at_ms: 10 },
+    { id: 'task-current', knowledge_domain: 'drone_bearing_design', updated_at_ms: 20 },
+    { id: 'task-other', knowledge_domain: 'other_domain', updated_at_ms: 15 },
+  ]);
+
+  assert.equal(tasks.length, 2);
+  assert.equal(tasks[0].id, 'task-current');
+  assert.deepEqual(tasks[0].lineage_task_ids, ['task-current', 'task-old']);
+});
+
 test('create task preserves selected local knowledge domain ids', () => {
   const knowledgeBases = [{ domain: 'drone_bearing_design', title: 'Drone Bearing Design' }];
 
@@ -614,15 +666,16 @@ test('research launch can rebuild verified models from the authoritative source 
 });
 
 test('research reports contain only live documents with explicit task or domain lineage', () => {
-  const task = { id: 'task-1', knowledge_domain: 'drone_bearing_design' };
+  const task = { id: 'task-1', lineage_task_ids: ['task-1', 'task-legacy'], knowledge_domain: 'drone_bearing_design' };
   const reports = hooks.researchReportsForTask(task, [
     { id: 'task-report', title: 'Task report', filename: 'task.docx', linked_records: [{ kind: 'research_task', id: 'task-1' }], updated_at_ms: 20 },
+    { id: 'lineage-report', title: 'Lineage report', filename: 'lineage.docx', linked_records: [{ kind: 'research_task', id: 'task-legacy' }], updated_at_ms: 25 },
     { id: 'domain-report', title: 'Domain report', filename: 'domain.docx', linked_records: [{ kind: 'knowledge_domain', id: 'drone_bearing_design' }], updated_at_ms: 30 },
     { id: 'unlinked-demo', title: 'Legacy demo', filename: 'legacy.md', linked_records: [], updated_at_ms: 40 },
     { id: 'deleted', title: 'Deleted', filename: 'deleted.docx', linked_records: [{ kind: 'research_task', id: 'task-1' }], is_deleted: true, updated_at_ms: 50 },
   ]);
 
-  assert.deepEqual(reports.map((report) => report.id), ['domain-report', 'task-report']);
+  assert.deepEqual(reports.map((report) => report.id), ['domain-report', 'lineage-report', 'task-report']);
 });
 
 test('diagnostic rows distinguish sync failures from local no-data', () => {
