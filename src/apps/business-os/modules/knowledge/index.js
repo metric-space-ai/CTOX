@@ -23,6 +23,7 @@ const labels = {
     noResults: 'Keine passenden Knowledge-Einträge gefunden.',
     noVisibleItems: 'Keine Knowledge-Einträge in dieser Ansicht.',
     syncUnavailable: 'Knowledge Store ist noch nicht verbunden.',
+    syncingData: 'Daten werden synchronisiert.',
     noRunbooks: 'Keine Runbooks vorhanden.',
     tableUnavailable: 'Für diesen Eintrag ist keine Tabelle verfügbar.',
     dataIncomplete: 'Daten unvollständig',
@@ -43,6 +44,7 @@ const labels = {
     noResults: 'No matching knowledge entries found.',
     noVisibleItems: 'No knowledge entries in this view.',
     syncUnavailable: 'Knowledge store is not connected yet.',
+    syncingData: 'Syncing data.',
     noRunbooks: 'No runbooks available.',
     tableUnavailable: 'This item has no table.',
     dataIncomplete: 'Incomplete data',
@@ -80,6 +82,8 @@ const state = {
   openGroups: new Set(['research/drone-design/drone-bearing-loads']),
   contextMenu: null,
   localSubscriptionCleanup: null,
+  readinessCleanup: null,
+  collectionReadiness: {},
   syncWarmupPromise: null,
   initialRetryTimer: null,
   initialRetryAttempt: 0,
@@ -108,6 +112,7 @@ export async function mount(ctx) {
   renderRunbooks();
   renderEmptyKnowledgeSelection();
   state.localSubscriptionCleanup = wireLocalRealtime();
+  state.readinessCleanup = wireCollectionReadiness();
   loadKnowledgeFromLocal({ initial: true }).catch((error) => {
     if (disposed || state.ctx !== ctx) return;
     state.loadError = error?.message || String(error);
@@ -122,6 +127,9 @@ export async function mount(ctx) {
     window.removeEventListener('keydown', handleContextEscape);
     state.localSubscriptionCleanup?.();
     state.localSubscriptionCleanup = null;
+    state.readinessCleanup?.();
+    state.readinessCleanup = null;
+    state.collectionReadiness = {};
     cancelInitialKnowledgeRetry();
     state.contextMenu?.remove();
     state.contextMenu = null;
@@ -524,6 +532,62 @@ function wireLocalRealtime() {
 
 function knowledgeCollection(collectionName) {
   return state.ctx?.db?.collection?.(collectionName) || null;
+}
+
+// Canonical collection readiness (shell sync API): while a replicated
+// collection has not finished its initial sync, an empty local result is a
+// SYNC state, not a "no data" state. Subscribing emits an immediate snapshot
+// and re-emits only on state changes; each emission re-renders the lists that
+// draw from that collection so the syncing shell flips to data/empty live.
+function wireCollectionReadiness() {
+  const sync = state.ctx?.sync;
+  const subscribe = sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribes = KNOWLEDGE_DATA_COLLECTIONS.map((collectionName) => {
+    const unsubscribe = subscribe.call(sync, collectionName, (snapshot) => {
+      state.collectionReadiness[collectionName] = snapshot || null;
+      renderKnowledgeList();
+      renderRunbooks();
+      if (state.activeTab === 'runbooks') {
+        renderRunbookWorkspace().catch((error) => console.warn('[knowledge] readiness re-render failed', error));
+      }
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+  });
+  return () => {
+    for (const unsubscribe of unsubscribes) {
+      try { unsubscribe(); } catch {}
+    }
+  };
+}
+
+function knowledgeReadinessSnapshot(collectionName) {
+  const snapshot = state.collectionReadiness?.[collectionName];
+  if (snapshot) return snapshot;
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, collectionName) : null;
+}
+
+// The knowledge list bundles records from ALL data collections, so its
+// data-driven empty branch is a sync state until every source is live.
+// Missing snapshots fail open (unknown → no syncing shell): readiness is a
+// render hint, never a mount blocker.
+function knowledgeSourceReadiness() {
+  const snapshots = KNOWLEDGE_DATA_COLLECTIONS.map(knowledgeReadinessSnapshot).filter(Boolean);
+  if (!snapshots.length) return null;
+  if (snapshots.some((snapshot) => snapshot.ready === false)) return { ready: false };
+  if (snapshots.every((snapshot) => snapshot.ready === true)) return { ready: true };
+  return null;
+}
+
+// Rows always win; the .ctox-syncing shell appears only for a data-driven
+// empty (the unfiltered replicated source is empty) whose collection is not
+// ready yet — selection/filter/permission empties stay .ctox-empty.
+function knowledgeListStateHtml({ dataDriven, readiness, message, syncingText }) {
+  if (dataDriven && readiness?.ready === false) {
+    return `<div class="ctox-syncing" role="status" aria-live="polite"><strong>${escapeHtml(syncingText)}</strong></div>`;
+  }
+  return `<div class="ctox-empty"><strong>${escapeHtml(message)}</strong></div>`;
 }
 
 function renderEmptyKnowledgeSelection() {
@@ -972,7 +1036,16 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
   const dir = state.sortDir === 'asc' ? 1 : -1;
   visibleGroups.sort((a, b) => ascending(a, b) * dir);
   if (!visibleGroups.length) {
-    els.list.innerHTML = `<div class="ctox-empty"><strong>${escapeHtml(knowledgeEmptyStateMessage(copy, term))}</strong></div>`;
+    // Only the UNFILTERED empty source (knowledgeEmptyStateMessage's noItems
+    // branch) is data-driven and gets the readiness gate; search/filter and
+    // error empties stay plain .ctox-empty.
+    const dataDriven = !state.loadError && !state.missingCollections.length && !term && !state.items.length;
+    els.list.innerHTML = knowledgeListStateHtml({
+      dataDriven,
+      readiness: knowledgeSourceReadiness(),
+      message: knowledgeEmptyStateMessage(copy, term),
+      syncingText: copy.syncingData,
+    });
     els.list.scrollTop = scrollTop;
   } else {
     els.list.replaceChildren(...visibleGroups.map((group) => renderKnowledgeBundle(group)));
@@ -1149,7 +1222,14 @@ function renderRunbooks() {
     ? state.runbooks.filter((runbook) => groupRunbookIds.has(normaliseRunbookId(runbook.id || runbook.runbook_id)))
     : state.runbooks;
   if (!visibleRunbooks.length) {
-    els.runbookList.innerHTML = `<div class="ctox-empty"><strong>${copy.noRunbooks}</strong></div>`;
+    // Group-scoped filtering is a selection empty; only an entirely empty
+    // knowledge_runbooks source is data-driven and readiness-gated.
+    els.runbookList.innerHTML = knowledgeListStateHtml({
+      dataDriven: !state.runbooks.length,
+      readiness: knowledgeReadinessSnapshot('knowledge_runbooks'),
+      message: copy.noRunbooks,
+      syncingText: copy.syncingData,
+    });
     fillRunbookForm(null);
     return;
   }
@@ -1305,7 +1385,14 @@ async function renderRunbookWorkspace() {
   els.selectedTitle.textContent = context.skillbook?.title || activeGroup()?.title || 'Knowledge';
   if (!visibleRunbooks.length) {
     els.runbookSwitcher.hidden = true;
-    els.runbookView.innerHTML = `<div class="ctox-empty"><strong>${copy.noRunbooks}</strong></div>`;
+    // Same gate as the runbook list: group/skillbook-scoped empties are
+    // selection states, an empty knowledge_runbooks source is data-driven.
+    els.runbookView.innerHTML = knowledgeListStateHtml({
+      dataDriven: !state.runbooks.length,
+      readiness: knowledgeReadinessSnapshot('knowledge_runbooks'),
+      message: copy.noRunbooks,
+      syncingText: copy.syncingData,
+    });
     fillRunbookForm(null);
     syncRunbookEditControls(false);
     return;
@@ -2948,6 +3035,7 @@ export const __knowledgeTestHooks = {
   knowledgeItemsFromTables,
   knowledgeGroupMatchesDomain,
   knowledgeEmptyStateMessage,
+  knowledgeListStateHtml,
   runCoalescedRefresh,
   validateKnowledgeTableChunks,
   dataFrameCompleteness,

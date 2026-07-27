@@ -27,6 +27,7 @@ const {
   isKnowledgeTabDisabled,
   knowledgeItemsFromTables,
   knowledgeGroupMatchesDomain,
+  knowledgeListStateHtml,
   runCoalescedRefresh,
   validateKnowledgeTableChunks,
   dataFrameCompleteness,
@@ -366,6 +367,50 @@ test('pane chrome follows the canonical data-pg-* grammar contract', async () =>
   // Markup is fetched from index.html with the JS cache-buster (single source).
   assert.match(js, /loadModuleMarkup/);
   assert.match(js, /\.\/index\.html/);
+});
+
+test('data-driven empty states show syncing shell only until the collection is live', () => {
+  const syncing = knowledgeListStateHtml({
+    dataDriven: true,
+    readiness: { ready: false, state: 'catching-up' },
+    message: 'Keine Knowledge-Einträge gefunden.',
+    syncingText: 'Daten werden synchronisiert.',
+  });
+  assert.match(syncing, /class="ctox-syncing"/);
+  assert.match(syncing, /role="status"/);
+  assert.match(syncing, /aria-live="polite"/);
+  assert.match(syncing, /Daten werden synchronisiert\./);
+
+  const offlinePending = knowledgeListStateHtml({
+    dataDriven: true,
+    readiness: { ready: false, state: 'offline-pending' },
+    message: 'Keine Knowledge-Einträge gefunden.',
+    syncingText: 'Daten werden synchronisiert.',
+  });
+  assert.match(offlinePending, /class="ctox-syncing"/);
+
+  const empty = knowledgeListStateHtml({
+    dataDriven: true,
+    readiness: { ready: true, state: 'live' },
+    message: 'Keine Knowledge-Einträge gefunden.',
+    syncingText: 'Daten werden synchronisiert.',
+  });
+  assert.match(empty, /class="ctox-empty"/);
+  assert.doesNotMatch(empty, /ctox-syncing/);
+  assert.match(empty, /Keine Knowledge-Einträge gefunden\./);
+
+  // Unknown readiness fails open (no spinner forever), and selection/filter
+  // empties never get the syncing shell even while the collection syncs.
+  const unknown = knowledgeListStateHtml({ dataDriven: true, readiness: null, message: 'm', syncingText: 's' });
+  assert.match(unknown, /class="ctox-empty"/);
+  const selectionEmpty = knowledgeListStateHtml({
+    dataDriven: false,
+    readiness: { ready: false, state: 'catching-up' },
+    message: 'Keine Runbooks vorhanden.',
+    syncingText: 'Daten werden synchronisiert.',
+  });
+  assert.match(selectionEmpty, /class="ctox-empty"/);
+  assert.doesNotMatch(selectionEmpty, /ctox-syncing/);
 });
 
 let passed = 0;
