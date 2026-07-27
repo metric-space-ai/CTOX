@@ -794,6 +794,7 @@ export async function mount(ctx) {
   configureActiveOutreach({ state, t, escapeHtml, rerender: () => render() });
   wireEvents(ctx.host);
   wireRealtime();
+  wireCollectionReadiness();
   let disposed = false;
 
   const scrollListener = (event) => {
@@ -1804,6 +1805,24 @@ function wireRealtime() {
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
   }
   startKnowledgeProjectionWatch();
+}
+
+function outboundCollectionReadiness(name) {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, name) : null;
+}
+
+function wireCollectionReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return;
+  for (const name of ['outbound_campaigns', 'outbound_companies']) {
+    const unsubscribe = subscribe.call(state.ctx.sync, name, () => render());
+    if (typeof unsubscribe === 'function') state.cleanup.push(() => unsubscribe());
+  }
+}
+
+function syncingStateHint() {
+  return `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(t('syncingData', 'Daten werden synchronisiert.'))}</div>`;
 }
 
 function scheduleDataRefresh(delay = 80) {
@@ -2880,7 +2899,17 @@ function renderCampaignList(root = state.ctx?.host?.querySelector?.('.outbound-l
   const campaigns = filteredCampaigns();
   list.classList.toggle('is-cards', state.campaignViewMode !== 'list');
   list.classList.toggle('is-list', state.campaignViewMode === 'list');
-  list.innerHTML = campaigns.map(renderCampaignItem).join('') || `<div class="ctox-empty">${escapeHtml(t('noCampaignsForView', 'Keine Campaigns für diese Ansicht.'))}</div>`;
+  let listHtml = campaigns.map(renderCampaignItem).join('');
+  if (!listHtml) {
+    const unfiltered = (state.campaignBand || 'all') === 'all'
+      && (state.campaignStatusFilter || 'all') === 'all'
+      && !state.campaignSearch.trim();
+    const readiness = unfiltered ? outboundCollectionReadiness('outbound_campaigns') : null;
+    listHtml = readiness?.ready === false
+      ? syncingStateHint()
+      : `<div class="ctox-empty">${escapeHtml(t('noCampaignsForView', 'Keine Campaigns für diese Ansicht.'))}</div>`;
+  }
+  list.innerHTML = listHtml;
   if (well && previousScrollTop) well.scrollTop = previousScrollTop;
   renderCampaignCountsAndFooter(root, campaigns.length);
 }
@@ -3188,7 +3217,10 @@ function renderCenter(force = false) {
   state.centerResizeCleanup = null;
   const campaign = selectedCampaign();
   if (!campaign) {
-    root.innerHTML = `<div class="ctox-empty">${escapeHtml(t('noCampaignSelected', 'Keine Campaign ausgewählt.'))}</div>`;
+    const readiness = outboundCollectionReadiness('outbound_campaigns');
+    root.innerHTML = readiness?.ready === false
+      ? syncingStateHint()
+      : `<div class="ctox-empty">${escapeHtml(t('noCampaignSelected', 'Keine Campaign ausgewählt.'))}</div>`;
     return;
   }
   if (state.outreachView) {
@@ -4133,6 +4165,18 @@ function renderTableLimitRow(total, columnCount) {
 }
 
 function renderTableEmptyState(message) {
+  if (state.filter === 'all' && !state.search.trim()) {
+    const readiness = outboundCollectionReadiness('outbound_companies');
+    if (readiness?.ready === false) {
+      return `
+    <div class="outbound-table-empty-overlay">
+        <div class="ctox-syncing" role="status" aria-live="polite">
+          <span>${escapeHtml(t('syncingData', 'Daten werden synchronisiert.'))}</span>
+        </div>
+    </div>
+  `;
+    }
+  }
   const hasSources = currentSources().length > 0;
   const title = hasSources
     ? t('emptyAfterImportTitle', 'Keine Firmen sichtbar')

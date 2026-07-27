@@ -201,6 +201,7 @@
   "noCompaniesCampaign": "No companies in this campaign yet.",
   "noCompaniesFilter": "No companies for filter: {0}.",
   "noCompaniesPipeline": "No companies in pipeline yet.",
+  "syncingData": "Syncing data.",
   "rowsVisibleHint": "{0} of {1} rows visible. Narrow down search or filter.",
   "sortedAsc": "Sorted ascending",
   "sortedDesc": "Sorted descending",

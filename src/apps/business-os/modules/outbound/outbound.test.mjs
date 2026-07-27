@@ -158,6 +158,18 @@ test('campaign column uses shell-owned grammar and stable in-place selection', a
   assert.doesNotMatch(css, /\.ctox-filterbar\s*\{|\.ctox-filter-tray\s*\{|\.ctox-view-switch\s*\{|\.ctox-well\s*\{|\.ctox-pane-footer\s*\{/);
 });
 
+test('data-driven empty states gate on canonical collection readiness', async () => {
+  const js = await fs.readFile(new URL('./index.js', import.meta.url), 'utf8');
+
+  assert.match(js, /sync\?\.subscribeCollectionReadiness/, 'canonical readiness changes are subscribed');
+  assert.match(js, /sync\?\.collectionReadiness/, 'readiness snapshots are read from the shell sync context');
+  assert.match(js, /outboundCollectionReadiness\('outbound_campaigns'\)/, 'campaign empties gate on outbound_campaigns readiness');
+  assert.match(js, /outboundCollectionReadiness\('outbound_companies'\)/, 'company table empty gates on outbound_companies readiness');
+  assert.match(js, /ctox-syncing" role="status" aria-live="polite"/, 'unready + empty renders the syncing shell');
+  assert.match(js, /readiness\?\.ready === false[\s\S]*?ctox-empty/, 'empty fallback only renders once the collection is ready');
+  assert.match(js, /t\('syncingData', 'Daten werden synchronisiert\.'\)/, 'sync hint goes through module i18n');
+});
+
 test('campaign scope recovers existing outbound rows for the only visible campaign', () => {
   const scoped = hooks.campaignScopedRows({
     campaigns: [{ id: 'outbound_default_campaign', name: 'Outbound Firmenqualifizierung' }],
