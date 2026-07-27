@@ -35,6 +35,7 @@ const state = {
   renderedDetailId: '',
   detailScrollByReport: {},
   diagnostics: createDiagnosticsState(),
+  readiness: {},
   t: null,
   lang: 'de',
 };
@@ -47,6 +48,7 @@ export async function mount(ctx) {
   state.renderedDetailId = '';
   state.renderKey = '';
   state.diagnostics = createDiagnosticsState();
+  state.readiness = readReportsReadiness();
   await ensureStyles();
 
   // Load localizations
@@ -74,7 +76,12 @@ export async function mount(ctx) {
   // multi-collection read before returning made the open feel laggy. The
   // realtime subscription re-renders as soon as the read resolves and on every
   // later change.
-  state.cleanup = wireRealtime();
+  const stopReadiness = wireReportsReadiness();
+  const stopRealtime = wireRealtime();
+  state.cleanup = () => {
+    stopReadiness();
+    stopRealtime();
+  };
   refreshReports().catch((error) => {
     console.warn('[reports] initial load failed', error);
   });
@@ -322,6 +329,43 @@ function wireRealtime() {
   });
 }
 
+// Canonical sync readiness for the data collections behind the report list
+// (business_module_reports + ctox_bug_reports merge into one list, so the list
+// is only "live" once BOTH finished their initial replication). Until then an
+// empty source renders the syncing shell, never the "no data" empty state.
+function readReportsReadiness() {
+  const read = state.ctx?.sync?.collectionReadiness;
+  if (typeof read !== 'function') return {};
+  return Object.fromEntries(REPORT_DATA_COLLECTIONS.map((name) => [name, read.call(state.ctx.sync, name)]));
+}
+
+function wireReportsReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribes = REPORT_DATA_COLLECTIONS.map((name) => subscribe.call(state.ctx.sync, name, (snapshot) => {
+    state.readiness = { ...state.readiness, [name]: snapshot };
+    render();
+  })).filter((unsubscribe) => typeof unsubscribe === 'function');
+  return () => unsubscribes.forEach((unsubscribe) => {
+    try { unsubscribe(); } catch {}
+  });
+}
+
+function reportsDataReadiness() {
+  const snapshots = REPORT_DATA_COLLECTIONS.map((name) => state.readiness?.[name]).filter(Boolean);
+  if (!snapshots.length) return null;
+  return { ready: snapshots.every((snapshot) => snapshot?.ready === true) };
+}
+
+export function resolveReportsDataState({ sourceCount = 0, readiness = null } = {}) {
+  if (Number(sourceCount) > 0) return 'content';
+  return readiness?.ready === false ? 'syncing' : 'empty';
+}
+
+function renderReportsSyncingState() {
+  return `<div class="ctox-syncing" role="status" aria-live="polite"><strong>${escapeHtml(state.t('syncingReports', 'Bugs & Features werden synchronisiert.'))}</strong><span>${escapeHtml(state.t('syncingReportsDetail', 'Die Einträge werden gerade aus dem CTOX-Datenstrom geladen.'))}</span></div>`;
+}
+
 function reportCollection(name) {
   return state.ctx?.db?.collection?.(name) || null;
 }
@@ -438,6 +482,9 @@ function renderListEmptyState(allItems) {
   if (allItems.length) {
     return `<p class="ctox-empty">${escapeHtml(state.t('noFilteredReports', 'Keine Einträge im aktuellen Filter.'))}</p>`;
   }
+  if (resolveReportsDataState({ sourceCount: allItems.length, readiness: reportsDataReadiness() }) === 'syncing') {
+    return renderReportsSyncingState();
+  }
   return `<p class="ctox-empty">${escapeHtml(reportStoreEmptyMessage(state.t('noReports', 'Noch keine Einträge.')))}</p>`;
 }
 
@@ -446,6 +493,9 @@ function renderDetailEmptyState({ normalized, filtered }) {
     return `<div class="ctox-empty"><strong>${escapeHtml(state.t('reportsUnavailable', 'Bugs & Features sind gerade nicht verfügbar.'))}</strong><span>${escapeHtml(state.t('reportsUnavailableDetail', 'Die Liste wird automatisch gefüllt, sobald Einträge geladen sind.'))}</span></div>`;
   }
   if (!normalized.length) {
+    if (resolveReportsDataState({ sourceCount: normalized.length, readiness: reportsDataReadiness() }) === 'syncing') {
+      return renderReportsSyncingState();
+    }
     return `<div class="ctox-empty"><strong>${escapeHtml(state.t('noReportsTitle', 'Noch keine Bugs oder Features'))}</strong><span>${escapeHtml(reportStoreEmptyMessage(state.t('noReportsDetail', 'Sobald Bugs oder Feature-Wünsche vorliegen, erscheinen Liste und Details hier.')))}</span></div>`;
   }
   if (!filtered.length) {
@@ -1039,21 +1089,8 @@ function hasBlockingReportDiagnostic() {
   const dataCollections = REPORT_DATA_COLLECTIONS.map((name) => state.diagnostics.collections?.[name]).filter(Boolean);
   if (!dataCollections.length) return true;
   const allStoresUnavailable = dataCollections.every((info) => info.missing || info.error);
-  const anyDataSyncIssue = dataCollections.some((info) => info.missing || info.error || info.syncError || isUnavailableReportSyncStatus(info.syncStatus));
-  return allStoresUnavailable || ((state.diagnostics.reportCount || 0) === 0 && anyDataSyncIssue);
-}
-
-function isUnavailableReportSyncStatus(value) {
-  return isPendingReportSyncStatus(value) || isUnhealthySyncStatus(value);
-}
-
-export function isPendingReportSyncStatus(value) {
-  return ['connecting', 'initializing', 'loading', 'pending', 'reconnecting', 'starting', 'syncing', 'waiting']
-    .includes(String(value || '').toLowerCase());
-}
-
-function isUnhealthySyncStatus(value) {
-  return ['failed', 'error', 'stopped'].includes(String(value || '').toLowerCase());
+  const anyDataError = dataCollections.some((info) => info.missing || info.error || info.syncError);
+  return allStoresUnavailable || ((state.diagnostics.reportCount || 0) === 0 && anyDataError);
 }
 
 function releasesForModule(moduleId) {

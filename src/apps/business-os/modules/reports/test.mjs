@@ -20,9 +20,9 @@ async function importBrowserBundle(relativePath) {
 
 const {
   filterReportItems,
-  isPendingReportSyncStatus,
   normalizeReportItems,
   resolveReportsContextRecord,
+  resolveReportsDataState,
 } = await importBrowserBundle('./index.js');
 
 const t = (_key, fallback) => fallback;
@@ -133,12 +133,16 @@ test('reads JSON encoded payload and client context fields', () => {
   assert.equal(items[0].attachment.capture_mode, 'viewport');
 });
 
-test('treats transient sync states as pending data, not true empty results', () => {
-  assert.equal(isPendingReportSyncStatus('connecting'), true);
-  assert.equal(isPendingReportSyncStatus('reconnecting'), true);
-  assert.equal(isPendingReportSyncStatus('syncing'), true);
-  assert.equal(isPendingReportSyncStatus('connected'), false);
-  assert.equal(isPendingReportSyncStatus('failed'), false);
+test('gates data empties on canonical readiness: unready renders syncing, ready renders empty', () => {
+  // Rows always win — even while a collection is still catching up.
+  assert.equal(resolveReportsDataState({ sourceCount: 2, readiness: { ready: false, syncing: true } }), 'content');
+  // Empty source + not ready (never-synced / catching-up / offline-pending) => syncing shell.
+  assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: { ready: false, syncing: true } }), 'syncing');
+  assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: { ready: false, syncing: false } }), 'syncing');
+  // Empty source + live => real empty state.
+  assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: { ready: true, syncing: false } }), 'empty');
+  // No readiness facade (legacy ctx) => previous behaviour: plain empty.
+  assert.equal(resolveReportsDataState({ sourceCount: 0, readiness: null }), 'empty');
 });
 
 test('right-click context resolves the clicked report before selected fallback', () => {
@@ -160,6 +164,20 @@ test('right-click context resolves the clicked report before selected fallback',
     visibleReports: reports,
     allReports: reports,
   }).id, 'selected-report');
+});
+
+test('module wires canonical collection readiness for the data-driven empty states', async () => {
+  const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+
+  // Canonical shell API: snapshot + subscription on the two data collections
+  // that merge into the report list.
+  assert.match(js, /sync\?\.collectionReadiness/);
+  assert.match(js, /sync\?\.subscribeCollectionReadiness/);
+  assert.match(js, /REPORT_DATA_COLLECTIONS\.map\(\(name\) => subscribe\.call/);
+  // Syncing shell is the kit class with status semantics; filter/selection
+  // empties keep ctox-empty.
+  assert.match(js, /class="ctox-syncing" role="status" aria-live="polite"/);
+  assert.match(js, /resolveReportsDataState\(\{ sourceCount: allItems\.length, readiness: reportsDataReadiness\(\) \}\)/);
 });
 
 test('presentation layer stays compact and shell-native', async () => {
