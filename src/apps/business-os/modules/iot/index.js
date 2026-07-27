@@ -13,7 +13,7 @@
 import { createContextMenu } from '../../shared/context-menu.js';
 import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js';
 
-const BUILD = '20260721-iot-ia-karte-v1';
+const BUILD = '20260727-canonical-readiness';
 const COLLECTIONS = [
   'iot_realms', 'iot_assets', 'iot_attributes', 'iot_datapoints', 'iot_alarms',
   'iot_dashboards', 'iot_widgets',
@@ -35,7 +35,12 @@ const state = {
   mainView: 'cards',      // MAIN dashboard: 'cards' | 'list'
   dragId: null,
   loading: true,
+  readiness: {},          // collection → ctx.sync readiness snapshot (frozen)
 };
+
+// Data-driven empty states gate on the readiness of THEIR backing collection:
+// the LEFT tree reads iot_assets, the MAIN dashboard widgets read iot_widgets.
+const READINESS_COLLECTIONS = ['iot_assets', 'iot_widgets'];
 
 function empty() { return Object.fromEntries(COLLECTIONS.map((c) => [c, []])); }
 function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
@@ -195,11 +200,24 @@ export async function mount(ctx) {
       });
   };
   const subs = COLLECTIONS.map((n) => col(n)?.$?.subscribe?.(requestReload)).filter(Boolean);
+  // Canonical collection readiness (shell sync API): re-render on state
+  // transitions so empty lists show the syncing shell until initial replication
+  // is live — never a false "no data" empty. Immediate snapshot per subscribe.
+  state.readiness = {};
+  const subscribeReadiness = ctx.sync?.subscribeCollectionReadiness;
+  const readinessSubs = (typeof subscribeReadiness === 'function'
+    ? READINESS_COLLECTIONS.map((name) => subscribeReadiness.call(ctx.sync, name, (snapshot) => {
+      state.readiness[name] = snapshot;
+      if (!disposed) render();
+    }))
+    : []
+  ).filter((unsub) => typeof unsub === 'function');
   requestReload();
 
   return () => {
     disposed = true;
     subs.forEach((s) => { try { s.unsubscribe?.(); } catch {} });
+    readinessSubs.forEach((unsubscribe) => { try { unsubscribe(); } catch {} });
     try { state.menu?.destroy?.(); } catch {}
     ctx.host.replaceChildren();
   };
@@ -365,6 +383,18 @@ function statusInfo(key) {
 function statusOf(w) { return statusInfo(w.trigger_status) || (w.trigger_code ? statusInfo('armed') : statusInfo('idle')); }
 
 /* ---------- render ---------- */
+// Readiness is a render hint, never a mount blocker: without a snapshot (older
+// shell, tests) lists behave as before. ready === false (never-synced,
+// catching-up, offline-pending) swaps a data-driven empty for the syncing
+// shell — rows always win, so there is no spinner deadlock.
+function collectionSyncing(name) {
+  const snapshot = state.readiness?.[name];
+  return snapshot ? snapshot.ready === false : false;
+}
+function syncingShell() {
+  return `<div class="ctox-syncing" role="status" aria-live="polite">${esc(t('syncing', 'Daten werden synchronisiert.'))}</div>`;
+}
+
 function render() {
   renderTree();
   renderCountsAndFooter();
@@ -408,6 +438,12 @@ function renderTree() {
   const host = state.ctx?.host?.querySelector('[data-iot-tree]');
   if (!host) return;
   if (!allAssets().length) {
+    // Data-driven empty (unfiltered iot_assets source): show the sync state
+    // until the collection is live, only then "no assets yet".
+    if (collectionSyncing('iot_assets')) {
+      host.innerHTML = syncingShell();
+      return;
+    }
     host.innerHTML = `<div class="ctox-empty"><strong>${esc(t('tree.emptyTitle', 'Noch keine Assets'))}</strong><span>${esc(t('tree.emptyBody', 'Lege oben links eins an.'))}</span></div>`;
     return;
   }
@@ -532,7 +568,9 @@ function renderMain() {
   const center = state.ctx?.host?.querySelector('[data-iot-center]');
   if (!center) return;
   if (resolveMainState(hasSelection()) === 'select' || !allAssets().length) {
-    center.innerHTML = mainEmptyState();
+    // No assets + collection not live yet → sync state, not the selection
+    // prompt (there may be assets inbound). Selection-empty stays ungated.
+    center.innerHTML = (!allAssets().length && collectionSyncing('iot_assets')) ? syncingShell() : mainEmptyState();
     return;
   }
   const widgets = displayedWidgets();
@@ -577,6 +615,9 @@ function mainHeader() {
 
 function renderCards(widgets) {
   if (!widgets.length) {
+    // Data-driven empty (iot_widgets source for the selection): sync state
+    // until the collection is live, only then "no orders yet".
+    if (collectionSyncing('iot_widgets')) return syncingShell();
     return `<div class="ctox-empty">
       <strong>${esc(t('cards.emptyTitle', 'Noch keine Aufträge'))}</strong>
       <p>${t('cards.emptyBody', 'Auftrag anlegen — schreibe <b>Wenn</b> &amp; <b>Dann</b>, CTOX programmiert den Wächter:')}</p>

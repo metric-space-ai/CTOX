@@ -113,7 +113,10 @@ const bundled = await build({
 });
 const [{ text: bundledSource }] = bundled.outputFiles;
 assert.ok(bundledSource.length > 0, 'index.js bundles to non-empty output');
-assert.ok(bundledSource.includes('mount'), 'bundle exposes mount');
+// Import the bundle and check the real export (works for self-contained
+// bundles and for the offline shim's re-export facade alike).
+const bundledModule = await import(`data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`);
+assert.equal(typeof bundledModule.mount, 'function', 'bundle exposes mount');
 
 console.log('iot module contract OK:', expectedCollections.length, 'collections, module.json/registry consistent, index.js bundles');
 
@@ -211,6 +214,22 @@ test('iot: band membership, filtering and counts (zeros included)', () => {
 test('iot: main dashboard is revealed by selection (auto-reveal analog)', () => {
   assert.equal(resolveMainState(false), 'select', 'no selection → select prompt');
   assert.equal(resolveMainState(true), 'dashboard', 'selection → dashboard');
+});
+
+test('iot: data-driven empties gate on canonical collection readiness', () => {
+  // Subscribes to the shell readiness API for the two backing collections and
+  // unsubscribes in the mount teardown.
+  assert.match(indexJs, /subscribeCollectionReadiness/, 'uses the canonical readiness subscription');
+  assert.match(indexJs, /READINESS_COLLECTIONS = \['iot_assets', 'iot_widgets'\]/, 'readiness tracks the backing collections');
+  assert.match(indexJs, /readinessSubs\.forEach\(\(unsubscribe\)/, 'teardown unsubscribes readiness');
+  // Empty + ready === false → .ctox-syncing shell (role/aria per kit contract);
+  // empty + ready → the existing .ctox-empty branches stay.
+  assert.match(indexJs, /class="ctox-syncing" role="status" aria-live="polite"/, 'syncing shell markup');
+  assert.match(indexJs, /snapshot\.ready === false/, 'sync state keyed on ready === false');
+  assert.match(indexJs, /collectionSyncing\('iot_assets'\)/, 'tree/main empties gate on iot_assets');
+  assert.match(indexJs, /collectionSyncing\('iot_widgets'\)/, 'widget empties gate on iot_widgets');
+  // Filter- and selection-empties stay ungated.
+  assert.doesNotMatch(indexJs, /tree\.noMatch[\s\S]{0,200}ctox-syncing/, 'filter empty is not gated');
 });
 
 test('iot: widgets are scoped by the selected asset (rollup) or signal (exact)', () => {
