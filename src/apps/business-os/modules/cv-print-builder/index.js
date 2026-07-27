@@ -24,6 +24,9 @@ const REQUIRED_COLLECTIONS = [
 const LIVE_COLLECTIONS = [
   ...REQUIRED_COLLECTIONS,
 ];
+// Backing collection of the candidate selector list (documents filtered to
+// document_type === 'cv_print_profile'); its readiness gates the data empty.
+const LIST_READINESS_COLLECTION = 'documents';
 let ACTIVE_LOCALE = 'de';
 
 function tr(de, en) {
@@ -109,6 +112,7 @@ export async function mount(ctx) {
     refreshTimer: null,
     renderSerial: 0,
     ready: false,
+    listReadiness: null,
     importing: false,
     bulkParsing: false,
     originalErrors: new Map(),
@@ -116,6 +120,8 @@ export async function mount(ctx) {
 
   bindStaticEvents(state);
   subscribeToCollections(state);
+  state.listReadiness = readListReadiness(state);
+  subscribeToReadiness(state);
   setModuleBusy(state, true);
   render(state);
   let disposed = false;
@@ -403,6 +409,26 @@ function subscribeToCollections(state) {
   });
 }
 
+// Readiness of the candidate list's backing collection (`documents`). While it
+// has not completed its initial replication, an empty list must render the
+// sync state instead of "no data" (render hint only — never a mount blocker).
+function readListReadiness(state) {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function'
+    ? read.call(state.ctx.sync, LIST_READINESS_COLLECTION)
+    : null;
+}
+
+function subscribeToReadiness(state) {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return;
+  const unsubscribe = subscribe.call(state.ctx.sync, LIST_READINESS_COLLECTION, (snapshot) => {
+    state.listReadiness = snapshot;
+    renderList(state);
+  });
+  if (typeof unsubscribe === 'function') state.disposers.push(unsubscribe);
+}
+
 function setModuleBusy(state, busy) {
   state.host.toggleAttribute('data-cv-busy', Boolean(busy));
   const upload = state.host.querySelector('[data-cv-upload]');
@@ -635,12 +661,24 @@ function renderList(state) {
   list.classList.toggle('is-compact', grammar.view === 'list');
   list.innerHTML = visible.length
     ? visible.map((item) => renderCandidateCard(state, item, grammar.view)).join('')
-    : '<div class="ctox-empty">' + escapeHtml(state.items.length
-      ? tr('Keine Kandidaten für diesen Filter.', 'No candidates for this filter.')
-      : tr('Noch keine CVs. Über „Neu" ein PDF anlegen.', 'No CVs yet. Add a PDF via "New".')) + '</div>';
+    : renderListEmptyState(state);
   applyListSelection(state);
   writeCounts(state, bandCounts(state));
   writeFooter(state, `${visible.length} ${visible.length === 1 ? tr('Eintrag', 'entry') : tr('Einträge', 'entries')} · ${bandLabel(grammar.band)}`);
+}
+
+// Empty branches of the candidate list: a FILTER empty (source has rows) always
+// wins; a DATA empty shows the sync shell while `documents` is not initially
+// replicated (ready === false, incl. offline-pending) and the honest empty
+// state only once the collection is live.
+function renderListEmptyState(state) {
+  if (state.items.length) {
+    return '<div class="ctox-empty">' + escapeHtml(tr('Keine Kandidaten für diesen Filter.', 'No candidates for this filter.')) + '</div>';
+  }
+  if (state.listReadiness?.ready === false) {
+    return '<div class="ctox-syncing" role="status" aria-live="polite">' + escapeHtml(tr('Daten werden synchronisiert.', 'Syncing data.')) + '</div>';
+  }
+  return '<div class="ctox-empty">' + escapeHtml(tr('Noch keine CVs. Über „Neu" ein PDF anlegen.', 'No CVs yet. Add a PDF via "New".')) + '</div>';
 }
 
 // In-place selection flip — never a rebuild, so the operator's scroll offset in

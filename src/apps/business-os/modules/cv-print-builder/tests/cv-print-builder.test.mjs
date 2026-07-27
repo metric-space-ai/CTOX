@@ -202,4 +202,21 @@ assert.match(source, /const markupHref = new URL\('\.\/index\.html', import\.met
 assert.match(source, /const cssVersion = String\(import\.meta\.url\)\.split\('\?v='\)\[1\] \|\| BUILD/);
 assert.match(source, /const cssHref = new URL\('\.\/index\.css', import\.meta\.url\)\.pathname \+ \(cssVersion \? `\?v=\$\{cssVersion\}` : ''\)/);
 
+// Canonical collection readiness: the candidate list's DATA empty is gated on
+// the `documents` readiness — syncing shell while unready, honest empty when live.
+assert.match(source, /const LIST_READINESS_COLLECTION = 'documents'/);
+assert.match(source, /ctx\?\.sync\?\.collectionReadiness/);
+assert.match(source, /ctx\?\.sync\?\.subscribeCollectionReadiness/);
+assert.match(source, /subscribe\.call\(state\.ctx\.sync, LIST_READINESS_COLLECTION/);
+assert.match(source, /state\.listReadiness = snapshot/);
+assert.match(source, /state\.disposers\.push\(unsubscribe\)/);
+assert.match(source, /function renderListEmptyState\(state\)/);
+assert.match(source, /state\.listReadiness\?\.ready === false/);
+assert.match(source, /<div class="ctox-syncing" role="status" aria-live="polite">/);
+assert.match(source, /Daten werden synchronisiert\./);
+assert.match(source, /Syncing data\./);
+// Filter empties and selection empties stay plain ctox-empty (not gated).
+assert.match(source, /Keine Kandidaten für diesen Filter\./);
+assert.match(source, /Kein CV ausgewählt/);
+
 console.log('cv-print-builder module contract OK');
