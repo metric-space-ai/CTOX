@@ -13,7 +13,7 @@ const COPY = {
     kicker: 'Bewerbungseingang', listTitle: 'Bewerbungen', newTitle: 'Neue Bewerbung',
     name: 'Name', email: 'E-Mail', phone: 'Telefon', vacancy: 'Vakanz-ID', channel: 'Kanal',
     capture: 'Erfassen', more: 'Weitere Angaben', entries: 'Einträge', empty: 'Noch keine Einträge.',
-    emptyFiltered: 'Keine Bewerbung passt zum Filter.',
+    emptyFiltered: 'Keine Bewerbung passt zum Filter.', syncing: 'Daten werden synchronisiert.',
     offlineService: 'Offline: Befehlsdienst nicht verfügbar.', nameRequired: 'Name ist erforderlich.',
     offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', blocked: 'Eingang blockiert.',
     captured: 'Bewerbung erfasst.', application: 'Application', dedupeKey: 'Dedupe-Key',
@@ -28,7 +28,7 @@ const COPY = {
     kicker: 'Application intake', listTitle: 'Applications', newTitle: 'New application',
     name: 'Name', email: 'Email', phone: 'Phone', vacancy: 'Vacancy ID', channel: 'Channel',
     capture: 'Capture', more: 'More details', entries: 'records', empty: 'No applications yet.',
-    emptyFiltered: 'No application matches the filter.',
+    emptyFiltered: 'No application matches the filter.', syncing: 'Syncing data.',
     offlineService: 'Offline: command service unavailable.', nameRequired: 'Name is required.',
     offlineSend: 'Offline: command could not be sent.', blocked: 'Intake blocked.',
     captured: 'Application captured.', application: 'Application', dedupeKey: 'Dedupe key',
@@ -126,9 +126,17 @@ export function applicationRow(r, opts = {}) {
 }
 
 // The list body markup (shards or compact rows), or the empty state.
+// Readiness contract: the kit syncing shell shows only when the list is
+// empty AND the caller passes a readiness snapshot with ready === false
+// (the UNFILTERED source collection has not finished initial replication).
+// Filter/search empties and a missing readiness API (older shells, tests)
+// keep the plain empty copy.
 export function renderRecordList(rows, opts = {}) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) {
+    if (opts.readiness && opts.readiness.ready === false) {
+      return '<div class="ctox-syncing" role="status" aria-live="polite"><strong>' + esc(text.syncing) + '</strong></div>';
+    }
     return '<div class="ctox-empty"><strong>' + esc(opts.emptyText || text.empty) + '</strong></div>';
   }
   return list.map((r) => applicationRow(r, { view: opts.view, selected: r.id && r.id === opts.selectedId })).join('');
@@ -207,6 +215,16 @@ export async function mount(ctx) {
   let userCollapsed = false;
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
 
+  // Shell-owned readiness snapshot for the applications collection (canonical
+  // sync contract); null when the shell exposes no readiness API → the
+  // previous empty-state behaviour. A render hint only, never a mount blocker.
+  let applicationsReadiness = readApplicationsReadiness();
+  function readApplicationsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    if (typeof read !== 'function') return null;
+    try { return read.call(ctx.sync, PRIMARY) || null; } catch { return null; }
+  }
+
   // Gate callout → kit .ctox-callout variants (base.css).
   const GATE_VARIANTS = { ok: ' is-success', block: ' is-danger', offline: ' is-warning' };
   function setGate(html, kind) {
@@ -262,7 +280,14 @@ export async function mount(ctx) {
     const filtered = filterRows(rowsCache, g);
     if (listEl) {
       const emptyText = rowsCache.length ? text.emptyFiltered : text.empty;
-      listEl.innerHTML = renderRecordList(filtered, { view: g.view, selectedId, emptyText });
+      // Only the data-driven empty (unfiltered source empty) is gated by
+      // readiness; a filter empty means data exists → readiness stays null.
+      listEl.innerHTML = renderRecordList(filtered, {
+        view: g.view,
+        selectedId,
+        emptyText,
+        readiness: rowsCache.length ? null : applicationsReadiness,
+      });
     }
     writeCounts(countsFor(rowsCache));
     const scope = g.band === 'all' ? text.bandAll : g.band === 'open' ? text.bandOpen : text.bandClosed;
@@ -478,11 +503,25 @@ export async function mount(ctx) {
   if (col?.find) {
     try { sub = col.find({ selector: {} }).$?.subscribe?.(() => { load().then(render).catch(() => {}); }); } catch {}
   }
+  // Re-render the record list when the applications collection flips its
+  // replication state so the empty list swaps between the syncing shell and
+  // the real empty state without waiting for data changes.
+  let readinessUnsub = null;
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    try {
+      const unsubscribe = ctx.sync.subscribeCollectionReadiness(PRIMARY, (snapshot) => {
+        applicationsReadiness = snapshot || null;
+        render();
+      });
+      if (typeof unsubscribe === 'function') readinessUnsub = unsubscribe;
+    } catch {}
+  }
   await load();
   render();
 
   return () => {
     try { sub?.unsubscribe?.(); } catch {}
+    try { readinessUnsub?.(); } catch {}
     listEl?.removeEventListener('click', onListClick);
     listEl?.removeEventListener('keydown', onListKey);
     root?.removeEventListener('click', onAction);

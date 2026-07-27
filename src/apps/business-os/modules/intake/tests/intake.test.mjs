@@ -90,6 +90,28 @@ test('intake: record list renders selector rows from a stub doc array', async ()
   assert.match(empty, /ctox-empty/, 'empty state renders the kit empty class');
 });
 
+test('intake: data-driven empty is gated by collection readiness', async () => {
+  const mod = await import('../index.js');
+  // Empty + not-yet-replicated (ready === false) → kit syncing shell.
+  const syncing = mod.renderRecordList([], { view: 'cards', readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncing, /ctox-syncing/, 'empty + unready renders the kit syncing shell');
+  assert.match(syncing, /role="status"/, 'syncing shell is a polite status region');
+  assert.ok(!/ctox-empty/.test(syncing), 'syncing shell replaces the empty copy');
+  // Empty + live (ready === true) → the real empty state.
+  const ready = mod.renderRecordList([], { view: 'cards', readiness: { ready: true, state: 'live' } });
+  assert.match(ready, /ctox-empty/, 'empty + ready renders the kit empty class');
+  assert.ok(!/ctox-syncing/.test(ready), 'no syncing shell once the collection is live');
+  // Rows always win, even while the collection reports unready.
+  const rows = [{ id: 'a1', channel: 'email', status: 'new', candidate: { name: 'Alice Ng' } }];
+  const withRows = mod.renderRecordList(rows, { view: 'cards', readiness: { ready: false } });
+  assert.match(withRows, /Alice Ng/, 'rows render regardless of readiness');
+  assert.ok(!/ctox-syncing/.test(withRows), 'no syncing shell when rows exist');
+  // Filter empties pass readiness=null → plain (filter) empty copy.
+  const filtered = mod.renderRecordList([], { view: 'cards', readiness: null, emptyText: 'FILTERED' });
+  assert.match(filtered, /ctox-empty/, 'filter empty keeps the empty class');
+  assert.match(filtered, /FILTERED/, 'filter empty keeps its own copy');
+});
+
 test('intake: band + counts derive from the record status field', async () => {
   const mod = await import('../index.js');
   const rows = [
