@@ -3927,11 +3927,13 @@ async function runSelectedResearch() {
   const requireDerivedBearingLoads = existingTables.has('derived_bearing_loads')
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
+  const sourceTable = tableForKey(base, task.source_catalog_key || 'source_catalog');
   const candidateRows = candidateTable ? await fetchTableRows(candidateTable.id) : [];
   const knowledgeTableRefs = compactKnowledgeTableReferences(base?.tables || []);
   const rawVerifiedSourceModels = (state.sourceModels || [])
     .filter((source) => source.evidenceEligible);
   const verifiedSourceModels = uniqueSourceModels(rawVerifiedSourceModels);
+  const verifiedSourceCount = boundedVerifiedSourceCount(verifiedSourceModels, sourceTable);
   const verifiedSourceUrls = [...new Set(sourceUrlsFromRows(
     verifiedSourceModels.map((source) => source.row),
   ))];
@@ -3943,6 +3945,7 @@ async function runSelectedResearch() {
     task?.payload?.target_verified_sources,
     rawVerifiedSourceModels.length,
     verifiedSourceModels.length,
+    verifiedSourceCount,
   );
   const minimumCandidateSources = Math.max(
     targetVerifiedSources * 2,
@@ -3973,7 +3976,7 @@ async function runSelectedResearch() {
     `Scoring-Modell:\n${scoringDimensions.map((axis) => `- ${axis.id}: ${axis.label}; weight=${axis.weight || scoringWeights(scoringDimensions)[axis.id] || 1}`).join('\n')}`,
     `Portfolio axes: x=${normalizedAxisPair(task).x}, y=${normalizedAxisPair(task).y}`,
     '',
-    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceModels.length}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
+    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceCount}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
     'Arbeite iterativ mit den typisierten Web-Stack-Werkzeugen, folge bei wissenschaftlichen Quellen den Referenzen und führe zwei orthogonale Nulltreffer-Runden durch. Behandle Discovery nur als Kandidatenmenge. Evidence, Knowledge, Graph und Reports dürfen ausschließlich aus gelesenen, gesnapshotpten und vom Evidence-Gate zugelassenen Originalquellen entstehen.',
     'Nutze die vom System materialisierte Skill-Anleitung und den serverseitigen Writeback-Vertrag. Erzeuge keine parallelen Tabellen, schreibe nicht direkt in Business-OS-Datenbanken und starte keine Child Agents.',
   ].filter(Boolean).join('\n');
@@ -4160,11 +4163,34 @@ function uniqueSourceModels(sourceModels = []) {
   });
 }
 
-function effectiveTargetVerifiedSources(configuredTarget, rawVerifiedCount, uniqueVerifiedCount) {
+function boundedVerifiedSourceCount(sourceModels = [], sourceTable = null) {
+  const modelCount = sourceModels.length;
+  const declaredCount = firstPositiveNumber(sourceTable, [
+    'row_count',
+    'rowCount',
+    'total_row_count',
+    'totalRows',
+    'projected_row_count',
+  ]);
+  return declaredCount ? Math.min(modelCount, declaredCount) : modelCount;
+}
+
+function effectiveTargetVerifiedSources(
+  configuredTarget,
+  rawVerifiedCount,
+  uniqueVerifiedCount,
+  authoritativeVerifiedCount = uniqueVerifiedCount,
+) {
   const configured = Number(configuredTarget || 0);
-  const duplicatedProjectionTarget = rawVerifiedCount > uniqueVerifiedCount
+  const verifiedCount = Math.min(
+    Number(uniqueVerifiedCount || 0),
+    Number(authoritativeVerifiedCount || uniqueVerifiedCount || 0),
+  );
+  const duplicatedProjectionTarget = rawVerifiedCount > verifiedCount
     && configured === rawVerifiedCount;
-  return Math.max(100, duplicatedProjectionTarget ? 0 : configured);
+  const duplicatedAliasTarget = verifiedCount > 0
+    && configured === verifiedCount * 2;
+  return Math.max(100, duplicatedProjectionTarget || duplicatedAliasTarget ? 0 : configured);
 }
 
 function researchScoringContract(scoringDimensions) {
@@ -5794,6 +5820,7 @@ export const __researchTestHooks = {
   renderNoTaskCenter,
   researchDomainFromFormValue,
   metricPropellerLength,
+  boundedVerifiedSourceCount,
   effectiveTargetVerifiedSources,
   shouldRetryEmptyKnowledgeTables,
   tangentialEquivalentForce,

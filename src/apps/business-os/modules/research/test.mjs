@@ -574,8 +574,10 @@ test('research launch deduplicates projected sources and repairs a legacy inflat
   const unique = hooks.uniqueSourceModels([source, duplicateProjection]);
 
   assert.equal(unique.length, 1);
-  assert.equal(hooks.effectiveTargetVerifiedSources(276, 276, 138), 100);
-  assert.equal(hooks.effectiveTargetVerifiedSources(150, 276, 138), 150);
+  assert.equal(hooks.boundedVerifiedSourceCount(Array.from({ length: 276 }), { row_count: 138 }), 138);
+  assert.equal(hooks.effectiveTargetVerifiedSources(276, 276, 276, 138), 100);
+  assert.equal(hooks.effectiveTargetVerifiedSources(276, 138, 138, 138), 100);
+  assert.equal(hooks.effectiveTargetVerifiedSources(150, 276, 276, 138), 150);
 });
 
 test('research reports contain only live documents with explicit task or domain lineage', () => {
