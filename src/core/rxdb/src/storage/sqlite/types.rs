@@ -56,8 +56,9 @@ impl RxStorageSqlite {
     }
 
     pub fn connection(&self) -> RxResult<SharedSqliteConnection> {
-        if let Some(existing) = self.connection.lock().clone() {
-            return Ok(existing);
+        let mut connection_slot = self.connection.lock();
+        if let Some(existing) = connection_slot.as_ref() {
+            return Ok(Arc::clone(existing));
         }
 
         let path = &self.settings.database_path;
@@ -102,7 +103,7 @@ impl RxStorageSqlite {
         ));
 
         let shared = Arc::new(Mutex::new(connection));
-        *self.connection.lock() = Some(Arc::clone(&shared));
+        *connection_slot = Some(Arc::clone(&shared));
         Ok(shared)
     }
 }
@@ -533,6 +534,54 @@ mod tests {
             external_database_poll_reference_count(&database_key),
             None,
             "dropping the last storage factory must stop and unregister the shared poller"
+        );
+    }
+
+    #[test]
+    fn concurrent_first_connections_initialize_once_and_release_poll_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("concurrent-first.sqlite3");
+        let database_key = crate::storage::sqlite::instance::database_key_for_path(&path);
+        let storage = RxStorageSqlite::new(RxStorageSqliteSettings {
+            database_path: path,
+        });
+        let worker_count = 16;
+        let start = Arc::new(std::sync::Barrier::new(worker_count));
+
+        let workers = (0..worker_count)
+            .map(|_| {
+                let storage = Arc::clone(&storage);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    storage.connection().unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        let connections = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let first = connections.first().unwrap();
+        assert!(
+            connections
+                .iter()
+                .all(|connection| Arc::ptr_eq(first, connection)),
+            "all concurrent first callers must receive the single initialized connection"
+        );
+        assert_eq!(
+            external_database_poll_reference_count(&database_key),
+            Some(1),
+            "concurrent initialization must acquire exactly one poll registration"
+        );
+
+        drop(connections);
+        drop(storage);
+        assert_eq!(
+            external_database_poll_reference_count(&database_key),
+            None,
+            "dropping the storage must fully release its poll registration"
         );
     }
 
