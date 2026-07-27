@@ -2606,7 +2606,7 @@ fn skill_markdown(root: &Path, skill_id: &str) -> anyhow::Result<String> {
         source_path.unwrap_or_else(|| "unbekannt".to_owned())
     );
     let mut files = conn.prepare(
-        "SELECT relative_path, substr(CAST(content_blob AS TEXT), 1, 120000) AS content_text
+        "SELECT relative_path, content_blob
            FROM ctox_skill_files
           WHERE skill_id = ?1
           ORDER BY CASE WHEN relative_path = 'SKILL.md' THEN 0 ELSE 1 END, relative_path
@@ -2615,7 +2615,11 @@ fn skill_markdown(root: &Path, skill_id: &str) -> anyhow::Result<String> {
     let mut rows = files.query([skill_id])?;
     while let Some(row) = rows.next()? {
         let relative_path: String = row.get(0)?;
-        let content: String = row.get(1)?;
+        let content_blob: Vec<u8> = row.get(1)?;
+        let Ok(content) = String::from_utf8(content_blob) else {
+            continue;
+        };
+        let content = content.chars().take(120_000).collect::<String>();
         text.push_str(&format!("\n\n## {relative_path}\n\n{content}"));
     }
     Ok(text)
