@@ -896,7 +896,13 @@ var BATCH_STATE_COLLECTION_INDEX = "stateCollection";
 var CONFLICT_STORE = "conflicts";
 var META_STORE = "meta";
 var ACKED_RETENTION_MS = 24 * 60 * 60 * 1e3;
+var PREVIEW_TTL_MS = 10 * 60 * 1e3;
 var previews = /* @__PURE__ */ new Map();
+function sweepExpiredPreviews(nowMs = Date.now()) {
+  for (const [previewId, preview] of previews) {
+    if (preview.expiresAtMs < nowMs) previews.delete(previewId);
+  }
+}
 async function openRecoveryJournal({ databaseName, instanceId = databaseName, quotaCoordinator = null } = {}) {
   if (!databaseName) throw new TypeError("Recovery journal requires databaseName");
   const db = await openJournalDatabase(`${databaseName}__recovery_v2`);
@@ -1170,7 +1176,8 @@ var CtoxRecoveryJournal = class {
       artifactSchemaHash: batch.schemaHash,
       localSchemaHash: this.replayers.get(batch.collection)?.schemaHash || null
     }));
-    previews.set(previewId, { journal: this, content, expiresAtMs: Date.now() + 10 * 60 * 1e3 });
+    sweepExpiredPreviews();
+    previews.set(previewId, { journal: this, content, expiresAtMs: Date.now() + PREVIEW_TTL_MS });
     return {
       previewId,
       pendingBatches: content.pendingBatches?.length || 0,
@@ -1181,6 +1188,7 @@ var CtoxRecoveryJournal = class {
     };
   }
   async applyImport(previewId) {
+    sweepExpiredPreviews();
     const preview = previews.get(previewId);
     if (!preview || preview.journal !== this || preview.expiresAtMs < Date.now()) {
       throw recoveryError("recovery_integrity_failed", "Recovery import preview is missing or expired.");
@@ -1458,7 +1466,10 @@ var recoveryJournalTestInternals = Object.freeze({
   CONFLICT_STORE,
   META_STORE,
   ACKED_RETENTION_MS,
-  masterAcknowledgesLocal
+  PREVIEW_TTL_MS,
+  masterAcknowledgesLocal,
+  previews,
+  sweepExpiredPreviews
 });
 
 // src/apps/business-os/rxdb/src/query-meta-backend-memory.mjs

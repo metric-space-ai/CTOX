@@ -10,7 +10,17 @@ const BATCH_STATE_COLLECTION_INDEX = 'stateCollection';
 const CONFLICT_STORE = 'conflicts';
 const META_STORE = 'meta';
 const ACKED_RETENTION_MS = 24 * 60 * 60 * 1000;
+const PREVIEW_TTL_MS = 10 * 60 * 1000;
 const previews = new Map();
+
+// Previews hold DECRYPTED recovery payloads. An import that is previewed but
+// never applied would otherwise pin its plaintext in this module-level map for
+// the lifetime of the tab, so every touch point sweeps expired entries.
+function sweepExpiredPreviews(nowMs = Date.now()) {
+  for (const [previewId, preview] of previews) {
+    if (preview.expiresAtMs < nowMs) previews.delete(previewId);
+  }
+}
 
 export async function openRecoveryJournal({ databaseName, instanceId = databaseName, quotaCoordinator = null } = {}) {
   if (!databaseName) throw new TypeError('Recovery journal requires databaseName');
@@ -312,7 +322,8 @@ export class CtoxRecoveryJournal {
       artifactSchemaHash: batch.schemaHash,
       localSchemaHash: this.replayers.get(batch.collection)?.schemaHash || null,
     }));
-    previews.set(previewId, { journal: this, content, expiresAtMs: Date.now() + 10 * 60 * 1000 });
+    sweepExpiredPreviews();
+    previews.set(previewId, { journal: this, content, expiresAtMs: Date.now() + PREVIEW_TTL_MS });
     return {
       previewId,
       pendingBatches: content.pendingBatches?.length || 0,
@@ -324,6 +335,7 @@ export class CtoxRecoveryJournal {
   }
 
   async applyImport(previewId) {
+    sweepExpiredPreviews();
     const preview = previews.get(previewId);
     if (!preview || preview.journal !== this || preview.expiresAtMs < Date.now()) {
       throw recoveryError('recovery_integrity_failed', 'Recovery import preview is missing or expired.');
@@ -630,5 +642,8 @@ export const recoveryJournalTestInternals = Object.freeze({
   CONFLICT_STORE,
   META_STORE,
   ACKED_RETENTION_MS,
+  PREVIEW_TTL_MS,
   masterAcknowledgesLocal,
+  previews,
+  sweepExpiredPreviews,
 });
