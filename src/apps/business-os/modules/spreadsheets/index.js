@@ -7,6 +7,7 @@ const TSV_MIME = 'text/tab-separated-values';
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const CHUNK_SIZE = 256000;
 const SPREADSHEET_RENDER_DEBOUNCE_MS = 80;
+const SPREADSHEETS_PRIMARY_COLLECTION = 'spreadsheets';
 const SUPPORTED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.xlsx'];
 // Layout preference for the right (runbook/AI) pane. The right pane is
 // situational — the spreadsheet workbench gets the full width until the
@@ -103,6 +104,8 @@ export async function mount(ctx) {
     tagFilter: 'all',
     sortBy: 'updated_desc',
     localSubscriptionCleanup: null,
+    readinessCleanup: null,
+    spreadsheetsReadiness: null,
     openFileToken: null,
     openFilePromise: Promise.resolve(),
     contextMenu: null,
@@ -123,6 +126,7 @@ export async function mount(ctx) {
     enqueueSpreadsheetOpenFile(state, payload.args?.openFile);
   }) || null;
   state.localSubscriptionCleanup = wireLocalRealtime(state);
+  state.readinessCleanup = wireSpreadsheetsReadiness(state);
   let disposed = false;
   renderLeft(state);
   renderRight(state);
@@ -157,6 +161,7 @@ export async function mount(ctx) {
     state.contextMenu?.remove();
     state.contextMenu = null;
     state.localSubscriptionCleanup?.();
+    state.readinessCleanup?.();
     if (state.editorHandle?.kind === 'ctox-spreadsheets') {
       state.editorHandle.destroy?.();
     }
@@ -274,6 +279,35 @@ function wireLocalRealtime(state) {
 
 function spreadsheetCollection(ctx, collectionName) {
   return ctx?.db?.collection?.(collectionName) || null;
+}
+
+// Canonical shell readiness (ctx.sync) for the primary `spreadsheets`
+// collection: while the initial replication has not landed, the explorer
+// must show a sync state instead of "Keine Tabellen".
+function readSpreadsheetsReadiness(state) {
+  const read = state?.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function'
+    ? read.call(state.ctx.sync, SPREADSHEETS_PRIMARY_COLLECTION)
+    : null;
+}
+
+function wireSpreadsheetsReadiness(state) {
+  const subscribe = state?.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribe = subscribe.call(state.ctx.sync, SPREADSHEETS_PRIMARY_COLLECTION, (snapshot) => {
+    state.spreadsheetsReadiness = snapshot;
+    renderLeft(state);
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+}
+
+// Render hint only — never blocks mounting. True exactly when the unfiltered
+// source is empty AND the backing collection has not finished its initial
+// replication (never-synced / catching-up / offline-pending ⇒ ready === false).
+function shouldRenderSpreadsheetsSyncing(state) {
+  if ((state?.spreadsheets?.length || 0) > 0) return false;
+  const readiness = state?.spreadsheetsReadiness ?? readSpreadsheetsReadiness(state);
+  return readiness != null && readiness.ready === false;
 }
 
 async function refreshSpreadsheetsFromLocal(state) {
@@ -890,6 +924,21 @@ function populateSpreadsheetList(state, list, records = visibleSpreadsheets(stat
   list.replaceChildren();
   if (records.length === 0) {
     const hasRecords = state.spreadsheets.length > 0;
+    // Data-driven empty (unfiltered source from the replicated `spreadsheets`
+    // collection is empty): show the sync state until the initial replication
+    // has landed. Filter-empties (hasRecords) keep the "Keine Treffer" copy.
+    if (!hasRecords && shouldRenderSpreadsheetsSyncing(state)) {
+      const syncing = document.createElement('div');
+      syncing.className = 'ctox-syncing';
+      syncing.setAttribute('role', 'status');
+      syncing.setAttribute('aria-live', 'polite');
+      syncing.innerHTML = `
+        <strong>${escapeHtml(state.t('syncingSpreadsheets', 'Tabellen werden synchronisiert.'))}</strong>
+        <span>${escapeHtml(state.t('syncingSpreadsheetsDetail', 'Die Tabellendaten werden gerade aus dem CTOX-Datenstrom geladen.'))}</span>
+      `;
+      list.append(syncing);
+      return;
+    }
     const empty = document.createElement('div');
     empty.className = 'ctox-empty';
     empty.innerHTML = `
@@ -2123,6 +2172,7 @@ export const __spreadsheetsTestHooks = {
   validateImportInput,
   validateNewSpreadsheetInput,
   visibleSpreadsheets,
+  shouldRenderSpreadsheetsSyncing,
   saveBlobChunks,
   escapeCsvCell,
   rowsToCsv,

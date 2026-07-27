@@ -263,3 +263,27 @@ test('spreadsheet blob chunks are persisted with one bulk write', async () => {
   assert.equal(bulkWrites.length, 1, 'blob chunks are written through one bulkUpsert call');
   assert.ok(bulkWrites[0].length > 1, 'test payload spans multiple chunk documents');
 });
+
+test('empty spreadsheet explorer shows syncing only while the collection is unready', () => {
+  const unready = { collection: 'spreadsheets', state: 'catching-up', ready: false, syncing: true, updatedAt: 0 };
+  const offlinePending = { collection: 'spreadsheets', state: 'offline-pending', ready: false, syncing: false, updatedAt: 0 };
+  const live = { collection: 'spreadsheets', state: 'live', ready: true, syncing: false, updatedAt: 1 };
+
+  // Empty + unready ⇒ syncing shell (render hint, includes offline-pending).
+  assert.equal(hooks.shouldRenderSpreadsheetsSyncing({ spreadsheets: [], spreadsheetsReadiness: unready }), true);
+  assert.equal(hooks.shouldRenderSpreadsheetsSyncing({ spreadsheets: [], spreadsheetsReadiness: offlinePending }), true);
+  // Empty + ready ⇒ regular ctox-empty.
+  assert.equal(hooks.shouldRenderSpreadsheetsSyncing({ spreadsheets: [], spreadsheetsReadiness: live }), false);
+  // Rows always win, regardless of readiness.
+  assert.equal(hooks.shouldRenderSpreadsheetsSyncing({ spreadsheets: [{ id: 'sheet_1' }], spreadsheetsReadiness: unready }), false);
+  // No readiness signal (older shells/tests) keeps the previous empty behaviour.
+  assert.equal(hooks.shouldRenderSpreadsheetsSyncing({ spreadsheets: [] }), false);
+  // Fallback reads the canonical shell API when no snapshot is cached.
+  assert.equal(
+    hooks.shouldRenderSpreadsheetsSyncing({
+      spreadsheets: [],
+      ctx: { sync: { collectionReadiness: (name) => (name === 'spreadsheets' ? unready : null) } },
+    }),
+    true,
+  );
+});
