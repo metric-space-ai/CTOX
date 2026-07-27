@@ -50,6 +50,54 @@ test('conversation empty state distinguishes filter misses from sync failures', 
   assert.match(syncFailure.body, /Konversationen/);
 });
 
+test('conversation empty state gates initial-empty on collection readiness', () => {
+  const base = {
+    totalBuckets: 0,
+    filteredBuckets: 0,
+    hasActiveFilters: false,
+    diagnostics: { hasFailure: false, isStarting: false },
+    t,
+  };
+
+  const unready = hooks.conversationEmptyState({
+    ...base,
+    readiness: { collection: 'communication_threads', state: 'catching-up', ready: false, syncing: true },
+  });
+  assert.equal(unready.kind, 'syncing');
+
+  const offlinePending = hooks.conversationEmptyState({
+    ...base,
+    readiness: { collection: 'communication_threads', state: 'offline-pending', ready: false, syncing: false },
+  });
+  assert.equal(offlinePending.kind, 'syncing');
+
+  const live = hooks.conversationEmptyState({
+    ...base,
+    readiness: { collection: 'communication_threads', state: 'live', ready: true, syncing: false },
+  });
+  assert.equal(live.kind, 'initial-empty');
+
+  // No readiness handle (older shells) keeps the legacy initial-empty copy.
+  const legacy = hooks.conversationEmptyState(base);
+  assert.equal(legacy.kind, 'initial-empty');
+
+  // Readiness never overrides filter misses, local projections, or failures.
+  const filterMiss = hooks.conversationEmptyState({
+    ...base,
+    totalBuckets: 2,
+    hasActiveFilters: true,
+    readiness: { ready: false },
+  });
+  assert.equal(filterMiss.kind, 'no-results');
+
+  const failure = hooks.conversationEmptyState({
+    ...base,
+    diagnostics: { hasFailure: true, isStarting: false },
+    readiness: { ready: false },
+  });
+  assert.equal(failure.kind, 'sync-failure');
+});
+
 test('communication diagnostics include accounts and messages sync errors', () => {
   const diagnostics = hooks.buildConversationDataDiagnostics({
     missingCollections: new Set(['communication_accounts']),

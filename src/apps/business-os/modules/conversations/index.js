@@ -92,6 +92,9 @@ const FALLBACK_LABELS = {
     syncFailureBody: 'Konversationen erscheinen automatisch, sobald Kommunikationsdaten geladen sind.',
     syncStartingTitle: 'Kommunikation wird synchronisiert',
     syncStartingBody: 'Accounts und Nachrichten sind noch nicht vollständig in der lokalen App angekommen.',
+    listSyncingTitle: 'Konversationen werden synchronisiert',
+    listSyncingBody: 'Daten werden synchronisiert. Konversationen erscheinen, sobald die erste Synchronisation abgeschlossen ist.',
+    timelineSyncing: 'Nachrichten werden synchronisiert.',
     projectionMissingTitle: 'Konversationen werden vorbereitet',
     projectionMissingBody: 'Accounts und Nachrichten werden gerade für die Kontaktansicht vorbereitet.',
     diagnosticsLabel: 'Status',
@@ -217,6 +220,9 @@ const FALLBACK_LABELS = {
     syncFailureBody: 'Conversations appear automatically once communication data is loaded.',
     syncStartingTitle: 'Communication is syncing',
     syncStartingBody: 'Accounts and messages have not fully arrived in the local app yet.',
+    listSyncingTitle: 'Syncing conversations',
+    listSyncingBody: 'Syncing data. Conversations appear once the initial sync completes.',
+    timelineSyncing: 'Syncing messages.',
     projectionMissingTitle: 'Preparing conversations',
     projectionMissingBody: 'Accounts and messages are being prepared for the contact view.',
     diagnosticsLabel: 'Status',
@@ -400,6 +406,8 @@ export async function mount(ctx) {
     collectionErrors: new Map(),
     missingCollections: new Set(),
     syncDiagnostics: ctx.sync?.diagnostics || window.ctoxBusinessOsSyncDiagnostics || null,
+    threadsReadiness: null,
+    messagesReadiness: null,
     buckets: [],
     selectedBucketKey: null,
     selectedChannel: ALL_CHANNELS_TAB,
@@ -495,6 +503,27 @@ export async function mount(ctx) {
       }).catch((error) => console.error('[conversations] account refresh failed:', error));
     });
     cleanups.push(() => sub.unsubscribe?.());
+  }
+
+  // Canonical collection readiness: while a backing collection has not
+  // finished its initial replication, the data-driven empty states must show
+  // a sync state instead of "no data". Snapshot + re-render on transitions.
+  if (typeof ctx.sync?.collectionReadiness === 'function') {
+    view.threadsReadiness = ctx.sync.collectionReadiness('communication_threads') || null;
+    view.messagesReadiness = ctx.sync.collectionReadiness('communication_messages') || null;
+  }
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    const unsubscribeThreadsReadiness = ctx.sync.subscribeCollectionReadiness('communication_threads', (snapshot) => {
+      view.threadsReadiness = snapshot || null;
+      if (!disposed) renderList();
+    });
+    cleanups.push(() => unsubscribeThreadsReadiness?.());
+    const unsubscribeMessagesReadiness = ctx.sync.subscribeCollectionReadiness('communication_messages', (snapshot) => {
+      view.messagesReadiness = snapshot || null;
+      if (disposed) return;
+      if (view.selectedBucketKey) renderTimeline();
+    });
+    cleanups.push(() => unsubscribeMessagesReadiness?.());
   }
 
   const syncDiagnosticsHandler = (event) => {
@@ -1086,8 +1115,19 @@ export async function mount(ctx) {
       hasActiveFilters: hasActiveListFilters(view),
       diagnostics: currentDataDiagnostics(),
       hasLocalCommunicationData: hasLocalCommunicationData(view),
+      readiness: view.threadsReadiness,
       t,
     });
+    const syncing = state.kind === 'syncing';
+    refs.emptyList.classList.toggle('ctox-empty', !syncing);
+    refs.emptyList.classList.toggle('ctox-syncing', syncing);
+    if (syncing) {
+      refs.emptyList.setAttribute('role', 'status');
+      refs.emptyList.setAttribute('aria-live', 'polite');
+    } else {
+      refs.emptyList.removeAttribute('role');
+      refs.emptyList.removeAttribute('aria-live');
+    }
     const title = refs.emptyList.querySelector('[data-empty-list-title]');
     const body = refs.emptyList.querySelector('[data-empty-list-body]');
     if (title) title.textContent = state.title;
@@ -1253,6 +1293,16 @@ export async function mount(ctx) {
   function renderTimeline() {
     refs.timeline.replaceChildren();
     if (!view.timelineMessages.length) {
+      if (view.messagesReadiness?.ready === false) {
+        const syncing = document.createElement('div');
+        syncing.className = 'ctox-syncing conv-syncing';
+        syncing.setAttribute('role', 'status');
+        syncing.setAttribute('aria-live', 'polite');
+        syncing.innerHTML = `<span></span>`;
+        syncing.querySelector('span').textContent = t('timelineSyncing', 'Nachrichten werden synchronisiert.');
+        refs.timeline.appendChild(syncing);
+        return;
+      }
       const empty = document.createElement('div');
       empty.className = 'ctox-empty conv-empty';
       empty.innerHTML = `<span></span>`;
@@ -2729,6 +2779,7 @@ function conversationEmptyState({
   hasActiveFilters = false,
   diagnostics = {},
   hasLocalCommunicationData: localData = false,
+  readiness = null,
   t = (key, fallback) => fallback || key,
 } = {}) {
   if (diagnostics.hasFailure) {
@@ -2757,6 +2808,15 @@ function conversationEmptyState({
       kind: 'sync-starting',
       title: t('syncStartingTitle', 'Kommunikation wird synchronisiert'),
       body: t('syncStartingBody', 'Accounts und Nachrichten sind noch nicht vollständig in der lokalen App angekommen.'),
+    };
+  }
+  // Canonical readiness gate: the unfiltered source collection has not
+  // finished its initial replication, so "no conversations" would be a lie.
+  if (totalBuckets === 0 && readiness?.ready === false) {
+    return {
+      kind: 'syncing',
+      title: t('listSyncingTitle', 'Konversationen werden synchronisiert'),
+      body: t('listSyncingBody', 'Daten werden synchronisiert. Konversationen erscheinen, sobald die erste Synchronisation abgeschlossen ist.'),
     };
   }
   return {
