@@ -1,4 +1,6 @@
-const MOD_BUILD = '20260721-ia1';
+import { renderListOrState } from '../../shared/list-state.js';
+
+const MOD_BUILD = '20260727-readiness';
 const MODULE_ID = 'placements';
 const PRIMARY = 'placements';
 const CREATE_COMMAND = 'ats.placement.create';
@@ -9,12 +11,12 @@ const TERMINAL_STATUSES = new Set(['early_leave', 'cancelled']);
 
 export const COPY = {
   de: {
-    kicker: 'VERMITTLUNGEN', listTitle: 'Vermittlungen', candidate: 'Kandidat-ID', client: 'Kunden-Account-ID', placementType: 'Vermittlungsart', directHire: 'Festanstellung (Personalvermittlung)', temporary: 'Arbeitnehmerüberlassung (Zeitarbeit)', qualifications: 'Pflicht-Qualifikationen (Komma)', fee: 'Honorar', guarantee: 'Garantie (Tage)', create: 'Anlegen', more: 'Weitere Angaben', entries: 'Einträge', empty: 'Noch keine Einträge.', earlyLeaveBooked: 'Frühausstieg verbucht.', clawback: 'Clawback', credit: 'Gutschrift', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', candidateRequired: 'Kandidat-ID erforderlich.', blocked: 'Blockiert.', placementCreated: 'Placement angelegt.', placement: 'Placement', feeInvoice: 'Honorar-Rechnung', invoice: 'Rechnung', cancellation: 'Storno', earlyLeave: 'Frühausstieg', status: 'Status',
+    kicker: 'VERMITTLUNGEN', listTitle: 'Vermittlungen', candidate: 'Kandidat-ID', client: 'Kunden-Account-ID', placementType: 'Vermittlungsart', directHire: 'Festanstellung (Personalvermittlung)', temporary: 'Arbeitnehmerüberlassung (Zeitarbeit)', qualifications: 'Pflicht-Qualifikationen (Komma)', fee: 'Honorar', guarantee: 'Garantie (Tage)', create: 'Anlegen', more: 'Weitere Angaben', entries: 'Einträge', empty: 'Noch keine Einträge.', syncing: 'Daten werden synchronisiert.', earlyLeaveBooked: 'Frühausstieg verbucht.', clawback: 'Clawback', credit: 'Gutschrift', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', candidateRequired: 'Kandidat-ID erforderlich.', blocked: 'Blockiert.', placementCreated: 'Placement angelegt.', placement: 'Placement', feeInvoice: 'Honorar-Rechnung', invoice: 'Rechnung', cancellation: 'Storno', earlyLeave: 'Frühausstieg', status: 'Status',
     allTypes: 'Alle Arten', viewAll: 'Alle', viewActive: 'Aktiv', viewEnded: 'Beendet', composerKicker: 'NEUE VERMITTLUNG', composerTitle: 'Vermittlung anlegen', composerHint: 'Eintrag wählen oder neue Vermittlung anlegen.', recordKicker: 'VERMITTLUNG', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusConfirmed: 'bestätigt', statusEarlyLeave: 'Frühausstieg', statusCancelled: 'storniert',
   },
   en: {
-    kicker: 'PLACEMENTS', listTitle: 'Placements', candidate: 'Candidate ID', client: 'Client account ID', placementType: 'Placement type', directHire: 'Permanent placement', temporary: 'Temporary staffing', qualifications: 'Required qualifications (comma-separated)', fee: 'Fee', guarantee: 'Guarantee (days)', create: 'Create', more: 'More details', entries: 'records', empty: 'No placements yet.', earlyLeaveBooked: 'Early leave recorded.', clawback: 'Clawback', credit: 'Credit note', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', candidateRequired: 'Candidate ID is required.', blocked: 'Blocked.', placementCreated: 'Placement created.', placement: 'Placement', feeInvoice: 'Fee invoice', invoice: 'Invoice', cancellation: 'Cancellation', earlyLeave: 'Early leave', status: 'Status',
+    kicker: 'PLACEMENTS', listTitle: 'Placements', candidate: 'Candidate ID', client: 'Client account ID', placementType: 'Placement type', directHire: 'Permanent placement', temporary: 'Temporary staffing', qualifications: 'Required qualifications (comma-separated)', fee: 'Fee', guarantee: 'Guarantee (days)', create: 'Create', more: 'More details', entries: 'records', empty: 'No placements yet.', syncing: 'Syncing data.', earlyLeaveBooked: 'Early leave recorded.', clawback: 'Clawback', credit: 'Credit note', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', candidateRequired: 'Candidate ID is required.', blocked: 'Blocked.', placementCreated: 'Placement created.', placement: 'Placement', feeInvoice: 'Fee invoice', invoice: 'Invoice', cancellation: 'Cancellation', earlyLeave: 'Early leave', status: 'Status',
     allTypes: 'All types', viewAll: 'All', viewActive: 'Active', viewEnded: 'Ended', composerKicker: 'NEW PLACEMENT', composerTitle: 'Create placement', composerHint: 'Select a record or start a new placement.', recordKicker: 'PLACEMENT', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusConfirmed: 'confirmed', statusEarlyLeave: 'early leave', statusCancelled: 'cancelled',
   },
@@ -48,6 +50,17 @@ export async function mount(ctx) {
   const state = { records: [], visible: [], selectedId: '', userCollapsed: false, grammar: readGrammarState(listPane) };
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
 
+  // Shell-owned readiness for the primary collection; absent API (older
+  // shells, tests) reads as null → the previous empty-state behaviour.
+  function readPlacementsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    if (typeof read !== 'function') return null;
+    try { return read.call(ctx.sync, PRIMARY) || null; } catch { return null; }
+  }
+  // Collection readiness snapshot for the record list (shell-owned sync
+  // contract); null when the shell exposes no readiness API.
+  let placementReadiness = readPlacementsReadiness();
+
   // Gate feedback renders in the kit callout; kinds map onto its variants.
   const GATE_VARIANTS = { ok: 'is-success', block: 'is-danger', offline: 'is-warning' };
   function setGate(html, kind) {
@@ -64,7 +77,12 @@ export async function mount(ctx) {
   function renderListRegion() {
     const counts = bandCounts(state.records);
     state.visible = filterRecords(state.records, state.grammar);
-    if (listEl) listEl.innerHTML = renderList(state.visible, { view: state.grammar.view, selectedId: state.selectedId }, text);
+    if (listEl) listEl.innerHTML = renderList(state.visible, {
+      view: state.grammar.view,
+      selectedId: state.selectedId,
+      sourceEmpty: state.records.length === 0,
+      readiness: placementReadiness,
+    }, text);
     writeCounts(listPane, counts);
     writeFooter(listPane, `${state.visible.length} ${text.entries} · ${bandLabel(state.grammar, text)}`);
   }
@@ -313,12 +331,26 @@ export async function mount(ctx) {
 
   // ---- Reactive backbone ----------------------------------------------------
   let sub = null;
+  let readinessUnsub = null;
   const col = collection();
   if (col?.find) { try { sub = col.find({ selector: {} }).$?.subscribe?.(() => { refresh().catch(() => {}); }); } catch {} }
+  // Re-render the record list when the primary collection flips its
+  // replication state so the empty list swaps between the syncing shell and
+  // the real empty state without waiting for data changes.
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    try {
+      const unsubscribe = ctx.sync.subscribeCollectionReadiness(PRIMARY, (snapshot) => {
+        placementReadiness = snapshot || null;
+        renderListRegion();
+      });
+      if (typeof unsubscribe === 'function') readinessUnsub = unsubscribe;
+    } catch {}
+  }
   await refresh();
 
   return () => {
     try { sub?.unsubscribe?.(); } catch {}
+    try { readinessUnsub?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     listEl?.removeEventListener('click', onListClick);
     detailEl?.removeEventListener('click', onDetailClick);
@@ -399,10 +431,15 @@ export function normalizePlacement(raw, opts = {}) {
 }
 
 export function renderList(records, opts = {}, t = text) {
-  if (!records || !records.length) return `<div class="ctox-empty">${esc(t.empty)}</div>`;
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selectedId = opts.selectedId || '';
-  return records.map((r) => (view === 'list' ? shardCompact(r, selectedId, t) : shardCard(r, selectedId, t))).join('');
+  // Readiness gates only the source-empty branch (unfiltered collection has
+  // no rows yet); filter-empties (source holds rows) stay plain ctox-empty.
+  return renderListOrState(records, opts.sourceEmpty ? (opts.readiness ?? null) : null, {
+    renderRows: (rows) => rows.map((r) => (view === 'list' ? shardCompact(r, selectedId, t) : shardCard(r, selectedId, t))).join(''),
+    empty: t.empty,
+    syncing: t.syncing,
+  });
 }
 
 function recordKey(r) { return (r && r.id) || ''; }

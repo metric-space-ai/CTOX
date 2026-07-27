@@ -95,8 +95,29 @@ test('placements: renders a shard list from a stub doc array with the context tr
   // Compact variant is a distinct rendering behind the toggle.
   const listHtml = renderList(docs, { view: 'list', selectedId: '' });
   assert.match(listHtml, /placements-row-compact/);
-  // Empty state.
+  // Empty state (no readiness info → legacy plain empty).
   assert.match(renderList([], { view: 'cards' }), /ctox-empty/);
+});
+
+test('placements: empty source gates on collection readiness', () => {
+  // Source empty + not yet replicated → kit syncing shell (role=status).
+  const syncingHtml = renderList([], { view: 'cards', sourceEmpty: true, readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncingHtml, /ctox-syncing/);
+  assert.match(syncingHtml, /role="status"/);
+  assert.doesNotMatch(syncingHtml, /ctox-empty/);
+  // Source empty + live → the real empty state.
+  const emptyHtml = renderList([], { view: 'cards', sourceEmpty: true, readiness: { ready: true, state: 'live' } });
+  assert.match(emptyHtml, /ctox-empty/);
+  assert.doesNotMatch(emptyHtml, /ctox-syncing/);
+  // Filter-empty (source holds rows) never shows the syncing shell, even
+  // while the collection is still catching up.
+  const filterEmptyHtml = renderList([], { view: 'cards', sourceEmpty: false, readiness: { ready: false } });
+  assert.match(filterEmptyHtml, /ctox-empty/);
+  assert.doesNotMatch(filterEmptyHtml, /ctox-syncing/);
+  // The mount path wires the canonical readiness API for the primary collection.
+  const js = read('index.js');
+  assert.match(js, /ctx\.sync\?\.collectionReadiness/);
+  assert.match(js, /subscribeCollectionReadiness\(PRIMARY/);
 });
 
 test('placements: band counts and filtering derive from the status field', () => {
