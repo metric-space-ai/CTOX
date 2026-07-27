@@ -848,6 +848,10 @@ class CtoxWebRtcReplicationState {
     // so a transport blip does not force a from-scratch resync.
     this.checkpointStorageKey = persistentCheckpointStorageKey(topic, collection.name);
     this.retainedCheckpoints = readPersistentCheckpoints(this.checkpointStorageKey);
+    // Persisted only inside the retained checkpoint record. It becomes trusted
+    // after the remote/local validity keys and permission digest match during
+    // handshake; until then an old marker must not make this collection live.
+    this.firstPullCompletedAtMs = 0;
     this.localCheckpointValidityKey = '';
     // SYNC-12: a non-secret digest of THIS browser's own effective read-permission
     // identity (role + capability_epoch), stamped alongside retained checkpoints.
@@ -1023,6 +1027,7 @@ class CtoxWebRtcReplicationState {
         && retained.localValidityKey === localValidityKey
         && readPermissionDigestMatches(retained.permissionDigest, readPermissionDigest)
       ) {
+        this.firstPullCompletedAtMs = retainedFirstPullCompletedAtMs(retained);
         if (retained.pull && !this.pullCheckpointsByPeer.has(peerId)) {
           this.pullCheckpointsByPeer.set(peerId, retained.pull);
         }
@@ -1032,7 +1037,9 @@ class CtoxWebRtcReplicationState {
       } else {
         // Different daemon run / storage generation: the retained
         // checkpoints are meaningless there — drop them so this and every
-        // later reconnect does the (correct) full resync.
+        // later reconnect does the (correct) full resync. The readiness marker
+        // shares this validity boundary and must be invalidated with them.
+        this.firstPullCompletedAtMs = 0;
         this.retainedCheckpoints = null;
         clearPersistentCheckpoints(this.checkpointStorageKey);
       }
@@ -1080,6 +1087,7 @@ class CtoxWebRtcReplicationState {
     }
     this.pullInProgress = true;
     this.pullAgainAfterCurrent = false;
+    this.publishTransportStatus();
     this.pullInProgressPromise = (async () => {
       do {
         this.pullAgainAfterCurrent = false;
@@ -1094,6 +1102,7 @@ class CtoxWebRtcReplicationState {
       this.pullInProgress = false;
       this.pullInProgressPromise = null;
       this.pullAgainAfterCurrent = false;
+      this.publishTransportStatus();
     });
     return this.pullInProgressPromise;
   }
@@ -1154,6 +1163,10 @@ class CtoxWebRtcReplicationState {
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pullCheckpointsByPeer.set(activePeerId, checkpoint);
+      // The first empty response proves that this collection's initial pull
+      // drained completely, including the valid "synced but empty" case. Stamp
+      // the marker before persisting so readiness survives a reload.
+      if (!documents.length) this.markFirstPullCompleted();
       await this.persistCheckpointsForPeer(activePeerId);
       // Drain until an EMPTY answer, not until a partial batch: the master
       // legitimately returns fewer documents than asked for (the
@@ -1797,6 +1810,33 @@ class CtoxWebRtcReplicationState {
     return this.demandLoader;
   }
 
+  markFirstPullCompleted() {
+    if (this.firstPullCompletedAtMs > 0) return;
+    this.firstPullCompletedAtMs = Date.now();
+    this.publishTransportStatus();
+  }
+
+  collectionReadinessState() {
+    if (this.firstPullCompletedAtMs > 0) return 'live';
+    if (this.pullInProgress) return 'catching-up';
+    if (!this.hasOpenReadinessPeer()) return 'offline-pending';
+    return 'never-synced';
+  }
+
+  hasOpenReadinessPeer() {
+    if ((this.shared?.openSharedPeerIds?.() || []).length > 0) return true;
+    const negotiatedPeerId = this.shared?.negotiated?.peerId || '';
+    return Boolean(negotiatedPeerId && this.shared?.isPeerOpen?.(negotiatedPeerId));
+  }
+
+  publishTransportStatus() {
+    if (this.cancelled) return;
+    const status = this.shared?.getTransportStatus?.()
+      || this.transportStatus$.getValue?.()
+      || {};
+    this.transportStatus$.next(this.decorateTransportStatus(status));
+  }
+
   resolveInitialReplication() {
     this.initialReplicationDeferred?.resolve?.(true);
   }
@@ -1816,7 +1856,11 @@ class CtoxWebRtcReplicationState {
     const validityKey = this.checkpointValidityKeyForPeer(peerId);
     const retainedPull = this.pullCheckpointsByPeer.get(peerId) || null;
     const retainedPush = this.pushCheckpointsByPeer.get(peerId) || null;
-    if (validityKey && this.localCheckpointValidityKey && (retainedPull || retainedPush)) {
+    if (
+      validityKey
+      && this.localCheckpointValidityKey
+      && (retainedPull || retainedPush || this.firstPullCompletedAtMs > 0)
+    ) {
       this.retainedCheckpoints = {
         validityKey,
         localValidityKey: this.localCheckpointValidityKey,
@@ -1825,6 +1869,10 @@ class CtoxWebRtcReplicationState {
         permissionDigest: this.readPermissionDigest,
         pull: retainedPull,
         push: retainedPush,
+        collection: this.collection.name,
+        schemaHash: this.schemaHashValue || '',
+        firstPullCompletedAtMs: this.firstPullCompletedAtMs || null,
+        updatedAtMs: Date.now(),
       };
       writePersistentCheckpoints(this.checkpointStorageKey, this.retainedCheckpoints);
     }
@@ -1832,6 +1880,7 @@ class CtoxWebRtcReplicationState {
     this.pullCheckpointsByPeer.delete(peerId);
     this.pushCheckpointsByPeer.delete(peerId);
     this.peerStates$.next(peerStates);
+    this.publishTransportStatus();
     try { this.demandLoader?.abortAllInFlight?.(`peer-${reason}`); } catch {}
     try { this.demandFileLoader?.abortAllInFlight?.(`peer-${reason}`); } catch {}
     try { this.shared?.abortPeerRequests?.(peerId, reason); } catch {}
@@ -1889,6 +1938,7 @@ class CtoxWebRtcReplicationState {
       push: this.pushCheckpointsByPeer.get(peerId) || null,
       collection: this.collection.name,
       schemaHash: this.schemaHashValue || '',
+      firstPullCompletedAtMs: this.firstPullCompletedAtMs || null,
       updatedAtMs: Date.now(),
     };
     this.retainedCheckpoints = retained;
@@ -2057,6 +2107,8 @@ class CtoxWebRtcReplicationState {
       collection: this.collection.name,
       topic: this.topic,
       activePeerCount: Math.max(localPeerCount, sharedPeerCount, connectionPeerCount),
+      collectionReadinessState: this.collectionReadinessState(),
+      firstPullCompletedAtMs: this.firstPullCompletedAtMs || null,
       pullInProgress: this.pullInProgress,
       pushInProgress: this.pushInProgress,
       demandLoading: snapshotV1_5Status(this.demandStatus),
@@ -2141,6 +2193,11 @@ function readPersistentCheckpoints(key) {
   } catch {
     return null;
   }
+}
+
+function retainedFirstPullCompletedAtMs(retained) {
+  const value = Number(retained?.firstPullCompletedAtMs || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function writePersistentCheckpoints(key, value) {
