@@ -193,12 +193,10 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
             let documents: Vec<serde_json::Value> = event_bulk
                 .events
                 .iter()
-                .map(|event| {
-                    let doc = event
-                        .document_data
-                        .clone()
-                        .unwrap_or(serde_json::Value::Null);
-                    write_doc_to_doc_state(&doc, has_attachments, keep_meta)
+                .filter_map(|event| {
+                    event.document_data.as_ref().map(|document_data| {
+                        write_doc_to_doc_state(document_data, has_attachments, keep_meta)
+                    })
                 })
                 .collect();
             crate::types::RxReplicationMasterChange::Documents(
@@ -228,12 +226,15 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
             .instance
             .get_changed_documents_since(batch_size, checkpoint.as_ref())
             .await?;
+        // Match upstream RxDB: an empty page echoes the requested checkpoint so
+        // the replication head cannot advance without a corresponding document.
+        // With no requested checkpoint, retain the storage's initial checkpoint.
         let next_checkpoint = if result.documents.is_empty() {
             checkpoint.unwrap_or(result.checkpoint)
         } else {
             result.checkpoint
         };
-        let documents = if is_file_chunks || is_knowledge_tables {
+        let (documents, response_checkpoint) = if is_file_chunks || is_knowledge_tables {
             let primary_path =
                 get_primary_field_of_primary_key(&self.instance.schema().primary_key);
             let max_bytes = if is_file_chunks {
@@ -249,20 +250,20 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
                 max_bytes,
                 &next_checkpoint,
             );
-            return Ok(crate::types::DocumentsWithCheckpoint {
-                documents: limited.documents,
-                checkpoint: limited.checkpoint,
-            });
+            (limited.documents, limited.checkpoint)
         } else {
-            result
-                .documents
-                .into_iter()
-                .map(|d| write_doc_to_doc_state(&d, has_attachments, self.keep_meta))
-                .collect()
+            (
+                result
+                    .documents
+                    .into_iter()
+                    .map(|d| write_doc_to_doc_state(&d, has_attachments, self.keep_meta))
+                    .collect(),
+                next_checkpoint,
+            )
         };
         Ok(crate::types::DocumentsWithCheckpoint {
             documents,
-            checkpoint: next_checkpoint,
+            checkpoint: response_checkpoint,
         })
     }
 

@@ -191,6 +191,8 @@ pub async fn get_meta_write_row(
             "_meta": { "lwt": 0 },
         })
     };
+    let composed =
+        get_composed_primary_key_of_document_data(state.input.meta_instance.schema(), &new_meta)?;
     if let Some(obj) = new_meta.as_object_mut() {
         obj.insert("docData".to_string(), new_master_doc_state.clone());
         if let Some(flag) = is_resolved_conflict {
@@ -202,19 +204,12 @@ pub async fn get_meta_write_row(
         if let Some(meta_obj) = obj.get_mut("_meta").and_then(|v| v.as_object_mut()) {
             meta_obj.insert("lwt".to_string(), json!(now()));
         }
-        let composed = get_composed_primary_key_of_document_data(
-            state.input.meta_instance.schema(),
-            &new_meta,
-        )?;
-        // Refresh `obj` borrow after the composed-key computation.
-        if let Some(obj2) = new_meta.as_object_mut() {
-            obj2.insert("id".to_string(), Value::String(composed));
-            let prev_rev = previous
-                .and_then(|p| p.get("_rev"))
-                .and_then(|v| v.as_str());
-            let rev = create_revision(&state.checkpoint_key, prev_rev).unwrap_or_default();
-            obj2.insert("_rev".to_string(), Value::String(rev));
-        }
+        obj.insert("id".to_string(), Value::String(composed));
+        let prev_rev = previous
+            .and_then(|p| p.get("_rev"))
+            .and_then(|v| v.as_str());
+        let rev = create_revision(&state.checkpoint_key, prev_rev).unwrap_or_default();
+        obj.insert("_rev".to_string(), Value::String(rev));
     }
     Ok(BulkWriteRow {
         previous: previous.cloned(),

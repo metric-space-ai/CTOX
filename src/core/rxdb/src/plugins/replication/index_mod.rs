@@ -555,6 +555,32 @@ struct ClosureReplicationHandler {
     remote_events: RxSubject<RxReplicationMasterChange>,
 }
 
+impl ClosureReplicationHandler {
+    async fn retry_on_handler_error<T, CallHandler, HandlerFuture, WrapError>(
+        &self,
+        mut call_handler: CallHandler,
+        wrap_error: WrapError,
+    ) -> Option<T>
+    where
+        CallHandler: FnMut() -> HandlerFuture,
+        HandlerFuture: std::future::Future<Output = Result<T, RxError>>,
+        WrapError: Fn(&RxError) -> RxError,
+    {
+        loop {
+            if self.canceled.get_value() || self.paused.get_value() {
+                return None;
+            }
+            match call_handler().await {
+                Ok(result) => return Some(result),
+                Err(error) => {
+                    self.error_relay.next(wrap_error(&error));
+                    await_retry(self.retry_time).await;
+                }
+            }
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::types::RxReplicationHandler for ClosureReplicationHandler {
     fn master_change_stream(&self) -> RxStream<RxReplicationMasterChange> {
@@ -620,27 +646,26 @@ impl crate::types::RxReplicationHandler for ClosureReplicationHandler {
                 checkpoint: Value::Null,
             });
         };
-        let result = loop {
-            if self.canceled.get_value() || self.paused.get_value() {
-                return Ok(DocumentsWithCheckpoint {
-                    documents: Vec::new(),
-                    checkpoint: Value::Null,
-                });
-            }
-            match handler(checkpoint.clone(), batch_size).await {
-                Ok(result) => break result,
-                Err(e) => {
-                    self.error_relay.next(new_rx_error(
+        let Some(result) = self
+            .retry_on_handler_error(
+                || handler(checkpoint.clone(), batch_size),
+                |error| {
+                    new_rx_error(
                         "RC_PULL",
                         Some(serde_json::json!({
                             "checkpoint": checkpoint.clone(),
-                            "errors": [error_to_plain_json(&e)],
+                            "errors": [error_to_plain_json(error)],
                             "direction": "pull",
                         })),
-                    ));
-                    await_retry(self.retry_time).await;
-                }
-            }
+                    )
+                },
+            )
+            .await
+        else {
+            return Ok(DocumentsWithCheckpoint {
+                documents: Vec::new(),
+                checkpoint: Value::Null,
+            });
         };
         match prepare_pulled_documents(
             &self.collection_schema,
@@ -673,24 +698,23 @@ impl crate::types::RxReplicationHandler for ClosureReplicationHandler {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        let conflicts = loop {
-            if self.canceled.get_value() || self.paused.get_value() {
-                return Ok(Vec::new());
-            }
-            match handler(rows.clone()).await {
-                Ok(conflicts) => break conflicts,
-                Err(e) => {
-                    self.error_relay.next(new_rx_error(
+        let Some(conflicts) = self
+            .retry_on_handler_error(
+                || handler(rows.clone()),
+                |error| {
+                    new_rx_error(
                         "RC_PUSH",
                         Some(serde_json::json!({
                             "pushRows": original_rows.clone(),
-                            "errors": [error_to_plain_json(&e)],
+                            "errors": [error_to_plain_json(error)],
                             "direction": "push",
                         })),
-                    ));
-                    await_retry(self.retry_time).await;
-                }
-            }
+                    )
+                },
+            )
+            .await
+        else {
+            return Ok(Vec::new());
         };
         handle_pulled_documents_with_schema(&self.collection_schema, &self.deleted_field, conflicts)
     }

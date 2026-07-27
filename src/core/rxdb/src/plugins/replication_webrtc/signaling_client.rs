@@ -197,12 +197,9 @@ impl SignalingClient {
             let mut delay = SIGNALING_RECONNECT_BASE_DELAY;
             loop {
                 let joined_before_disconnect = run_reader(&supervisor_client, &mut read_half).await;
-                supervisor_client
-                    .socket_connected
-                    .store(false, Ordering::Release);
-                supervisor_client
-                    .join_accepted
-                    .store(false, Ordering::Release);
+                // Clear every server-issued identity field before a reconnect can
+                // install its writer or mark the new socket connected.
+                supervisor_client.reset_server_identity();
                 if supervisor_client.closed.load(Ordering::Acquire) {
                     return;
                 }
@@ -384,6 +381,16 @@ impl SignalingClient {
             data,
         })
         .await
+    }
+
+    fn reset_server_identity(&self) {
+        self.socket_connected.store(false, Ordering::Release);
+        self.join_accepted.store(false, Ordering::Release);
+        self.own_peer_id.next(None);
+        // Keep role metadata in sync before publishing the empty peer list, just
+        // as `Joined` installs roles before publishing its populated list.
+        self.peer_roles.lock().clear();
+        self.peer_list.next(Vec::new());
     }
 
     pub fn server_messages_stream(&self) -> RxStream<ServerToClient> {
@@ -771,6 +778,87 @@ mod tests {
             "client must auto re-join the room after reconnect (saw {} joins)",
             joins.load(Ordering::SeqCst)
         );
+    }
+
+    #[tokio::test]
+    async fn signaling_disconnect_clears_identity_before_reconnect_init() {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let listener = socket.listen(128).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (drop_first_tx, drop_first_rx) = tokio::sync::oneshot::channel();
+        let (second_connected_tx, second_connected_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let (first_stream, _) = listener.accept().await.unwrap();
+            let mut first_ws = accept_async(first_stream).await.unwrap();
+            first_ws
+                .send(Message::Text(
+                    r#"{"type":"init","yourPeerId":"old-peer"}"#.to_string(),
+                ))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = first_ws.next().await {
+                if let Message::Text(text) = message {
+                    if text.contains("\"type\":\"join\"") {
+                        break;
+                    }
+                }
+            }
+            first_ws
+                .send(Message::Text(
+                    r#"{"type":"joined","otherPeerIds":["old-browser"],"peers":[{"peerId":"old-browser","role":"browser"}]}"#
+                        .to_string(),
+                ))
+                .await
+                .unwrap();
+
+            drop_first_rx.await.unwrap();
+            drop(first_ws);
+
+            let (second_stream, _) = listener.accept().await.unwrap();
+            let second_ws = accept_async(second_stream).await.unwrap();
+            second_connected_tx.send(()).unwrap();
+            // Deliberately withhold the new Init frame so the test observes the
+            // identity state attached to the newly installed socket.
+            let _ = finish_rx.await;
+            drop(second_ws);
+        });
+
+        let client = SignalingClient::connect(format!("ws://{addr}"))
+            .await
+            .unwrap();
+        client
+            .join("room-identity-reset".to_string())
+            .await
+            .unwrap();
+        assert_eq!(client.own_peer_id().as_deref(), Some("old-peer"));
+        assert_eq!(
+            client.peer_list.get_value(),
+            vec!["old-browser".to_string()]
+        );
+        assert_eq!(client.peer_role("old-browser").as_deref(), Some("browser"));
+
+        drop_first_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), second_connected_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let connected_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !client.socket_connected() && tokio::time::Instant::now() < connected_deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert!(client.socket_connected());
+        assert_eq!(client.own_peer_id(), None);
+        assert!(client.peer_list.get_value().is_empty());
+        assert_eq!(client.peer_role("old-browser"), None);
+        assert!(!client.join_accepted());
+
+        finish_tx.send(()).unwrap();
+        let _ = server.await;
+        client.close().await;
     }
 
     /// Serve one accepted WebSocket signaling session: init frame, count the
