@@ -7526,6 +7526,213 @@ pub fn update_module_to_catalog(
     }))
 }
 
+/// Bring legacy runtime-installed shadows of release-managed CTOX apps forward
+/// before the Business OS serves assets. These copies existed before selected
+/// catalog apps moved to `install_scope = internal`; an old RxDB catalog can
+/// still address their stable `installed-modules/<id>` URL during an upgrade.
+///
+/// Only an explicit catalog clone of a first-party app qualifies. Bespoke
+/// runtime apps, marketplace installs, and operator-owned local modules are
+/// never touched. The regular catalog updater performs the staged swap and
+/// records a recovery version before discarding a locally changed shadow.
+pub(crate) fn reconcile_release_managed_module_shadows(root: &Path) -> anyhow::Result<Value> {
+    let source_app_root = resolve_business_os_app_root(root)?;
+    let installed_app_root = resolve_business_os_installed_app_root(root);
+    let installed_modules_root = installed_app_root.join("installed-modules");
+    if !installed_modules_root.is_dir() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "checked": 0,
+            "updated": [],
+        }));
+    }
+
+    let mut entries = fs::read_dir(&installed_modules_root)?
+        .collect::<Result<Vec<_>, _>>()
+        .with_context(|| {
+            format!(
+                "failed to list runtime-installed modules at {}",
+                installed_modules_root.display()
+            )
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+
+    let session = BusinessOsSession {
+        ok: true,
+        authenticated: true,
+        auth_required: false,
+        user: Some(BusinessOsSessionUser {
+            id: "ctox-system".to_owned(),
+            display_name: "CTOX System".to_owned(),
+            role: "admin".to_owned(),
+            is_admin: true,
+        }),
+        login_url: None,
+        reason: None,
+    };
+    let mut checked = 0usize;
+    let mut updated = Vec::new();
+
+    for entry in entries {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let manifest_path = entry.path().join("module.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let installed_manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)
+            .with_context(|| {
+                format!(
+                    "failed to parse runtime-installed module manifest {}",
+                    manifest_path.display()
+                )
+            })?;
+        let Some(source_module_id) =
+            release_managed_shadow_source(&source_app_root, &installed_manifest)?
+        else {
+            continue;
+        };
+        checked += 1;
+
+        let module_id = installed_manifest
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_owned();
+        let source_dir = source_app_root.join("modules").join(&source_module_id);
+        let installed_version = installed_manifest
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        let catalog_version = catalog_module_version(&source_app_root, &source_module_id);
+        if !catalog_version.is_empty()
+            && installed_version == catalog_version
+            && release_managed_module_payload_sha(&entry.path())?
+                == release_managed_module_payload_sha(&source_dir)?
+        {
+            continue;
+        }
+        let outcome = update_module_to_catalog(
+            root,
+            &source_app_root,
+            &installed_app_root,
+            &session,
+            ModuleUpdateRequest {
+                module_id: module_id.clone(),
+                mode: "discard".to_owned(),
+                expected_baseline_sha256: String::new(),
+                target_catalog_version: String::new(),
+            },
+        )
+        .with_context(|| {
+            format!("failed to reconcile release-managed Business OS module shadow `{module_id}`")
+        })?;
+        if outcome.get("updated").and_then(Value::as_bool) == Some(true) {
+            updated.push(serde_json::json!({
+                "module_id": module_id,
+                "source_module_id": source_module_id,
+                "catalog_version": outcome.get("catalog_version").cloned().unwrap_or(Value::Null),
+            }));
+        }
+    }
+
+    Ok(serde_json::json!({
+        "ok": true,
+        "checked": checked,
+        "updated": updated,
+    }))
+}
+
+fn release_managed_shadow_source(
+    source_app_root: &Path,
+    installed_manifest: &Value,
+) -> anyhow::Result<Option<String>> {
+    let Some(source_module_id) = module_catalog_source_id(source_app_root, installed_manifest)
+    else {
+        return Ok(None);
+    };
+    let source_manifest_path = source_app_root
+        .join("modules")
+        .join(&source_module_id)
+        .join("module.json");
+    if !source_manifest_path.is_file() {
+        return Ok(None);
+    }
+    let source_manifest: ModuleManifest = serde_json::from_slice(&fs::read(&source_manifest_path)?)
+        .with_context(|| {
+            format!(
+                "failed to parse release-managed module manifest {}",
+                source_manifest_path.display()
+            )
+        })?;
+    if !module_ships_on_first_install(&module_install_scope(&source_manifest))
+        || source_manifest.developer.trim() != "CTOX"
+        || installed_manifest
+            .get("developer")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            != Some("CTOX")
+    {
+        return Ok(None);
+    }
+
+    let explicit_catalog_clone = installed_manifest
+        .get("source_module_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        == Some(source_module_id.as_str())
+        || (installed_manifest
+            .pointer("/app_source/kind")
+            .and_then(Value::as_str)
+            == Some("catalog")
+            && installed_manifest
+                .pointer("/app_source/verified")
+                .and_then(Value::as_bool)
+                == Some(true));
+    Ok(explicit_catalog_clone.then_some(source_module_id))
+}
+
+fn release_managed_module_payload_sha(module_dir: &Path) -> anyhow::Result<String> {
+    fn collect(
+        root: &Path,
+        current: &Path,
+        files: &mut Vec<(PathBuf, PathBuf)>,
+    ) -> anyhow::Result<()> {
+        let mut entries = fs::read_dir(current)?
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| format!("failed to list module payload {}", current.display()))?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                collect(root, &path, files)?;
+            } else if file_type.is_file()
+                && path.strip_prefix(root).ok() != Some(Path::new("module.json"))
+            {
+                files.push((path.strip_prefix(root)?.to_path_buf(), path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut files = Vec::new();
+    collect(module_dir, module_dir, &mut files)?;
+    let mut hasher = Sha256::new();
+    for (relative, path) in files {
+        let relative = relative.to_string_lossy();
+        update_module_catalog_stamp_hash(&mut hasher, &relative);
+        let bytes = fs::read(&path)
+            .with_context(|| format!("failed to read module payload {}", path.display()))?;
+        hasher.update(bytes.len().to_le_bytes());
+        hasher.update(bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 pub fn delete_installed_module_command(
     root: &Path,
     app_root: &Path,
@@ -48632,12 +48839,16 @@ mod tests {
         let app_root = temp.path().join("business-os");
         let catalog_dir = app_root.join("modules/research");
         fs::create_dir_all(&catalog_dir)?;
-        fs::write(catalog_dir.join("module.json"), r#"{"id":"research"}"#)?;
+        fs::write(
+            catalog_dir.join("module.json"),
+            r#"{"id":"research","title":"Research","developer":"CTOX","install_scope":"internal"}"#,
+        )?;
 
         let legacy = serde_json::json!({
             "id": "research",
             "developer": "CTOX",
             "default_installed": true,
+            "source_module_id": "research",
             "store": {
                 "distribution": "ctox-runtime-installed-module",
                 "source_path": "installed-modules/research",
@@ -48648,18 +48859,27 @@ mod tests {
             module_catalog_source_id(&app_root, &legacy).as_deref(),
             Some("research")
         );
+        assert_eq!(
+            release_managed_shadow_source(&app_root, &legacy)?.as_deref(),
+            Some("research")
+        );
 
         let bespoke = serde_json::json!({
             "id": "research",
             "developer": "Customer",
             "default_installed": false,
+            "source_module_id": "research",
             "store": {
                 "distribution": "custom",
                 "source_path": "installed-modules/research",
                 "installable": false
             }
         });
-        assert_eq!(module_catalog_source_id(&app_root, &bespoke), None);
+        assert_eq!(
+            module_catalog_source_id(&app_root, &bespoke).as_deref(),
+            Some("research")
+        );
+        assert_eq!(release_managed_shadow_source(&app_root, &bespoke)?, None);
         Ok(())
     }
 

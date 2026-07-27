@@ -168,6 +168,14 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
             app_root.display()
         );
     }
+    let reconciled = store::reconcile_release_managed_module_shadows(root)?;
+    if reconciled
+        .get("updated")
+        .and_then(Value::as_array)
+        .is_some_and(|updated| !updated.is_empty())
+    {
+        eprintln!("[business-os] reconciled release-managed module shadows: {reconciled}");
+    }
     // Claim the HTTP surface before opening the store or starting the native
     // peer. A legacy standalone shell may still own the address during an
     // upgrade; failing here keeps that ownership conflict away from SQLite.
