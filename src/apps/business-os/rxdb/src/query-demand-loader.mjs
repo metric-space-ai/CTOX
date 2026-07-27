@@ -113,13 +113,12 @@ export function createQueryDemandLoader({
         && !emptyWindowStale
         && !mutableMembershipWindowStale
       ) {
-        // V1.5 production hardening: authoritative-revision check. If the
-        // caller supplies `requireRevision` (e.g. from a change-bulk that
-        // touched a doc in the window), we re-verify with the server when
-        // the cached revision is older. Otherwise the cache-hit path is fast.
+        // `requireRevision` is an opaque caller token, not a server revision.
+        // Re-fetch once when that token changes; the successful fetch records
+        // it as satisfied so subsequent execs with the same token hit cache.
         if (
           query?.requireRevision &&
-          cached.authoritativeRevision !== query.requireRevision
+          cached.satisfiedRevision !== query.requireRevision
         ) {
           // fall through to remote fetch
         } else if (!controlPlaneWindowStale) {
@@ -164,6 +163,7 @@ export function createQueryDemandLoader({
             documentIds,
             complete: true,
             authoritativeRevision: result.authoritativeRevision ?? null,
+            satisfiedRevision: query?.requireRevision ?? null,
             queryShape: {
               selector: query?.selector ?? {},
               sort: normalizeSort(query?.sort),

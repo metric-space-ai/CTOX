@@ -1596,7 +1596,7 @@ var QueryMetaStorage = class {
     await this.backend.putQueryWindow(record);
     return record;
   }
-  async upsertQueryWindow({ collection, queryFingerprint: queryFingerprint2, offset, limit, documentIds, complete, authoritativeRevision, queryShape = null }) {
+  async upsertQueryWindow({ collection, queryFingerprint: queryFingerprint2, offset, limit, documentIds, complete, authoritativeRevision, satisfiedRevision = null, queryShape = null }) {
     const now = this.clock();
     const existing = await this.backend.getQueryWindow(
       [collection, queryFingerprint2, offset, limit].join("|")
@@ -1615,6 +1615,9 @@ var QueryMetaStorage = class {
       // their members as partial orphans.
       everCompleted: Boolean(complete) || Boolean(existing?.everCompleted),
       authoritativeRevision: authoritativeRevision ?? null,
+      // Opaque caller requireRevision token this window's last successful
+      // fetch satisfied — distinct from the server echo above.
+      satisfiedRevision: satisfiedRevision ?? null,
       queryShape: queryShape && typeof queryShape === "object" ? structuredCloneSafe3(queryShape) : null,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
@@ -7134,7 +7137,7 @@ function createQueryDemandLoader({
         const emptyWindowStale = cached && (!Array.isArray(cached.documentIds) || cached.documentIds.length === 0) && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= EMPTY_QUERY_WINDOW_REVALIDATE_MS;
         const mutableMembershipWindowStale = isMutableMembershipCollection(collectionName) && cached && Array.isArray(cached.documentIds) && cached.documentIds.length > 0 && clock() - Number(cached.updatedAt || cached.createdAt || 0) >= MUTABLE_QUERY_MEMBERSHIP_REVALIDATE_MS;
         if (cached && cached.complete && cachedDocumentsAvailable && !emptyWindowStale && !mutableMembershipWindowStale) {
-          if (query?.requireRevision && cached.authoritativeRevision !== query.requireRevision) {
+          if (query?.requireRevision && cached.satisfiedRevision !== query.requireRevision) {
           } else if (!controlPlaneWindowStale) {
             await touchSidecarAccess(sidecar, collectionName, cached.documentIds);
             return readLocalDocuments(storageCollection, query, normalizedWindow);
@@ -7176,6 +7179,7 @@ function createQueryDemandLoader({
                 documentIds,
                 complete: true,
                 authoritativeRevision: result.authoritativeRevision ?? null,
+                satisfiedRevision: query?.requireRevision ?? null,
                 queryShape: {
                   selector: query?.selector ?? {},
                   sort: normalizeSort(query?.sort)

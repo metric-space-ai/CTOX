@@ -16,7 +16,7 @@ const RXDB_RESET_TIMEOUT_MS = 5000;
 const INDEXEDDB_PREFLIGHT_TIMEOUT_MS = 8000;
 const RXDB_MODULE_IMPORT_TIMEOUT_MS = 8000;
 const RXDB_CREATE_DATABASE_TIMEOUT_MS = 8000;
-const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260727-first-pull-readiness-v81';
+const RXDB_BUNDLE_URL = '../rxdb/dist/ctox-rxdb-js.mjs?v=20260727-query-demand-revision-v82';
 
 export async function createBusinessDb({ name }) {
   const storageHealth = await inspectBrowserStorageDurability(name);
