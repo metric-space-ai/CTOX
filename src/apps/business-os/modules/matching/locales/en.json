@@ -8,5 +8,14 @@
   "compute": "Compute match",
   "emptySources": "No sources or import tasks yet.",
   "emptyMatches": "No match results or tasks yet.",
-  "emptyObjects": "No objects or import tasks yet."
+  "emptyObjects": "No objects or import tasks yet.",
+  "emptyRequirements": "No requirements available yet.",
+  "syncingTitle": "Matching is syncing",
+  "syncingCollections": "RxDB is loading: {collections}.",
+  "syncingPreparing": "RxDB is preparing local data.",
+  "syncingRequirements": "Requirements are syncing.",
+  "syncingObjects": "Objects are syncing.",
+  "syncCollectionRequirements": "Requirements",
+  "syncCollectionObjects": "Objects",
+  "syncCollectionResults": "Matches"
 }

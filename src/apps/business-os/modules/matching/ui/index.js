@@ -15,17 +15,32 @@ import { normalizeCandidateStage } from '../core/pipeline.js';
 window.recomputeAllMatchScoresOnce = recomputeAllMatchScoresOnce;
 
 import { CtoxQueuedCommandError, llmChat, queueObjectParseTask, queueRequirementParseTask, setCtoxCommandBus } from './ctoxCommandAdapter.js';
-import { getContactsCollection, getMatchingCollectionDiagnostics } from './businessOsDataSource.js';
+import {
+  getContactsCollection,
+  getMatchingCollectionReadiness,
+  subscribeMatchingCollectionReadiness
+} from './businessOsDataSource.js';
 import { createSyncFeedback } from './syncFeedback.js';
 import { getActiveMatchingDefinition, matchingText, setActiveMatchingDefinition } from './matchingDefinition.js';
 import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../../shared/dialogs.js';
+import { loadModuleMessages } from '../../../shared/i18n.js';
+import { renderListOrState } from '../../../shared/list-state.js';
 
 const EMBEDDING_REQUEST_TIMEOUT_MS = 12_000;
 const MATCH_SCORE_FORMULA_VERSION = 3;
 const MATCH_SCORE_FORMULA_VERSION_KEY = 'requirementMatching.scoreFormulaVersion';
 let activeObjectId = null;
+let matchingMessages = {};
 function defText(path, fallback = '') {
   return matchingText(path, fallback);
+}
+
+function uiText(key, fallback = '', replacements = {}) {
+  let text = String(matchingMessages?.[key] ?? fallback ?? key);
+  for (const [name, value] of Object.entries(replacements)) {
+    text = text.replaceAll(`{${name}}`, String(value));
+  }
+  return text;
 }
 
 function activeDefinitionId() {
@@ -939,17 +954,14 @@ let rxdb = null;
 let sources = [];
 let objects = [];
 let matches = [];
-const rawDocCounts = { sources: 0, requirements: 0, objects: 0, matches: 0 };
-let matchingCollectionDiagnostics = null;
-let matchingDiagnosticsPromise = null;
 let matchingRuntimeCtx = null;
-let matchingInitialSyncStartedAt = 0;
-let matchingSyncProgressCleanup = null;
+let matchingReadinessCleanup = null;
+const matchingReadinessByCollection = new Map();
 const MATCHING_SYNC_PROGRESS_ID = 'matching-initial-sync';
 const MATCHING_SYNC_COLLECTIONS = Object.freeze([
-  { name: 'matching_requirements', label: 'Anforderungen' },
-  { name: 'matching_objects', label: 'Objekte' },
-  { name: 'matching_results', label: 'Matches' }
+  { name: 'matching_requirements', labelKey: 'syncCollectionRequirements', fallbackLabel: 'Anforderungen' },
+  { name: 'matching_objects', labelKey: 'syncCollectionObjects', fallbackLabel: 'Objekte' },
+  { name: 'matching_results', labelKey: 'syncCollectionResults', fallbackLabel: 'Matches' }
 ]);
 
 // Standard action glyphs (shared/icons.js actionIconPaths) — used only when
@@ -976,62 +988,25 @@ function actionIcon(name, size = 16, strokeWidth = 1.8) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ctox-action-icon ctox-action-${name}"><path d="${path}"></path></svg>`;
 }
 
-function hasUnsyncedMatchingData() {
-  // True when the RxDB collections hold records but the aggregated UI arrays
-  // are still empty. This is the classic "data is there but not yet projected"
-  // state — show a sync placeholder instead of "empty database".
-  return ((rawDocCounts.sources > 0 || rawDocCounts.requirements > 0) && sources.length === 0)
-    || (rawDocCounts.objects > 0 && objects.length === 0)
-    || (rawDocCounts.matches > 0 && matches.length === 0);
-}
-
-function getShellSyncDiagnosticsSnapshot() {
-  return matchingRuntimeCtx?.sync?.diagnostics
-    || window.ctoxBusinessOsSyncDiagnostics
-    || null;
-}
-
-function getShellSyncCollectionDiagnostic(collectionName) {
-  const collections = getShellSyncDiagnosticsSnapshot()?.collections;
-  if (!collections) return null;
-  if (Array.isArray(collections)) {
-    return collections.find((entry) => entry?.collection === collectionName) || null;
-  }
-  return collections[collectionName] || null;
-}
-
-function isShellSyncCollectionReady(entry) {
-  if (!entry) return false;
-  const status = String(entry.connectionStatus || entry.status || '').toLowerCase();
-  return Boolean(entry.initialReplicationAt)
-    || entry.initialReplicationState === 'complete'
-    || status === 'connected'
-    || status === 'running'
-    || status === 'reused';
-}
-
-function isMatchingCollectionInitialSyncPending(collectionName) {
-  if (!matchingInitialSyncStartedAt) return false;
-  const entry = getShellSyncCollectionDiagnostic(collectionName);
-  if (entry) return !isShellSyncCollectionReady(entry);
-
-  // Avoid a false empty-state flash while the shell is still publishing the
-  // first diagnostics frame for this module.
-  return Date.now() - matchingInitialSyncStartedAt < 15000;
+function matchingCollectionReadiness(collectionName) {
+  const cached = matchingReadinessByCollection.get(collectionName);
+  if (cached) return cached;
+  const snapshot = getMatchingCollectionReadiness(collectionName);
+  matchingReadinessByCollection.set(collectionName, snapshot);
+  return snapshot;
 }
 
 function getMatchingInitialSyncProgress() {
   let ready = 0;
   const pendingLabels = [];
-  const missingDiagnostics = [];
+  let syncing = false;
 
   for (const item of MATCHING_SYNC_COLLECTIONS) {
-    const entry = getShellSyncCollectionDiagnostic(item.name);
-    if (isShellSyncCollectionReady(entry)) {
-      ready += 1;
-    } else {
-      pendingLabels.push(item.label);
-      if (!entry) missingDiagnostics.push(item.name);
+    const readiness = matchingCollectionReadiness(item.name);
+    if (readiness.ready) ready += 1;
+    if (readiness.syncing) {
+      syncing = true;
+      pendingLabels.push(uiText(item.labelKey, item.fallbackLabel));
     }
   }
 
@@ -1039,102 +1014,71 @@ function getMatchingInitialSyncProgress() {
     ready,
     total: MATCHING_SYNC_COLLECTIONS.length,
     pendingLabels,
-    hasDiagnostics: missingDiagnostics.length < MATCHING_SYNC_COLLECTIONS.length
+    syncing
   };
 }
 
 function updateMatchingInitialSyncFeedback() {
-  if (!matchingInitialSyncStartedAt) return;
   const progress = getMatchingInitialSyncProgress();
-  if (progress.ready >= progress.total) {
+  if (!progress.syncing || progress.ready >= progress.total) {
     syncFeedback.clearProgress?.(MATCHING_SYNC_PROGRESS_ID, { delayMs: 1200 });
     return;
   }
 
   const pending = progress.pendingLabels.join(', ');
   syncFeedback.upsertProgress?.(MATCHING_SYNC_PROGRESS_ID, {
-    title: 'Matching wird synchronisiert',
+    title: uiText('syncingTitle', 'Matching wird synchronisiert'),
     detail: pending
-      ? `RxDB lädt gerade: ${pending}.`
-      : 'RxDB bereitet die lokalen Daten vor.',
+      ? uiText('syncingCollections', 'RxDB lädt gerade: {collections}.', { collections: pending })
+      : uiText('syncingPreparing', 'RxDB bereitet die lokalen Daten vor.'),
     meta: `${progress.ready}/${progress.total}`,
-    value: progress.hasDiagnostics
-      ? (progress.ready / progress.total) * 100
-      : null,
-    indeterminate: !progress.hasDiagnostics,
+    value: (progress.ready / progress.total) * 100,
+    indeterminate: false,
     type: 'info'
   });
 }
 
-function setupMatchingInitialSyncFeedback() {
-  matchingSyncProgressCleanup?.();
-  matchingInitialSyncStartedAt = Date.now();
+function rerenderMatchingReadinessStates() {
+  renderSources();
+  renderRequirements();
+  renderObjects();
+  renderMap();
+}
+
+function setupMatchingCollectionReadiness() {
+  matchingReadinessCleanup?.();
+  matchingReadinessByCollection.clear();
+  let subscribing = true;
+  const unsubscribers = MATCHING_SYNC_COLLECTIONS.map((item) =>
+    subscribeMatchingCollectionReadiness(item.name, (snapshot) => {
+      const previous = matchingReadinessByCollection.get(item.name);
+      matchingReadinessByCollection.set(item.name, snapshot);
+      updateMatchingInitialSyncFeedback();
+      if (!subscribing && previous?.state !== snapshot.state) {
+        rerenderMatchingReadinessStates();
+      }
+    })
+  );
+  subscribing = false;
   updateMatchingInitialSyncFeedback();
 
-  const onDiagnostics = () => {
-    updateMatchingInitialSyncFeedback();
-    if (getMatchingInitialSyncProgress().ready >= MATCHING_SYNC_COLLECTIONS.length) {
-      window.removeEventListener('ctox-business-os-sync-diagnostics', onDiagnostics);
+  matchingReadinessCleanup = () => {
+    for (const unsubscribe of unsubscribers) {
+      try { unsubscribe?.(); } catch (_) {}
     }
-  };
-  window.addEventListener('ctox-business-os-sync-diagnostics', onDiagnostics);
-  matchingSyncProgressCleanup = () => {
-    window.removeEventListener('ctox-business-os-sync-diagnostics', onDiagnostics);
+    matchingReadinessByCollection.clear();
     syncFeedback.clearProgress?.(MATCHING_SYNC_PROGRESS_ID);
-    matchingInitialSyncStartedAt = 0;
-    matchingSyncProgressCleanup = null;
+    matchingReadinessCleanup = null;
   };
-  return matchingSyncProgressCleanup;
+  return matchingReadinessCleanup;
 }
 
-function renderCollectionDiagnostic(collectionName, fallbackText) {
-  if (isMatchingCollectionInitialSyncPending(collectionName)) {
-    return 'Daten werden synchronisiert...';
-  }
-
-  const entry = matchingCollectionDiagnostics?.collections?.find(item => item.collection === collectionName);
-  if (!entry) return fallbackText;
-
-  const localCount = Number(entry.localCount || 0);
-  const sync = entry.sync;
-  const pull = entry.pull;
-  const availableCount = Math.max(localCount, Number(sync?.count || 0), Number(pull?.count || 0));
-  if (availableCount > 0 && !sources.length) return 'Daten werden geladen...';
-  return fallbackText;
-}
-
-function shouldRefreshMatchingDiagnostics() {
-  return !matchingDiagnosticsPromise && (
-    (!sources.length && !objects.length && !matches.length) ||
-    hasUnsyncedMatchingData()
-  );
-}
-
-function refreshMatchingCollectionDiagnostics({ rerender = false } = {}) {
-  if (matchingDiagnosticsPromise) return matchingDiagnosticsPromise;
-  matchingDiagnosticsPromise = getMatchingCollectionDiagnostics({ probePull: true })
-    .then((diagnostics) => {
-      matchingCollectionDiagnostics = diagnostics;
-      if (rerender) {
-        renderSources();
-        renderRequirements();
-        renderObjects();
-        renderMap();
-      }
-      return diagnostics;
-    })
-    .catch((error) => {
-      matchingCollectionDiagnostics = {
-        checkedAt: new Date().toISOString(),
-        collections: [],
-        error: String(error?.message || error || 'diagnostics failed')
-      };
-      return matchingCollectionDiagnostics;
-    })
-    .finally(() => {
-      matchingDiagnosticsPromise = null;
-    });
-  return matchingDiagnosticsPromise;
+function renderCollectionListState(rows, collectionName, { empty, syncing } = {}) {
+  return renderListOrState(rows, matchingCollectionReadiness(collectionName), {
+    renderRows: () => '',
+    empty,
+    syncing
+  });
 }
 
 // requirement matching view globals
@@ -1582,13 +1526,6 @@ async function loadFromRxdb(){
     const requirementSourcesJson   = requirementSourceDocs.map(d => d.toJSON());
     const matchesJson    = matchDocs.map(d => d.toJSON());
 
-    // Track raw doc counts so the UI can distinguish "really empty" from
-    // "data is in the database but hasn't been projected into UI shape yet".
-    rawDocCounts.sources = sourcesJson.length;
-    rawDocCounts.requirements = requirementsJson.length;
-    rawDocCounts.objects = objectsJson.length;
-    rawDocCounts.matches = matchesJson.length;
-
     const sourceRowsForUi = buildSyntheticSourcesFromRequirements(sourcesJson, requirementsJson);
 
     const requirementsBySource = new Map();
@@ -1906,13 +1843,8 @@ async function loadFromRxdb(){
     }
 
     reconcilePersistedMatchingSelection();
-    if (shouldRefreshMatchingDiagnostics()) {
-      await refreshMatchingCollectionDiagnostics({ rerender: false });
-    }
-
   } catch (e) {
     console.error('Fehler beim Laden aus RxDB (UI bleibt leer oder minimal):', e);
-    await refreshMatchingCollectionDiagnostics({ rerender: false });
   }
 }
 
@@ -2324,7 +2256,7 @@ async function setupRxdbLiveUiSync() {
 
 // teardown bleibt gleich
 function teardownRxdbLiveUiSync() {
-  matchingSyncProgressCleanup?.();
+  matchingReadinessCleanup?.();
   __unsubscribeAllRxdbLiveSubs();
   console.log('[rxdb-live] UI sync disabled');
 }
@@ -5393,9 +5325,16 @@ function renderRequirementSelector() {
   grid.classList.toggle('is-list-view', matchingPaneState.left.view === 'list');
   grid.replaceChildren();
   if (!visibleRows.length) {
-    const empty = el('div', 'ctox-empty');
-    empty.textContent = allRows.length ? 'Keine Anforderungen im aktuellen Filter.' : renderCollectionDiagnostic('matching_requirements', 'Noch keine Anforderungen verfügbar.');
-    grid.appendChild(empty);
+    if (allRows.length) {
+      const empty = el('div', 'ctox-empty');
+      empty.textContent = 'Keine Anforderungen im aktuellen Filter.';
+      grid.appendChild(empty);
+    } else {
+      grid.innerHTML = renderCollectionListState(allRows, 'matching_requirements', {
+        empty: uiText('emptyRequirements', 'Noch keine Anforderungen verfügbar.'),
+        syncing: uiText('syncingRequirements', 'Anforderungen werden synchronisiert.')
+      });
+    }
   } else {
     visibleRows.forEach(({ source, requirement }) => {
       const row = el('article', 'ctox-list-item matching-requirement-row');
@@ -5777,20 +5716,10 @@ function renderSources(){
   grid.innerHTML = '';
 
   if (!sources.length){
-    // If the underlying RxDB collection actually has documents but the
-    // aggregation produced none yet, we're mid-sync (peer data arrived but
-    // hasn't been projected into the UI shape). Show a sync state instead of
-    // the misleading "empty database" message.
-    if (hasUnsyncedMatchingData()) {
-      grid.innerHTML = `<div class="muted collection-empty-state">` +
-        renderCollectionDiagnostic('matching_requirements', 'Daten werden geladen...') +
-        `</div>`;
-    } else {
-      grid.innerHTML = `<div class="muted collection-empty-state">` +
-        renderCollectionDiagnostic('matching_requirements', 'Noch keine Anforderungen verfügbar.') +
-        `</div>`;
-    }
-    if (shouldRefreshMatchingDiagnostics()) refreshMatchingCollectionDiagnostics({ rerender: true });
+    grid.innerHTML = renderCollectionListState(sources, 'matching_requirements', {
+      empty: uiText('emptyRequirements', 'Noch keine Anforderungen verfügbar.'),
+      syncing: uiText('syncingRequirements', 'Anforderungen werden synchronisiert.')
+    });
     return;
   }
 
@@ -5989,10 +5918,10 @@ function renderRequirements(){
 
   if (!sources.length){
     compNameEl.textContent = 'Keine Anforderungen';
-    list.innerHTML = `<div class="muted collection-empty-state">` +
-      renderCollectionDiagnostic('matching_requirements', 'Noch keine Anforderungen verfügbar.') +
-      `</div>`;
-    if (shouldRefreshMatchingDiagnostics()) refreshMatchingCollectionDiagnostics({ rerender: true });
+    list.innerHTML = renderCollectionListState(sources, 'matching_requirements', {
+      empty: uiText('emptyRequirements', 'Noch keine Anforderungen verfügbar.'),
+      syncing: uiText('syncingRequirements', 'Anforderungen werden synchronisiert.')
+    });
     return;
   }
 
@@ -7843,10 +7772,10 @@ function renderObjects(opts = {}){
     for (const [, node] of objectDomById) { try { node.remove(); } catch (_) {} }
     objectDomById.clear();
 
-    list.innerHTML = `<div class="muted collection-empty-state">` +
-      renderCollectionDiagnostic('matching_objects', 'Noch keine Objekte verfügbar.') +
-      `</div>`;
-    if (shouldRefreshMatchingDiagnostics()) refreshMatchingCollectionDiagnostics({ rerender: true });
+    list.innerHTML = renderCollectionListState(objects, 'matching_objects', {
+      empty: uiText('emptyObjects', 'Noch keine Objekte verfügbar.'),
+      syncing: uiText('syncingObjects', 'Objekte werden synchronisiert.')
+    });
     return;
   }
 
@@ -8559,12 +8488,7 @@ function renderMap() {
     .filter(x => x.sourceMatches.length > 0);
 
   if (!sourcesWithMatches.length) {
-    mapEl.innerHTML = `<div class="muted collection-empty-state">` +
-      renderCollectionDiagnostic('matching_results', 'Keine Matches im aktuellen Matrix-Filter.') +
-      `</div>`;
-    if (!matchingCollectionDiagnostics && !matchingDiagnosticsPromise) {
-      refreshMatchingCollectionDiagnostics({ rerender: true });
-    }
+    mapEl.innerHTML = '<div class="ctox-empty">Keine Matches im aktuellen Matrix-Filter.</div>';
     return;
   }
 
@@ -8948,12 +8872,7 @@ function renderMap() {
   });
 
   if (!renderedSections) {
-    container.innerHTML = `<div class="muted collection-empty-state">` +
-      renderCollectionDiagnostic('matching_results', 'Keine Matches im aktuellen Matrix-Filter.') +
-      `</div>`;
-    if (!matchingCollectionDiagnostics && !matchingDiagnosticsPromise) {
-      refreshMatchingCollectionDiagnostics({ rerender: true });
-    }
+    container.innerHTML = '<div class="ctox-empty">Keine Matches im aktuellen Matrix-Filter.</div>';
   }
 }
 
@@ -9253,6 +9172,10 @@ function applyMatchingDefinitionUi(root = getMatchingModuleHost()) {
 // Initial: erst RxDB laden, dann rendern, dann Live-Sync aktivieren
 export async function mountMatchingDashboard(ctx = {}){
   matchingRuntimeCtx = ctx;
+  matchingMessages = await loadModuleMessages(
+    new URL('../index.js', import.meta.url).href,
+    ctx.locale || document.documentElement.lang || 'de'
+  );
   setViewStateStorageScope(ctx.storageScope);
   matchingViewState = readViewState(MATCHING_VIEW_STATE_KEY, MATCHING_VIEW_STATE_DEFAULTS);
   activeSource = matchingViewState.activeSource || null;
@@ -9268,7 +9191,7 @@ export async function mountMatchingDashboard(ctx = {}){
   applyMatchingDefinitionUi();
   syncFeedback.setHostRoot?.(document.body);
   syncFeedback.ensureHost();
-  setupMatchingInitialSyncFeedback();
+  setupMatchingCollectionReadiness();
   await ensureMatchScoreFormulaUpdate();
   await loadFromRxdb();
   updateMatchingInitialSyncFeedback();

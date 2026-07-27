@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { afterEach, test } from 'node:test';
 
+import { renderListOrState } from '../../shared/list-state.js';
 import {
   getContactsCollection,
-  getMatchingCollectionDiagnostics,
-  setBusinessOsDatabaseContext
+  getMatchingCollectionReadiness,
+  setBusinessOsDatabaseContext,
+  subscribeMatchingCollectionReadiness
 } from './ui/businessOsDataSource.js';
 
 function row(doc) {
@@ -32,7 +35,7 @@ function collection(rows = []) {
   };
 }
 
-function businessOsContext({ requirements = [], objects = [], matches = [] } = {}, permissions = {}) {
+function businessOsContext({ requirements = [], objects = [], matches = [] } = {}, permissions = {}, sync = null) {
   const collections = {
     matching_requirements: collection(requirements),
     matching_objects: collection(objects),
@@ -45,7 +48,8 @@ function businessOsContext({ requirements = [], objects = [], matches = [] } = {
     permissions: {
       canReadCollection: permissions.canReadCollection || (() => true),
       canWriteCollection: permissions.canWriteCollection || (() => true)
-    }
+    },
+    ...(sync ? { sync } : {})
   };
 }
 
@@ -80,20 +84,53 @@ test('normalizes canonical matching requirement records for UI queries', async (
   assert.equal(sources.length, 0);
 });
 
-test('reports shell-facade collection diagnostics', async () => {
-  setBusinessOsDatabaseContext(businessOsContext());
-  const diagnostics = await getMatchingCollectionDiagnostics({ probePull: true });
+test('reads and subscribes through the canonical collection readiness facade', () => {
+  const snapshots = {
+    matching_requirements: Object.freeze({
+      collection: 'matching_requirements',
+      state: 'catching-up',
+      ready: false,
+      syncing: true,
+      updatedAt: '2026-07-27T10:00:00.000Z'
+    })
+  };
+  let unsubscribed = false;
+  const sync = {
+    collectionReadiness: (name) => snapshots[name],
+    subscribeCollectionReadiness: (name, listener) => {
+      listener(snapshots[name]);
+      return () => { unsubscribed = true; };
+    }
+  };
+  setBusinessOsDatabaseContext(businessOsContext({}, {}, sync));
 
-  assert.equal(diagnostics.databaseName, 'business-os-shell-facade');
-  assert.equal(diagnostics.collections.length, 3);
-  assert.deepEqual(
-    diagnostics.collections.map(item => [item.collection, item.localCount, item.pull.count]),
-    [
-      ['matching_requirements', 0, 0],
-      ['matching_objects', 0, 0],
-      ['matching_results', 0, 0]
-    ]
-  );
+  assert.equal(getMatchingCollectionReadiness('matching_requirements'), snapshots.matching_requirements);
+  const emitted = [];
+  const unsubscribe = subscribeMatchingCollectionReadiness('matching_requirements', (snapshot) => emitted.push(snapshot));
+  assert.deepEqual(emitted, [snapshots.matching_requirements]);
+  unsubscribe();
+  assert.equal(unsubscribed, true);
+});
+
+test('renders unready replicated empties as syncing and ready empties as empty', () => {
+  const options = {
+    empty: 'No requirements available yet.',
+    syncing: 'Requirements are syncing.'
+  };
+  const syncingHtml = renderListOrState([], { ready: false, syncing: true }, options);
+  const emptyHtml = renderListOrState([], { ready: true, syncing: false }, options);
+
+  assert.match(syncingHtml, /class="ctox-syncing"/);
+  assert.match(syncingHtml, /Requirements are syncing\./);
+  assert.match(emptyHtml, /class="ctox-empty"/);
+  assert.match(emptyHtml, /No requirements available yet\./);
+});
+
+test('matching UI uses canonical readiness subscriptions and list states', async () => {
+  const source = await readFile(new URL('./ui/index.js', import.meta.url), 'utf8');
+  assert.match(source, /subscribeMatchingCollectionReadiness/);
+  assert.match(source, /matchingCollectionReadiness\(collectionName\)/);
+  assert.match(source, /renderListOrState/);
 });
 
 test('denies writes when the Business OS permission facade denies collection writes', async () => {

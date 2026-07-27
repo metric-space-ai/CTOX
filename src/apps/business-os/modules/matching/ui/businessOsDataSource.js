@@ -1,6 +1,3 @@
-import { collections as matchingSchemas } from '../schema.js';
-
-const DATABASE_SURFACE = 'business-os-shell-facade';
 const MATCHING_REMOTE_COLLECTIONS = Object.freeze([
   'matching_requirements',
   'matching_objects',
@@ -20,12 +17,10 @@ const COLLECTION_MAP = {
 let dbPromise = null;
 let businessOsContext = null;
 const cacheByCollection = new Map();
-let diagnosticsCache = null;
 
 export function setBusinessOsDatabaseContext(ctx) {
   businessOsContext = ctx && typeof ctx === 'object' ? ctx : null;
   dbPromise = null;
-  diagnosticsCache = null;
   cacheByCollection.clear();
 }
 
@@ -33,30 +28,32 @@ export async function getContactsCollection() {
   return { database: await getDatabase() };
 }
 
-export async function getMatchingCollectionDiagnostics({ probePull = false } = {}) {
-  if (!probePull && diagnosticsCache) return structuredCloneSafe(diagnosticsCache);
+export function getMatchingCollectionReadiness(collectionName) {
+  const name = matchingCollectionName(collectionName);
+  const collectionReadiness = businessOsContext?.sync?.collectionReadiness;
+  if (typeof collectionReadiness === 'function') {
+    return collectionReadiness.call(businessOsContext.sync, name);
+  }
+  return Object.freeze({
+    collection: name,
+    state: 'live',
+    ready: true,
+    syncing: false,
+    updatedAt: null
+  });
+}
 
-  const collections = await Promise.all(
-    ['matching_requirements', 'matching_objects', 'matching_results'].map(async (collectionName) => {
-      const local = await describeLocalCollection(collectionName);
-      const pull = probePull ? describeLocalPullEquivalent(collectionName, local) : null;
-      return {
-        collection: collectionName,
-        schemaVersion: Number(matchingSchemas?.[collectionName]?.version ?? 0),
-        localCount: local.count,
-        localError: local.error,
-        sync: describeRxdbSyncCollection(collectionName, local),
-        pull
-      };
-    })
-  );
-
-  diagnosticsCache = {
-    checkedAt: new Date().toISOString(),
-    databaseName: DATABASE_SURFACE,
-    collections
-  };
-  return structuredCloneSafe(diagnosticsCache);
+export function subscribeMatchingCollectionReadiness(collectionName, listener) {
+  const name = matchingCollectionName(collectionName);
+  if (typeof listener !== 'function') {
+    throw new TypeError('Matching collection readiness listener must be a function.');
+  }
+  const subscribe = businessOsContext?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe === 'function') {
+    return subscribe.call(businessOsContext.sync, name, listener);
+  }
+  listener(getMatchingCollectionReadiness(name));
+  return () => {};
 }
 
 export async function getDatabase() {
@@ -149,11 +146,21 @@ async function saveDocument(name, input) {
   return doc;
 }
 
-function matchingCollection(collectionName, { mode = 'read', optional = false } = {}) {
+function matchingCollectionName(collectionName) {
   const name = String(collectionName || '').trim();
   if (!name || !MATCHING_REMOTE_COLLECTIONS.includes(name)) {
-    if (optional) return null;
     throw new Error(`Matching collection is not part of the module contract: ${name || 'unknown'}`);
+  }
+  return name;
+}
+
+function matchingCollection(collectionName, { mode = 'read', optional = false } = {}) {
+  let name;
+  try {
+    name = matchingCollectionName(collectionName);
+  } catch (error) {
+    if (optional) return null;
+    throw error;
   }
   if (mode === 'write' && !canWriteCollection(name)) {
     throw createPermissionError(name, 'data.write');
@@ -191,7 +198,6 @@ function createPermissionError(collectionName, permission) {
 }
 
 function invalidateCacheForRemote(remote) {
-  diagnosticsCache = null;
   for (const [name, mapped] of Object.entries(COLLECTION_MAP)) {
     if (mapped === remote) cacheByCollection.delete(name);
   }
@@ -355,37 +361,6 @@ function belongsToUiCollection(name, doc) {
   if (name === 'objects') return kind === 'object' || kind === 'object';
   if (name === 'matches') return kind === 'match' || kind === 'result';
   return true;
-}
-
-async function describeLocalCollection(collectionName) {
-  try {
-    if (!canReadCollection(collectionName)) return { count: 0, error: 'collection read denied' };
-    const rxCollection = matchingCollection(collectionName, { mode: 'read', optional: true });
-    if (!rxCollection?.find) return { count: 0, error: 'collection unavailable' };
-    const rows = await rxCollection.find().exec();
-    return { count: Array.isArray(rows) ? rows.length : 0, error: '' };
-  } catch (error) {
-    return { count: 0, error: String(error?.message || error || 'unknown error') };
-  }
-}
-
-function describeRxdbSyncCollection(collectionName, local) {
-  return {
-    ok: !local.error,
-    mode: 'rxdb-webrtc',
-    count: Number(local.count || 0),
-    error: local.error || ''
-  };
-}
-
-function describeLocalPullEquivalent(collectionName, local) {
-  return {
-    ok: !local.error,
-    status: 'rxdb-local',
-    collection: collectionName,
-    count: Number(local.count || 0),
-    error: local.error || ''
-  };
 }
 
 function inferKind(name) {

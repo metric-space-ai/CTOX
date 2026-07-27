@@ -1,4 +1,4 @@
-const MATCHING_BUILD = '20260718-ctox-kit-migration2';
+const MATCHING_BUILD = '20260727-canonical-readiness';
 
 export async function mount(ctx) {
   await ensureStyles();
