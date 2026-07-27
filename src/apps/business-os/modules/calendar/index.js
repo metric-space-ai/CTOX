@@ -53,6 +53,7 @@ const labels = {
     save: 'Speichern',
     delete: 'Löschen',
     cancel: 'Abbrechen',
+    syncingData: 'Daten werden synchronisiert.',
   },
   en: {
     calendar: 'Calendar',
@@ -86,6 +87,7 @@ const labels = {
     save: 'Save',
     delete: 'Delete',
     cancel: 'Cancel',
+    syncingData: 'Syncing data.',
   },
 };
 
@@ -126,6 +128,11 @@ const state = {
   calendarViewInstance: null,
   renderTimer: null,
   domHandlers: null,
+
+  // Collection readiness (sync render-hint for data-driven empty states).
+  readiness: {},
+  readinessUnsubscribes: [],
+  leftEmptyDefaultHtml: null,
 };
 
 const els = {};
@@ -229,8 +236,29 @@ export async function mount(ctx) {
     });
   }
 
+  // Collection readiness is a render hint only: while the backing collections
+  // of the left column have not finished their initial replication, the
+  // data-driven empty state shows a syncing shell instead of "no entries".
+  state.readiness = {};
+  state.readinessUnsubscribes = [];
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    for (const name of ['calendar_calendars', 'calendar_booking_pages']) {
+      try {
+        const unsubscribe = ctx.sync.subscribeCollectionReadiness(name, (snapshot) => {
+          state.readiness[name] = snapshot;
+          scheduleRender();
+        });
+        state.readinessUnsubscribes.push(unsubscribe);
+      } catch (error) {
+        console.warn('[calendar] readiness subscription failed for', name, error);
+      }
+    }
+  }
+
   return () => {
     disposed = true;
+    state.readinessUnsubscribes.forEach(unsubscribe => unsubscribe());
+    state.readinessUnsubscribes = [];
     state.presenceCleanup?.();
     state.presenceCleanup = null;
     try { state.ctx?.presence?.clear?.(); } catch {}
@@ -367,6 +395,7 @@ function bindElements(host) {
   // Left grammar column (the band, filter tray and search are SHELL-wired).
   els.leftList = host.querySelector('[data-calendar-left-list]');
   els.leftEmpty = host.querySelector('[data-calendar-left-empty]');
+  state.leftEmptyDefaultHtml = els.leftEmpty?.innerHTML ?? null;
 
   // Center
   els.calendarDataStatus = host.querySelector('#calendarDataStatus');
@@ -771,6 +800,20 @@ function bookingPageMatchesFilters(bp) {
   return true;
 }
 
+// Data-driven empty-state decision for the left column: only when the
+// UNFILTERED source of the active band is empty does collection readiness
+// gate the empty copy. Filter/search empties (source non-empty, no match)
+// always keep the plain empty markup. Pure so it is unit-testable.
+function leftEmptyContent({ sourceEmpty, ready, syncingText }) {
+  if (sourceEmpty && ready === false) {
+    return {
+      syncing: true,
+      html: `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(syncingText)}</div>`,
+    };
+  }
+  return { syncing: false, html: null };
+}
+
 function renderLeftList() {
   if (!els.leftList) return;
 
@@ -790,7 +833,23 @@ function renderLeftList() {
 
   if (!rows.length) {
     els.leftList.innerHTML = '';
-    if (els.leftEmpty) els.leftEmpty.hidden = false;
+    if (els.leftEmpty) {
+      const collectionName = isPages ? 'calendar_booking_pages' : 'calendar_calendars';
+      const readiness = state.readiness?.[collectionName]
+        ?? state.ctx?.sync?.collectionReadiness?.(collectionName)
+        ?? null;
+      const content = leftEmptyContent({
+        sourceEmpty: (isPages ? state.bookingPages : state.calendars).length === 0,
+        ready: readiness?.ready,
+        syncingText: state.t('syncingData', labels[state.lang].syncingData),
+      });
+      if (content.syncing) {
+        els.leftEmpty.innerHTML = content.html;
+      } else if (state.leftEmptyDefaultHtml != null) {
+        els.leftEmpty.innerHTML = state.leftEmptyDefaultHtml;
+      }
+      els.leftEmpty.hidden = false;
+    }
     return;
   }
   if (els.leftEmpty) els.leftEmpty.hidden = true;
@@ -1962,4 +2021,5 @@ export const __calendarTestHooks = {
   computeViewBandCounts,
   buildCalendarExport,
   parseCalendarImport,
+  leftEmptyContent,
 };

@@ -237,6 +237,29 @@ test('export builds an honest snapshot and import round-trips the authoring reco
   assert.equal(hooks.parseCalendarImport([]).calendars.length, 0);
 });
 
+test('left empty state shows syncing shell only when source is empty and collection unready', () => {
+  // Unfiltered source empty + readiness not live ⇒ syncing shell.
+  const syncing = hooks.leftEmptyContent({
+    sourceEmpty: true,
+    ready: false,
+    syncingText: 'Daten werden synchronisiert.',
+  });
+  assert.equal(syncing.syncing, true);
+  assert.match(syncing.html, /class="ctox-syncing"/);
+  assert.match(syncing.html, /role="status"/);
+  assert.match(syncing.html, /aria-live="polite"/);
+  assert.match(syncing.html, /Daten werden synchronisiert\./);
+
+  // Unfiltered source empty + readiness live ⇒ plain empty (no syncing shell).
+  assert.equal(hooks.leftEmptyContent({ sourceEmpty: true, ready: true, syncingText: 'x' }).syncing, false);
+
+  // Filter empty (source has rows, no match) ⇒ never a syncing shell.
+  assert.equal(hooks.leftEmptyContent({ sourceEmpty: false, ready: false, syncingText: 'x' }).syncing, false);
+
+  // No readiness signal (no sync context) ⇒ plain empty.
+  assert.equal(hooks.leftEmptyContent({ sourceEmpty: true, ready: undefined, syncingText: 'x' }).syncing, false);
+});
+
 test('context pane auto-reveals only with a selection and no user collapse', () => {
   assert.equal(hooks.calendarContextVisible(true, false), true);
   assert.equal(hooks.calendarContextVisible(true, true), false);

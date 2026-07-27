@@ -61,5 +61,6 @@
   "sunday": "Sunday",
   "bookingHolds": "Temporary Holds",
   "bookings": "Bookings",
-  "presenceEditing": "is editing right now"
+  "presenceEditing": "is editing right now",
+  "syncingData": "Syncing data."
 }
