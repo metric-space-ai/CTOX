@@ -174,6 +174,10 @@ through `collectionStartQueue` (500 ms spacing). Key mechanics, all in
   registered; otherwise a reconnect would fan out every `masterChangesSince`
   request at once. A peer that still reaches the hard budget is treated as
   wedged and recycled.
+- *Idempotent framed retries:* completed transfer ACKs are cached on both
+  peers. A repeated `resume` or chunk from the final window replays the final
+  ACK without decoding or delivering the payload twice; losing the final ACK
+  therefore cannot tear down the shared multiplexed peer.
 - *Suspend/resume:* `suspendCollections`/`resumeCollections` park bridges as
   `paused` without tearing the runtime down.
 - *Demand-cache budgets:* ordinary collections retain a 6 MiB LRU working
@@ -597,6 +601,7 @@ by `checkpoint-contract-smoke.mjs`, which drives the real
 | Missed trailing writes / stale pulls | Push re-run flag (`pushAgainAfterCurrent`): a local write landing during an in-flight push triggers another pass. Failed pulls/pushes re-arm single retry timers using `retryTime` (min 1 s). | `replication-webrtc.mjs` |
 | Browser-side repair | Error classification (§3.2) decides between recording a reconnect hint (blips, lifecycle events) and scheduling the unhealthy-collection sweep / full restart; an `active$` drop schedules a 750 ms restart. | `sync.js` |
 | Native peer death | Supervised respawn with capped backoff; config re-read per attempt (room-password rotation applies); bring-up failure or stale heartbeat ⇒ fatal exit ⇒ respawn — never a zombie. | `rxdb_peer.rs` (§4.2) |
+| SQLite contention while accepting durable background controls | Commands with durable identities and idempotent effects are returned to `pending_sync` with their payload and authorization receipt intact. The allowlist covers external-SQL sync/write, person research, and outbound source adapter generation/test/auth assistance; non-idempotent controls still fail closed. Accepted or non-terminal failed allowlisted rows remain restart-recoverable. | `store.rs::is_recoverable_background_control_command_type`, `rxdb_peer.rs::transient_business_command_retry_document` |
 
 ### 8.1 Hard invariants (2026-06-10 soak campaign)
 

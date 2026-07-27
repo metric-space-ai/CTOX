@@ -738,6 +738,8 @@ function taskIsHarnessTerminal(task) {
 }
 
 function taskHarnessStatuses(task) {
+  const authoritative = authoritativeTaskStatus(task);
+  if (authoritative) return [authoritative];
   const raw = [
     task?.status,
     task?.routeStatus,
@@ -1573,8 +1575,12 @@ function withRouteStatusStep(steps, task, state) {
 }
 
 function taskMatchesHarnessFlow(task, state) {
-  if (!task || !state) return false;
-  const source = state.flow?.flow?.source || {};
+  return Boolean(task && state && flowMatchesTask(state.flow, task));
+}
+
+function flowMatchesTask(flowResult, task) {
+  if (!task) return false;
+  const source = flowResult?.flow?.source || {};
   const ids = new Set([source.message_key, source.work_id].filter(Boolean));
   if (ids.has(task.id) || ids.has(task.taskId) || ids.has(task.commandId) || ids.has(task.runId)) return true;
   return false;
@@ -2162,11 +2168,15 @@ function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de') {
 function buildHarnessModel(data, flow, lang = 'de') {
   const tasks = applyHarnessFlowStatus(buildTaskList(data), flow)
     .filter(isTaskOverviewItemVisible);
-  const activeTask = tasks.find((task) => normalizeCommandStatus(task.status) === 'running') || null;
+  const activeTask = tasks.find(taskIsHarnessActive) || null;
   const activeRun = data.runs.find((run) => run.status === 'running') || null;
   const liveWork = Boolean(activeTask || activeRun);
   const displayFlow = shouldDisplayHarnessFlow(flow, tasks) ? flow : emptyHarnessFlow('no_live_work');
-  const observedIds = observedPathFromFlow(displayFlow);
+  const observedIds = reconcileObservedPathWithAuthoritativeTask(
+    observedPathFromFlow(displayFlow),
+    activeTask,
+    displayFlow,
+  );
   const observedIdSet = new Set(observedIds);
   const tracePosition = new Map(observedIds.map((id, index) => [id, index]));
   const activeTraceIndex = Math.max(0, observedIds.length - 1);
@@ -2235,6 +2245,7 @@ function applyHarnessFlowStatus(tasks, flowResult) {
   const summary = terminalSummaryFromFlow(flowResult) || (terminalNode === 'passed' ? 'Completed by CTOX harness' : 'CTOX harness marked this queue item failed');
   return tasks.map((task) => {
     if (!ids.has(task.id) && !ids.has(task.taskId) && !ids.has(task.commandId) && !ids.has(task.runId)) return task;
+    if (authoritativeTaskStatus(task)) return task;
     return {
       ...task,
       status,
@@ -2927,6 +2938,29 @@ function observedPathFromFlow(flowResult) {
   return ids.filter((id) => REVIEW_HARNESS_NODE_SET.has(id));
 }
 
+function reconcileObservedPathWithAuthoritativeTask(observedIds, task, flowResult) {
+  const currentNodeId = authoritativeTaskNodeId(task);
+  if (!currentNodeId) return observedIds;
+  const base = flowMatchesTask(flowResult, task)
+    ? observedIds.filter((id) => !['passed', 'model-failed', 'infra-failed'].includes(id))
+    : [];
+  const reconciled = [...base];
+  for (const nodeId of authoritativeTaskPath(currentNodeId)) {
+    if (!reconciled.includes(nodeId)) reconciled.push(nodeId);
+  }
+  if (reconciled.at(-1) !== currentNodeId) reconciled.push(currentNodeId);
+  return reconciled.filter((id) => REVIEW_HARNESS_NODE_SET.has(id));
+}
+
+function authoritativeTaskPath(nodeId) {
+  if (nodeId === 'queued') return ['queued'];
+  if (nodeId === 'leased') return ['queued', 'leased'];
+  if (nodeId === 'running') return ['queued', 'leased', 'running'];
+  if (nodeId === 'awaiting-review') return ['queued', 'leased', 'running', 'awaiting-review'];
+  if (nodeId === 'validating') return ['queued', 'leased', 'running', 'awaiting-review', 'awaiting-validation', 'validating'];
+  return [nodeId];
+}
+
 function observedDetailsFromFlow(flowResult, lang = 'de') {
   const flow = flowResult?.flow || emptyHarnessFlow().flow;
   const map = new Map();
@@ -3080,30 +3114,6 @@ function edgePath(from, to, route = 'normal') {
 }
 
 function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports = []) {
-  const commandQueue = commands
-    .filter((doc) => doc.command_type === 'browser.capture.extract' || doc.result?.extract)
-    .map((doc) => {
-      const extractArtifact = browserExtractArtifactFromCommand(doc);
-      return {
-        id: `command-${doc.command_id || doc.id}`,
-        taskId: doc.task_id || '',
-        commandId: doc.command_id || doc.id || '',
-        title: doc.payload?.title || `Browser Extract: ${extractArtifact.source_id || extractArtifact.capture_script || doc.command_id || doc.id}`,
-        prompt: doc.payload?.instruction || '',
-        source: doc.module || doc.payload?.source_module || 'browser',
-        channel: inferInboundChannel(doc),
-        priority: doc.payload?.priority || 'normal',
-        status: normalizeCommandStatus(doc.status),
-        routeStatus: doc.task_status || doc.status || '',
-        target: doc.command_type || 'browser.capture.extract',
-        browserExtractArtifact: extractArtifact,
-        result: doc.result || null,
-        resultSummary: browserExtractSummary(extractArtifact.fields) || resultSummary(doc.result),
-        createdAt: new Date(doc.created_at_ms || doc.updated_at_ms || Date.now()).toISOString(),
-        updatedAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
-      };
-    })
-    .filter((item) => item.id && item.browserExtractArtifact?.kind === 'browser_extract');
   const runtimeQueue = queueTasks.map((doc) => ({
     id: doc.id || doc.task_id || doc.command_id,
     taskId: doc.task_id || doc.id || '',
@@ -3122,6 +3132,14 @@ function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports =
     createdAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
     updatedAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
   })).filter((item) => item.id);
+  const runtimeByTaskId = new Map(runtimeQueue.map((item) => [String(item.taskId || item.id), item]));
+  const runtimeByCommandId = new Map(runtimeQueue
+    .filter((item) => item.commandId)
+    .map((item) => [String(item.commandId), item]));
+  const commandQueue = commands
+    .filter((doc) => isQueuedCommandLifecycle(doc) || isLegacyBrowserExtractCommand(doc))
+    .map((doc) => commandTaskFromProjection(doc, runtimeByTaskId, runtimeByCommandId))
+    .filter(Boolean);
   const tickets = bugReports.map((doc) => ({
     id: doc.id || doc.report_id,
     title: doc.title || doc.surface || doc.id || 'CTOX ticket',
@@ -3144,6 +3162,79 @@ function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports =
   };
 }
 
+function commandTaskFromProjection(doc, runtimeByTaskId, runtimeByCommandId) {
+  const commandId = String(doc.command_id || doc.id || '').trim();
+  if (!commandId) return null;
+  const executionTaskId = commandExecutionTaskId(doc);
+  const queueTask = (executionTaskId && runtimeByTaskId.get(executionTaskId))
+    || runtimeByCommandId.get(commandId)
+    || null;
+  const lifecycle = hasAuthoritativeCommandLifecycle(doc);
+  const extractArtifact = isLegacyBrowserExtractCommand(doc)
+    ? browserExtractArtifactFromCommand(doc)
+    : null;
+  const status = lifecycle
+    ? authoritativeTaskStatus(doc)
+    : normalizeCommandStatus(doc.status);
+  const taskId = executionTaskId || queueTask?.taskId || '';
+  return {
+    ...(queueTask || {}),
+    id: queueTask?.id || taskId || `command-${commandId}`,
+    taskId,
+    commandId,
+    title: doc.payload?.title
+      || queueTask?.title
+      || (extractArtifact
+        ? `Browser Extract: ${extractArtifact.source_id || extractArtifact.capture_script || commandId}`
+        : displayCommandTitle(doc)),
+    prompt: doc.payload?.instruction || queueTask?.prompt || '',
+    source: doc.module || doc.payload?.source_module || queueTask?.source || 'ctox',
+    channel: inferInboundChannel(doc),
+    priority: doc.payload?.priority || queueTask?.priority || 'normal',
+    status,
+    routeStatus: lifecycle
+      ? (String(doc.execution_phase) === 'terminal'
+        ? String(doc.terminal_status || doc.status || 'terminal')
+        : String(doc.execution_phase))
+      : (doc.task_status || doc.status || ''),
+    executionPhase: lifecycle ? String(doc.execution_phase) : '',
+    execution_phase: lifecycle ? String(doc.execution_phase) : '',
+    terminalStatus: lifecycle ? String(doc.terminal_status || 'none') : '',
+    terminal_status: lifecycle ? String(doc.terminal_status || 'none') : '',
+    projectionVersion: lifecycle ? Number(doc.projection_version || 0) : null,
+    target: doc.command_type || queueTask?.target || 'business_os.command',
+    browserExtractArtifact: extractArtifact,
+    result: doc.result || queueTask?.result || null,
+    resultSummary: (extractArtifact ? browserExtractSummary(extractArtifact.fields) : '')
+      || resultSummary(doc.result)
+      || queueTask?.resultSummary
+      || '',
+    createdAt: new Date(doc.created_at_ms || Date.parse(queueTask?.createdAt || '') || doc.updated_at_ms || Date.now()).toISOString(),
+    updatedAt: new Date(doc.updated_at_ms || Date.parse(queueTask?.updatedAt || '') || Date.now()).toISOString(),
+  };
+}
+
+function commandExecutionTaskId(doc = {}) {
+  const explicit = String(doc.execution_task_id || '').trim();
+  if (explicit) return explicit;
+  if (Number(doc.contract_version) === 2 || doc.execution_mode === 'control') return '';
+  return String(doc.task_id || '').trim();
+}
+
+function hasAuthoritativeCommandLifecycle(doc = {}) {
+  return Boolean(String(doc.execution_phase || '').trim());
+}
+
+function isQueuedCommandLifecycle(doc = {}) {
+  if (!hasAuthoritativeCommandLifecycle(doc)) return false;
+  return doc.execution_mode === 'queue'
+    || Boolean(String(doc.execution_task_id || '').trim());
+}
+
+function isLegacyBrowserExtractCommand(doc = {}) {
+  return doc.command_type === 'browser.capture.extract' || Boolean(doc.result?.extract);
+}
+
 function isQueueOverviewItemVisible(item) {
   return isTaskOverviewItemVisible(item);
 }
@@ -3161,6 +3252,8 @@ function isTaskOverviewItemVisible(item) {
 }
 
 function taskStatusCandidates(item = {}) {
+  const authoritative = authoritativeTaskStatus(item);
+  if (authoritative) return [authoritative];
   return [
     item.status,
     item.task_status,
@@ -3312,10 +3405,40 @@ function isFocusedTask(item, focusTask) {
   );
 }
 
+function authoritativeTaskStatus(task = {}) {
+  const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
+  if (!phase) return '';
+  if (phase === 'terminal') {
+    return normalizeCommandStatus(task.terminalStatus || task.terminal_status || task.status || 'completed');
+  }
+  if (['waiting_dependencies', 'waiting-dependencies', 'accepted', 'queued', 'retry_wait', 'retry-wait'].includes(phase)) return 'queued';
+  if (phase === 'leased' || phase === 'running') return 'running';
+  if (['awaiting_review', 'awaiting-review', 'validating'].includes(phase)) return 'review';
+  if (phase === 'blocked') return 'blocked';
+  return normalizeCommandStatus(phase);
+}
+
+function authoritativeTaskNodeId(task = {}) {
+  const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
+  if (!phase) return routeStatusNodeId(task.routeStatus || task.status);
+  if (['waiting_dependencies', 'waiting-dependencies', 'accepted', 'queued', 'retry_wait', 'retry-wait'].includes(phase)) return 'queued';
+  if (phase === 'leased') return 'leased';
+  if (phase === 'running') return 'running';
+  if (phase === 'awaiting_review' || phase === 'awaiting-review') return 'awaiting-review';
+  if (phase === 'validating') return 'validating';
+  if (phase === 'blocked') return 'model-failed';
+  if (phase === 'terminal') {
+    const terminal = normalizeCommandStatus(task.terminalStatus || task.terminal_status || task.status);
+    return terminal === 'completed' ? 'passed' : 'model-failed';
+  }
+  return routeStatusNodeId(phase);
+}
+
 function normalizeCommandStatus(status) {
   const value = String(status || '').toLowerCase();
-  if (value === 'accepted' || value === 'pending') return 'queued';
+  if (['accepted', 'pending', 'waiting_dependencies', 'waiting-dependencies', 'retry_wait', 'retry-wait'].includes(value)) return 'queued';
   if (value === 'leased' || value === 'working') return 'running';
+  if (['awaiting_review', 'awaiting-review', 'validating'].includes(value)) return 'review';
   if (value === 'done') return 'completed';
   if (value === 'handled') return 'handled';
   if (value === 'cancelled' || value === 'canceled') return 'cancelled';
@@ -3326,10 +3449,12 @@ function normalizeCommandStatus(status) {
 
 function routeStatusNodeId(status) {
   const value = String(status || '').toLowerCase();
-  if (value === 'accepted' || value === 'pending' || value === 'queued') return 'queued';
+  if (['accepted', 'pending', 'queued', 'waiting_dependencies', 'waiting-dependencies', 'retry_wait', 'retry-wait'].includes(value)) return 'queued';
   if (value === 'leased') return 'leased';
   if (value === 'running' || value === 'working') return 'running';
-  if (value === 'completed' || value === 'done' || value === 'handled') return 'passed';
+  if (value === 'awaiting_review' || value === 'awaiting-review' || value === 'review') return 'awaiting-review';
+  if (value === 'validating') return 'validating';
+  if (value === 'completed' || value === 'done' || value === 'handled' || value === 'terminal') return 'passed';
   if (value === 'failed' || value === 'cancelled' || value === 'canceled' || value === 'blocked' || value === 'stale_missing_native') return 'model-failed';
   return '';
 }
@@ -4190,6 +4315,7 @@ function escapeAttr(value) {
 
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
+  buildHarnessModel,
   clampMetric,
   deriveHarnessHealth,
   eventToNodeId,
@@ -4197,6 +4323,7 @@ export const __ctoxTestHooks = {
   formatRelativeAge,
   friendlyWebStackStatus,
   labels,
+  mergeBundleWithCommands,
   progressPercent,
   safeTaskDisplayText,
   setFlowZoom,

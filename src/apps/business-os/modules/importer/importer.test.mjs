@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { parseGitHubUrl, shouldSkipPath, isTextFile, validModuleId } from "./index.js";
+import {
+  parseGitHubUrl,
+  shouldSkipPath,
+  isTextFile,
+  isImportableFile,
+  validModuleId,
+} from "./index.js";
 
 test("parseGitHubUrl handles repo, tree refs and subdirs", () => {
   assert.deepEqual(parseGitHubUrl("https://github.com/acme/po-tracker"), {
@@ -46,6 +52,12 @@ test("isTextFile allows source and asset text, rejects binaries", () => {
   assert.equal(isTextFile("Makefile"), false);
 });
 
+test("isImportableFile keeps browser image and font assets", () => {
+  assert.equal(isImportableFile("src/assets/hero.png"), true);
+  assert.equal(isImportableFile("src/fonts/ui.woff2"), true);
+  assert.equal(isImportableFile("archive.zip"), false);
+});
+
 test("validModuleId enforces the launcher slug contract", () => {
   assert.equal(validModuleId("po-tracker"), true);
   assert.equal(validModuleId("a1"), true);
@@ -55,49 +67,42 @@ test("validModuleId enforces the launcher slug contract", () => {
   assert.equal(validModuleId("with space"), false);
 });
 
-test("presentation collapses redundant card section captions", async () => {
+test("presentation is a focused windowed import flow", async () => {
   const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
   const css = await readFile(new URL("./index.css", import.meta.url), "utf8");
   const js = await readFile(new URL("./index.js", import.meta.url), "utf8");
+  const manifest = JSON.parse(await readFile(new URL("./module.json", import.meta.url), "utf8"));
   const de = JSON.parse(await readFile(new URL("./locales/de.json", import.meta.url), "utf8"));
   const en = JSON.parse(await readFile(new URL("./locales/en.json", import.meta.url), "utf8"));
 
-  // 1. No card carries a section-caption header — the pane title
-  //    ("App Importer") already names the flow; the buttons and the report
-  //    fields label their own cards implicitly.
-  assert.doesNotMatch(html, /data-imp-source-title/);
-  assert.doesNotMatch(html, /data-imp-report-title/);
-  assert.doesNotMatch(html, /data-imp-done-title/);
-  assert.doesNotMatch(html, /<header[^>]*>\s*Source\s*<\/header>/i);
-  assert.doesNotMatch(html, /<header[^>]*>\s*Report\s*<\/header>/i);
-  assert.doesNotMatch(html, /<header[^>]*>\s*Installed\s*<\/header>/i);
+  assert.match(html, /class="imp-rail"/);
+  assert.match(html, /data-imp-step="source"/);
+  assert.match(html, /data-imp-step="review"/);
+  assert.match(html, /data-imp-step="done"/);
+  assert.match(html, /data-imp-open/);
+  assert.doesNotMatch(html, /class="ctox-card"/);
 
-  // 2. JS no longer queries the deleted header hooks (would throw on mount).
-  assert.doesNotMatch(js, /querySelector\(['"]\[data-imp-source-title\]['"]\)/);
-  assert.doesNotMatch(js, /querySelector\(['"]\[data-imp-report-title\]['"]\)/);
-  assert.doesNotMatch(js, /querySelector\(['"]\[data-imp-done-title\]['"]\)/);
-  assert.doesNotMatch(js, /refs\.sourceTitle\.textContent/);
-  assert.doesNotMatch(js, /refs\.reportTitle\.textContent/);
-  assert.doesNotMatch(js, /refs\.doneTitle\.textContent/);
+  assert.match(css, /\.importer-module\s*\{[^}]*grid-template-columns:\s*230px/);
+  assert.match(css, /\.imp-stage\s*\{[^}]*width:\s*min\(100%,\s*650px\)/);
+  assert.match(css, /\.imp-done-stage/);
+  assert.match(css, /prefers-reduced-motion:\s*reduce/);
 
-  // 3. Locale files dropped the three dead keys; everything else is still
-  //    there (assertions below pin the surviving keys).
-  assert.equal(de.sourceTitle, undefined);
-  assert.equal(de.reportTitle, undefined);
-  assert.equal(de.installedTitle, undefined);
-  assert.equal(en.sourceTitle, undefined);
-  assert.equal(en.reportTitle, undefined);
-  assert.equal(en.installedTitle, undefined);
-  assert.equal(typeof en.title, "string");
-  assert.equal(typeof en.pickFolder, "string");
-  assert.equal(typeof en.idLabel, "string");
-  assert.equal(typeof en.install, "string");
+  assert.match(js, /const setStage = \(stage\)/);
+  assert.match(js, /setStage\('review'\)/);
+  assert.match(js, /setStage\('done'\)/);
+  assert.match(js, /globalThis\.location\.hash = moduleId/);
+  assert.match(js, /globalThis\.location\.reload\(\)/);
+  assert.match(js, /globalThis\.location\.reload\(\)/);
 
-  // 4. The card body now supplies the top padding the deleted header used
-  //    to provide (kit default is 0 12px 12px, so the first row would sit
-  //    flush against the surface step otherwise).
-  assert.match(
-    css,
-    /\.importer-module \.imp-card-body\s*\{[^}]*padding-top:\s*12px/,
-  );
+  assert.equal(manifest.layout.shell, "windowed");
+  assert.deepEqual(manifest.presentation.initial_size, { width: 860, height: 600 });
+  assert.deepEqual(manifest.presentation.minimum_size, { width: 640, height: 480 });
+
+  for (const locale of [de, en]) {
+    assert.equal(typeof locale.title, "string");
+    assert.equal(typeof locale.sourceHeading, "string");
+    assert.equal(typeof locale.reviewHeading, "string");
+    assert.equal(typeof locale.doneHeading, "string");
+    assert.equal(typeof locale.openApp, "string");
+  }
 });

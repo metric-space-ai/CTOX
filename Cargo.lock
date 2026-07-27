@@ -2710,6 +2710,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "notify",
  "parking_lot",
  "rand 0.8.5",
  "regex",

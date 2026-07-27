@@ -2843,7 +2843,7 @@ pub fn peek_leasable_inbound_messages(
                 m.direction, m.folder_hint, m.sender_display, m.sender_address,
                 m.subject, m.preview, m.body_text, m.status, m.seen,
                 m.external_created_at, m.observed_at, m.metadata_json,
-                r.route_status, r.lease_owner, r.leased_at, r.acked_at, r.updated_at,
+                r.route_status, r.lease_owner, r.leased_at, r.acked_at, r.last_error, r.updated_at,
                 MIN(COALESCE(r.first_pending_at, m.external_created_at)) OVER (
                     PARTITION BY m.thread_key
                 ) AS thread_pending_since,
@@ -2874,7 +2874,7 @@ pub fn peek_leasable_inbound_messages(
             message_key, channel, account_key, thread_key, remote_id, direction,
             folder_hint, sender_display, sender_address, subject, preview, body_text,
             status, seen, external_created_at, observed_at, metadata_json,
-            route_status, lease_owner, leased_at, acked_at, updated_at
+            route_status, lease_owner, leased_at, acked_at, last_error, updated_at
         FROM eligible
         WHERE thread_rank = 1
         ORDER BY
@@ -4323,6 +4323,82 @@ pub(crate) fn complete_business_control_command(
     Ok(())
 }
 
+pub(crate) fn progress_business_control_command(
+    root: &Path,
+    command_id: &str,
+    execution_phase: &str,
+    result: &Value,
+) -> Result<()> {
+    anyhow::ensure!(
+        matches!(execution_phase, "running"),
+        "invalid control command progress phase"
+    );
+    let db_path = resolve_db_path(root, None);
+    let mut conn = open_channel_db(&db_path)?;
+    let tx = conn.transaction()?;
+    let (phase, version) = tx.query_row(
+        "SELECT execution_phase, projection_version
+         FROM business_command_aggregates WHERE command_id = ?1",
+        params![command_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    if phase == "terminal" || phase == execution_phase {
+        tx.commit()?;
+        return Ok(());
+    }
+    crate::business_os::command_lifecycle::validate_execution_phase_transition(
+        &phase,
+        execution_phase,
+    )?;
+    let next_version = version.saturating_add(1);
+    let now_ms = epoch_millis();
+    tx.execute(
+        "UPDATE business_command_aggregates
+         SET execution_phase = ?2, terminal_status = 'none', projection_version = ?3,
+             result_json = ?4, retryable = 0,
+             attempt = attempt + CASE WHEN execution_phase != ?2 THEN 1 ELSE 0 END,
+             updated_at_ms = ?5
+         WHERE command_id = ?1",
+        params![
+            command_id,
+            execution_phase,
+            next_version,
+            serde_json::to_string(result)?,
+            now_ms,
+        ],
+    )?;
+    tx.execute(
+        "INSERT INTO business_command_transitions
+            (command_id, projection_version, from_phase, to_phase, terminal_status, reason, evidence_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, 'none', 'control effect progress persisted', ?5, ?6)",
+        params![
+            command_id,
+            next_version,
+            phase,
+            execution_phase,
+            serde_json::to_string(result)?,
+            now_ms,
+        ],
+    )?;
+    insert_business_command_outbox_rows(
+        &tx,
+        command_id,
+        next_version,
+        "command.progress",
+        &json!({
+            "command_id": command_id,
+            "execution_mode": "control",
+            "execution_phase": execution_phase,
+            "terminal_status": "none",
+            "projection_version": next_version,
+            "result": result,
+        }),
+        now_ms,
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
 pub(crate) fn transition_business_command_for_task(
     root: &Path,
     task_id: &str,
@@ -4887,6 +4963,9 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
     let (
+        module,
+        command_type,
+        record_id,
         payload_hash,
         execution_mode,
         execution_phase,
@@ -4901,7 +4980,8 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
         created_at_ms,
         updated_at_ms,
     ) = conn.query_row(
-        "SELECT payload_hash, execution_mode, execution_phase, terminal_status, attempt,
+        "SELECT module, command_type, record_id,
+                payload_hash, execution_mode, execution_phase, terminal_status, attempt,
                 projection_version, intent_json, result_json, error_code, error_message,
                 retryable, created_at_ms, updated_at_ms
          FROM business_command_aggregates WHERE command_id = ?1",
@@ -4912,15 +4992,18 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
-                row.get::<_, u32>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
-                row.get::<_, Option<String>>(7)?,
-                row.get::<_, Option<String>>(8)?,
-                row.get::<_, Option<String>>(9)?,
-                row.get::<_, i64>(10)? != 0,
-                row.get::<_, i64>(11)?,
-                row.get::<_, i64>(12)?,
+                row.get::<_, u32>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<String>>(12)?,
+                row.get::<_, i64>(13)? != 0,
+                row.get::<_, i64>(14)?,
+                row.get::<_, i64>(15)?,
             ))
         },
     )?;
@@ -4966,6 +5049,9 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
         "command_id".to_string(),
         Value::String(command_id.to_string()),
     );
+    object.insert("module".to_string(), Value::String(module));
+    object.insert("command_type".to_string(), Value::String(command_type));
+    object.insert("record_id".to_string(), Value::String(record_id));
     object.insert("contract_version".to_string(), Value::from(2));
     object.insert("status".to_string(), Value::String(status.to_string()));
     object.insert(
@@ -5486,6 +5572,7 @@ pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) ->
     let mut missing_links = Vec::new();
     let mut missing_tasks = Vec::new();
     let mut missing_outbox = Vec::new();
+    let mut cancelled_queue_command_drift = Vec::new();
     {
         let mut stmt = conn.prepare(
             "SELECT aggregate_row.command_id, aggregate_row.execution_phase
@@ -5536,6 +5623,47 @@ pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) ->
             missing_outbox.push((command_id, version));
         }
     }
+    {
+        let mut stmt = conn.prepare(
+            "SELECT link.command_id, link.task_id, aggregate_row.execution_phase
+             FROM business_command_task_links link
+             JOIN business_command_aggregates aggregate_row
+               ON aggregate_row.command_id = link.command_id
+             JOIN communication_routing_state route
+               ON route.message_key = link.task_id
+             WHERE aggregate_row.execution_mode = 'queue'
+               AND aggregate_row.execution_phase != 'terminal'
+               AND route.route_status = 'cancelled'",
+        )?;
+        for row in stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })? {
+            cancelled_queue_command_drift.push(row?);
+        }
+    }
+    let mut repaired_cancelled_queue_commands = 0_u64;
+    if apply && !cancelled_queue_command_drift.is_empty() {
+        let tx = conn.transaction()?;
+        for (_, task_id, _) in &cancelled_queue_command_drift {
+            if transition_business_command_for_task_in_transaction(
+                &tx,
+                task_id,
+                "cancelled",
+                None,
+                None,
+                Some("queue task was already cancelled"),
+                "reconciled cancelled queue task",
+            )? {
+                repaired_cancelled_queue_commands =
+                    repaired_cancelled_queue_commands.saturating_add(1);
+            }
+        }
+        tx.commit()?;
+    }
     let mut repaired_outbox = 0_u64;
     if apply && !missing_outbox.is_empty() {
         let tx = conn.transaction()?;
@@ -5564,7 +5692,16 @@ pub(crate) fn reconcile_business_command_invariants(root: &Path, apply: bool) ->
             "command_id": command_id,
             "projection_version": version,
         })).collect::<Vec<_>>(),
+        "cancelled_queue_command_drift": cancelled_queue_command_drift.iter().map(
+            |(command_id, task_id, execution_phase)| json!({
+                "command_id": command_id,
+                "execution_task_id": task_id,
+                "execution_phase": execution_phase,
+                "queue_route_status": "cancelled",
+            })
+        ).collect::<Vec<_>>(),
         "repaired_outbox_commands": repaired_outbox,
+        "repaired_cancelled_queue_commands": repaired_cancelled_queue_commands,
         "unsafe_repairs_applied": 0,
     }))
 }
@@ -6030,16 +6167,18 @@ pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let command_transitioned = route_status.eq_ignore_ascii_case("pending")
-            && transition_business_command_for_task_in_transaction(
-                &tx,
-                &current.message_key,
-                route_status,
-                None,
-                None,
-                status_note,
-                status_note.unwrap_or("queue task released for retry"),
-            )?;
+        let command_transitioned = matches!(
+            route_status.trim().to_ascii_lowercase().as_str(),
+            "pending" | "cancelled"
+        ) && transition_business_command_for_task_in_transaction(
+            &tx,
+            &current.message_key,
+            route_status,
+            None,
+            None,
+            status_note,
+            status_note.unwrap_or("queue task released for retry"),
+        )?;
         if !command_transitioned {
             set_routing_status(
                 &tx,
@@ -14648,6 +14787,46 @@ mod tests {
     }
 
     #[test]
+    fn queue_peek_projects_the_complete_routing_row() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-queue-peek-routing-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("failed to create temp test root");
+
+        let created = create_queue_task(
+            &root,
+            QueueTaskCreateRequest {
+                title: "peek queue task".to_string(),
+                prompt: "Verify the read-only queue peek projection.".to_string(),
+                thread_key: "queue/peek-routing".to_string(),
+                workspace_root: None,
+                priority: "high".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("failed to create queue task");
+
+        let peeked = peek_leasable_inbound_messages(&root, 10, "peek-worker")
+            .expect("queue peek must map every routing column");
+        assert_eq!(peeked.len(), 1);
+        assert_eq!(peeked[0].message_key, created.message_key);
+
+        let loaded = load_queue_task(&root, &created.message_key)
+            .expect("failed to load queue task after peek")
+            .expect("queue task missing after peek");
+        assert_eq!(loaded.route_status, "pending");
+        assert!(loaded.lease_owner.is_none());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn releasing_queue_task_clears_retry_and_defer_state() {
         let root = std::env::temp_dir().join(format!(
             "ctox-queue-release-defer-test-{}",
@@ -19298,6 +19477,48 @@ mod tests {
     }
 
     #[test]
+    fn business_control_progress_is_durable_and_idempotent() {
+        let root = business_command_test_root("ctox-business-command-control-progress");
+        claim_business_control_command(
+            &root,
+            business_command_claim("command-control-progress-1", "sha256:control-progress"),
+        )
+        .expect("claim control command");
+
+        progress_business_control_command(
+            &root,
+            "command-control-progress-1",
+            "running",
+            &json!({"ok": true, "status": "running"}),
+        )
+        .expect("persist control progress");
+        progress_business_control_command(
+            &root,
+            "command-control-progress-1",
+            "running",
+            &json!({"ok": true, "status": "running"}),
+        )
+        .expect("repeat control progress");
+
+        let projection = business_command_projection(&root, "command-control-progress-1")
+            .expect("project running control command");
+        assert_eq!(projection["execution_phase"], "running");
+        assert_eq!(projection["task_status"], "running");
+        assert_eq!(projection["attempt"], 1);
+        let conn = open_channel_db(&resolve_db_path(&root, None)).expect("reopen core db");
+        let transitions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM business_command_transitions
+                 WHERE command_id = 'command-control-progress-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count progress transitions");
+        assert_eq!(transitions, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn registered_saga_blocks_premature_success_and_persists_compensation() {
         let root = business_command_test_root("ctox-business-command-saga");
         let mut claim = business_command_claim("command-saga-1", "sha256:saga");
@@ -19705,6 +19926,143 @@ mod tests {
         let clean = reconcile_business_command_invariants(&root, false).expect("verify repair");
         assert_eq!(
             clean["missing_current_outbox"].as_array().map(Vec::len),
+            Some(0)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancelling_linked_queue_task_terminalizes_business_command() {
+        let root = business_command_test_root("ctox-business-command-cancel");
+        let claimed = claim_business_command_with_queue(
+            &root,
+            business_command_claim("command-cancel", "sha256:cancel"),
+            QueueTaskCreateRequest {
+                title: "Cancel linked work".to_string(),
+                prompt: "This task will be cancelled.".to_string(),
+                thread_key: "business-os/tests/cancel".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: Some(json!({"idempotency_key": "command-cancel"})),
+            },
+        )
+        .expect("claim command");
+        let task_id = claimed.task.message_key;
+        lease_queue_task(&root, &task_id, "ctox-test").expect("lease queue task");
+        transition_business_command_for_task(
+            &root,
+            &task_id,
+            "leased",
+            None,
+            None,
+            None,
+            "initial lease",
+        )
+        .expect("lease command");
+        transition_business_command_for_task(
+            &root,
+            &task_id,
+            "running",
+            None,
+            None,
+            None,
+            "initial execution",
+        )
+        .expect("run command");
+
+        let cancelled = update_queue_task(
+            &root,
+            QueueTaskUpdateRequest {
+                message_key: task_id,
+                route_status: Some("cancelled".to_string()),
+                status_note: Some("operator cancelled stale work".to_string()),
+                ..Default::default()
+            },
+        )
+        .expect("cancel linked queue task");
+        assert_eq!(cancelled.route_status, "cancelled");
+
+        let projection =
+            business_command_projection(&root, "command-cancel").expect("load projection");
+        assert_eq!(projection["execution_phase"], "terminal");
+        assert_eq!(projection["terminal_status"], "cancelled");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_reconciler_repairs_cancelled_queue_command_drift() {
+        let root = business_command_test_root("ctox-business-command-reconcile-cancel");
+        let claimed = claim_business_command_with_queue(
+            &root,
+            business_command_claim("command-reconcile-cancel", "sha256:reconcile-cancel"),
+            QueueTaskCreateRequest {
+                title: "Repair cancelled work".to_string(),
+                prompt: "Simulate a legacy split-brain cancellation.".to_string(),
+                thread_key: "business-os/tests/reconcile-cancel".to_string(),
+                workspace_root: Some(root.display().to_string()),
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: Some(json!({"idempotency_key": "command-reconcile-cancel"})),
+            },
+        )
+        .expect("claim command");
+        let task_id = claimed.task.message_key;
+        lease_queue_task(&root, &task_id, "ctox-test").expect("lease queue task");
+        transition_business_command_for_task(
+            &root,
+            &task_id,
+            "leased",
+            None,
+            None,
+            None,
+            "initial lease",
+        )
+        .expect("lease command");
+        transition_business_command_for_task(
+            &root,
+            &task_id,
+            "running",
+            None,
+            None,
+            None,
+            "initial execution",
+        )
+        .expect("run command");
+        let conn = open_channel_db(&resolve_db_path(&root, None)).expect("open core db");
+        conn.execute(
+            "UPDATE communication_routing_state
+             SET route_status = 'cancelled', lease_owner = NULL, leased_at = NULL,
+                 lease_expires_at = NULL
+             WHERE message_key = ?1",
+            params![task_id],
+        )
+        .expect("seed legacy cancelled route");
+        drop(conn);
+
+        let report =
+            reconcile_business_command_invariants(&root, false).expect("report cancelled drift");
+        assert_eq!(
+            report["cancelled_queue_command_drift"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let applied =
+            reconcile_business_command_invariants(&root, true).expect("repair cancelled drift");
+        assert_eq!(applied["repaired_cancelled_queue_commands"], 1);
+        let projection = business_command_projection(&root, "command-reconcile-cancel")
+            .expect("load reconciled projection");
+        assert_eq!(projection["execution_phase"], "terminal");
+        assert_eq!(projection["terminal_status"], "cancelled");
+        let clean =
+            reconcile_business_command_invariants(&root, false).expect("verify cancelled repair");
+        assert_eq!(
+            clean["cancelled_queue_command_drift"]
+                .as_array()
+                .map(Vec::len),
             Some(0)
         );
         let _ = fs::remove_dir_all(root);

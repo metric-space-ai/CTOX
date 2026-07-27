@@ -1106,6 +1106,14 @@ fn handle_business_os_app(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 Ok(())
             }
         }
+        Some("refresh-catalog") => {
+            crate::business_os::store::write_module_catalog_projection_to_rxdb(root)?;
+            print_json(&serde_json::json!({
+                "ok": true,
+                "command": "business-os app refresh-catalog",
+                "data_plane": "rxdb-webrtc",
+            }))
+        }
         Some("finalize") => {
             let module_id = args
                 .get(1)
@@ -2908,15 +2916,18 @@ pub(crate) fn run_business_os_web_stack_auth_assist_request(
     let credential_ref = optional_web_stack_credential_ref(flag_value(args, "--credential-ref"))?;
     let login_hint = optional_web_stack_login_hint(flag_value(args, "--login-hint"));
     let requesting_task_id = flag_value(args, "--task-id").unwrap_or_default();
+    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id)?;
     enqueue_web_stack_auth_assist_request(
         root,
         source_id,
         target_url_override,
         credential_ref.as_deref(),
         login_hint.as_deref(),
+        None,
         requesting_task_id,
         "ctox_harness",
         "ctox_web_auth_assist_request",
+        owner_user_id.as_deref(),
         false,
         true,
     )
@@ -2995,8 +3006,9 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
         optional_web_stack_credential_ref(flag_value(args, "--credential-ref"))?
             .context("auth-assist-login requires --credential-ref <ctox-secret://scope/name>")?;
     let local_secret_ref = parse_local_ctox_secret_ref(&credential_ref)?;
-    let login_hint = optional_web_stack_login_hint(flag_value(args, "--login-hint"));
+    let explicit_login_hint = optional_web_stack_login_hint(flag_value(args, "--login-hint"));
     let requesting_task_id = flag_value(args, "--task-id").unwrap_or_default();
+    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id)?;
     let timeout_ms = flag_value(args, "--timeout-ms")
         .map(|value| {
             value
@@ -3007,15 +3019,34 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
         .unwrap_or(45_000)
         .clamp(1_000, 300_000);
     let browser_dir = flag_value(args, "--dir").map(PathBuf::from);
+    let secret_value =
+        crate::secrets::read_secret_value(root, &local_secret_ref.scope, &local_secret_ref.name)
+            .with_context(|| {
+                format!(
+            "failed to resolve credential_ref {credential_ref}; expected ctox secret scope/name"
+        )
+            })?;
+    anyhow::ensure!(
+        !secret_value.trim().is_empty(),
+        "credential_ref {credential_ref} resolved to an empty secret"
+    );
+    let resolved_credential =
+        resolve_web_stack_credential(&secret_value, explicit_login_hint.clone());
+    anyhow::ensure!(
+        !resolved_credential.credential_value.trim().is_empty(),
+        "credential_ref {credential_ref} resolved to an empty credential value"
+    );
     let auth_assist = enqueue_web_stack_auth_assist_request(
         root,
         source_id,
         target_url_override,
         Some(&credential_ref),
-        login_hint.as_deref(),
+        explicit_login_hint.as_deref(),
+        None,
         requesting_task_id,
         "ctox_harness",
         "ctox_web_auth_assist_login",
+        owner_user_id.as_deref(),
         false,
         false,
     )?;
@@ -3052,23 +3083,12 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
                 .map(str::to_string)
         })
         .unwrap_or_default();
-    let secret_value =
-        crate::secrets::read_secret_value(root, &local_secret_ref.scope, &local_secret_ref.name)
-            .with_context(|| {
-                format!(
-            "failed to resolve credential_ref {credential_ref}; expected ctox secret scope/name"
-        )
-            })?;
-    anyhow::ensure!(
-        !secret_value.trim().is_empty(),
-        "credential_ref {credential_ref} resolved to an empty secret"
-    );
     let automation_source = build_web_stack_auth_assist_login_source_with_continuation(
         &target_url,
         &source_id,
-        login_hint.as_deref(),
+        resolved_credential.login_hint.as_deref(),
         &credential_ref,
-        &secret_value,
+        &resolved_credential.credential_value,
         credential_selector.trim(),
         verify_selector.trim(),
         continuation_source,
@@ -3083,6 +3103,12 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
         },
     )?;
     redact_secret_value_from_json(&mut automation, &secret_value);
+    redact_secret_value_from_json(&mut automation, &resolved_credential.credential_value);
+    if resolved_credential.login_hint_from_secret {
+        if let Some(login_hint) = resolved_credential.login_hint.as_deref() {
+            redact_secret_value_from_json(&mut automation, login_hint);
+        }
+    }
     let login_result = automation
         .get("result")
         .cloned()
@@ -3128,7 +3154,8 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
         "source_id": source_id,
         "target_url": target_url,
         "credential_ref": credential_ref,
-        "login_hint": login_hint,
+        "login_hint": explicit_login_hint,
+        "login_hint_from_credential_bundle": resolved_credential.login_hint_from_secret,
         "login_state": login_state,
         "mfa_required": mfa_required,
         "login_error_detected": login_error_detected,
@@ -3144,7 +3171,7 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
     }))
 }
 
-fn run_business_os_web_stack_source_capture(
+pub(crate) fn run_business_os_web_stack_source_capture(
     root: &Path,
     args: &[String],
 ) -> anyhow::Result<serde_json::Value> {
@@ -3155,35 +3182,144 @@ fn run_business_os_web_stack_source_capture(
     anyhow::ensure!(
         matches!(
             source_id.as_str(),
-            "dnbhoovers.com" | "leadfeeder.com" | "xing.com"
+            "dnbhoovers.com" | "leadfeeder.com" | "rocketreach.com" | "xing.com"
         ),
-        "source-capture supports only authenticated D&B, Leadfeeder, and XING sessions"
+        "source-capture supports only authenticated D&B, Leadfeeder, RocketReach, and XING sessions"
     );
     let company = flag_value(args, "--company")
         .context("source-capture requires --company <name>")?
         .trim();
     anyhow::ensure!(!company.is_empty(), "source-capture company is empty");
     let country = flag_value(args, "--country").unwrap_or("DE").trim();
-    let session_id = flag_value(args, "--session-id")
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "browser_session_web_stack_auth_{}",
-                rxdb_id_slug(&source_id)
-            )
-        });
-    let timeout_ms = flag_value(args, "--timeout-ms")
-        .map(str::parse::<u64>)
-        .transpose()
-        .context("failed to parse --timeout-ms")?
-        .unwrap_or(60_000)
-        .clamp(1_000, 120_000);
     let source = build_web_stack_authenticated_source_capture(&source_id, company, country)?;
+    let credential_ref = optional_web_stack_credential_ref(flag_value(args, "--credential-ref"))?
+        .or_else(|| {
+            ctox_web_stack::sources::find(&source_id)
+                .and_then(|module| module.browser_recipe())
+                .and_then(|recipe| recipe.required_secret_name)
+                .map(|name| format!("ctox-secret://credentials/{name}"))
+        })
+        .or_else(|| {
+            web_stack_auth_source_defaults(&source_id)
+                .map(|defaults| format!("ctox-secret://credentials/{}", defaults.secret_name))
+        });
+    let credential_available = credential_ref
+        .as_deref()
+        .and_then(|reference| parse_local_ctox_secret_ref(reference).ok())
+        .and_then(|reference| {
+            crate::secrets::read_secret_value(root, &reference.scope, &reference.name).ok()
+        })
+        .is_some_and(|value| !value.trim().is_empty());
+    if !credential_available {
+        return run_business_os_web_stack_source_capture_with_browser_authorization(
+            root,
+            args,
+            &source_id,
+            company,
+            country,
+            credential_ref.as_deref(),
+            &source,
+        );
+    }
+    let credential_ref =
+        credential_ref.context("source-capture requires a browser credential_ref")?;
+    let mut login_args = args.to_vec();
+    if flag_value(&login_args, "--credential-ref").is_none() {
+        login_args.push("--credential-ref".to_string());
+        login_args.push(credential_ref.clone());
+    }
+    if flag_value(&login_args, "--target-url").is_none() {
+        if let Some(defaults) = web_stack_auth_source_defaults(&source_id) {
+            login_args.push("--target-url".to_string());
+            login_args.push(defaults.login_url.to_string());
+        }
+    }
+    let combined = run_business_os_web_stack_auth_assist_login_with_continuation(
+        root,
+        &login_args,
+        Some(&source),
+    )?;
+    let result = combined
+        .pointer("/login_result/post_auth_result")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let records = result
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Ok(serde_json::json!({
+        "ok": combined.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false)
+            && matches!(result.get("status").and_then(serde_json::Value::as_str), Some("completed") | Some("succeeded") | Some("no_match") | Some("no_extractable_fields")),
+        "source_id": source_id,
+        "session_id": combined.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+        "company": company,
+        "country": country,
+        "records": records,
+        "record_count": records.len(),
+        "source_status": result.get("status").and_then(serde_json::Value::as_str).unwrap_or("failed"),
+        "source_url": result.get("source_url").and_then(serde_json::Value::as_str),
+        "credential_ref": credential_ref,
+        "secret_value_in_payload": false,
+        "browser_stream": "rxdb",
+        "authenticated_capture": combined,
+    }))
+}
+
+fn run_business_os_web_stack_source_capture_with_browser_authorization(
+    root: &Path,
+    args: &[String],
+    source_id: &str,
+    company: &str,
+    country: &str,
+    credential_ref: Option<&str>,
+    continuation_source: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let requesting_task_id = flag_value(args, "--task-id").unwrap_or_default();
+    let timeout_ms = flag_value(args, "--timeout-ms")
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("failed to parse --timeout-ms `{value}`"))
+        })
+        .transpose()?
+        .unwrap_or(45_000)
+        .clamp(1_000, 300_000);
+    let browser_dir = flag_value(args, "--dir").map(PathBuf::from);
+    let browser_assist = enqueue_web_stack_auth_assist_request(
+        root,
+        source_id,
+        flag_value(args, "--target-url"),
+        credential_ref,
+        optional_web_stack_login_hint(flag_value(args, "--login-hint")).as_deref(),
+        None,
+        requesting_task_id,
+        "ctox_harness",
+        "ctox_web_source_capture",
+        None,
+        true,
+        true,
+    )?;
+    let session_id = browser_assist
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .context("source-capture browser authorization did not produce a session_id")?
+        .to_string();
+    let target_url = browser_assist
+        .get("target_url")
+        .and_then(serde_json::Value::as_str)
+        .context("source-capture browser authorization did not produce a target_url")?;
+    let source = format!(
+        "await ctoxBrowser.goto({}, {{ timeoutMs: {} }});\n{}",
+        serde_json::to_string(target_url)?,
+        timeout_ms.min(60_000),
+        continuation_source
+    );
     let automation = crate::business_os::run_browser_session_automation(
         root,
         crate::business_os::BrowserSessionAutomationRequest {
             session_id: session_id.clone(),
-            dir: flag_value(args, "--dir").map(PathBuf::from),
+            dir: browser_dir,
             timeout_ms: Some(timeout_ms),
             source,
         },
@@ -3197,19 +3333,53 @@ fn run_business_os_web_stack_source_capture(
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let source_status = result
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("auth_required");
+    let automation_ok = automation
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let capture_complete = matches!(
+        source_status,
+        "completed" | "succeeded" | "no_match" | "no_extractable_fields"
+    );
+    let login_state = if capture_complete {
+        "authenticated"
+    } else {
+        "user_authorization_required"
+    };
     Ok(serde_json::json!({
-        "ok": automation.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false),
+        "ok": automation_ok && capture_complete,
         "source_id": source_id,
         "session_id": session_id,
         "company": company,
         "country": country,
         "records": records,
         "record_count": records.len(),
-        "source_status": result.get("status").and_then(serde_json::Value::as_str).unwrap_or("failed"),
+        "source_status": source_status,
         "source_url": result.get("source_url").and_then(serde_json::Value::as_str),
+        "credential_ref": credential_ref,
         "secret_value_in_payload": false,
         "browser_stream": "rxdb",
-        "automation": automation,
+        "browser_assist": browser_assist,
+        "authenticated_capture": {
+            "ok": automation_ok && capture_complete,
+            "status": if capture_complete { "completed" } else { "user_authorization_required" },
+            "login_state": login_state,
+            "mfa_required": false,
+            "login_error_detected": false,
+            "session_id": session_id,
+            "secret_value_in_payload": false,
+            "browser_stream": "rxdb",
+            "login_result": {
+                "ok": automation_ok && capture_complete,
+                "login_state": login_state,
+                "post_auth_result": result,
+            },
+            "automation": automation,
+        },
     }))
 }
 
@@ -3218,6 +3388,14 @@ fn build_web_stack_authenticated_source_capture(
     company: &str,
     country: &str,
 ) -> anyhow::Result<String> {
+    if source_id == "xing.com" {
+        return ctox_web_stack::sources::xing::build_authenticated_browser_capture(
+            company, country,
+        );
+    }
+    if source_id == "rocketreach.com" {
+        return build_web_stack_rocketreach_source_capture(company, country);
+    }
     Ok(format!(
         r#"const sourceId = {};
 const company = {};
@@ -3225,7 +3403,6 @@ const country = {};
 const allowedHosts = {{
   "dnbhoovers.com": ["dnbhoovers.com", "app.dnbhoovers.com"],
   "leadfeeder.com": ["leadfeeder.com", "app.leadfeeder.com"],
-  "xing.com": ["xing.com", "www.xing.com"],
 }}[sourceId];
 const hostAllowed = (raw) => {{
   try {{
@@ -3237,34 +3414,53 @@ const currentUrl = page.url();
 if (/login|signin|auth/i.test(currentUrl)) {{
   return {{ status: "auth_required", source_url: currentUrl, records: [] }};
 }}
-if (sourceId === "xing.com") {{
-  await page.goto(`https://www.xing.com/search/people?keywords=${{encodeURIComponent(company)}}`, {{
-    waitUntil: "domcontentloaded", timeout: 30000,
-  }});
-}} else {{
+{{
   const candidates = [
-    'input[type="search"]',
     'input[placeholder*="search" i]',
     'input[placeholder*="suche" i]',
+    'input[placeholder*="firma" i]',
     'input[aria-label*="search" i]',
+    'input[type="search"]',
   ];
   for (const selector of candidates) {{
     const field = page.locator(selector).first();
-    if ((await field.count()) < 1 || !(await field.isVisible().catch(() => false))) continue;
-    await field.fill(company);
-    await field.press("Enter");
-    break;
+    if ((await field.count()) < 1
+        || !(await field.isVisible().catch(() => false))
+        || !(await field.isEditable().catch(() => false))) continue;
+    try {{
+      await field.fill(company, {{ timeout: 3000 }});
+      await field.press("Enter", {{ timeout: 3000 }});
+      break;
+    }} catch {{}}
   }}
 }}
 await page.waitForLoadState("networkidle", {{ timeout: 12000 }}).catch(() => null);
+if (sourceId === "dnbhoovers.com") {{
+  await page.locator('a[href*="/company/"]')
+    .filter({{ hasText: company }})
+    .first()
+    .waitFor({{ state: "visible", timeout: 10000 }})
+    .catch(() => null);
+}}
 await page.waitForTimeout(1200);
 if (!hostAllowed(page.url())) {{
   return {{ status: "wrong_origin", source_url: page.url(), records: [] }};
 }}
 const snapshot = await page.evaluate((companyName) => {{
+  const clean = (value, max = 1500) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  const contextFor = (link) => {{
+    let node = link.parentElement;
+    let context = clean(link.innerText || link.textContent || "");
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {{
+      const candidate = clean(node.innerText || node.textContent || "");
+      if (candidate.length >= context.length && candidate.length <= 1500) context = candidate;
+      if (candidate.length > 1500) break;
+    }}
+    return context;
+  }};
   const text = String(document.body?.innerText || "").replace(/\s+/g, " ").trim().slice(0, 100000);
   const links = Array.from(document.querySelectorAll("a[href]"))
-    .map((link) => ({{ url: link.href, text: String(link.innerText || link.textContent || "").replace(/\s+/g, " ").trim() }}))
+    .map((link) => ({{ url: link.href, text: clean(link.innerText || link.textContent || ""), context: contextFor(link) }}))
     .filter((link) => link.text)
     .slice(0, 500);
   return {{ text, links, title: document.title, companyName }};
@@ -3276,25 +3472,49 @@ const matched = companyTokens.length > 0 && companyTokens.slice(0, 2).every((tok
 const records = [];
 const push = (field, value, confidence, note, url = page.url()) => {{
   if (!value || !hostAllowed(url)) return;
-  records.push({{ field, value: String(value).trim(), confidence, source_url: url, note }});
+  const normalizedValue = String(value).trim();
+  if (records.some((record) => record.field === field && record.value === normalizedValue)) return;
+  records.push({{ field, value: normalizedValue, confidence, source_url: url, note }});
 }};
-if (matched) push("firma_name", company, "medium", `${{sourceId}} authenticated search result`);
 const sourceLinks = snapshot.links.filter((link) => hostAllowed(link.url));
-for (const link of sourceLinks.slice(0, 20)) {{
-  if (sourceId === "xing.com" && /\/profile\//i.test(link.url)) {{
-    const parts = link.text.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) {{
-      push("person_vorname", parts[0], "medium", "XING profile result", link.url);
-      push("person_nachname", parts.slice(1).join(" "), "medium", "XING profile result", link.url);
-      push("person_xing", link.url, "high", "XING profile URL", link.url);
-    }}
+if (sourceId === "dnbhoovers.com") {{
+  const companyName = normalized(company);
+  const hit = sourceLinks.find((link) => normalized(link.text) === companyName && /\/company\//i.test(link.url));
+  if (hit) {{
+    const context = hit.context || snapshot.text;
+    push("firma_name", hit.text, "high", "D&B Hoovers exact company result", hit.url);
+    const phone = context.match(/(?:\+|00)\d[\d\s()\/-]{{7,}}\d/)?.[0];
+    const city = context.match(/\bFolgen\s+([^,]{{2,80}}),/)?.[1];
+    const revenue = context.match(/Umsatz\s+EUR:\s*([0-9.,]+\s*[BMK]?)/i)?.[1];
+    const employees = context.match(/Beschäftigte\s*\(Gesamt\):\s*([0-9.,]+\s*[KMB]?)/i)?.[1];
+    const duns = context.match(/D-U-N-S:\s*([0-9-]+)/i)?.[1];
+    const industry = phone
+      ? context.match(new RegExp(`${{phone.replace(/[.*+?^${{}}()|[\]\\]/g, "\\$&")}}\\s+(.+?)\\s+(?:Private|Public|Nonprofit)`, "i"))?.[1]
+      : null;
+    const structure = context.match(/\b((?:Private|Public|Nonprofit)(?:Parent|Subsidiary|Branch|Independent)(?:Firmenzentrale)?)\b/i)?.[1];
+    push("firma_telefon", phone, "high", "D&B Hoovers company result", hit.url);
+    push("firma_ort", city, "high", "D&B Hoovers company result", hit.url);
+    push("branche", industry, "high", "D&B Hoovers industry", hit.url);
+    push("umsatz", revenue, "high", "D&B Hoovers revenue EUR", hit.url);
+    push("mitarbeiter", employees, "high", "D&B Hoovers employee total", hit.url);
+    push("firma_register", duns, "high", "D&B D-U-N-S", hit.url);
+    push("konzernstruktur", structure, "medium", "D&B Hoovers organization role", hit.url);
   }}
-}}
-for (const email of [...snapshot.text.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{{2,}}\b/gi)].map((match) => match[0]).slice(0, 5)) {{
-  push("person_email", email.toLowerCase(), "medium", `${{sourceId}} authenticated page`);
-}}
-for (const phone of [...snapshot.text.matchAll(/(?:\+|00)\d[\d\s()\/-]{{7,}}\d/g)].map((match) => match[0]).slice(0, 3)) {{
-  push("person_telefon", phone, "medium", `${{sourceId}} authenticated page`);
+}} else if (sourceId === "leadfeeder.com") {{
+  const companyName = normalized(company);
+  const hit = sourceLinks.find((link) => normalized(link.text) === companyName && /\/h\/company\//i.test(link.url));
+  if (hit) {{
+    const context = hit.context || snapshot.text;
+    const escapedName = hit.text.replace(/[.*+?^${{}}()|[\]\\]/g, "\\$&");
+    const employeePattern = "[0-9]{{1,3}}(?:[.,][0-9]{{3}})*[-–][0-9]{{1,3}}(?:[.,][0-9]{{3}})*";
+    const location = context.match(new RegExp(`${{escapedName}}\\s+(.{{2,80}}?)\\s+${{employeePattern}}`, "i"))?.[1];
+    const employees = context.match(new RegExp(`\\b(${{employeePattern}})\\b`))?.[1];
+    const website = context.match(/\b(?:https?:\/\/|www\.)[^\s]+/i)?.[0]?.replace(/\.\.\.$/, "");
+    push("firma_name", hit.text, "high", "Leadfeeder exact company result", hit.url);
+    push("firma_ort", location, "medium", "Leadfeeder company location", hit.url);
+    push("mitarbeiter", employees, "medium", "Leadfeeder employee range", hit.url);
+    push("firma_domain", website, "medium", "Leadfeeder company website", hit.url);
+  }}
 }}
 return {{
   status: records.length > 0 ? "succeeded" : (matched ? "no_extractable_fields" : "no_match"),
@@ -3307,6 +3527,312 @@ return {{
         serde_json::to_string(country)?,
     ))
 }
+
+#[derive(Clone, Copy)]
+struct WebStackAuthSourceDefaults {
+    login_url: &'static str,
+    allowed_domains: &'static [&'static str],
+    secret_name: &'static str,
+}
+
+fn web_stack_auth_source_defaults(source_id: &str) -> Option<WebStackAuthSourceDefaults> {
+    match source_id.trim().to_ascii_lowercase().as_str() {
+        "rocketreach.com" => Some(WebStackAuthSourceDefaults {
+            login_url: "https://rocketreach.co/login",
+            allowed_domains: &["rocketreach.com", "rocketreach.co"],
+            secret_name: "ROCKETREACH_BROWSER_LOGIN",
+        }),
+        _ => None,
+    }
+}
+
+fn build_web_stack_rocketreach_source_capture(
+    company: &str,
+    country: &str,
+) -> anyhow::Result<String> {
+    let company = serde_json::to_string(company)?;
+    let country = serde_json::to_string(country)?;
+    Ok(ROCKETREACH_BROWSER_CAPTURE_TEMPLATE
+        .replace("__COMPANY_JSON__", &company)
+        .replace("__COUNTRY_JSON__", &country)
+        .replace("__RECORD_PARSER__", ROCKETREACH_BROWSER_RECORD_PARSER))
+}
+
+const ROCKETREACH_BROWSER_RECORD_PARSER: &str = r#"const parseRocketReachRecords = (companyName, snapshots) => {
+  const clean = (value, max = 500) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  const normalize = (value) => clean(value, 3000)
+    .toLocaleLowerCase("de-DE")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  const ignoredCompanyTokens = new Set([
+    "ag", "se", "gmbh", "kg", "ohg", "gbr", "mbh", "inc", "ltd", "llc",
+    "gesellschaft", "aktiengesellschaft", "holding", "group", "gruppe", "company",
+  ]);
+  const companyTokens = normalize(companyName).split(/\s+/).filter((token) =>
+    token.length >= 3 && !ignoredCompanyTokens.has(token)
+  );
+  const relevantCompanyText = (value) => {
+    const required = companyTokens.slice(0, Math.min(2, companyTokens.length));
+    const haystack = normalize(value);
+    return required.length > 0 && required.every((token) => haystack.includes(token));
+  };
+  const providerUrl = (raw) => {
+    try {
+      const url = new URL(raw);
+      const host = url.hostname.toLowerCase();
+      return host === "rocketreach.com" || host.endsWith(".rocketreach.com")
+        || host === "rocketreach.co" || host.endsWith(".rocketreach.co") ? url : null;
+    } catch { return null; }
+  };
+  const companyProfileUrl = (raw) => {
+    const url = providerUrl(raw);
+    if (!url) return null;
+    return /(?:\/company\/|\/companies\/|-profile_[a-z0-9])/i.test(url.pathname) ? url : null;
+  };
+  const personProfileUrl = (raw) => {
+    const url = providerUrl(raw);
+    if (!url) return null;
+    return /(?:\/person\/|\/people\/|-email_[a-z0-9])/i.test(url.pathname) ? url : null;
+  };
+  const validNamePart = (value) => /\p{L}/u.test(value)
+    && !/\d/u.test(value)
+    && /^[\p{L}][\p{L}.'’\-]*$/u.test(value);
+  const personName = (candidate) => {
+    const values = [candidate.name, candidate.heading, candidate.linkText, candidate.title];
+    for (const raw of values) {
+      const value = clean(raw)
+        .replace(/\s*[|·-]\s*RocketReach.*$/i, "")
+        .replace(/\s+(?:email|phone|contact)(?:\s+information)?\s*$/i, "")
+        .replace(/^(?:(?:dr|prof)\.?\s+)+/i, "");
+      const parts = value.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2 && parts.length <= 6 && parts.every(validNamePart)
+          && !relevantCompanyText(value)) return parts;
+    }
+    return [];
+  };
+  const records = [];
+  const push = (field, value, confidence, note, rawUrl) => {
+    const url = providerUrl(rawUrl);
+    const cleanValue = clean(value);
+    if (!url || !cleanValue) return;
+    if (records.some((record) => record.field === field
+        && record.value === cleanValue && record.source_url === url.href)) return;
+    records.push({ field, value: cleanValue, confidence, source_url: url.href, note });
+  };
+  const safeSnapshots = (Array.isArray(snapshots) ? snapshots : []).filter((snapshot) =>
+    providerUrl(snapshot?.sourceUrl)
+  );
+  let companyEvidenceUrl = null;
+  let companyEvidenceName = "";
+  for (const snapshot of safeSnapshots) {
+    const candidates = [
+      ...(snapshot.links || []).map((link) => ({
+        url: link.url,
+        text: `${link.text || ""} ${(link.contextLines || []).join(" ")}`,
+        name: link.text,
+      })),
+      { url: snapshot.sourceUrl, text: `${snapshot.title || ""} ${(snapshot.headings || []).join(" ")}`, name: (snapshot.headings || [])[0] },
+    ];
+    const hit = candidates.find((candidate) => companyProfileUrl(candidate.url)
+      && relevantCompanyText(candidate.text));
+    if (!hit) continue;
+    companyEvidenceUrl = companyProfileUrl(hit.url).href;
+    companyEvidenceName = clean(hit.name) || companyName;
+    break;
+  }
+  if (!companyEvidenceUrl) return { records: [], companyMatched: false, protectedFieldCount: 0 };
+  push("firma_name", relevantCompanyText(companyEvidenceName) ? companyEvidenceName : companyName,
+    "high", "RocketReach company identity verified", companyEvidenceUrl);
+
+  const people = [];
+  for (const snapshot of safeSnapshots) {
+    for (const embedded of snapshot.embeddedPeople || []) {
+      people.push({ ...embedded, sourceUrl: embedded.sourceUrl || snapshot.sourceUrl });
+    }
+    for (const link of snapshot.links || []) {
+      const url = personProfileUrl(link.url);
+      const contextLines = (link.contextLines || []).map((line) => clean(line)).filter(Boolean);
+      if (!url || !relevantCompanyText(contextLines.join(" "))) continue;
+      people.push({ sourceUrl: url.href, linkText: link.text, contextLines });
+    }
+    if (personProfileUrl(snapshot.sourceUrl)) {
+      people.push({
+        sourceUrl: snapshot.sourceUrl,
+        heading: (snapshot.headings || [])[0],
+        title: snapshot.title,
+        contextLines: snapshot.bodyLines || [],
+      });
+    }
+  }
+  const seenPeople = new Set();
+  for (const candidate of people) {
+    const sourceUrl = personProfileUrl(candidate.sourceUrl);
+    if (!sourceUrl) continue;
+    const lines = (candidate.contextLines || []).map((line) => clean(line)).filter(Boolean);
+    const companyContext = clean(candidate.company || lines.join(" "), 4000);
+    if (!relevantCompanyText(companyContext)) continue;
+    const names = personName(candidate);
+    if (names.length < 2) continue;
+    const personKey = `${normalize(names.join(" "))}|${sourceUrl.href}`;
+    if (seenPeople.has(personKey)) continue;
+    seenPeople.add(personKey);
+    const context = lines.join(" ");
+    const email = clean(candidate.email || context.match(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i)?.[0]);
+    const phone = clean(candidate.phone || context.match(/(?:\+|00)\d[\d\s().\/-]{6,}\d/)?.[0]);
+    const ignoredPosition = /^(?:contact|contacts?|email|phone|telefon|mobile|mobil|location|standort|rocketreach|view profile|profil ansehen)$/i;
+    const position = clean(candidate.position || lines.find((line) =>
+      line.length >= 2 && line.length <= 160
+      && /\p{L}/u.test(line)
+      && !relevantCompanyText(line)
+      && normalize(line) !== normalize(names.join(" "))
+      && !ignoredPosition.test(line)
+      && !/@/.test(line)
+      && !/(?:\+|00)\d/.test(line)
+    ));
+    push("person_vorname", names[0], "high", "RocketReach authenticated person profile", sourceUrl.href);
+    push("person_nachname", names.slice(1).join(" "), "high", "RocketReach authenticated person profile", sourceUrl.href);
+    push("person_position", position, "medium", "RocketReach current company context", sourceUrl.href);
+    push("person_email", email, "high", "RocketReach authenticated contact field", sourceUrl.href);
+    push("person_telefon", phone, "high", "RocketReach authenticated contact field", sourceUrl.href);
+  }
+  const protectedFieldCount = records.filter((record) => record.field.startsWith("person_")).length;
+  return { records, companyMatched: true, protectedFieldCount };
+};"#;
+
+const ROCKETREACH_BROWSER_CAPTURE_TEMPLATE: &str = r#"const company = __COMPANY_JSON__;
+const country = __COUNTRY_JSON__;
+__RECORD_PARSER__
+const hostAllowed = (raw) => {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return host === "rocketreach.com" || host.endsWith(".rocketreach.com")
+      || host === "rocketreach.co" || host.endsWith(".rocketreach.co");
+  } catch { return false; }
+};
+const currentUrl = page.url();
+if (!hostAllowed(currentUrl)) return { status: "wrong_origin", source_url: currentUrl, country, records: [] };
+if (/\/(?:login|signin|auth)(?:\/|$|\?)/i.test(new URL(currentUrl).pathname)) {
+  return { status: "auth_required", source_url: currentUrl, country, records: [] };
+}
+const snapshotPage = async () => page.evaluate(() => {
+  const clean = (value, max = 500) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  const contextLines = (node) => {
+    const container = node.closest("article, li, tr, [role='row'], [data-testid*='result'], [class*='result'], [class*='card']") || node.parentElement;
+    return String(container?.innerText || "").split(/\n+/).map((line) => clean(line)).filter(Boolean).slice(0, 24);
+  };
+  const links = Array.from(document.querySelectorAll("a[href]"))
+    .map((link) => ({ url: link.href, text: clean(link.innerText || link.textContent), contextLines: contextLines(link) }))
+    .filter((link) => link.text || link.contextLines.length > 0)
+    .slice(0, 800);
+  const headings = Array.from(document.querySelectorAll("h1, h2, [role='heading']"))
+    .map((node) => clean(node.innerText || node.textContent)).filter(Boolean).slice(0, 40);
+  const bodyLines = String(document.body?.innerText || "").split(/\n+/)
+    .map((line) => clean(line)).filter(Boolean).slice(0, 500);
+  const embeddedPeople = [];
+  const seen = new Set();
+  const pick = (object, keys) => {
+    for (const key of keys) {
+      const value = object?.[key];
+      if (typeof value === "string" && clean(value)) return clean(value);
+    }
+    return "";
+  };
+  const visit = (value, depth = 0) => {
+    if (!value || depth > 9 || embeddedPeople.length >= 100) return;
+    if (Array.isArray(value)) {
+      for (const entry of value.slice(0, 500)) visit(entry, depth + 1);
+      return;
+    }
+    if (typeof value !== "object") return;
+    const first = pick(value, ["firstName", "first_name", "first"]);
+    const last = pick(value, ["lastName", "last_name", "last"]);
+    const name = pick(value, ["fullName", "full_name", "displayName", "name"]);
+    const companyValue = value.company && typeof value.company === "object"
+      ? pick(value.company, ["name", "companyName", "company_name"])
+      : pick(value, ["companyName", "company_name", "currentCompany", "current_company"]);
+    const sourceUrl = pick(value, ["profileUrl", "profile_url", "url", "canonicalUrl", "canonical_url"]);
+    const email = pick(value, ["email", "workEmail", "work_email", "professionalEmail", "professional_email"]);
+    const phone = pick(value, ["phone", "phoneNumber", "phone_number", "mobilePhone", "mobile_phone"]);
+    const position = pick(value, ["title", "jobTitle", "job_title", "position", "currentTitle", "current_title"]);
+    if ((first && last) || name) {
+      const key = `${first}|${last}|${name}|${sourceUrl}|${companyValue}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        embeddedPeople.push({ first, last, name: name || `${first} ${last}`, company: companyValue, sourceUrl, email, phone, position });
+      }
+    }
+    for (const entry of Object.values(value).slice(0, 200)) visit(entry, depth + 1);
+  };
+  for (const script of Array.from(document.querySelectorAll("script[type='application/json'], script#__NEXT_DATA__")).slice(0, 30)) {
+    const text = script.textContent || "";
+    if (!text || text.length > 3000000) continue;
+    try { visit(JSON.parse(text)); } catch {}
+  }
+  return { sourceUrl: location.href, title: document.title, links, headings, bodyLines, embeddedPeople };
+});
+const waitForResults = async () => {
+  await Promise.race([
+    page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => null),
+    page.locator('a[href*="-profile_"], a[href*="/company/"], a[href*="-email_"]').first()
+      .waitFor({ state: "visible", timeout: 12000 }).catch(() => null),
+  ]).catch(() => null);
+};
+const snapshots = [];
+const searchSelectors = [
+  'input[placeholder*="search" i]', 'input[aria-label*="search" i]',
+  'input[placeholder*="company" i]', 'input[type="search"]',
+];
+for (const selector of searchSelectors) {
+  const field = page.locator(selector).first();
+  if ((await field.count()) < 1 || !(await field.isVisible().catch(() => false))
+      || !(await field.isEditable().catch(() => false))) continue;
+  try {
+    await field.fill(company, { timeout: 3000 });
+    await field.press("Enter", { timeout: 3000 });
+    await waitForResults();
+    break;
+  } catch {}
+}
+snapshots.push(await snapshotPage());
+let parsed = parseRocketReachRecords(company, snapshots);
+if (!parsed.companyMatched) {
+  const queryUrl = `https://rocketreach.co/search?query=${encodeURIComponent(company)}`;
+  await ctoxBrowser.goto(queryUrl, { timeoutMs: 30000 });
+  await waitForResults();
+  if (!hostAllowed(page.url())) return { status: "wrong_origin", source_url: page.url(), country, records: [] };
+  snapshots.push(await snapshotPage());
+  parsed = parseRocketReachRecords(company, snapshots);
+}
+const companyLink = snapshots.flatMap((snapshot) => snapshot.links || []).find((link) =>
+  hostAllowed(link.url) && /(?:\/company\/|\/companies\/|-profile_[a-z0-9])/i.test(new URL(link.url).pathname)
+  && parseRocketReachRecords(company, [{ ...snapshot, links: [link] }]).companyMatched
+);
+if (companyLink && page.url() !== companyLink.url) {
+  await ctoxBrowser.goto(companyLink.url, { timeoutMs: 30000 });
+  await waitForResults();
+  if (!hostAllowed(page.url())) return { status: "wrong_origin", source_url: page.url(), country, records: [] };
+  snapshots.push(await snapshotPage());
+}
+const personUrls = [...new Set(snapshots.flatMap((snapshot) => snapshot.links || [])
+  .map((link) => link.url)
+  .filter((url) => hostAllowed(url) && /(?:\/person\/|\/people\/|-email_[a-z0-9])/i.test(new URL(url).pathname))
+)].slice(0, 5);
+for (const personUrl of personUrls) {
+  await ctoxBrowser.goto(personUrl, { timeoutMs: 30000 });
+  await waitForResults();
+  if (!hostAllowed(page.url())) continue;
+  snapshots.push(await snapshotPage());
+}
+parsed = parseRocketReachRecords(company, snapshots);
+return {
+  status: parsed.protectedFieldCount > 0 ? "succeeded" : (parsed.companyMatched ? "no_extractable_fields" : "no_match"),
+  source_url: snapshots.at(-1)?.sourceUrl || page.url(),
+  country,
+  records: parsed.records,
+};"#;
 
 fn run_business_os_web_stack_auth_assist_signup(
     root: &Path,
@@ -3343,9 +3869,11 @@ fn run_business_os_web_stack_auth_assist_signup(
         Some(target_url_override),
         Some(&credential_ref),
         Some(login_hint.as_str()),
+        None,
         requesting_task_id,
         "ctox_harness",
         "ctox_web_auth_assist_signup",
+        None,
         false,
         false,
     )?;
@@ -3619,9 +4147,11 @@ pub(crate) fn run_business_os_web_stack_cli_json_local(
     args: &[String],
 ) -> anyhow::Result<serde_json::Value> {
     match args.first().map(String::as_str) {
+        Some("person-research") => run_business_os_web_stack_person_research(root, args),
         Some("auth-assist-request") => run_business_os_web_stack_auth_assist_request(root, args),
         Some("auth-assist-signup") => run_business_os_web_stack_auth_assist_signup(root, args),
         Some("auth-assist-login") => run_business_os_web_stack_auth_assist_login(root, args),
+        Some("source-capture") => run_business_os_web_stack_source_capture(root, args),
         Some("authenticated-automation") => {
             let mut source = String::new();
             std::io::stdin()
@@ -3669,91 +4199,364 @@ pub(crate) fn run_business_os_web_stack_cli_json(
     run_business_os_web_stack_cli_json_local(root, args)
 }
 
+fn run_business_os_web_stack_person_research(
+    root: &Path,
+    args: &[String],
+) -> anyhow::Result<serde_json::Value> {
+    let company = flag_value(args, "--company")
+        .context("usage: ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]")?;
+    let country_raw = flag_value(args, "--country")
+        .context("business-os web-stack person-research requires --country <DE|AT|CH>")?;
+    let country = ctox_web_stack::sources::Country::from_iso(country_raw)
+        .with_context(|| format!("unsupported --country `{country_raw}`"))?;
+    let mode_raw = flag_value(args, "--mode").context(
+        "business-os web-stack person-research requires --mode <new_record|update_firm|update_person|update_inventory_general|have_data>",
+    )?;
+    let mode = ctox_web_stack::sources::ResearchMode::from_str(mode_raw)
+        .with_context(|| format!("unsupported --mode `{mode_raw}`"))?;
+    let fields = flag_values(args, "--field")
+        .into_iter()
+        .filter_map(ctox_web_stack::sources::FieldKey::from_str)
+        .collect::<Vec<_>>();
+    let include_private = flag_values(args, "--include-private")
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    let workspace = business_os_web_stack_workspace(root, args);
+    let persist_workspace = !args.iter().any(|arg| arg == "--no-workspace");
+    let request = ctox_web_stack::PersonResearchRequest {
+        company: company.to_string(),
+        country,
+        mode,
+        fields,
+        include_private,
+        workspace,
+        persist_workspace,
+    };
+    let mut payload = ctox_web_stack::run_ctox_person_research_tool(root, &request)?;
+    if args.iter().any(|arg| arg == "--auto-auth-assist") {
+        let generated_task_id = format!(
+            "person_research_{}_{}_{}",
+            rxdb_id_slug(&company),
+            country.as_iso().to_ascii_lowercase(),
+            mode.as_str()
+        );
+        let requesting_task_id = flag_value(args, "--task-id")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(generated_task_id.as_str());
+        let mut capture_summaries = Vec::new();
+        let mut capture_outcomes = BTreeMap::new();
+        let mut remaining_tasks = Vec::new();
+        let tasks = authenticated_person_research_capture_tasks(&payload);
+        for task in &tasks {
+            let Some(source_id) = task.get("source_id").and_then(serde_json::Value::as_str) else {
+                remaining_tasks.push(task.clone());
+                continue;
+            };
+            if let Some(capture_succeeded) = capture_outcomes.get(source_id) {
+                if !capture_succeeded {
+                    remaining_tasks.push(task.clone());
+                }
+                continue;
+            }
+            if !web_stack_authenticated_source_capture_supported(source_id) {
+                capture_outcomes.insert(source_id.to_string(), false);
+                remaining_tasks.push(task.clone());
+                continue;
+            }
+            let capture_args = vec![
+                "source-capture".to_string(),
+                "--source-id".to_string(),
+                source_id.to_string(),
+                "--company".to_string(),
+                company.to_string(),
+                "--country".to_string(),
+                country.as_iso().to_string(),
+                "--task-id".to_string(),
+                requesting_task_id.to_string(),
+                "--timeout-ms".to_string(),
+                "180000".to_string(),
+            ];
+            let capture_succeeded =
+                match run_business_os_web_stack_source_capture(root, &capture_args) {
+                    Ok(capture) => {
+                        match merge_authenticated_person_research_capture(&mut payload, &capture) {
+                            Ok(summary) => {
+                                let succeeded = summary
+                                    .get("ok")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                capture_summaries.push(summary);
+                                succeeded
+                            }
+                            Err(_) => {
+                                capture_summaries
+                                    .push(authenticated_capture_failure_summary(source_id));
+                                false
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        capture_summaries.push(authenticated_capture_failure_summary(source_id));
+                        false
+                    }
+                };
+            capture_outcomes.insert(source_id.to_string(), capture_succeeded);
+            if !capture_succeeded {
+                remaining_tasks.push(task.clone());
+            }
+        }
+        payload["browser_assist_tasks"] = serde_json::Value::Array(remaining_tasks.clone());
+        payload["authenticated_source_captures"] = serde_json::Value::Array(capture_summaries);
+
+        let mut commands = Vec::new();
+        let mut queued_sources = BTreeSet::new();
+        for task in remaining_tasks {
+            let Some(source_id) = task.get("source_id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if !queued_sources.insert(source_id.to_string()) {
+                continue;
+            }
+            let command = enqueue_web_stack_auth_assist_request(
+                root,
+                source_id,
+                None,
+                None,
+                None,
+                None,
+                requesting_task_id,
+                "ctox_web_stack",
+                "ctox_business_os_web_stack_person_research",
+                None,
+                true,
+                true,
+            )?;
+            commands.push(command);
+        }
+        payload["auth_assist_commands"] = serde_json::Value::Array(commands);
+        payload["auto_auth_assist"] = serde_json::json!({
+            "enabled": true,
+            "stream": "rxdb",
+            "secret_value_in_payload": false,
+            "command_count": payload
+                .get("auth_assist_commands")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+        });
+        repersist_augmented_person_research(&request, &mut payload);
+    }
+    Ok(payload)
+}
+
+fn web_stack_authenticated_source_capture_supported(source_id: &str) -> bool {
+    matches!(
+        source_id.trim().to_ascii_lowercase().as_str(),
+        "dnbhoovers.com" | "leadfeeder.com" | "rocketreach.com" | "xing.com"
+    )
+}
+
+pub(crate) fn authenticated_person_research_capture_tasks(
+    payload: &serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let mut tasks = Vec::new();
+    let mut sources = BTreeSet::new();
+    for task in payload
+        .get("browser_assist_tasks")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(source_id) = task.get("source_id").and_then(serde_json::Value::as_str) else {
+            tasks.push(task.clone());
+            continue;
+        };
+        if sources.insert(source_id.to_ascii_lowercase()) {
+            tasks.push(task.clone());
+        }
+    }
+    for recommendation in payload
+        .get("browser_assist_recommendations")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(source_id) = recommendation
+            .get("source_id")
+            .and_then(serde_json::Value::as_str)
+        else {
+            continue;
+        };
+        if !web_stack_authenticated_source_capture_supported(source_id)
+            || !person_research_recommendation_has_missing_targets(payload, recommendation)
+            || !sources.insert(source_id.to_ascii_lowercase())
+        {
+            continue;
+        }
+        tasks.push(serde_json::json!({
+            "source_id": source_id,
+            "target_fields": recommendation
+                .get("target_fields")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+            "reason": "missing_target_fields_after_public_research",
+            "status": "auth_assist_required",
+            "stream": "rxdb",
+            "browser_assist": recommendation,
+            "next_command": format!("ctox business-os web-stack auth-assist-request --source-id {source_id}"),
+            "secret_value_in_payload": false,
+            "frame_data_in_payload": false,
+        }));
+    }
+    for plan in payload
+        .get("plan")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(source_id) = plan.get("source_id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if !web_stack_authenticated_source_capture_supported(source_id)
+            || !person_research_recommendation_has_missing_targets(payload, plan)
+            || !sources.insert(source_id.to_ascii_lowercase())
+        {
+            continue;
+        }
+        tasks.push(serde_json::json!({
+            "source_id": source_id,
+            "target_fields": plan
+                .get("target_fields")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+            "reason": "missing_target_fields_after_public_research",
+            "status": "auth_assist_required",
+            "stream": "rxdb",
+            "browser_assist": serde_json::Value::Null,
+            "next_command": format!("ctox business-os web-stack auth-assist-request --source-id {source_id}"),
+            "secret_value_in_payload": false,
+            "frame_data_in_payload": false,
+        }));
+    }
+    tasks
+}
+
+fn person_research_recommendation_has_missing_targets(
+    payload: &serde_json::Value,
+    recommendation: &serde_json::Value,
+) -> bool {
+    recommendation
+        .get("target_fields")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .any(|field| {
+            payload
+                .pointer(&format!("/fields/{field}/value"))
+                .is_none_or(|value| {
+                    value.is_null() || value.as_str().is_some_and(|value| value.trim().is_empty())
+                })
+        })
+}
+
+pub(crate) fn merge_authenticated_person_research_capture(
+    payload: &mut serde_json::Value,
+    capture: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let source_id = capture
+        .get("source_id")
+        .and_then(serde_json::Value::as_str)
+        .context("authenticated source capture has no source_id")?;
+    let capture_ok = capture
+        .get("ok")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let records = capture
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let merged_count = if capture_ok {
+        ctox_web_stack::merge_person_research_source_records(payload, source_id, &records)?
+    } else {
+        0
+    };
+    Ok(serde_json::json!({
+        "ok": capture_ok,
+        "source_id": source_id,
+        "source_status": capture.get("source_status").and_then(serde_json::Value::as_str).unwrap_or("failed"),
+        "record_count": records.len(),
+        "merged_count": merged_count,
+        "session_id": capture.get("session_id").cloned().unwrap_or(serde_json::Value::Null),
+        "source_url": capture.get("source_url").cloned().unwrap_or(serde_json::Value::Null),
+        "secret_value_in_payload": false,
+        "browser_stream": "rxdb",
+    }))
+}
+
+fn authenticated_capture_failure_summary(source_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "source_id": source_id,
+        "source_status": "capture_failed",
+        "record_count": 0,
+        "merged_count": 0,
+        "secret_value_in_payload": false,
+        "browser_stream": "rxdb",
+    })
+}
+
+pub(crate) fn repersist_augmented_person_research(
+    request: &ctox_web_stack::PersonResearchRequest,
+    payload: &mut serde_json::Value,
+) {
+    if !request.persist_workspace {
+        return;
+    }
+    let workspace = request.workspace.clone().or_else(|| {
+        payload
+            .pointer("/workspace/path")
+            .and_then(serde_json::Value::as_str)
+            .map(PathBuf::from)
+    });
+    let Some(workspace) = workspace else {
+        payload["workspace_error"] =
+            serde_json::Value::String("person-research workspace path is unavailable".to_string());
+        return;
+    };
+    match ctox_web_stack::persist_person_research_workspace(&workspace, request, payload) {
+        Ok(summary) => {
+            payload["workspace"] = summary;
+            if let Some(object) = payload.as_object_mut() {
+                object.remove("workspace_error");
+            }
+        }
+        Err(error) => {
+            payload["workspace_error"] = serde_json::Value::String(error.to_string());
+        }
+    }
+}
+
+fn business_os_web_stack_workspace(root: &Path, args: &[String]) -> Option<PathBuf> {
+    flag_value(args, "--workspace")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        })
+}
+
 fn handle_business_os_web_stack(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("person-research") => {
-            let company = flag_value(args, "--company")
-                .context("usage: ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]")?;
-            let country_raw = flag_value(args, "--country")
-                .context("business-os web-stack person-research requires --country <DE|AT|CH>")?;
-            let country = ctox_web_stack::sources::Country::from_iso(country_raw)
-                .with_context(|| format!("unsupported --country `{country_raw}`"))?;
-            let mode_raw = flag_value(args, "--mode").context(
-                "business-os web-stack person-research requires --mode <new_record|update_firm|update_person|update_inventory_general|have_data>",
-            )?;
-            let mode = ctox_web_stack::sources::ResearchMode::from_str(mode_raw)
-                .with_context(|| format!("unsupported --mode `{mode_raw}`"))?;
-            let fields = flag_values(args, "--field")
-                .into_iter()
-                .filter_map(ctox_web_stack::sources::FieldKey::from_str)
-                .collect::<Vec<_>>();
-            let include_private = flag_values(args, "--include-private")
-                .into_iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect::<Vec<_>>();
-            let workspace = flag_value(args, "--workspace").map(PathBuf::from);
-            let persist_workspace = !args.iter().any(|arg| arg == "--no-workspace");
-            let mut payload = ctox_web_stack::run_ctox_person_research_tool(
-                root,
-                &ctox_web_stack::PersonResearchRequest {
-                    company: company.to_string(),
-                    country,
-                    mode,
-                    fields,
-                    include_private,
-                    workspace,
-                    persist_workspace,
-                },
-            )?;
-            if args.iter().any(|arg| arg == "--auto-auth-assist") {
-                let generated_task_id = format!(
-                    "person_research_{}_{}_{}",
-                    rxdb_id_slug(&company),
-                    country.as_iso().to_ascii_lowercase(),
-                    mode.as_str()
-                );
-                let requesting_task_id = flag_value(args, "--task-id")
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(generated_task_id.as_str());
-                let mut commands = Vec::new();
-                let tasks = payload
-                    .get("browser_assist_tasks")
-                    .and_then(serde_json::Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                for task in tasks {
-                    let Some(source_id) = task.get("source_id").and_then(serde_json::Value::as_str)
-                    else {
-                        continue;
-                    };
-                    let command = enqueue_web_stack_auth_assist_request(
-                        root,
-                        source_id,
-                        None,
-                        None,
-                        None,
-                        requesting_task_id,
-                        "ctox_web_stack",
-                        "ctox_business_os_web_stack_person_research",
-                        true,
-                        true,
-                    )?;
-                    commands.push(command);
-                }
-                payload["auth_assist_commands"] = serde_json::Value::Array(commands);
-                payload["auto_auth_assist"] = serde_json::json!({
-                    "enabled": true,
-                    "stream": "rxdb",
-                    "secret_value_in_payload": false,
-                    "command_count": payload
-                        .get("auth_assist_commands")
-                        .and_then(serde_json::Value::as_array)
-                        .map(Vec::len)
-                        .unwrap_or(0),
-                });
-            }
+            let payload = run_business_os_web_stack_cli_json(root, args)?;
             print_json(&payload)
         }
         Some("auth-assist-request") => {
@@ -3770,9 +4573,11 @@ fn handle_business_os_web_stack(root: &Path, args: &[String]) -> anyhow::Result<
                 target_url_override,
                 credential_ref.as_deref(),
                 login_hint.as_deref(),
+                None,
                 requesting_task_id,
                 "ctox_harness",
                 "ctox_web_auth_assist_request",
+                None,
                 false,
                 true,
             )?;
@@ -3785,6 +4590,10 @@ fn handle_business_os_web_stack(root: &Path, args: &[String]) -> anyhow::Result<
         Some("auth-assist-login") => {
             let login = run_business_os_web_stack_cli_json(root, args)?;
             print_json(&login)
+        }
+        Some("source-capture") => {
+            let capture = run_business_os_web_stack_cli_json(root, args)?;
+            print_json(&capture)
         }
         Some("authenticated-automation") => {
             let mut source = String::new();
@@ -4166,8 +4975,8 @@ fn print_business_os_help() {
 fn business_os_usage() -> String {
     business_os_usage_base()
         .replace(
-            "  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]",
-            "  ctox business-os app references [--query <text>] [--limit <n>|--all] [--json]\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app smoke <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>]\n  ctox business-os app e2e <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>]",
+            "  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog",
+            "  ctox business-os app references [--query <text>] [--limit <n>|--all] [--json]\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app smoke <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>]\n  ctox business-os app e2e <module-id> [--installed|--source] [--url <business-os-url>] [--json] [--timeout-ms <n>] [--output <path>] [--screenshot <path>] [--marker <value>]",
         )
         .replace(
             "  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]",
@@ -4190,13 +4999,13 @@ fn business_os_usage() -> String {
             "  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os commands diagnostics --json\n  ctox business-os commands inspect <command-id>\n  ctox business-os commands gc (--dry-run | --apply)\n  ctox business-os commands reconcile (--dry-run | --apply)\n  ctox business-os harness-bench catalog\n  ctox business-os harness-bench run (--dry-run | --confirm-live) [--run-id <id>] [--actor <user-id>] [--reviewer <user-id>] [--family <id>] [--case <H001>] [--limit <n>]\n  ctox business-os harness-bench status --run-id <id> [--fail-on-inflight]",
         )
         .replace(
-            "  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--task-id <id>]\n  ctox business-os web-stack auth-assist-status --session-id <id>",
-            "  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--credential-ref <ctox-secret://scope/name>] [--login-hint <hint>] [--task-id <id>]\n  ctox business-os web-stack auth-assist-signup --source-id <id> --target-url <url> --credential-ref <ctox-secret://scope/name> --login-hint <hint> --confirm-provisioning [--task-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack auth-assist-login --source-id <id> --credential-ref <ctox-secret://scope/name> [--target-url <url>] [--login-hint <hint>] [--task-id <id>] [--timeout-ms <n>] [--dir <path>] [--credential-selector <selector>] [--verify-selector <selector>]\n  ctox business-os web-stack authenticated-automation --source-id <id> --target-url <url> --credential-ref <ctox-secret://scope/name> [--login-hint <hint>] [--task-id <id>] [--timeout-ms <n>] [--dir <path>] [--credential-selector <selector>] [--verify-selector <selector>] < automation.js\n  ctox business-os web-stack auth-assist-status --session-id <id>",
+            "  ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|xing.com> --company <name> [--country <DE|AT|CH>] [--session-id <id>] [--timeout-ms <n>] [--dir <path>]",
+            "  ctox business-os web-stack auth-assist-signup --source-id <id> --target-url <url> --credential-ref <ctox-secret://scope/name> --login-hint <hint> --confirm-provisioning [--task-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack auth-assist-login --source-id <id> --credential-ref <ctox-secret://scope/name> [--target-url <url>] [--login-hint <hint>] [--task-id <id>] [--timeout-ms <n>] [--dir <path>] [--credential-selector <selector>] [--verify-selector <selector>]\n  ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|rocketreach.com|xing.com> --company <name> [--country <DE|AT|CH>] [--credential-ref <ctox-secret://scope/name>] [--login-hint <hint>] [--session-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack authenticated-automation --source-id <id> --target-url <url> --credential-ref <ctox-secret://scope/name> [--login-hint <hint>] [--task-id <id>] [--timeout-ms <n>] [--dir <path>] [--credential-selector <selector>] [--verify-selector <selector>] < automation.js",
         )
 }
 
 fn business_os_usage_base() -> &'static str {
-    "usage:\n  ctox business-os status\n  ctox business-os serve [--addr 127.0.0.1:8765]\n  ctox business-os mcp status\n  ctox business-os mcp tools\n  ctox business-os mcp policy\n  ctox business-os mcp policy keys\n  ctox business-os mcp policy set [--enabled true|false] [--allow-reads true|false] [--allow-writes true|false] [--allow-approvals true|false] [--allow-external-effects true|false] [--rate-limit-per-minute <n>] [--audit-retention-days <n>] [--allow-actor <id>]... [--allow-workspace <id>]... [--allow-module <id>]... [--allow-collection <name>]... [--deny-tool business_os.<tool>]... [--clear-deny-tools]\n  ctox business-os mcp call <tool-name> [--args <json>]\n  ctox business-os mcp audit [--limit <n>] [--format json|jsonl] [--output <path>] [--prune]\n  ctox business-os mcp serve [--addr 127.0.0.1:8788]\n  ctox business-os mcp connect --url wss://mcp.ctox.dev/connect/<instance-id> [--token <token>] [--once] [--max-reconnect-delay-ms <n>] [--heartbeat-interval-ms <n>] [--max-connection-age-ms <n>]\n  ctox business-os mcp gateway-status --url https://mcp.ctox.dev/status/<instance-id> [--token <token>]\n  ctox business-os peer status\n  ctox business-os peer rotate\n  ctox business-os peer start\n  ctox business-os desktop invite [--display-name <name>] [--ttl-hours <n> | --expires-at <rfc3339>] [--format json|link] [--output <path>]\n  ctox business-os rxdb status [--json]\n  ctox business-os rxdb repair-optional-drift --collection <name> [--dry-run] [--force]\n  ctox business-os turn status\n  ctox business-os turn set [--url turns:host:5349] [--secret <coturn use-auth-secret>]\n  ctox business-os app create --instruction <text> [--module-id <id>]\n  ctox business-os app modify <module-id> --instruction <text>\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app finalize <module-id> --task-id <queue-task-id> [--installed|--source] [--reason <text>]\n  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]\n  ctox business-os repair queue-projections (--dry-run | --apply)\n  ctox business-os backup restore-drill [--module <module-id>]\n  ctox business-os backup prune-drills [--dry-run]\n  ctox business-os commands process <command-id>\n  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]\n  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--task-id <id>]\n  ctox business-os web-stack auth-assist-status --session-id <id>\n  ctox business-os web-stack context-capture --session-id <id> [--source-id <id>] [--task-id <id>] [--no-handoff]\n  ctox business-os web-stack context-extract --session-id <id> [--source-id <id>] [--capture-script <id>] [--task-id <id>]\n  ctox business-os web-stack redaction-audit --canary <value> [--canary <value>]... [--path <path>]...\n  ctox business-os web-stack browser-doctor [--dir <path>]\n  ctox business-os files sync <path>\n  ctox business-os files sync-workspace <path>\n  ctox business-os modules list\n  ctox business-os modules enable <module>\n  ctox business-os modules disable <module> [--force-remove-skills]\n  ctox business-os skills list\n  ctox business-os skills enable <skill>\n  ctox business-os skills disable <skill> [--force-remove]"
+    "usage:\n  ctox business-os status\n  ctox business-os serve [--addr 127.0.0.1:8765]\n  ctox business-os mcp status\n  ctox business-os mcp tools\n  ctox business-os mcp policy\n  ctox business-os mcp policy keys\n  ctox business-os mcp policy set [--enabled true|false] [--allow-reads true|false] [--allow-writes true|false] [--allow-approvals true|false] [--allow-external-effects true|false] [--rate-limit-per-minute <n>] [--audit-retention-days <n>] [--allow-actor <id>]... [--allow-workspace <id>]... [--allow-module <id>]... [--allow-collection <name>]... [--deny-tool business_os.<tool>]... [--clear-deny-tools]\n  ctox business-os mcp call <tool-name> [--args <json>]\n  ctox business-os mcp audit [--limit <n>] [--format json|jsonl] [--output <path>] [--prune]\n  ctox business-os mcp serve [--addr 127.0.0.1:8788]\n  ctox business-os mcp connect --url wss://mcp.ctox.dev/connect/<instance-id> [--token <token>] [--once] [--max-reconnect-delay-ms <n>] [--heartbeat-interval-ms <n>] [--max-connection-age-ms <n>]\n  ctox business-os mcp gateway-status --url https://mcp.ctox.dev/status/<instance-id> [--token <token>]\n  ctox business-os peer status\n  ctox business-os peer rotate\n  ctox business-os peer start\n  ctox business-os desktop invite [--display-name <name>] [--ttl-hours <n> | --expires-at <rfc3339>] [--format json|link] [--output <path>]\n  ctox business-os rxdb status [--json]\n  ctox business-os rxdb repair-optional-drift --collection <name> [--dry-run] [--force]\n  ctox business-os turn status\n  ctox business-os turn set [--url turns:host:5349] [--secret <coturn use-auth-secret>]\n  ctox business-os app create --instruction <text> [--module-id <id>]\n  ctox business-os app modify <module-id> --instruction <text>\n  ctox business-os app validate <module-id> [--installed|--source] [--workspace <path>] [--json] [--skip-tests] [--skip-node-check]\n  ctox business-os app refresh-catalog\n  ctox business-os app finalize <module-id> --task-id <queue-task-id> [--installed|--source] [--reason <text>]\n  ctox business-os app bench run --suite core-five --model minimax-m3 --context 256k [--run-id <id>] [--actor <user-id>] [--no-clean]\n  ctox business-os repair queue-projections (--dry-run | --apply)\n  ctox business-os backup restore-drill [--module <module-id>]\n  ctox business-os backup prune-drills [--dry-run]\n  ctox business-os commands process <command-id>\n  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os web-stack person-research --company <name> --country <DE|AT|CH> --mode <new_record|update_firm|update_person|update_inventory_general|have_data> [--field <field-key>]... [--include-private <source-id>]... [--auto-auth-assist] [--task-id <id>] [--workspace <path>] [--no-workspace]\n  ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--task-id <id>]\n  ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|xing.com> --company <name> [--country <DE|AT|CH>] [--session-id <id>] [--timeout-ms <n>] [--dir <path>]\n  ctox business-os web-stack auth-assist-status --session-id <id>\n  ctox business-os web-stack context-capture --session-id <id> [--source-id <id>] [--task-id <id>] [--no-handoff]\n  ctox business-os web-stack context-extract --session-id <id> [--source-id <id>] [--capture-script <id>] [--task-id <id>]\n  ctox business-os web-stack redaction-audit --canary <value> [--canary <value>]... [--path <path>]...\n  ctox business-os web-stack browser-doctor [--dir <path>]\n  ctox business-os files sync <path>\n  ctox business-os files sync-workspace <path>\n  ctox business-os modules list\n  ctox business-os modules enable <module>\n  ctox business-os modules disable <module> [--force-remove-skills]\n  ctox business-os skills list\n  ctox business-os skills enable <skill>\n  ctox business-os skills disable <skill> [--force-remove]"
 }
 
 fn exists_label(exists: bool) -> &'static str {
@@ -4724,17 +5533,21 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
     target_url_override: Option<&str>,
     credential_ref: Option<&str>,
     login_hint: Option<&str>,
+    preferred_auth_assist: Option<&serde_json::Value>,
     requesting_task_id: &str,
     source_module: &str,
     command_path: &str,
+    owner_user_id: Option<&str>,
     deterministic_for_task: bool,
     accept_as_trusted_local: bool,
 ) -> anyhow::Result<serde_json::Value> {
     let module = ctox_web_stack::sources::find(source_id);
     let recipe = module.and_then(|module| module.browser_recipe());
+    let source_defaults = web_stack_auth_source_defaults(source_id);
     let target_url = target_url_override
         .map(str::to_string)
         .or_else(|| recipe.as_ref().map(|recipe| recipe.login_url.clone()))
+        .or_else(|| source_defaults.map(|defaults| defaults.login_url.to_string()))
         .with_context(|| {
             format!(
                 "web-stack source `{}` has no browser auth-assist recipe",
@@ -4747,6 +5560,15 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         .as_ref()
         .map(|recipe| recipe.allowed_domains.clone())
         .filter(|domains| !domains.is_empty())
+        .or_else(|| {
+            source_defaults.map(|defaults| {
+                defaults
+                    .allowed_domains
+                    .iter()
+                    .map(|domain| (*domain).to_string())
+                    .collect()
+            })
+        })
         .unwrap_or_else(|| allowed_domains_from_url(&target_url));
     let explicit_secret_name = credential_ref
         .and_then(|value| parse_local_ctox_secret_ref(value).ok())
@@ -4760,7 +5582,20 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
                 .and_then(|recipe| recipe.required_secret_name)
         })
         .or_else(|| module.and_then(|module| module.requires_credential()))
+        .or_else(|| source_defaults.map(|defaults| defaults.secret_name))
         .unwrap_or_default();
+    let owner_user_id = owner_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(source_module);
+    if let Some(existing) = crate::business_os::store::reusable_web_stack_auth_assist_request(
+        root,
+        source_id,
+        secret_name,
+        owner_user_id,
+    )? {
+        return Ok(existing);
+    }
     let now = now_ms();
     let source_slug = rxdb_id_slug(source_id);
     let dedupe_key = format!(
@@ -4782,8 +5617,20 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
     } else {
         format!("{}_{}", source_slug, rxdb_id_slug(requesting_task_id))
     };
-    let session_id = format!("browser_session_web_stack_auth_{session_suffix}");
-    let tab_id = format!("browser_tab_web_stack_auth_{session_suffix}");
+    let generated_session_id = format!("browser_session_web_stack_auth_{session_suffix}");
+    let session_id = preferred_auth_assist
+        .and_then(|assist| assist.get("session_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| reusable_web_stack_auth_identifier(value, "browser_session_", &source_slug))
+        .map(str::to_string)
+        .unwrap_or(generated_session_id);
+    let generated_tab_id = format!("browser_tab_web_stack_auth_{session_suffix}");
+    let tab_id = preferred_auth_assist
+        .and_then(|assist| assist.get("tab_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| reusable_web_stack_auth_identifier(value, "browser_tab_", &source_slug))
+        .map(str::to_string)
+        .unwrap_or(generated_tab_id);
     let verify_selector = recipe
         .as_ref()
         .and_then(|recipe| recipe.verify_selector)
@@ -4817,6 +5664,7 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
             "login_hint": login_hint,
             "capture_script": capture_script,
             "purpose": "web_stack_auth",
+            "owner_user_id": owner_user_id,
             "expires_at_ms": now + 30 * 60 * 1000,
             "browser_stream": "rxdb",
             "secret_value_in_rxdb": false,
@@ -4829,8 +5677,8 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
             "source_module": source_module,
             "command_path": command_path,
             "actor": {
-                "id": source_module,
-                "display_name": source_module,
+                "id": owner_user_id,
+                "display_name": owner_user_id,
                 "role": "admin",
                 "is_admin": true
             }
@@ -4885,6 +5733,7 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         "verify_selector": verify_selector,
         "credential_selector": credential_selector,
         "capture_script": capture_script,
+        "owner_user_id": owner_user_id,
         "dedupe_key": dedupe_key,
         "deduped_by_command_id": deterministic_for_task,
         "browser_stream": "rxdb",
@@ -4894,6 +5743,17 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         "execution_task_id": stored.get("execution_task_id").and_then(serde_json::Value::as_str).unwrap_or_default(),
         "trusted_local_intake": accept_as_trusted_local
     }))
+}
+
+fn reusable_web_stack_auth_identifier(value: &str, prefix: &str, source_slug: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 180
+        && value.starts_with(prefix)
+        && value.contains(source_slug)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 fn optional_web_stack_credential_ref(value: Option<&str>) -> anyhow::Result<Option<String>> {
@@ -4924,6 +5784,78 @@ fn optional_web_stack_login_hint(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+fn resolve_web_stack_auth_owner_user_id(
+    root: &Path,
+    args: &[String],
+    requesting_task_id: &str,
+) -> anyhow::Result<Option<String>> {
+    if let Some(owner) = flag_value(args, "--owner-user-id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(owner.to_string()));
+    }
+    if requesting_task_id.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(context) =
+        channels::inspect_business_command_for_task(root, requesting_task_id.trim())?
+    else {
+        return Ok(None);
+    };
+    Ok([
+        "/command/client_context/actor/id",
+        "/command/client_context/actor/user_id",
+        "/command/payload/owner_user_id",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        context
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWebStackCredential {
+    credential_value: String,
+    login_hint: Option<String>,
+    login_hint_from_secret: bool,
+}
+
+fn resolve_web_stack_credential(
+    secret_value: &str,
+    explicit_login_hint: Option<String>,
+) -> ResolvedWebStackCredential {
+    let parsed = serde_json::from_str::<serde_json::Value>(secret_value).ok();
+    let object = parsed.as_ref().and_then(serde_json::Value::as_object);
+    let bundled_credential = object.and_then(|value| {
+        ["password", "credential", "secret"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    let bundled_login_hint = object.and_then(|value| {
+        ["username", "email", "login", "login_hint"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    let login_hint_from_secret = explicit_login_hint.is_none() && bundled_login_hint.is_some();
+    ResolvedWebStackCredential {
+        credential_value: bundled_credential.unwrap_or_else(|| secret_value.to_string()),
+        login_hint: explicit_login_hint.or(bundled_login_hint),
+        login_hint_from_secret,
+    }
 }
 
 fn parse_local_ctox_secret_ref(value: &str) -> anyhow::Result<LocalCtoxSecretRef> {
@@ -5144,10 +6076,24 @@ const clickSubmit = async (credentialField) => {
     "[role='button']:has-text('Weiter')",
     "[role='button']:has-text('Fortfahren')",
   ];
+  if (credentialField && credentialField.selector) {
+    try {
+      const field = page.locator(credentialField.selector).nth(Number(credentialField.index || 0));
+      const form = field.locator("xpath=ancestor::form[1]");
+      if ((await form.count()) > 0) {
+        for (const selector of submitSelectors) {
+          const locator = form.locator(selector).first();
+          if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
+          await locator.click({ timeout: 3500 });
+          return { mode: "click", scope: "field-form", selector };
+        }
+      }
+    } catch {}
+  }
   for (const selector of submitSelectors) {
     try {
       const locator = page.locator(selector).first();
-      if ((await locator.count()) < 1) continue;
+      if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
       await locator.click({ timeout: 3500 });
       return { mode: "click", selector };
     } catch {}
@@ -5204,6 +6150,28 @@ const clickLoginEntry = async () => {
     } catch {}
   }
   return null;
+};
+const dismissConsent = async () => {
+  const selectors = [
+    "button#onetrust-accept-btn-handler",
+    "button[data-testid='uc-accept-all-button']",
+    "button[aria-label*='Accept all' i]",
+    "button[aria-label*='Alle akzeptieren' i]",
+    "button:has-text('Accept all')",
+    "button:has-text('Alle akzeptieren')",
+    "button:has-text('Allow all')",
+    "button:has-text('Zustimmen')",
+  ];
+  for (const selector of selectors) {
+    try {
+      const locator = page.locator(selector).first();
+      if ((await locator.count()) < 1 || !(await locator.isVisible().catch(() => false))) continue;
+      await locator.click({ timeout: 2500 });
+      await page.waitForTimeout(150).catch(() => null);
+      return { clicked: true, selector };
+    } catch {}
+  }
+  return { clicked: false };
 };
 const pageSignals = async () => {
   let title = "";
@@ -5370,6 +6338,23 @@ const waitForLoginEntryTransition = async (previousUrl, timeoutMs = 12000) => {
   }
   return signals;
 };
+const waitForCredentialTransition = async (previousUrl, timeoutMs = 12000) => {
+  const deadline = Date.now() + timeoutMs;
+  let signals = await pageSignals();
+  while (Date.now() < deadline) {
+    await Promise.race([
+      page.waitForLoadState("domcontentloaded", { timeout: 1500 }).catch(() => null),
+      page.waitForTimeout(250).catch(() => null),
+    ]).catch(() => null);
+    signals = await pageSignals();
+    const credentialCandidates = await browserCandidateFields("credential").catch(() => []);
+    if (credentialCandidates.length > 0) break;
+    const authSignals = signals.auth_signals || emptyAuthSignals();
+    if (authSignals.mfa_required === true || authSignals.login_error_detected === true) break;
+    await page.waitForTimeout(signals.url === previousUrl ? 250 : 100).catch(() => null);
+  }
+  return signals;
+};
 const gotoTargetWithRetry = async () => {
   let lastError = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -5386,6 +6371,42 @@ const before = await gotoTargetWithRetry();
 await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => null);
 const consentTransition = await dismissConsent();
 const beforeSignals = await pageSignals();
+const preAuthenticatedVerifyFound = configuredVerifySelector
+  ? await page.locator(configuredVerifySelector).first().isVisible().catch(() => false)
+  : false;
+let loginOutcome = null;
+if (preAuthenticatedVerifyFound) {
+  const observed = await ctoxBrowser.observe({ limit: 50, textMax: 140 });
+  loginOutcome = {
+    ok: true,
+    reason: "already-authenticated",
+    login_state: "authenticated",
+    source_id: sourceId,
+    target_url: targetUrl,
+    credential_ref: credentialRef,
+    login_hint_present: !!loginHint,
+    login_transition: null,
+    consent_transition: consentTransition,
+    mfa_required: false,
+    login_error_detected: false,
+    auth_signals: beforeSignals.auth_signals,
+    login_field: null,
+    credential_field: null,
+    submit: null,
+    verify_selector: configuredVerifySelector,
+    verify_selector_found: true,
+    auth_transition_settled_reason: "already-authenticated",
+    before: { url: beforeSignals.url, title: beforeSignals.title, form_state: beforeSignals.form_state, auth_signals: beforeSignals.auth_signals },
+    credential_submit_base: null,
+    after: { url: beforeSignals.url, title: beforeSignals.title, form_state: beforeSignals.form_state, auth_signals: beforeSignals.auth_signals },
+    url_changed: false,
+    credential_url_changed: false,
+    same_origin_after_login: true,
+    observed: { url: observed.url, title: observed.title, document_text: trimText(observed.documentText) },
+    elapsed_ms: Date.now() - startedAt,
+    redaction: "credential value is not returned",
+  };
+} else {
 let loginField = null;
 if (loginHint) {
   loginField = await fillField("login", loginHint);
@@ -5408,7 +6429,7 @@ let afterLoginStepSignals = null;
 if (!credentialField && loginField) {
   loginTransition = await clickSubmit(loginField);
   if (loginTransition) {
-    afterLoginStepSignals = (await waitForAuthTransition(beforeSignals.url, 12000)).signals;
+    afterLoginStepSignals = await waitForCredentialTransition(beforeSignals.url, 12000);
     credentialField = await fillField("credential", credentialValue, configuredCredentialSelector);
   }
 }
@@ -5481,7 +6502,7 @@ const reason = ok
       : verifySelectorMissing
         ? "verify-selector-not-found"
         : "login-signals-insufficient";
-const loginOutcome = {
+loginOutcome = {
   ok,
   reason,
   login_state: loginState,
@@ -5510,6 +6531,7 @@ const loginOutcome = {
   elapsed_ms: Date.now() - startedAt,
   redaction: "credential value is not returned",
 };
+}
 "#,
     );
     if let Some(continuation_source) = continuation_source {
@@ -6093,6 +7115,10 @@ mod tests {
             usage.contains("ctox business-os web-stack authenticated-automation --source-id <id>")
         );
         assert!(usage.contains("< automation.js"));
+        assert!(usage.contains(
+            "source-capture --source-id <dnbhoovers.com|leadfeeder.com|rocketreach.com|xing.com>"
+        ));
+        assert!(usage.contains("[--credential-ref <ctox-secret://scope/name>]"));
     }
 
     #[test]
@@ -6220,6 +7246,182 @@ mod tests {
     }
 
     #[test]
+    fn web_stack_auth_assist_reuses_active_task_across_request_ids() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let first = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "request-one",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            Some("user-a"),
+            false,
+            true,
+        )?;
+        crate::business_os::store::deliver_business_command_outbox(root.path(), 16)?;
+        let first_task_id = first
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .context("first auth-assist task id")?;
+        let owner_args = vec!["--task-id".to_string(), first_task_id.to_string()];
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id(root.path(), &owner_args, first_task_id)?
+                .as_deref(),
+            Some("user-a")
+        );
+        let second = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "request-two",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            Some("user-a"),
+            false,
+            true,
+        )?;
+
+        assert_eq!(first.get("command_id"), second.get("command_id"));
+        assert_eq!(first.get("task_id"), second.get("task_id"));
+        assert_eq!(
+            second
+                .get("owner_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some("user-a")
+        );
+        assert_eq!(
+            second
+                .get("deduped_by_active_auth_assist")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            second
+                .get("route_status")
+                .and_then(serde_json::Value::as_str),
+            Some("pending")
+        );
+        let other_owner = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "request-three",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            Some("user-b"),
+            false,
+            true,
+        )?;
+        assert_ne!(first.get("command_id"), other_owner.get("command_id"));
+        assert_eq!(
+            other_owner
+                .get("owner_user_id")
+                .and_then(serde_json::Value::as_str),
+            Some("user-b")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_auth_assist_does_not_reuse_expired_task() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let first = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "expired-request",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            None,
+            false,
+            true,
+        )?;
+        let first_command_id = first
+            .get("command_id")
+            .and_then(serde_json::Value::as_str)
+            .expect("first command id");
+        crate::business_os::store::deliver_business_command_outbox(root.path(), 16)?;
+        let conn = crate::business_os::store::open_store(root.path())?;
+        let payload_json: String = conn.query_row(
+            "SELECT payload_json FROM business_commands WHERE command_id = ?1",
+            [first_command_id],
+            |row| row.get(0),
+        )?;
+        let mut payload: serde_json::Value = serde_json::from_str(&payload_json)?;
+        payload["expires_at_ms"] = serde_json::json!(1);
+        conn.execute(
+            "UPDATE business_commands SET payload_json = ?1 WHERE command_id = ?2",
+            [
+                serde_json::to_string(&payload)?,
+                first_command_id.to_string(),
+            ],
+        )?;
+        drop(conn);
+
+        let second = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "fresh-request",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            None,
+            false,
+            true,
+        )?;
+
+        assert_ne!(first.get("command_id"), second.get("command_id"));
+        assert_ne!(first.get("task_id"), second.get("task_id"));
+        assert_ne!(
+            second
+                .get("deduped_by_active_auth_assist")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_person_research_resolves_relative_workspace_against_root() {
+        let root = Path::new("/srv/ctox/current");
+        let relative = vec![
+            "person-research".to_string(),
+            "--workspace".to_string(),
+            "runtime/research/person/example".to_string(),
+        ];
+        assert_eq!(
+            business_os_web_stack_workspace(root, &relative),
+            Some(root.join("runtime/research/person/example"))
+        );
+
+        let absolute = vec![
+            "person-research".to_string(),
+            "--workspace".to_string(),
+            "/var/lib/ctox/research/example".to_string(),
+        ];
+        assert_eq!(
+            business_os_web_stack_workspace(root, &absolute),
+            Some(PathBuf::from("/var/lib/ctox/research/example"))
+        );
+    }
+
+    #[test]
     fn web_stack_auth_assist_login_source_classifies_login_states() -> anyhow::Result<()> {
         let source = build_web_stack_auth_assist_login_source_with_continuation(
             "https://example.test/login",
@@ -6242,13 +7444,19 @@ mod tests {
         assert!(source.contains("waitForAuthTransition"));
         assert!(source.contains("login_transition"));
         assert!(source.contains("clickLoginEntry"));
+        assert!(source.contains("const dismissConsent = async () =>"));
+        assert!(source.contains("button#onetrust-accept-btn-handler"));
         assert!(source.contains("waitForLoginEntryTransition"));
+        assert!(source.contains("waitForCredentialTransition"));
+        assert!(source.contains("browserCandidateFields(\"credential\")"));
         assert!(source.contains("gotoTargetWithRetry"));
         assert!(source.contains("attempt <= 2"));
         assert!(source.contains("same-origin-link"));
         assert!(source.contains("after_login_entry"));
         assert!(source.contains("parsed.origin !== targetOrigin"));
         assert!(source.contains("credential-field-not-found-after-login-transition"));
+        assert!(source.contains("scope: \"field-form\""));
+        assert!(source.contains("xpath=ancestor::form[1]"));
         assert!(source.contains("credentialSubmitBaseSignals"));
         assert!(source.contains("credential_url_changed"));
         assert!(source.contains("while (Date.now() < deadline)"));
@@ -6269,6 +7477,32 @@ mod tests {
     }
 
     #[test]
+    fn web_stack_credential_bundle_keeps_login_hint_inside_secret_boundary() {
+        let bundled = resolve_web_stack_credential(
+            r#"{"username":"user@example.test","password":"secret-value"}"#,
+            None,
+        );
+        assert_eq!(bundled.credential_value, "secret-value");
+        assert_eq!(bundled.login_hint.as_deref(), Some("user@example.test"));
+        assert!(bundled.login_hint_from_secret);
+
+        let explicit = resolve_web_stack_credential(
+            r#"{"email":"bundled@example.test","secret":"secret-value"}"#,
+            Some("operator@example.test".to_string()),
+        );
+        assert_eq!(
+            explicit.login_hint.as_deref(),
+            Some("operator@example.test")
+        );
+        assert!(!explicit.login_hint_from_secret);
+
+        let legacy = resolve_web_stack_credential("legacy-password", None);
+        assert_eq!(legacy.credential_value, "legacy-password");
+        assert_eq!(legacy.login_hint, None);
+        assert!(!legacy.login_hint_from_secret);
+    }
+
+    #[test]
     fn web_stack_authenticated_automation_runs_continuation_after_login_gate() -> anyhow::Result<()>
     {
         let source = build_web_stack_auth_assist_login_source_with_continuation(
@@ -6282,7 +7516,9 @@ mod tests {
             Some("return { ok: true, task_type: 'same-origin-api-map' };"),
         )?;
 
-        assert!(source.contains("const loginOutcome ="));
+        assert!(source.contains("let loginOutcome = null"));
+        assert!(source.contains("preAuthenticatedVerifyFound"));
+        assert!(source.contains("already-authenticated"));
         assert!(source.contains("if (!loginOutcome.ok) return loginOutcome"));
         assert!(source.contains("const postAuthResult = await (async () =>"));
         assert!(source.contains("task_type: 'same-origin-api-map'"));
@@ -6293,15 +7529,386 @@ mod tests {
 
     #[test]
     fn web_stack_authenticated_capture_is_source_scoped_and_secret_free() -> anyhow::Result<()> {
-        let source =
-            build_web_stack_authenticated_source_capture("dnbhoovers.com", "WITTENSTEIN SE", "DE")?;
+        let source = build_web_stack_authenticated_source_capture(
+            "dnbhoovers.com",
+            "Example Industrial GmbH",
+            "DE",
+        )?;
 
         assert!(source.contains("app.dnbhoovers.com"));
         assert!(source.contains("hostAllowed"));
         assert!(source.contains("wrong_origin"));
-        assert!(source.contains("authenticated search result"));
+        assert!(source.contains("D&B Hoovers exact company result"));
         assert!(!source.contains("credentialValue"));
         assert!(!source.contains("password"));
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_existing_authenticated_capture_providers_remain_available() -> anyhow::Result<()> {
+        let dnb =
+            build_web_stack_authenticated_source_capture("dnbhoovers.com", "Example AG", "DE")?;
+        assert!(dnb.contains("app.dnbhoovers.com"));
+        assert!(dnb.contains("D&B Hoovers exact company result"));
+
+        let leadfeeder =
+            build_web_stack_authenticated_source_capture("leadfeeder.com", "Example AG", "DE")?;
+        assert!(leadfeeder.contains("app.leadfeeder.com"));
+        assert!(leadfeeder.contains("Leadfeeder exact company result"));
+
+        for source in [dnb, leadfeeder] {
+            assert!(source.contains("hostAllowed"));
+            assert!(source.contains("wrong_origin"));
+            assert!(!source.contains("credentialValue"));
+            assert!(!source.contains("password"));
+        }
+        Ok(())
+    }
+
+    fn parse_rocketreach_records_for_test(
+        company: &str,
+        snapshots: serde_json::Value,
+    ) -> serde_json::Value {
+        let script = format!(
+            "{}\nconst result = parseRocketReachRecords({}, {});\nprocess.stdout.write(JSON.stringify(result));",
+            ROCKETREACH_BROWSER_RECORD_PARSER,
+            serde_json::to_string(company).expect("company json"),
+            serde_json::to_string(&snapshots).expect("snapshots json")
+        );
+        let output = std::process::Command::new("node")
+            .args(["--input-type=module", "--eval", &script])
+            .output()
+            .expect("Node.js is required for RocketReach capture parser tests");
+        assert!(
+            output.status.success(),
+            "RocketReach capture parser failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("RocketReach parser result json")
+    }
+
+    #[test]
+    fn web_stack_rocketreach_capture_is_provider_scoped_and_secret_free() -> anyhow::Result<()> {
+        let defaults =
+            web_stack_auth_source_defaults("rocketreach.com").expect("RocketReach auth defaults");
+        assert_eq!(defaults.login_url, "https://rocketreach.co/login");
+        assert_eq!(
+            defaults.allowed_domains,
+            &["rocketreach.com", "rocketreach.co"]
+        );
+        assert_eq!(defaults.secret_name, "ROCKETREACH_BROWSER_LOGIN");
+
+        let source = build_web_stack_authenticated_source_capture(
+            "rocketreach.com",
+            "Example Manufacturing AG",
+            "DE",
+        )?;
+        for expected in [
+            "rocketreach.com",
+            "rocketreach.co",
+            "RocketReach company identity verified",
+            "person_vorname",
+            "person_nachname",
+            "person_position",
+            "person_email",
+            "person_telefon",
+            "embeddedPeople",
+            "protectedFieldCount",
+        ] {
+            assert!(
+                source.contains(expected),
+                "missing capture guard: {expected}"
+            );
+        }
+        assert!(!source.contains("ROCKETREACH_BROWSER_LOGIN"));
+        assert!(!source.contains("credentialValue"));
+        assert!(!source.contains("password"));
+        assert!(!source.contains("console."));
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_rocketreach_capture_requires_company_identity_for_protected_fields() {
+        let matching = parse_rocketreach_records_for_test(
+            "Example Manufacturing AG",
+            serde_json::json!([
+                {
+                    "sourceUrl": "https://rocketreach.co/example-manufacturing-ag-profile_bexample",
+                    "title": "Example Manufacturing AG Company Profile | RocketReach",
+                    "headings": ["Example Manufacturing AG"],
+                    "bodyLines": ["Example Manufacturing AG"],
+                    "embeddedPeople": [],
+                    "links": [{
+                        "url": "https://rocketreach.com/ada-lovelace-email_bexample",
+                        "text": "Ada Lovelace",
+                        "contextLines": [
+                            "Ada Lovelace",
+                            "Chief Technology Officer",
+                            "Example Manufacturing AG",
+                            "ada.lovelace@example.test",
+                            "+49 711 1234567"
+                        ]
+                    }]
+                },
+                {
+                    "sourceUrl": "https://rocketreach.com/ada-lovelace-email_bexample",
+                    "title": "Ada Lovelace Email & Phone | RocketReach",
+                    "headings": ["Ada Lovelace"],
+                    "bodyLines": [
+                        "Ada Lovelace",
+                        "Chief Technology Officer",
+                        "Example Manufacturing AG",
+                        "ada.lovelace@example.test",
+                        "+49 711 1234567"
+                    ],
+                    "embeddedPeople": [],
+                    "links": []
+                }
+            ]),
+        );
+        assert_eq!(
+            matching
+                .get("companyMatched")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        let records = matching
+            .get("records")
+            .and_then(serde_json::Value::as_array)
+            .expect("records");
+        for field in [
+            "firma_name",
+            "person_vorname",
+            "person_nachname",
+            "person_position",
+            "person_email",
+            "person_telefon",
+        ] {
+            assert!(
+                records.iter().any(|record| {
+                    record.get("field").and_then(serde_json::Value::as_str) == Some(field)
+                }),
+                "missing RocketReach field {field}"
+            );
+        }
+        assert!(records.iter().all(|record| record
+            .get("source_url")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|url| url.starts_with("https://rocketreach.co/")
+                || url.starts_with("https://rocketreach.com/"))));
+
+        let wrong_company = parse_rocketreach_records_for_test(
+            "Example Manufacturing AG",
+            serde_json::json!([{
+                "sourceUrl": "https://rocketreach.co/another-company-profile_bother",
+                "title": "Another Company GmbH Company Profile | RocketReach",
+                "headings": ["Another Company GmbH"],
+                "bodyLines": ["Another Company GmbH"],
+                "embeddedPeople": [{
+                    "name": "Ada Lovelace",
+                    "company": "Another Company GmbH",
+                    "sourceUrl": "https://rocketreach.co/ada-lovelace-email_bother",
+                    "email": "ada.lovelace@example.test"
+                }],
+                "links": []
+            }]),
+        );
+        assert_eq!(
+            wrong_company
+                .get("companyMatched")
+                .and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            wrong_company
+                .get("records")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn web_stack_xing_capture_delegates_to_current_provider_routes() -> anyhow::Result<()> {
+        let source = build_web_stack_authenticated_source_capture(
+            "xing.com",
+            "Example Industrial GmbH",
+            "DE",
+        )?;
+
+        assert!(source.contains("https://www.xing.com/search/companies"));
+        assert!(source.contains("https://www.xing.com/search/members"));
+        assert!(!source.contains("https://www.xing.com/search/people"));
+        assert!(source.contains("XING canonical profile URL"));
+        assert!(!source.contains("console."));
+        assert!(!source.contains("credentialValue"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn web_stack_source_capture_command_is_registered() {
+        let root = tempfile::tempdir().expect("temp root");
+        let args = vec![
+            "source-capture".to_string(),
+            "--source-id".to_string(),
+            "unsupported.example".to_string(),
+            "--company".to_string(),
+            "Example AG".to_string(),
+        ];
+        let error = run_business_os_web_stack_cli_json_local(root.path(), &args)
+            .expect_err("unsupported source must be rejected")
+            .to_string();
+
+        assert!(error.contains("source-capture supports only authenticated"));
+        assert!(!error.contains("unknown business-os web-stack command"));
+    }
+
+    #[test]
+    fn authenticated_capture_merges_only_redacted_planned_evidence() -> anyhow::Result<()> {
+        let mut payload = serde_json::json!({
+            "plan": [{
+                "source_id": "dnbhoovers.com",
+                "tier": "C",
+                "target_fields": ["umsatz", "mitarbeiter"]
+            }],
+            "fields": {
+                "umsatz": {"value": null, "confidence": "missing", "candidates": []},
+                "mitarbeiter": {"value": null, "confidence": "missing", "candidates": []}
+            }
+        });
+        let capture = serde_json::json!({
+            "ok": true,
+            "source_id": "dnbhoovers.com",
+            "source_status": "succeeded",
+            "session_id": "browser-session-1",
+            "source_url": "https://app.dnbhoovers.com/company/example",
+            "credential_ref": "ctox-secret://credentials/provider-login",
+            "records": [{
+                "field": "umsatz",
+                "value": "530 Mio.",
+                "confidence": "high",
+                "source_url": "https://app.dnbhoovers.com/company/example",
+                "note": "structured company result"
+            }, {
+                "field": "mitarbeiter",
+                "value": "2.830",
+                "confidence": "high",
+                "source_url": "https://app.dnbhoovers.com/company/example"
+            }]
+        });
+
+        let summary = merge_authenticated_person_research_capture(&mut payload, &capture)?;
+
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["record_count"], 2);
+        assert_eq!(summary["merged_count"], 2);
+        assert_eq!(payload["fields"]["umsatz"]["value"], "530 Mio.");
+        assert_eq!(payload["fields"]["mitarbeiter"]["value"], "2.830");
+        let serialized = serde_json::to_string(&summary)?;
+        assert!(!serialized.contains("credential_ref"));
+        assert!(!serialized.contains("provider-login"));
+        assert_eq!(summary["secret_value_in_payload"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn authenticated_capture_is_planned_for_missing_credentialed_target() {
+        let payload = serde_json::json!({
+            "fields": {
+                "person_funktion": {"value": null, "confidence": "missing", "candidates": []},
+                "person_xing": {"value": "https://www.xing.com/profile/Ada_Lovelace", "confidence": "medium", "candidates": []}
+            },
+            "browser_assist_tasks": [],
+            "browser_assist_recommendations": [{
+                "source_id": "xing.com",
+                "target_fields": ["person_funktion", "person_xing"],
+                "target_url": "https://login.xing.com/"
+            }]
+        });
+
+        let tasks = authenticated_person_research_capture_tasks(&payload);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["source_id"], "xing.com");
+        assert_eq!(
+            tasks[0]["reason"],
+            "missing_target_fields_after_public_research"
+        );
+        assert_eq!(tasks[0]["secret_value_in_payload"], false);
+    }
+
+    #[test]
+    fn authenticated_capture_is_not_planned_when_all_targets_are_populated() {
+        let payload = serde_json::json!({
+            "fields": {
+                "person_funktion": {"value": "Einkaufsleitung"},
+                "person_xing": {"value": "https://www.xing.com/profile/Ada_Lovelace"}
+            },
+            "browser_assist_tasks": [],
+            "browser_assist_recommendations": [{
+                "source_id": "xing.com",
+                "target_fields": ["person_funktion", "person_xing"]
+            }]
+        });
+
+        assert!(authenticated_person_research_capture_tasks(&payload).is_empty());
+    }
+
+    #[test]
+    fn authenticated_capture_task_deduplicates_failure_and_recommendation() {
+        let payload = serde_json::json!({
+            "fields": {
+                "person_email": {"value": null}
+            },
+            "browser_assist_tasks": [{
+                "source_id": "rocketreach.com",
+                "target_fields": ["person_email"],
+                "reason": "blocked"
+            }],
+            "browser_assist_recommendations": [{
+                "source_id": "rocketreach.com",
+                "target_fields": ["person_email"]
+            }]
+        });
+
+        let tasks = authenticated_person_research_capture_tasks(&payload);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["reason"], "blocked");
+    }
+
+    #[test]
+    fn authenticated_capture_uses_plan_when_provider_has_no_browser_recipe() {
+        let payload = serde_json::json!({
+            "plan": [{
+                "source_id": "rocketreach.com",
+                "target_fields": ["person_position", "person_email", "person_telefon"]
+            }],
+            "fields": {
+                "person_position": {"value": null},
+                "person_email": {"value": null},
+                "person_telefon": {"value": null}
+            },
+            "browser_assist_tasks": [],
+            "browser_assist_recommendations": []
+        });
+
+        let tasks = authenticated_person_research_capture_tasks(&payload);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["source_id"], "rocketreach.com");
+        assert_eq!(tasks[0]["target_fields"].as_array().map(Vec::len), Some(3));
+    }
+
+    #[test]
+    fn leadfeeder_capture_uses_canonical_person_research_fields() -> anyhow::Result<()> {
+        let source =
+            build_web_stack_authenticated_source_capture("leadfeeder.com", "Example AG", "DE")?;
+
+        assert!(source.contains("push(\"firma_domain\", website"));
+        assert!(!source.contains("push(\"firma_website\", website"));
+        assert!(source.contains("push(\"mitarbeiter\", employees"));
         Ok(())
     }
 

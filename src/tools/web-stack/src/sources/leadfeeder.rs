@@ -59,7 +59,7 @@ const SECRET_NAME: &str = "LEADFEEDER_API_KEY";
 const BROWSER_SECRET_NAME: &str = "LEADFEEDER_BROWSER_LOGIN";
 const LOGIN_URL: &str = "https://app.leadfeeder.com/login";
 const VERIFY_SELECTOR: &str =
-    "[data-testid=\"account-menu\"], [data-testid*=\"account-switcher\"], a[href*=\"/leads\"]";
+    "[data-testid=\"account-menu\"], [data-testid*=\"account-switcher\"], input[placeholder*=\"Firma suchen\" i]";
 const CREDENTIAL_SELECTOR: &str =
     "input[name=\"password\"], input#password, input[type=\"password\"]";
 const CAPTURE_SCRIPT: &str = "leadfeeder.lead_capture.v1";
@@ -95,6 +95,7 @@ impl SourceModule for Leadfeeder {
         &[
             FieldKey::FirmaEmail,
             FieldKey::FirmaDomain,
+            FieldKey::Mitarbeiter,
             FieldKey::PersonEmail,
         ]
     }
@@ -553,6 +554,7 @@ mod tests {
         let auth = m.authoritative_for();
         assert!(auth.contains(&FieldKey::FirmaEmail));
         assert!(auth.contains(&FieldKey::FirmaDomain));
+        assert!(auth.contains(&FieldKey::Mitarbeiter));
         assert!(auth.contains(&FieldKey::PersonEmail));
     }
 

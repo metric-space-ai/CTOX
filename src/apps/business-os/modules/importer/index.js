@@ -3,7 +3,7 @@ import {
   transcodeApp,
   suggestedModuleId,
   scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260717-importer-v2';
+} from '../../shared/app-transcode.mjs?v=20260720-importer-v6';
 
 // The App Importer is the hand-over moment of the product story: a coding
 // agent conceived the app, the importer raises it. Source (folder or public
@@ -16,6 +16,9 @@ const MAX_FILES = 400;
 const MAX_FILE_BYTES = 512 * 1024;
 const TEXT_EXTENSIONS = new Set([
   '.ts', '.tsx', '.js', '.jsx', '.mjs', '.css', '.json', '.html', '.svg', '.md', '.txt',
+]);
+const ASSET_EXTENSIONS = new Set([
+  '.avif', '.gif', '.ico', '.jpeg', '.jpg', '.png', '.webp', '.woff', '.woff2',
 ]);
 
 const FALLBACK_LABELS = {
@@ -56,6 +59,13 @@ export function isTextFile(path) {
   return TEXT_EXTENSIONS.has(path.slice(dot).toLowerCase());
 }
 
+export function isImportableFile(path) {
+  const dot = path.lastIndexOf('.');
+  if (dot === -1) return false;
+  const extension = path.slice(dot).toLowerCase();
+  return TEXT_EXTENSIONS.has(extension) || ASSET_EXTENSIONS.has(extension);
+}
+
 export function validModuleId(id) {
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(id);
 }
@@ -69,12 +79,14 @@ async function readDirectoryFiles(dirHandle) {
       if (shouldSkipPath(path)) continue;
       if (entry.kind === 'directory') {
         await walk(entry, path);
-      } else if (isTextFile(path)) {
+      } else if (isImportableFile(path)) {
         count += 1;
         if (count > MAX_FILES) throw Object.assign(new Error('too_many_files'), { count });
         const file = await entry.getFile();
         if (file.size > MAX_FILE_BYTES) continue;
-        files[path] = await file.text();
+        files[path] = isTextFile(path)
+          ? await file.text()
+          : new Uint8Array(await file.arrayBuffer());
       }
     }
   }
@@ -95,7 +107,7 @@ async function fetchGitHubFiles(ref) {
     .filter((node) => node.type === 'blob')
     .map((node) => node.path)
     .filter((path) => (ref.subdir ? path.startsWith(`${ref.subdir}/`) : true))
-    .filter((path) => !shouldSkipPath(path) && isTextFile(path));
+    .filter((path) => !shouldSkipPath(path) && isImportableFile(path));
   if (wanted.length === 0) throw new Error('no importable files');
   if (wanted.length > MAX_FILES) throw Object.assign(new Error('too_many_files'), { count: wanted.length });
   const files = {};
@@ -105,7 +117,9 @@ async function fetchGitHubFiles(ref) {
       `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${path}`,
     );
     if (!res.ok) continue;
-    files[rel] = await res.text();
+    files[rel] = isTextFile(rel)
+      ? await res.text()
+      : new Uint8Array(await res.arrayBuffer());
   }
   return files;
 }
@@ -163,7 +177,19 @@ export async function mount(ctx) {
   const refs = {
     title: root.querySelector('[data-imp-title]'),
     subtitle: root.querySelector('[data-imp-subtitle]'),
+    sourceStep: root.querySelector('[data-imp-source-step]'),
+    sourceStepNote: root.querySelector('[data-imp-source-step-note]'),
+    reviewStep: root.querySelector('[data-imp-review-step]'),
+    reviewStepNote: root.querySelector('[data-imp-review-step-note]'),
+    doneStep: root.querySelector('[data-imp-done-step]'),
+    doneStepNote: root.querySelector('[data-imp-done-step-note]'),
     notice: root.querySelector('[data-imp-notice]'),
+    sourceSection: root.querySelector('[data-imp-source-section]'),
+    sourceEyebrow: root.querySelector('[data-imp-source-eyebrow]'),
+    sourceHeading: root.querySelector('[data-imp-source-heading]'),
+    sourceIntro: root.querySelector('[data-imp-source-intro]'),
+    githubLabel: root.querySelector('[data-imp-github-label]'),
+    folderHeading: root.querySelector('[data-imp-folder-heading]'),
     pickFolder: root.querySelector('[data-imp-pick-folder]'),
     or: root.querySelector('[data-imp-or]'),
     githubForm: root.querySelector('[data-imp-github-form]'),
@@ -171,6 +197,11 @@ export async function mount(ctx) {
     githubBtn: root.querySelector('[data-imp-github-btn]'),
     sourceHint: root.querySelector('[data-imp-source-hint]'),
     reportSection: root.querySelector('[data-imp-report-section]'),
+    reviewEyebrow: root.querySelector('[data-imp-review-eyebrow]'),
+    reviewHeading: root.querySelector('[data-imp-review-heading]'),
+    reviewIntro: root.querySelector('[data-imp-review-intro]'),
+    reportStatus: root.querySelector('[data-imp-report-status]'),
+    reportStatusNote: root.querySelector('[data-imp-report-status-note]'),
     report: root.querySelector('[data-imp-report]'),
     reportHint: root.querySelector('[data-imp-report-hint]'),
     details: root.querySelector('[data-imp-details]'),
@@ -178,29 +209,59 @@ export async function mount(ctx) {
     titleLabel: root.querySelector('[data-imp-title-label]'),
     moduleId: root.querySelector('[data-imp-module-id]'),
     moduleTitle: root.querySelector('[data-imp-module-title]'),
+    back: root.querySelector('[data-imp-back]'),
     install: root.querySelector('[data-imp-install]'),
     doneSection: root.querySelector('[data-imp-done-section]'),
+    doneEyebrow: root.querySelector('[data-imp-done-eyebrow]'),
+    doneHeading: root.querySelector('[data-imp-done-heading]'),
     done: root.querySelector('[data-imp-done]'),
+    open: root.querySelector('[data-imp-open]'),
+    openLabel: root.querySelector('[data-imp-open-label]'),
   };
 
   refs.title.textContent = t('title', FALLBACK_LABELS.title);
   refs.subtitle.textContent = t('subtitle', FALLBACK_LABELS.subtitle);
-  refs.pickFolder.textContent = t('pickFolder', 'Choose folder…');
+  refs.sourceStep.textContent = t('sourceStep', 'Source');
+  refs.sourceStepNote.textContent = t('sourceStepNote', 'Choose an app');
+  refs.reviewStep.textContent = t('reviewStep', 'Review');
+  refs.reviewStepNote.textContent = t('reviewStepNote', 'Check portability');
+  refs.doneStep.textContent = t('doneStep', 'Install');
+  refs.doneStepNote.textContent = t('doneStepNote', 'Open in CTOX');
+  refs.sourceEyebrow.textContent = t('sourceEyebrow', 'Import source');
+  refs.sourceHeading.textContent = t('sourceHeading', 'Bring an existing app into CTOX.');
+  refs.sourceIntro.textContent = t('sourceIntro', 'Use a public GitHub repository or choose the project folder from this computer.');
+  refs.githubLabel.textContent = t('githubLabel', 'GitHub repository');
+  refs.folderHeading.textContent = t('folderHeading', 'Choose project folder');
   refs.or.textContent = t('or', 'or');
   refs.githubUrl.placeholder = t('githubPlaceholder', 'https://github.com/owner/repo');
-  refs.githubBtn.textContent = t('fetchGithub', 'Fetch from GitHub');
+  refs.githubBtn.textContent = t('fetchGithub', 'Analyze repo');
   refs.sourceHint.textContent = t('sourceHint', '');
+  refs.reviewEyebrow.textContent = t('reviewEyebrow', 'Import review');
+  refs.reviewHeading.textContent = t('reviewHeading', 'Ready to become a CTOX app.');
+  refs.reviewIntro.textContent = t('reviewIntro', 'Review the detected entry point and runtime dependencies before installation.');
+  refs.reportStatus.textContent = t('reportStatus', 'Portable');
+  refs.reportStatusNote.textContent = t('reportStatusNote', 'The app can run in CTOX.');
   refs.idLabel.textContent = t('idLabel', 'Module id');
   refs.titleLabel.textContent = t('titleLabel', 'Title');
-  refs.install.textContent = t('install', 'Install into local-modules…');
+  refs.back.textContent = t('back', 'Back');
+  refs.install.textContent = t('install', 'Install app');
+  refs.doneEyebrow.textContent = t('doneEyebrow', 'Import complete');
+  refs.doneHeading.textContent = t('doneHeading', 'Your app is in CTOX.');
+  refs.openLabel.textContent = t('openApp', 'Open app');
 
-  const state = { files: null, result: null };
+  const state = { files: null, result: null, installedModuleId: '' };
   let disposed = false;
+
+  const setStage = (stage) => {
+    root.dataset.impStage = stage;
+    refs.sourceSection.hidden = stage !== 'source';
+    refs.reportSection.hidden = stage !== 'review';
+    refs.doneSection.hidden = stage !== 'done';
+  };
 
   const notify = (text, isError = false) => {
     refs.notice.hidden = !text;
     refs.notice.textContent = text || '';
-    // Notice is a .ctox-callout; errors use the kit's danger variant.
     refs.notice.classList.toggle('is-danger', isError);
   };
 
@@ -217,10 +278,16 @@ export async function mount(ctx) {
     const { files, result } = state;
     if (!files || !result) return;
     refs.reportHint.hidden = true;
+    refs.reportStatus.textContent = t('reportStatus', 'Portable');
+    refs.reportStatusNote.textContent = t('reportStatusNote', 'The app can run in CTOX.');
+    refs.reportStatus.closest('.imp-report-status')?.classList.remove('is-danger');
     const lines = [row(t('filesRead', 'Files read'), Object.keys(files).length)];
     if (result.report?.error === 'entry_not_found') {
       lines.push(row(t('entry', 'Entry'), esc(t('entryMissing', 'No entry found.')), 'imp-bad'));
       refs.details.hidden = true;
+      refs.reportStatus.textContent = t('reportBlocked', 'Needs attention');
+      refs.reportStatusNote.textContent = t('reportBlockedNote', 'CTOX could not find an app entry point.');
+      refs.reportStatus.closest('.imp-report-status')?.classList.add('is-danger');
     } else {
       lines.push(row(t('entry', 'Entry'), esc(result.entry), 'imp-good'));
       lines.push(row(t('bareDeps', 'Runtime dependencies'), esc(result.report.bareImports.join(', ') || '—')));
@@ -231,6 +298,9 @@ export async function mount(ctx) {
         refs.reportHint.textContent = hint;
         refs.reportHint.hidden = !hint;
         refs.details.hidden = true;
+        refs.reportStatus.textContent = t('reportBlocked', 'Needs attention');
+        refs.reportStatusNote.textContent = t('reportBlockedNote', 'Some dependencies need to be replaced before installation.');
+        refs.reportStatus.closest('.imp-report-status')?.classList.add('is-danger');
       } else {
         lines.push(row(t('unsupported', 'Not portable'), t('ok', 'ready'), 'imp-good'));
         refs.details.hidden = false;
@@ -240,8 +310,7 @@ export async function mount(ctx) {
       }
     }
     refs.report.innerHTML = lines.join('');
-    refs.reportSection.hidden = false;
-    refs.doneSection.hidden = true;
+    setStage('review');
   }
 
   async function analyze(files) {
@@ -306,12 +375,28 @@ export async function mount(ctx) {
       );
       await writeModuleToDirectory(rootHandle, moduleId, moduleFiles, state.files);
       notify('');
+      state.installedModuleId = moduleId;
       refs.done.innerHTML = `<p>${esc(t('doneNote', 'Module written.', { id: moduleId }))}</p>`;
-      refs.doneSection.hidden = false;
+      setStage('done');
     } catch (error) {
       if (error?.name === 'AbortError') { notify(''); return; }
       notify(t('writeFailed', 'Write failed.', { error: error?.message || error }), true);
     }
+  });
+
+  refs.back.addEventListener('click', () => {
+    notify('');
+    setStage('source');
+  });
+
+  refs.open.addEventListener('click', async () => {
+    const moduleId = state.installedModuleId;
+    if (!moduleId) return;
+    // The install may replace an existing module manifest as well as create a
+    // new one. Reload the catalog in both cases, then let the shell launch the
+    // freshly written app contract rather than a stale in-memory descriptor.
+    globalThis.location.hash = moduleId;
+    globalThis.location.reload();
   });
 
   return () => { disposed = true; void disposed; };

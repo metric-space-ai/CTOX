@@ -395,6 +395,10 @@ fn http_request_uses_previous_response_id_for_incremental_delta() {
         wire_request.previous_response_id.as_deref(),
         Some("resp_previous")
     );
+    assert_eq!(
+        wire_request.prompt_cache_key.as_deref(),
+        Some("thread-1")
+    );
     assert_eq!(wire_request.input, vec![next_user]);
 }
 
@@ -458,6 +462,10 @@ fn http_request_uses_previous_response_id_for_minimax_proxy_responses() {
     assert_eq!(
         wire_request.previous_response_id.as_deref(),
         Some("resp_previous")
+    );
+    assert_eq!(
+        wire_request.prompt_cache_key.as_deref(),
+        Some("thread-1")
     );
     assert_eq!(wire_request.input, vec![next_user]);
 }

@@ -27,7 +27,7 @@ const QUERY_RATE_LIMIT_RETRY_MS = 100;
 const QUERY_RATE_LIMIT_RETRIES = 16;
 const QUERY_PEER_RETRY_MS = 250;
 const QUERY_PEER_RETRIES = 24;
-const QUERY_PEER_WAIT_TIMEOUT_MS = 8000;
+const AUTHORIZED_PEER_WAIT_TIMEOUT_MS = 60000;
 const QUERY_PEER_WAIT_POLL_MS = 100;
 const QUERY_FETCH_REQUEST_TIMEOUT_MS = 45000;
 const DEFAULT_COLLECTOR_TIMEOUT_MS = Math.max(
@@ -636,15 +636,6 @@ export function createDemandLoadingTransport({
   function resolvePeerId() {
     const configured = getPeerId();
     if (configured && isPeerOpen(configured)) return configured;
-    return firstOpenPeerId();
-  }
-
-  function firstOpenPeerId() {
-    const entries = peer?.connections?.entries?.();
-    if (!entries) return '';
-    for (const [peerId, connection] of entries) {
-      if (isPeerConnectionOpen(connection)) return peerId;
-    }
     return '';
   }
 
@@ -662,7 +653,7 @@ export function createDemandLoadingTransport({
     return channelState === 'open' && !['closed', 'failed', 'disconnected'].includes(String(peerState));
   }
 
-  async function waitForPeerId(timeoutMs = QUERY_PEER_WAIT_TIMEOUT_MS) {
+  async function waitForPeerId(timeoutMs = AUTHORIZED_PEER_WAIT_TIMEOUT_MS) {
     const immediate = resolvePeerId();
     if (immediate) return immediate;
     const deadline = Date.now() + timeoutMs;

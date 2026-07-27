@@ -114,7 +114,7 @@ export function initBusinessChat({
     trackingSyncRunning = true;
     try {
       captureDrafts(root, state);
-      const changed = await syncTrackedMessages({ state, db });
+      const changed = await syncTrackedMessages({ state, db, sync: syncFacade });
       if (changed) persistChatState({ state, db });
       if (changed) renderChatRoot({ root, state, commandBus, db, getActiveModule });
     } finally {
@@ -212,15 +212,17 @@ export function initBusinessChat({
   const handleExternalOpen = async (event) => {
     const detail = event.detail || {};
     state.selectedDate = getLocalDateString(Date.now());
-    const chat = detail.reuseActive === true
-      ? ensureChat(state, session)
-      : createChat(state.ownerUserId, state.selectedDate);
-    if (detail.reuseActive !== true) state.chats.push(chat);
+    const chat = resolveChatForOpenDetail(state, session, detail);
     chat.title = String(detail.title || chat.title || 'CTOX').trim() || 'CTOX';
     focusChatForUser(state, chat);
     chat.maximized = Boolean(detail.maximized);
-    chat.draft = String(detail.draft || detail.message || '');
-    chat.contextMeta = chatContextMetaFromDetail(detail);
+    if ('draft' in detail || 'message' in detail) {
+      chat.draft = String(detail.draft || detail.message || '');
+    }
+    chat.contextMeta = {
+      ...(chat.contextMeta && typeof chat.contextMeta === 'object' ? chat.contextMeta : {}),
+      ...chatContextMetaFromDetail(detail),
+    };
     const contextText = String(detail.context_text || detail.contextText || '').trim();
     if (contextText && !chat.messages.some((message) => message.contextFor === chat.id)) {
       chat.messages.push({
@@ -699,6 +701,10 @@ function setWindowInteractiveState(win, isActive) {
   });
 }
 
+function stageWindowChats(activeExpandedChat) {
+  return activeExpandedChat ? [activeExpandedChat] : [];
+}
+
 function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const syncFacade = root.__ctoxChatSync || null;
   initSchedulerLoop({
@@ -722,7 +728,10 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const activeExpandedChat = activeChat && !activeChat.minimized
     ? activeChat
     : expandedChats.find((chat) => chat.id === state.activeChatId) || expandedChats[0] || null;
-  const visibleWindowChats = selectVisibleChats(expandedChats, activeExpandedChat);
+  // The dock already provides navigation between chats. Rendering historical
+  // chats as translucent cards behind the active one made covered app controls
+  // look clickable while an inactive chat surface intercepted the click.
+  const visibleWindowChats = stageWindowChats(activeExpandedChat);
   const hiddenChatCount = Math.max(0, openChats.length - visibleChats.length);
   const hasVisibleChats = openChats.length > 0;
   const showChatStrip = !Boolean(state.dockCollapsed) && hasVisibleChats;
@@ -754,8 +763,16 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const attachmentsUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
     win.dataset.chatAttachmentSignature === attachmentSignature(visibleWindowChats[idx])
   ));
+  const composerShapeUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
+    win.dataset.chatComposerSignature === chatComposerSignature(visibleWindowChats[idx])
+  ));
+  const taskStateUnchanged = windowShapeUnchanged && existingWindows.every((win, idx) => (
+    windowTaskStateMatches(win, visibleWindowChats[idx])
+  ));
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
+                           composerShapeUnchanged &&
+                           taskStateUnchanged &&
                            root.querySelector('[data-chat-dock]') &&
                            wasCollapsed === dockCollapsed &&
                            matchesCurrentDate &&
@@ -1209,13 +1226,18 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   });
 
   root.querySelectorAll('[data-chat-followup-trigger]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', () => {
       const chatId = btn.dataset.chatFollowupTrigger;
       const chat = state.chats.find((item) => item.id === chatId);
       if (chat) {
         chat.showFollowUp = true;
-        await persistChatState({ state, db });
+        touchChats(state, [chat]);
+        state.lastUiMutationMs = Date.now();
         renderChatRoot({ root, state, commandBus, db, getActiveModule });
+        root.querySelector('.ctox-chat-window.is-active textarea[name="message"]')?.focus();
+        persistChatState({ state, db }).catch((error) => {
+          console.warn('Unable to persist chat follow-up state', error);
+        });
       }
     });
   });
@@ -1292,6 +1314,7 @@ async function submitChatForm({ root, state, chat, node, commandBus, db, sync, g
 
   chat.__submitting = true;
   chat.draft = '';
+  const isFollowUpSubmission = chat.showFollowUp === true;
   chat.showFollowUp = false; // Reset follow-up container state
   if (input) input.value = '';
   try {
@@ -1305,6 +1328,7 @@ async function submitChatForm({ root, state, chat, node, commandBus, db, sync, g
       getActiveModule,
       meta: chat.contextMeta || {},
       attachments,
+      followUpSubmission: isFollowUpSubmission,
       onPending: () => {
         persistChatState({ state, db, remote: false }).catch(() => {});
         renderChatRoot({ root, state, commandBus, db, getActiveModule });
@@ -1473,6 +1497,31 @@ function focusChatForUser(state, chat, { openDock = true } = {}) {
   return chat;
 }
 
+function findChatForOpenDetail(state, detail = {}) {
+  const focus = detail.focus && typeof detail.focus === 'object' ? detail.focus : {};
+  const taskId = String(detail.task_id || detail.taskId || focus.task_id || focus.taskId || '').trim();
+  const commandId = String(detail.command_id || detail.commandId || focus.command_id || focus.commandId || '').trim();
+  if (!taskId && !commandId) return null;
+  const chats = Array.isArray(state?.chats) ? state.chats : [];
+  return [...chats].reverse().find((chat) => {
+    if (taskId && String(chat?.lastTrackingId || '').trim() === taskId) return true;
+    if (commandId && String(chat?.lastTrackingId || '').trim() === commandId) return true;
+    return (Array.isArray(chat?.messages) ? chat.messages : []).some((message) => (
+      (taskId && [message?.taskId, message?.task_id, message?.replyFor].some((value) => String(value || '').trim() === taskId))
+      || (commandId && [message?.commandId, message?.command_id, message?.replyFor].some((value) => String(value || '').trim() === commandId))
+    ));
+  }) || null;
+}
+
+function resolveChatForOpenDetail(state, session, detail = {}) {
+  const trackedChat = findChatForOpenDetail(state, detail);
+  if (trackedChat) return trackedChat;
+  if (detail.reuseActive === true) return ensureChat(state, session);
+  const chat = createChat(state.ownerUserId, state.selectedDate);
+  state.chats.push(chat);
+  return chat;
+}
+
 function chatActivityMs(chat) {
   const messages = Array.isArray(chat?.messages) ? chat.messages : [];
   const latestMessage = messages.reduce((latest, message) => {
@@ -1526,6 +1575,14 @@ function attachmentSignature(chat) {
       att.size || att.size_bytes || 0,
     ].join(':'))
     .join('|');
+}
+
+function chatComposerSignature(chat) {
+  return `${getTaskState(chat)}:${chat?.showFollowUp ? 'follow-up' : 'default'}`;
+}
+
+function windowTaskStateMatches(win, chat) {
+  return Boolean(win?.classList?.contains?.(`is-task-${getTaskState(chat)}`));
 }
 
 export function chatAgentScopeViewFromMeta(contextMeta = {}) {
@@ -1736,7 +1793,7 @@ function chatWindow(chat, activeId, relation = 'center') {
   }
 
   return `
-    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}">
+    <section class="ctox-chat-window no-left-transition ${chat.maximized ? 'is-maximized' : ''} ${chat.id === activeId ? 'is-active' : ''} ${isMinimizedClass} ${taskStateClass}" data-chat-id="${escapeAttr(chat.id)}" data-chat-module="${escapeAttr(moduleName)}" data-chat-rel="${escapeAttr(relation)}" data-chat-attachment-signature="${escapeAttr(attachmentSignature(chat))}" data-chat-composer-signature="${escapeAttr(chatComposerSignature(chat))}">
       <header>
         <button class="ctox-chat-title" type="button" data-chat-title="${escapeAttr(chat.id)}">
           <div style="display: flex; align-items: center; gap: var(--space-2); width: 100%; min-width: 0;">
@@ -2366,6 +2423,7 @@ async function submitChatMessage({
   getActiveModule,
   meta = {},
   attachments = [],
+  followUpSubmission = false,
   onPending = null,
 }) {
   const activeModule = getActiveModule?.() || { id: 'ctox', title: 'CTOX' };
@@ -2379,6 +2437,7 @@ async function submitChatMessage({
   const commandId = meta.command_id || meta.commandId || `cmd_${crypto.randomUUID()}`;
   const messageId = `chatmsg_${crypto.randomUUID()}`;
   const threadKey = meta.thread_key || meta.threadKey || extraPayload.thread_key || extraPayload.threadKey || chat.contextMeta?.thread_key || `business-os/chat/${chat.id}`;
+  const sourceTracking = followUpSubmission ? chatTrackingSummary(chat) : null;
   chat.contextMeta = {
     ...(chat.contextMeta && typeof chat.contextMeta === 'object' ? chat.contextMeta : {}),
     module: sourceModule,
@@ -2434,8 +2493,13 @@ async function submitChatMessage({
       payload: {
         ...extraPayload,
         title: meta.title || extraPayload.title || titleFromText(text),
-        instruction: meta.instruction || extraPayload.instruction || text,
-        prompt: meta.prompt || extraPayload.prompt || text,
+        instruction: followUpSubmission ? text : meta.instruction || extraPayload.instruction || text,
+        prompt: followUpSubmission ? text : meta.prompt || extraPayload.prompt || text,
+        ...(followUpSubmission ? {
+          continuation: true,
+          source_task_id: sourceTracking?.tracking_task_id || '',
+          source_command_id: sourceTracking?.tracking_command_id || '',
+        } : {}),
         chat_id: chat.id,
         message_id: messageId,
         conversation: compactConversation(chat.messages),
@@ -2464,6 +2528,11 @@ async function submitChatMessage({
         url: location.href,
         language: document.documentElement.lang || 'de',
         created_at: new Date(now).toISOString(),
+        ...(followUpSubmission ? {
+          continuation: true,
+          source_task_id: sourceTracking?.tracking_task_id || '',
+          source_command_id: sourceTracking?.tracking_command_id || '',
+        } : {}),
       },
     };
     const result = await commandBus.dispatch(command, declaredControlCommand ? { until: 'local' } : {});
@@ -2542,7 +2611,7 @@ async function waitForSubmittedTaskId(db, commandId, { timeoutMs = 12_000, inter
   return '';
 }
 
-async function syncTrackedMessages({ state, db }) {
+async function syncTrackedMessages({ state, db, sync = null }) {
   let changed = false;
   const commands = db?.raw?.business_commands;
   const queue = db?.raw?.ctox_queue_tasks;
@@ -2550,6 +2619,7 @@ async function syncTrackedMessages({ state, db }) {
 
   const tracked = collectTrackedMessages(state);
   if (!tracked.length) return false;
+  await flushChatTrackingCollections({ sync, db });
 
   const commandIds = new Set();
   const taskIds = new Set();
@@ -2757,17 +2827,35 @@ async function findDoc(collection, id) {
 }
 
 function preferredTrackingStatus(commandDoc, taskDoc, currentStatus = '') {
-  const commandStatus = firstStatusValue(commandDoc, ['task_status', 'status', 'route_status']);
-  const taskStatus = firstStatusValue(taskDoc, ['task_status', 'status', 'route_status']);
+  const commandStatus = firstStatusValue(commandDoc, ['execution_phase', 'task_status', 'status', 'route_status', 'terminal_status']);
+  const taskStatus = firstStatusValue(taskDoc, ['execution_phase', 'task_status', 'status', 'route_status', 'terminal_status']);
   const terminalStatus = [commandStatus, taskStatus].find(isTerminalTrackingStatus);
   if (terminalStatus) return canonicalTrackingStatus(terminalStatus);
-  return canonicalTrackingStatus(taskStatus || commandStatus || currentStatus || '');
+  return canonicalTrackingStatus(commandStatus || taskStatus || currentStatus || '');
+}
+
+async function flushChatTrackingCollections({ sync, db } = {}) {
+  if (!sync?.startCollection) return [];
+  const collections = ['business_commands', 'ctox_queue_tasks']
+    .filter((collection) => db?.raw?.[collection]);
+  if (!collections.length) return [];
+  return Promise.all(collections.map(async (collection) => {
+    try {
+      const bridge = await sync.startCollection(collection);
+      await waitForSyncBridgeReady(bridge, 3500);
+      return { collection, ok: true };
+    } catch (error) {
+      console.warn?.(`[business-chat] tracking sync flush failed for ${collection}`, error);
+      return { collection, ok: false, error };
+    }
+  }));
 }
 
 function firstStatusValue(doc, fields) {
   if (!doc || typeof doc !== 'object') return '';
   for (const field of fields) {
     const value = String(doc[field] || '').trim();
+    if (value === 'none') continue;
     if (value) return value;
   }
   return '';
@@ -2989,7 +3077,7 @@ function readChatState(session) {
   try {
     const parsed = JSON.parse(localStorage.getItem(CHAT_STATE_KEY) || '{}') || {};
     const chats = Array.isArray(parsed.chats) ? parsed.chats : [];
-    return {
+    const state = {
       ownerUserId: owner,
       selectedDate: parsed.selectedDate || getLocalDateString(Date.now()),
       activeChatId: parsed.activeChatId || '',
@@ -3021,9 +3109,24 @@ function readChatState(session) {
             : {},
         })),
     };
+    collapseRestoredTerminalChat(state);
+    return state;
   } catch {
     return { ownerUserId: owner, selectedDate: getLocalDateString(Date.now()), dockCollapsed: true, preCollapseExpandedChatIds: [], deletedChatIds: {}, remoteHydrationComplete: false, chats: [] };
   }
+}
+
+function collapseRestoredTerminalChat(state) {
+  const activeId = String(state?.activeChatId || '');
+  if (!activeId || state.dockCollapsed) return state;
+  const active = state.chats?.find((chat) => chat.id === activeId);
+  if (!active) return state;
+  if (!['success', 'failed'].includes(getTaskState(active))) return state;
+  active.minimized = true;
+  state.activeChatId = '';
+  state.dockCollapsed = true;
+  state.preCollapseExpandedChatIds = [];
+  return state;
 }
 
 function writeChatState(state) {
@@ -3160,8 +3263,7 @@ function startChatLiveCollections({ sync, db, onReady } = {}) {
     .map(async (collection) => {
       try {
         const bridge = await sync.startCollection(collection);
-        await bridge?.state?.awaitInSync?.().catch?.(() => {});
-        await bridge?.state?.awaitInitialReplication?.().catch?.(() => {});
+        await waitForSyncBridgeReady(bridge, 5000);
         return { collection, ok: true };
       } catch (error) {
         console.warn?.(`[business-chat] live sync start failed for ${collection}`, error);
@@ -3220,16 +3322,35 @@ async function hydrateChatsFromRxDb({ state, db, session }) {
     return false;
   }
   const freshRemoteBaseline = state.remoteHydrationComplete !== true;
-  const focusChatId = freshRemoteBaseline || state.dockCollapsed
+  const localActiveChatId = String(state.activeChatId || '');
+  const hasRecentUserFocus = localActiveChatId
+    && Number(state.lastUiMutationMs || 0) > 0
+    && Date.now() - Number(state.lastUiMutationMs) < 30_000;
+  const focusChatId = freshRemoteBaseline || state.dockCollapsed || hasRecentUserFocus
     ? ''
     : remoteReplyChatToFocus(state.chats, remoteChats);
   const merged = mergeChats(state.chats, remoteChats, owner);
+  const preserveActiveChat = freshRemoteBaseline
+    && localActiveChatId
+    && merged.some((chat) => chat.id === localActiveChatId)
+    && hasRecentUserFocus;
   const changed = JSON.stringify(stripDraftsForCompare(state.chats)) !== JSON.stringify(stripDraftsForCompare(merged));
   state.chats = freshRemoteBaseline
-    ? merged.map((chat) => ({ ...chat, minimized: true, maximized: false }))
+    ? merged.map((chat) => ({
+      ...chat,
+      minimized: preserveActiveChat ? chat.id !== localActiveChatId : true,
+      maximized: false,
+    }))
     : merged;
   state.remoteHydrationComplete = true;
-  if (freshRemoteBaseline) state.activeChatId = '';
+  if (freshRemoteBaseline) {
+    if (preserveActiveChat) {
+      const activeChat = state.chats.find((chat) => chat.id === localActiveChatId);
+      if (activeChat) focusChatForUser(state, activeChat);
+    } else {
+      state.activeChatId = '';
+    }
+  }
   if (focusChatId) {
     const focusChat = state.chats.find((chat) => chat.id === focusChatId);
     if (focusChat) focusChatForUser(state, focusChat);
@@ -4383,7 +4504,7 @@ function installChatStyles() {
       max-width: min(440px, calc(100dvw - 24px));
       border: 1px solid color-mix(in srgb, var(--line) 25%, transparent);
       border-radius: 16px;
-      background: color-mix(in srgb, var(--surface) 60%, transparent);
+      background: color-mix(in srgb, var(--surface) 94%, transparent);
       backdrop-filter: blur(24px) saturate(180%);
       -webkit-backdrop-filter: blur(24px) saturate(180%);
       color: var(--text);
@@ -4440,7 +4561,9 @@ function installChatStyles() {
       --accent-soft: rgba(244, 63, 94, 0.12) !important;
     }
     .ctox-chat-window:not(.is-active) {
-      opacity: 0.6;
+      opacity: 0;
+      visibility: hidden;
+      pointer-events: none;
     }
     .ctox-chat-window:not(.is-active)[data-chat-rel="left"] {
       transform: rotateY(32deg) scale(0.8) translateZ(-160px) translateY(18px);
@@ -4764,6 +4887,7 @@ function installChatStyles() {
       letter-spacing: 0.3px;
     }
     .ctox-chat-message {
+      flex: 0 0 auto;
       max-width: 88%;
       min-inline-size: 0;
       max-inline-size: 88%;
@@ -6134,24 +6258,30 @@ export const __businessChatTestInternals = Object.freeze({
   clearSchedulerLoop,
   collectScheduledChatEntries,
   collectTrackedMessages,
+  collapseRestoredTerminalChat,
   createTrackedMessageWatch,
   findDocsByIds,
+  findChatForOpenDetail,
   focusChatForUser,
   getLocalDateString,
   hasActiveTrackedMessages,
   hasTrackedMessagesNeedingSync,
+  flushChatTrackingCollections,
   hydrateChatsFromRxDb,
   initSchedulerLoop,
   isChatEmptyForDeletion,
   preferredChatForDockOpen,
+  resolveChatForOpenDetail,
   persistChatDocsRemote,
   persistChatState,
   schedulerDelayMs,
   shouldDeferRemoteChatHydration,
   startChatLiveCollections,
   stageChatAttachments,
+  stageWindowChats,
   submitChatMessage,
   waitForSubmittedTaskId,
+  windowTaskStateMatches,
   syncTrackedMessages,
   isTransientCommandTrackingError,
   withChatPersistenceTimeout,

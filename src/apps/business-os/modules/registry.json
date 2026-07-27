@@ -613,12 +613,12 @@
           "focus"
         ],
         "initial_size": {
-          "width": 1040,
-          "height": 720
+          "width": 860,
+          "height": 600
         },
         "minimum_size": {
-          "width": 720,
-          "height": 520
+          "width": 640,
+          "height": 480
         },
         "multi_instance": false,
         "auto_restore": false

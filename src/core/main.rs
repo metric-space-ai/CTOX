@@ -350,6 +350,13 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
             {
                 return true;
             }
+            // Browser-backed Business OS web-stack commands are routed to
+            // the running daemon over the typed service IPC channel. The
+            // caller may be a read-only worker sandbox and must not attempt
+            // to open the daemon-owned turn ledger first.
+            "business-os" | "business" if args.get(1).map(String::as_str) == Some("web-stack") => {
+                return true;
+            }
             "business-os" | "business"
                 if args.get(1).map(String::as_str) == Some("peer")
                     && matches!(
@@ -5021,6 +5028,13 @@ mod tests {
     fn agent_research_commands_skip_caller_side_turn_ledger() {
         for args in [
             vec!["web", "deep-research", "--query", "bearing loads"],
+            vec![
+                "business-os",
+                "web-stack",
+                "person-research",
+                "--company",
+                "Example GmbH",
+            ],
             vec!["knowledge", "search", "--query", "bearing loads"],
             vec!["knowledge", "data", "list"],
         ] {

@@ -93,7 +93,10 @@ pub fn browser_runtime_manager() -> &'static BrowserRuntimeManager {
 }
 
 fn browser_profile_key(profile_owner: &str, session_id: &str, private_profile: bool) -> String {
-    if private_profile || session_id.starts_with("browser_session_web_stack_auth_") {
+    if private_profile
+        || session_id.starts_with("browser_session_web_stack_auth_")
+        || session_id.starts_with("browser_session_web_stack_public_")
+    {
         format!("{profile_owner}:{session_id}")
     } else {
         profile_owner.to_string()
@@ -350,6 +353,22 @@ mod tests {
         assert_eq!(
             browser_profile_key(owner, "browser_session_regular", false),
             owner
+        );
+    }
+
+    #[test]
+    fn web_stack_public_sessions_use_source_scoped_profiles() {
+        let owner = "ctox";
+        let companyhouse = "browser_session_web_stack_public_companyhouse-de";
+        let northdata = "browser_session_web_stack_public_northdata-de";
+
+        assert_ne!(
+            Sha256::digest(browser_profile_key(owner, companyhouse, false)),
+            Sha256::digest(browser_profile_key(owner, northdata, false))
+        );
+        assert_ne!(
+            browser_profile_key(owner, companyhouse, false),
+            browser_profile_key(owner, "browser_session_regular", false)
         );
     }
 }

@@ -1,7 +1,7 @@
 const EDITOR_PROTOCOL = 'euro-office-cell-binary-v10';
 const EDITOR_PROTOCOL_VERSION = 10;
 
-export async function createCtoxForkRuntime({ root, bridge, permissions, emit, locale = 'de', theme = 'system', kind = 'spreadsheet' }) {
+export async function createCtoxForkRuntime({ root, bridge, permissions, emit, locale = 'de', theme = 'system', kind = 'spreadsheet', launchArgs = {} }) {
   const isDocument = kind === 'document';
   const productId = isDocument ? 'ctox-documents' : 'ctox-spreadsheets';
   const productName = isDocument ? 'CTOX Documents' : 'CTOX Spreadsheets';
@@ -29,13 +29,16 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   entry.searchParams.set('lang', locale === 'en' ? 'en' : 'de');
   entry.searchParams.set('frameEditorId', frameEditorId);
   entry.searchParams.set('parentOrigin', location.origin);
+  const assetRevision = new URL(import.meta.url).searchParams.get('v');
+  if (assetRevision) entry.searchParams.set('v', assetRevision);
   frame.src = entry.href;
   root.replaceChildren(frame);
 
   let resolveAppReady;
   let rejectAppReady;
   const appReady = new Promise((resolve, reject) => { resolveAppReady = resolve; rejectAppReady = reject; });
-  const readyTimeout = setTimeout(() => rejectAppReady(new Error(`${productName} app-ready timed out`)), 30000);
+  const appReadyTimeoutMs = normalizeAppReadyTimeout(launchArgs.appReadyTimeoutMs);
+  const readyTimeout = setTimeout(() => rejectAppReady(new Error(`${productName} app-ready timed out`)), appReadyTimeoutMs);
   const onMessage = async (event) => {
     if (destroyed || event.origin !== location.origin || event.source !== frame.contentWindow) return;
     let message = event.data;
@@ -610,6 +613,13 @@ function normalizeBytes(value) {
 
 function permissionError(message) { return Object.assign(new Error(message), { code: 'permission_denied' }); }
 
+function normalizeAppReadyTimeout(value) {
+  const timeoutMs = Number(value);
+  return Number.isFinite(timeoutMs) && timeoutMs >= 10000
+    ? Math.min(timeoutMs, 295000)
+    : 115000;
+}
+
 export const __ctoxForkTestHooks = {
   hasCellBinarySignature,
   hasEditorBinarySignature,
@@ -619,4 +629,5 @@ export const __ctoxForkTestHooks = {
   installDocumentMediaResolver,
   mimeTypeForOfficeMedia,
   resolveOfficeMediaUrl,
+  normalizeAppReadyTimeout,
 };

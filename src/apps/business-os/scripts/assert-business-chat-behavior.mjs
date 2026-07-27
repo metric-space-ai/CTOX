@@ -222,19 +222,11 @@ try {
     await page.screenshot({ path: groupedScreenshotPath, fullPage: true });
   });
 
-  await scenario(page, 'inactive-window-click-selects', { count: 4, activeIndex: 2 }, async (m) => {
+  await scenario(page, 'only-active-window-renders', { count: 4, activeIndex: 2 }, async (m) => {
     expect(m.inactiveFocusable === 0, `inactive controls must not be tabbable, got ${m.inactiveFocusable}`);
     expect(m.inactiveVisibleActions === 0, `inactive header actions must be hidden, got ${m.inactiveVisibleActions}`);
-    const before = m.activeId;
-    const after = await page.evaluate(async () => {
-      const inactive = document.querySelector('.ctox-chat-window:not(.is-active)');
-      inactive.click();
-      await window.chatHarness.waitFor(() => document.querySelector('.ctox-chat-window.is-active')?.dataset.chatId === inactive.dataset.chatId);
-      return window.chatHarness.collect();
-    });
-    results.push({ scenario: 'inactive-window-after-click', metrics: after });
-    expect(after.activeId !== before, 'clicking inactive preview body must select it');
-    expect(after.inactiveFocusable === 0, `post-select inactive controls must stay out of tab order, got ${after.inactiveFocusable}`);
+    expect(m.windowCount === 1, `the stage must render only the active chat window, got ${m.windowCount}`);
+    expect(m.renderedWindowIds.join(',') === 'chat_2', `the rendered window should be chat_2, got ${m.renderedWindowIds.join(',')}`);
   });
 
   await scenario(page, 'minimized-active-window-leaves-chip-only', { count: 2, activeIndex: 0 }, async () => {
@@ -303,6 +295,48 @@ try {
     results.push({ scenario: 'active-control-latency-ms', maximizeLatency, minimizeLatency });
     expect(maximizeLatency < 150, `maximize must render before persistence delay, got ${maximizeLatency.toFixed(1)}ms`);
     expect(minimizeLatency < 150, `minimize must render before persistence delay, got ${minimizeLatency.toFixed(1)}ms`);
+  });
+
+  await scenario(page, 'follow-up-renders-before-db-delay', {
+    count: 1,
+    activeIndex: 0,
+    failedChat: true,
+    dbDelay: 500,
+  }, async () => {
+    const followUpResult = await page.evaluate(async () => {
+      const start = performance.now();
+      document.querySelector('.ctox-chat-window.is-active [data-chat-followup-trigger]').click();
+      await window.chatHarness.waitForPaint();
+      return {
+        latency: performance.now() - start,
+        composerVisible: Boolean(document.querySelector('.ctox-chat-window.is-active textarea[placeholder="Folgeaufgabe eingeben..."]')),
+        triggerVisible: Boolean(document.querySelector('.ctox-chat-window.is-active [data-chat-followup-trigger]')),
+      };
+    });
+    results.push({ scenario: 'follow-up-control-result', followUpResult });
+    expect(followUpResult.composerVisible, 'follow-up click must render the follow-up composer');
+    expect(followUpResult.latency < 150, `follow-up composer must render before persistence delay, got ${followUpResult.latency.toFixed(1)}ms`);
+    const followUpCommand = await page.evaluate(async () => {
+      const textarea = document.querySelector('.ctox-chat-window.is-active textarea[placeholder="Folgeaufgabe eingeben..."]');
+      textarea.value = 'Korrigierte Folgeaufgabe';
+      textarea.dispatchEvent(new InputEvent('input', { bubbles: true }));
+      document.querySelector('.ctox-chat-window.is-active [data-chat-send]').click();
+      await window.chatHarness.waitFor(() => window.chatHarness.lastCommand);
+      const command = window.chatHarness.lastCommand;
+      return {
+        instruction: command.payload.instruction,
+        prompt: command.payload.prompt,
+        continuation: command.payload.continuation,
+        sourceTaskId: command.payload.source_task_id,
+        sourceCommandId: command.payload.source_command_id,
+      };
+    });
+    results.push({ scenario: 'follow-up-command-payload', followUpCommand });
+    expect(followUpCommand.instruction === 'Korrigierte Folgeaufgabe', `follow-up instruction must use current user text, got ${followUpCommand.instruction}`);
+    expect(followUpCommand.prompt === 'Korrigierte Folgeaufgabe', `follow-up prompt must use current user text, got ${followUpCommand.prompt}`);
+    expect(followUpCommand.continuation === true, 'follow-up command must declare durable continuation');
+    expect(followUpCommand.sourceTaskId === 'task_failed_0', `follow-up command must link source task, got ${followUpCommand.sourceTaskId}`);
+    expect(followUpCommand.sourceCommandId === 'task_failed_0', `follow-up command must link source command, got ${followUpCommand.sourceCommandId}`);
   });
 
   await scenario(page, 'delete-renders-before-db-delay', { count: 1, dbDelay: 500 }, async () => {
@@ -608,6 +642,7 @@ function harnessHtml() {
       localStorage.clear();
       sessionStorage.clear();
       chatCollectionSubscribers = new Set();
+      window.chatHarness.lastCommand = null;
 
       const selectedDate = localDateString(addDays(new Date(), options.selectedOffset || 0));
       const chats = Array.from({ length: options.count || 0 }, (_, index) => makeChat({ index, selectedDate, options }));
@@ -653,7 +688,12 @@ function harnessHtml() {
           createdAt: createdAt + i * 1000,
         });
       }
-      const trackingId = groupedResearch ? 'task_research_' + index : '';
+      const failedChat = Boolean(options.failedChat) && index === Number(options.activeIndex || 0);
+      const trackingId = groupedResearch
+        ? 'task_research_' + index
+        : failedChat
+          ? 'task_failed_' + index
+          : '';
       if (groupedResearch) {
         const statuses = ['running', 'queued', 'success', 'success', 'success', 'failed'];
         messages.push({
@@ -663,6 +703,16 @@ function harnessHtml() {
           taskId: trackingId,
           commandId: trackingId,
           status: statuses[index % statuses.length],
+          createdAt: createdAt + 500,
+        });
+      } else if (failedChat) {
+        messages.push({
+          id: 'status_failed_' + index,
+          role: 'ctox',
+          text: 'CTOX konnte die Aufgabe nicht ausführen.',
+          taskId: trackingId,
+          commandId: trackingId,
+          status: 'failed',
           createdAt: createdAt + 500,
         });
       }
@@ -686,7 +736,17 @@ function harnessHtml() {
               thread_key: 'research/web/wettbewerberanalyse',
               group_key: 'research:wettbewerberanalyse',
             }
-          : { module: moduleName },
+          : failedChat
+            ? {
+                module: moduleName,
+                instruction: 'Ursprüngliche Instruktion',
+                prompt: 'Ursprünglicher Prompt',
+                payload: {
+                  instruction: 'Ursprüngliche Payload-Instruktion',
+                  prompt: 'Ursprünglicher Payload-Prompt',
+                },
+              }
+            : { module: moduleName },
         createdAt,
         updated_at_ms: createdAt,
         showFollowUp: false,
@@ -702,7 +762,8 @@ function harnessHtml() {
 
     function makeCommandBus(options) {
       return {
-        dispatch: async () => {
+        dispatch: async (command) => {
+          window.chatHarness.lastCommand = structuredClone(command);
           if (options.commandError === 'transient') {
             throw new Error('Timed out waiting for WebRTC response rxdb.query.fetch');
           }

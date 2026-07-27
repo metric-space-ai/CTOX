@@ -8,9 +8,17 @@
     "expected_provider": "handelsregister",
     "country_hints": ["DE"],
     "tier": "P",
+    "adapter_version": "v1",
     "skip_probe": true,
     "expected_min_records": 1,
     "record_key_fields": ["field", "source_url"],
+    "access_mode": "public_browser",
+    "provider_owned_only": true,
+    "allowed_domains": ["handelsregister.de", "www.handelsregister.de"],
+    "challenge_detection": true,
+    "unlock_signal_source": "scrape-target:handelsregister.de",
+    "heal_mode": "versioned_script",
+    "failure_modes": ["blocked", "portal_drift", "temporary_unreachable"],
     "api": {
       "semantic": {
         "source_fields": ["value", "note"]

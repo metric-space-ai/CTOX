@@ -17,8 +17,12 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Duration;
 use std::time::Instant;
+use url::Url;
 
 use crate::browser::{run_browser_automation, BrowserAutomationRequest};
 
@@ -59,6 +63,438 @@ pub struct ProbeOutcome {
     pub duration_ms: u64,
     pub raw_excerpt: Value,
     pub notes: Option<String>,
+}
+
+/// One bounded browser warm-up for a public scrape source after an access
+/// classification. This path never carries credentials and may only navigate
+/// inside the source-owned domain allow-list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicUnlockRequest {
+    pub source_id: String,
+    pub browser_session_id: String,
+    pub target_url: String,
+    pub allowed_domains: Vec<String>,
+    pub trigger: String,
+    pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PublicUnlockOutcome {
+    pub attempted: bool,
+    pub ok: bool,
+    pub status: String,
+    pub source_id: String,
+    pub browser_session_id: String,
+    pub trigger: String,
+    pub target_url: String,
+    pub final_url: Option<String>,
+    pub challenge_detected: bool,
+    pub markers: Vec<String>,
+    pub error: Option<String>,
+    pub secret_value_in_payload: bool,
+}
+
+/// Warm the shared CTOX browser profile for a blocked public source. The
+/// registered scrape adapter is responsible for the subsequent extraction;
+/// this function only establishes lawful browser state (redirects, ordinary
+/// consent, cookies) and observes whether a challenge remains.
+pub fn run_public_browser_fallback(
+    root: &Path,
+    ctox_bin: &Path,
+    request: &PublicUnlockRequest,
+) -> PublicUnlockOutcome {
+    let rejected = |error: String| PublicUnlockOutcome {
+        attempted: false,
+        ok: false,
+        status: "policy_rejected".to_string(),
+        source_id: request.source_id.clone(),
+        browser_session_id: request.browser_session_id.clone(),
+        trigger: request.trigger.clone(),
+        target_url: request.target_url.clone(),
+        final_url: None,
+        challenge_detected: false,
+        markers: Vec::new(),
+        error: Some(error),
+        secret_value_in_payload: false,
+    };
+    if let Err(error) = validate_public_unlock_request(request) {
+        return rejected(error.to_string());
+    }
+    if let Err(error) = crate::egress::assert_browser_egress_url(root, &request.target_url) {
+        return rejected(error.to_string());
+    }
+
+    let source = match build_public_unlock_browser_source(request) {
+        Ok(source) => source,
+        Err(error) => return rejected(error.to_string()),
+    };
+    let payload = match run_public_browser_session_automation(root, ctox_bin, request, &source) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return PublicUnlockOutcome {
+                attempted: true,
+                ok: false,
+                status: "browser_error".to_string(),
+                source_id: request.source_id.clone(),
+                browser_session_id: request.browser_session_id.clone(),
+                trigger: request.trigger.clone(),
+                target_url: request.target_url.clone(),
+                final_url: None,
+                challenge_detected: false,
+                markers: Vec::new(),
+                error: Some(error.to_string()),
+                secret_value_in_payload: false,
+            };
+        }
+    };
+
+    let result = payload.get("result").unwrap_or(&Value::Null);
+    let final_url = result
+        .get("final_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let final_url_allowed = final_url
+        .as_deref()
+        .is_some_and(|url| url_allowed_for_public_unlock(url, &request.allowed_domains));
+    let mut markers = result
+        .get("markers")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    markers.extend(
+        payload
+            .pointer("/detection/markers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string),
+    );
+    markers.sort();
+    markers.dedup();
+    markers.truncate(12);
+    let challenge_detected = result
+        .get("challenge_detected")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || !markers.is_empty();
+    let browser_ok = payload.get("ok").and_then(Value::as_bool) == Some(true)
+        && result.get("ok").and_then(Value::as_bool) == Some(true);
+    let ok = browser_ok && final_url_allowed && !challenge_detected;
+    let status = if !browser_ok {
+        "browser_error"
+    } else if !final_url_allowed {
+        "unsafe_redirect"
+    } else if challenge_detected {
+        "challenge_persisted"
+    } else if ok {
+        "browser_ready"
+    } else {
+        "browser_error"
+    };
+    let error = (!ok).then(|| {
+        result
+            .get("error")
+            .and_then(Value::as_str)
+            .or_else(|| payload.get("error").and_then(Value::as_str))
+            .unwrap_or(status)
+            .to_string()
+    });
+    if !ok {
+        record_signal_lossy(
+            root,
+            &format!("public-browser-fallback:{}", request.source_id),
+            final_url.as_deref().or(Some(request.target_url.as_str())),
+            json!({
+                "reason": status,
+                "trigger": request.trigger,
+                "markers": markers.clone(),
+                "secret_value_in_payload": false,
+            }),
+        );
+    }
+    PublicUnlockOutcome {
+        attempted: true,
+        ok,
+        status: status.to_string(),
+        source_id: request.source_id.clone(),
+        browser_session_id: request.browser_session_id.clone(),
+        trigger: request.trigger.clone(),
+        target_url: request.target_url.clone(),
+        final_url,
+        challenge_detected,
+        markers,
+        error,
+        secret_value_in_payload: false,
+    }
+}
+
+fn validate_public_unlock_request(request: &PublicUnlockRequest) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            request.trigger.as_str(),
+            "blocked" | "temporary_unreachable"
+        ),
+        "public browser fallback trigger must be blocked or temporary_unreachable"
+    );
+    anyhow::ensure!(
+        !request.source_id.trim().is_empty(),
+        "public browser fallback source_id is required"
+    );
+    anyhow::ensure!(
+        valid_public_browser_session_id(&request.browser_session_id),
+        "public browser fallback requires a bounded browser session id"
+    );
+    anyhow::ensure!(
+        !request.allowed_domains.is_empty(),
+        "public browser fallback requires an explicit source domain allow-list"
+    );
+    for domain in &request.allowed_domains {
+        anyhow::ensure!(
+            valid_public_unlock_domain(domain),
+            "invalid public browser fallback domain `{domain}`"
+        );
+    }
+    anyhow::ensure!(
+        url_allowed_for_public_unlock(&request.target_url, &request.allowed_domains),
+        "public browser fallback target is outside the source domain allow-list"
+    );
+    Ok(())
+}
+
+fn valid_public_browser_session_id(raw: &str) -> bool {
+    let value = raw.trim();
+    !value.is_empty()
+        && value.len() <= 180
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '-'))
+}
+
+fn run_public_browser_session_automation(
+    root: &Path,
+    ctox_bin: &Path,
+    request: &PublicUnlockRequest,
+    source: &str,
+) -> Result<Value> {
+    let script_dir = root.join("runtime").join("web-unlock");
+    std::fs::create_dir_all(&script_dir)
+        .with_context(|| format!("failed to create {}", script_dir.display()))?;
+    let script_path = script_dir.join(format!(
+        "public-fallback-{}-{}.js",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    std::fs::write(&script_path, source)
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+
+    let timeout_ms = request.timeout_ms.clamp(5_000, 90_000);
+    let command = public_browser_session_command(root, ctox_bin, request, &script_path);
+    let output = crate::browser::command_output_with_timeout(
+        command,
+        Duration::from_millis(timeout_ms.saturating_add(10_000)),
+    );
+    let _ = std::fs::remove_file(&script_path);
+    let output = output?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    anyhow::ensure!(
+        output.status.success(),
+        "persistent browser automation failed: {}",
+        if stderr.is_empty() { &stdout } else { &stderr }
+    );
+    serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "persistent browser automation produced invalid JSON: {}",
+            stdout.chars().take(400).collect::<String>()
+        )
+    })
+}
+
+fn public_browser_session_command(
+    root: &Path,
+    ctox_bin: &Path,
+    request: &PublicUnlockRequest,
+    script_path: &Path,
+) -> Command {
+    let mut command = Command::new(ctox_bin);
+    command
+        .current_dir(root)
+        .arg("web")
+        .arg("browser-automation")
+        .arg("--session-id")
+        .arg(&request.browser_session_id)
+        .arg("--timeout-ms")
+        .arg(request.timeout_ms.clamp(5_000, 90_000).to_string())
+        .arg("--script-file")
+        .arg(script_path);
+    command
+}
+
+fn valid_public_unlock_domain(raw: &str) -> bool {
+    let value = raw.trim().trim_start_matches('.');
+    !value.is_empty()
+        && value.len() <= 253
+        && value.contains('.')
+        && value.parse::<IpAddr>().is_err()
+        && !value.contains('/')
+        && !value.contains(':')
+        && !value.chars().any(char::is_whitespace)
+        && value.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        })
+}
+
+fn url_allowed_for_public_unlock(raw: &str, allowed_domains: &[String]) -> bool {
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "http" | "https")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    let Some(host) = url.host_str().map(|host| host.to_ascii_lowercase()) else {
+        return false;
+    };
+    allowed_domains.iter().any(|domain| {
+        let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+        host == domain || host.ends_with(&format!(".{domain}"))
+    })
+}
+
+fn build_public_unlock_browser_source(request: &PublicUnlockRequest) -> Result<String> {
+    validate_public_unlock_request(request)?;
+    let target_url = serde_json::to_string(&request.target_url)?;
+    let allowed_domains = serde_json::to_string(&request.allowed_domains)?;
+    Ok(format!(
+        r#"const targetUrl = {target_url};
+const allowedDomains = {allowed_domains};
+const hostAllowed = (raw) => {{
+  try {{
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
+    return ["http:", "https:"].includes(parsed.protocol)
+      && !parsed.username && !parsed.password
+      && allowedDomains.some((domain) => host === domain || host.endsWith(`.${{domain}}`));
+  }} catch {{
+    return false;
+  }}
+}};
+const alignBrowserIdentity = async () => {{
+  const currentUa = await page.evaluate(() => navigator.userAgent);
+  let runtimeVersion = "";
+  if (browser && typeof browser.version === "function") {{
+    try {{ runtimeVersion = String(await browser.version() || ""); }} catch {{}}
+  }}
+  const version = runtimeVersion || currentUa.match(/Chrome\/(\d+(?:\.\d+){{0,3}})/)?.[1] || "";
+  const major = String(version || "").match(/^(\d+)/)?.[1];
+  if (!major) return;
+  const userAgent = currentUa.replace(/Chrome\/\d+(?:\.\d+){{0,3}}/, `Chrome/${{version}}`);
+  const platformName = process.platform === "darwin" ? "macOS"
+    : process.platform === "win32" ? "Windows" : "Linux";
+  const navigatorPlatform = process.platform === "darwin" ? "MacIntel"
+    : process.platform === "win32" ? "Win32" : "Linux x86_64";
+  const brands = [
+    {{ brand: "Chromium", version: major }},
+    {{ brand: "Google Chrome", version: major }},
+    {{ brand: "Not.A/Brand", version: "24" }},
+  ];
+  await context.setExtraHTTPHeaders({{
+    "Sec-CH-UA": `"Chromium";v="${{major}}", "Google Chrome";v="${{major}}", "Not.A/Brand";v="24"`,
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": `"${{platformName}}"`,
+  }});
+  const client = await context.newCDPSession(page);
+  await client.send("Network.setUserAgentOverride", {{
+    userAgent,
+    acceptLanguage: "de-DE,de;q=0.9,en;q=0.8",
+    platform: navigatorPlatform,
+    userAgentMetadata: {{
+      brands,
+      fullVersionList: brands.map((item) => ({{
+        brand: item.brand,
+        version: item.brand === "Not.A/Brand" ? "24.0.0.0" : version,
+      }})),
+      fullVersion: version,
+      platform: platformName,
+      platformVersion: "",
+      architecture: process.arch === "arm64" ? "arm" : "x86",
+      model: "",
+      mobile: false,
+      bitness: "64",
+      wow64: false,
+    }},
+  }});
+}};
+const dismissConsent = async () => {{
+  for (const name of [
+    /^(alle (cookies )?akzeptieren|akzeptieren|zustimmen|accept all|allow all)$/i,
+    /^(alle ablehnen|reject all|alles ablehnen)$/i,
+  ]) {{
+    const button = page.getByRole("button", {{ name }}).first();
+    if (await button.isVisible({{ timeout: 1200 }}).catch(() => false)) {{
+      await button.click({{ timeout: 2000 }}).catch(() => null);
+      await page.waitForTimeout(500);
+      break;
+    }}
+  }}
+}};
+const challengeState = async () => {{
+  const title = await page.title().catch(() => "");
+  const text = await page.locator("body").innerText({{ timeout: 3000 }}).catch(() => "");
+  const html = await page.content().catch(() => "");
+  const corpus = `${{title}}\n${{text}}\n${{html.slice(0, 64000)}}`.slice(0, 120000).toLowerCase();
+  const checks = [
+    ["captcha", /captcha|recaptcha/],
+    ["cloudflare_challenge", /cf-chl-|cf-mitigated|challenge-platform|cloudflare|turnstile|just a moment|nur einen moment/],
+    ["human_verification", /verify (?:that )?you are human|bestätigen sie.{{0,30}}mensch|sicherheits(?:ü|u)berpr(?:ü|u)fung/],
+    ["access_denied", /access denied|request blocked|zugriff verweigert|wurden gesperrt/],
+    ["rate_limited", /too many requests|rate.?limit|ungewöhnlich viele anfragen/],
+  ];
+  return {{
+    markers: checks.filter(([, pattern]) => pattern.test(corpus)).map(([name]) => name),
+    title,
+    text,
+  }};
+}};
+await alignBrowserIdentity();
+await ctoxBrowser.goto(targetUrl, {{ timeoutMs: 30000, waitUntil: "domcontentloaded" }});
+if (!hostAllowed(page.url())) return {{ ok: false, status: "unsafe_redirect", final_url: page.url(), challenge_detected: false, markers: [] }};
+await dismissConsent();
+await page.waitForTimeout(2500);
+for (const delay of [3000, 5000]) {{
+  if ((await challengeState()).markers.length === 0) break;
+  if (globalThis.humanlike?.humanScroll) {{
+    await globalThis.humanlike.humanScroll(page, 320, {{ scrollOvershootChance: 0 }}).catch(() => null);
+  }}
+  await page.waitForTimeout(delay);
+  if ((await challengeState()).markers.length === 0) break;
+  await page.reload({{ waitUntil: "domcontentloaded", timeout: 15000 }}).catch(() => null);
+  await dismissConsent();
+}}
+const finalUrl = page.url();
+if (!hostAllowed(finalUrl)) return {{ ok: false, status: "unsafe_redirect", final_url: finalUrl, challenge_detected: false, markers: [] }};
+const finalState = await challengeState();
+const markers = finalState.markers;
+return {{
+  ok: markers.length === 0,
+  status: markers.length === 0 ? "browser_ready" : "challenge_persisted",
+  final_url: finalUrl,
+  challenge_detected: markers.length > 0,
+  markers,
+}};"#
+    ))
 }
 
 fn core_db_path(root: &Path) -> PathBuf {
@@ -481,6 +917,24 @@ pub fn handle_unlock_command(root: &Path, args: &[String]) -> Result<()> {
             let limit = find_flag_u64(args, "--limit").unwrap_or(20);
             cmd_history(root, probe_filter.as_deref(), limit)
         }
+        "report" => {
+            let strict = args.iter().any(|arg| arg == "--strict");
+            let max_age_hours = find_flag_u64(args, "--max-age-hours").unwrap_or(168);
+            let report = crate::unlock_report::build_unlock_acceptance_report(
+                root,
+                crate::unlock_report::UnlockReportOptions {
+                    strict,
+                    max_age_hours,
+                },
+            )?;
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            anyhow::ensure!(
+                !strict || report.ok,
+                "strict web unlock acceptance failed for {} active target(s)",
+                report.action_required
+            );
+            Ok(())
+        }
         "add-vector" => cmd_add_vector(root, args),
         "set-vector-status" => cmd_set_vector_status(root, args),
         "repair" => {
@@ -545,6 +999,9 @@ fn print_usage() {
     println!("                                 matching the failed test names.");
     println!("  history [<probe_id>] [--limit N]");
     println!("                                 Show recent test runs from the run history");
+    println!("  report [--strict] [--max-age-hours N]");
+    println!("                                 Verify every active registered adapter from");
+    println!("                                 durable production extraction evidence.");
     println!("  add-vector --id <vid> --probe <pid> --test <name> --desc <text> --fix <text>");
     println!("                                 Register a newly discovered vector");
     println!("  set-vector-status --id <vid> --status <working|broken|untested>");
@@ -1321,6 +1778,98 @@ fn first_positional(args: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn public_request() -> PublicUnlockRequest {
+        PublicUnlockRequest {
+            source_id: "companyhouse.de".to_string(),
+            browser_session_id: "browser_session_web_stack_public_companyhouse-de".to_string(),
+            target_url: "https://www.companyhouse.de/".to_string(),
+            allowed_domains: vec!["companyhouse.de".to_string()],
+            trigger: "blocked".to_string(),
+            timeout_ms: 45_000,
+        }
+    }
+
+    #[test]
+    fn public_browser_fallback_accepts_only_bounded_access_classifications() {
+        let mut request = public_request();
+        assert!(validate_public_unlock_request(&request).is_ok());
+        request.trigger = "temporary_unreachable".to_string();
+        assert!(validate_public_unlock_request(&request).is_ok());
+        request.trigger = "portal_drift".to_string();
+        assert!(validate_public_unlock_request(&request).is_err());
+        request = public_request();
+        request.browser_session_id = "invalid session/id".to_string();
+        assert!(validate_public_unlock_request(&request).is_err());
+    }
+
+    #[test]
+    fn public_browser_fallback_rejects_cross_domain_and_credential_urls() {
+        let mut request = public_request();
+        for target in [
+            "https://companyhouse.de.evil.example/",
+            "https://user:secret@companyhouse.de/",
+            "file:///etc/passwd",
+            "http://127.0.0.1/",
+        ] {
+            request.target_url = target.to_string();
+            assert!(
+                validate_public_unlock_request(&request).is_err(),
+                "target must be rejected: {target}"
+            );
+        }
+        request.target_url = "https://www.companyhouse.de/profil".to_string();
+        request.allowed_domains = vec!["https://companyhouse.de/".to_string()];
+        assert!(validate_public_unlock_request(&request).is_err());
+        request.target_url = "http://127.0.0.1/".to_string();
+        request.allowed_domains = vec!["127.0.0.1".to_string()];
+        assert!(validate_public_unlock_request(&request).is_err());
+    }
+
+    #[test]
+    fn public_browser_fallback_script_is_domain_bound_and_redacted() {
+        let source = build_public_unlock_browser_source(&public_request()).unwrap();
+        assert!(source.contains("https://www.companyhouse.de/"));
+        assert!(source.contains("hostAllowed"));
+        assert!(source.contains("unsafe_redirect"));
+        assert!(source.contains("challenge_persisted"));
+        assert!(source.contains("alignBrowserIdentity"));
+        assert!(source.contains("browser && typeof browser.version === \"function\""));
+        assert!(source.contains("runtimeVersion = String(await browser.version()"));
+        assert!(!source.contains("browser.version().catch"));
+        assert!(source.contains("currentUa.match(/Chrome"));
+        assert!(source.contains("humanlike.humanScroll"));
+        assert!(source.contains("page.reload"));
+        assert!(!source.contains("credential_ref"));
+        assert!(!source.contains("secret_value"));
+        assert!(!source.contains("screenshot"));
+    }
+
+    #[test]
+    fn public_browser_fallback_invokes_the_persistent_session_contract() {
+        let request = public_request();
+        let root = Path::new("/ctox-root");
+        let script = Path::new("/ctox-root/runtime/web-unlock/fallback.js");
+        let command =
+            public_browser_session_command(root, Path::new("/usr/bin/ctox"), &request, script);
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "web",
+                "browser-automation",
+                "--session-id",
+                "browser_session_web_stack_public_companyhouse-de",
+                "--timeout-ms",
+                "45000",
+                "--script-file",
+                "/ctox-root/runtime/web-unlock/fallback.js",
+            ]
+        );
+    }
 
     #[test]
     fn evaluate_sannysoft_passed_when_no_failed() {

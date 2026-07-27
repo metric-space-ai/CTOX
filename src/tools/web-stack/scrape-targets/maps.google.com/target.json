@@ -1,9 +1,9 @@
 {
   "target_key": "maps-google-com",
   "display_name": "Google Maps Company Research",
-  "start_url": "https://www.google.de/maps",
+  "start_url": "https://www.google.com/maps/search/?api=1",
   "target_kind": "prospect-research",
   "status": "active",
-  "config": { "expected_provider": "maps.google.com", "country_hints": ["DE", "AT", "CH"], "tier": "S", "expected_min_records": 1, "record_key_fields": ["field", "source_url"] },
+  "config": { "expected_provider": "maps.google.com", "country_hints": ["DE", "AT", "CH"], "tier": "S", "expected_min_records": 1, "record_key_fields": ["field", "source_url"], "adapter_version": "v1", "access_mode": "public_browser", "provider_owned_only": true, "maps_url_api_version": 1, "allowed_domains": ["google.com", "google.de"], "challenge_detection": true, "unlock_signal_source": "scrape-target:maps.google.com", "heal_mode": "versioned_script", "failure_modes": ["blocked", "portal_drift", "temporary_unreachable"] },
   "output_schema": { "schema_key": "prospect.v1", "primary_artifact_kind": "field_records_json", "record_key_fields": ["field", "source_url"] }
 }

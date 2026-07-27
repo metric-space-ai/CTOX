@@ -165,6 +165,13 @@
     },
     {
       "file": "src/core/business_os/store.rs",
+      "function": "reusable_web_stack_auth_assist_request",
+      "occurrence": 1,
+      "semantics": "execution_link",
+      "target_field": "execution_task_id"
+    },
+    {
+      "file": "src/core/business_os/store.rs",
       "function": "write_rxdb_control_command_state",
       "occurrence": 1,
       "semantics": "compatibility_target",

@@ -1,34 +1,34 @@
 {
   "input": {
     "source_id": "companyhouse.de",
-    "company": "WITTENSTEIN SE",
+    "company": "Beispiel Maschinenbau SE",
     "country": "DE"
   },
   "expected": {
-    "firma_name": "WITTENSTEIN SE"
+    "firma_name": "Beispiel Maschinenbau SE"
   },
   "search": {
     "results": [
       {
-        "title": "WITTENSTEIN SE",
-        "url": "https://www.companyhouse.de/WITTENSTEIN-SE-Igersheim",
+        "title": "Beispiel Maschinenbau SE",
+        "url": "https://www.companyhouse.de/Beispiel-Maschinenbau-SE-Musterstadt",
         "summary": "Firmenprofil"
       }
     ]
   },
   "read": {
     "ok": true,
-    "url": "https://www.companyhouse.de/WITTENSTEIN-SE-Igersheim",
+    "url": "https://www.companyhouse.de/Beispiel-Maschinenbau-SE-Musterstadt",
     "title": "Nur einen Moment...",
     "raw_html": "<main>Cloudflare - Noch einen Schritt, natürlicher Zugriff erforderlich</main>"
   },
   "browser": {
     "ok": true,
     "result": {
-      "url": "https://www.companyhouse.de/WITTENSTEIN-SE-Igersheim",
-      "title": "WITTENSTEIN SE | CompanyHouse",
-      "text": "WITTENSTEIN SE Unternehmensprofil Igersheim",
-      "html": "<main><h1>WITTENSTEIN SE</h1><p>Unternehmensprofil Igersheim</p></main>",
+      "url": "https://www.companyhouse.de/Beispiel-Maschinenbau-SE-Musterstadt",
+      "title": "Beispiel Maschinenbau SE | CompanyHouse",
+      "text": "Beispiel Maschinenbau SE Unternehmensprofil Musterstadt",
+      "html": "<main><h1>Beispiel Maschinenbau SE</h1><p>Unternehmensprofil Musterstadt</p></main>",
       "origin_ok": true,
       "blocked": false
     }

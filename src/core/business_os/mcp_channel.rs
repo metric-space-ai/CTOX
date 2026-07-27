@@ -2,8 +2,11 @@
 // License: AGPL-3.0-only
 
 use anyhow::Context;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use futures_util::SinkExt;
 use futures_util::StreamExt;
+use ring::hmac;
 use rusqlite::params;
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
@@ -470,6 +473,34 @@ struct BusinessOsMcpPolicyPayload {
 
 const MCP_AUTH_SECRET_SCOPE: &str = "business_os";
 const MCP_AUTH_SECRET_NAME: &str = "mcp_inbound_auth_token";
+const MCP_INTERNAL_SESSION_SECRET_NAME: &str = "mcp_internal_command_session_signing_secret";
+const MCP_INTERNAL_SESSION_HEADER: &str = "X-CTOX-Business-Command-Session";
+const MCP_INTERNAL_SESSION_AUTH_SOURCE: &str = "ctox_internal_business_command";
+const MCP_INTERNAL_SESSION_TTL_MS: i64 = 4 * 60 * 60 * 1000;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BusinessOsMcpAllowedAction {
+    module_id: String,
+    action_id: String,
+    #[serde(default)]
+    operation_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BusinessOsMcpInternalSessionClaims {
+    schema: String,
+    actor: String,
+    role: String,
+    workspace: String,
+    command_id: String,
+    payload_hash: String,
+    #[serde(default)]
+    allowed_actions: Vec<BusinessOsMcpAllowedAction>,
+    #[serde(default)]
+    allowed_collections: Vec<String>,
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+}
 
 /// Per-instance bearer token that an inbound MCP client must present on `/mcp`.
 /// Auto-generated and persisted in the CTOX secret store on first use; the
@@ -501,6 +532,211 @@ fn mcp_auth_token(root: &Path) -> anyhow::Result<String> {
     Ok(value)
 }
 
+fn mcp_internal_session_signing_secret(root: &Path) -> anyhow::Result<Vec<u8>> {
+    if crate::secrets::secret_exists(
+        root,
+        MCP_AUTH_SECRET_SCOPE,
+        MCP_INTERNAL_SESSION_SECRET_NAME,
+    )? {
+        let value = crate::secrets::read_secret_value(
+            root,
+            MCP_AUTH_SECRET_SCOPE,
+            MCP_INTERNAL_SESSION_SECRET_NAME,
+        )?;
+        if !value.trim().is_empty() {
+            return Ok(value.into_bytes());
+        }
+    }
+    use ring::rand::SecureRandom;
+    let mut bytes = [0u8; 32];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("failed to generate MCP internal session signing secret"))?;
+    let value = URL_SAFE_NO_PAD.encode(bytes);
+    crate::secrets::write_secret_record(
+        root,
+        MCP_AUTH_SECRET_SCOPE,
+        MCP_INTERNAL_SESSION_SECRET_NAME,
+        &value,
+        Some("Business OS internal MCP command-session signing secret".to_string()),
+        serde_json::json!({ "auto_managed": true }),
+    )?;
+    Ok(value.into_bytes())
+}
+
+fn normalized_string_array(value: Option<&Value>) -> Vec<String> {
+    let mut values = value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn allowed_actions_from_writeback_contract(
+    writeback_contract: &Value,
+) -> anyhow::Result<Vec<BusinessOsMcpAllowedAction>> {
+    let Some(actions) = writeback_contract
+        .get("allowed_actions")
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    anyhow::ensure!(
+        actions.len() <= 64,
+        "Business OS writeback contract contains too many allowed actions"
+    );
+    let mut allowed = Vec::with_capacity(actions.len());
+    for action in actions {
+        let module_id = string_field(action, "module_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .context("Business OS allowed action is missing module_id")?;
+        let action_id = string_field(action, "action_id")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .context("Business OS allowed action is missing action_id")?;
+        allowed.push(BusinessOsMcpAllowedAction {
+            module_id,
+            action_id,
+            operation_ids: normalized_string_array(action.get("operation_ids")),
+        });
+    }
+    allowed.sort_by(|left, right| {
+        (&left.module_id, &left.action_id).cmp(&(&right.module_id, &right.action_id))
+    });
+    allowed.dedup();
+    Ok(allowed)
+}
+
+pub(crate) fn issue_internal_command_session_token(
+    root: &Path,
+    command_id: &str,
+    payload_hash: &str,
+    actor: &str,
+    role: &str,
+    workspace: &str,
+    writeback_contract: &Value,
+) -> anyhow::Result<String> {
+    let command_id = command_id.trim();
+    let payload_hash = payload_hash.trim();
+    let actor = actor.trim();
+    let role = normalize_role(role);
+    let workspace = workspace.trim();
+    anyhow::ensure!(!command_id.is_empty(), "Business OS command id is empty");
+    anyhow::ensure!(
+        !payload_hash.is_empty(),
+        "Business OS command payload hash is empty"
+    );
+    anyhow::ensure!(!actor.is_empty(), "Business OS command actor is empty");
+    anyhow::ensure!(
+        matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
+        "Business OS command actor role is invalid"
+    );
+    anyhow::ensure!(
+        !workspace.is_empty(),
+        "Business OS command workspace is empty"
+    );
+    let issued_at_ms = now_ms();
+    let claims = BusinessOsMcpInternalSessionClaims {
+        schema: "ctox.business_os.mcp_command_session.v1".to_string(),
+        actor: actor.to_string(),
+        role,
+        workspace: workspace.to_string(),
+        command_id: command_id.to_string(),
+        payload_hash: payload_hash.to_string(),
+        allowed_actions: allowed_actions_from_writeback_contract(writeback_contract)?,
+        allowed_collections: normalized_string_array(writeback_contract.get("allowed_collections")),
+        issued_at_ms,
+        expires_at_ms: issued_at_ms.saturating_add(MCP_INTERNAL_SESSION_TTL_MS),
+    };
+    let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims)?);
+    let secret = mcp_internal_session_signing_secret(root)?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &secret);
+    let signature = URL_SAFE_NO_PAD.encode(hmac::sign(&key, payload.as_bytes()).as_ref());
+    Ok(format!("{payload}.{signature}"))
+}
+
+fn verify_internal_command_session_token(root: &Path, token: &str) -> anyhow::Result<Value> {
+    let claims = decode_internal_command_session_token(root, token)?;
+    let command = crate::mission::channels::inspect_business_command(root, &claims.command_id)?
+        .context("Business OS internal command session references an unknown command")?;
+    anyhow::ensure!(
+        command
+            .pointer("/command/payload_hash")
+            .and_then(Value::as_str)
+            == Some(claims.payload_hash.as_str()),
+        "Business OS internal command payload changed"
+    );
+    anyhow::ensure!(
+        command
+            .pointer("/command/execution_phase")
+            .and_then(Value::as_str)
+            != Some("terminal"),
+        "Business OS internal command is already terminal"
+    );
+    let authorization =
+        store::revalidate_business_command_execution_authorization(root, &claims.command_id)?;
+    anyhow::ensure!(
+        authorization.pointer("/actor/id").and_then(Value::as_str) == Some(claims.actor.as_str())
+            && authorization
+                .pointer("/actor/role")
+                .and_then(Value::as_str)
+                .map(normalize_role)
+                .as_deref()
+                == Some(claims.role.as_str()),
+        "Business OS internal command authorization changed"
+    );
+    Ok(serde_json::json!({
+        "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+        "channel": "ctox_internal_business_command",
+        "surface": "business_os_command_session",
+        "actor": claims.actor,
+        "role": claims.role,
+        "workspace": claims.workspace,
+        "command_id": claims.command_id,
+        "payload_hash": claims.payload_hash,
+        "allowed_actions": claims.allowed_actions,
+        "allowed_collections": claims.allowed_collections,
+        "expires_at_ms": claims.expires_at_ms,
+    }))
+}
+
+fn decode_internal_command_session_token(
+    root: &Path,
+    token: &str,
+) -> anyhow::Result<BusinessOsMcpInternalSessionClaims> {
+    let (payload, signature) = token
+        .trim()
+        .split_once('.')
+        .context("malformed Business OS internal command-session token")?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature)
+        .context("invalid Business OS internal command-session signature")?;
+    let secret = mcp_internal_session_signing_secret(root)?;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, &secret);
+    hmac::verify(&key, payload.as_bytes(), &signature)
+        .map_err(|_| anyhow::anyhow!("invalid Business OS internal command-session signature"))?;
+    let claims: BusinessOsMcpInternalSessionClaims =
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    anyhow::ensure!(
+        claims.schema == "ctox.business_os.mcp_command_session.v1",
+        "unsupported Business OS internal command-session schema"
+    );
+    let current_time = now_ms();
+    anyhow::ensure!(
+        claims.issued_at_ms <= current_time && current_time < claims.expires_at_ms,
+        "Business OS internal command session expired"
+    );
+    Ok(claims)
+}
+
 pub fn mcp_operator_auth_token(root: &Path) -> anyhow::Result<String> {
     mcp_auth_token(root)
 }
@@ -518,6 +754,15 @@ fn request_bearer_token(request: &Request) -> Option<String> {
                 .strip_prefix("Bearer ")
                 .map(|token| token.trim().to_string())
         })
+}
+
+fn request_internal_command_session_token(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(MCP_INTERNAL_SESSION_HEADER))
+        .map(|header| header.value.as_str().trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 /// Inbound `/mcp` requests must carry a valid bearer token. Fail closed: a
@@ -2305,6 +2550,7 @@ fn call_tool_inner(
         &arguments,
         trusted_gateway_context,
     )?;
+    enforce_internal_command_session_scope(tool_name, &arguments, trusted_gateway_context)?;
     enforce_tool_policy(root, tool_name)?;
     enforce_context_policy(root, &context)?;
     enforce_argument_scope_policy(root, &context, tool_name, &arguments)?;
@@ -4283,8 +4529,31 @@ fn handle_mcp_http_request(root: &Path, mut request: Request) -> anyhow::Result<
                 )?;
                 return Ok(());
             }
+            let trusted_context = match request_internal_command_session_token(&request) {
+                Some(token) => match verify_internal_command_session_token(root, &token) {
+                    Ok(context) => Some(context),
+                    Err(error) => {
+                        respond_json_status(
+                            request,
+                            401,
+                            serde_json::json!({
+                                "ok": false,
+                                "error": "invalid_command_session",
+                                "message": error.to_string(),
+                            }),
+                        )?;
+                        return Ok(());
+                    }
+                },
+                None => None,
+            };
             let body = read_json(&mut request)?;
-            let response = handle_json_rpc(root, body);
+            if is_json_rpc_notification(&body) {
+                respond_empty_status(request, 202)?;
+                return Ok(());
+            }
+            let response =
+                handle_json_rpc_with_gateway_context(root, body, trusted_context.as_ref());
             respond_json_value(request, response)?;
         }
         _ => respond_json_status(
@@ -4491,6 +4760,12 @@ fn read_json(request: &mut Request) -> anyhow::Result<Value> {
 
 fn respond_json_value(request: Request, value: Value) -> anyhow::Result<()> {
     respond_json_status(request, 200, value)
+}
+
+fn respond_empty_status(request: Request, status: u16) -> anyhow::Result<()> {
+    request
+        .respond(Response::empty(status))
+        .map_err(|error| anyhow::anyhow!("failed to send response: {error}"))
 }
 
 fn respond_json_status(request: Request, status: u16, value: Value) -> anyhow::Result<()> {
@@ -5682,22 +5957,48 @@ fn context_from_arguments_with_trusted_gateway_context(
 ) -> anyhow::Result<McpChannelRequestContext> {
     let context = arguments.get("_context").unwrap_or(&Value::Null);
     let trusted_role = trusted_managed_gateway_role(trusted_gateway_context);
+    let internal_context = trusted_gateway_context.filter(|context| {
+        string_field(context, "auth_source").as_deref() == Some(MCP_INTERNAL_SESSION_AUTH_SOURCE)
+    });
     let request_context = McpChannelRequestContext {
-        channel: string_field(context, "channel").unwrap_or_else(|| "chatgpt_mcp".to_string()),
-        surface: string_field(context, "surface").unwrap_or_else(|| "business_os_mcp".to_string()),
-        actor: string_field(context, "actor").unwrap_or_else(|| "mcp:local".to_string()),
-        workspace: string_field(context, "workspace").unwrap_or_else(|| "local".to_string()),
+        channel: internal_context
+            .and_then(|context| string_field(context, "channel"))
+            .or_else(|| string_field(context, "channel"))
+            .unwrap_or_else(|| "chatgpt_mcp".to_string()),
+        surface: internal_context
+            .and_then(|context| string_field(context, "surface"))
+            .or_else(|| string_field(context, "surface"))
+            .unwrap_or_else(|| "business_os_mcp".to_string()),
+        actor: internal_context
+            .and_then(|context| string_field(context, "actor"))
+            .or_else(|| string_field(context, "actor"))
+            .unwrap_or_else(|| "mcp:local".to_string()),
+        workspace: internal_context
+            .and_then(|context| string_field(context, "workspace"))
+            .or_else(|| string_field(context, "workspace"))
+            .unwrap_or_else(|| "local".to_string()),
         tool: tool_name.to_string(),
         request_id: string_field(context, "request_id")
             .unwrap_or_else(|| format!("local-{}", uuid::Uuid::new_v4())),
-        confirmation_state: match string_field(context, "confirmation_state")
-            .unwrap_or_else(|| "not_required".to_string())
-            .as_str()
+        confirmation_state: if internal_context.is_some()
+            && tool_name == "business_os.execute_action"
         {
-            "required" => McpConfirmationState::Required,
-            "approved" => McpConfirmationState::Approved,
-            "rejected" => McpConfirmationState::Rejected,
-            _ => McpConfirmationState::NotRequired,
+            // The signed command session is issued only after native actor,
+            // role, capability, module scope, and the bounded writeback
+            // contract have been persisted and revalidated. Treat that exact
+            // allowed action as the originating user's approval; the scope
+            // guard below still rejects every other module or operation.
+            McpConfirmationState::Approved
+        } else {
+            match string_field(context, "confirmation_state")
+                .unwrap_or_else(|| "not_required".to_string())
+                .as_str()
+            {
+                "required" => McpConfirmationState::Required,
+                "approved" => McpConfirmationState::Approved,
+                "rejected" => McpConfirmationState::Rejected,
+                _ => McpConfirmationState::NotRequired,
+            }
         },
         trusted_role,
         trusted_role_source: trusted_gateway_context
@@ -5707,18 +6008,99 @@ fn context_from_arguments_with_trusted_gateway_context(
     Ok(request_context)
 }
 
+fn enforce_internal_command_session_scope(
+    tool_name: &str,
+    arguments: &Value,
+    trusted_gateway_context: Option<&Value>,
+) -> anyhow::Result<()> {
+    let Some(context) = trusted_gateway_context.filter(|context| {
+        string_field(context, "auth_source").as_deref() == Some(MCP_INTERNAL_SESSION_AUTH_SOURCE)
+    }) else {
+        return Ok(());
+    };
+    let allowed_actions = context
+        .get("allowed_actions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let allowed_modules = allowed_actions
+        .iter()
+        .filter_map(|action| string_field(action, "module_id"))
+        .collect::<BTreeSet<_>>();
+    match tool_name {
+        "business_os.propose_action" | "business_os.execute_action" => {
+            let module_id = required_arg(arguments, "module_id")?;
+            let action_id = required_arg(arguments, "action_id")?;
+            let allowed = allowed_actions.iter().find(|action| {
+                string_field(action, "module_id").as_deref() == Some(module_id.as_str())
+                    && string_field(action, "action_id").as_deref() == Some(action_id.as_str())
+            });
+            let Some(allowed) = allowed else {
+                anyhow::bail!(
+                    "Business OS action `{module_id}/{action_id}` is outside the command writeback contract"
+                );
+            };
+            let operation_ids = normalized_string_array(allowed.get("operation_ids"));
+            if !operation_ids.is_empty() {
+                let operation_id = arguments
+                    .pointer("/payload/operation_id")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .context(
+                        "Business OS action requires payload.operation_id from the command writeback contract",
+                    )?;
+                anyhow::ensure!(
+                    operation_ids.iter().any(|allowed| allowed == operation_id),
+                    "Business OS operation `{operation_id}` is outside the command writeback contract"
+                );
+            }
+        }
+        "business_os.get_module"
+        | "business_os.list_entities"
+        | "business_os.list_module_actions" => {
+            let module_id = required_arg(arguments, "module_id")?;
+            anyhow::ensure!(
+                allowed_modules.is_empty() || allowed_modules.contains(&module_id),
+                "Business OS module `{module_id}` is outside the command writeback contract"
+            );
+        }
+        "business_os.query_records"
+        | "business_os.search_records"
+        | "business_os.get_record"
+        | "business_os.get_record_context" => {
+            let allowed_collections = normalized_string_array(context.get("allowed_collections"));
+            if !allowed_collections.is_empty() {
+                let collection = required_arg(arguments, "collection")?;
+                anyhow::ensure!(
+                    allowed_collections
+                        .iter()
+                        .any(|allowed| allowed == &collection),
+                    "Business OS collection `{collection}` is outside the command writeback contract"
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn trusted_managed_gateway_role(context: Option<&Value>) -> Option<String> {
     let context = context?;
     let auth_source = string_field(context, "auth_source")?;
-    if auth_source != "ctox_dev_managed_mcp_token" {
-        return None;
-    }
-    if string_field(context, "channel").as_deref() != Some("ctox_dev_managed_mcp") {
-        return None;
-    }
     let role = normalize_role(&string_field(context, "role")?);
-    match role.as_str() {
-        "chef" | "admin" => Some(role),
+    match auth_source.as_str() {
+        "ctox_dev_managed_mcp_token"
+            if string_field(context, "channel").as_deref() == Some("ctox_dev_managed_mcp") =>
+        {
+            matches!(role.as_str(), "chef" | "admin").then_some(role)
+        }
+        MCP_INTERNAL_SESSION_AUTH_SOURCE
+            if string_field(context, "channel").as_deref()
+                == Some("ctox_internal_business_command") =>
+        {
+            matches!(role.as_str(), "chef" | "admin" | "founder" | "user").then_some(role)
+        }
         _ => None,
     }
 }
@@ -6308,6 +6690,285 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    #[test]
+    fn internal_command_session_is_signed_and_tamper_evident() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let token = issue_internal_command_session_token(
+            temp.path(),
+            "cmd-test",
+            "sha256:test",
+            "user:test",
+            "admin",
+            "workspace:test",
+            &serde_json::json!({
+                "allowed_actions": [{
+                    "module_id": "crm",
+                    "action_id": "external_sql.write",
+                    "operation_ids": ["company_create"]
+                }],
+                "allowed_collections": ["crm_companies"]
+            }),
+        )?;
+        let claims = decode_internal_command_session_token(temp.path(), &token)?;
+        assert_eq!(claims.actor, "user:test");
+        assert_eq!(claims.role, "admin");
+        assert_eq!(claims.allowed_actions.len(), 1);
+        assert_eq!(claims.allowed_collections, vec!["crm_companies"]);
+
+        let mut bytes = token.into_bytes();
+        bytes[0] = if bytes[0] == b'A' { b'B' } else { b'A' };
+        let tampered = String::from_utf8(bytes)?;
+        assert!(decode_internal_command_session_token(temp.path(), &tampered).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn internal_command_session_overrides_actor_and_bounds_writeback() -> anyhow::Result<()> {
+        let trusted = serde_json::json!({
+            "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "channel": "ctox_internal_business_command",
+            "surface": "business_os_command_session",
+            "actor": "user:trusted",
+            "role": "admin",
+            "workspace": "workspace:trusted",
+            "allowed_actions": [{
+                "module_id": "crm",
+                "action_id": "external_sql.write",
+                "operation_ids": ["company_create"]
+            }],
+            "allowed_collections": ["crm_companies"]
+        });
+        let arguments = serde_json::json!({
+            "module_id": "crm",
+            "action_id": "external_sql.write",
+            "payload": { "operation_id": "company_create" },
+            "_context": {
+                "actor": "user:forged",
+                "workspace": "workspace:forged",
+                "confirmation_state": "rejected"
+            }
+        });
+        let context = context_from_arguments_with_trusted_gateway_context(
+            "business_os.execute_action",
+            &arguments,
+            Some(&trusted),
+        )?;
+        assert_eq!(context.actor, "user:trusted");
+        assert_eq!(context.workspace, "workspace:trusted");
+        assert_eq!(context.trusted_role.as_deref(), Some("admin"));
+        assert_eq!(
+            context.trusted_role_source.as_deref(),
+            Some(MCP_INTERNAL_SESSION_AUTH_SOURCE)
+        );
+        assert_eq!(context.confirmation_state, McpConfirmationState::Approved);
+        enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &arguments,
+            Some(&trusted),
+        )?;
+
+        let proposal_context = context_from_arguments_with_trusted_gateway_context(
+            "business_os.propose_action",
+            &arguments,
+            Some(&trusted),
+        )?;
+        assert_eq!(
+            proposal_context.confirmation_state,
+            McpConfirmationState::Rejected
+        );
+
+        let wrong_operation = serde_json::json!({
+            "module_id": "crm",
+            "action_id": "external_sql.write",
+            "payload": { "operation_id": "person_delete" }
+        });
+        assert!(enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &wrong_operation,
+            Some(&trusted),
+        )
+        .is_err());
+        let wrong_collection = serde_json::json!({ "collection": "other_records" });
+        assert!(enforce_internal_command_session_scope(
+            "business_os.query_records",
+            &wrong_collection,
+            Some(&trusted),
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn internal_command_session_executes_bounded_action_without_weakening_external_confirmation(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_installed_module(
+            root,
+            "matching",
+            "Matching",
+            "1.0.0",
+            &["business_matches"],
+            Some(serde_json::json!({ "public": true })),
+        )?;
+        seed_business_user(root, "user:trusted", "admin")?;
+        seed_default_mcp_admin(root)?;
+
+        let arguments = serde_json::json!({
+            "module_id": "matching",
+            "action_id": "matching.run_match",
+            "title": "Run match",
+            "objective": "Find matching candidates",
+            "payload": { "query": "cto" },
+            "_context": {
+                "actor": "user:forged",
+                "confirmation_state": "rejected"
+            }
+        });
+        let trusted = serde_json::json!({
+            "auth_source": MCP_INTERNAL_SESSION_AUTH_SOURCE,
+            "channel": "ctox_internal_business_command",
+            "surface": "business_os_command_session",
+            "actor": "user:trusted",
+            "role": "admin",
+            "workspace": "workspace:trusted",
+            "allowed_actions": [{
+                "module_id": "matching",
+                "action_id": "matching.run_match",
+                "operation_ids": []
+            }],
+            "allowed_collections": []
+        });
+        let internal_context = context_from_arguments_with_trusted_gateway_context(
+            "business_os.execute_action",
+            &arguments,
+            Some(&trusted),
+        )?;
+        enforce_internal_command_session_scope(
+            "business_os.execute_action",
+            &arguments,
+            Some(&trusted),
+        )?;
+        let executed = execute_action(
+            root,
+            &internal_context,
+            "matching",
+            "matching.run_match",
+            &arguments,
+        )?;
+        assert!(executed.ok);
+        assert_eq!(
+            internal_context.confirmation_state,
+            McpConfirmationState::Approved
+        );
+
+        let external_error = execute_action(
+            root,
+            &test_context("business_os.execute_action"),
+            "matching",
+            "matching.run_match",
+            &arguments,
+        )
+        .expect_err("external risky action must still require explicit approval");
+        let typed = external_error
+            .downcast_ref::<BusinessOsMcpError>()
+            .context("expected typed Business OS MCP error")?;
+        assert_eq!(typed.code, BusinessOsMcpErrorCode::ConfirmationRequired);
+        Ok(())
+    }
+
+    #[test]
+    fn internal_command_session_revalidates_canonical_actor_and_role() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd-mcp-canonical-role";
+        let (capability_token, _) = store::issue_business_os_capability_token_for_managed_user(
+            root,
+            "operator",
+            "Operator",
+            "admin",
+            now_ms(),
+        )?;
+        let writeback_contract = serde_json::json!({
+            "allowed_actions": [{
+                "module_id": "crm",
+                "action_id": "external_sql.write",
+                "operation_ids": ["company_update"]
+            }],
+            "allowed_collections": ["crm_companies"]
+        });
+        let accepted = store::accept_rxdb_business_command_with_origin(
+            root,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "crm",
+                "command_type": "business_os.chat.task",
+                "record_id": "company-42",
+                "payload": {
+                    "title": "Update company",
+                    "instruction": "Apply the approved update.",
+                    "writeback_contract": writeback_contract
+                },
+                "client_context": {
+                    "actor": { "id": "forged", "role": "chef" },
+                    "capability_token": capability_token
+                }
+            }),
+            store::CommandOrigin::ReplicatedPeer,
+        )?;
+        assert_eq!(accepted["status"], "accepted");
+        let canonical = crate::mission::channels::business_command_projection(root, command_id)?;
+        let payload_hash = canonical["payload_hash"]
+            .as_str()
+            .context("canonical command payload hash is missing")?;
+        let authorization =
+            store::revalidate_business_command_execution_authorization(root, command_id)?;
+        let token = issue_internal_command_session_token(
+            root,
+            command_id,
+            payload_hash,
+            authorization["actor"]["id"]
+                .as_str()
+                .context("authorized actor is missing")?,
+            authorization["actor"]["role"]
+                .as_str()
+                .context("authorized role is missing")?,
+            "workspace:test",
+            &writeback_contract,
+        )?;
+
+        let trusted = verify_internal_command_session_token(root, &token)?;
+        assert_eq!(trusted["actor"], "operator");
+        assert_eq!(trusted["role"], "admin");
+        let context = context_from_arguments_with_trusted_gateway_context(
+            "business_os.execute_action",
+            &serde_json::json!({
+                "module_id": "crm",
+                "action_id": "external_sql.write",
+                "payload": { "operation_id": "company_update" },
+                "_context": { "actor": "forged", "role": "chef" }
+            }),
+            Some(&trusted),
+        )?;
+        assert_eq!(context.actor, "operator");
+        assert_eq!(context.trusted_role.as_deref(), Some("admin"));
+        Ok(())
+    }
+
+    #[test]
+    fn streamable_http_initialized_notification_uses_notification_path() {
+        assert!(is_json_rpc_notification(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        })));
+        assert!(!is_json_rpc_notification(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize"
+        })));
+    }
+
     fn test_context(tool: &str) -> McpChannelRequestContext {
         McpChannelRequestContext {
             channel: "chatgpt_mcp".to_string(),
@@ -6339,7 +7000,10 @@ mod tests {
                 "description": "Test module",
                 "install_scope": "core",
                 "entry": format!("modules/{id}/index.html"),
-                "collections": collections
+                "collections": collections,
+                "lifecycle": {
+                    "public": true
+                }
             }))?,
         )?;
         Ok(())
@@ -9928,7 +10592,14 @@ mod tests {
     fn execute_action_requires_approval_for_risky_actions() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
-        write_module(root, "matching", "Matching", &["business_matches"])?;
+        write_installed_module(
+            root,
+            "matching",
+            "Matching",
+            "1.0.0",
+            &["business_matches"],
+            Some(serde_json::json!({ "public": true })),
+        )?;
         seed_default_mcp_admin(root)?;
 
         let error = execute_action(

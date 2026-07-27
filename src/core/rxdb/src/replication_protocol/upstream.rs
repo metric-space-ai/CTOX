@@ -81,21 +81,44 @@ pub async fn start_replication_upstream(state: Arc<RxStorageInstanceReplicationS
         Arc::clone(&initial_sync_start_time),
     );
 
-    // 3. Initial sync (per-batch lock).
-    if let Err(e) = upstream_initial_sync_until_no_conflicts_with_timing(
-        &state,
-        &timer,
-        &initial_sync_start_time,
-    )
-    .await
-    {
-        tracing::error!(
-            target: "ctox_rxdb::replication_protocol::upstream",
-            "upstreamInitialSync failed: {e}",
-        );
-    }
-    if !state.first_sync_done.up.get_value() && !state.events.canceled.get_value() {
-        state.first_sync_done.up.next(true);
+    // 3. Initial sync (per-batch lock). A failed first pass must stay pending:
+    // consumers use first_sync_done as the readiness invariant, so publishing
+    // success before a retry would leave the replication permanently stale.
+    let mut initial_sync_retry_delay = std::time::Duration::from_millis(50);
+    while !state.events.canceled.get_value() {
+        match upstream_initial_sync_until_no_conflicts_with_timing(
+            &state,
+            &timer,
+            &initial_sync_start_time,
+        )
+        .await
+        {
+            Ok(()) => {
+                if !state.first_sync_done.up.get_value() && !state.events.canceled.get_value() {
+                    state.first_sync_done.up.next(true);
+                }
+                break;
+            }
+            Err(e) => {
+                state
+                    .events
+                    .error
+                    .next(crate::plugins::utils::utils_error::error_to_plain_json(&e));
+                tracing::error!(
+                    target: "ctox_rxdb::replication_protocol::upstream",
+                    "upstreamInitialSync failed: {e}",
+                );
+                // Remote handler failures already apply the configured retry
+                // delay, but local storage failures would otherwise spin hot.
+                // Back off bounded and stay responsive to cancel.
+                tokio::select! {
+                    _ = tokio::time::sleep(initial_sync_retry_delay) => {}
+                    _ = wait_for_cancel(&state) => break,
+                }
+                initial_sync_retry_delay =
+                    (initial_sync_retry_delay * 2).min(std::time::Duration::from_secs(5));
+            }
+        }
     }
 
     // 4. Stay alive until canceled, then drop the subscription.
@@ -699,6 +722,44 @@ mod tests {
         }
     }
 
+    struct InitialSyncRetryHandler {
+        master_write_calls: std::sync::Arc<AtomicUsize>,
+        allow_second_attempt: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl RxReplicationHandler for InitialSyncRetryHandler {
+        fn master_change_stream(&self) -> RxStream<RxReplicationMasterChange> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        async fn master_changes_since(
+            &self,
+            _checkpoint: Option<Value>,
+            _batch_size: u64,
+        ) -> Result<DocumentsWithCheckpoint, crate::rx_error::RxError> {
+            Ok(DocumentsWithCheckpoint {
+                documents: Vec::new(),
+                checkpoint: Value::Null,
+            })
+        }
+
+        async fn master_write(
+            &self,
+            _rows: Vec<RxReplicationWriteToMasterRow>,
+        ) -> Result<Vec<Value>, crate::rx_error::RxError> {
+            let attempt = self.master_write_calls.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(crate::rx_error::new_rx_error(
+                    "TEST_UPSTREAM_INITIAL_SYNC",
+                    Some(json!({ "attempt": 1 })),
+                ));
+            }
+            self.allow_second_attempt.notified().await;
+            Ok(Vec::new())
+        }
+    }
+
     struct BatchCountingHandler {
         master_write_calls: std::sync::Arc<AtomicUsize>,
         batch_sizes: std::sync::Arc<parking_lot::Mutex<Vec<usize>>>,
@@ -1054,6 +1115,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(docs[0]["age"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn initial_upstream_sync_error_stays_pending_relays_error_and_retries() {
+        let storage = get_rx_storage_memory(());
+        let schema = test_schema();
+        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: "db-upstream-initial-error-retry".to_string(),
+                    collection_name: "docs".to_string(),
+                    schema: schema.clone(),
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        fork_instance
+            .bulk_write(
+                vec![BulkWriteRow {
+                    previous: None,
+                    document: fork_doc(1),
+                }],
+                "seed",
+            )
+            .await
+            .unwrap();
+        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
+        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: "db-upstream-initial-error-retry".to_string(),
+                    collection_name: "meta".to_string(),
+                    schema: meta_schema,
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let allow_second_attempt = std::sync::Arc::new(tokio::sync::Notify::new());
+        let input = RxStorageInstanceReplicationInput {
+            identifier: "replication-test".to_string(),
+            fork_instance,
+            meta_instance,
+            hash_function: std::sync::Arc::new(TestHashFunction),
+            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
+            replication_handler: std::sync::Arc::new(InitialSyncRetryHandler {
+                master_write_calls: std::sync::Arc::clone(&master_write_calls),
+                allow_second_attempt: std::sync::Arc::clone(&allow_second_attempt),
+            }),
+            push_batch_size: 100,
+            pull_batch_size: 100,
+            bulk_size: 100,
+            keep_meta: false,
+            initial_checkpoint: None,
+            wait_before_persist: None,
+        };
+        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
+            primary_path: "id".to_string(),
+            input: std::sync::Arc::new(input),
+            checkpoint_key: "checkpoint".to_string(),
+            downstream_bulk_write_flag: "downstream".to_string(),
+            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
+            events: ReplicationEvents::new(),
+            stats: ReplicationStats::new(),
+            first_sync_done: FirstSyncDone::default(),
+            stream_queue: StreamQueue::default(),
+            checkpoint_queue: tokio::sync::Mutex::new(()),
+            has_attachments: false,
+        });
+        let mut errors = state.events.error.subscribe();
+        let state_for_task = std::sync::Arc::clone(&state);
+        let replication_task =
+            tokio::spawn(async move { start_replication_upstream(state_for_task).await });
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), errors.next())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while master_write_calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(error["code"], json!("TEST_UPSTREAM_INITIAL_SYNC"));
+        assert!(!state.first_sync_done.up.get_value());
+        assert_eq!(master_write_calls.load(Ordering::SeqCst), 2);
+
+        allow_second_attempt.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !state.first_sync_done.up.get_value() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.events.canceled.next(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), replication_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

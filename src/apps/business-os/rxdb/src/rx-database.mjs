@@ -668,6 +668,7 @@ class CtoxRxQuery {
     return new CtoxRxQuery(this.collection, {
       selector: patch.selector ?? this.query.selector,
       sort: patch.sort ?? this.query.sort,
+      index: patch.index ?? this.query.index,
       limit: patch.limit ?? this.query.limit,
       skip: patch.skip ?? this.query.skip,
       requireRevision: patch.requireRevision ?? this.query.requireRevision,
@@ -754,12 +755,19 @@ function normalizeQuery(query, primaryPath) {
   return {
     selector: query?.selector || {},
     sort: normalizeSort(query?.sort),
+    index: normalizeIndex(query?.index),
     limit: Number.isFinite(Number(query?.limit)) ? Number(query.limit) : undefined,
     skip: Number.isFinite(Number(query?.skip)) ? Math.max(0, Number(query.skip)) : undefined,
     requireRevision: typeof query?.requireRevision === 'string' && query.requireRevision
       ? query.requireRevision
       : undefined,
   };
+}
+
+function normalizeIndex(index) {
+  if (!Array.isArray(index)) return undefined;
+  const fields = index.map((field) => String(field || '').trim()).filter(Boolean);
+  return fields.length ? fields : undefined;
 }
 
 function matchesSelector(doc, selector = {}) {

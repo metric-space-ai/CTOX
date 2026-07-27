@@ -192,6 +192,10 @@ struct RefreshQueryConfig {
     parameters: Vec<ParameterBinding>,
     #[serde(default)]
     record_id_prefix: String,
+    #[serde(default)]
+    delete_when_missing: bool,
+    #[serde(default)]
+    missing_record_id_path: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -550,7 +554,12 @@ async fn sync_projection(
                 .unwrap_or_else(now_ms);
             object.insert("updated_at_ms".to_string(), json!(updated_at_ms));
             if explicitly_deleted {
-                writer.upsert(&projection.collection, &record_id, updated_at_ms, row)?;
+                writer.upsert_source_projection(
+                    &projection.collection,
+                    &record_id,
+                    updated_at_ms,
+                    row,
+                )?;
                 stats.deleted_count += 1;
             } else {
                 let fingerprint = payload_fingerprint(&row);
@@ -560,7 +569,12 @@ async fn sync_projection(
                     Some(_) => stats.unchanged_count += 1,
                 }
                 if existing.get(&record_id) != Some(&fingerprint) {
-                    writer.upsert(&projection.collection, &record_id, updated_at_ms, row)?;
+                    writer.upsert_source_projection(
+                        &projection.collection,
+                        &record_id,
+                        updated_at_ms,
+                        row,
+                    )?;
                 }
             }
             seen.insert(record_id);
@@ -589,7 +603,7 @@ async fn sync_projection(
             .filter(|record_id| !seen.contains(*record_id))
         {
             let deleted_at_ms = now_ms();
-            writer.upsert(
+            writer.upsert_source_projection(
                 &projection.collection,
                 record_id,
                 deleted_at_ms,
@@ -774,6 +788,27 @@ async fn write_source(
             let parameters = bind_parameters(&refresh_payload, &refresh.parameters)?;
             let rows = adapter.query(query, &parameters).await?;
             let mut writer = store::BusinessProjectionWriter::open(root)?;
+            if rows.is_empty() && refresh.delete_when_missing {
+                let record_id_path = if refresh.missing_record_id_path.is_empty() {
+                    refresh.record_id_field.as_str()
+                } else {
+                    refresh.missing_record_id_path.as_str()
+                };
+                let record_id = format!(
+                    "{}{}",
+                    refresh.record_id_prefix,
+                    scalar_string(
+                        value_at_path(&refresh_payload, record_id_path)
+                            .context("missing refresh tombstone record id")?
+                    )?
+                );
+                writer.tombstone_source_projection(&refresh.collection, &record_id, now_ms())?;
+                projections.push(json!({
+                    "collection": refresh.collection,
+                    "record_id": record_id,
+                    "deleted": true
+                }));
+            }
             for source_row in rows {
                 let mut row = match projection {
                     Some(projection) => transform_projection_row(source_row, projection)?,
@@ -794,7 +829,12 @@ async fn write_source(
                     .and_then(Value::as_i64)
                     .unwrap_or_else(now_ms);
                 object.insert("updated_at_ms".into(), json!(updated_at_ms));
-                writer.upsert(&refresh.collection, &record_id, updated_at_ms, row)?;
+                writer.upsert_source_projection(
+                    &refresh.collection,
+                    &record_id,
+                    updated_at_ms,
+                    row,
+                )?;
                 projections.push(json!({"collection":refresh.collection,"record_id":record_id}));
             }
         }
@@ -1198,6 +1238,14 @@ fn validate_source(source: &ExternalSqlSourceConfig) -> anyhow::Result<()> {
         for refresh in &operation.refresh {
             validate_collection(&refresh.collection)?;
             validate_json_path(&refresh.record_id_field)?;
+            if refresh.delete_when_missing {
+                let record_id_path = if refresh.missing_record_id_path.is_empty() {
+                    refresh.record_id_field.as_str()
+                } else {
+                    refresh.missing_record_id_path.as_str()
+                };
+                validate_json_path(record_id_path)?;
+            }
             validate_bindings(&refresh.parameters)?;
             let projection = if refresh.projection_id.is_empty() {
                 None
@@ -2095,6 +2143,8 @@ mod tests {
                 required: true,
             }],
             record_id_prefix: "inventory-item-".into(),
+            delete_when_missing: true,
+            missing_record_id_path: "item_id".into(),
         }];
         validate_source(&source).expect("projection readback source");
 

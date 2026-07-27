@@ -145,6 +145,9 @@ pub fn run_ctox_person_research_tool(
                     root,
                     &ctox_bin,
                 );
+                if let Some(task) = browser_assist_task_from_scrape_result(plan, module, &result) {
+                    browser_assist_tasks.push(task);
+                }
                 scrape_runs.push(json!({
                     "source_id": plan.source_id,
                     "target_key": result.target_key,
@@ -154,6 +157,9 @@ pub fn run_ctox_person_research_tool(
                     "run_id": result.run_id,
                     "record_count": result.fields.len(),
                     "evidence_rejections": result.evidence_rejections,
+                    "attempts": result.attempts,
+                    "initial_classification": result.initial_classification,
+                    "public_browser_fallback": result.public_browser_fallback,
                 }));
                 for (field, ev) in result.fields {
                     if !request.fields.is_empty() && !request.fields.contains(&field) {
@@ -466,7 +472,7 @@ pub fn run_ctox_person_research_tool(
             .workspace
             .clone()
             .unwrap_or_else(|| default_person_workspace(root, &company));
-        match persist_person_workspace(&workspace, request, &payload) {
+        match persist_person_research_workspace(&workspace, request, &payload) {
             Ok(summary) => {
                 let mut payload = payload;
                 payload["workspace"] = summary;
@@ -653,6 +659,65 @@ fn browser_assist_tasks_from_source_failures(
     tasks
 }
 
+fn browser_assist_task_from_scrape_result(
+    plan: &PersonResearchPlan,
+    module: &dyn SourceModule,
+    result: &scrape_bridge::ScrapeBridgeResult,
+) -> Option<Value> {
+    if !matches!(
+        result.classification.as_str(),
+        "blocked" | "temporary_unreachable"
+    ) {
+        return None;
+    }
+    let fallback = result.public_browser_fallback.as_ref()?;
+    let mut allowed_domains = vec![module
+        .id()
+        .trim()
+        .trim_start_matches("www.")
+        .to_ascii_lowercase()];
+    allowed_domains.extend(module.host_suffixes().iter().map(|domain| {
+        domain
+            .trim()
+            .trim_start_matches("www.")
+            .to_ascii_lowercase()
+    }));
+    allowed_domains.retain(|domain| !domain.is_empty());
+    allowed_domains.sort();
+    allowed_domains.dedup();
+    let reason = if fallback.challenge_detected {
+        "public_browser_challenge"
+    } else if fallback.ok {
+        "public_browser_retry_blocked"
+    } else {
+        "public_browser_unavailable"
+    };
+    Some(json!({
+        "source_id": plan.source_id,
+        "target_fields": plan.target_fields.iter().map(|field| field.as_str()).collect::<Vec<_>>(),
+        "reason": reason,
+        "error": fallback.error,
+        "status": "browser_assist_required",
+        "stream": "rxdb",
+        "browser_assist": {
+            "source_id": plan.source_id,
+            "session_id": fallback.browser_session_id,
+            "target_url": fallback.final_url.as_deref().unwrap_or(&fallback.target_url),
+            "allowed_domains": allowed_domains,
+            "challenge_detected": fallback.challenge_detected,
+            "status": fallback.status,
+            "secret_value_in_payload": false,
+        },
+        "next_command": format!(
+            "ctox business-os web-stack auth-assist-request --source-id {} --target-url {}",
+            plan.source_id,
+            fallback.final_url.as_deref().unwrap_or(&fallback.target_url)
+        ),
+        "secret_value_in_payload": false,
+        "frame_data_in_payload": false,
+    }))
+}
+
 // ---------------------------------------------------------------------------
 // Aggregation
 // ---------------------------------------------------------------------------
@@ -709,6 +774,141 @@ fn aggregate_fields(
         );
     }
     Value::Object(out)
+}
+
+/// Merges redacted, structured records returned by an authenticated source
+/// capture into an existing person-research result. The result's plan remains
+/// the authority for source and field scope; arbitrary fields or foreign URLs
+/// are rejected rather than copied into the research payload.
+pub fn merge_person_research_source_records(
+    payload: &mut Value,
+    source_id: &str,
+    records: &[Value],
+) -> Result<usize> {
+    let normalized_source = source_id.trim().to_ascii_lowercase();
+    let plan = payload
+        .get("plan")
+        .and_then(Value::as_array)
+        .and_then(|plans| {
+            plans.iter().find(|plan| {
+                plan.get("source_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&normalized_source))
+            })
+        })
+        .context("authenticated source capture is outside the person-research plan")?;
+    let module = sources::find(&normalized_source)
+        .with_context(|| format!("unknown authenticated source `{normalized_source}`"))?;
+    let allowed_fields = plan
+        .get("target_fields")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(FieldKey::from_str)
+        .collect::<BTreeSet<_>>();
+    let tier = plan
+        .get("tier")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| tier_label(module.tier()))
+        .to_string();
+    let fields = payload
+        .get_mut("fields")
+        .and_then(Value::as_object_mut)
+        .context("person-research result has no fields object")?;
+
+    let mut added = 0_usize;
+    for record in records {
+        let Some(field_name) = record.get("field").and_then(Value::as_str) else {
+            continue;
+        };
+        if forbidden_browser_extract_key(field_name) {
+            continue;
+        }
+        let Some(field) = FieldKey::from_str(field_name) else {
+            continue;
+        };
+        if !allowed_fields.contains(&field) || !fields.contains_key(field.as_str()) {
+            continue;
+        }
+        let Some(value) = record.get("value").and_then(browser_extract_scalar) else {
+            continue;
+        };
+        let Some(source_url) = record
+            .get("source_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if !valid_http_url(source_url)
+            || !url_belongs_to_source(
+                source_url,
+                module.id(),
+                module.aliases(),
+                module.host_suffixes(),
+            )
+        {
+            continue;
+        }
+        let confidence = record
+            .get("confidence")
+            .and_then(Value::as_str)
+            .filter(|value| matches!(*value, "high" | "medium" | "low" | "user_provided"))
+            .unwrap_or("low");
+        let candidate = json!({
+            "value": value,
+            "confidence": confidence,
+            "source_id": module.id(),
+            "source_url": source_url,
+            "tier": tier,
+            "via": "authenticated_source_capture",
+            "note": record.get("note").and_then(Value::as_str).unwrap_or_default(),
+        });
+        let Some(field_result) = fields
+            .get_mut(field.as_str())
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let candidates = field_result
+            .entry("candidates")
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .context("person-research field candidates must be an array")?;
+        let duplicate = candidates.iter().any(|existing| {
+            existing.get("value") == candidate.get("value")
+                && existing.get("source_id") == candidate.get("source_id")
+                && existing.get("source_url") == candidate.get("source_url")
+        });
+        if duplicate {
+            continue;
+        }
+        candidates.push(candidate);
+        candidates.sort_by(|a, b| {
+            confidence_rank(b.get("confidence").and_then(Value::as_str)).cmp(&confidence_rank(
+                a.get("confidence").and_then(Value::as_str),
+            ))
+        });
+        if let Some(best) = candidates.first().cloned() {
+            for key in [
+                "value",
+                "confidence",
+                "source_id",
+                "source_url",
+                "tier",
+                "note",
+            ] {
+                field_result.insert(
+                    key.to_string(),
+                    best.get(key).cloned().unwrap_or(Value::Null),
+                );
+            }
+        }
+        added += 1;
+    }
+    Ok(added)
 }
 
 fn confidence_rank(raw: Option<&str>) -> u8 {
@@ -1581,7 +1781,9 @@ fn unique_workspace_dir(base: PathBuf) -> PathBuf {
     base
 }
 
-fn persist_person_workspace(
+/// Rewrites a persisted person-research workspace after an external evidence
+/// source has augmented the original result.
+pub fn persist_person_research_workspace(
     workspace: &Path,
     request: &PersonResearchRequest,
     payload: &Value,
@@ -2004,6 +2206,59 @@ mod tests {
     }
 
     #[test]
+    fn public_scrape_challenge_materializes_existing_browser_session() {
+        let module = sources::find("companyhouse.de").unwrap();
+        let plan = PersonResearchPlan {
+            source_id: module.id(),
+            aliases: module.aliases(),
+            host_suffixes: module.host_suffixes(),
+            tier: module.tier(),
+            target_fields: vec![FieldKey::FirmaName],
+            api_path: false,
+        };
+        let result = scrape_bridge::ScrapeBridgeResult {
+            target_key: "companyhouse-de",
+            fields: Vec::new(),
+            classification: "blocked".to_string(),
+            reason: Some("explicit_failure_mode_blocked".to_string()),
+            repair_queued: false,
+            run_id: Some("scrape_run-blocked".to_string()),
+            evidence_rejections: Vec::new(),
+            attempts: 1,
+            initial_classification: Some("blocked".to_string()),
+            public_browser_fallback: Some(crate::unlock::PublicUnlockOutcome {
+                attempted: true,
+                ok: false,
+                status: "challenge_persisted".to_string(),
+                source_id: "companyhouse.de".to_string(),
+                browser_session_id: "browser_session_web_stack_public_companyhouse-de".to_string(),
+                trigger: "blocked".to_string(),
+                target_url: "https://www.companyhouse.de/".to_string(),
+                final_url: Some("https://www.companyhouse.de/".to_string()),
+                challenge_detected: true,
+                markers: vec!["cloudflare_challenge".to_string()],
+                error: Some("challenge_persisted".to_string()),
+                secret_value_in_payload: false,
+            }),
+        };
+        let task = browser_assist_task_from_scrape_result(&plan, module, &result)
+            .expect("public challenge task");
+        assert_eq!(task["reason"], "public_browser_challenge");
+        assert_eq!(task["status"], "browser_assist_required");
+        assert_eq!(
+            task["browser_assist"]["session_id"],
+            "browser_session_web_stack_public_companyhouse-de"
+        );
+        assert_eq!(
+            task["browser_assist"]["allowed_domains"],
+            json!(["companyhouse.de"])
+        );
+        let serialized = serde_json::to_string(&task).unwrap();
+        assert!(!serialized.contains("cookie"));
+        assert!(!serialized.contains("password"));
+    }
+
+    #[test]
     fn browser_extract_evidence_imports_only_typed_redacted_fields() {
         let root = std::env::temp_dir().join(format!(
             "ctox-web-stack-browser-extract-{}",
@@ -2224,8 +2479,80 @@ mod tests {
     }
 
     #[test]
+    fn authenticated_source_records_merge_only_planned_fields_and_provider_urls() {
+        let mut payload = json!({
+            "plan": [{
+                "source_id": "dnbhoovers.com",
+                "tier": "C",
+                "target_fields": ["umsatz", "mitarbeiter"]
+            }],
+            "fields": {
+                "umsatz": {"value": null, "confidence": "missing", "candidates": []},
+                "mitarbeiter": {"value": "100", "confidence": "low", "source_id": "other.example", "candidates": [{
+                    "value": "100", "confidence": "low", "source_id": "other.example", "source_url": "https://other.example/company"
+                }]},
+                "firma_email": {"value": null, "confidence": "missing", "candidates": []}
+            }
+        });
+        let added = merge_person_research_source_records(
+            &mut payload,
+            "dnbhoovers.com",
+            &[
+                json!({
+                    "field": "umsatz",
+                    "value": "0,53B",
+                    "confidence": "high",
+                    "source_url": "https://app.dnbhoovers.com/company/example",
+                    "note": "structured capture"
+                }),
+                json!({
+                    "field": "mitarbeiter",
+                    "value": "2,83K",
+                    "confidence": "high",
+                    "source_url": "https://app.dnbhoovers.com/company/example"
+                }),
+                json!({
+                    "field": "firma_email",
+                    "value": "outside-plan@example.test",
+                    "confidence": "high",
+                    "source_url": "https://app.dnbhoovers.com/company/example"
+                }),
+                json!({
+                    "field": "umsatz",
+                    "value": "foreign",
+                    "confidence": "high",
+                    "source_url": "https://evil.example/company/example"
+                }),
+                json!({
+                    "field": "secret_value",
+                    "value": "must-not-pass",
+                    "source_url": "https://app.dnbhoovers.com/company/example"
+                }),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(added, 2);
+        assert_eq!(payload["fields"]["umsatz"]["value"], "0,53B");
+        assert_eq!(payload["fields"]["mitarbeiter"]["value"], "2,83K");
+        assert_eq!(
+            payload["fields"]["umsatz"]["via"],
+            Value::Null,
+            "top-level result stays compatible"
+        );
+        assert_eq!(
+            payload["fields"]["umsatz"]["candidates"][0]["via"],
+            "authenticated_source_capture"
+        );
+        assert!(payload["fields"]["firma_email"]["value"].is_null());
+        let serialized = serde_json::to_string(&payload).unwrap();
+        assert!(!serialized.contains("evil.example"));
+        assert!(!serialized.contains("must-not-pass"));
+    }
+
+    #[test]
     fn slugify_handles_typical_company_names() {
-        assert_eq!(slugify("WITTENSTEIN SE"), "wittenstein-se");
+        assert_eq!(slugify("Example Industrial GmbH"), "example-industrial-gmbh");
         assert_eq!(slugify("DO & Co. AG"), "do-co-ag");
         assert_eq!(slugify("  Foo   Bar  "), "foo-bar");
     }

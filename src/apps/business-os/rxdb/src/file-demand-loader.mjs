@@ -62,21 +62,30 @@ export function createFileDemandLoader({
           // the presence blob still names them; reconcile so `knownSequences`
           // never tells the peer to skip a sequence we no longer hold — otherwise
           // the returned window would be missing chunks and the file read fails.
-          const knownSequences = persistChunks
+          let knownSequences = persistChunks
             ? await reconcilePresentSequences(sidecarBackend, collectionName, fileId, presence?.presentSequences || [])
             : [];
           const validChunks = [];
           const consumedSequences = new Set();
           let returnedBytes = 0;
-          const consumeChunk = async (chunk) => {
-            if (!chunk || typeof chunk !== 'object' || chunk.complete && chunk.sequence == null) return;
-            const sequence = Number(chunk.sequence);
-            if (!Number.isFinite(sequence) || consumedSequences.has(sequence)) return;
+          let completedChunkCount = null;
+          const consumeChunk = async (chunk, { persist = true } = {}) => {
+            if (!chunk || typeof chunk !== 'object') return;
             const bytesBase64 = String(chunk.bytesBase64 || '');
+            const sequence = Number(chunk.sequence);
+            // Streaming sources finish with an empty completion frame carrying
+            // the next numeric sequence. It resolves the transport collector;
+            // it is not a file chunk and must never enter the primary store.
+            if (chunk.complete === true && bytesBase64.length === 0) {
+              if (Number.isFinite(sequence)) completedChunkCount = sequence;
+              return;
+            }
+            if (!Number.isFinite(sequence) || consumedSequences.has(sequence)) return;
+            if (chunk.complete === true) completedChunkCount = sequence + 1;
             const hash = chunk.hash || null;
             consumedSequences.add(sequence);
             bump(status, 'fileBytesReceived', bytesBase64.length);
-            if (persistChunks) {
+            if (persistChunks && persist) {
               await storageCollection.bulkWrite([{
                 id: `${fileId}-${sequence}`,
                 file_id: fileId,
@@ -116,6 +125,21 @@ export function createFileDemandLoader({
               validChunks.push({ sequence, hash });
             }
           };
+          if (inlineReturn && knownSequences.length > 0) {
+            const hydrated = await readPersistedChunks(storageCollection, fileId, knownSequences);
+            if (hydrated === null) {
+              // A storage adapter without point reads cannot reconstruct a
+              // materialized result from resume hints. Request the complete
+              // window instead of returning an incomplete file.
+              knownSequences = [];
+            } else {
+              knownSequences = [];
+              for (const chunk of hydrated) {
+                await consumeChunk(chunk, { persist: false });
+                knownSequences.push(chunk.sequence);
+              }
+            }
+          }
           const chunks = await requestFileFetch({
             requestId,
             collectionName,
@@ -134,9 +158,9 @@ export function createFileDemandLoader({
           if (persistChunks) {
             const highestSequence = sequences.length ? Math.max(...sequences) : -1;
             const expectedTotal = Math.max(
-              highestSequence,
-              presence?.expectedChunkCount || 0,
-            ) + 1;
+              highestSequence + 1,
+              completedChunkCount ?? (presence?.expectedChunkCount || 0),
+            );
             await sidecarBackend.putDocumentAccess({
               collection: collectionName,
               id: `${fileId}-presence`,
@@ -214,6 +238,25 @@ export function createFileDemandLoader({
       };
     },
   };
+}
+
+async function readPersistedChunks(storageCollection, fileId, sequences) {
+  if (typeof storageCollection.getStoredRecord !== 'function') return null;
+  const chunks = [];
+  for (const sequence of sequences) {
+    const row = await storageCollection.getStoredRecord(`${fileId}-${sequence}`);
+    const bytesBase64 = String(row?.bytes_base64 || '');
+    // Empty rows were written by older clients from terminal completion
+    // frames. Excluding them from the resume hint makes the peer repair the
+    // presence set on this fetch.
+    if (!row || bytesBase64.length === 0) continue;
+    chunks.push({
+      sequence: Number(sequence),
+      bytesBase64,
+      hash: row.hash || null,
+    });
+  }
+  return chunks;
 }
 
 // M5: keep the resume hint honest against the LRU. A presence sequence is only

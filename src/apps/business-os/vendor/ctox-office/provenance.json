@@ -51,11 +51,11 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/business-os-bridge.mjs",
-      "sha256": "220ff61b5e4662e82be547945cd1a64c75992bb2434424ec659febd738691c69"
+      "sha256": "2e04728f5eb597efbbbd5f53a86ae3facc44e562fa4a1dadeaa62fbadc14a14a"
     },
     {
       "path": "src/apps/business-os/office-engine/src/capsule.mjs",
-      "sha256": "99e2533a655f162ca4df16abaaa8f2e46cda1793b4ec679d868d1d117cfa4d5e"
+      "sha256": "88076e1089327e09db36ebd677939d95d6a47e10a25a9017f1dd04eac4e226ad"
     },
     {
       "path": "src/apps/business-os/office-engine/src/document.mjs",
@@ -83,7 +83,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/frame-runtime.mjs",
-      "sha256": "c250d5b4dd86c006a178fe069b14c6441781da9c2b6417efabf2f83e588f6f11"
+      "sha256": "3e76d0d4a9d80890a90a4cf9f4a4fd7ce225dcf00323659a21f9614714127fc9"
     },
     {
       "path": "src/apps/business-os/office-engine/src/frame.css",
@@ -91,7 +91,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/frame.html",
-      "sha256": "485d022bcb3aaa190f3609231c619b34aebce9800f21961874e25cef0a89bbc5"
+      "sha256": "60d5b477670d305d7c911c162a35621c1a10c833dea25c8a8f3b8e28565e1271"
     },
     {
       "path": "src/apps/business-os/office-engine/src/legacy-runtime/document.mjs",
@@ -107,15 +107,15 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-documents.mjs",
-      "sha256": "b2f57e70a0b6797299825c0077be0bb2084f780312b234500b3468c751807a61"
+      "sha256": "d56e22ed0059ac47381ff15504029cb11b3d5c727a392cabc08f5895bd92d54d"
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-fork-core.mjs",
-      "sha256": "61902665591653102beb8a823a5458997fd5113b21e0c9cac9d507c05283100f"
+      "sha256": "43462e5b730499e9518e638f1964a4295501ceff4a40806e032203fb655b75a8"
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-spreadsheets.mjs",
-      "sha256": "4c8d0107e98d488eae10f88c08649887d2ef9a9a49a58a905e770032bc8c241e"
+      "sha256": "b3254e48f8f5333c772cf7650c061a77942c8d873b6138444163f3c4c859ae85"
     },
     {
       "path": "src/apps/business-os/office-engine/src/spreadsheet.mjs",
@@ -3722,12 +3722,12 @@
     {
       "path": "web-apps/apps/documenteditor/main/index.html",
       "staged_path": "upstream/web-apps/apps/documenteditor/main/index.html",
-      "sha256": "4265467c66c5457095ee462f5589edfb2e27329501fd3517a38e87cdf7d22275"
+      "sha256": "42d6d66f2f5884338180e6394dc1b424a96356fe326cc7a2d46d3432190f3b44"
     },
     {
       "path": "web-apps/apps/documenteditor/main/index_loader.html",
       "staged_path": "upstream/web-apps/apps/documenteditor/main/index_loader.html",
-      "sha256": "4b68ecc5baa7a13ca502234f7e442f50dc8a4bbf4dbada30048dddef67a1010b"
+      "sha256": "adddaa4d60945721febd830a3e838e8811834e2b0689dc6ea6a0949d46175266"
     },
     {
       "path": "web-apps/apps/documenteditor/main/locale/de.json",
@@ -3822,17 +3822,17 @@
     {
       "path": "web-apps/apps/spreadsheeteditor/main/index.html",
       "staged_path": "upstream/web-apps/apps/spreadsheeteditor/main/index.html",
-      "sha256": "91ad2c9da853e131d9549c06a2e832ee37ab29cebc980483e9f283fca67987eb"
+      "sha256": "5e71f24c52439171815fe6dd3667c3b9e3a6becb2e1ea9e144ec0dec243dea2a"
     },
     {
       "path": "web-apps/apps/spreadsheeteditor/main/index_internal.html",
       "staged_path": "upstream/web-apps/apps/spreadsheeteditor/main/index_internal.html",
-      "sha256": "675432cb374debeff0a2fd5f04b7cb4cce6e001cac2eebbe7297e52755135d30"
+      "sha256": "5fa7bb0ac529fa89984da4e594c6023c92178d535bc8d8b47b4b3bc5424a577b"
     },
     {
       "path": "web-apps/apps/spreadsheeteditor/main/index_loader.html",
       "staged_path": "upstream/web-apps/apps/spreadsheeteditor/main/index_loader.html",
-      "sha256": "5ca39d5b57c7e4d691310d76c4ad0de96e61bc7c928213d69aae076780c581fb"
+      "sha256": "7ef9e6755d878588b881743888571cc0e94bac5a7e6408cd6d58cfdcd69d5575"
     },
     {
       "path": "web-apps/apps/spreadsheeteditor/main/locale/de.json",
@@ -3929,26 +3929,26 @@
     {
       "kind": "document",
       "path": "src/apps/business-os/vendor/ctox-office/ctox-office-document.mjs",
-      "bytes": 11366,
-      "sha256": "98e62c134f7dd6581f20f9508017b21184aede6fba2789846da27f7ba7f2f2ff"
+      "bytes": 11953,
+      "sha256": "772f3ff704ad8355ba9e709fdfa3200304533a11c6363e31706b19bd144262ac"
     },
     {
       "kind": "spreadsheet",
       "path": "src/apps/business-os/vendor/ctox-office/ctox-office-spreadsheet.mjs",
-      "bytes": 11402,
-      "sha256": "c8e3f4739aeaf5dd4e65f366ee5e0ad8ecbfa451441382c03f393ee5422642ce"
+      "bytes": 11989,
+      "sha256": "5efd0dd232ac0a9daaf2e5ceb353bde5033e85206b2e174b76b6a65e537da5d1"
     }
   ],
   "artifacts": [
     {
       "path": "src/apps/business-os/vendor/ctox-office/ctox-office-document.mjs",
-      "bytes": 11366,
-      "sha256": "98e62c134f7dd6581f20f9508017b21184aede6fba2789846da27f7ba7f2f2ff"
+      "bytes": 11953,
+      "sha256": "772f3ff704ad8355ba9e709fdfa3200304533a11c6363e31706b19bd144262ac"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/ctox-office-spreadsheet.mjs",
-      "bytes": 11402,
-      "sha256": "c8e3f4739aeaf5dd4e65f366ee5e0ad8ecbfa451441382c03f393ee5422642ce"
+      "bytes": 11989,
+      "sha256": "5efd0dd232ac0a9daaf2e5ceb353bde5033e85206b2e174b76b6a65e537da5d1"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/forks/ctox-documents/business-os.css",
@@ -3977,8 +3977,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/frame-runtime.mjs",
-      "bytes": 4073,
-      "sha256": "c250d5b4dd86c006a178fe069b14c6441781da9c2b6417efabf2f83e588f6f11"
+      "bytes": 4384,
+      "sha256": "3e76d0d4a9d80890a90a4cf9f4a4fd7ce225dcf00323659a21f9614714127fc9"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/frame.css",
@@ -3987,8 +3987,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/frame.html",
-      "bytes": 474,
-      "sha256": "485d022bcb3aaa190f3609231c619b34aebce9800f21961874e25cef0a89bbc5"
+      "bytes": 536,
+      "sha256": "60d5b477670d305d7c911c162a35621c1a10c833dea25c8a8f3b8e28565e1271"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/rpc.mjs",
@@ -3997,18 +3997,18 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-documents.mjs",
-      "bytes": 183,
-      "sha256": "b2f57e70a0b6797299825c0077be0bb2084f780312b234500b3468c751807a61"
+      "bytes": 397,
+      "sha256": "d56e22ed0059ac47381ff15504029cb11b3d5c727a392cabc08f5895bd92d54d"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-fork-core.mjs",
-      "bytes": 26495,
-      "sha256": "61902665591653102beb8a823a5458997fd5113b21e0c9cac9d507c05283100f"
+      "bytes": 26960,
+      "sha256": "43462e5b730499e9518e638f1964a4295501ceff4a40806e032203fb655b75a8"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-spreadsheets.mjs",
-      "bytes": 186,
-      "sha256": "4c8d0107e98d488eae10f88c08649887d2ef9a9a49a58a905e770032bc8c241e"
+      "bytes": 400,
+      "sha256": "b3254e48f8f5333c772cf7650c061a77942c8d873b6138444163f3c4c859ae85"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/document_editor_service_worker.js",
@@ -7602,13 +7602,13 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index.html",
-      "bytes": 290517,
-      "sha256": "4265467c66c5457095ee462f5589edfb2e27329501fd3517a38e87cdf7d22275"
+      "bytes": 290519,
+      "sha256": "42d6d66f2f5884338180e6394dc1b424a96356fe326cc7a2d46d3432190f3b44"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index_loader.html",
-      "bytes": 113915,
-      "sha256": "4b68ecc5baa7a13ca502234f7e442f50dc8a4bbf4dbada30048dddef67a1010b"
+      "bytes": 113917,
+      "sha256": "adddaa4d60945721febd830a3e838e8811834e2b0689dc6ea6a0949d46175266"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/locale/de.json",
@@ -7702,18 +7702,18 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/index.html",
-      "bytes": 294522,
-      "sha256": "91ad2c9da853e131d9549c06a2e832ee37ab29cebc980483e9f283fca67987eb"
+      "bytes": 294524,
+      "sha256": "5e71f24c52439171815fe6dd3667c3b9e3a6becb2e1ea9e144ec0dec243dea2a"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/index_internal.html",
-      "bytes": 42256,
-      "sha256": "675432cb374debeff0a2fd5f04b7cb4cce6e001cac2eebbe7297e52755135d30"
+      "bytes": 42258,
+      "sha256": "5fa7bb0ac529fa89984da4e594c6023c92178d535bc8d8b47b4b3bc5424a577b"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/index_loader.html",
-      "bytes": 134220,
-      "sha256": "5ca39d5b57c7e4d691310d76c4ad0de96e61bc7c928213d69aae076780c581fb"
+      "bytes": 134222,
+      "sha256": "7ef9e6755d878588b881743888571cc0e94bac5a7e6408cd6d58cfdcd69d5575"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/locale/de.json",

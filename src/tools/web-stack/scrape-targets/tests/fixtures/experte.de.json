@@ -1,5 +1,5 @@
 {
-  "input": { "source_id": "experte.de", "company": "WITTENSTEIN SE", "country": "DE", "email": "kontakt@wittenstein.de" },
-  "expected": { "person_email_validation": "valid" },
-  "browser": { "ok": true, "result": { "email": "kontakt@wittenstein.de", "status": "valid", "evidence": "kontakt@wittenstein.de Gültig", "url": "https://www.experte.de/email-pruefen", "title": "E-Mail prüfen | EXPERTE.de" } }
+  "input": { "source_id": "experte.de", "company": "Example Manufacturing AG", "country": "DE", "email": "contact@example.test" },
+  "expected": { "person_email_validation": "invalid" },
+  "browser": { "ok": true, "result": { "email": "contact@example.test", "status": "invalid", "evidence": "contact@example.test Ungültig", "url": "https://www.experte.de/email-pruefen", "title": "E-Mail prüfen | EXPERTE.de" } }
 }

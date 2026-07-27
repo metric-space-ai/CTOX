@@ -5,11 +5,16 @@ import {
 
 const written = [];
 const writeBatches = [];
+const stored = new Map();
 const storageCollection = {
   async bulkWrite(rows) {
     writeBatches.push(rows.slice());
-    for (const row of rows) written.push(row);
+    for (const row of rows) {
+      written.push(row);
+      stored.set(row.id, { ...row });
+    }
   },
+  async getStoredRecord(id) { return stored.get(id) || null; },
 };
 
 const backend = createMemoryMetaBackend();
@@ -57,6 +62,47 @@ const presenceRecord = await backend.getDocumentAccess('desktop_files', 'file-1-
 assert(presenceRecord !== null, 'sidecar must record presence for file-1');
 assert(presenceRecord.fileChunkPresence.presentSequences.length === 3, 'all sequences recorded');
 assert(presenceRecord.fileChunkPresence.expectedChunkCount === 3, 'expected count recorded');
+
+// Seed the stale terminal row produced by older browser bundles. The repaired
+// loader must neither hydrate nor retain it in the presence contract.
+stored.set('file-1-3', {
+  id: 'file-1-3', file_id: 'file-1', sequence: 3, bytes_base64: '', hash: null,
+});
+await backend.putDocumentAccess({
+  collection: 'desktop_files', id: 'file-1-3', lastAccessedAt: Date.now(),
+  pinReason: 'file-chunk', dirty: false, estimatedBytes: 0,
+});
+await backend.putDocumentAccess({
+  ...presenceRecord,
+  fileChunkPresence: {
+    ...presenceRecord.fileChunkPresence,
+    expectedChunkCount: 4,
+    presentSequences: [0, 1, 2, 3],
+  },
+});
+
+// A streaming source terminates with an empty completion frame whose numeric
+// sequence is the next sequence. It must not be persisted. A later materialized
+// read must hydrate the known chunks and still return the complete file even
+// when the peer only sends that terminal frame.
+let resumeKnownSequences = null;
+const resumeLoader = createFileDemandLoader({
+  collectionName: 'desktop_files',
+  storageCollection,
+  sidecarBackend: backend,
+  requestFileFetch: async ({ knownSequences }) => {
+    resumeKnownSequences = knownSequences;
+    return [{ sequence: 3, bytesBase64: '', hash: null, complete: true }];
+  },
+  status,
+});
+const resumed = await resumeLoader.fetchFile('file-1');
+assert(resumed.length === 3, `materialized resume returns all persisted chunks (got ${resumed.length})`);
+assert(resumeKnownSequences.join(',') === '0,1,2', `resume advertises only data chunks (got ${resumeKnownSequences})`);
+assert(stored.get('file-1-3')?.bytes_base64 === '', 'terminal completion frame is not rewritten as file data');
+const resumedPresence = await backend.getDocumentAccess('desktop_files', 'file-1-presence');
+assert(resumedPresence.fileChunkPresence.expectedChunkCount === 3, 'resume does not grow expected chunk count');
+assert(resumedPresence.fileChunkPresence.presentSequences.join(',') === '0,1,2', 'presence excludes terminal frame');
 
 // Range-specific in-flight keys: same file + different ranges must not share
 // the same promise; same range with different key order should still dedup.

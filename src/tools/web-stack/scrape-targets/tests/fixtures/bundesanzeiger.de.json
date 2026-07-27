@@ -1,18 +1,19 @@
 {
   "input": {
     "source_id": "bundesanzeiger.de",
-    "company": "WITTENSTEIN SE",
+    "company": "Beispiel Maschinenbau SE",
     "country": "DE"
   },
   "expected": {
-    "firma_name": "WITTENSTEIN SE"
+    "firma_name": "Beispiel Maschinenbau SE",
+    "firma_ort": "Musterstadt"
   },
   "search": {
     "results": [
       {
-        "title": "WITTENSTEIN SE Jahresabschluss",
+        "title": "Beispiel Maschinenbau SE Jahresabschluss",
         "url": "https://www.bundesanzeiger.de/pub/de/suche?result=1",
-        "summary": "WITTENSTEIN SE"
+        "summary": "Beispiel Maschinenbau SE"
       }
     ]
   },
@@ -26,11 +27,16 @@
     "ok": true,
     "result": {
       "url": "https://www.bundesanzeiger.de/pub/de/suche?result=1",
-      "title": "WITTENSTEIN SE - Bundesanzeiger",
-      "text": "WITTENSTEIN SE",
-      "html": "<article data-id=\"hit-1\"><div class=\"title\">WITTENSTEIN SE</div></article>",
-      "origin_ok": true,
-      "blocked": false
+      "title": "Suchergebnis - Bundesanzeiger",
+      "blocked": false,
+      "results_page": true,
+      "entries": [{
+        "name": "Beispiel Maschinenbau SE",
+        "city": "Musterstadt",
+        "section": "Rechnungslegung",
+        "information": "Jahresabschluss",
+        "date": "01.01.2026"
+      }]
     }
   }
 }

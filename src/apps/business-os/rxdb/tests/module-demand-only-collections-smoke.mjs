@@ -7,6 +7,7 @@ const {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   createFollowerBridge,
+  shouldReplaceCachedBridgeForStart,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
   COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
@@ -20,6 +21,25 @@ assert(
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS < COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
   'follower bridge deadline contains the complete direct failover budget',
 );
+
+{
+  const follower = createFollowerBridge('document_blob_chunks', { role: 'follower' });
+  assert.equal(
+    shouldReplaceCachedBridgeForStart(follower, { forceDirect: true }),
+    true,
+    'a force-direct blob lease replaces a cached follower bridge',
+  );
+  assert.equal(
+    shouldReplaceCachedBridgeForStart(follower, { forceDirect: false }),
+    false,
+    'ordinary collection starts keep the multi-tab follower bridge',
+  );
+  assert.equal(
+    shouldReplaceCachedBridgeForStart({ mode: 'leader' }, { forceDirect: true }),
+    false,
+    'force-direct starts do not discard an existing direct bridge',
+  );
+}
 
 {
   let directFallbackCalls = 0;
@@ -213,6 +233,11 @@ function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
   assert.equal(starts[0].pull, null, 'demand-only chunk collection keeps normal pull replication disabled');
   assert.equal(await lease.release(), true, 'lease release succeeds');
   assert.deepEqual(cancels, ['desktop_file_chunks'], 'releasing the final lease stops the demand-only bridge');
+  assert.equal(runtime.diagnostics.collections.desktop_file_chunks.status, 'skipped');
+  assert.equal(runtime.diagnostics.collections.desktop_file_chunks.connectionStatus, 'demand-only');
+  assert.equal(runtime.diagnostics.collections.desktop_file_chunks.reason, 'demand-only-lease-released');
+  assert.equal(runtime.diagnostics.collections.desktop_file_chunks.active, false);
+  assert.equal(runtime.diagnostics.collections.desktop_file_chunks.frameTransport, null);
   await runtime.stop();
 }
 

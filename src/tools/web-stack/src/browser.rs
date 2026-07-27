@@ -2595,13 +2595,46 @@ for await (const line of rl) {{
       await locator.setInputFiles(String(message.filePath));
       respond({{ id, ok: true, nav: await navState() }});
     }} else if (op === "credential_fill") {{
-      const selector = String(message.selector || "");
-      if (!selector) throw new Error("credential selector is required");
-      const locator = page.locator(selector);
-      if (await locator.count() !== 1) throw new Error("credential selector must resolve to exactly one field");
-      await locator.fill(String(message.value || ""));
-      message.value = "[redacted]";
-      respond({{ id, ok: true, nav: await navState() }});
+      const fieldRole = String(message.fieldRole || "password");
+      const fillFirstVisible = async (selectors, value) => {{
+        for (const selector of selectors.filter(Boolean)) {{
+          const locator = page.locator(selector);
+          const count = Math.min(await locator.count(), 12);
+          for (let index = 0; index < count; index += 1) {{
+            const field = locator.nth(index);
+            if (!await field.isVisible().catch(() => false)) continue;
+            if (await field.isDisabled().catch(() => true)) continue;
+            await field.fill(String(value));
+            return {{ selector, index }};
+          }}
+        }}
+        return null;
+      }};
+      const filled = {{}};
+      if ((fieldRole === "username" || fieldRole === "both") && message.usernameValue != null) {{
+        filled.username = await fillFirstVisible([
+          "input[autocomplete='username']",
+          "input[type='email']",
+          "input[name*='email' i]",
+          "input[name*='user' i]",
+          "input[id*='email' i]",
+          "input[id*='user' i]",
+        ], message.usernameValue);
+        if (!filled.username) throw new Error("username field was not found");
+      }}
+      if ((fieldRole === "password" || fieldRole === "both") && message.passwordValue != null) {{
+        filled.password = await fillFirstVisible([
+          String(message.selector || ""),
+          "input[autocomplete='current-password']",
+          "input[type='password']",
+          "input[name*='password' i]",
+          "input[id*='password' i]",
+        ], message.passwordValue);
+        if (!filled.password) throw new Error("password field was not found");
+      }}
+      message.usernameValue = "[redacted]";
+      message.passwordValue = "[redacted]";
+      respond({{ id, ok: true, filled, nav: await navState() }});
     }} else if (op === "clipboard_copy") {{
       const clipboardText = await page.evaluate(() => String(globalThis.getSelection?.()?.toString?.() || ""));
       respond({{ id, ok: true, clipboardText, nav: await navState() }});
@@ -3108,6 +3141,9 @@ mod tests {
         assert!(script.contains("blocked browser egress host"));
         assert!(script.contains("op === \"webauthn_respond\""));
         assert!(script.contains("op === \"credential_fill\""));
+        assert!(script.contains("username field was not found"));
+        assert!(script.contains("message.usernameValue = \"[redacted]\""));
+        assert!(script.contains("message.passwordValue = \"[redacted]\""));
         assert!(script.contains("op === \"clipboard_copy\""));
         let path = std::env::temp_dir().join(format!(
             "ctox-persistent-browser-runner-{}.mjs",

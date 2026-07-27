@@ -6,6 +6,14 @@ const path = require("path");
 
 const COMMAND_ERRORS = [];
 const BLOCKED_DETECTIONS = [];
+const RECORD_FIELDS = new Set([
+  "firma_name", "firma_anschrift", "firma_plz", "firma_ort", "firma_email",
+  "firma_domain", "firma_telefon", "wz_code", "umsatz", "mitarbeiter",
+  "crm_record_number", "person_titel", "person_vorname", "person_nachname",
+  "person_funktion", "person_position", "person_email", "person_email_validation",
+  "person_telefon", "person_linkedin", "person_xing",
+]);
+const CONFIDENCE_LEVELS = new Set(["low", "medium", "high", "user_provided"]);
 
 const PROTECTED_SOURCE_CONFIG = Object.freeze({
   "dnbhoovers.com": {
@@ -15,7 +23,7 @@ const PROTECTED_SOURCE_CONFIG = Object.freeze({
     capture_supported: true,
   },
   "leadfeeder.com": {
-    login_url: "https://app.leadfeeder.com/login",
+    login_url: "https://app.leadfeeder.com/f/sign/in",
     allowed_domains: ["leadfeeder.com", "app.leadfeeder.com", "api.leadfeeder.com"],
     credential_ref: "ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN",
     capture_supported: true,
@@ -24,13 +32,20 @@ const PROTECTED_SOURCE_CONFIG = Object.freeze({
     login_url: "https://rocketreach.co/login",
     allowed_domains: ["rocketreach.com", "rocketreach.co"],
     credential_ref: "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN",
-    capture_supported: false,
+    capture_supported: true,
+    public_fields: ["firma_name"],
+  },
+  "xing.com": {
+    login_url: "https://login.xing.com/",
+    allowed_domains: ["xing.com", "www.xing.com", "login.xing.com", "api.xing.com"],
+    credential_ref: "ctox-secret://credentials/XING_BROWSER_LOGIN",
+    capture_supported: true,
   },
 });
 
 function commandErrorsIndicateBlocking() {
   return COMMAND_ERRORS.some((error) =>
-    /captcha|anti-bot|interstitial|cloudflare|turnstile|verify (that )?you are human/i.test(error)
+    /captcha|anti-bot|interstitial|cloudflare|turnstile|verify (that )?you are human|access denied|request blocked|rate.?limit|too many requests/i.test(error)
   );
 }
 
@@ -48,15 +63,15 @@ function rememberCommandError(command, detail) {
 const SOURCE_CONFIG = Object.freeze({
   "bundesanzeiger.de": { native: true, domains: ["bundesanzeiger.de"] },
   "companyhouse.de": { native: true, domains: ["companyhouse.de"] },
-  "dnbhoovers.com": { native: true, domains: ["dnbhoovers.com", "dnb.com", "app.dnbhoovers.com", "plus.dnb.com"] },
+  "dnbhoovers.com": { native: true, native_only: true, domains: ["dnbhoovers.com", "dnb.com", "app.dnbhoovers.com", "plus.dnb.com"] },
   "firmenabc.at": { native: true, domains: ["firmenabc.at"] },
   "handelsregister.de": { native: true, domains: ["handelsregister.de"] },
-  "leadfeeder.com": { native: true, domains: ["leadfeeder.com", "app.leadfeeder.com", "api.leadfeeder.com"] },
+  "leadfeeder.com": { native: true, native_only: true, domains: ["leadfeeder.com", "app.leadfeeder.com", "api.leadfeeder.com"] },
   "moneyhouse.ch": { native: false, domains: ["moneyhouse.ch"] },
   "northdata.de": { native: true, domains: ["northdata.de"] },
-  "xing.com": { native: true, domains: ["xing.com", "api.xing.com"] },
-  "zefix.ch": { native: true, domains: ["zefix.ch", "zefix.admin.ch"] },
-  "google.de": { native: false, domains: [] },
+  "xing.com": { native: true, native_only: true, domains: ["xing.com", "api.xing.com"] },
+  "zefix.ch": { native: true, native_only: true, domains: ["zefix.ch", "zefix.admin.ch"] },
+  "google.de": { native: true, native_only: true, domains: [] },
   "maps.google.com": { native: false, domains: ["google.com", "google.de"] },
   "rocketreach.com": { native: false, domains: ["rocketreach.com", "rocketreach.co"] },
   "experte.de": { native: false, domains: ["experte.de"] },
@@ -154,9 +169,32 @@ return { email, status, evidence: evidence.slice(0, 700), url: page.url(), title
 
 function hostOf(url) {
   try {
-    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return "";
+    }
+    return parsed.hostname.replace(/^www\./, "").toLowerCase();
   } catch (error) {
     return "";
+  }
+}
+
+function safePublicHttpUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    return Boolean(host)
+      && host !== "localhost"
+      && !host.endsWith(".localhost")
+      && !host.endsWith(".local")
+      && !/^(?:127\.|10\.|169\.254\.|192\.168\.)/.test(host)
+      && !/^172\.(?:1[6-9]|2\d|3[01])\./.test(host)
+      && host !== "::1";
+  } catch {
+    return false;
   }
 }
 
@@ -265,22 +303,26 @@ function requestBrowserAuthorization(sourceId, config, credentialRef, input) {
 }
 
 function recordUnlockSignal(sourceId, url, markers) {
-  const sourceUrl = isAllowedSourceUrl(sourceId, url) ? url : protectedSourceConfig(sourceId)?.login_url;
+  const sourceUrl = isAllowedSourceUrl(sourceId, url)
+    ? url
+    : protectedSourceConfig(sourceId)?.login_url;
   const evidence = JSON.stringify({
     source_id: sourceId,
     detection: "access_challenge",
     markers: [...new Set((markers || []).map(String))].slice(0, 12),
     secret_value_in_payload: false,
   });
-  return runCtox([
+  const args = [
     "web", "unlock", "signals", "record",
     "--source", `scrape-target:${sourceId}`,
-    "--url", sourceUrl,
     "--evidence", evidence,
-  ]);
+  ];
+  if (sourceUrl) args.push("--url", sourceUrl);
+  return runCtox(args);
 }
 
 function isAllowedSourceUrl(sourceId, url) {
+  if (!safePublicHttpUrl(url)) return false;
   if (sourceId === "google.de") return true;
   const host = hostOf(url);
   return sourceConfig(sourceId).domains.some((domain) =>
@@ -299,8 +341,20 @@ function search(sourceId, company, country) {
     if (country) args.push("--country", country);
     payloads.push(runCtox(args));
   }
-  for (const domain of config.domains) {
-    const args = ["web", "search", "--query", query, "--include-sources", "--domain", domain];
+  if (!config.native_only) {
+    for (const domain of config.domains) {
+      const args = ["web", "search", "--query", query, "--include-sources", "--domain", domain];
+      if (country) args.push("--country", country);
+      payloads.push(runCtox(args));
+    }
+  }
+  // Directory-only searches can be empty even though the provider has an
+  // exact public company profile. Keep the fallback query provider-labelled
+  // and accept only URLs that pass the source allow-list below.
+  if (sourceId === "rocketreach.com") {
+    const args = [
+      "web", "search", "--query", `${company} RocketReach`, "--include-sources",
+    ];
     if (country) args.push("--country", country);
     payloads.push(runCtox(args));
   }
@@ -311,8 +365,10 @@ function search(sourceId, company, country) {
   }
   const results = [];
   const sourceFailures = [];
+  const providers = [];
   const seen = new Set();
   for (const payload of payloads.filter(Boolean)) {
+    if (payload.provider) providers.push(String(payload.provider).toLowerCase());
     for (const hit of Array.isArray(payload.results) ? payload.results : []) {
       if (!hit?.url || seen.has(hit.url)) continue;
       seen.add(hit.url);
@@ -320,7 +376,7 @@ function search(sourceId, company, country) {
     }
     if (Array.isArray(payload.source_failures)) sourceFailures.push(...payload.source_failures);
   }
-  return { results, source_failures: sourceFailures };
+  return { results, source_failures: sourceFailures, providers: [...new Set(providers)] };
 }
 
 function readPage(url, country) {
@@ -441,12 +497,35 @@ await page.waitForFunction((value) => document.body?.innerText.toLowerCase().inc
 const text = await page.locator("body").innerText();
 return { url: page.url(), title: await page.title(), page_text_excerpt: text.replace(/\\s+/g, " ").trim().slice(0, 16000) };
 `;
+  } else if (sourceId === "google.de") {
+    source = `
+const company = ${JSON.stringify(company)};
+const url = "https://www.google.de/search?q=" + encodeURIComponent(company);
+await ctoxBrowser.goto(url, { timeoutMs: 30000 });
+const reject = page.getByRole("button", { name: /alle ablehnen|reject all/i }).first();
+if (await reject.count()) {
+  await reject.click({ timeout: 3000 }).catch(() => null);
+  await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => null);
+}
+await page.waitForFunction(
+  (value) => document.body?.innerText.toLowerCase().includes(value.toLowerCase()),
+  company,
+  { timeout: 30000 },
+).catch(() => null);
+const text = await page.locator("body").innerText();
+return {
+  url: page.url(),
+  title: await page.title(),
+  page_text_excerpt: text.replace(/\\s+/g, " ").trim().slice(0, 16000),
+};
+`;
   } else if (sourceId === "maps.google.com") {
     source = `
 const company = ${JSON.stringify(company)};
 const country = ${JSON.stringify(country)};
 const countryName = ({ DE: "Deutschland", AT: "Österreich", CH: "Schweiz" })[country] || country;
-await ctoxBrowser.goto("https://www.google.com/maps/search/" + encodeURIComponent([company, countryName].filter(Boolean).join(" ")), { timeoutMs: 30000 });
+const query = [company, countryName].filter(Boolean).join(", ");
+await ctoxBrowser.goto("https://www.google.com/maps/search/?api=1&query=" + encodeURIComponent(query), { timeoutMs: 30000 });
 const reject = page.getByRole("button", { name: /tout refuser|alle ablehnen|reject all|alles ablehnen/i }).first();
 if (await reject.count()) {
   await reject.click({ timeout: 3000 }).catch(() => null);
@@ -462,7 +541,8 @@ const text = await page.locator("body").innerText();
 const phoneButton = page.locator('button[data-item-id^="phone:tel:"]').first();
 const phone = await phoneButton.getAttribute("data-item-id").then((value) => value?.replace(/^phone:tel:/, "") || "").catch(() => "");
 const addressButton = page.locator('button[data-item-id="address"]').first();
-const address = await addressButton.getAttribute("aria-label").then((value) => value?.replace(/^Adresse:\\s*/i, "") || "").catch(() => "");
+const address = await addressButton.getAttribute("aria-label").then((value) => value?.replace(/^(?:Adresse|Address):\\s*/i, "") || "").catch(() => "");
+const postal = address.match(/\\b(?:D-|A-|CH-)?(\\d{4,5})\\s+([^,]+)/);
 return {
   url: page.url(),
   title: await page.title(),
@@ -470,18 +550,10 @@ return {
   extracted_fields: { fields: [
     ...(phone ? [{ field: "firma_telefon", value: phone, confidence: "high", note: "Google Maps detail panel" }] : []),
     ...(address ? [{ field: "firma_anschrift", value: address, confidence: "high", note: "Google Maps detail panel" }] : []),
+    ...(postal ? [{ field: "firma_plz", value: postal[1], confidence: "high", note: "Google Maps address" }] : []),
+    ...(postal ? [{ field: "firma_ort", value: postal[2].trim(), confidence: "high", note: "Google Maps address" }] : []),
   ] },
 };
-`;
-  } else if (sourceId === "xing.com") {
-    source = `
-const company = ${JSON.stringify(company)};
-const slug = company.normalize("NFKD").replace(/[\\u0300-\\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "");
-await ctoxBrowser.goto("https://www.xing.com/pages/" + slug + "/about_us", { timeoutMs: 30000 });
-await page.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => null);
-await page.waitForFunction((value) => document.body?.innerText.toLowerCase().includes(value.toLowerCase()), company, { timeout: 30000 }).catch(() => null);
-const text = await page.locator("body").innerText();
-return { url: page.url(), title: await page.title(), page_text_excerpt: text.replace(/\\s+/g, " ").trim().slice(0, 16000) };
 `;
   } else {
     return null;
@@ -492,15 +564,18 @@ return { url: page.url(), title: await page.title(), page_text_excerpt: text.rep
 function appendRecord(records, record, fallbackUrl) {
   const field = String(record?.field || "").trim();
   const value = String(record?.value || "").trim();
-  if (!field || !value) return;
+  if (!RECORD_FIELDS.has(field) || !value) return;
   const sourceUrl = String(record?.source_url || fallbackUrl || "").trim();
+  if (!safePublicHttpUrl(sourceUrl)) return;
+  const confidence = String(record?.confidence || "medium").toLowerCase();
+  if (!CONFIDENCE_LEVELS.has(confidence)) return;
   const key = `${field}\u0000${value}\u0000${sourceUrl}`;
   if (records.some((item) => item.__key === key)) return;
   records.push({
     __key: key,
     field,
     value,
-    confidence: String(record?.confidence || "medium"),
+    confidence,
     source_url: sourceUrl,
     note: String(record?.note || "CTOX web-stack source adapter"),
   });
@@ -508,11 +583,26 @@ function appendRecord(records, record, fallbackUrl) {
 
 function finalizeRecords(records, sourceId) {
   const observedAt = new Date().toISOString();
-  return records.map(({ __key, ...record }) => ({
-    ...record,
-    source_id: String(record.source_id || sourceId),
-    observed_at: String(record.observed_at || observedAt),
-  }));
+  const clean = [];
+  for (const item of records) {
+    const normalized = [];
+    appendRecord(normalized, item, item?.source_url);
+    if (normalized.length < 1) continue;
+    const { __key, ...record } = normalized[0];
+    if (!isAllowedSourceUrl(sourceId, record.source_url)) continue;
+    clean.push({
+      ...record,
+      source_id: sourceId,
+      observed_at: observedAt,
+    });
+  }
+  return clean;
+}
+
+function acceptedProviderRecords(sourceId, company, records) {
+  const clean = finalizeRecords(Array.isArray(records) ? records : [], sourceId)
+    .filter((record) => sourceUrlIsProvider(sourceId, record.source_url));
+  return recordsMatchCompany(company, clean) ? clean : [];
 }
 
 function extractedFields(page) {
@@ -557,7 +647,7 @@ function pageMatchesCompany(company, hit, page) {
   if (normalizedPageTitle && !tokens.every((token) => normalizedPageTitle.includes(token))) {
     return false;
   }
-  const hitCorpus = [hit?.title, hit?.summary]
+  const hitCorpus = [hit?.title, hit?.summary, hit?.snippet]
     .filter(Boolean)
     .join(" ")
     .toLocaleLowerCase("de-DE")
@@ -603,18 +693,20 @@ function appendPublicHeuristics(records, sourceId, hit, page, company) {
   const sourceUrl = String(page?.url || hit?.url || "");
   if (!text || !sourceUrl) return;
 
-  const emails = [...text.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)]
-    .map((match) => match[0].toLowerCase())
-    .filter((email) => !emailBelongsToProvider(sourceId, email))
-    .slice(0, 3);
-  for (const email of emails) {
-    appendRecord(records, {
-      field: "person_email",
-      value: email,
-      confidence: "medium",
-      source_url: sourceUrl,
-      note: `${sourceId} page text`,
-    }, sourceUrl);
+  if (sourceId === "google.de") {
+    const emails = [...text.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)]
+      .map((match) => match[0].toLowerCase())
+      .filter((email) => !emailBelongsToProvider(sourceId, email))
+      .slice(0, 3);
+    for (const email of emails) {
+      appendRecord(records, {
+        field: "firma_email",
+        value: email,
+        confidence: "medium",
+        source_url: sourceUrl,
+        note: "Email published on the company page discovered by Google",
+      }, sourceUrl);
+    }
   }
 
   const mayUseGenericPhone = sourceId !== "maps.google.com"
@@ -634,7 +726,7 @@ function appendPublicHeuristics(records, sourceId, hit, page, company) {
     }, sourceUrl);
   }
 
-  const postal = text.match(/\b(?:D-|A-|CH-)?(\d{4,5})\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß .'-]{2,40})/);
+  const postal = text.match(/\b(?:D-|A-|CH-)?(\d{4,5})\s+([A-ZÄÖÜ][A-Za-zÄÖÜäöüß.'-]*(?:\s+[A-ZÄÖÜ][A-Za-zÄÖÜäöüß.'-]*){0,2})/);
   if (postal && sourceId === "maps.google.com") {
     appendRecord(records, {
       field: "firma_plz",
@@ -710,13 +802,29 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
 
   if (sourceId === "experte.de") {
     const validation = validateEmailWithExperte(email);
-    if (!validation || !["valid", "invalid", "unknown"].includes(validation.status)) {
+    const blocked = BLOCKED_DETECTIONS.length > 0 || commandErrorsIndicateBlocking();
+    if (blocked) {
+      recordUnlockSignal(
+        sourceId,
+        validation?.url || "https://www.experte.de/email-pruefen",
+        BLOCKED_DETECTIONS.length > 0 ? BLOCKED_DETECTIONS : ["access_challenge"],
+      );
       process.stdout.write(JSON.stringify({
         records: [],
-      failure_mode: "temporary_unreachable",
-      detail: COMMAND_ERRORS.length > 0
-        ? COMMAND_ERRORS.join(" | ")
-        : "EXPERTE email validation did not return a conclusive result",
+        failure_mode: "blocked",
+        detail: "EXPERTE email validation was blocked before provider evidence was available",
+      }));
+      return;
+    }
+    if (!validation
+        || !["valid", "invalid", "unknown"].includes(validation.status)
+        || !isAllowedSourceUrl(sourceId, validation.url)) {
+      process.stdout.write(JSON.stringify({
+        records: [],
+        failure_mode: "temporary_unreachable",
+        detail: COMMAND_ERRORS.length > 0
+          ? COMMAND_ERRORS.join(" | ")
+          : "EXPERTE email validation did not return conclusive provider evidence",
       }));
       return;
     }
@@ -736,6 +844,7 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
   let protectedCaptureStatus = "";
   let browserAssist = null;
   if (protectedConfig?.capture_supported) {
+    let unlockRecorded = false;
     let captured = runProtectedCapture(
       sourceId,
       company,
@@ -743,28 +852,27 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
       safeSessionId(input),
     );
     protectedCaptureStatus = String(captured?.source_status || "").trim();
-    if (captured?.ok
-        && Array.isArray(captured.records)
-        && captured.records.length > 0
-        && recordsMatchCompany(company, captured.records)) {
-      process.stdout.write(JSON.stringify({ records: finalizeRecords(captured.records, sourceId) }));
+    let accepted = acceptedProviderRecords(sourceId, company, captured?.records);
+    if (captured?.ok && accepted.length > 0) {
+      process.stdout.write(JSON.stringify({ records: accepted }));
       return;
     }
     if (["blocked", "access_challenge"].includes(protectedCaptureStatus)) {
       const captureUrl = String(captured?.source_url || protectedConfig.login_url);
       recordUnlockSignal(sourceId, captureUrl, [protectedCaptureStatus]);
+      unlockRecorded = true;
     }
-    if (["auth_required", "blocked", "access_challenge", "wrong_origin"].includes(protectedCaptureStatus)) {
+    const shouldRetryAfterLogin = Boolean(credentialRef)
+      && protectedCaptureStatus !== "succeeded";
+    if (shouldRetryAfterLogin) {
       const login = runProtectedLogin(sourceId, protectedConfig, credentialRef, input);
       const sessionId = String(login?.session_id || "").trim();
       if (sessionId) {
         captured = runProtectedCapture(sourceId, company, country, sessionId);
         protectedCaptureStatus = String(captured?.source_status || "").trim();
-        if (captured?.ok
-            && Array.isArray(captured.records)
-            && captured.records.length > 0
-            && recordsMatchCompany(company, captured.records)) {
-          process.stdout.write(JSON.stringify({ records: finalizeRecords(captured.records, sourceId) }));
+        accepted = acceptedProviderRecords(sourceId, company, captured?.records);
+        if (captured?.ok && accepted.length > 0) {
+          process.stdout.write(JSON.stringify({ records: accepted }));
           return;
         }
       }
@@ -775,19 +883,52 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
         input,
       );
     }
-  } else if (sourceId === "xing.com") {
-    const captured = runProtectedCapture(
-      sourceId,
-      company,
-      country,
-      safeSessionId(input),
-    );
-    protectedCaptureStatus = String(captured?.source_status || "").trim();
-    if (captured?.ok
-        && Array.isArray(captured.records)
-        && captured.records.length > 0
-        && recordsMatchCompany(company, captured.records)) {
-      process.stdout.write(JSON.stringify({ records: finalizeRecords(captured.records, sourceId) }));
+    const captureBlocked = ["blocked", "access_challenge"].includes(protectedCaptureStatus)
+      || BLOCKED_DETECTIONS.length > 0
+      || commandErrorsIndicateBlocking();
+    if (captureBlocked && !protectedConfig.public_fields) {
+      if (!unlockRecorded) {
+        recordUnlockSignal(
+          sourceId,
+          captured?.source_url || protectedConfig.login_url,
+          BLOCKED_DETECTIONS.length > 0 ? BLOCKED_DETECTIONS : ["access_challenge"],
+        );
+      }
+      if (!browserAssist) {
+        browserAssist = requestBrowserAuthorization(
+          sourceId,
+          protectedConfig,
+          credentialRef,
+          input,
+        );
+      }
+      process.stdout.write(JSON.stringify({
+        records: [],
+        failure_mode: "blocked",
+        detail: `${sourceId} requires Web-Unlock before provider data can be accepted`,
+        browser_assist_requested: Boolean(browserAssist),
+      }));
+      return;
+    }
+    if (["auth_required", "wrong_origin"].includes(protectedCaptureStatus)
+        && !protectedConfig.public_fields) {
+      process.stdout.write(JSON.stringify({
+        records: [],
+        failure_mode: "auth_required",
+        detail: `${sourceId} requires an authenticated CTOX browser session`,
+        browser_assist_requested: Boolean(browserAssist),
+      }));
+      return;
+    }
+    if (!protectedConfig.public_fields) {
+      process.stdout.write(JSON.stringify({
+        records: [],
+        failure_mode: protectedCaptureStatus === "succeeded" ? "portal_drift" : "temporary_unreachable",
+        detail: protectedCaptureStatus === "succeeded"
+          ? `${sourceId} capture did not return company-matched provider records`
+          : `${sourceId} authenticated capture returned ${protectedCaptureStatus || "no status"}`,
+        browser_assist_requested: Boolean(browserAssist),
+      }));
       return;
     }
   }
@@ -810,7 +951,11 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
   }
 
   const payload = search(sourceId, queryValue, country);
-  const hits = Array.isArray(payload?.results) ? payload.results.slice(0, 5) : [];
+  const googleProviderVerified = sourceId !== "google.de"
+    || payload.providers.includes("google");
+  const hits = googleProviderVerified && Array.isArray(payload?.results)
+    ? payload.results.slice(0, 5)
+    : [];
   for (const hit of hits) {
     if (!hit?.url || !isAllowedSourceUrl(sourceId, hit.url)) continue;
     if (protectedConfig && isPortalOrLoginTitle(hit?.title)) {
@@ -833,18 +978,43 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
         && records.some((record) => record.field === "firma_domain")) break;
   }
 
-  const clean = finalizeRecords(records, sourceId);
+  let clean = finalizeRecords(records, sourceId);
+  if (protectedConfig?.public_fields) {
+    const publicFields = new Set(protectedConfig.public_fields);
+    clean = clean.filter((record) => publicFields.has(record.field)
+      && sourceUrlIsProvider(sourceId, record.source_url));
+  }
   const authFailure = Array.isArray(payload?.source_failures)
     && payload.source_failures.some((failure) => failure?.kind === "auth_required");
   const providerBlocked = Array.isArray(payload?.source_failures)
     && payload.source_failures.some((failure) => ["blocked", "access_challenge"].includes(failure?.kind));
   const protectedAuthFailure = ["auth_required", "wrong_origin"].includes(protectedCaptureStatus);
+  const protectedNeedsAuth = Boolean(protectedConfig && clean.length === 0);
   const commandBlocked = commandErrorsIndicateBlocking();
   const accessBlocked = BLOCKED_DETECTIONS.length > 0
     || providerBlocked
     || commandBlocked
     || ["blocked", "access_challenge"].includes(protectedCaptureStatus);
-  if (protectedConfig && (accessBlocked || authFailure || protectedAuthFailure) && !browserAssist) {
+  if (protectedConfig?.public_fields && clean.length > 0) {
+    if (!browserAssist) {
+      browserAssist = requestBrowserAuthorization(
+        sourceId,
+        protectedConfig,
+        credentialRef,
+        input,
+      );
+    }
+    process.stdout.write(JSON.stringify({
+      records: clean,
+      partial: true,
+      protected_fields_require_authorization: true,
+      browser_assist_requested: Boolean(browserAssist),
+    }));
+    return;
+  }
+  if (protectedConfig
+      && (accessBlocked || authFailure || protectedAuthFailure || protectedNeedsAuth)
+      && !browserAssist) {
     if (accessBlocked) {
       recordUnlockSignal(
         sourceId,
@@ -877,11 +1047,27 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
     }));
     return;
   }
-  if (BLOCKED_DETECTIONS.length > 0) {
+  if (accessBlocked) {
+    if (!protectedConfig) {
+      recordUnlockSignal(
+        sourceId,
+        portalPage?.url || hits[0]?.url,
+        BLOCKED_DETECTIONS.length > 0 ? BLOCKED_DETECTIONS : ["access_challenge"],
+      );
+    }
     process.stdout.write(JSON.stringify({
-      records: clean,
+      records: [],
       failure_mode: "blocked",
-      detail: `${sourceId} browser challenge: ${[...new Set(BLOCKED_DETECTIONS)].join(", ")}`,
+      detail: `${sourceId} access challenge prevented provider evidence`,
+      browser_assist_requested: Boolean(browserAssist),
+    }));
+    return;
+  }
+  if (protectedNeedsAuth) {
+    process.stdout.write(JSON.stringify({
+      records: [],
+      failure_mode: "auth_required",
+      detail: `${sourceId} requires an authenticated CTOX browser session for protected data`,
       browser_assist_requested: Boolean(browserAssist),
     }));
     return;
@@ -891,7 +1077,9 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
       records: [],
       failure_mode: accessBlocked ? "blocked"
         : (authFailure || protectedAuthFailure) ? "auth_required" : "temporary_unreachable",
-      detail: (authFailure || protectedAuthFailure)
+      detail: !googleProviderVerified
+        ? "google.de target rejected results from a non-Google search provider"
+        : (authFailure || protectedAuthFailure)
         ? `${sourceId} requires an authenticated CTOX browser session`
         : BLOCKED_DETECTIONS.length > 0
           ? `${sourceId} browser challenge: ${[...new Set(BLOCKED_DETECTIONS)].join(", ")}`

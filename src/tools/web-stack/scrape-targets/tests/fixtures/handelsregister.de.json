@@ -1,18 +1,17 @@
 {
   "input": {
     "source_id": "handelsregister.de",
-    "company": "WITTENSTEIN SE",
+    "company": "Beispiel Maschinenbau SE",
     "country": "DE"
   },
   "expected": {
-    "firma_name": "WITTENSTEIN SE",
-    "firma_plz": "97999",
-    "firma_ort": "Igersheim"
+    "firma_name": "Beispiel Maschinenbau SE",
+    "firma_ort": "Musterstadt"
   },
   "search": {
     "results": [
       {
-        "title": "WITTENSTEIN SE",
+        "title": "Beispiel Maschinenbau SE",
         "url": "https://www.handelsregister.de/rp_web/auszug.xhtml?id=fixture",
         "summary": "Aktueller Abdruck"
       }
@@ -28,11 +27,14 @@
     "ok": true,
     "result": {
       "url": "https://www.handelsregister.de/rp_web/auszug.xhtml?id=fixture",
-      "title": "WITTENSTEIN SE - Handelsregister",
-      "text": "WITTENSTEIN SE Walter-Wittenstein-Strasse 1, 97999 Igersheim",
-      "html": "<table><tr><td>Firma</td><td>WITTENSTEIN SE</td></tr><tr><td>Geschaftsanschrift</td><td>Walter-Wittenstein-Strasse 1, 97999 Igersheim</td></tr><tr><td>Vorstand</td><td>Wittenstein, Anna, Igersheim</td></tr></table>",
-      "origin_ok": true,
-      "blocked": false
+      "title": "Suchergebnis - Handelsregister",
+      "blocked": false,
+      "results_page": true,
+      "entries": [{
+        "name": "Beispiel Maschinenbau SE",
+        "city": "Musterstadt",
+        "registry": "Amtsgericht Musterstadt HRB 12345"
+      }]
     }
   }
 }

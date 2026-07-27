@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
@@ -71,6 +71,23 @@ const DIRECT_SESSION_TURN_START_TIMEOUT_SECS: u64 = 30;
 const EXACT_PROMPT_SAFE_INPUT_BUDGET_NUMERATOR: i64 = 3;
 const EXACT_PROMPT_SAFE_INPUT_BUDGET_DENOMINATOR: i64 = 4;
 const CTOX_PERSISTENT_WORKER_THREAD_NAME: &str = "ctox-service-worker";
+const BUSINESS_OS_MCP_ADDR_KEY: &str = "CTOX_BUSINESS_OS_MCP_ADDR";
+const BUSINESS_OS_MCP_DEFAULT_ADDR: &str = "127.0.0.1:8788";
+const BUSINESS_OS_MCP_SESSION_SERVER_NAME: &str = "ctox-business-os";
+const BUSINESS_OS_MCP_SESSION_TOOLS: &[&str] = &[
+    "business_os.get_module",
+    "business_os.list_entities",
+    "business_os.query_records",
+    "business_os.search_records",
+    "business_os.get_record",
+    "business_os.get_record_context",
+    "business_os.list_module_actions",
+    "business_os.propose_action",
+    "business_os.execute_action",
+    "business_os.get_command_status",
+    "business_os.list_runs",
+    "business_os.get_run",
+];
 #[cfg(test)]
 static DIRECT_SESSION_EVENT_DESERIALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
@@ -82,6 +99,57 @@ fn direct_session_arg0_paths() -> Arg0DispatchPaths {
         ctox_linux_sandbox_exe: None,
         main_execve_wrapper_exe: None,
     }
+}
+
+fn business_os_mcp_thread_config(
+    configured_addr: &str,
+    token: &str,
+    command_session_token: &str,
+) -> Result<HashMap<String, JsonValue>> {
+    let token = token.trim();
+    anyhow::ensure!(!token.is_empty(), "Business OS MCP token is empty");
+    let command_session_token = command_session_token.trim();
+    anyhow::ensure!(
+        !command_session_token.is_empty(),
+        "Business OS MCP command-session token is empty"
+    );
+    let configured_addr = configured_addr.trim();
+    anyhow::ensure!(
+        !configured_addr.is_empty(),
+        "Business OS MCP address is empty"
+    );
+    anyhow::ensure!(
+        !configured_addr.contains("://") && !configured_addr.contains('/'),
+        "Business OS MCP address must be a local bind address"
+    );
+    let client_addr = if let Some(port) = configured_addr.strip_prefix("0.0.0.0:") {
+        format!("127.0.0.1:{port}")
+    } else if let Some(port) = configured_addr.strip_prefix("[::]:") {
+        format!("[::1]:{port}")
+    } else {
+        configured_addr.to_string()
+    };
+    let mut config = HashMap::new();
+    config.insert(
+        "mcp_servers".to_string(),
+        serde_json::json!({
+            (BUSINESS_OS_MCP_SESSION_SERVER_NAME): {
+                "url": format!("http://{client_addr}/mcp"),
+                "http_headers": {
+                    "Authorization": format!("Bearer {token}"),
+                    "X-CTOX-Business-Command-Session": command_session_token
+                },
+                "enabled": true,
+                "required": true,
+                "startup_timeout_sec": 10,
+                "tool_timeout_sec": 120,
+                "enabled_tools": BUSINESS_OS_MCP_SESSION_TOOLS
+            }
+        }),
+    );
+    // Connected ChatGPT Apps are unrelated to this internal command session.
+    config.insert("features.apps".to_string(), JsonValue::Bool(false));
+    Ok(config)
 }
 
 fn configure_managed_linux_sandbox(cli_overrides: &mut Vec<(String, toml::Value)>) {
@@ -493,6 +561,7 @@ pub(crate) struct PersistentSession {
     base_instructions: String,
     disable_active_tools: bool,
     disable_mcp_servers: bool,
+    thread_config: Option<HashMap<String, JsonValue>>,
     read_only_sandbox: bool,
     persistent_worker: bool,
     /// Set when a turn ended ambiguously (e.g. `turn/start` timed out with
@@ -507,7 +576,33 @@ impl PersistentSession {
     /// Start or resume the normal persistent worker session.
     pub fn start(root: &Path, settings: &BTreeMap<String, String>) -> Result<Self> {
         Self::start_with_instructions_and_tool_mode(
-            root, settings, None, false, false, false, false, true,
+            root, settings, None, false, false, false, None, false, true,
+        )
+    }
+
+    /// Start an isolated task session with only the policy-gated local
+    /// Business OS MCP server added to the thread configuration.
+    pub(crate) fn start_with_business_os_mcp(
+        root: &Path,
+        settings: &BTreeMap<String, String>,
+        command_session_token: &str,
+    ) -> Result<Self> {
+        let addr = settings
+            .get(BUSINESS_OS_MCP_ADDR_KEY)
+            .map(String::as_str)
+            .unwrap_or(BUSINESS_OS_MCP_DEFAULT_ADDR);
+        let token = crate::business_os::mcp_channel::mcp_operator_auth_token(root)?;
+        let thread_config = business_os_mcp_thread_config(addr, &token, command_session_token)?;
+        Self::start_with_instructions_and_tool_mode(
+            root,
+            settings,
+            None,
+            false,
+            false,
+            false,
+            Some(thread_config),
+            false,
+            false,
         )
     }
 
@@ -535,6 +630,7 @@ impl PersistentSession {
             false,
             false,
             true,
+            None,
             false,
             false,
         )
@@ -595,6 +691,7 @@ impl PersistentSession {
             disable_compaction,
             disable_compaction,
             false,
+            None,
             false,
             false,
         )
@@ -618,6 +715,7 @@ impl PersistentSession {
             true,  // disable_compaction
             false, // disable_active_tools
             true,  // disable_mcp_servers
+            None,  // thread_config
             true,  // read_only_sandbox
             false, // persistent_worker
         )
@@ -642,6 +740,7 @@ impl PersistentSession {
             true,  // disable_compaction
             true,  // disable_active_tools
             true,  // disable_mcp_servers
+            None,  // thread_config
             true,  // read_only_sandbox
             false, // persistent_worker
         )
@@ -654,6 +753,7 @@ impl PersistentSession {
         disable_compaction: bool,
         disable_active_tools: bool,
         disable_mcp_servers: bool,
+        thread_config: Option<HashMap<String, JsonValue>>,
         read_only_sandbox: bool,
         persistent_worker: bool,
     ) -> Result<Self> {
@@ -673,6 +773,7 @@ impl PersistentSession {
                 &composed_base_instructions,
                 disable_active_tools,
                 disable_mcp_servers,
+                thread_config.as_ref(),
                 read_only_sandbox,
                 persistent_worker,
             )
@@ -749,6 +850,7 @@ impl PersistentSession {
             base_instructions: composed_base_instructions,
             disable_active_tools,
             disable_mcp_servers,
+            thread_config,
             read_only_sandbox,
             persistent_worker,
             poisoned: false,
@@ -825,6 +927,7 @@ impl PersistentSession {
         let base_instructions = self.base_instructions.clone();
         let disable_active_tools = self.disable_active_tools;
         let disable_mcp_servers = self.disable_mcp_servers;
+        let thread_config = self.thread_config.clone();
         let read_only_sandbox = self.read_only_sandbox;
         let persistent_worker = self.persistent_worker;
         let required_initial_tool = required_initial_tool.map(str::to_string);
@@ -856,6 +959,7 @@ impl PersistentSession {
                 &mut self.ctx_log,
                 disable_active_tools,
                 disable_mcp_servers,
+                thread_config.as_ref(),
                 read_only_sandbox,
                 persistent_worker,
                 exact_prompt_preflight,
@@ -892,6 +996,7 @@ impl PersistentSession {
         base_instructions: &str,
         disable_active_tools: bool,
         disable_mcp_servers: bool,
+        thread_config: Option<&HashMap<String, JsonValue>>,
         read_only_sandbox: bool,
         persistent_worker: bool,
     ) -> Result<(
@@ -1234,6 +1339,7 @@ impl PersistentSession {
                         base_instructions,
                         disable_active_tools,
                         disable_mcp_servers,
+                        thread_config,
                         persistent_worker,
                         persistent_thread_name.as_deref(),
                     )
@@ -1250,6 +1356,7 @@ impl PersistentSession {
                 base_instructions,
                 disable_active_tools,
                 disable_mcp_servers,
+                thread_config,
                 persistent_worker,
                 persistent_thread_name.as_deref(),
             )
@@ -1286,6 +1393,7 @@ impl PersistentSession {
         ctx_log: &mut ContextLogger,
         disable_active_tools: bool,
         disable_mcp_servers: bool,
+        thread_config: Option<&HashMap<String, JsonValue>>,
         read_only_sandbox: bool,
         persistent_worker: bool,
         exact_prompt_preflight: Option<ExactPromptTokenCount>,
@@ -1450,6 +1558,7 @@ impl PersistentSession {
                     base_instructions,
                     disable_active_tools,
                     disable_mcp_servers,
+                    thread_config,
                     persistent_worker,
                     persistent_worker
                         .then(|| persistent_worker_thread_name(root))
@@ -1919,6 +2028,67 @@ mod tests {
 
         #[cfg(not(target_os = "linux"))]
         assert!(paths.ctox_linux_sandbox_exe.is_none());
+    }
+
+    #[test]
+    fn business_os_mcp_thread_config_is_local_scoped_and_tool_bounded() {
+        let config =
+            business_os_mcp_thread_config("0.0.0.0:9877", "test-secret", "command-session")
+                .expect("build MCP thread config");
+        let server = config
+            .get("mcp_servers")
+            .and_then(|value| value.get(BUSINESS_OS_MCP_SESSION_SERVER_NAME))
+            .expect("Business OS MCP server");
+
+        assert_eq!(
+            server.get("url").and_then(JsonValue::as_str),
+            Some("http://127.0.0.1:9877/mcp")
+        );
+        assert_eq!(
+            server.get("required").and_then(JsonValue::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            server
+                .pointer("/http_headers/Authorization")
+                .and_then(JsonValue::as_str),
+            Some("Bearer test-secret")
+        );
+        assert_eq!(
+            server
+                .pointer("/http_headers/X-CTOX-Business-Command-Session")
+                .and_then(JsonValue::as_str),
+            Some("command-session")
+        );
+        assert_eq!(
+            server
+                .get("enabled_tools")
+                .and_then(JsonValue::as_array)
+                .map(Vec::len),
+            Some(BUSINESS_OS_MCP_SESSION_TOOLS.len())
+        );
+        assert!(!server
+            .get("enabled_tools")
+            .and_then(JsonValue::as_array)
+            .expect("enabled tools")
+            .iter()
+            .any(|tool| tool.as_str() == Some("business_os.upsert_record")));
+        assert_eq!(
+            config.get("features.apps").and_then(JsonValue::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn business_os_mcp_thread_config_rejects_remote_urls_and_empty_tokens() {
+        assert!(business_os_mcp_thread_config(
+            "https://example.com/mcp",
+            "secret",
+            "command-session"
+        )
+        .is_err());
+        assert!(business_os_mcp_thread_config("127.0.0.1:8788", " ", "command-session").is_err());
+        assert!(business_os_mcp_thread_config("127.0.0.1:8788", "secret", " ").is_err());
     }
 
     #[test]
@@ -2435,6 +2605,7 @@ async fn start_session_thread(
     base_instructions: &str,
     disable_active_tools: bool,
     disable_mcp_servers: bool,
+    thread_config: Option<&HashMap<String, JsonValue>>,
     persistent_worker: bool,
     persistent_thread_name: Option<&str>,
 ) -> Result<String> {
@@ -2450,6 +2621,7 @@ async fn start_session_thread(
             cwd: Some(cwd.to_string_lossy().to_string()),
             approval_policy: Some(AskForApproval::Never.into()),
             sandbox: Some(ctox_app_server_protocol::SandboxMode::WorkspaceWrite),
+            config: thread_config.cloned(),
             base_instructions: Some(base_instructions.to_string()),
             dynamic_tools: disable_active_tools.then(Vec::new),
             disable_mcp_servers: Some(disable_mcp_servers),

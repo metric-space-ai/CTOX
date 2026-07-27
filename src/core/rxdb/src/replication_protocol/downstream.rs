@@ -76,18 +76,44 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
         Arc::clone(&last_time_master_changes_requested),
     );
 
-    // 3. Initial resync.
-    if let Err(e) =
-        downstream_resync_once_with_timing(&state, &timer, &last_time_master_changes_requested)
-            .await
-    {
-        tracing::error!(
-            target: "ctox_rxdb::replication_protocol::downstream",
-            "downstreamResyncOnce failed: {e}",
-        );
-    }
-    if !state.first_sync_done.down.get_value() && !state.events.canceled.get_value() {
-        state.first_sync_done.down.next(true);
+    // 3. Initial resync. A failed first pass must stay pending: consumers use
+    // first_sync_done as the readiness invariant, so only a successful retry may
+    // release waiters.
+    let mut initial_sync_retry_delay = std::time::Duration::from_millis(50);
+    while !state.events.canceled.get_value() {
+        match downstream_resync_once_with_timing(
+            &state,
+            &timer,
+            &last_time_master_changes_requested,
+        )
+        .await
+        {
+            Ok(()) => {
+                if !state.first_sync_done.down.get_value() && !state.events.canceled.get_value() {
+                    state.first_sync_done.down.next(true);
+                }
+                break;
+            }
+            Err(e) => {
+                state
+                    .events
+                    .error
+                    .next(crate::plugins::utils::utils_error::error_to_plain_json(&e));
+                tracing::error!(
+                    target: "ctox_rxdb::replication_protocol::downstream",
+                    "downstreamResyncOnce failed: {e}",
+                );
+                // Remote handler failures already apply the configured retry
+                // delay, but local storage failures would otherwise spin hot.
+                // Back off bounded and stay responsive to cancel.
+                tokio::select! {
+                    _ = tokio::time::sleep(initial_sync_retry_delay) => {}
+                    _ = wait_for_cancel_down(&state) => break,
+                }
+                initial_sync_retry_delay =
+                    (initial_sync_retry_delay * 2).min(std::time::Duration::from_secs(5));
+            }
+        }
     }
 
     // 4. Stay alive until canceled, then drop the subscription.
@@ -570,6 +596,46 @@ mod tests {
         }
     }
 
+    struct InitialSyncRetryHandler {
+        master_changes_since_calls: Arc<AtomicUsize>,
+        allow_second_attempt: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl RxReplicationHandler for InitialSyncRetryHandler {
+        fn master_change_stream(&self) -> RxStream<RxReplicationMasterChange> {
+            Box::pin(tokio_stream::empty())
+        }
+
+        async fn master_changes_since(
+            &self,
+            _checkpoint: Option<Value>,
+            _batch_size: u64,
+        ) -> Result<DocumentsWithCheckpoint, crate::rx_error::RxError> {
+            let attempt = self
+                .master_changes_since_calls
+                .fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                return Err(crate::rx_error::new_rx_error(
+                    "TEST_DOWNSTREAM_INITIAL_SYNC",
+                    Some(json!({ "attempt": 1 })),
+                ));
+            }
+            self.allow_second_attempt.notified().await;
+            Ok(DocumentsWithCheckpoint {
+                documents: Vec::new(),
+                checkpoint: Value::Null,
+            })
+        }
+
+        async fn master_write(
+            &self,
+            _rows: Vec<crate::types::RxReplicationWriteToMasterRow>,
+        ) -> Result<Vec<Value>, crate::rx_error::RxError> {
+            Ok(Vec::new())
+        }
+    }
+
     struct StreamReplicationHandler {
         stream: RxSubject<RxReplicationMasterChange>,
     }
@@ -686,6 +752,111 @@ mod tests {
             "_rev": rev,
             "_meta": { "lwt": 1.0 },
         })
+    }
+
+    #[tokio::test]
+    async fn initial_downstream_sync_error_stays_pending_relays_error_and_retries() {
+        let storage = get_rx_storage_memory(());
+        let schema = test_schema();
+        let fork_instance: Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: "db-downstream-initial-error-retry".to_string(),
+                    collection_name: "docs".to_string(),
+                    schema: schema.clone(),
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
+        let meta_instance: Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: "db-downstream-initial-error-retry".to_string(),
+                    collection_name: "meta".to_string(),
+                    schema: meta_schema,
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        let master_changes_since_calls = Arc::new(AtomicUsize::new(0));
+        let allow_second_attempt = Arc::new(tokio::sync::Notify::new());
+        let input = RxStorageInstanceReplicationInput {
+            identifier: "replication-test".to_string(),
+            fork_instance,
+            meta_instance,
+            hash_function: Arc::new(TestHashFunction),
+            conflict_handler: Arc::new(DefaultConflictHandler),
+            replication_handler: Arc::new(InitialSyncRetryHandler {
+                master_changes_since_calls: Arc::clone(&master_changes_since_calls),
+                allow_second_attempt: Arc::clone(&allow_second_attempt),
+            }),
+            push_batch_size: 100,
+            pull_batch_size: 100,
+            bulk_size: 100,
+            keep_meta: false,
+            initial_checkpoint: None,
+            wait_before_persist: None,
+        };
+        let state = Arc::new(RxStorageInstanceReplicationState {
+            primary_path: "id".to_string(),
+            input: Arc::new(input),
+            checkpoint_key: "checkpoint".to_string(),
+            downstream_bulk_write_flag: "downstream".to_string(),
+            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
+            events: ReplicationEvents::new(),
+            stats: ReplicationStats::new(),
+            first_sync_done: FirstSyncDone::default(),
+            stream_queue: StreamQueue::default(),
+            checkpoint_queue: tokio::sync::Mutex::new(()),
+            has_attachments: false,
+        });
+        let mut errors = state.events.error.subscribe();
+        let state_for_task = Arc::clone(&state);
+        let replication_task =
+            tokio::spawn(async move { start_replication_downstream(state_for_task).await });
+
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), errors.next())
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while master_changes_since_calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(error["code"], json!("TEST_DOWNSTREAM_INITIAL_SYNC"));
+        assert!(!state.first_sync_done.down.get_value());
+        assert_eq!(master_changes_since_calls.load(Ordering::SeqCst), 2);
+
+        allow_second_attempt.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !state.first_sync_done.down.get_value() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.events.canceled.next(true);
+        tokio::time::timeout(std::time::Duration::from_secs(1), replication_task)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

@@ -131,6 +131,7 @@ static SYNC_CONNECTION_CONFIG_CACHE: OnceLock<
 > = OnceLock::new();
 static BUSINESS_OS_STORE_SCHEMA_READY: OnceLock<Mutex<HashSet<BusinessOsStoreDbKey>>> =
     OnceLock::new();
+static ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 #[cfg(test)]
 static RXDB_TABLE_COLUMN_LOADS: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
 #[cfg(test)]
@@ -1025,6 +1026,83 @@ pub fn open_store(root: &Path) -> anyhow::Result<Connection> {
     let conn = open_store_connection(&path)?;
     ensure_store_schema_once(&path, &conn)?;
     Ok(conn)
+}
+
+pub(crate) fn reusable_web_stack_auth_assist_request(
+    root: &Path,
+    source_id: &str,
+    secret_name: &str,
+    owner_user_id: &str,
+) -> anyhow::Result<Option<Value>> {
+    let conn = open_store(root)?;
+    let mut statement = conn.prepare(
+        "SELECT command_id, status, payload_json
+         FROM business_commands
+         WHERE command_type = 'web_stack.auth_assist.request'
+           AND json_extract(payload_json, '$.source_id') = ?1
+           AND COALESCE(json_extract(payload_json, '$.secret_name'), '') = ?2
+           AND COALESCE(json_extract(payload_json, '$.purpose'), '') = 'web_stack_auth'
+           AND COALESCE(json_extract(payload_json, '$.owner_user_id'), '') = ?3
+         ORDER BY observed_at_ms DESC
+         LIMIT 32",
+    )?;
+    let rows = statement.query_map(params![source_id, secret_name, owner_user_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let candidates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    drop(conn);
+
+    for (command_id, status, payload_json) in candidates {
+        let payload: Value =
+            serde_json::from_str(&payload_json).context("invalid web-stack auth-assist payload")?;
+        let Some(expires_at_ms) = payload.get("expires_at_ms").and_then(Value::as_u64) else {
+            continue;
+        };
+        if u128::from(expires_at_ms) <= now_ms() {
+            continue;
+        }
+        let Some(task) = channels::load_queue_task_for_business_os_command(root, &command_id)?
+        else {
+            continue;
+        };
+        if !matches!(
+            task.route_status.as_str(),
+            "pending" | "leased" | "review_rework" | "blocked"
+        ) {
+            continue;
+        }
+        return Ok(Some(serde_json::json!({
+            "ok": true,
+            "command_id": command_id,
+            "session_id": payload.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+            "tab_id": payload.get("tab_id").and_then(Value::as_str).unwrap_or_default(),
+            "source_id": payload.get("source_id").and_then(Value::as_str).unwrap_or(source_id),
+            "target_url": payload.get("target_url").and_then(Value::as_str).unwrap_or_default(),
+            "allowed_domains": payload.get("allowed_domains").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+            "required_secret_name": payload.get("secret_name").and_then(Value::as_str).unwrap_or(secret_name),
+            "owner_user_id": payload.get("owner_user_id").and_then(Value::as_str).unwrap_or(owner_user_id),
+            "credential_ref": payload.get("credential_ref").cloned().unwrap_or(Value::Null),
+            "login_hint": payload.get("login_hint").cloned().unwrap_or(Value::Null),
+            "verify_selector": payload.get("verify_selector").and_then(Value::as_str).unwrap_or_default(),
+            "credential_selector": payload.get("credential_selector").and_then(Value::as_str).unwrap_or_default(),
+            "capture_script": payload.get("capture_script").and_then(Value::as_str).unwrap_or_default(),
+            "dedupe_key": payload.get("dedupe_key").and_then(Value::as_str).unwrap_or_default(),
+            "deduped_by_active_auth_assist": true,
+            "browser_stream": "rxdb",
+            "secret_value_in_payload": false,
+            "status": status,
+            "task_id": task.message_key,
+            "execution_task_id": task.message_key,
+            "route_status": task.route_status,
+            "trusted_local_intake": true
+        })));
+    }
+    Ok(None)
 }
 
 fn with_store_connection<T>(
@@ -13159,12 +13237,17 @@ pub fn record_command(
             ..CommandAccepted::default()
         });
     }
+    let native_authorization = queue_command_native_authorization(root, &command)?;
     let missing_dependencies = missing_business_command_dependencies(root, &command)?;
     if !missing_dependencies.is_empty() {
         let evidence = Value::Array(missing_dependencies);
         channels::claim_business_command_waiting_dependencies(
             root,
-            business_command_core_claim(&command_id, &command)?,
+            business_command_core_claim_with_authorization(
+                &command_id,
+                &command,
+                native_authorization.as_ref(),
+            )?,
             &evidence,
         )?;
         let _ = deliver_business_command_outbox(root, 10);
@@ -13188,7 +13271,8 @@ pub fn record_command(
     )? {
         return Ok(completed);
     }
-    let queue_task = create_ctox_queue_task(root, &command_id, &command)?;
+    let queue_task =
+        create_ctox_queue_task(root, &command_id, &command, native_authorization.as_ref())?;
     let inbound_channel = command_inbound_channel(&command);
     let chat_id = if is_business_chat_command(&command) {
         Some(materialize_pending_business_chat(
@@ -14270,14 +14354,156 @@ fn reject_app_build_command_if_denied(
     Ok(Some(decision))
 }
 
+fn queue_command_policy_target(command: &BusinessCommand) -> (BusinessOsPermission, String, bool) {
+    if let Some((permission, module_id)) = app_build_command_policy_target(command) {
+        return (
+            permission,
+            module_id,
+            permission != BusinessOsPermission::AppsModify,
+        );
+    }
+    (
+        if command.command_type == "business_os.context.ask" {
+            BusinessOsPermission::DataRead
+        } else {
+            BusinessOsPermission::DataWrite
+        },
+        command.module.clone(),
+        false,
+    )
+}
+
+fn queue_command_policy_decision(
+    root: &Path,
+    session: &BusinessOsSession,
+    command: &BusinessCommand,
+) -> anyhow::Result<PolicyDecision> {
+    let (permission, module_id, explicitly_scoped) = queue_command_policy_target(command);
+    if explicitly_scoped {
+        scoped_policy_decision(
+            root,
+            session,
+            permission,
+            BusinessOsScope::module(module_id, false),
+        )
+    } else {
+        module_policy_decision(root, session, permission, &module_id)
+    }
+}
+
+fn queue_command_native_authorization(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Option<Value>> {
+    if !matches!(command.origin, CommandOrigin::ReplicatedPeer) {
+        return Ok(None);
+    }
+    let session = rxdb_authenticated_session(root, command)?;
+    let decision = queue_command_policy_decision(root, &session, command)?;
+    anyhow::ensure!(
+        decision.allowed,
+        "Business OS queue command permission denied: {}",
+        decision.display_reason
+    );
+    Ok(Some(serde_json::json!({
+        "contract": "ctox-business-command-authorization-v1",
+        "actor": session_audit_actor_context(&session),
+        "allowed": true,
+        "permission": decision.permission,
+        "scope_type": decision.scope_type,
+        "scope_id": decision.scope_id,
+        "reason_code": decision.reason_code,
+    })))
+}
+
+fn revalidate_queue_native_authorization(
+    root: &Path,
+    command: &BusinessCommand,
+    authorization: &Value,
+) -> anyhow::Result<(BusinessOsSession, PolicyDecision)> {
+    anyhow::ensure!(
+        authorization.get("contract").and_then(Value::as_str)
+            == Some("ctox-business-command-authorization-v1"),
+        "Business OS command has an invalid native authorization receipt"
+    );
+    anyhow::ensure!(
+        authorization.get("allowed").and_then(Value::as_bool) == Some(true),
+        "Business OS command was not authorized at admission"
+    );
+    let (permission, module_id, _) = queue_command_policy_target(command);
+    anyhow::ensure!(
+        authorization.get("permission").and_then(Value::as_str) == Some(permission.as_str()),
+        "Business OS command authorization permission changed"
+    );
+    anyhow::ensure!(
+        authorization.get("scope_type").and_then(Value::as_str) == Some("module")
+            && authorization.get("scope_id").and_then(Value::as_str) == Some(module_id.as_str()),
+        "Business OS command authorization scope changed"
+    );
+    let actor = authorization
+        .get("actor")
+        .filter(|actor| actor.get("trusted").and_then(Value::as_bool) == Some(true))
+        .context("Business OS command has no trusted authorized actor")?;
+    let actor_id = actor
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("Business OS command authorized actor is missing")?;
+    let authorized_role = actor
+        .get("role")
+        .and_then(Value::as_str)
+        .map(normalize_business_role)
+        .context("Business OS command authorized actor role is missing")?;
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let user = active_business_user(&conn, actor_id)?
+        .context("Business OS command actor is no longer active")?;
+    anyhow::ensure!(
+        user.role == authorized_role,
+        "Business OS command actor role changed after admission"
+    );
+    let session = BusinessOsSession {
+        ok: true,
+        authenticated: true,
+        auth_required: false,
+        user: Some(BusinessOsSessionUser {
+            id: user.id,
+            display_name: user.display_name,
+            role: user.role.clone(),
+            is_admin: role_can_manage(&user.role),
+        }),
+        login_url: None,
+        reason: None,
+    };
+    let decision = queue_command_policy_decision(root, &session, command)?;
+    anyhow::ensure!(
+        decision.allowed,
+        "Business OS execution permission was revoked: {}",
+        decision.display_reason
+    );
+    Ok((session, decision))
+}
+
 pub(crate) fn revalidate_business_command_execution_authorization(
     root: &Path,
     command_id: &str,
 ) -> anyhow::Result<Value> {
     let conn = open_store(root)?;
     let command = load_business_command(&conn, command_id)?;
-    let session = rxdb_authenticated_session(root, &command)
-        .context("Business OS capability is no longer valid at harness lease")?;
+    let canonical = channels::business_command_projection(root, command_id)?;
+    let native_authorization = canonical.get("native_authorization");
+    let (session, native_policy_decision) = if let Some(authorization) = native_authorization {
+        let (session, decision) =
+            revalidate_queue_native_authorization(root, &command, authorization)?;
+        (session, Some(decision))
+    } else {
+        (
+            rxdb_authenticated_session(root, &command)
+                .context("Business OS capability is no longer valid at harness lease")?,
+            None,
+        )
+    };
     anyhow::ensure!(
         session.authenticated,
         "Business OS actor is no longer authenticated at harness lease"
@@ -14298,25 +14524,30 @@ pub(crate) fn revalidate_business_command_execution_authorization(
             "deadline_exceeded: Business OS command deadline elapsed before harness execution"
         );
     }
-    let mut policy_decision = Value::Null;
-    if let Some((permission, module_id)) = app_build_command_policy_target(&command) {
-        let decision = match permission {
-            BusinessOsPermission::AppsModify => {
-                module_policy_decision(root, &session, permission, &module_id)?
-            }
-            _ => scoped_policy_decision(
-                root,
-                &session,
-                permission,
-                BusinessOsScope::module(module_id, false),
-            )?,
-        };
-        anyhow::ensure!(
-            decision.allowed,
-            "Business OS execution permission was revoked: {}",
-            decision.display_reason
-        );
-        policy_decision = policy_decision_payload(&decision);
+    let mut policy_decision = native_policy_decision
+        .as_ref()
+        .map(policy_decision_payload)
+        .unwrap_or(Value::Null);
+    if native_policy_decision.is_none() {
+        if let Some((permission, module_id)) = app_build_command_policy_target(&command) {
+            let decision = match permission {
+                BusinessOsPermission::AppsModify => {
+                    module_policy_decision(root, &session, permission, &module_id)?
+                }
+                _ => scoped_policy_decision(
+                    root,
+                    &session,
+                    permission,
+                    BusinessOsScope::module(module_id, false),
+                )?,
+            };
+            anyhow::ensure!(
+                decision.allowed,
+                "Business OS execution permission was revoked: {}",
+                decision.display_reason
+            );
+            policy_decision = policy_decision_payload(&decision);
+        }
     }
     Ok(serde_json::json!({
         "authenticated": true,
@@ -19721,6 +19952,39 @@ impl RxdbProjectionWriterCache {
         }
         Ok(())
     }
+
+    fn upsert_source_projection(
+        &mut self,
+        collection: &str,
+        record_id: &str,
+        source_updated_at_ms: i64,
+        payload: Value,
+    ) -> anyhow::Result<()> {
+        if !self.writers.contains_key(collection) {
+            let writer = RxdbCollectionWriter::open(&self.root, collection)?;
+            self.writers.insert(collection.to_string(), writer);
+        }
+        if let Some(Some(writer)) = self.writers.get_mut(collection) {
+            writer.upsert_source_projection(record_id, source_updated_at_ms, payload)?;
+        }
+        Ok(())
+    }
+
+    fn tombstone_source_projection(
+        &mut self,
+        collection: &str,
+        record_id: &str,
+        source_updated_at_ms: i64,
+    ) -> anyhow::Result<()> {
+        if !self.writers.contains_key(collection) {
+            let writer = RxdbCollectionWriter::open(&self.root, collection)?;
+            self.writers.insert(collection.to_string(), writer);
+        }
+        if let Some(Some(writer)) = self.writers.get_mut(collection) {
+            writer.tombstone_source_projection(record_id, source_updated_at_ms)?;
+        }
+        Ok(())
+    }
 }
 
 pub(crate) struct BusinessProjectionWriter {
@@ -19753,12 +20017,46 @@ impl BusinessProjectionWriter {
         self.rxdb_writers
             .upsert(collection, record_id, updated_at_ms, payload)
     }
+
+    pub(crate) fn upsert_source_projection(
+        &mut self,
+        collection: &str,
+        record_id: &str,
+        source_updated_at_ms: i64,
+        payload: Value,
+    ) -> anyhow::Result<()> {
+        upsert_business_record(
+            &self.conn,
+            collection,
+            record_id,
+            source_updated_at_ms,
+            payload.clone(),
+        )?;
+        self.rxdb_writers.upsert_source_projection(
+            collection,
+            record_id,
+            source_updated_at_ms,
+            payload,
+        )
+    }
+
+    pub(crate) fn tombstone_source_projection(
+        &mut self,
+        collection: &str,
+        record_id: &str,
+        source_updated_at_ms: i64,
+    ) -> anyhow::Result<()> {
+        upsert_business_record_tombstone(&self.conn, collection, record_id, source_updated_at_ms)?;
+        self.rxdb_writers
+            .tombstone_source_projection(collection, record_id, source_updated_at_ms)
+    }
 }
 
 struct RxdbCollectionWriter {
     conn: Connection,
     table: String,
     columns: HashSet<String>,
+    last_replication_lwt: i64,
 }
 
 impl RxdbCollectionWriter {
@@ -19785,10 +20083,16 @@ impl RxdbCollectionWriter {
             return Ok(None);
         };
         let columns = rxdb_table_columns_for_path(&conn, &path, &table)?;
+        let last_replication_lwt = conn.query_row(
+            &format!("SELECT COALESCE(MAX(lastWriteTime), 0) FROM {table}"),
+            [],
+            |row| row.get::<_, f64>(0),
+        )? as i64;
         Ok(Some(Self {
             conn,
             table,
             columns,
+            last_replication_lwt,
         }))
     }
 
@@ -19804,7 +20108,54 @@ impl RxdbCollectionWriter {
             &self.columns,
             record_id,
             updated_at_ms,
+            updated_at_ms,
             payload,
+            false,
+        )
+    }
+
+    fn upsert_source_projection(
+        &mut self,
+        record_id: &str,
+        source_updated_at_ms: i64,
+        payload: Value,
+    ) -> anyhow::Result<()> {
+        let replication_now = now_ms().min(i64::MAX as u128) as i64;
+        let replication_lwt = replication_now.max(self.last_replication_lwt.saturating_add(1));
+        self.last_replication_lwt = replication_lwt;
+        upsert_rxdb_collection_record_with_writer(
+            &self.conn,
+            &self.table,
+            &self.columns,
+            record_id,
+            source_updated_at_ms,
+            replication_lwt,
+            payload,
+            false,
+        )
+    }
+
+    fn tombstone_source_projection(
+        &mut self,
+        record_id: &str,
+        source_updated_at_ms: i64,
+    ) -> anyhow::Result<()> {
+        let replication_now = now_ms().min(i64::MAX as u128) as i64;
+        let replication_lwt = replication_now.max(self.last_replication_lwt.saturating_add(1));
+        self.last_replication_lwt = replication_lwt;
+        upsert_rxdb_collection_record_with_writer(
+            &self.conn,
+            &self.table,
+            &self.columns,
+            record_id,
+            source_updated_at_ms,
+            replication_lwt,
+            serde_json::json!({
+                "id": record_id,
+                "is_deleted": true,
+                "_deleted": true,
+            }),
+            true,
         )
     }
 }
@@ -19814,8 +20165,10 @@ fn upsert_rxdb_collection_record_with_writer(
     table: &str,
     table_columns: &HashSet<String>,
     record_id: &str,
-    updated_at_ms: i64,
+    payload_updated_at_ms: i64,
+    replication_lwt_ms: i64,
     mut payload: Value,
+    deleted: bool,
 ) -> anyhow::Result<()> {
     if let Some(existing_json) = conn
         .query_row(
@@ -19835,8 +20188,12 @@ fn upsert_rxdb_collection_record_with_writer(
         object.insert("id".to_string(), Value::String(record_id.to_string()));
         object.insert(
             "updated_at_ms".to_string(),
-            Value::Number(serde_json::Number::from(updated_at_ms)),
+            Value::Number(serde_json::Number::from(payload_updated_at_ms)),
         );
+        if deleted {
+            object.insert("is_deleted".to_string(), Value::Bool(true));
+            object.insert("_deleted".to_string(), Value::Bool(true));
+        }
     }
     // SECURITY: strip bearer credentials from client_context on the FINAL merged
     // document before it lands in the replicated RxDB store. Applied post-merge so
@@ -19855,8 +20212,8 @@ fn upsert_rxdb_collection_record_with_writer(
         .find_map(|column| table_columns.contains(column).then_some(column))
     {
         columns.push(deleted_column.to_string());
-        values.push(SqlValue::Integer(0));
-        updates.push(format!("{deleted_column} = 0"));
+        values.push(SqlValue::Integer(if deleted { 1 } else { 0 }));
+        updates.push(format!("{deleted_column} = excluded.{deleted_column}"));
     }
     if let Some(revision_column) = ["revision", "_rev"]
         .into_iter()
@@ -19868,7 +20225,7 @@ fn upsert_rxdb_collection_record_with_writer(
     }
     if table_columns.contains("lastWriteTime") {
         columns.push("lastWriteTime".to_string());
-        values.push(SqlValue::Real(updated_at_ms as f64));
+        values.push(SqlValue::Real(replication_lwt_ms as f64));
         updates.push("lastWriteTime = excluded.lastWriteTime".to_string());
     }
     let placeholders = (1..=columns.len())
@@ -20589,8 +20946,11 @@ pub fn refresh_business_command_queue_task_projection(
             .optional()?
             .unwrap_or_else(|| "accepted".to_string()),
     };
-    let mut command_projection = conn
-        .query_row(
+    let canonical_projection = channels::business_command_projection(root, &command_id).ok();
+    let mut command_projection = if let Some(projection) = canonical_projection {
+        projection
+    } else {
+        conn.query_row(
             "SELECT payload_json
              FROM business_records
              WHERE collection = 'business_commands'
@@ -20612,7 +20972,8 @@ pub fn refresh_business_command_queue_task_projection(
                 "payload": command.payload.clone(),
                 "client_context": command.client_context.clone()
             })
-        });
+        })
+    };
     if let Some(object) = command_projection.as_object_mut() {
         object.insert("status".to_string(), Value::String(command_status.clone()));
         object.insert(
@@ -20626,6 +20987,30 @@ pub fn refresh_business_command_queue_task_projection(
         object.insert(
             "task_status".to_string(),
             Value::String(normalize_queue_status(&task.route_status).to_string()),
+        );
+        let execution_phase = queue_projection_execution_phase(
+            &task.route_status,
+            object
+                .get("execution_phase")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        );
+        object.insert("contract_version".to_string(), Value::from(2));
+        object.insert(
+            "replication_phase".to_string(),
+            Value::String("native_observed".to_string()),
+        );
+        object.insert(
+            "execution_mode".to_string(),
+            Value::String("queue".to_string()),
+        );
+        object.insert(
+            "execution_phase".to_string(),
+            Value::String(execution_phase),
+        );
+        object.insert(
+            "terminal_status".to_string(),
+            Value::String(queue_projection_terminal_status(&task.route_status).to_string()),
         );
         if let Some(note) = task.status_note.as_deref() {
             object.insert(
@@ -20924,7 +21309,15 @@ fn business_command_core_claim(
     command_id: &str,
     command: &BusinessCommand,
 ) -> anyhow::Result<channels::BusinessCommandClaimRequest> {
-    let intent = serde_json::json!({
+    business_command_core_claim_with_authorization(command_id, command, None)
+}
+
+fn business_command_core_claim_with_authorization(
+    command_id: &str,
+    command: &BusinessCommand,
+    native_authorization: Option<&Value>,
+) -> anyhow::Result<channels::BusinessCommandClaimRequest> {
+    let mut intent = serde_json::json!({
         "command_id": command_id,
         "module": command.module.clone(),
         "command_type": command.command_type.clone(),
@@ -20932,6 +21325,9 @@ fn business_command_core_claim(
         "payload": command.payload,
         "client_context": policy_audit_client_context(command),
     });
+    if let (Some(object), Some(authorization)) = (intent.as_object_mut(), native_authorization) {
+        object.insert("native_authorization".to_string(), authorization.clone());
+    }
     Ok(channels::BusinessCommandClaimRequest {
         command_id: command_id.to_string(),
         idempotency_key: command_id.to_string(),
@@ -20942,6 +21338,42 @@ fn business_command_core_claim(
         intent,
         created_at_ms: now_ms() as i64,
     })
+}
+
+struct ActiveExternalSqlControlCommand {
+    command_id: String,
+}
+
+impl ActiveExternalSqlControlCommand {
+    fn try_acquire(command_id: &str) -> Option<Self> {
+        let mut active = ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.insert(command_id.to_string()).then(|| Self {
+            command_id: command_id.to_string(),
+        })
+    }
+}
+
+impl Drop for ActiveExternalSqlControlCommand {
+    fn drop(&mut self) {
+        ACTIVE_EXTERNAL_SQL_CONTROL_COMMANDS
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.command_id);
+    }
+}
+
+fn external_sql_command_in_flight_outcome(root: &Path, command_id: &str) -> anyhow::Result<Value> {
+    let mut outcome = channels::business_command_projection(root, command_id)?;
+    if let Some(object) = outcome.as_object_mut() {
+        object.insert("ok".to_string(), Value::Bool(true));
+        object.insert("already_accepted".to_string(), Value::Bool(true));
+        object.insert("in_flight".to_string(), Value::Bool(true));
+    }
+    Ok(outcome)
 }
 
 fn is_rxdb_control_command_type(command_type: &str) -> bool {
@@ -20972,6 +21404,66 @@ fn is_rxdb_control_command_type(command_type: &str) -> bool {
         || command_type.starts_with("office.spreadsheet.")
         || super::support::is_support_command(command_type)
         || super::threads::is_threads_command(command_type)
+}
+
+pub(crate) fn is_recoverable_background_control_command_type(command_type: &str) -> bool {
+    matches!(command_type, "web_stack.person_research")
+        || super::external_sql_sync::is_external_sql_command(command_type)
+        || matches!(
+            command_type,
+            "outbound.research_source.generate_adapter"
+                | "outbound.research_source.test"
+                | "outbound.research_source.auth_assist"
+        )
+}
+
+fn recoverable_background_control_authorization(
+    root: &Path,
+    command: &BusinessCommand,
+) -> Option<Value> {
+    let permission = recoverable_background_control_permission(&command.command_type)?;
+    let session = rxdb_authenticated_session(root, command).ok()?;
+    let decision = module_policy_decision(root, &session, permission, &command.module).ok()?;
+    Some(serde_json::json!({
+        "contract": "ctox-business-command-authorization-v1",
+        "actor": session_audit_actor_context(&session),
+        "allowed": decision.allowed,
+        "permission": decision.permission,
+        "scope_type": decision.scope_type,
+        "scope_id": decision.scope_id,
+        "reason_code": decision.reason_code,
+    }))
+}
+
+fn recoverable_background_control_claim_authorization(
+    root: &Path,
+    command: &BusinessCommand,
+) -> Option<Value> {
+    recoverable_background_control_authorization(root, command).or_else(|| {
+        recoverable_background_control_permission(&command.command_type)?;
+        let command_id = command.id.as_deref()?;
+        channels::business_command_projection(root, command_id)
+            .ok()?
+            .get("native_authorization")
+            .cloned()
+    })
+}
+
+fn recoverable_background_control_permission(command_type: &str) -> Option<BusinessOsPermission> {
+    if command_type == "web_stack.person_research" {
+        Some(BusinessOsPermission::DataRead)
+    } else if super::external_sql_sync::is_external_sql_command(command_type) {
+        Some(super::external_sql_sync::data_write_permission())
+    } else if matches!(
+        command_type,
+        "outbound.research_source.generate_adapter"
+            | "outbound.research_source.test"
+            | "outbound.research_source.auth_assist"
+    ) {
+        Some(BusinessOsPermission::DataWrite)
+    } else {
+        None
+    }
 }
 
 /// Accept a command that originated in trusted, in-process code (operator CLI,
@@ -21023,14 +21515,31 @@ pub fn accept_rxdb_business_command_with_origin(
             .cloned()
             .unwrap_or(Value::Null),
     };
+    let native_authorization = recoverable_background_control_claim_authorization(root, &command);
     let control_claim = if is_rxdb_control_command_type(&command.command_type) {
         Some(channels::claim_business_control_command(
             root,
-            business_command_core_claim(&command_id, &command)?,
+            business_command_core_claim_with_authorization(
+                &command_id,
+                &command,
+                native_authorization.as_ref(),
+            )?,
         )?)
     } else {
         None
     };
+    let _external_sql_execution_guard =
+        if super::external_sql_sync::is_external_sql_command(&command.command_type) {
+            match ActiveExternalSqlControlCommand::try_acquire(&command_id) {
+                Some(guard) => Some(guard),
+                None => return external_sql_command_in_flight_outcome(root, &command_id),
+            }
+        } else {
+            None
+        };
+    let owns_new_control_claim = control_claim
+        .as_ref()
+        .is_some_and(|claim| claim.disposition == "new");
     let conn = open_store(root)?;
     let existing_status: Option<String> = conn
         .query_row(
@@ -21039,7 +21548,16 @@ pub fn accept_rxdb_business_command_with_origin(
             |row| row.get(0),
         )
         .optional()?;
-    if existing_status.as_deref() != Some("waiting_dependencies") && existing_status.is_some() {
+    let resumes_recoverable_accepted_claim = control_claim
+        .as_ref()
+        .is_some_and(|claim| claim.disposition == "uncertain")
+        && existing_status.as_deref() == Some("accepted")
+        && is_recoverable_background_control_command_type(&command.command_type);
+    if !owns_new_control_claim
+        && !resumes_recoverable_accepted_claim
+        && existing_status.as_deref() != Some("waiting_dependencies")
+        && existing_status.is_some()
+    {
         if let Some(stored_outcome) = stored_rxdb_business_command_outcome(&conn, &command_id)? {
             if let Ok(mut lifecycle_outcome) =
                 channels::business_command_projection(root, &command_id)
@@ -21078,6 +21596,21 @@ pub fn accept_rxdb_business_command_with_origin(
         }));
     }
     drop(conn);
+    let command = if resumes_recoverable_accepted_claim {
+        match authorize_recoverable_background_control_command(root, &command) {
+            Ok(command) => command,
+            Err(error) => {
+                return write_rxdb_failed_control_command_outcome(
+                    root,
+                    &command,
+                    "recoverable_control_authorization",
+                    error,
+                );
+            }
+        }
+    } else {
+        command
+    };
     if is_rxdb_control_command_type(&command.command_type) {
         let claim = control_claim.context("business control command claim is missing")?;
         match claim.disposition {
@@ -21099,6 +21632,7 @@ pub fn accept_rxdb_business_command_with_origin(
                     "already_accepted": true,
                 }));
             }
+            _ if is_recoverable_background_control_command_type(&command.command_type) => {}
             _ => {
                 if command.command_type == app_runtime::APP_ACTION_COMMAND_TYPE {
                     if let Some(snapshot) = app_runtime::admitted_snapshot(root, &command_id)? {
@@ -24992,15 +25526,27 @@ fn outbound_handle_research_source_adapter(
             .as_deref()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or(&adapter_id);
+        let owner_user_id = command
+            .client_context
+            .pointer("/actor/id")
+            .or_else(|| command.client_context.get("user_id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let effect = crate::service::business_os::enqueue_web_stack_auth_assist_request(
             root,
             &source_id,
             Some(&url),
             credential_ref.as_deref(),
             None,
+            command
+                .payload
+                .pointer("/record_snapshot/auth_assist")
+                .or_else(|| command.payload.get("auth_assist")),
             requesting_task_id,
             &command.module,
             &command.command_type,
+            owner_user_id,
             true,
             true,
         )?;
@@ -25643,6 +26189,11 @@ fn outbound_queue_research_scraper_generation(
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
     let command_id = command.id.clone().unwrap_or_default();
+    let task_idempotency_key = if command_id.is_empty() {
+        format!("outbound-research-adapter:{target_key}:legacy:{}", now_ms())
+    } else {
+        format!("outbound-research-adapter:{target_key}:{command_id}")
+    };
     let prompt = format!(
         "Erzeuge oder repariere einen CTOX Universal-Scraping Adapter fuer die Outbound Research Quelle.\n\
          Ziel:\n\
@@ -25675,7 +26226,7 @@ fn outbound_queue_research_scraper_generation(
                 "source": "outbound.research_source.generate_adapter",
                 "adapter_source_id": source_id,
                 "target_key": target_key,
-                "idempotency_key": format!("outbound-research-adapter:{target_key}"),
+                "idempotency_key": task_idempotency_key,
             })),
         },
     )?;
@@ -29189,6 +29740,23 @@ pub(super) fn capability_allows_collection_permission(
     .unwrap_or(false)
 }
 
+pub(super) fn capability_allows_workspace_permission(
+    root: &Path,
+    token: &str,
+    permission: BusinessOsPermission,
+) -> bool {
+    let Some(claims) = verified_capability_claims(root, token) else {
+        return false;
+    };
+    let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
+    let scope = BusinessOsScope::workspace();
+    with_store_connection(root, |conn| {
+        evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+    })
+    .map(|decision| decision.allowed)
+    .unwrap_or(false)
+}
+
 /// Preserve the pre-hardening ordinary-data behavior by materializing it as
 /// explicit, auditable collection grants. The sync hooks themselves remain
 /// fail-closed and consult only native policy plus these exact grants.
@@ -29691,7 +30259,7 @@ fn write_rxdb_control_command_state(
     status: &str,
     task_id: Option<&str>,
     task_status: Option<&str>,
-    result: Value,
+    mut result: Value,
     terminal: bool,
 ) -> anyhow::Result<Value> {
     let command_id = command.id.as_deref().context("command id is required")?;
@@ -29711,6 +30279,16 @@ fn write_rxdb_control_command_state(
                 .flatten()
         })
         .unwrap_or_default();
+    if let Some(object) = result.as_object_mut() {
+        object.insert("status".to_string(), Value::String(status.to_string()));
+        object.insert(
+            "task_status".to_string(),
+            Value::String(task_status.unwrap_or(status).to_string()),
+        );
+    }
+    if !terminal && is_rxdb_control_command_type(&command.command_type) {
+        channels::progress_business_control_command(root, command_id, status, &result)?;
+    }
     if terminal && is_rxdb_control_command_type(&command.command_type) {
         let terminal_status = match status {
             "completed" => "completed",
@@ -29756,7 +30334,14 @@ fn write_rxdb_control_command_state(
             now
         ],
     )?;
-    let projection = serde_json::json!({
+    let chat_id = if is_business_chat_command(command) {
+        Some(materialize_control_business_chat_state(
+            root, &conn, command_id, command, status, &result, terminal, now,
+        )?)
+    } else {
+        None
+    };
+    let mut projection = serde_json::json!({
         "id": command_id,
         "command_id": command_id,
         "module": command.module.clone(),
@@ -29777,6 +30362,9 @@ fn write_rxdb_control_command_state(
         "error_message": result.get("error").cloned().unwrap_or(Value::Null),
         "updated_at_ms": now
     });
+    if let Some(chat_id) = chat_id.as_deref() {
+        projection["chat_id"] = Value::String(chat_id.to_string());
+    }
     upsert_business_record(
         &conn,
         "business_commands",
@@ -29799,6 +30387,7 @@ fn write_rxdb_control_command_state(
         "task_status": task_status.unwrap_or(status),
         "error_code": result.get("error_code").cloned().unwrap_or(Value::Null),
         "error_message": result.get("error").cloned().unwrap_or(Value::Null),
+        "chat_id": chat_id,
         "result": result
     }))
 }
@@ -29835,14 +30424,107 @@ pub(crate) fn finalize_runtime_app_action(
     write_rxdb_control_command_outcome(root, &command, status, None, Some(status), result)
 }
 
-pub(super) fn running_person_research_commands(
+pub(super) struct RecoverablePersonResearchCommand {
+    pub(super) command: BusinessCommand,
+    pub(super) status: String,
+}
+
+pub(super) fn authorize_recoverable_person_research_command(
     root: &Path,
-) -> anyhow::Result<Vec<BusinessCommand>> {
+    command: &BusinessCommand,
+) -> anyhow::Result<BusinessCommand> {
+    anyhow::ensure!(
+        command.command_type == "web_stack.person_research",
+        "person-research recovery requires web_stack.person_research"
+    );
+    authorize_recoverable_background_control_command(root, command)
+}
+
+fn authorize_recoverable_background_control_command(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<BusinessCommand> {
+    let permission = recoverable_background_control_permission(&command.command_type)
+        .context("command type is not recoverable")?;
+    if let Ok(session) = rxdb_authenticated_session(root, command) {
+        let decision = module_policy_decision(root, &session, permission, &command.module)?;
+        anyhow::ensure!(
+            decision.allowed,
+            "accepted recoverable command authorization is no longer valid: {}",
+            decision.display_reason
+        );
+        return Ok(command.clone());
+    }
+
+    let command_id = command
+        .id
+        .as_deref()
+        .context("recoverable command id is required")?;
+    let projection = channels::business_command_projection(root, command_id)?;
+    let authorization = projection
+        .get("native_authorization")
+        .context("accepted recoverable command has no native authorization receipt")?;
+    anyhow::ensure!(
+        authorization.get("contract").and_then(Value::as_str)
+            == Some("ctox-business-command-authorization-v1"),
+        "accepted recoverable command has an invalid native authorization receipt"
+    );
+    anyhow::ensure!(
+        authorization.get("allowed").and_then(Value::as_bool) == Some(true),
+        "accepted recoverable command was not authorized"
+    );
+    anyhow::ensure!(
+        authorization.get("permission").and_then(Value::as_str) == Some(permission.as_str()),
+        "accepted recoverable command authorization permission changed"
+    );
+    anyhow::ensure!(
+        authorization.get("scope_type").and_then(Value::as_str) == Some("module")
+            && authorization.get("scope_id").and_then(Value::as_str)
+                == Some(command.module.as_str()),
+        "accepted recoverable command authorization scope changed"
+    );
+    let actor = authorization
+        .get("actor")
+        .filter(|actor| actor.get("trusted").and_then(Value::as_bool) == Some(true))
+        .context("accepted recoverable command has no trusted authorized actor")?;
+    let actor_id = actor
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("accepted recoverable command authorized actor is missing")?;
+
+    let mut recovered = command.clone();
+    recovered.origin = CommandOrigin::TrustedLocal;
+    recovered.client_context = serde_json::json!({
+        "actor": {
+            "id": actor_id,
+            "display_name": actor
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or(actor_id),
+        },
+        "recovered_from": "ctox-business-command-authorization-v1",
+    });
+    let session = rxdb_authenticated_session(root, &recovered)?;
+    let decision = module_policy_decision(root, &session, permission, &recovered.module)?;
+    anyhow::ensure!(
+        decision.allowed,
+        "accepted recoverable command authorization is no longer valid: {}",
+        decision.display_reason
+    );
+    Ok(recovered)
+}
+
+pub(super) fn recoverable_person_research_commands(
+    root: &Path,
+) -> anyhow::Result<Vec<RecoverablePersonResearchCommand>> {
     let conn = open_store(root)?;
     let mut statement = conn.prepare(
-        "SELECT command_id, module, record_id, payload_json, client_context_json
+        "SELECT command_id, module, record_id, payload_json, client_context_json, status
          FROM business_commands
-         WHERE command_type = 'web_stack.person_research' AND status = 'running'
+         WHERE command_type = 'web_stack.person_research'
+           AND status IN ('accepted', 'running')
          ORDER BY observed_at_ms ASC",
     )?;
     let rows = statement.query_map([], |row| {
@@ -29851,14 +30533,18 @@ pub(super) fn running_person_research_commands(
         let record_id: String = row.get(2)?;
         let payload_json: String = row.get(3)?;
         let client_context_json: String = row.get(4)?;
-        Ok(BusinessCommand {
-            id: Some(command_id),
-            module,
-            command_type: "web_stack.person_research".to_string(),
-            record_id: (!record_id.trim().is_empty()).then_some(record_id),
-            payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
-            client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
-            origin: CommandOrigin::TrustedLocal,
+        let status: String = row.get(5)?;
+        Ok(RecoverablePersonResearchCommand {
+            command: BusinessCommand {
+                id: Some(command_id),
+                module,
+                command_type: "web_stack.person_research".to_string(),
+                record_id: (!record_id.trim().is_empty()).then_some(record_id),
+                payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
+                origin: CommandOrigin::ReplicatedPeer,
+            },
+            status,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -37635,6 +38321,94 @@ fn materialize_pending_business_chat(
     Ok(chat_id)
 }
 
+fn materialize_control_business_chat_state(
+    root: &Path,
+    conn: &Connection,
+    command_id: &str,
+    command: &BusinessCommand,
+    status: &str,
+    result: &Value,
+    terminal: bool,
+    updated_at_ms: i64,
+) -> anyhow::Result<String> {
+    let chat_id =
+        materialize_pending_business_chat(conn, command_id, command, None, updated_at_ms)?;
+    let mut chat = conn
+        .query_row(
+            "SELECT payload_json FROM business_records
+             WHERE collection = 'business_chats' AND record_id = ?1",
+            params![chat_id.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
+        .context("native control chat was not materialized")?;
+    let obj = chat
+        .as_object_mut()
+        .context("native control chat payload is not an object")?;
+    obj.insert("open".to_string(), Value::Bool(true));
+    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
+    obj.insert(
+        "lastTrackingId".to_string(),
+        Value::String(command_id.to_string()),
+    );
+    let messages = obj
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .context("native control chat messages is not an array")?;
+    let message_id = format!("status_{command_id}");
+    let normalized_status = normalize_business_chat_tracking_status(status);
+    let text = first_string_field(result, &["summary", "message", "error"])
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            if terminal {
+                if normalized_status == "completed" {
+                    "Aufgabe abgeschlossen.".to_string()
+                } else {
+                    "Aufgabe konnte nicht abgeschlossen werden.".to_string()
+                }
+            } else if normalized_status == "running" {
+                "Aufgabe wird ausgeführt.".to_string()
+            } else {
+                "Aufgabe wurde angenommen.".to_string()
+            }
+        });
+    if let Some(message) = messages
+        .iter_mut()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(message_id.as_str()))
+    {
+        message["text"] = Value::String(text);
+        message["commandId"] = Value::String(command_id.to_string());
+        message["taskId"] = Value::String(String::new());
+        message["status"] = Value::String(normalized_status);
+        message["createdAt"] = Value::from(updated_at_ms);
+    } else {
+        messages.push(serde_json::json!({
+            "id": message_id,
+            "role": "ctox",
+            "text": text,
+            "commandId": command_id,
+            "taskId": "",
+            "status": normalized_status,
+            "createdAt": updated_at_ms
+        }));
+    }
+    if messages.len() > 40 {
+        let keep_from = messages.len() - 40;
+        messages.drain(0..keep_from);
+    }
+    update_business_chat_tracking_fields(obj);
+    upsert_business_record(
+        conn,
+        "business_chats",
+        &chat_id,
+        updated_at_ms,
+        chat.clone(),
+    )?;
+    upsert_rxdb_collection_record(root, "business_chats", &chat_id, updated_at_ms, chat)?;
+    Ok(chat_id)
+}
+
 fn business_chat_payload(
     conn: &Connection,
     chat_id: &str,
@@ -39909,6 +40683,7 @@ fn create_ctox_queue_task(
     root: &Path,
     command_id: &str,
     command: &BusinessCommand,
+    native_authorization: Option<&Value>,
 ) -> anyhow::Result<Option<channels::QueueTaskView>> {
     let attachments = materialize_business_chat_attachments(root, command_id, command)?;
     let prompt_enrichment = cv_print_pdf_text_prompt_enrichment(root, command_id, command)?;
@@ -39935,7 +40710,7 @@ fn create_ctox_queue_task(
     let workspace_root = business_os_command_workspace_root(root, command_id)?;
     let claimed = channels::claim_business_command_with_queue(
         root,
-        business_command_core_claim(command_id, command)?,
+        business_command_core_claim_with_authorization(command_id, command, native_authorization)?,
         channels::QueueTaskCreateRequest {
             title,
             prompt,
@@ -40670,7 +41445,7 @@ fn suggested_skill_for_command(command: &BusinessCommand) -> Option<String> {
     {
         Some(BUSINESS_OS_APP_MODULE_SKILL_NAME.to_string())
     } else {
-        None
+        required_skill_names(command).into_iter().next()
     }
 }
 
@@ -40713,6 +41488,31 @@ fn normalize_queue_status(route_status: &str) -> &str {
     }
 }
 
+fn queue_projection_execution_phase(route_status: &str, canonical_phase: Option<String>) -> String {
+    match route_status {
+        "handled" | "failed" | "cancelled" => "terminal".to_string(),
+        "leased" => "leased".to_string(),
+        "running" => "running".to_string(),
+        "blocked" => "blocked".to_string(),
+        "pending" => match canonical_phase.as_deref() {
+            Some("accepted" | "queued" | "retry_wait" | "waiting_dependencies") => {
+                canonical_phase.unwrap_or_else(|| "queued".to_string())
+            }
+            _ => "queued".to_string(),
+        },
+        _ => canonical_phase.unwrap_or_else(|| "queued".to_string()),
+    }
+}
+
+fn queue_projection_terminal_status(route_status: &str) -> &str {
+    match route_status {
+        "handled" => "completed",
+        "failed" => "failed",
+        "cancelled" => "cancelled",
+        _ => "none",
+    }
+}
+
 pub(super) fn upsert_business_record(
     conn: &Connection,
     collection: &str,
@@ -40738,6 +41538,40 @@ pub(super) fn upsert_business_record(
          ON CONFLICT(collection, record_id) DO UPDATE SET
             rev = excluded.rev,
             deleted = excluded.deleted,
+            updated_at_ms = excluded.updated_at_ms,
+            payload_json = excluded.payload_json",
+        params![
+            collection,
+            record_id,
+            rev,
+            updated_at_ms,
+            serde_json::to_string(&payload)?
+        ],
+    )?;
+    Ok(())
+}
+
+fn upsert_business_record_tombstone(
+    conn: &Connection,
+    collection: &str,
+    record_id: &str,
+    updated_at_ms: i64,
+) -> anyhow::Result<()> {
+    let rev = format!("rev_{}", Uuid::new_v4());
+    let payload = serde_json::json!({
+        "id": record_id,
+        "_rev": rev,
+        "_deleted": true,
+        "is_deleted": true,
+        "updated_at_ms": updated_at_ms,
+    });
+    conn.execute(
+        "INSERT INTO business_records
+            (collection, record_id, rev, deleted, updated_at_ms, payload_json)
+         VALUES (?1, ?2, ?3, 1, ?4, ?5)
+         ON CONFLICT(collection, record_id) DO UPDATE SET
+            rev = excluded.rev,
+            deleted = 1,
             updated_at_ms = excluded.updated_at_ms,
             payload_json = excluded.payload_json",
         params![
@@ -44150,6 +44984,7 @@ mod tests {
     fn control_command_outcome_updates_outbox_intake_projection() -> anyhow::Result<()> {
         let root = tempdir()?;
         let command_id = "cmd_appsec_outbox_race";
+        drop(create_repair_rxdb_tables(root.path())?);
         let command = BusinessCommand {
             origin: CommandOrigin::TrustedLocal,
             id: Some(command_id.to_string()),
@@ -44182,6 +45017,13 @@ mod tests {
         )?;
         drop(conn);
 
+        write_rxdb_control_command_progress(
+            root.path(),
+            &command,
+            "running",
+            serde_json::json!({ "ok": true, "status": "running" }),
+        )?;
+
         let outcome = write_rxdb_control_command_outcome(
             root.path(),
             &command,
@@ -44203,6 +45045,17 @@ mod tests {
         )?;
         assert_eq!(count, 1);
         assert_eq!(status, "completed");
+        let rxdb_conn = Connection::open(rxdb_store_path(root.path()))?;
+        let projected: String = rxdb_conn.query_row(
+            "SELECT data FROM ctox_business_os__business_commands__v1 WHERE id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )?;
+        let projected: Value = serde_json::from_str(&projected)?;
+        assert_eq!(projected["status"], "completed");
+        assert_eq!(projected["task_status"], "completed");
+        assert_eq!(projected["result"]["status"], "completed");
+        assert_eq!(projected["result"]["task_status"], "completed");
         Ok(())
     }
 
@@ -44470,11 +45323,15 @@ mod tests {
             Some("crafted")
         );
         assert_eq!(
-            entries[0].pointer("/craft/session_id").and_then(Value::as_str),
+            entries[0]
+                .pointer("/craft/session_id")
+                .and_then(Value::as_str),
             Some("session-1")
         );
         assert_eq!(
-            entries[0].pointer("/craft/iterations").and_then(Value::as_u64),
+            entries[0]
+                .pointer("/craft/iterations")
+                .and_then(Value::as_u64),
             Some(1)
         );
 
@@ -48467,9 +49324,10 @@ mod tests {
             client_context: serde_json::json!({}),
         };
 
-        let first = create_ctox_queue_task(root, command_id, &command)?.expect("first queue task");
+        let first =
+            create_ctox_queue_task(root, command_id, &command, None)?.expect("first queue task");
         let second =
-            create_ctox_queue_task(root, command_id, &command)?.expect("second queue task");
+            create_ctox_queue_task(root, command_id, &command, None)?.expect("second queue task");
 
         assert_eq!(first.message_key, second.message_key);
         let conn = channels::open_channel_db(&crate::paths::core_db(root))?;
@@ -49044,6 +49902,36 @@ mod tests {
         assert_eq!(
             suggested_skill_for_command(&command).as_deref(),
             Some(BUSINESS_OS_APP_MODULE_SKILL_NAME)
+        );
+    }
+
+    #[test]
+    fn generic_business_command_binds_first_required_skill() {
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some("cmd_generic_chat".to_owned()),
+            module: "customer-crm".to_owned(),
+            command_type: "business_os.chat.task".to_owned(),
+            record_id: Some("record-42".to_owned()),
+            payload: serde_json::json!({
+                "instruction": "Validate and update the selected record.",
+                "required_skills": ["customer-record-research", "secondary-validator"]
+            }),
+            client_context: serde_json::json!({
+                "required_skills": ["customer-record-research"]
+            }),
+        };
+
+        assert_eq!(
+            required_skill_names(&command),
+            vec![
+                "customer-record-research".to_string(),
+                "secondary-validator".to_string()
+            ]
+        );
+        assert_eq!(
+            suggested_skill_for_command(&command).as_deref(),
+            Some("customer-record-research")
         );
     }
 
@@ -53717,6 +54605,77 @@ mod tests {
     }
 
     #[test]
+    fn replayed_external_sql_command_does_not_overwrite_an_in_flight_execution(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_external_sql_in_flight_replay";
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "inventory".to_string(),
+            command_type: "external_sql.sync.refresh".to_string(),
+            record_id: Some("inventory-sync-status".to_string()),
+            payload: serde_json::json!({ "source_id": "primary" }),
+            client_context: Value::Null,
+        };
+        let authorization = recoverable_background_control_claim_authorization(root, &command);
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim_with_authorization(
+                command_id,
+                &command,
+                authorization.as_ref(),
+            )?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&command.client_context)?,
+            ],
+        )?;
+        drop(conn);
+
+        let _active = ActiveExternalSqlControlCommand::try_acquire(command_id)
+            .context("test must own the simulated in-flight execution")?;
+        let replay = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "inventory",
+                "command_type": "external_sql.sync.refresh",
+                "record_id": "inventory-sync-status",
+                "payload": { "source_id": "primary" },
+                "client_context": null
+            }),
+        )?;
+
+        assert_eq!(replay["status"], "accepted");
+        assert_eq!(replay["terminal_status"], "none");
+        assert_eq!(replay["already_accepted"], true);
+        assert_eq!(replay["in_flight"], true);
+        let conn = open_store(root)?;
+        let status: String = conn.query_row(
+            "SELECT status FROM business_commands WHERE command_id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "accepted");
+        Ok(())
+    }
+
+    #[test]
     fn module_lifecycle_projection_repair_resyncs_releases_and_catalog() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -56671,6 +57630,117 @@ mod tests {
     }
 
     #[test]
+    fn refresh_queue_task_projection_preserves_retry_wait_lifecycle() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let accepted = accept_rxdb_business_command(
+            root,
+            serde_json::json!({
+                "id": "cmd_retry_wait_queue_chat",
+                "command_id": "cmd_retry_wait_queue_chat",
+                "module": "research",
+                "command_type": "business_os.chat.task",
+                "record_id": "research",
+                "status": "pending_sync",
+                "payload": {
+                    "title": "Kontext-Aufgabe",
+                    "instruction": "teste retry_wait projection",
+                    "prompt": "teste retry_wait projection"
+                },
+                "client_context": {
+                    "source": "business-os-chat",
+                    "module": "research"
+                }
+            }),
+        )?;
+        let task_id = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .context("expected queue task id")?
+            .to_string();
+
+        channels::lease_queue_task(root, &task_id, "ctox-service")?;
+        channels::transition_business_command_for_task(
+            root,
+            &task_id,
+            "leased",
+            None,
+            None,
+            None,
+            "test worker leased",
+        )?;
+        channels::transition_business_command_for_task(
+            root,
+            &task_id,
+            "pending",
+            None,
+            None,
+            None,
+            "test worker requeued",
+        )?;
+        let rxdb_conn = create_repair_rxdb_tables(root)?;
+        insert_rxdb_test_record(
+            &rxdb_conn,
+            "ctox_business_os__business_commands__v1",
+            "cmd_retry_wait_queue_chat",
+            serde_json::json!({
+                "id": "cmd_retry_wait_queue_chat",
+                "command_id": "cmd_retry_wait_queue_chat",
+                "status": "accepted",
+                "route_status": "leased",
+                "task_id": task_id,
+                "task_status": "running",
+                "updated_at_ms": 1
+            }),
+        )?;
+        drop(rxdb_conn);
+
+        let projected = refresh_business_command_queue_task_projection(root, &task_id)?
+            .context("expected retry_wait command projection")?;
+        assert_eq!(
+            projected.get("status").and_then(Value::as_str),
+            Some("accepted")
+        );
+        assert_eq!(
+            projected.get("route_status").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            projected.get("task_status").and_then(Value::as_str),
+            Some("queued")
+        );
+        assert_eq!(
+            projected.get("execution_phase").and_then(Value::as_str),
+            Some("retry_wait")
+        );
+        assert_eq!(
+            projected.get("terminal_status").and_then(Value::as_str),
+            Some("none")
+        );
+        assert_eq!(
+            projected.get("replication_phase").and_then(Value::as_str),
+            Some("native_observed")
+        );
+
+        let rxdb_command =
+            load_rxdb_collection_record(root, "business_commands", "cmd_retry_wait_queue_chat")?
+                .context("expected retry_wait rxdb command row")?;
+        assert_eq!(
+            rxdb_command.get("execution_phase").and_then(Value::as_str),
+            Some("retry_wait")
+        );
+        assert_eq!(
+            rxdb_command.get("route_status").and_then(Value::as_str),
+            Some("pending")
+        );
+        assert_eq!(
+            rxdb_command.get("task_status").and_then(Value::as_str),
+            Some("queued")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn queue_worker_success_marks_active_rxdb_business_command_completed() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -58364,7 +59434,7 @@ mod tests {
         )?;
         let actor = serde_json::json!({
             "actor": { "id": "tester", "role": "admin", "display_name": "Tester" },
-            "source_module": "private-outbound"
+            "source_module": "outbound"
         });
 
         let outcome = accept_rxdb_business_command(
@@ -58395,6 +59465,12 @@ mod tests {
                         "collection": "outbound_adapters",
                         "record_id": "adapter_leadfeeder_browser"
                     },
+                    "record_snapshot": {
+                        "auth_assist": {
+                            "session_id": "browser_session_web_stack_auth_leadfeeder_com_existing",
+                            "tab_id": "browser_tab_browser_session_web_stack_auth_leadfeeder_com_existing"
+                        }
+                    },
                     "secret_value_in_payload": false
                 },
                 "client_context": actor
@@ -58418,6 +59494,18 @@ mod tests {
                 .pointer("/result/auth_assist/status")
                 .and_then(Value::as_str),
             Some("accepted")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/auth_assist/session_id")
+                .and_then(Value::as_str),
+            Some("browser_session_web_stack_auth_leadfeeder_com_existing")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/auth_assist/tab_id")
+                .and_then(Value::as_str),
+            Some("browser_tab_browser_session_web_stack_auth_leadfeeder_com_existing")
         );
         let queued_command_id = outcome
             .pointer("/result/auth_assist/command_id")
@@ -58545,6 +59633,17 @@ mod tests {
         assert_eq!(task.suggested_skill.as_deref(), Some("universal-scraping"));
         assert!(task.prompt.contains("research-partner-example"));
         assert!(task.prompt.contains("https://research.partner.example/"));
+        let queue_conn = channels::open_channel_db(&crate::paths::core_db(root))?;
+        let generation_idempotency_key: String = queue_conn.query_row(
+            "SELECT json_extract(metadata_json, '$.idempotency_key')
+             FROM communication_messages WHERE message_key = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(
+            generation_idempotency_key,
+            "outbound-research-adapter:research-partner-example:cmd_outbound_adapter_generate_custom"
+        );
         let generated_manifest =
             root.join("runtime/scraping/outbound-adapters/research-partner-example/target.json");
         assert!(generated_manifest.is_file());
@@ -59425,6 +60524,139 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(last_write_time, 1_004.0);
+        Ok(())
+    }
+
+    #[test]
+    fn source_projection_tombstone_marks_business_record_and_rxdb_row_deleted() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime"))?;
+        let table = "ctox_business_os__writer_delete_probe__v0";
+        let conn = Connection::open(rxdb_store_path(root))?;
+        conn.execute(
+            &format!(
+                "CREATE TABLE {table} (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    revision TEXT,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    lastWriteTime REAL NOT NULL DEFAULT 0,
+                    data TEXT NOT NULL
+                )"
+            ),
+            [],
+        )?;
+        drop(conn);
+
+        let mut writer = BusinessProjectionWriter::open(root)?;
+        writer.upsert_source_projection(
+            "writer_delete_probe",
+            "probe-1",
+            1_000,
+            serde_json::json!({"id":"probe-1","name":"Probe"}),
+        )?;
+        writer.tombstone_source_projection("writer_delete_probe", "probe-1", 2_000)?;
+        drop(writer);
+
+        let conn = Connection::open(rxdb_store_path(root))?;
+        let (deleted, data): (i64, String) = conn.query_row(
+            &format!("SELECT deleted,data FROM {table} WHERE id='probe-1'"),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(deleted, 1);
+        let data: Value = serde_json::from_str(&data)?;
+        assert_eq!(data["_deleted"], true);
+        assert_eq!(data["is_deleted"], true);
+
+        let conn = open_store(root)?;
+        let (deleted, payload): (i64, String) = conn.query_row(
+            "SELECT deleted,payload_json FROM business_records
+             WHERE collection='writer_delete_probe' AND record_id='probe-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(deleted, 1);
+        let payload: Value = serde_json::from_str(&payload)?;
+        assert_eq!(payload["_deleted"], true);
+        assert_eq!(payload["is_deleted"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn source_projection_keeps_source_version_and_advances_replication_checkpoint(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime"))?;
+        let table = "ctox_business_os__source_probe__v0";
+        let sqlite_path = rxdb_store_path(root);
+        let conn = Connection::open(&sqlite_path)?;
+        conn.execute(
+            &format!(
+                "CREATE TABLE {table} (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    revision TEXT,
+                    deleted INTEGER NOT NULL DEFAULT 0,
+                    lastWriteTime REAL NOT NULL DEFAULT 0,
+                    data TEXT NOT NULL
+                )"
+            ),
+            [],
+        )?;
+        conn.execute(
+            &format!(
+                "INSERT INTO {table} (id, revision, deleted, lastWriteTime, data)
+                 VALUES ('checkpoint', 'rev_1', 0, ?1, ?2)"
+            ),
+            params![
+                (now_ms().min(i64::MAX as u128) as i64).saturating_add(10_000),
+                serde_json::json!({"id":"checkpoint"}).to_string()
+            ],
+        )?;
+        drop(conn);
+
+        let mut writers = RxdbProjectionWriterCache::new(root);
+        writers.upsert_source_projection(
+            "source_probe",
+            "source-1",
+            42,
+            serde_json::json!({"id":"source-1","name":"First","updated_at_ms":42}),
+        )?;
+        writers.upsert_source_projection(
+            "source_probe",
+            "source-2",
+            43,
+            serde_json::json!({"id":"source-2","name":"Second","updated_at_ms":43}),
+        )?;
+
+        let conn = Connection::open(sqlite_path)?;
+        let checkpoint: f64 = conn.query_row(
+            &format!("SELECT lastWriteTime FROM {table} WHERE id='checkpoint'"),
+            [],
+            |row| row.get(0),
+        )?;
+        let (first_lwt, first_source_version): (f64, i64) = conn.query_row(
+            &format!(
+                "SELECT lastWriteTime, CAST(json_extract(data,'$.updated_at_ms') AS INTEGER)
+                 FROM {table} WHERE id='source-1'"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let (second_lwt, second_source_version): (f64, i64) = conn.query_row(
+            &format!(
+                "SELECT lastWriteTime, CAST(json_extract(data,'$.updated_at_ms') AS INTEGER)
+                 FROM {table} WHERE id='source-2'"
+            ),
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert!(first_lwt > checkpoint);
+        assert!(second_lwt > first_lwt);
+        assert_eq!(first_source_version, 42);
+        assert_eq!(second_source_version, 43);
         Ok(())
     }
 
@@ -64367,6 +65599,235 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_external_sql_commands_are_recoverable_control_commands() {
+        assert!(is_recoverable_background_control_command_type(
+            "external_sql.write"
+        ));
+        assert!(is_recoverable_background_control_command_type(
+            "external_sql.sync.refresh"
+        ));
+        assert!(!is_recoverable_background_control_command_type(
+            "office.document.create"
+        ));
+    }
+
+    #[test]
+    fn outbound_research_source_commands_are_recoverable_control_commands() {
+        for command_type in [
+            "outbound.research_source.generate_adapter",
+            "outbound.research_source.test",
+            "outbound.research_source.auth_assist",
+        ] {
+            assert!(is_recoverable_background_control_command_type(command_type));
+            assert_eq!(
+                recoverable_background_control_permission(command_type),
+                Some(BusinessOsPermission::DataWrite)
+            );
+        }
+        assert!(!is_recoverable_background_control_command_type(
+            "office.document.create"
+        ));
+    }
+
+    #[test]
+    fn external_sql_recovery_uses_native_authorization_after_token_redaction() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_external_sql_authorization_receipt";
+        seed_business_user(root, "operator", "chef")?;
+        let (capability_token, _) =
+            issue_business_os_capability_token(root, "operator", now_ms() as i64)?;
+        let command = BusinessCommand {
+            origin: CommandOrigin::ReplicatedPeer,
+            id: Some(command_id.to_string()),
+            module: "inventory".to_string(),
+            command_type: "external_sql.write".to_string(),
+            record_id: Some("inventory-item-42".to_string()),
+            payload: serde_json::json!({
+                "source_id": "primary",
+                "operation_id": "item_update",
+                "item_id": 42
+            }),
+            client_context: serde_json::json!({
+                "actor": { "id": "operator", "display_name": "Operator" },
+                "capability_token": capability_token
+            }),
+        };
+        let authorization = recoverable_background_control_authorization(root, &command)
+            .context("valid external SQL command must produce an authorization receipt")?;
+        assert_eq!(authorization["permission"], "data.write");
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim_with_authorization(
+                command_id,
+                &command,
+                Some(&authorization),
+            )?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+
+        let mut redacted = command;
+        redacted.client_context = redact_client_context_secrets(&redacted.client_context);
+        let replay_authorization =
+            recoverable_background_control_claim_authorization(root, &redacted)
+                .context("replay must reuse the stored native authorization receipt")?;
+        let replay_claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim_with_authorization(
+                command_id,
+                &redacted,
+                Some(&replay_authorization),
+            )?,
+        )?;
+        assert_eq!(replay_claim.disposition, "uncertain");
+        let recovered = authorize_recoverable_background_control_command(root, &redacted)?;
+        assert_eq!(recovered.origin, CommandOrigin::TrustedLocal);
+        assert_eq!(recovered.client_context["actor"]["id"], "operator");
+        Ok(())
+    }
+
+    #[test]
+    fn replicated_queue_command_persists_and_revalidates_native_authorization() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_queue_native_authorization";
+        seed_business_user(root, "operator", "admin")?;
+        let (capability_token, _) =
+            issue_business_os_capability_token(root, "operator", now_ms() as i64)?;
+
+        let accepted = accept_rxdb_business_command_with_origin(
+            root,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "crm",
+                "command_type": "business_os.chat.task",
+                "record_id": "company-42",
+                "status": "pending_sync",
+                "payload": {
+                    "title": "Update company",
+                    "instruction": "Apply the approved company update."
+                },
+                "client_context": {
+                    "actor": {
+                        "id": "forged-actor",
+                        "display_name": "Forged Actor",
+                        "role": "user"
+                    },
+                    "capability_token": capability_token
+                }
+            }),
+            CommandOrigin::ReplicatedPeer,
+        )?;
+        assert_eq!(accepted["status"], "accepted");
+
+        let canonical = channels::business_command_projection(root, command_id)?;
+        assert_eq!(
+            canonical["native_authorization"]["contract"],
+            "ctox-business-command-authorization-v1"
+        );
+        assert_eq!(canonical["native_authorization"]["actor"]["id"], "operator");
+        assert_eq!(canonical["native_authorization"]["actor"]["role"], "admin");
+        assert_eq!(
+            canonical["native_authorization"]["permission"],
+            "data.write"
+        );
+        assert_eq!(canonical["native_authorization"]["scope_id"], "crm");
+
+        let authorization = revalidate_business_command_execution_authorization(root, command_id)?;
+        assert_eq!(authorization["authenticated"], true);
+        assert_eq!(authorization["actor"]["id"], "operator");
+        assert_eq!(authorization["actor"]["role"], "admin");
+        assert_eq!(authorization["policy_decision"]["permission"], "data.write");
+
+        let conn = open_store(root)?;
+        conn.execute(
+            "UPDATE business_users SET role = 'user', updated_at_ms = ?2 WHERE user_id = ?1",
+            params!["operator", now_ms() as i64],
+        )?;
+        drop(conn);
+        let error = revalidate_business_command_execution_authorization(root, command_id)
+            .expect_err("role changes must invalidate an admitted queue command");
+        assert!(error
+            .to_string()
+            .contains("actor role changed after admission"));
+        Ok(())
+    }
+
+    #[test]
+    fn accepted_external_sql_without_authorization_receipt_fails_terminally() -> anyhow::Result<()>
+    {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_external_sql_missing_authorization";
+        let document = serde_json::json!({
+            "id": command_id,
+            "command_id": command_id,
+            "module": "inventory",
+            "command_type": "external_sql.write",
+            "record_id": "inventory-item-42",
+            "status": "accepted",
+            "payload": {
+                "source_id": "primary",
+                "operation_id": "item_update",
+                "item_id": 42
+            },
+            "client_context": {
+                "actor": { "id": "operator", "display_name": "Operator" }
+            }
+        });
+        let command = BusinessCommand {
+            origin: CommandOrigin::ReplicatedPeer,
+            id: Some(command_id.to_string()),
+            module: "inventory".to_string(),
+            command_type: "external_sql.write".to_string(),
+            record_id: Some("inventory-item-42".to_string()),
+            payload: document["payload"].clone(),
+            client_context: document["client_context"].clone(),
+        };
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim(command_id, &command)?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&command.client_context)?,
+            ],
+        )?;
+        drop(conn);
+
+        let outcome = accept_rxdb_business_command_with_origin(
+            root,
+            document,
+            CommandOrigin::ReplicatedPeer,
+        )?;
+        assert_eq!(outcome["status"], "failed");
+        assert!(outcome["error_message"]
+            .as_str()
+            .is_some_and(|error| error.contains("native authorization receipt")));
+        let conn = open_store(root)?;
+        let status: String = conn.query_row(
+            "SELECT status FROM business_commands WHERE command_id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(status, "failed");
+        Ok(())
+    }
+
+    #[test]
     fn person_research_runs_as_recoverable_background_control_command() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -64386,13 +65847,17 @@ mod tests {
                     "country": "DE",
                     "mode": "have_data",
                     "fields": [],
-                    "include_private": []
+                    "include_private": [],
+                    "response_channel": "business_os_chat",
+                    "title": "Recherche Example GmbH",
+                    "prompt": "Recherchiere Example GmbH und zeige den Fortschritt."
                 },
                 "client_context": {}
             }),
         )?;
         assert_eq!(accepted["status"], "running");
         assert_eq!(accepted["execution_mode"], "control");
+        assert_eq!(accepted["chat_id"], format!("chat_{command_id}"));
 
         let mut terminal = Value::Null;
         for _ in 0..100 {
@@ -64404,6 +65869,228 @@ mod tests {
         }
         assert_eq!(terminal["terminal_status"], "completed");
         assert_eq!(terminal["result"]["tool"], "ctox_person_research");
+        let conn = open_store(root)?;
+        let chat =
+            load_business_record_payload(&conn, "business_chats", &format!("chat_{command_id}"))?
+                .context("native research chat must be materialized")?;
+        assert_eq!(chat["open"], true);
+        assert_eq!(chat["tracking_active"], false);
+        assert_eq!(chat["tracking_status"], "completed");
+        assert!(chat["messages"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["role"] == "user"
+                    && message["text"] == "Recherchiere Example GmbH und zeige den Fortschritt."
+            }) && messages.iter().any(|message| {
+                message["commandId"] == command_id && message["status"] == "completed"
+            })
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn person_research_recovers_an_accepted_claim_projected_before_effect_start(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_person_research_accepted_recovery";
+        seed_business_user(root, "researcher", "chef")?;
+        let (capability_token, _) =
+            issue_business_os_capability_token(root, "researcher", now_ms() as i64)?;
+        let document = serde_json::json!({
+            "id": command_id,
+            "command_id": command_id,
+            "module": "research",
+            "command_type": "web_stack.person_research",
+            "record_id": "company-example",
+            "status": "accepted",
+            "payload": {
+                "command_id": command_id,
+                "company": "Example GmbH",
+                "country": "DE",
+                "mode": "have_data",
+                "fields": [],
+                "include_private": []
+            },
+            "client_context": {
+                "actor": { "id": "researcher", "display_name": "Researcher" },
+                "capability_token": capability_token
+            }
+        });
+        let command = BusinessCommand {
+            origin: CommandOrigin::TrustedLocal,
+            id: Some(command_id.to_string()),
+            module: "research".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("company-example".to_string()),
+            payload: document["payload"].clone(),
+            client_context: document["client_context"].clone(),
+        };
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim(command_id, &command)?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&command.client_context)?,
+            ],
+        )?;
+        drop(conn);
+
+        let resumed = crate::business_os::person_research_command::recover_once(root)?;
+        assert_eq!(resumed, 1);
+
+        let mut terminal = Value::Null;
+        for _ in 0..100 {
+            terminal = channels::business_command_projection(root, command_id)?;
+            if terminal["terminal_status"] == "completed" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(terminal["terminal_status"], "completed");
+        assert_eq!(terminal["result"]["tool"], "ctox_person_research");
+        Ok(())
+    }
+
+    #[test]
+    fn person_research_accepted_recovery_uses_native_authorization_receipt_without_token(
+    ) -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_person_research_authorization_receipt";
+        seed_business_user(root, "researcher", "chef")?;
+        let (capability_token, _) =
+            issue_business_os_capability_token(root, "researcher", now_ms() as i64)?;
+        let command = BusinessCommand {
+            origin: CommandOrigin::ReplicatedPeer,
+            id: Some(command_id.to_string()),
+            module: "research".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("company-example".to_string()),
+            payload: serde_json::json!({
+                "command_id": command_id,
+                "company": "Example GmbH",
+                "country": "DE",
+                "mode": "have_data",
+                "fields": [],
+                "include_private": []
+            }),
+            client_context: serde_json::json!({
+                "actor": { "id": "researcher", "display_name": "Researcher" },
+                "capability_token": capability_token
+            }),
+        };
+        let authorization = recoverable_background_control_authorization(root, &command)
+            .context("valid peer command must produce a native authorization receipt")?;
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim_with_authorization(
+                command_id,
+                &command,
+                Some(&authorization),
+            )?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+
+        let redacted_context = redact_client_context_secrets(&command.client_context);
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&redacted_context)?,
+            ],
+        )?;
+        drop(conn);
+
+        assert_eq!(
+            crate::business_os::person_research_command::recover_once(root)?,
+            1
+        );
+        let mut terminal = Value::Null;
+        for _ in 0..100 {
+            terminal = channels::business_command_projection(root, command_id)?;
+            if terminal["terminal_status"] == "completed" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(terminal["terminal_status"], "completed");
+        assert_eq!(terminal["result"]["tool"], "ctox_person_research");
+        Ok(())
+    }
+
+    #[test]
+    fn person_research_accepted_recovery_rechecks_peer_authentication() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let command_id = "cmd_person_research_recovery_requires_auth";
+        let command = BusinessCommand {
+            origin: CommandOrigin::ReplicatedPeer,
+            id: Some(command_id.to_string()),
+            module: "research".to_string(),
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some("company-example".to_string()),
+            payload: serde_json::json!({
+                "command_id": command_id,
+                "company": "Example GmbH",
+                "country": "DE",
+                "mode": "have_data",
+                "fields": [],
+                "include_private": []
+            }),
+            client_context: serde_json::json!({
+                "actor": { "id": "claimed-admin", "role": "admin" }
+            }),
+        };
+        let claim = channels::claim_business_control_command(
+            root,
+            business_command_core_claim(command_id, &command)?,
+        )?;
+        assert_eq!(claim.disposition, "new");
+
+        let conn = open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, 1)",
+            params![
+                command_id,
+                command.module,
+                command.command_type,
+                command.record_id,
+                serde_json::to_string(&command.payload)?,
+                serde_json::to_string(&command.client_context)?,
+            ],
+        )?;
+        drop(conn);
+
+        assert_eq!(
+            crate::business_os::person_research_command::recover_once(root)?,
+            0
+        );
+        let terminal = channels::business_command_projection(root, command_id)?;
+        assert_eq!(terminal["terminal_status"], "failed");
+        assert!(terminal["result"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("native authorization receipt")));
         Ok(())
     }
 

@@ -23,6 +23,7 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 const {
   aggregateFlowMetrics,
   applyTaskSelection,
+  buildHarnessModel,
   clampMetric,
   compactTaskFlowRow,
   deriveHarnessHealth,
@@ -31,6 +32,7 @@ const {
   formatRelativeAge,
   friendlyWebStackStatus,
   labels,
+  mergeBundleWithCommands,
   normalizeFocusTask,
   observedDetailsFromFlow,
   progressPercent,
@@ -415,6 +417,151 @@ test('Queued work without a lease becomes critical after the stall grace window'
   });
   assert.equal(health.severity, 'critical');
   assert.equal(health.reason, 'queue_stalled');
+});
+
+test('Authoritative running command lifecycle overrides a stale queued task projection', () => {
+  const bundle = mergeBundleWithCommands(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    [{
+      id: 'command-runtime-1',
+      command_id: 'command-runtime-1',
+      contract_version: 2,
+      module: 'example-module',
+      command_type: 'example.work.execute',
+      execution_mode: 'queue',
+      execution_task_id: 'queue-runtime-1',
+      execution_phase: 'running',
+      terminal_status: 'none',
+      projection_version: 7,
+      status: 'accepted',
+      payload: { title: 'Execute example work' },
+      updated_at_ms: Date.now(),
+    }],
+    [{
+      id: 'queue-runtime-1',
+      command_id: 'command-runtime-1',
+      title: 'Execute example work',
+      status: 'queued',
+      route_status: 'pending',
+      module: 'example-module',
+      updated_at_ms: Date.now() - 30_000,
+    }],
+  );
+
+  assert.equal(bundle.queue.length, 1);
+  assert.equal(bundle.queue[0].id, 'queue-runtime-1');
+  assert.equal(bundle.queue[0].commandId, 'command-runtime-1');
+  assert.equal(bundle.queue[0].status, 'running');
+  assert.equal(bundle.queue[0].routeStatus, 'running');
+  assert.equal(bundle.queue[0].executionPhase, 'running');
+});
+
+test('Running command remains active at the running station when flow telemetry is stale', () => {
+  const bundle = mergeBundleWithCommands(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    [{
+      id: 'command-runtime-2',
+      command_id: 'command-runtime-2',
+      contract_version: 2,
+      module: 'example-module',
+      command_type: 'example.work.execute',
+      execution_mode: 'queue',
+      execution_task_id: 'queue-runtime-2',
+      execution_phase: 'running',
+      terminal_status: 'none',
+      projection_version: 9,
+      status: 'accepted',
+      payload: { title: 'Run current work' },
+      updated_at_ms: Date.now(),
+    }],
+    [{
+      id: 'queue-runtime-2',
+      command_id: 'command-runtime-2',
+      title: 'Run current work',
+      status: 'queued',
+      route_status: 'pending',
+      module: 'example-module',
+      updated_at_ms: Date.now() - 45_000,
+    }],
+  );
+  const staleFlow = {
+    ok: true,
+    flow: {
+      source: { message_key: 'queue-runtime-2', work_id: 'queue-runtime-2' },
+      blocks: [{
+        kind: 'task',
+        title: 'Queued',
+        lines: ['Queue projection has not advanced.'],
+        branches: [{
+          kind: 'queue_pickup',
+          title: 'Reload status',
+          lines: ['Current queue state: completed'],
+        }],
+      }],
+      ledger_events: [],
+    },
+  };
+  const model = buildHarnessModel(bundle, staleFlow, 'en');
+  const health = deriveHarnessHealth({ model, flow: staleFlow, ctx: { sync: { mode: 'webrtc' } } });
+
+  assert.equal(model.activeTask.id, 'queue-runtime-2');
+  assert.equal(model.activeNodeId, 'running');
+  assert.equal(model.timeline.at(-1).id, 'running');
+  assert.equal(model.nodeMap.get('running').status, 'active');
+  assert.equal(health.severity, 'ok');
+  assert.equal(health.waitingCount, 0);
+  assert.equal(health.activeCount, 1);
+});
+
+test('Running command without a queue projection is synthesized from its execution link', () => {
+  const bundle = mergeBundleWithCommands(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    [{
+      id: 'command-runtime-3',
+      command_id: 'command-runtime-3',
+      contract_version: 2,
+      module: 'example-module',
+      command_type: 'example.work.execute',
+      execution_mode: 'queue',
+      execution_task_id: 'queue-runtime-3',
+      execution_phase: 'running',
+      terminal_status: 'none',
+      projection_version: 4,
+      status: 'accepted',
+      payload: { title: 'Recover projected work' },
+      updated_at_ms: Date.now(),
+    }],
+    [],
+  );
+  const missingFlow = { ok: false, error: 'rxdb_flow_projection_unavailable' };
+  const model = buildHarnessModel(bundle, missingFlow, 'en');
+
+  assert.equal(bundle.queue.length, 1);
+  assert.equal(bundle.queue[0].id, 'queue-runtime-3');
+  assert.equal(bundle.queue[0].status, 'running');
+  assert.equal(model.activeNodeId, 'running');
+  assert.deepEqual(model.timeline.map((node) => node.id), ['queued', 'leased', 'running']);
+});
+
+test('Synchronous control commands do not become task overview items', () => {
+  const bundle = mergeBundleWithCommands(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    [{
+      id: 'command-control-1',
+      command_id: 'command-control-1',
+      contract_version: 2,
+      module: 'example-module',
+      command_type: 'example.control.refresh',
+      execution_mode: 'control',
+      execution_phase: 'terminal',
+      terminal_status: 'completed',
+      status: 'completed',
+      updated_at_ms: Date.now(),
+    }],
+    [],
+  );
+
+  assert.deepEqual(bundle.queue, []);
 });
 
 test('Empty CTOX task selection does not crash task step rendering', () => {

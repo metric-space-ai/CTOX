@@ -20,6 +20,7 @@
 use super::app_runtime;
 use super::browser_runtime::{browser_runtime_manager, BrowserSessionAutomationRequest};
 use super::command_lifecycle_generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
+use super::policy::BusinessOsPermission;
 use super::store;
 use crate::mission::channels;
 use crate::mission::tickets;
@@ -435,6 +436,14 @@ const NATIVE_PEER_WATCHDOG_MAX_HEARTBEAT_AGE_MS: u64 = 90_000;
 const NATIVE_PEER_PROGRESS_WARN_AGE_MS: u64 = 60_000;
 const NATIVE_PEER_PROGRESS_RESPAWN_AGE_MS: u64 = 180_000;
 const NATIVE_PEER_PROGRESS_RESPAWN_TICKS: u32 = 2;
+
+fn backlog_made_progress(previous: Option<(u64, u64)>, current: (u64, u64)) -> bool {
+    previous
+        .map(|(previous_outbox, previous_transport)| {
+            current.0 < previous_outbox || current.1 < previous_transport
+        })
+        .unwrap_or(true)
+}
 
 /// FIX 2: worker-thread count for the peer's tokio runtime: `max(4, cores)`.
 fn native_peer_worker_threads() -> usize {
@@ -3096,6 +3105,7 @@ async fn run_native_peer(
     runtime_schema_watch.tick().await;
     let mut exit = NativePeerExit::Shutdown;
     let mut progress_stall_ticks = 0_u32;
+    let mut previous_backlog = None;
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => {
@@ -3133,13 +3143,24 @@ async fn run_native_peer(
                     .unwrap_or_default();
                 let has_backlog = pending_outbox > 0 || transport_backlog > 0;
                 let progress_age_ms = outbox_age_ms.max(transport_age_ms);
-                if has_backlog && progress_age_ms >= NATIVE_PEER_PROGRESS_WARN_AGE_MS {
+                let made_progress = backlog_made_progress(
+                    previous_backlog,
+                    (pending_outbox, transport_backlog),
+                );
+                previous_backlog = has_backlog.then_some((pending_outbox, transport_backlog));
+                if has_backlog
+                    && !made_progress
+                    && progress_age_ms >= NATIVE_PEER_PROGRESS_WARN_AGE_MS
+                {
                     eprintln!(
                         "[business-os] native rxdb peer watchdog: backlog without progress for {progress_age_ms}ms \
                          (outbox={pending_outbox}, transport={transport_backlog})"
                     );
                 }
-                if has_backlog && progress_age_ms >= NATIVE_PEER_PROGRESS_RESPAWN_AGE_MS {
+                if has_backlog
+                    && !made_progress
+                    && progress_age_ms >= NATIVE_PEER_PROGRESS_RESPAWN_AGE_MS
+                {
                     progress_stall_ticks = progress_stall_ticks.saturating_add(1);
                 } else {
                     progress_stall_ticks = 0;
@@ -4926,6 +4947,26 @@ async fn wait_for_business_command_wake(
 /// How often a single command may fail `accept_pending_business_command`
 /// before it is marked `failed` and dropped from the pending queue.
 const BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET: u32 = 5;
+const BUSINESS_COMMAND_RETRY_CANDIDATE_SQL: &str = r#"(
+  json_extract(data, '$.status') IN ('pending_sync', 'waiting_dependencies')
+  OR (
+    (
+      json_extract(data, '$.status') = 'accepted'
+      OR (
+        json_extract(data, '$.status') = 'failed'
+        AND COALESCE(json_extract(data, '$.terminal_status'), 'none') = 'none'
+      )
+    )
+    AND json_extract(data, '$.command_type') IN (
+      'external_sql.sync.refresh',
+      'external_sql.write',
+      'outbound.research_source.generate_adapter',
+      'outbound.research_source.test',
+      'outbound.research_source.auth_assist',
+      'web_stack.person_research'
+    )
+  )
+)"#;
 
 async fn enqueue_business_command_document_with_database(
     database: &Arc<RxDatabase>,
@@ -4957,10 +4998,13 @@ async fn enqueue_business_command_document_with_database(
         .collection("business_commands")
         .context("business_commands collection is not registered")?;
     let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
-    commands
-        .incremental_upsert(document.clone())
-        .await
-        .map_err(|err| anyhow::anyhow!("enqueue business command {command_id}: {err}"))?;
+    incremental_upsert_document_with_repair(
+        &commands,
+        document.clone(),
+        &format!("enqueued business_command {command_id}"),
+    )
+    .await
+    .map_err(|err| anyhow::anyhow!("enqueue business command {command_id}: {err}"))?;
     Ok(document)
 }
 
@@ -5105,6 +5149,7 @@ async fn browser_session_automation_with_database(
         session.viewport_h,
         size_bytes,
         &frame_hash,
+        None,
     )
     .await?;
     upsert_browser_tab(
@@ -5119,6 +5164,7 @@ async fn browser_session_automation_with_database(
         can_go_forward,
         Some(&frame_id),
         next_seq,
+        None,
     )
     .await?;
     upsert_browser_session(
@@ -5136,6 +5182,8 @@ async fn browser_session_automation_with_database(
         "browser.automation",
         command_created_at_ms,
         output.get("error").and_then(Value::as_str),
+        None,
+        None,
     )
     .await?;
     if let Some(object) = output.as_object_mut() {
@@ -5279,11 +5327,12 @@ async fn consume_pending_business_commands(
                 let failure_root = root.to_path_buf();
                 let failed_document = document.clone();
                 let failure_message = format!("{err:#}");
+                let persisted_failure_message = failure_message.clone();
                 let persisted_failure = match tokio::task::spawn_blocking(move || {
                     store::record_business_command_intake_failure(
                         &failure_root,
                         &failed_document,
-                        &failure_message,
+                        &persisted_failure_message,
                         BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET,
                     )
                 })
@@ -5332,6 +5381,32 @@ async fn consume_pending_business_commands(
                     .get("exhausted")
                     .and_then(Value::as_bool)
                     .unwrap_or(failures >= BUSINESS_COMMAND_ACCEPT_RETRY_BUDGET);
+                if !exhausted {
+                    if let Some(retry_document) = transient_business_command_retry_document(
+                        &document,
+                        failure_message.as_str(),
+                        failures,
+                    ) {
+                        let commands = database
+                            .collection("business_commands")
+                            .context("business_commands collection is not registered")?;
+                        incremental_upsert_document_with_repair(
+                            &commands,
+                            retry_document,
+                            "retryable business_command",
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "requeue transient business_command {command_id}: {error}"
+                            )
+                        })?;
+                        COMMAND_PLANE_METRICS
+                            .retries_total
+                            .fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                }
                 if exhausted {
                     COMMAND_PLANE_METRICS
                         .exhausted_total
@@ -5449,7 +5524,7 @@ fn pending_business_command_documents_sync(
                 "SELECT data
                  FROM {quoted}
                  WHERE {deleted_expr} = 0
-                   AND json_extract(data, '$.status') IN ('pending_sync', 'waiting_dependencies')
+                   AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}
                  ORDER BY {lwt_expr} {direction}
                  LIMIT ?1"
             ))
@@ -6146,6 +6221,41 @@ fn is_transient_business_command_store_error(error: &anyhow::Error) -> bool {
     .any(|needle| message.contains(needle))
 }
 
+fn transient_business_command_retry_document(
+    document: &Value,
+    error_message: &str,
+    attempt: u32,
+) -> Option<Value> {
+    let command_type = document
+        .get("command_type")
+        .or_else(|| document.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !store::is_recoverable_background_control_command_type(command_type) {
+        return None;
+    }
+    let mut retry = document.clone();
+    let object = retry.as_object_mut()?;
+    object.insert(
+        "status".to_string(),
+        Value::String("pending_sync".to_string()),
+    );
+    object.insert(
+        "task_status".to_string(),
+        Value::String("pending_sync".to_string()),
+    );
+    object.insert("retryable".to_string(), Value::Bool(true));
+    object.insert("retry_attempt".to_string(), Value::from(attempt));
+    object.insert(
+        "last_retry_error".to_string(),
+        Value::String(error_message.to_string()),
+    );
+    object.remove("error");
+    object.remove("error_code");
+    object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
+    Some(retry)
+}
+
 async fn project_appsec_command_result(
     root: PathBuf,
     database: &Arc<RxDatabase>,
@@ -6215,6 +6325,10 @@ fn is_browser_runtime_command(command_type: &str) -> bool {
             | "browser.forward"
             | "browser.reset"
             | "browser.session.stop"
+            | "browser.controller.acquire"
+            | "browser.controller.renew"
+            | "browser.controller.release"
+            | "browser.credential.fill"
     )
 }
 
@@ -6265,12 +6379,45 @@ async fn apply_browser_runtime_command(
         .context("browser command capability token is required")?;
     let (profile_owner, _) = store::verify_capability_actor(root, capability_token)
         .context("browser command capability token is invalid")?;
+    let tenant_id = store::sync_config(root)
+        .context("browser command tenant configuration is unavailable")?
+        .instance_id;
+    anyhow::ensure!(
+        !tenant_id.trim().is_empty(),
+        "browser command tenant id is empty"
+    );
     let private_profile = payload
         .get("profile_mode")
         .and_then(Value::as_str)
         .is_some_and(|mode| mode == "private");
+    let requested_lease_id = payload
+        .get("lease_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let existing_session = find_browser_document(database, "browser_sessions", &session_id).await?;
+    let existing_owner = existing_session
+        .get("owner_user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "ctox");
+    if let Some(existing_owner) = existing_owner {
+        anyhow::ensure!(
+            existing_owner == profile_owner,
+            "browser session belongs to another user"
+        );
+    }
+    let mut access = BrowserSessionAccess {
+        tenant_id: Some(tenant_id),
+        owner_user_id: Some(profile_owner.clone()),
+        controller_user_id: requested_lease_id.as_ref().map(|_| profile_owner.clone()),
+        controller_lease_id: requested_lease_id.clone(),
+        controller_lease_expires_at_ms: requested_lease_id
+            .as_ref()
+            .map(|_| now_ms() as u64 + 120_000),
+    };
     let existing_tab = find_browser_document(database, "browser_tabs", &tab_id).await?;
     let previous_url = existing_tab
         .get("url")
@@ -6284,6 +6431,179 @@ async fn apply_browser_runtime_command(
         .map(normalize_browser_runtime_url)
         .filter(|value| !value.is_empty())
         .unwrap_or(previous_url);
+
+    if matches!(
+        command_type,
+        "browser.controller.acquire" | "browser.controller.renew" | "browser.controller.release"
+    ) {
+        anyhow::ensure!(existing_session.is_object(), "browser session not found");
+        let lease_id = requested_lease_id
+            .as_deref()
+            .context("browser controller lease id is required")?;
+        let current_controller = existing_session
+            .get("controller_user_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let current_lease = existing_session
+            .get("controller_lease_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if command_type != "browser.controller.acquire" {
+            anyhow::ensure!(
+                current_controller == profile_owner && current_lease == lease_id,
+                "browser controller lease does not match"
+            );
+        }
+        if command_type == "browser.controller.release" {
+            access.controller_user_id = Some(String::new());
+            access.controller_lease_id = Some(String::new());
+            access.controller_lease_expires_at_ms = Some(0);
+        } else {
+            access.controller_user_id = Some(profile_owner.clone());
+            access.controller_lease_id = Some(lease_id.to_string());
+            access.controller_lease_expires_at_ms = Some(now_ms() as u64 + 120_000);
+        }
+        let status = existing_session
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("active");
+        let runtime_status = existing_session
+            .get("runtime_status")
+            .and_then(Value::as_str)
+            .unwrap_or(status);
+        let title = existing_session
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("Remote Browser");
+        let current_tab_id = existing_session
+            .get("current_tab_id")
+            .and_then(Value::as_str)
+            .unwrap_or(&tab_id);
+        let frame_id = existing_session
+            .get("active_frame_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty());
+        let frame_seq = existing_session
+            .get("last_frame_seq")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        upsert_browser_session(
+            database,
+            &session_id,
+            current_tab_id,
+            status,
+            runtime_status,
+            &target_url,
+            title,
+            viewport_w,
+            viewport_h,
+            frame_id,
+            frame_seq,
+            command_type,
+            command_created_at_ms,
+            None,
+            Some(&access),
+            None,
+        )
+        .await?;
+        mark_browser_runtime_command_completed(
+            database,
+            document,
+            accepted,
+            json!({
+                "ok": true,
+                "session_id": session_id,
+                "controller_user_id": access.controller_user_id,
+                "controller_lease_id": access.controller_lease_id,
+                "controller_lease_expires_at_ms": access.controller_lease_expires_at_ms
+            }),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if existing_session.is_object() && command_type != "browser.session.start" {
+        let current_controller = existing_session
+            .get("controller_user_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let current_lease = existing_session
+            .get("controller_lease_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let current_lease_expires_at_ms = existing_session
+            .get("controller_lease_expires_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        anyhow::ensure!(
+            current_controller == profile_owner
+                && requested_lease_id.as_deref() == Some(current_lease)
+                && current_lease_expires_at_ms > now_ms() as u64,
+            "browser controller lease is missing or expired"
+        );
+    }
+
+    let credential_fill = if command_type == "browser.credential.fill" {
+        anyhow::ensure!(existing_session.is_object(), "browser session not found");
+        anyhow::ensure!(
+            payload.get("confirmed").and_then(Value::as_bool) == Some(true),
+            "credential fill requires explicit confirmation"
+        );
+        anyhow::ensure!(
+            store::capability_allows_workspace_permission(
+                root,
+                capability_token,
+                BusinessOsPermission::SecretsManage,
+            ),
+            "credential fill requires secrets.manage permission"
+        );
+        let secret_scope = payload
+            .get("secret_scope")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        anyhow::ensure!(
+            secret_scope == crate::secrets::credential_scope(),
+            "credential fill accepts only the credentials scope"
+        );
+        let secret_name = payload
+            .get("secret_name")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| is_safe_browser_credential_name(value))
+            .context("credential fill secret name is invalid")?;
+        let field_role = payload
+            .get("field_role")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("password");
+        anyhow::ensure!(
+            matches!(field_role, "username" | "password" | "both"),
+            "credential fill field role must be username, password, or both"
+        );
+        let selector = payload
+            .get("selector")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+        let stored_secret = crate::secrets::read_secret_value(root, secret_scope, secret_name)
+            .context("configured browser credential is unavailable")?;
+        let username = matches!(field_role, "username" | "both")
+            .then(|| resolve_browser_credential_field(&stored_secret, "username"))
+            .transpose()?;
+        let password = matches!(field_role, "password" | "both")
+            .then(|| resolve_browser_credential_field(&stored_secret, "password"))
+            .transpose()?;
+        Some(ResolvedBrowserCredentialFill {
+            selector,
+            field_role: field_role.to_string(),
+            username,
+            password,
+        })
+    } else {
+        None
+    };
 
     if command_type == "browser.session.stop" {
         let title = existing_tab
@@ -6307,6 +6627,8 @@ async fn apply_browser_runtime_command(
             command_type,
             command_created_at_ms,
             None,
+            Some(&access),
+            None,
         )
         .await?;
         upsert_browser_tab(
@@ -6321,6 +6643,7 @@ async fn apply_browser_runtime_command(
             false,
             None,
             0,
+            Some(&access),
         )
         .await?;
         mark_browser_runtime_command_completed(
@@ -6339,7 +6662,7 @@ async fn apply_browser_runtime_command(
         return Ok(());
     }
 
-    // All remaining commands (start/navigate/reload/back/forward/reset) drive a
+    // All remaining commands drive a
     // live, persistent Chromium runtime via the session registry.
     let manager = browser_runtime_manager();
     if command_type == "browser.reset" {
@@ -6372,6 +6695,7 @@ async fn apply_browser_runtime_command(
                 command_type,
                 command_created_at_ms,
                 &detail,
+                Some(&access),
             )
             .await?;
             return Err(err);
@@ -6386,6 +6710,20 @@ async fn apply_browser_runtime_command(
         "browser.reload" => ("reload", json!({ "timeoutMs": 30000 })),
         "browser.back" => ("back", json!({ "timeoutMs": 30000 })),
         "browser.forward" => ("forward", json!({ "timeoutMs": 30000 })),
+        "browser.credential.fill" => {
+            let fill = credential_fill
+                .as_ref()
+                .context("credential fill was not resolved")?;
+            (
+                "credential_fill",
+                json!({
+                    "selector": fill.selector,
+                    "fieldRole": fill.field_role,
+                    "usernameValue": fill.username,
+                    "passwordValue": fill.password,
+                }),
+            )
+        }
         _ => ("nav_state", json!({})),
     };
 
@@ -6406,6 +6744,7 @@ async fn apply_browser_runtime_command(
                 command_type,
                 command_created_at_ms,
                 &detail,
+                Some(&access),
             )
             .await?;
             return Err(err);
@@ -6478,6 +6817,7 @@ async fn apply_browser_runtime_command(
                 command_type,
                 command_created_at_ms,
                 &detail,
+                Some(&access),
             )
             .await?;
             return Err(err);
@@ -6518,6 +6858,7 @@ async fn apply_browser_runtime_command(
         viewport_h,
         size_bytes,
         &frame_hash,
+        Some(&access),
     )
     .await?;
     upsert_browser_tab(
@@ -6532,8 +6873,20 @@ async fn apply_browser_runtime_command(
         can_go_forward,
         Some(&frame_id),
         next_seq,
+        Some(&access),
     )
     .await?;
+    let session_metadata_patch = if command_type == "browser.session.start" {
+        Some(payload.clone())
+    } else {
+        credential_fill.as_ref().map(|fill| {
+            json!({
+                "credential_fill_status": "completed",
+                "credential_field_role": fill.field_role,
+                "secret_value_in_rxdb": false
+            })
+        })
+    };
     upsert_browser_session(
         database,
         &session_id,
@@ -6549,6 +6902,8 @@ async fn apply_browser_runtime_command(
         command_type,
         command_created_at_ms,
         navigation_error.as_deref(),
+        Some(&access),
+        session_metadata_patch.as_ref(),
     )
     .await?;
     mark_browser_runtime_command_completed(
@@ -6567,11 +6922,56 @@ async fn apply_browser_runtime_command(
             "size_bytes": size_bytes,
             "can_go_back": can_go_back,
             "can_go_forward": can_go_forward,
-            "navigation_error": navigation_error
+            "navigation_error": navigation_error,
+            "credential_fill_status": credential_fill.as_ref().map(|_| "completed"),
+            "secret_value_in_rxdb": false
         }),
     )
     .await?;
     Ok(())
+}
+
+fn is_safe_browser_credential_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+struct ResolvedBrowserCredentialFill {
+    selector: String,
+    field_role: String,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+fn resolve_browser_credential_field(
+    secret_value: &str,
+    field_role: &str,
+) -> anyhow::Result<String> {
+    let parsed = serde_json::from_str::<Value>(secret_value).ok();
+    let object = parsed.as_ref().and_then(Value::as_object);
+    let keys: &[&str] = match field_role {
+        "username" => &["username", "email", "login", "login_hint"],
+        "password" => &["password", "credential", "secret", "value"],
+        _ => anyhow::bail!("unsupported credential field role"),
+    };
+    let bundled = object.and_then(|value| {
+        keys.iter()
+            .find_map(|key| value.get(*key).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    });
+    if let Some(value) = bundled {
+        return Ok(value);
+    }
+    anyhow::ensure!(
+        field_role == "password" && object.is_none() && !secret_value.is_empty(),
+        "configured credential does not contain the requested field"
+    );
+    Ok(secret_value.to_string())
 }
 
 fn browser_runtime_reference_dir(root: &Path) -> Option<PathBuf> {
@@ -6608,6 +7008,7 @@ async fn mark_browser_session_runtime_error(
     command_type: &str,
     command_created_at_ms: u64,
     detail: &str,
+    access: Option<&BrowserSessionAccess>,
 ) -> anyhow::Result<()> {
     let existing_session = find_browser_document(database, "browser_sessions", session_id).await?;
     let existing_tab = find_browser_document(database, "browser_tabs", tab_id).await?;
@@ -6638,6 +7039,7 @@ async fn mark_browser_session_runtime_error(
         false,
         frame_id.as_deref(),
         frame_seq,
+        access,
     )
     .await?;
     upsert_browser_session(
@@ -6655,6 +7057,8 @@ async fn mark_browser_session_runtime_error(
         command_type,
         command_created_at_ms,
         Some(detail),
+        access,
+        None,
     )
     .await?;
     Ok(())
@@ -6851,6 +7255,7 @@ async fn drain_browser_session_inputs(
                 "browser.input",
                 now,
                 &format!("{err:#}"),
+                None,
             )
             .await?;
             return Ok(touched_rows);
@@ -6972,6 +7377,7 @@ async fn capture_and_store_browser_frame(
         session.viewport_h,
         size_bytes,
         &frame_hash,
+        None,
     )
     .await?;
     upsert_browser_tab(
@@ -6986,6 +7392,7 @@ async fn capture_and_store_browser_frame(
         can_go_forward,
         Some(&frame_id),
         next_seq,
+        None,
     )
     .await?;
     upsert_browser_session(
@@ -7002,6 +7409,8 @@ async fn capture_and_store_browser_frame(
         next_seq,
         "browser.input",
         now_ms() as u64,
+        None,
+        None,
         None,
     )
     .await?;
@@ -7310,6 +7719,15 @@ async fn has_newer_browser_runtime_command(
     }))
 }
 
+#[derive(Debug, Clone, Default)]
+struct BrowserSessionAccess {
+    tenant_id: Option<String>,
+    owner_user_id: Option<String>,
+    controller_user_id: Option<String>,
+    controller_lease_id: Option<String>,
+    controller_lease_expires_at_ms: Option<u64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn upsert_browser_session(
     database: &Arc<RxDatabase>,
@@ -7326,6 +7744,8 @@ async fn upsert_browser_session(
     command_type: &str,
     command_created_at_ms: u64,
     error: Option<&str>,
+    access: Option<&BrowserSessionAccess>,
+    metadata_patch: Option<&Value>,
 ) -> anyhow::Result<()> {
     let now = now_ms() as u64;
     let existing = find_browser_document(database, "browser_sessions", session_id).await?;
@@ -7348,6 +7768,41 @@ async fn upsert_browser_session(
         .get("pending_input_count")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    let preserved_tenant_id = existing
+        .get("tenant_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let preserved_owner_user_id = existing
+        .get("owner_user_id")
+        .and_then(Value::as_str)
+        .unwrap_or("ctox");
+    let preserved_controller_user_id = existing
+        .get("controller_user_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let preserved_controller_lease_id = existing
+        .get("controller_lease_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let preserved_controller_lease_expires_at_ms = existing
+        .get("controller_lease_expires_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let tenant_id = access
+        .and_then(|value| value.tenant_id.as_deref())
+        .unwrap_or(preserved_tenant_id);
+    let owner_user_id = access
+        .and_then(|value| value.owner_user_id.as_deref())
+        .unwrap_or(preserved_owner_user_id);
+    let controller_user_id = access
+        .and_then(|value| value.controller_user_id.as_deref())
+        .unwrap_or(preserved_controller_user_id);
+    let controller_lease_id = access
+        .and_then(|value| value.controller_lease_id.as_deref())
+        .unwrap_or(preserved_controller_lease_id);
+    let controller_lease_expires_at_ms = access
+        .and_then(|value| value.controller_lease_expires_at_ms)
+        .unwrap_or(preserved_controller_lease_expires_at_ms);
     let mut payload = existing
         .get("payload")
         .cloned()
@@ -7360,13 +7815,37 @@ async fn upsert_browser_session(
     }
     payload["runtime"] = Value::String("ctox-web-stack".to_string());
     payload["updated_by"] = Value::String("native-rxdb-peer".to_string());
+    if let Some(metadata_patch) = metadata_patch {
+        for key in [
+            "source_id",
+            "purpose",
+            "target_url",
+            "allowed_domains",
+            "capture_script",
+            "verify_selector",
+            "credential_selector",
+            "secret_name",
+            "auth_assist_status",
+            "profile_mode",
+            "credential_fill_status",
+            "credential_field_role",
+            "secret_value_in_rxdb",
+        ] {
+            if let Some(value) = metadata_patch.get(key) {
+                payload[key] = value.clone();
+            }
+        }
+    }
     if let Some(error) = error {
         payload["error"] = Value::String(error.to_string());
     }
     let doc = json!({
         "id": session_id,
-        "owner_user_id": "ctox",
-        "controller_user_id": "ctox",
+        "tenant_id": tenant_id,
+        "owner_user_id": owner_user_id,
+        "controller_user_id": controller_user_id,
+        "controller_lease_id": controller_lease_id,
+        "controller_lease_expires_at_ms": controller_lease_expires_at_ms,
         "status": status,
         "runtime_status": runtime_status,
         "current_tab_id": tab_id,
@@ -7411,10 +7890,27 @@ async fn upsert_browser_tab(
     can_go_forward: bool,
     frame_id: Option<&str>,
     frame_seq: u64,
+    access: Option<&BrowserSessionAccess>,
 ) -> anyhow::Result<()> {
     let now = now_ms() as u64;
+    let session = find_browser_document(database, "browser_sessions", session_id).await?;
+    let tenant_id = access
+        .and_then(|value| value.tenant_id.as_deref())
+        .or_else(|| session.get("tenant_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let owner_user_id = access
+        .and_then(|value| value.owner_user_id.as_deref())
+        .or_else(|| session.get("owner_user_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let controller_user_id = access
+        .and_then(|value| value.controller_user_id.as_deref())
+        .or_else(|| session.get("controller_user_id").and_then(Value::as_str))
+        .unwrap_or_default();
     let doc = json!({
         "id": tab_id,
+        "tenant_id": tenant_id,
+        "owner_user_id": owner_user_id,
+        "controller_user_id": controller_user_id,
         "session_id": session_id,
         "title": title,
         "url": url,
@@ -7456,10 +7952,27 @@ async fn upsert_browser_frame(
     height: u64,
     size_bytes: u64,
     frame_hash: &str,
+    access: Option<&BrowserSessionAccess>,
 ) -> anyhow::Result<()> {
     let now = now_ms() as u64;
+    let session = find_browser_document(database, "browser_sessions", session_id).await?;
+    let tenant_id = access
+        .and_then(|value| value.tenant_id.as_deref())
+        .or_else(|| session.get("tenant_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let owner_user_id = access
+        .and_then(|value| value.owner_user_id.as_deref())
+        .or_else(|| session.get("owner_user_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let controller_user_id = access
+        .and_then(|value| value.controller_user_id.as_deref())
+        .or_else(|| session.get("controller_user_id").and_then(Value::as_str))
+        .unwrap_or_default();
     let doc = json!({
         "id": frame_id,
+        "tenant_id": tenant_id,
+        "owner_user_id": owner_user_id,
+        "controller_user_id": controller_user_id,
         "session_id": session_id,
         "tab_id": tab_id,
         "seq": seq,
@@ -7558,6 +8071,8 @@ async fn mark_browser_runtime_command_failed(
         "browser.runtime.failed",
         now_ms() as u64,
         Some(&message),
+        None,
+        None,
     )
     .await?;
     let commands = database
@@ -8141,7 +8656,7 @@ async fn business_record_projection_source_stamp(
     let queue_stamp_root = root.to_path_buf();
     let store_stamp_root = root.to_path_buf();
     let knowledge_stamp_root = root.to_path_buf();
-    let collections = business_record_projection_collections();
+    let collections = business_record_projection_collections_for_root(root);
     let queue_chat_repair = queue_chat_repair_projection_stamp_async(&queue_stamp_root).await?;
     let (records, communication, knowledge) = tokio::task::spawn_blocking(move || {
         Ok::<_, anyhow::Error>((
@@ -8273,7 +8788,7 @@ async fn sync_business_record_projections_slice_with_database(
             support_intake_count.max_updated_at_ms.saturating_add(1),
         );
     }
-    let collections = business_record_projection_collections();
+    let collections = business_record_projection_collections_for_root(root);
     let root = root.to_path_buf();
     let threads_relevance_commands_since_ms = *since_by_collection
         .get(THREADS_CTOX_RELEVANCE_COMMANDS_SINCE_KEY)
@@ -9471,7 +9986,16 @@ fn projection_normalized_value_for_schema_field(
             }
         }
         Some("string") => match value {
-            Value::String(_) => ProjectionValueNormalization::Keep,
+            Value::String(text) => property
+                .max_length
+                .and_then(|max_length| usize::try_from(max_length).ok())
+                .filter(|max_length| text.len() > *max_length)
+                .map(|max_length| {
+                    ProjectionValueNormalization::Replace(Value::String(truncate_utf8_to_bytes(
+                        text, max_length,
+                    )))
+                })
+                .unwrap_or(ProjectionValueNormalization::Keep),
             Value::Number(number) => {
                 ProjectionValueNormalization::Replace(Value::String(number.to_string()))
             }
@@ -9505,6 +10029,17 @@ fn projection_normalized_value_for_schema_field(
         }
         _ => ProjectionValueNormalization::Keep,
     }
+}
+
+fn truncate_utf8_to_bytes(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn projection_value_as_f64(value: &Value, field: &str) -> Option<f64> {
@@ -9967,7 +10502,7 @@ fn business_commands_table_stamp(root: &Path) -> anyhow::Result<BusinessCommands
                 "SELECT COUNT(*), COALESCE(MAX({lwt_expr}), 0)
                  FROM {quoted}
                  WHERE {deleted_expr} = 0
-                   AND json_extract(data, '$.status') = 'pending_sync'"
+                   AND {BUSINESS_COMMAND_RETRY_CANDIDATE_SQL}"
             ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
@@ -14812,6 +15347,19 @@ fn business_record_projection_collections() -> Vec<String> {
         .collect()
 }
 
+fn business_record_projection_collections_for_root(root: &Path) -> Vec<String> {
+    let mut collections = business_record_projection_collections();
+    collections.extend(
+        runtime_module_collection_entries_for_root(root)
+            .into_iter()
+            .filter(|entry| matches!(entry.sync_profile, RuntimeModuleSyncProfile::Eager))
+            .map(|entry| entry.name),
+    );
+    collections.sort();
+    collections.dedup();
+    collections
+}
+
 /// FIX 4: the set of Business OS RxDB collections whose failure must abort the
 /// peer bring-up. These carry runtime data the daemon depends on (module
 /// catalog, runtime settings, command queue, queue tasks, desktop files +
@@ -15304,6 +15852,91 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn watchdog_treats_declining_outbox_as_progress() {
+        assert!(backlog_made_progress(Some((509, 0)), (434, 0)));
+        assert!(backlog_made_progress(Some((20, 8)), (20, 7)));
+    }
+
+    #[test]
+    fn watchdog_treats_unchanged_or_growing_backlog_as_stalled() {
+        assert!(!backlog_made_progress(Some((12, 3)), (12, 3)));
+        assert!(!backlog_made_progress(Some((12, 3)), (13, 4)));
+        assert!(backlog_made_progress(None, (509, 0)));
+    }
+
+    #[test]
+    fn transient_external_sql_command_is_requeued_without_losing_intent() {
+        let original = json!({
+            "id": "cmd-sql-retry",
+            "command_id": "cmd-sql-retry",
+            "module": "crm",
+            "command_type": "external_sql.write",
+            "record_id": "company-7",
+            "status": "accepted",
+            "payload": {
+                "source_id": "primary",
+                "operation_id": "company_update",
+                "phone": "+49 30 123"
+            },
+            "error": "database is locked"
+        });
+        let retry = transient_business_command_retry_document(&original, "database is locked", 1)
+            .expect("external SQL writes have idempotent receipts and may retry");
+        assert_eq!(retry["status"], "pending_sync");
+        assert_eq!(retry["task_status"], "pending_sync");
+        assert_eq!(retry["retryable"], true);
+        assert_eq!(retry["retry_attempt"], 1);
+        assert_eq!(retry["payload"], original["payload"]);
+        assert!(retry.get("error").is_none());
+    }
+
+    #[test]
+    fn transient_outbound_source_command_is_requeued_without_losing_intent() {
+        let original = json!({
+            "id": "cmd-source-auth-retry",
+            "command_id": "cmd-source-auth-retry",
+            "module": "outbound",
+            "command_type": "outbound.research_source.auth_assist",
+            "record_id": "companyhouse.de",
+            "status": "accepted",
+            "payload": {
+                "source_id": "companyhouse.de",
+                "session_id": "browser-session-companyhouse"
+            },
+            "error": "database is locked"
+        });
+        let retry = transient_business_command_retry_document(&original, "database is locked", 2)
+            .expect("outbound source controls use durable command and task identities");
+        assert_eq!(retry["status"], "pending_sync");
+        assert_eq!(retry["task_status"], "pending_sync");
+        assert_eq!(retry["retryable"], true);
+        assert_eq!(retry["retry_attempt"], 2);
+        assert_eq!(retry["payload"], original["payload"]);
+        assert!(retry.get("error").is_none());
+    }
+
+    #[test]
+    fn transient_non_idempotent_control_command_is_not_requeued() {
+        let document = json!({
+            "id": "cmd-office",
+            "command_type": "office.document.create",
+            "status": "accepted"
+        });
+        assert!(
+            transient_business_command_retry_document(&document, "database is locked", 1,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn projection_string_normalization_respects_utf8_byte_limits() {
+        assert_eq!(truncate_utf8_to_bytes("abcdefgh", 5), "abcde");
+        assert_eq!(truncate_utf8_to_bytes("abcäö", 5), "abcä");
+        assert_eq!(truncate_utf8_to_bytes("äö", 1), "");
+        assert_eq!(truncate_utf8_to_bytes("äö", 4), "äö");
+    }
 
     #[test]
     fn browser_capture_prefers_fresh_screenshot_navigation() {
@@ -16041,6 +16674,16 @@ mod tests {
                 .schema,
         )?;
         assert_eq!(schema_with, schema_without);
+        assert!(
+            !business_record_projection_collections_for_root(with_profile.path())
+                .iter()
+                .any(|collection| collection == "camscan_blob_chunks")
+        );
+        assert!(
+            business_record_projection_collections_for_root(without_profile.path())
+                .iter()
+                .any(|collection| collection == "camscan_blob_chunks")
+        );
         Ok(())
     }
 
@@ -17293,6 +17936,218 @@ mod tests {
         assert_eq!(deleted_state("old_failed"), 1);
         assert_eq!(deleted_state("old_pending"), 0);
         assert_eq!(deleted_state("recent_consumed"), 0);
+    }
+
+    #[tokio::test]
+    async fn browser_session_upsert_persists_verified_owner_and_controller_lease() {
+        assert!(is_browser_runtime_command("browser.controller.acquire"));
+        assert!(is_browser_runtime_command("browser.controller.renew"));
+        assert!(is_browser_runtime_command("browser.controller.release"));
+        assert!(is_browser_runtime_command("browser.credential.fill"));
+
+        let root = tempfile::tempdir().expect("temp root");
+        let database = open_test_database(root.path().join("browser-session-access.sqlite3"))
+            .await
+            .expect("open test database");
+        database
+            .add_collections(HashMap::from([
+                (
+                    "browser_sessions".to_string(),
+                    RxCollectionCreator {
+                        schema: business_os_schema("browser_sessions", "id"),
+                        conflict_handler: None,
+                        options: HashMap::new(),
+                    },
+                ),
+                (
+                    "browser_tabs".to_string(),
+                    RxCollectionCreator {
+                        schema: business_os_schema("browser_tabs", "id"),
+                        conflict_handler: None,
+                        options: HashMap::new(),
+                    },
+                ),
+                (
+                    "browser_frames".to_string(),
+                    RxCollectionCreator {
+                        schema: business_os_schema("browser_frames", "id"),
+                        conflict_handler: None,
+                        options: HashMap::new(),
+                    },
+                ),
+            ]))
+            .await
+            .expect("add browser_sessions collection");
+        let access = BrowserSessionAccess {
+            tenant_id: Some("tenant-verified".to_string()),
+            owner_user_id: Some("verified-user@example.test".to_string()),
+            controller_user_id: Some("verified-user@example.test".to_string()),
+            controller_lease_id: Some("lease-verified".to_string()),
+            controller_lease_expires_at_ms: Some(123_456),
+        };
+        let auth_metadata = json!({
+            "source_id": "example.test",
+            "purpose": "web_stack_auth",
+            "secret_name": "EXAMPLE_LOGIN",
+            "secret_value_in_rxdb": false
+        });
+
+        upsert_browser_frame(
+            &database,
+            "browser_frame_verified_1",
+            "browser_session_verified",
+            "browser_tab_verified",
+            1,
+            "image/png",
+            "ZmFrZQ==",
+            1280,
+            720,
+            4,
+            "frame-hash",
+            Some(&access),
+        )
+        .await
+        .expect("create scoped frame before session");
+        upsert_browser_tab(
+            &database,
+            "browser_tab_verified",
+            "browser_session_verified",
+            "Example",
+            "https://example.com",
+            "active",
+            false,
+            false,
+            false,
+            Some("browser_frame_verified_1"),
+            1,
+            Some(&access),
+        )
+        .await
+        .expect("create scoped tab before session");
+
+        upsert_browser_session(
+            &database,
+            "browser_session_verified",
+            "browser_tab_verified",
+            "active",
+            "active",
+            "https://example.com",
+            "Example",
+            1280,
+            720,
+            Some("frame_1"),
+            1,
+            "browser.session.start",
+            100,
+            None,
+            Some(&access),
+            Some(&auth_metadata),
+        )
+        .await
+        .expect("create verified browser session");
+        upsert_browser_session(
+            &database,
+            "browser_session_verified",
+            "browser_tab_verified",
+            "active",
+            "active",
+            "https://example.com/next",
+            "Example next",
+            1280,
+            720,
+            Some("frame_2"),
+            2,
+            "browser.input",
+            200,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("update browser session without replacing access state");
+
+        let session =
+            find_browser_document(&database, "browser_sessions", "browser_session_verified")
+                .await
+                .expect("load browser session");
+        assert_eq!(
+            session.get("tenant_id").and_then(Value::as_str),
+            Some("tenant-verified")
+        );
+        assert_eq!(
+            session.get("owner_user_id").and_then(Value::as_str),
+            Some("verified-user@example.test")
+        );
+        assert_eq!(
+            session.get("controller_user_id").and_then(Value::as_str),
+            Some("verified-user@example.test")
+        );
+        assert_eq!(
+            session.get("controller_lease_id").and_then(Value::as_str),
+            Some("lease-verified")
+        );
+        assert_eq!(
+            session
+                .get("controller_lease_expires_at_ms")
+                .and_then(Value::as_u64),
+            Some(123_456)
+        );
+        assert_eq!(
+            session
+                .get("payload")
+                .and_then(|payload| payload.get("source_id"))
+                .and_then(Value::as_str),
+            Some("example.test")
+        );
+        assert_eq!(
+            session
+                .get("payload")
+                .and_then(|payload| payload.get("secret_value_in_rxdb"))
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        for (collection, id) in [
+            ("browser_tabs", "browser_tab_verified"),
+            ("browser_frames", "browser_frame_verified_1"),
+        ] {
+            let document = find_browser_document(&database, collection, id)
+                .await
+                .expect("load scoped browser projection");
+            assert_eq!(
+                document.get("tenant_id").and_then(Value::as_str),
+                Some("tenant-verified")
+            );
+            assert_eq!(
+                document.get("owner_user_id").and_then(Value::as_str),
+                Some("verified-user@example.test")
+            );
+        }
+    }
+
+    #[test]
+    fn browser_credential_resolution_is_role_scoped() {
+        let bundled = r#"{
+            "username": "user@example.test",
+            "password": "not-a-real-password"
+        }"#;
+        assert_eq!(
+            resolve_browser_credential_field(bundled, "username").unwrap(),
+            "user@example.test"
+        );
+        assert_eq!(
+            resolve_browser_credential_field(bundled, "password").unwrap(),
+            "not-a-real-password"
+        );
+        assert!(resolve_browser_credential_field(bundled, "token").is_err());
+        assert!(resolve_browser_credential_field(r#"{"username":"user"}"#, "password").is_err());
+        assert_eq!(
+            resolve_browser_credential_field("legacy-password", "password").unwrap(),
+            "legacy-password"
+        );
+        assert!(resolve_browser_credential_field("legacy-user", "username").is_err());
+        assert!(is_safe_browser_credential_name("DNB_HOOVERS_BROWSER_LOGIN"));
+        assert!(!is_safe_browser_credential_name("../SECRET"));
+        assert!(!is_safe_browser_credential_name("lowercase_secret"));
     }
 
     #[tokio::test]
@@ -23491,6 +24346,128 @@ mod tests {
                 task_doc.get("command_id").and_then(Value::as_str),
                 Some("cmd_native_consumer_sqlite"),
                 "task_doc={task_doc}"
+            );
+        });
+    }
+
+    #[test]
+    fn pending_command_scan_recovers_only_idempotent_accepted_control_commands() {
+        let root = tempfile::tempdir().expect("temp root");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+
+        runtime.block_on(async {
+            let database = open_test_database(store::rxdb_store_path(root.path()))
+                .await
+                .expect("open rxdb sqlite");
+            database
+                .add_collections(collection_creators())
+                .await
+                .expect("register collections");
+            drop(database);
+
+            let path = store::rxdb_store_path(root.path());
+            let conn = Connection::open(&path).expect("open rxdb sqlite directly");
+            let table = latest_rxdb_collection_table(&conn, "business_commands")
+                .expect("lookup business_commands table")
+                .expect("business_commands table");
+            let documents = [
+                json!({
+                    "id": "cmd_external_sql_accepted",
+                    "command_id": "cmd_external_sql_accepted",
+                    "command_type": "external_sql.write",
+                    "status": "accepted"
+                }),
+                json!({
+                    "id": "cmd_web_research_accepted",
+                    "command_id": "cmd_web_research_accepted",
+                    "command_type": "web_stack.person_research",
+                    "status": "accepted"
+                }),
+                json!({
+                    "id": "cmd_office_accepted",
+                    "command_id": "cmd_office_accepted",
+                    "command_type": "office.document.create",
+                    "status": "accepted"
+                }),
+                json!({
+                    "id": "cmd_external_sql_completed",
+                    "command_id": "cmd_external_sql_completed",
+                    "command_type": "external_sql.write",
+                    "status": "completed"
+                }),
+                json!({
+                    "id": "cmd_external_sql_failed_nonterminal",
+                    "command_id": "cmd_external_sql_failed_nonterminal",
+                    "command_type": "external_sql.write",
+                    "status": "failed",
+                    "terminal_status": "none"
+                }),
+                json!({
+                    "id": "cmd_external_sql_failed_terminal",
+                    "command_id": "cmd_external_sql_failed_terminal",
+                    "command_type": "external_sql.write",
+                    "status": "failed",
+                    "terminal_status": "failed"
+                }),
+                json!({
+                    "id": "cmd_office_failed_nonterminal",
+                    "command_id": "cmd_office_failed_nonterminal",
+                    "command_type": "office.document.create",
+                    "status": "failed",
+                    "terminal_status": "none"
+                }),
+                json!({
+                    "id": "cmd_regular_pending",
+                    "command_id": "cmd_regular_pending",
+                    "command_type": "business_os.test",
+                    "status": "pending_sync"
+                }),
+            ];
+            for (index, document) in documents.iter().enumerate() {
+                let id = document["id"].as_str().expect("document id");
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {} (id, revision, deleted, lastWriteTime, data) VALUES (?1, ?2, 0, ?3, ?4)",
+                        sqlite_quote_identifier(&table)
+                    ),
+                    params![
+                        id,
+                        format!("1-test-{index}"),
+                        now_ms() as f64 + index as f64,
+                        document.to_string()
+                    ],
+                )
+                .expect("insert command directly into sqlite");
+            }
+            drop(conn);
+
+            let pending = pending_business_command_documents_sync(root.path(), 25)
+                .expect("scan recoverable commands");
+            let stamp = business_commands_table_stamp(root.path()).expect("stamp commands");
+            assert_eq!(stamp.pending_count, 4, "stamp={stamp:?}");
+            let ids = pending
+                .iter()
+                .filter_map(|document| document.get("id").and_then(Value::as_str))
+                .collect::<HashSet<_>>();
+            assert!(ids.contains("cmd_external_sql_accepted"), "pending={pending:?}");
+            assert!(ids.contains("cmd_web_research_accepted"), "pending={pending:?}");
+            assert!(ids.contains("cmd_regular_pending"), "pending={pending:?}");
+            assert!(
+                ids.contains("cmd_external_sql_failed_nonterminal"),
+                "pending={pending:?}"
+            );
+            assert!(!ids.contains("cmd_office_accepted"), "pending={pending:?}");
+            assert!(!ids.contains("cmd_external_sql_completed"), "pending={pending:?}");
+            assert!(
+                !ids.contains("cmd_external_sql_failed_terminal"),
+                "pending={pending:?}"
+            );
+            assert!(
+                !ids.contains("cmd_office_failed_nonterminal"),
+                "pending={pending:?}"
             );
         });
     }

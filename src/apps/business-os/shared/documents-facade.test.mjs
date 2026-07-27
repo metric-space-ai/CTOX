@@ -173,6 +173,7 @@ test('createMailMerge stores one document with navigable recipient versions', as
   assert.equal(db.collections.document_versions.rows.size, 2);
   assert.equal(created.recipientCount, 2);
   assert.equal(created.document.document_type, 'mail_merge');
+  assert.equal(created.document.mail_merge.bundle_id, 'summer-mail-merge:v1');
   assert.equal(created.document.mail_merge.recipient_count, 2);
   assert.deepEqual(created.document.tags, ['kampagne', 'brief']);
   assert.match(created.document.index_text, /Kosten senken Beschaffung/);
@@ -220,6 +221,49 @@ test('createMailMerge rejects duplicate recipients and empty variant sets', asyn
     }),
     (error) => error.code === 'DOCUMENTS_INVALID_INPUT',
   );
+});
+
+test('createMailMerge reuses completed recipient payloads for the same idempotency key', async () => {
+  const db = createMemoryDb();
+  const documents = createDocumentsFacade({ db });
+  const input = {
+    filename: 'stable-mail-merge.docx',
+    mimeType: DOCX_MIME_TYPE,
+    idempotencyKey: 'stable-mail-merge:v1',
+    variants: [
+      {
+        recipientId: 'person-1',
+        recipientLabel: 'Ada Lovelace',
+        filename: 'ada.docx',
+        bytes: new Uint8Array([0x50, 0x4b, 1]),
+      },
+      {
+        recipientId: 'person-2',
+        recipientLabel: 'Grace Hopper',
+        filename: 'grace.docx',
+        bytes: new Uint8Array([0x50, 0x4b, 2]),
+      },
+    ],
+  };
+  const created = await documents.createMailMerge(input);
+  const retry = await documents.createMailMerge({
+    ...input,
+    variants: input.variants.map((variant, index) => ({
+      ...variant,
+      bytes: new Uint8Array([0x50, 0x4b, 90 + index]),
+    })),
+  });
+  const loaded = await documents.loadVersion({
+    documentId: retry.documentId,
+    versionId: retry.versions[0].versionId,
+    expectedSha256: created.versions[0].sha256,
+  });
+
+  assert.equal(retry.idempotent, true);
+  assert.equal(retry.versions[0].sha256, created.versions[0].sha256);
+  assert.deepEqual(loaded.bytes, input.variants[0].bytes);
+  assert.equal(db.collections.documents.rows.size, 1);
+  assert.equal(db.collections.document_versions.rows.size, 2);
 });
 
 test('createMailMerge repairs a missing recipient version without duplicating the parent', async () => {
@@ -286,6 +330,43 @@ test('createMailMerge resumes partial recipient data when the parent was not sto
   assert.equal(resumed.document.provenance.app_id, 'crm');
   assert.equal(db.collections.documents.rows.size, 1);
   assert.equal(db.collections.document_versions.rows.size, 2);
+});
+
+test('createMailMerge repairs stale recipient hashes when partial blobs are missing', async () => {
+  const db = createMemoryDb();
+  const documents = createDocumentsFacade({ db, now: () => 123456 });
+  const input = {
+    filename: 'repair-partial-mail-merge.docx',
+    mimeType: DOCX_MIME_TYPE,
+    idempotencyKey: 'repair-partial-mail-merge:v1',
+    variants: [
+      {
+        recipientId: 'person-1',
+        recipientLabel: 'Ada Lovelace',
+        filename: 'ada.docx',
+        bytes: new Uint8Array([0x50, 0x4b, 1]),
+      },
+    ],
+  };
+  const created = await documents.createMailMerge(input);
+  db.collections.documents.rows.delete(created.documentId);
+  const versionId = created.versions[0].versionId;
+  const version = db.collections.document_versions.rows.get(versionId);
+  db.collections.document_versions.rows.set(versionId, {
+    ...version,
+    source_sha256: '0'.repeat(64),
+  });
+  for (const [chunkId, chunk] of db.collections.document_blob_chunks.rows) {
+    if (chunk.version_id === versionId) db.collections.document_blob_chunks.rows.delete(chunkId);
+  }
+
+  const repaired = await documents.createMailMerge(input);
+  const repairedVersion = db.collections.document_versions.rows.get(versionId);
+
+  assert.equal(repaired.idempotent, false);
+  assert.equal(repairedVersion.source_sha256, created.versions[0].sha256);
+  assert.equal(db.collections.document_blob_chunks.rows.size, 1);
+  assert.equal(db.collections.documents.rows.size, 1);
 });
 
 test('createDocx answers repeated idempotencyKey calls without duplicates', async () => {
@@ -361,6 +442,10 @@ test('idempotent retry requeues stored chunks before flushing replication', asyn
   assert.deepEqual(calls, [
     `requeue:${first.version.blob_id}_0`,
     'push',
+    'push',
+    'push',
+    'release',
+    'release',
     'release',
   ]);
 });
@@ -458,12 +543,12 @@ test('createDocx rejects a conflicting partial idempotent dataset', async () => 
   );
 });
 
-test('createDocx leases and flushes demand-only blob replication', async () => {
+test('createDocx leases and flushes document metadata, versions, and blobs', async () => {
   const calls = [];
   const replication = {
     async awaitInitialReplication() { calls.push('initial'); },
     async awaitInSync() { calls.push('in-sync'); },
-    async pushToRemotePeers() { calls.push('push'); },
+    async pushDocumentsToRemotePeers(documents) { calls.push(`push-direct:${documents.length}`); },
   };
   const documents = createDocumentsFacade({
     db: createMemoryDb(),
@@ -471,6 +556,7 @@ test('createDocx leases and flushes demand-only blob replication', async () => {
       async leaseCollection(collection, reason) {
         calls.push(`lease:${collection}:${reason}`);
         return {
+          collection,
           bridge: { state: replication },
           async release() { calls.push('release'); },
         };
@@ -481,9 +567,17 @@ test('createDocx leases and flushes demand-only blob replication', async () => {
   await documents.createDocx(createInput());
 
   assert.deepEqual(calls, [
-    'lease:document_blob_chunks:documents-create-docx',
+    'lease:documents:documents-write:documents',
     'in-sync',
-    'push',
+    'lease:document_versions:documents-write:document_versions',
+    'in-sync',
+    'lease:document_blob_chunks:documents-write:document_blob_chunks',
+    'in-sync',
+    'push-direct:1',
+    'push-direct:1',
+    'push-direct:1',
+    'release',
+    'release',
     'release',
   ]);
 });
@@ -513,7 +607,62 @@ test('createDocx retries explicitly retryable native peer lease failures', async
   const created = await documents.createDocx(createInput());
 
   assert.equal(created.idempotent, false);
-  assert.deepEqual(calls, ['lease:1', 'lease:2', 'lease:3', 'push', 'release']);
+  assert.deepEqual(calls, [
+    'lease:1',
+    'lease:2',
+    'lease:3',
+    'lease:4',
+    'lease:5',
+    'push',
+    'push',
+    'push',
+    'release',
+    'release',
+    'release',
+  ]);
+});
+
+test('createDocx replaces a follower lease with a direct bridge before publishing dependencies', async () => {
+  const calls = [];
+  const replication = {
+    async pushDocumentsToRemotePeers(documents) {
+      calls.push(`push:${documents.length}`);
+    },
+  };
+  const documents = createDocumentsFacade({
+    db: createMemoryDb(),
+    sync: {
+      async leaseCollection(collection) {
+        calls.push(`lease:${collection}`);
+        return {
+          collection,
+          bridge: { mode: 'follower', state: null },
+          async release() { calls.push(`release:${collection}`); },
+        };
+      },
+      async startCollection(collection, options) {
+        calls.push(`direct:${collection}:${options?.forceDirect === true}`);
+        return { mode: 'leader', state: replication };
+      },
+    },
+  });
+
+  await documents.createDocx(createInput());
+
+  assert.deepEqual(calls, [
+    'lease:documents',
+    'direct:documents:true',
+    'lease:document_versions',
+    'direct:document_versions:true',
+    'lease:document_blob_chunks',
+    'direct:document_blob_chunks:true',
+    'push:1',
+    'push:1',
+    'push:1',
+    'release:document_blob_chunks',
+    'release:document_versions',
+    'release:documents',
+  ]);
 });
 
 test('createDocx does not retry non-retryable lease failures', async () => {
@@ -555,7 +704,17 @@ test('createDocx waits for an open native peer before writing chunks', async () 
 
   await documents.createDocx(createInput());
 
-  assert.deepEqual(calls, ['lease', 'push', 'release']);
+  assert.deepEqual(calls, [
+    'lease',
+    'lease',
+    'lease',
+    'push',
+    'push',
+    'push',
+    'release',
+    'release',
+    'release',
+  ]);
 });
 
 test('createDocx rejects row-level bulk chunk errors before metadata is written', async () => {
@@ -623,6 +782,33 @@ test('open supports a resolved generic Documents workspace id', async () => {
   assert.deepEqual(calls, [[
     'documents-workspace',
     { args: { record: 'doc_19' } },
+  ]]);
+});
+
+test('creator app provenance and Documents workspace launch target remain independent', async () => {
+  const calls = [];
+  const db = createMemoryDb();
+  const documents = createDocumentsFacade({
+    db,
+    creatorAppId: 'customer-workspace',
+    workspaceAppId: 'documents-workspace',
+    openApp: async (...args) => {
+      calls.push(args);
+      return 'window-documents-workspace';
+    },
+  });
+
+  const created = await documents.createDocx(createInput({
+    idempotencyKey: 'customer-workspace:document:v1',
+    provenance: {},
+  }));
+  const stored = db.collections.documents.rows.get(created.documentId);
+  await documents.open({ documentId: created.documentId });
+
+  assert.equal(stored.provenance.app_id, 'customer-workspace');
+  assert.deepEqual(calls, [[
+    'documents-workspace',
+    { args: { record: created.documentId } },
   ]]);
 });
 

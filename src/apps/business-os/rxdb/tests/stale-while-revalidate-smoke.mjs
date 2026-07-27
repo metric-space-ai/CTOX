@@ -145,6 +145,52 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
   assert((await cold).length === 1, 'cold fetch returns the fetched doc');
 }
 
+// --- 3b. concurrent strict read never inherits stale immediate result -------
+{
+  const sidecar = createSidecarWithMemoryBackend({ databaseName: 'swr-3b' });
+  const storage = makeStorageCollection();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let fetches = 0;
+  const loader = createQueryDemandLoader({
+    storageCollection: storage,
+    sidecar,
+    collectionName: 'business_records',
+    schemaVersion: 1,
+    requestQueryFetch: async () => {
+      fetches += 1;
+      if (fetches === 1) {
+        return { documents: [{ id: 'a', status: 'open' }], authoritativeRevision: 'r1' };
+      }
+      await gate;
+      return {
+        documents: [
+          { id: 'a', status: 'open' },
+          { id: 'b', status: 'open' },
+        ],
+        authoritativeRevision: 'r2',
+      };
+    },
+  });
+  await loader.resolveQuery({ selector: { status: 'open' } });
+  await loader.invalidateDocumentChange(['a']);
+
+  const stale = loader.resolveQuery({ selector: { status: 'open' } });
+  let strictResolved = false;
+  const strict = loader
+    .resolveQuery({ selector: { status: 'open' }, requireRevision: 'r2' })
+    .then((docs) => {
+      strictResolved = true;
+      return docs;
+    });
+  assert((await stale).length === 1, 'concurrent non-strict read still serves stale data');
+  await settle();
+  assert(!strictResolved, 'concurrent strict read must await the shared remote fetch');
+  release();
+  assert((await strict).length === 2, 'concurrent strict read returns the refreshed window');
+  assert(fetches === 2, `strict and stale reads share one refresh (got ${fetches} fetches)`);
+}
+
 // --- 4. reconnect-abort never tombstones ever-complete window members -------
 {
   const sidecar = createSidecarWithMemoryBackend({ databaseName: 'swr-4' });

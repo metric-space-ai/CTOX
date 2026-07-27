@@ -271,10 +271,10 @@ var checkLocalStorage=function(){try{localStorage.setItem("test",1);localStorage
         var requireTimeoutID = setTimeout(function(){
             window.alert(window.requireTimeourError());
             window.location.reload();
-        }, 30000);
+        }, 120000);
 
         var require = {
-            waitSeconds: 30,
+            waitSeconds: 120,
             callback: function(){
                 clearTimeout(requireTimeoutID);
             }

@@ -30,6 +30,65 @@ const fakePeer = {
 };
 transport.attach(fakePeer);
 
+// A DataChannel can be open before the symmetric capability handshake has
+// authorized it. Demand loading must wait for the explicitly negotiated peer
+// instead of falling back to any open connection.
+let negotiatedPeerId = '';
+const preHandshakeRequests = [];
+const preHandshakeTransport = createDemandLoadingTransport({
+  getPeerId: () => negotiatedPeerId,
+});
+preHandshakeTransport.attach({
+  connections: new Map([
+    ['native-reconnect', { channel: { readyState: 'open' }, peer: { connectionState: 'connected' } }],
+  ]),
+  async request(peerId, method, params) {
+    preHandshakeRequests.push({ peerId, method, params });
+    return { ack: true };
+  },
+});
+const preHandshakeFile = preHandshakeTransport.requestFileFetch({
+  requestId: 'file-before-auth',
+  collectionName: 'document_blob_chunks',
+  fileId: 'document-before-auth',
+});
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert(preHandshakeRequests.length === 0, 'an open but unauthorized peer must not receive file.fetch');
+negotiatedPeerId = 'native-reconnect';
+await waitUntil(() => preHandshakeRequests.length === 1);
+await preHandshakeTransport.requestHandlers['rxdb.file.chunk']({
+  params: [{
+    requestId: 'file-before-auth',
+    sequence: 0,
+    bytesBase64: 'AAAA',
+    complete: true,
+  }],
+});
+await preHandshakeFile;
+
+// A service restart can reuse the same native peer id. Clearing the negotiated
+// peer must still gate the replacement connection until its fresh handshake
+// completes.
+negotiatedPeerId = '';
+const reconnectFile = preHandshakeTransport.requestFileFetch({
+  requestId: 'file-after-restart-before-auth',
+  collectionName: 'document_blob_chunks',
+  fileId: 'document-after-restart',
+});
+await new Promise((resolve) => setTimeout(resolve, 150));
+assert(preHandshakeRequests.length === 1, 'reconnect must not reuse prior authorization by peer id');
+negotiatedPeerId = 'native-reconnect';
+await waitUntil(() => preHandshakeRequests.length === 2);
+await preHandshakeTransport.requestHandlers['rxdb.file.chunk']({
+  params: [{
+    requestId: 'file-after-restart-before-auth',
+    sequence: 0,
+    bytesBase64: 'BBBB',
+    complete: true,
+  }],
+});
+await reconnectFile;
+
 // Fire a query-fetch. The promise should pend until we route a complete chunk.
 const envelope = {
   requestId: 'q-1',
@@ -55,6 +114,14 @@ assert(diagnostics.maxPendingQueryCollectors >= 1, 'diagnostics record query col
 const compressedDocs = Array.from({ length: 30 }, (_, i) => ({ id: `c-${i}`, n: i, status: 'open' }));
 const compressedPayload = Buffer.from(JSON.stringify(compressedDocs), 'utf8');
 const compressed = deflateRawSync(compressedPayload);
+const supportsDeflateRawStream = (() => {
+  try {
+    return typeof globalThis.DecompressionStream === 'function'
+      && Boolean(new globalThis.DecompressionStream('deflate-raw'));
+  } catch {
+    return false;
+  }
+})();
 
 await transport.requestHandlers['rxdb.query.chunk']({
   params: [{
@@ -67,15 +134,23 @@ await transport.requestHandlers['rxdb.query.chunk']({
 });
 
 await transport.requestHandlers['rxdb.query.chunk']({
-  params: [{
-    requestId: 'q-1',
-    sequence: 1,
-    documents: [],
-    complete: true,
-    authoritativeRevision: 'rev-1',
-    compressed: 'deflate',
-    compressedBase64: compressed.toString('base64'),
-  }],
+  params: [supportsDeflateRawStream
+    ? {
+        requestId: 'q-1',
+        sequence: 1,
+        documents: [],
+        complete: true,
+        authoritativeRevision: 'rev-1',
+        compressed: 'deflate',
+        compressedBase64: compressed.toString('base64'),
+      }
+    : {
+        requestId: 'q-1',
+        sequence: 1,
+        documents: compressedDocs,
+        complete: true,
+        authoritativeRevision: 'rev-1',
+      }],
 });
 
 const result = await promise;
@@ -436,3 +511,12 @@ console.log('ctox-rxdb-js demand-loading transport smoke OK', {
 });
 
 function assert(c, m) { if (!c) throw new Error(m); }
+
+async function waitUntil(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('timed out waiting for test condition');
+}

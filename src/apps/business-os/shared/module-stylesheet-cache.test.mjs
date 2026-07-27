@@ -10,6 +10,8 @@ assert.match(html, new RegExp(`app\\.js\\?v=${build}`));
 
 assert.match(app, /function ensureModuleStylesheet\(moduleLike\)/);
 assert.match(app, /const revision = moduleRevisionQuery\(moduleLike\)/);
+assert.match(app, /const version = String\(mod\?\.version \|\| ''\)\.trim\(\)/);
+assert.match(app, /\[releaseRevision, version\]\.filter\(Boolean\)/);
 assert.match(app, /index\.css\?v=\$\{APP_BUILD\}\$\{revision\}/);
 assert.match(app, /existing\.forEach\(\(link\) => link\.remove\(\)\)/);
 assert.doesNotMatch(app, /ensureModuleStylesheet\(base\)/);

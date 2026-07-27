@@ -2,6 +2,7 @@ export const DOCX_MIME_TYPE = 'application/vnd.openxmlformats-officedocument.wor
 export const DOCUMENT_BLOB_CHUNK_BASE64_SIZE = 256000;
 const DOCUMENT_SYNC_LEASE_ATTEMPTS = 4;
 const DOCUMENT_SYNC_LEASE_RETRY_DELAY_MS = 1_000;
+const DOCUMENT_SYNC_PAYLOAD = Symbol('ctox.documents.sync-payload');
 
 const DOCUMENT_COLLECTION_NAMES = [
   'documents',
@@ -14,6 +15,8 @@ export function createDocumentsFacade({
   openApp,
   sync,
   appId = 'documents',
+  creatorAppId = appId,
+  workspaceAppId = appId,
   crypto: cryptoProvider = globalThis.crypto,
   now = () => Date.now(),
 } = {}) {
@@ -29,7 +32,7 @@ export function createDocumentsFacade({
       const normalized = await normalizeCreateDocxInput(
         input,
         cryptoProvider,
-        resolveFacadeAppId(appId),
+        resolveFacadeAppId(creatorAppId),
       );
       const fingerprint = canonicalJson({
         filename: normalized.filename,
@@ -53,8 +56,9 @@ export function createDocumentsFacade({
         return pending.promise;
       }
 
-      const promise = withChunkSyncLease(sync, () => createStoredDocx({
-        collections: requireDocumentCollections(db, { write: true }),
+      const collections = requireDocumentCollections(db, { write: true });
+      const promise = withDocumentSyncLeases(sync, collections, () => createStoredDocx({
+        collections,
         input: normalized,
         cryptoProvider,
         now,
@@ -73,7 +77,7 @@ export function createDocumentsFacade({
       const normalized = await normalizeCreateMailMergeInput(
         input,
         cryptoProvider,
-        resolveFacadeAppId(appId),
+        resolveFacadeAppId(creatorAppId),
       );
       const fingerprint = canonicalJson({
         filename: normalized.filename,
@@ -107,8 +111,9 @@ export function createDocumentsFacade({
         return pending.promise;
       }
 
-      const promise = withChunkSyncLease(sync, () => createStoredMailMerge({
-        collections: requireDocumentCollections(db, { write: true }),
+      const collections = requireDocumentCollections(db, { write: true });
+      const promise = withDocumentSyncLeases(sync, collections, () => createStoredMailMerge({
+        collections,
         input: normalized,
         cryptoProvider,
         now,
@@ -134,7 +139,7 @@ export function createDocumentsFacade({
           'The Business OS app launcher is unavailable.',
         );
       }
-      const resolvedAppId = typeof appId === 'function' ? appId() : appId;
+      const resolvedAppId = typeof workspaceAppId === 'function' ? workspaceAppId() : workspaceAppId;
       const launched = await openApp(requireId(resolvedAppId, 'appId'), {
         args: {
           record,
@@ -227,6 +232,7 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
     provenance: cloneJson(input.provenance),
     idempotency_key: input.idempotencyKey,
     mail_merge: {
+      bundle_id: input.idempotencyKey,
       recipient_count: versions.length,
       requested_count: versions.length + input.failures.length,
       failed_count: input.failures.length,
@@ -245,7 +251,7 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
 
   const existingDocumentDoc = await findOne(collections.documents, documentId);
   if (existingDocumentDoc) {
-    const existingDocument = documentJson(existingDocumentDoc);
+    let existingDocument = documentJson(existingDocumentDoc);
     assertEquivalentFields(existingDocument, document, [
       'id',
       'current_version_id',
@@ -264,101 +270,56 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
     const repaired = { chunks: [], versions: [], document: false };
     try {
       for (const expected of versions) {
-        let versionDoc = await findOne(collections.document_versions, expected.version.id);
-        if (versionDoc) {
-          const version = documentJson(versionDoc);
-          assertIdempotentVersion(version, expected.version);
-          assertEquivalentFields(version, expected.version, ['mail_merge_recipient']);
-        }
-        let chunks = (await findChunks(
-          collections.document_blob_chunks,
-          expected.version.blob_id,
-        )).map(documentJson);
-        if (chunks.length) {
-          const sorted = assertChunkSet(chunks, {
-            blobId: expected.version.blob_id,
-            documentId,
-            versionId: expected.version.id,
-            expectedTotal: expected.chunks.length,
-          });
-          if (canonicalJson(sorted.map((chunk) => chunk.data))
-              !== canonicalJson(expected.chunks.map((chunk) => chunk.data))) {
-            throw documentsError(
-              'DOCUMENTS_IDEMPOTENCY_CONFLICT',
-              'Stored mail merge chunks differ from the payload for this idempotencyKey.',
-            );
-          }
-          chunks = sorted;
-        } else {
-          await insertChunks(collections.document_blob_chunks, expected.chunks);
-          repaired.chunks.push(...expected.chunks);
-          chunks = expected.chunks;
-        }
-        if (!versionDoc) {
-          versionDoc = await collections.document_versions.insert(expected.version);
-          repaired.versions.push(expected.version);
-        }
-        const version = documentJson(versionDoc);
-        await verifyStoredBytes(
-          { document: existingDocument, version, chunks },
-          expected.version.source_sha256,
+        const stored = await resolveStoredMailMergeRecipient({
+          collections,
+          document: existingDocument,
+          expected,
           cryptoProvider,
-        );
-        await requeueStoredChunks(collections.document_blob_chunks, chunks);
-        storedVersions.push(version);
+          tracker: repaired,
+        });
+        storedVersions.push(stored.version);
+      }
+      const currentVersion = storedVersions.find(
+        (version) => version.id === existingDocument.current_version_id,
+      ) || storedVersions[0];
+      if (currentVersion && existingDocument.source_sha256 !== currentVersion.source_sha256) {
+        await patchStoredDocument(collections.documents, existingDocumentDoc, {
+          source_sha256: currentVersion.source_sha256,
+          updated_at_ms: createdAtMs,
+        });
+        existingDocument = {
+          ...existingDocument,
+          source_sha256: currentVersion.source_sha256,
+          updated_at_ms: createdAtMs,
+        };
       }
     } catch (error) {
       await cleanupFailedMailMerge(collections, document, repaired).catch(() => {});
       throw error;
     }
-    return mailMergeCreationResult(existingDocument, storedVersions, true);
+    return attachDocumentSyncPayload(
+      mailMergeCreationResult(existingDocument, storedVersions, true),
+      existingDocument,
+      storedVersions,
+      versions.flatMap((entry) => entry.chunks),
+    );
   }
 
   const created = { chunks: [], versions: [], document: false };
+  const storedVersions = [];
   try {
     for (const expected of versions) {
-      let versionDoc = await findOne(collections.document_versions, expected.version.id);
-      if (versionDoc) {
-        const storedVersion = documentJson(versionDoc);
-        assertIdempotentVersion(storedVersion, expected.version);
-        assertEquivalentFields(storedVersion, expected.version, ['mail_merge_recipient']);
-      }
-      let existingChunks = (await findChunks(
-        collections.document_blob_chunks,
-        expected.version.blob_id,
-      )).map(documentJson);
-      if (existingChunks.length) {
-        existingChunks = assertChunkSet(existingChunks, {
-          blobId: expected.version.blob_id,
-          documentId,
-          versionId: expected.version.id,
-          expectedTotal: expected.chunks.length,
-        });
-        if (canonicalJson(existingChunks.map((chunk) => chunk.data))
-            !== canonicalJson(expected.chunks.map((chunk) => chunk.data))) {
-          throw documentsError(
-            'DOCUMENTS_IDEMPOTENCY_CONFLICT',
-            'Stored mail merge chunks differ from the payload for this idempotencyKey.',
-          );
-        }
-      } else {
-        await insertChunks(collections.document_blob_chunks, expected.chunks);
-        created.chunks.push(...expected.chunks);
-      }
-      if (!versionDoc) {
-        versionDoc = await collections.document_versions.insert(expected.version);
-        created.versions.push(expected.version);
-      }
-      await verifyStoredBytes(
-        {
-          document,
-          version: documentJson(versionDoc),
-          chunks: existingChunks.length ? existingChunks : expected.chunks,
-        },
-        expected.version.source_sha256,
+      const stored = await resolveStoredMailMergeRecipient({
+        collections,
+        document,
+        expected,
         cryptoProvider,
-      );
+        tracker: created,
+      });
+      storedVersions.push(stored.version);
     }
+    document.current_version_id = storedVersions[0].id;
+    document.source_sha256 = storedVersions[0].source_sha256;
     await collections.documents.insert(document);
     created.document = true;
   } catch (error) {
@@ -366,18 +327,79 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
     throw error;
   }
 
-  for (const expected of versions) {
-    await verifyStoredBytes(
-      {
-        document,
-        version: expected.version,
-        chunks: expected.chunks,
-      },
-      expected.version.source_sha256,
-      cryptoProvider,
-    );
+  return attachDocumentSyncPayload(
+    mailMergeCreationResult(document, storedVersions, false),
+    document,
+    storedVersions,
+    versions.flatMap((entry) => entry.chunks),
+  );
+}
+
+async function resolveStoredMailMergeRecipient({
+  collections,
+  document,
+  expected,
+  cryptoProvider,
+  tracker,
+}) {
+  let versionDoc = await findOne(collections.document_versions, expected.version.id);
+  let version = versionDoc ? documentJson(versionDoc) : null;
+  if (version) {
+    assertIdempotentVersion(version, expected.version, { allowSourceHashMismatch: true });
+    assertEquivalentFields(version, expected.version, ['mail_merge_recipient']);
   }
-  return mailMergeCreationResult(document, versions.map(({ version }) => version), false);
+
+  let chunks = (await findChunks(
+    collections.document_blob_chunks,
+    expected.version.blob_id,
+  )).map(documentJson);
+  if (chunks.length) {
+    chunks = assertChunkSet(chunks, {
+      blobId: expected.version.blob_id,
+      documentId: document.id,
+      versionId: expected.version.id,
+      expectedTotal: version ? undefined : expected.chunks.length,
+    });
+    if (!version && canonicalJson(chunks.map((chunk) => chunk.data))
+        !== canonicalJson(expected.chunks.map((chunk) => chunk.data))) {
+      throw documentsError(
+        'DOCUMENTS_IDEMPOTENCY_CONFLICT',
+        'Stored mail merge chunks differ from the payload for this idempotencyKey.',
+      );
+    }
+  } else {
+    await insertChunks(collections.document_blob_chunks, expected.chunks);
+    tracker.chunks.push(...expected.chunks);
+    chunks = expected.chunks;
+    if (version && version.source_sha256 !== expected.version.source_sha256) {
+      await patchStoredDocument(collections.document_versions, versionDoc, {
+        source_sha256: expected.version.source_sha256,
+        updated_at_ms: expected.version.updated_at_ms,
+      });
+      versionDoc = await findOne(collections.document_versions, expected.version.id);
+      version = documentJson(versionDoc);
+    }
+  }
+
+  if (!versionDoc) {
+    versionDoc = await collections.document_versions.insert(expected.version);
+    tracker.versions.push(expected.version);
+    version = documentJson(versionDoc);
+  }
+
+  const verificationDocument = {
+    ...document,
+    ...(document.current_version_id === version.id
+      ? { source_sha256: version.source_sha256 }
+      : {}),
+  };
+  await verifyStoredBytes(
+    { document: verificationDocument, version, chunks },
+    version.source_sha256,
+    cryptoProvider,
+  );
+  await requeueStoredChunks(collections.document_blob_chunks, chunks);
+  return { version, chunks };
 }
 
 async function createStoredDocx({ collections, input, cryptoProvider, now }) {
@@ -459,7 +481,12 @@ async function createStoredDocx({ collections, input, cryptoProvider, now }) {
       cryptoProvider,
     );
     await requeueStoredChunks(collections.document_blob_chunks, existing.chunks);
-    return creationResult(existing, true);
+    return attachDocumentSyncPayload(
+      creationResult(existing, true),
+      existing.document,
+      existing.version ? [existing.version] : [],
+      existing.chunks,
+    );
   }
 
   const created = { document: false, version: false, chunks: false };
@@ -493,7 +520,12 @@ async function createStoredDocx({ collections, input, cryptoProvider, now }) {
     );
   }
   await verifyStoredBytes(stored, input.sha256, cryptoProvider);
-  return creationResult(stored, false);
+  return attachDocumentSyncPayload(
+    creationResult(stored, false),
+    stored.document,
+    stored.version ? [stored.version] : [],
+    stored.chunks,
+  );
 }
 
 async function inspectIdempotentState(
@@ -982,24 +1014,55 @@ async function requeueStoredChunks(collection, chunks) {
   }
 }
 
-async function withChunkSyncLease(sync, operation) {
+async function withDocumentSyncLeases(sync, collections, operation) {
   if (typeof sync?.leaseCollection !== 'function') return operation();
-  const lease = await acquireChunkSyncLease(sync);
+  const leases = [];
   try {
-    await waitForChunkSync(lease);
+    for (const collection of DOCUMENT_COLLECTION_NAMES) {
+      const lease = await acquireDocumentSyncLease(sync, collection);
+      leases.push(lease);
+      await waitForDocumentSync(lease);
+    }
     const result = await operation();
-    await flushChunkSync(lease);
+    const documentsByCollection = await collectDocumentSyncPayload(collections, result);
+    // Publish payload dependencies before the parent metadata becomes visible.
+    for (const lease of [...leases].reverse()) {
+      await flushDocumentSync(
+        lease,
+        documentsByCollection.get(lease?.collection) || [],
+      );
+    }
     return result;
   } finally {
-    await lease?.release?.().catch(() => null);
+    await Promise.allSettled(leases.reverse().map((lease) => lease?.release?.()));
   }
 }
 
-async function acquireChunkSyncLease(sync) {
+async function acquireDocumentSyncLease(sync, collection) {
   let lastError = null;
   for (let attempt = 1; attempt <= DOCUMENT_SYNC_LEASE_ATTEMPTS; attempt += 1) {
     try {
-      return await sync.leaseCollection('document_blob_chunks', 'documents-create-docx');
+      const lease = await sync.leaseCollection(collection, `documents-write:${collection}`);
+      const bridge = lease?.bridge || null;
+      if (bridge?.mode === 'follower' || bridge?.mode === 'pending' || !bridge?.state) {
+        try {
+          const directBridge = await sync.startCollection?.(collection, {
+            pin: false,
+            forceDirect: true,
+          });
+          if (!directBridge?.state) {
+            throw documentsError(
+              'DOCUMENTS_SYNC_UNAVAILABLE',
+              `Document storage did not acquire a direct native peer for ${collection}.`,
+            );
+          }
+          lease.bridge = directBridge;
+        } catch (error) {
+          await lease?.release?.().catch(() => null);
+          throw error;
+        }
+      }
+      return lease;
     } catch (error) {
       lastError = error;
       if (error?.retryable !== true || attempt === DOCUMENT_SYNC_LEASE_ATTEMPTS) throw error;
@@ -1009,7 +1072,7 @@ async function acquireChunkSyncLease(sync) {
   throw lastError;
 }
 
-async function waitForChunkSync(lease) {
+async function waitForDocumentSync(lease) {
   const bridge = lease?.bridge || lease || null;
   const replication = bridge?.state || lease?.state || null;
   if (!replication) return;
@@ -1031,7 +1094,43 @@ async function waitForChunkSync(lease) {
   );
 }
 
-async function flushChunkSync(lease) {
+async function collectDocumentSyncPayload(collections, result) {
+  if (result?.[DOCUMENT_SYNC_PAYLOAD] instanceof Map) {
+    return result[DOCUMENT_SYNC_PAYLOAD];
+  }
+  const documentDoc = await findOne(collections.documents, result.documentId);
+  const document = documentDoc ? documentJson(documentDoc) : null;
+  const versionIds = Array.isArray(result.versions)
+    ? result.versions.map((version) => version.versionId)
+    : [result.versionId];
+  const versions = (await Promise.all(
+    versionIds.map((versionId) => findOne(collections.document_versions, versionId)),
+  )).map(documentJson).filter(Boolean);
+  const chunks = (
+    await Promise.all(
+      versions.map((version) => findChunks(collections.document_blob_chunks, version.blob_id)),
+    )
+  ).flat().map(documentJson).filter(Boolean);
+  return new Map([
+    ['documents', document ? [document] : []],
+    ['document_versions', versions],
+    ['document_blob_chunks', chunks],
+  ]);
+}
+
+function attachDocumentSyncPayload(result, document, versions, chunks) {
+  Object.defineProperty(result, DOCUMENT_SYNC_PAYLOAD, {
+    value: new Map([
+      ['documents', document ? [cloneJson(document)] : []],
+      ['document_versions', (versions || []).map(cloneJson)],
+      ['document_blob_chunks', (chunks || []).map(cloneJson)],
+    ]),
+    enumerable: false,
+  });
+  return result;
+}
+
+async function flushDocumentSync(lease, documents = []) {
   const bridge = lease?.bridge || lease || null;
   if (bridge?.mode === 'follower' && typeof bridge.flush === 'function') {
     await withDocumentsTimeout(
@@ -1045,8 +1144,11 @@ async function flushChunkSync(lease) {
   if (!replication) return;
   await withDocumentsTimeout(
     () => {
+      if (documents.length && typeof replication.pushDocumentsToRemotePeers === 'function') {
+        return replication.pushDocumentsToRemotePeers(documents);
+      }
       if (typeof replication.pushToRemotePeers === 'function') {
-        return replication.pushToRemotePeers();
+        return replication.pushToRemotePeers({ requireSuccess: true });
       }
       if (typeof replication.scheduleLocalWritePush === 'function') {
         return replication.scheduleLocalWritePush();

@@ -34,6 +34,7 @@ const ENTRY_CANDIDATES = [
 // Matches static import/export-from and dynamic import specifiers. Good
 // enough for transcoded output (sucrase normalizes exotic whitespace).
 const SPECIFIER_RE = /(\bimport\s*(?:[\w${}\s,*]*?\s*from\s*)?|\bexport\s+[\w${}\s,*]*?\s+from\s*|\bimport\s*\(\s*)(["'])([^"']+)\2/g;
+const ASSET_IMPORT_RE = /\bimport\s+([A-Za-z_$][\w$]*)\s+from\s+(["'])([^"']+\.(?:avif|gif|jpe?g|png|svg|webp|woff2?))\2\s*;?/gi;
 
 function normalizePath(path) {
   const parts = [];
@@ -119,9 +120,12 @@ export function transcodeFile({ transform }, name, source, fileNames) {
     : ext === ".ts" ? ["typescript"]
     : ext === ".jsx" ? ["jsx"]
     : [];
-  const code = transforms.length
+  let code = transforms.length
     ? transform(source, { transforms, jsxRuntime: "automatic", production: true }).code
     : source;
+  code = code.replace(ASSET_IMPORT_RE, (_match, binding, quote, spec) => (
+    `const ${binding} = new URL(${quote}${spec}${quote}, import.meta.url).href;`
+  ));
 
   const cssImports = [];
   const bareImports = new Set();
@@ -177,7 +181,10 @@ export function transcodeApp(sucrase, files, options = {}) {
   for (const [name, content] of Object.entries(files)) {
     if (name === "package.json" || name.endsWith(".d.ts") || isBuildConfigFile(name)) continue;
     if (name.endsWith(".css")) { out[name] = content; continue; }
-    if (!isSourceFile(name)) { out[name] = content; continue; }
+    if (!isSourceFile(name)) {
+      out[name.startsWith("public/") ? name.slice("public/".length) : name] = content;
+      continue;
+    }
     const result = transcodeFile(sucrase, name, content, fileNames);
     out[outputName(name)] = result.code;
     allCss.push(...result.cssImports);
@@ -204,8 +211,9 @@ export function transcodeApp(sucrase, files, options = {}) {
   };
 }
 
-// Business OS scaffold around the transcoded app: an HTML-entry module
-// (installed apps run from their own document; the shell frames it).
+// Business OS scaffold around the transcoded app. The shell launches every
+// module through index.js, so imported browser apps get a tiny real module
+// adapter that mounts their generated HTML document in the CTOX window.
 export function scaffoldModule({ id, title, description = "", version = "0.1.0" }, transcoded) {
   const importMapJson = JSON.stringify(transcoded.importMap, null, 2);
   const cssLinks = transcoded.cssFiles
@@ -228,6 +236,17 @@ ${cssLinks}
   </body>
 </html>
 `;
+  const indexJs = `export function mount(ctx) {
+  const host = ctx?.host || document.body;
+  const frame = document.createElement('iframe');
+  frame.title = ${JSON.stringify(title)};
+  frame.src = new URL('./index.html', import.meta.url).href;
+  frame.style.cssText = 'display:block;width:100%;height:100%;border:0;background:#fff';
+  frame.setAttribute('sandbox', 'allow-scripts allow-same-origin');
+  host.replaceChildren(frame);
+  return () => frame.remove();
+}
+`;
   const moduleJson = {
     id,
     title,
@@ -235,18 +254,41 @@ ${cssLinks}
     entry: `local-modules/${id}/index.html`,
     icon: "icon.svg",
     install_scope: "local",
+    collections: [],
     version,
     category: "Imported",
     developer: "Imported via CTOX App Importer",
+    launch_kind: "desktop-app",
+    layout: {
+      shell: "windowed",
+      default_width: 960,
+      default_height: 640,
+      min_width: 640,
+      min_height: 480,
+    },
+    presentation: {
+      default_mode: "window",
+      supported_modes: ["window", "maximized", "focus"],
+      initial_size: { width: 960, height: 640 },
+      minimum_size: { width: 640, height: 480 },
+      multi_instance: false,
+      auto_restore: false,
+    },
     provenance: {
       imported_at: new Date().toISOString(),
       transcoder: "sucrase",
       note: "Transcoded from a coding-agent app; original source kept under source/.",
     },
   };
+  const appFiles = { ...transcoded.files };
+  // A Vite project's source index.html points at the original TS/TSX entry
+  // and must never overwrite the runnable document generated above.
+  delete appFiles["index.html"];
   return {
     "module.json": `${JSON.stringify(moduleJson, null, 2)}\n`,
+    "index.js": indexJs,
+    "schema.js": "export const collections = {};\n",
     "index.html": indexHtml,
-    ...transcoded.files,
+    ...appFiles,
   };
 }

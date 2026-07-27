@@ -19,6 +19,7 @@ const {
   schemaIndexQueryPlanFor,
   selectBestIndex,
   shouldUsePushableReplicationIndex,
+  storedRecordForWrite,
 } = ctoxIndexedDbStorageTestInternals;
 const { normalizeDoc } = ctoxRxdbTestInternals;
 
@@ -54,6 +55,31 @@ assert(
   'compound schema-index entry was not materialized for IndexedDB multiEntry lookup',
 );
 assert(encodeIndexValue(false).join('|') === 'b|0', 'boolean index encoding mismatch');
+
+const demandedRecord = storedRecordForWrite({
+  collection: 'messages',
+  id: 'message-demanded',
+  doc: {
+    id: 'message-demanded',
+    message: { key: 'message-demanded' },
+    thread_key: 'thread-demanded',
+    external_created_at: '2026-07-22T00:00:00.000Z',
+    updated_at_ms: 43,
+  },
+  lwt: 43,
+  indexes,
+  indexSignature: 'demanded-test',
+  replicationOrigin: { role: 'ctox_instance' },
+});
+assert(demandedRecord.doc._deleted === false, 'demand-loaded documents must normalize a missing _deleted field');
+assert(
+  demandedRecord.indexValues['idx_0__deleted_thread_key_external_created_at_message.key'][0] === false,
+  'demand-loaded index values must use the normalized _deleted=false value',
+);
+assert(
+  demandedRecord.schemaIndexEntries.length === indexes.length,
+  'demand-loaded documents without an input _deleted field must remain visible through schema indexes',
+);
 
 const selected = selectBestIndex(indexes, ['thread_key'], ['external_created_at']);
 assert(selected?.name === 'idx_0__deleted_thread_key_external_created_at_message.key', 'best compound index was not selected');

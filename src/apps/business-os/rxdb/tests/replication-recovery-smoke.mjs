@@ -147,6 +147,74 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   await state.cancel();
 }
 
+// --- 1d. targeted writes wait for a late native collection handler ----------
+{
+  const state = await makeState('document_blob_chunks');
+  let requests = 0;
+  state.collection.schema.primaryPath = 'id';
+  state.openPeerIds = () => ['p1'];
+  state.shared.peer = {
+    async request() {
+      requests += 1;
+      if (requests < 3) {
+        return {
+          type: 'ctoxError',
+          scope: 'replication',
+          code: 'RC_WEBRTC_PEER',
+          message: 'no master handler registered for document_blob_chunks',
+        };
+      }
+      return [];
+    },
+  };
+
+  await state.pushDocumentsToRemotePeers([{
+    id: 'blob_1_0',
+    blob_id: 'blob_1',
+    idx: 0,
+    total: 1,
+  }]);
+
+  assert(requests === 3, `targeted push should retry the late handler twice, got ${requests}`);
+  await state.cancel();
+}
+
+// --- 1e. large confirmed writes stay below the framed-transfer ceiling ------
+{
+  const state = await makeState('document_blob_chunks');
+  const batches = [];
+  state.collection.schema.primaryPath = 'id';
+  state.openPeerIds = () => ['p1'];
+  state.shared.peer = {
+    async request(_peerId, method, [rows], _timeoutMs, collection) {
+      assert(method === 'masterWrite', `expected masterWrite, got ${method}`);
+      assert(collection === 'document_blob_chunks', `unexpected collection ${collection}`);
+      batches.push(rows);
+      return [];
+    },
+  };
+  const largeDocuments = Array.from({ length: 6 }, (_, index) => ({
+    id: `blob_large_${index}`,
+    blob_id: 'blob_large',
+    idx: index,
+    total: 6,
+    data: 'x'.repeat(700_000),
+  }));
+
+  await state.pushDocumentsToRemotePeers(largeDocuments);
+
+  assert(batches.length === 3, `large direct push should be split into 3 batches, got ${batches.length}`);
+  assert(
+    batches.every((batch) => batch.length === 2),
+    `large direct push should preserve two rows per bounded batch, got ${batches.map((batch) => batch.length)}`,
+  );
+  assert(
+    batches.flat().map((row) => row.newDocumentState.id).join(',') === largeDocuments.map((row) => row.id).join(','),
+    'bounded direct push must preserve document order and content',
+  );
+  await state.cancel();
+}
+
 // --- 2. push scan continues after empty scan-limit batches ------------------
 {
   const state = await makeState('push-scan-limit');

@@ -28,6 +28,9 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use chrono::DateTime;
+use rusqlite::params;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
 use serde_json::json;
 use serde_json::Value;
 
@@ -36,6 +39,8 @@ use super::Country;
 use super::FieldEvidence;
 use super::FieldKey;
 use super::SourceModule;
+use crate::unlock::PublicUnlockOutcome;
+use crate::unlock::PublicUnlockRequest;
 
 const MAX_EVIDENCE_AGE_MS: u64 = 24 * 60 * 60 * 1_000;
 const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1_000;
@@ -59,6 +64,13 @@ pub struct ScrapeBridgeResult {
     /// Reasons why individual records were rejected before they could become
     /// person-research evidence.
     pub evidence_rejections: Vec<String>,
+    /// Total registered-adapter executions for this source. Public browser
+    /// fallback is bounded to one retry, so this is always one or two.
+    pub attempts: usize,
+    /// First classification when a public browser fallback caused a retry.
+    pub initial_classification: Option<String>,
+    /// Redacted result of the generic public-browser warm-up.
+    pub public_browser_fallback: Option<PublicUnlockOutcome>,
 }
 
 /// Drive a scrape-target extraction for the given source module.
@@ -83,6 +95,9 @@ pub fn run_via_scrape_target(
             repair_queued: false,
             run_id: None,
             evidence_rejections: Vec::new(),
+            attempts: 0,
+            initial_classification: None,
+            public_browser_fallback: None,
         };
     };
 
@@ -92,6 +107,125 @@ pub fn run_via_scrape_target(
         "source_id": module.id(),
     });
 
+    let current = run_with_public_browser_fallback(
+        module,
+        input,
+        |input| execute_scrape_target_once(module, company, root, ctox_bin, target_key, input),
+        |request| crate::unlock::run_public_browser_fallback(root, ctox_bin, request),
+    );
+    if !requires_public_browser_fallback(&current.classification) {
+        return current;
+    }
+    recent_successful_result(root, target_key, module, company, &current).unwrap_or(current)
+}
+
+fn run_with_public_browser_fallback<Execute, Unlock>(
+    module: &dyn SourceModule,
+    mut input: Value,
+    mut execute: Execute,
+    mut unlock: Unlock,
+) -> ScrapeBridgeResult
+where
+    Execute: FnMut(&Value) -> ScrapeBridgeResult,
+    Unlock: FnMut(&PublicUnlockRequest) -> PublicUnlockOutcome,
+{
+    let mut initial = execute(&input);
+    initial.attempts = 1;
+    if !requires_public_browser_fallback(&initial.classification) {
+        return initial;
+    }
+
+    let trigger = initial.classification.clone();
+    let allowed_domains = public_source_domains(module);
+    let request = PublicUnlockRequest {
+        source_id: module.id().to_string(),
+        browser_session_id: public_source_browser_session_id(module),
+        target_url: public_source_start_url(module),
+        allowed_domains,
+        trigger: trigger.clone(),
+        timeout_ms: 45_000,
+    };
+    let fallback = unlock(&request);
+    if !fallback.ok {
+        initial.initial_classification = Some(trigger);
+        initial.public_browser_fallback = Some(fallback);
+        return initial;
+    }
+
+    input["web_fallback"] = json!({
+        "kind": "public_browser_unlock",
+        "attempt": 1,
+        "trigger": trigger,
+        "source_id": module.id(),
+        "browser_session_id": fallback.browser_session_id.clone(),
+        "target_url": fallback.target_url.clone(),
+        "final_url": fallback.final_url.clone(),
+        "browser_status": fallback.status.clone(),
+        "secret_value_in_payload": false,
+    });
+    input["browser_session_id"] = json!(fallback.browser_session_id.clone());
+    let mut retried = execute(&input);
+    retried.attempts = 2;
+    retried.initial_classification = Some(initial.classification);
+    retried.public_browser_fallback = Some(fallback);
+    retried
+}
+
+fn requires_public_browser_fallback(classification: &str) -> bool {
+    matches!(classification, "blocked" | "temporary_unreachable")
+}
+
+fn public_source_domains(module: &dyn SourceModule) -> Vec<String> {
+    let mut domains = Vec::with_capacity(1 + module.host_suffixes().len());
+    domains.push(
+        module
+            .id()
+            .trim()
+            .trim_start_matches("www.")
+            .to_ascii_lowercase(),
+    );
+    domains.extend(module.host_suffixes().iter().map(|domain| {
+        domain
+            .trim()
+            .trim_start_matches("www.")
+            .to_ascii_lowercase()
+    }));
+    domains.retain(|domain| !domain.is_empty());
+    domains.sort();
+    domains.dedup();
+    domains
+}
+
+fn public_source_start_url(module: &dyn SourceModule) -> String {
+    format!(
+        "https://www.{}/",
+        module.id().trim().trim_start_matches("www.")
+    )
+}
+
+fn public_source_browser_session_id(module: &dyn SourceModule) -> String {
+    let source = module
+        .id()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("browser_session_web_stack_public_{source}")
+}
+
+fn execute_scrape_target_once(
+    module: &dyn SourceModule,
+    company: &str,
+    root: &Path,
+    ctox_bin: &Path,
+    target_key: &'static str,
+    input: &Value,
+) -> ScrapeBridgeResult {
     let output = Command::new(ctox_bin)
         .arg("scrape")
         .arg("execute")
@@ -117,6 +251,9 @@ pub fn run_via_scrape_target(
                 repair_queued: false,
                 run_id: None,
                 evidence_rejections: Vec::new(),
+                attempts: 1,
+                initial_classification: None,
+                public_browser_fallback: None,
             };
         }
     };
@@ -141,6 +278,9 @@ pub fn run_via_scrape_target(
             repair_queued: false,
             run_id: None,
             evidence_rejections: Vec::new(),
+            attempts: 1,
+            initial_classification: None,
+            public_browser_fallback: None,
         };
     }
 
@@ -155,6 +295,9 @@ pub fn run_via_scrape_target(
                 repair_queued: false,
                 run_id: None,
                 evidence_rejections: Vec::new(),
+                attempts: 1,
+                initial_classification: None,
+                public_browser_fallback: None,
             };
         }
     };
@@ -259,6 +402,9 @@ fn parse_scrape_envelope(
         repair_queued,
         run_id,
         evidence_rejections,
+        attempts: 1,
+        initial_classification: None,
+        public_browser_fallback: None,
     }
 }
 
@@ -298,6 +444,223 @@ fn load_records_file(path: &Path) -> Option<Vec<Value>> {
         }
         _ => None,
     }
+}
+
+fn recent_successful_result(
+    root: &Path,
+    target_key: &'static str,
+    module: &dyn SourceModule,
+    company: &str,
+    current: &ScrapeBridgeResult,
+) -> Option<ScrapeBridgeResult> {
+    let relative = Path::new("scraping")
+        .join("targets")
+        .join(target_key)
+        .join("runs");
+    let run_roots = [root.join(&relative), root.join("runtime").join(&relative)];
+    let mut cached_candidates = database_success_candidates(root, target_key, company);
+    for runs in run_roots {
+        let Ok(entries) = std::fs::read_dir(runs) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let manifest_path = entry.path().join("run.json");
+            let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_str::<Value>(&raw) else {
+                continue;
+            };
+            if manifest.get("target_key").and_then(Value::as_str) != Some(target_key) {
+                continue;
+            }
+            if manifest.get("status").and_then(Value::as_str) == Some("succeeded")
+                && cached_run_company_matches(&manifest, &manifest_path, company)
+            {
+                let finished_at = manifest
+                    .get("finished_at_ms")
+                    .or_else(|| manifest.get("started_at_ms"))
+                    .or_else(|| manifest.get("scheduled_for"))
+                    .and_then(timestamp_ms)
+                    .or_else(|| file_modified_ms(&manifest_path));
+                if let (Some(finished_at), Some(run_id), Some(records_path)) = (
+                    finished_at.filter(|timestamp| is_fresh(*timestamp)),
+                    manifest.get("run_id").and_then(Value::as_str),
+                    manifest_records_path(&manifest_path),
+                ) {
+                    cached_candidates.push((finished_at, run_id.to_string(), records_path));
+                }
+            }
+            if let Some(candidate) = embedded_last_success_candidate(&manifest, target_key, company)
+            {
+                cached_candidates.push(candidate);
+            }
+        }
+    }
+    cached_candidates.sort_by(|left, right| right.0.cmp(&left.0));
+    cached_candidates.dedup_by(|left, right| left.1 == right.1);
+
+    for (_, run_id, records_path) in cached_candidates {
+        let Some(records) = load_records_file(&records_path) else {
+            continue;
+        };
+        let envelope = json!({
+            "ok": true,
+            "status": "succeeded",
+            "run_id": run_id,
+            "records": records,
+        });
+        let mut cached = parse_scrape_envelope(target_key, module, company, &envelope);
+        if cached.fields.is_empty() || !cached.evidence_rejections.is_empty() {
+            continue;
+        }
+        cached.reason = Some(format!(
+            "fresh_cached_success_after_{}",
+            current.classification
+        ));
+        cached.attempts = current.attempts;
+        cached.initial_classification = Some(current.classification.clone());
+        cached.public_browser_fallback = current.public_browser_fallback.clone();
+        return Some(cached);
+    }
+    None
+}
+
+fn database_success_candidates(
+    root: &Path,
+    target_key: &str,
+    company: &str,
+) -> Vec<(u64, String, PathBuf)> {
+    let mut candidates = Vec::new();
+    for db_path in [root.join("ctox.sqlite3"), root.join("runtime/ctox.sqlite3")] {
+        if !db_path.is_file() {
+            continue;
+        }
+        let Ok(connection) = Connection::open_with_flags(
+            &db_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let Ok(mut statement) = connection.prepare(
+            "SELECT r.run_id, r.finished_at, r.started_at, r.output_dir
+             FROM scrape_run r
+             JOIN scrape_target t ON t.target_id = r.target_id
+             WHERE t.target_key = ?1 AND r.status = 'succeeded'
+             ORDER BY COALESCE(r.finished_at, r.started_at) DESC
+             LIMIT 24",
+        ) else {
+            continue;
+        };
+        let Ok(rows) = statement.query_map(params![target_key], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        }) else {
+            continue;
+        };
+        for row in rows.flatten() {
+            let (run_id, finished_at, started_at, output_dir) = row;
+            let Some(timestamp) = finished_at
+                .as_deref()
+                .or(Some(started_at.as_str()))
+                .and_then(|value| timestamp_ms(&Value::String(value.to_string())))
+                .filter(|timestamp| is_fresh(*timestamp))
+            else {
+                continue;
+            };
+            let Some(output_dir) = output_dir.filter(|value| !value.trim().is_empty()) else {
+                continue;
+            };
+            let records_path = PathBuf::from(output_dir).join("outputs/records.json");
+            if cached_records_company_matches(&records_path, company) {
+                candidates.push((timestamp, run_id, records_path));
+            }
+        }
+    }
+    candidates
+}
+
+fn manifest_records_path(manifest_path: &Path) -> Option<PathBuf> {
+    Some(manifest_path.parent()?.join("outputs").join("records.json"))
+}
+
+fn embedded_last_success_candidate(
+    manifest: &Value,
+    target_key: &str,
+    company: &str,
+) -> Option<(u64, String, PathBuf)> {
+    let previous = manifest.pointer("/run_context/last_successful_run")?;
+    let finished_at = previous.get("finished_at").and_then(timestamp_ms)?;
+    if !is_fresh(finished_at) {
+        return None;
+    }
+    let run_id = previous.get("run_id").and_then(Value::as_str)?.to_string();
+    let materialization = previous.pointer("/result/materialization")?;
+    if materialization.get("target_key").and_then(Value::as_str) != Some(target_key) {
+        return None;
+    }
+    let records_path = PathBuf::from(
+        materialization
+            .get("latest_records_path")
+            .and_then(Value::as_str)?,
+    );
+    if !records_path
+        .components()
+        .any(|component| component.as_os_str() == target_key)
+        || !cached_records_company_matches(&records_path, company)
+    {
+        return None;
+    }
+    Some((finished_at, run_id, records_path))
+}
+
+fn cached_run_company_matches(manifest: &Value, manifest_path: &Path, company: &str) -> bool {
+    if manifest
+        .pointer("/input/company")
+        .or_else(|| manifest.pointer("/run_context/input/company"))
+        .and_then(Value::as_str)
+        .is_some_and(|identity| company_identity_matches(company, identity))
+    {
+        return true;
+    }
+    let records_path = manifest_path
+        .parent()
+        .map(|run_dir| run_dir.join("outputs").join("records.json"));
+    records_path
+        .as_deref()
+        .is_some_and(|path| cached_records_company_matches(path, company))
+}
+
+fn cached_records_company_matches(records_path: &Path, company: &str) -> bool {
+    load_records_file(records_path).is_some_and(|records| {
+        records.iter().any(|record| {
+            let field = record
+                .get("field")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !matches!(field, "firma_name" | "company_name") {
+                return false;
+            }
+            record
+                .get("value")
+                .and_then(Value::as_str)
+                .is_some_and(|identity| company_identity_matches(company, identity))
+        })
+    })
+}
+
+fn file_modified_ms(path: &Path) -> Option<u64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis() as u64)
 }
 
 fn record_to_field_evidence(
@@ -523,7 +886,21 @@ fn company_tokens(company: &str) -> Vec<String> {
         .filter(|token| {
             !matches!(
                 token.as_str(),
-                "ag" | "at" | "ch" | "co" | "de" | "gmbh" | "kg" | "mbh" | "se" | "the" | "und"
+                "ag" | "at"
+                    | "ch"
+                    | "co"
+                    | "de"
+                    | "gmbh"
+                    | "inc"
+                    | "kg"
+                    | "ltd"
+                    | "mbh"
+                    | "sa"
+                    | "sarl"
+                    | "se"
+                    | "the"
+                    | "ug"
+                    | "und"
             )
         })
         .collect()
@@ -571,6 +948,439 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn write_cached_run(root: &Path, checked_at: u64, finished_at: u64) {
+        let run_id = "scrape_run-cached";
+        let run = root.join("scraping/targets/northdata-de/runs").join(run_id);
+        std::fs::create_dir_all(run.join("outputs")).unwrap();
+        std::fs::write(
+            run.join("run.json"),
+            serde_json::to_vec(&json!({
+                "run_id": run_id,
+                "target_key": "northdata-de",
+                "status": "succeeded",
+                "finished_at_ms": finished_at,
+                "input": { "company": "Example Industrial GmbH", "country": "DE" }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run.join("outputs/records.json"),
+            serde_json::to_vec(&json!([{
+                "field": "firma_name",
+                "value": "Example Industrial GmbH",
+                "confidence": "high",
+                "source_url": "https://www.northdata.de/Example+Industrial+GmbH",
+                "run_id": run_id,
+                "source_id": "northdata.de",
+                "company_name": "Example Industrial GmbH",
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "http_status": 200,
+                "checked_at": checked_at,
+                "snapshot_hash": "sha256:cached"
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fresh_identity_matched_success_can_cover_a_transient_access_failure() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-scrape-cache-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        write_cached_run(&root, now_ms(), now_ms());
+        let current = stub_result("temporary_unreachable");
+        let result = recent_successful_result(
+            &root,
+            "northdata-de",
+            crate::sources::find("northdata.de").unwrap(),
+            "Example Industrial GmbH",
+            &current,
+        )
+        .expect("fresh cached result");
+        assert_eq!(result.classification, "succeeded");
+        assert_eq!(result.fields.len(), 1);
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("fresh_cached_success_after_temporary_unreachable")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registry_database_resolves_release_bound_success_output() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-scrape-cache-registry-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let release_run = root
+            .join("releases/release-previous/runtime/scraping/targets/northdata-de/runs")
+            .join("scrape_run-registry");
+        std::fs::create_dir_all(release_run.join("outputs")).unwrap();
+        std::fs::write(
+            release_run.join("outputs/records.json"),
+            serde_json::to_vec(&json!([{
+                "field": "firma_name",
+                "value": "Example Industrial GmbH",
+                "confidence": "high",
+                "source_url": "https://www.northdata.de/Example+Industrial+GmbH",
+                "run_id": "scrape_run-registry",
+                "source_id": "northdata.de",
+                "company_name": "Example Industrial GmbH",
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "http_status": 200,
+                "checked_at": now_ms(),
+                "snapshot_hash": "sha256:registry"
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let connection = Connection::open(root.join("ctox.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE scrape_target (target_id TEXT PRIMARY KEY, target_key TEXT NOT NULL);
+                 CREATE TABLE scrape_run (
+                   run_id TEXT PRIMARY KEY,
+                   target_id TEXT NOT NULL,
+                   started_at TEXT NOT NULL,
+                   finished_at TEXT,
+                   status TEXT NOT NULL,
+                   output_dir TEXT
+                 );",
+            )
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO scrape_target (target_id, target_key) VALUES (?1, ?2)",
+                params!["target-northdata", "northdata-de"],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO scrape_run
+                 (run_id, target_id, started_at, finished_at, status, output_dir)
+                 VALUES (?1, ?2, ?3, ?4, 'succeeded', ?5)",
+                params![
+                    "scrape_run-registry",
+                    "target-northdata",
+                    &now,
+                    &now,
+                    release_run.to_string_lossy().as_ref()
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        let result = recent_successful_result(
+            &root,
+            "northdata-de",
+            crate::sources::find("northdata.de").unwrap(),
+            "Example Industrial GmbH",
+            &stub_result("blocked"),
+        )
+        .expect("registry output should be reusable across release paths");
+        assert_eq!(result.classification, "succeeded");
+        assert_eq!(result.run_id.as_deref(), Some("scrape_run-registry"));
+        assert_eq!(result.fields.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_success_is_not_reused() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-scrape-cache-stale-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let stale = now_ms().saturating_sub(MAX_EVIDENCE_AGE_MS + 1_000);
+        write_cached_run(&root, stale, stale);
+        assert!(recent_successful_result(
+            &root,
+            "northdata-de",
+            crate::sources::find("northdata.de").unwrap(),
+            "Example Industrial GmbH",
+            &stub_result("blocked"),
+        )
+        .is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn real_scrape_manifest_shape_uses_verified_record_identity_and_file_time() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-scrape-cache-real-shape-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        write_cached_run(&root, now_ms(), now_ms());
+        let manifest = root.join("scraping/targets/northdata-de/runs/scrape_run-cached/run.json");
+        std::fs::write(
+            &manifest,
+            serde_json::to_vec(&json!({
+                "run_id": "scrape_run-cached",
+                "target_key": "northdata-de",
+                "status": "succeeded",
+                "result": { "records_found": 1 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let result = recent_successful_result(
+            &root,
+            "northdata-de",
+            crate::sources::find("northdata.de").unwrap(),
+            "Example Industrial GmbH",
+            &stub_result("blocked"),
+        )
+        .expect("real scrape manifest should be reusable");
+        assert_eq!(result.classification, "succeeded");
+        assert_eq!(result.fields.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn embedded_last_success_uses_verified_snapshot_and_ignores_legal_form_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "ctox-scrape-cache-embedded-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let current_run = root.join("scraping/targets/moneyhouse-ch/runs/scrape_run-current");
+        let records_path =
+            root.join("archive/scraping/targets/moneyhouse-ch/state/latest_records.json");
+        std::fs::create_dir_all(&current_run).unwrap();
+        std::fs::create_dir_all(records_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &records_path,
+            serde_json::to_vec(&json!([{
+                "field": "firma_name",
+                "value": "Nests Sàrl",
+                "confidence": "high",
+                "source_url": "https://www.moneyhouse.ch/de/company/nests-sarl-2272997971",
+                "run_id": "scrape_run-previous",
+                "source_id": "moneyhouse.ch",
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "http_status": 200,
+                "checked_at": now_ms(),
+                "snapshot_hash": "sha256:embedded"
+            }]))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            current_run.join("run.json"),
+            serde_json::to_vec(&json!({
+                "run_id": "scrape_run-current",
+                "target_key": "moneyhouse-ch",
+                "status": "temporary_unreachable",
+                "run_context": {
+                    "last_successful_run": {
+                        "run_id": "scrape_run-previous",
+                        "finished_at": chrono::Utc::now().to_rfc3339(),
+                        "result": {
+                            "materialization": {
+                                "target_key": "moneyhouse-ch",
+                                "latest_records_path": records_path
+                            }
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let result = recent_successful_result(
+            &root,
+            "moneyhouse-ch",
+            crate::sources::find("moneyhouse.ch").unwrap(),
+            "Nests Sarl",
+            &stub_result("temporary_unreachable"),
+        )
+        .expect("embedded fresh success should be reusable");
+        assert_eq!(result.classification, "succeeded");
+        assert_eq!(result.fields.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn stub_result(classification: &str) -> ScrapeBridgeResult {
+        ScrapeBridgeResult {
+            target_key: "northdata.de",
+            fields: Vec::new(),
+            classification: classification.to_string(),
+            reason: None,
+            repair_queued: false,
+            run_id: Some(format!("scrape_run-{classification}")),
+            evidence_rejections: Vec::new(),
+            attempts: 1,
+            initial_classification: None,
+            public_browser_fallback: None,
+        }
+    }
+
+    fn successful_unlock(request: &PublicUnlockRequest) -> PublicUnlockOutcome {
+        PublicUnlockOutcome {
+            attempted: true,
+            ok: true,
+            status: "browser_ready".to_string(),
+            source_id: request.source_id.clone(),
+            browser_session_id: request.browser_session_id.clone(),
+            trigger: request.trigger.clone(),
+            target_url: request.target_url.clone(),
+            final_url: Some(request.target_url.clone()),
+            challenge_detected: false,
+            markers: Vec::new(),
+            error: None,
+            secret_value_in_payload: false,
+        }
+    }
+
+    #[test]
+    fn access_failures_run_one_public_unlock_and_one_adapter_retry() {
+        for initial_status in ["blocked", "temporary_unreachable"] {
+            let module = crate::sources::find("northdata.de").unwrap();
+            let mut executions = 0;
+            let mut retry_input = None;
+            let mut unlocks = 0;
+            let result = run_with_public_browser_fallback(
+                module,
+                json!({
+                    "company": "North Data GmbH",
+                    "country": "DE",
+                    "source_id": "northdata.de",
+                }),
+                |input| {
+                    executions += 1;
+                    if executions == 1 {
+                        stub_result(initial_status)
+                    } else {
+                        retry_input = Some(input.clone());
+                        stub_result("succeeded")
+                    }
+                },
+                |request| {
+                    unlocks += 1;
+                    assert_eq!(request.source_id, "northdata.de");
+                    assert_eq!(request.trigger, initial_status);
+                    assert_eq!(request.allowed_domains, ["northdata.de"]);
+                    assert_eq!(
+                        request.browser_session_id,
+                        "browser_session_web_stack_public_northdata-de"
+                    );
+                    successful_unlock(request)
+                },
+            );
+
+            assert_eq!(executions, 2, "{initial_status}");
+            assert_eq!(unlocks, 1, "{initial_status}");
+            assert_eq!(result.attempts, 2);
+            assert_eq!(
+                result.initial_classification.as_deref(),
+                Some(initial_status)
+            );
+            assert_eq!(result.classification, "succeeded");
+            assert_eq!(
+                result
+                    .public_browser_fallback
+                    .as_ref()
+                    .map(|outcome| outcome.status.as_str()),
+                Some("browser_ready")
+            );
+            let retry_input = retry_input.expect("retry input");
+            assert_eq!(
+                retry_input.pointer("/web_fallback/trigger"),
+                Some(&json!(initial_status))
+            );
+            assert_eq!(
+                retry_input.pointer("/web_fallback/secret_value_in_payload"),
+                Some(&json!(false))
+            );
+            assert_eq!(
+                retry_input.pointer("/browser_session_id"),
+                Some(&json!("browser_session_web_stack_public_northdata-de"))
+            );
+        }
+    }
+
+    #[test]
+    fn non_access_failures_never_open_the_browser_fallback() {
+        for status in ["succeeded", "portal_drift", "partial_output"] {
+            let module = crate::sources::find("northdata.de").unwrap();
+            let mut executions = 0;
+            let mut unlocks = 0;
+            let result = run_with_public_browser_fallback(
+                module,
+                json!({}),
+                |_| {
+                    executions += 1;
+                    stub_result(status)
+                },
+                |request| {
+                    unlocks += 1;
+                    successful_unlock(request)
+                },
+            );
+
+            assert_eq!(executions, 1, "{status}");
+            assert_eq!(unlocks, 0, "{status}");
+            assert_eq!(result.attempts, 1);
+            assert!(result.initial_classification.is_none());
+            assert!(result.public_browser_fallback.is_none());
+        }
+    }
+
+    #[test]
+    fn failed_public_unlock_does_not_retry_the_adapter() {
+        let module = crate::sources::find("companyhouse.de").unwrap();
+        let mut executions = 0;
+        let mut unlocks = 0;
+        let result = run_with_public_browser_fallback(
+            module,
+            json!({}),
+            |_| {
+                executions += 1;
+                stub_result("blocked")
+            },
+            |request| {
+                unlocks += 1;
+                PublicUnlockOutcome {
+                    attempted: true,
+                    ok: false,
+                    status: "challenge_persisted".to_string(),
+                    source_id: request.source_id.clone(),
+                    browser_session_id: request.browser_session_id.clone(),
+                    trigger: request.trigger.clone(),
+                    target_url: request.target_url.clone(),
+                    final_url: Some(request.target_url.clone()),
+                    challenge_detected: true,
+                    markers: vec!["captcha".to_string()],
+                    error: Some("challenge_persisted".to_string()),
+                    secret_value_in_payload: false,
+                }
+            },
+        );
+
+        assert_eq!(executions, 1);
+        assert_eq!(unlocks, 1);
+        assert_eq!(result.attempts, 1);
+        assert_eq!(result.initial_classification.as_deref(), Some("blocked"));
+        assert_eq!(
+            result
+                .public_browser_fallback
+                .as_ref()
+                .map(|outcome| outcome.status.as_str()),
+            Some("challenge_persisted")
+        );
+    }
 
     #[test]
     fn parse_envelope_decodes_typed_records() {
@@ -630,15 +1440,18 @@ mod tests {
         assert_eq!(result.classification, "succeeded");
         assert_eq!(result.run_id.as_deref(), Some("scrape_run-abc"));
         assert!(!result.repair_queued);
-        // Empty-value records are dropped.
-        assert_eq!(result.fields.len(), 3);
+        // Empty values and cross-source records without the required run,
+        // source, identity, and evidence gate are dropped.
+        assert_eq!(result.fields.len(), 2);
         let (firma_key, firma_ev) = &result.fields[0];
         assert_eq!(*firma_key, FieldKey::FirmaName);
         assert_eq!(firma_ev.value, "Roche Holding AG");
         assert_eq!(firma_ev.confidence, Confidence::High);
         assert_eq!(firma_ev.note.as_deref(), Some("h1 selector"));
-        assert_eq!(result.fields[2].0, FieldKey::PersonEmailValidation);
-        assert_eq!(result.fields[2].1.value, "valid");
+        assert!(result
+            .evidence_rejections
+            .iter()
+            .any(|reason| reason == "record_2:missing_record_run_id"));
     }
 
     #[test]

@@ -29,6 +29,7 @@ const MAINTENANCE_STATE_ID: &str = "business-os-upgrade";
 const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 const MAINTENANCE_LEASE_TTL_MS: i64 = 90_000;
 const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+const MAINTENANCE_READ_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_INSTALL_ROOT_RELATIVE_PATH: &str = ".local/lib/ctox";
 const DEFAULT_STATE_ROOT_RELATIVE_PATH: &str = ".local/state/ctox";
 const DEFAULT_CACHE_ROOT_RELATIVE_PATH: &str = ".cache/ctox";
@@ -555,8 +556,6 @@ pub fn business_os_platform_status(root: &Path) -> Result<serde_json::Value> {
 }
 
 fn open_maintenance_store(state_root: &Path) -> Result<rusqlite::Connection> {
-    use rusqlite::OptionalExtension;
-
     ensure_dir(state_root)?;
     let connection = rusqlite::Connection::open(state_root.join(MAINTENANCE_STORE_FILE_NAME))?;
     connection.busy_timeout(Duration::from_secs(10))?;
@@ -636,7 +635,48 @@ fn migrate_legacy_maintenance_state(
 fn load_maintenance_state_from_root(state_root: &Path) -> Result<Option<MaintenanceState>> {
     use rusqlite::OptionalExtension;
 
+    // Status polling must not queue behind initialization once the singleton exists.
+    if let Some(state) = load_existing_maintenance_state_from_root(state_root)? {
+        return Ok(Some(state));
+    }
+
     let connection = open_maintenance_store(state_root)?;
+    let raw: Option<String> = connection
+        .query_row(
+            "SELECT state_json FROM ctox_maintenance_state WHERE state_id = ?1",
+            [MAINTENANCE_STATE_ID],
+            |row| row.get(0),
+        )
+        .optional()?;
+    raw.map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
+}
+
+fn load_existing_maintenance_state_from_root(
+    state_root: &Path,
+) -> Result<Option<MaintenanceState>> {
+    use rusqlite::OptionalExtension;
+
+    let path = state_root.join(MAINTENANCE_STORE_FILE_NAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        &path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(MAINTENANCE_READ_BUSY_TIMEOUT)?;
+    let table_exists = connection.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_schema
+            WHERE type = 'table' AND name = 'ctox_maintenance_state'
+        )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !table_exists {
+        return Ok(None);
+    }
     let raw: Option<String> = connection
         .query_row(
             "SELECT state_json FROM ctox_maintenance_state WHERE state_id = ?1",
@@ -4397,6 +4437,7 @@ fn create_symlink(target: &Path, link_path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use tempfile::tempdir;
 
     fn maintenance_test_layout(root: &Path) -> InstallLayout {
@@ -4451,6 +4492,41 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn terminal_maintenance_status_does_not_wait_for_store_migration() {
+        let temp = tempdir().unwrap();
+        let layout = InstallLayout::resolve(temp.path()).unwrap();
+        let started = begin_maintenance(&layout, "branch:main").unwrap();
+        update_maintenance(&layout.state_root, &started.lease_id, |state| {
+            state.phase = "completed".to_string();
+            state.status = "completed".to_string();
+            state.progress.percent = 100;
+            state.finished_at = Some(now_rfc3339());
+        })
+        .unwrap();
+        let store = rusqlite::Connection::open(layout.state_root.join(MAINTENANCE_STORE_FILE_NAME))
+            .unwrap();
+        store.pragma_update(None, "user_version", 0).unwrap();
+        drop(store);
+
+        let migration = MAINTENANCE_STORE_MIGRATION.lock().unwrap();
+        let root = temp.path().to_path_buf();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            tx.send(business_os_maintenance_status(&root)).unwrap();
+        });
+
+        let payload = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("terminal maintenance reads must not queue behind store migration")
+            .unwrap();
+        drop(migration);
+        reader.join().unwrap();
+
+        assert_eq!(payload["active"], false);
+        assert_eq!(payload["state"]["status"], "completed");
     }
 
     #[test]

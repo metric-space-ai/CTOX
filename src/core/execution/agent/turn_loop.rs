@@ -36,6 +36,8 @@ fn turn_counters() -> &'static Mutex<HashMap<i64, RefreshTelemetry>> {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChatTurnSessionOptions {
     pub(crate) disable_mcp_servers: bool,
+    pub(crate) enable_business_os_mcp: bool,
+    pub(crate) business_os_mcp_command_session: Option<String>,
     pub(crate) force_isolated_session: bool,
     pub(crate) base_instructions: Option<String>,
     pub(crate) plain_prompt: bool,
@@ -747,7 +749,17 @@ where
     let operator_settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
     emit("session-start");
     let mut owned_session = if session.is_none() {
-        if options.disable_mcp_servers || options.base_instructions.is_some() {
+        if options.enable_business_os_mcp {
+            emit("session-business-os-mcp");
+            Some(PersistentSession::start_with_business_os_mcp(
+                root,
+                &operator_settings,
+                options
+                    .business_os_mcp_command_session
+                    .as_deref()
+                    .context("Business OS MCP session is missing its signed command scope")?,
+            )?)
+        } else if options.disable_mcp_servers || options.base_instructions.is_some() {
             emit("session-mcp-servers-disabled");
             Some(
                 PersistentSession::start_without_mcp_servers_with_instructions(

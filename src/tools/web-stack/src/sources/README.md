@@ -32,8 +32,16 @@ Pro Quelle entscheidet die Trait-Implementierung, welcher Pfad gilt:
    das Modul erwartet, deklariert es über `requires_credential()`.
    Beispiele: Zefix, D&B Hoovers, Leadfeeder, LinkedIn, XING.
 3. **Browser-Pfad** — Crawl wie (1), aber `extract_fields` weiß, dass die
-   Roh-Antwort aus `ctox web browser-automation` kommt (Captcha, JS-Wall).
-   Heute genau einer: Handelsregister.
+   Roh-Antwort aus `ctox web browser-automation` kommt (JS-Wall).
+   Handelsregister nutzt diesen Pfad direkt.
+
+Unabhängig von diesen Routing-Klassen besitzt jeder registrierte öffentliche
+Scrape-Adapter einen generischen, begrenzten Zugriffs-Fallback: Nur nach
+`blocked` oder `temporary_unreachable` wird die kanonische Quell-Domain einmal
+in einer quellgebundenen Business-OS-Browsersitzung aufgerufen und deren ID bei
+erfolgreichem Warm-up an genau einen Adapter-Retry übergeben. Der Fallback
+übergibt weder Credentials noch Seiteninhalt, folgt keinen fremden Domains und
+löst keine CAPTCHAs. Andere Klassifikationen starten ihn nicht.
 
 ## Datei-Konventionen
 

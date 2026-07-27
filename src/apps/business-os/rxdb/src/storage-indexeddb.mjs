@@ -1293,12 +1293,12 @@ function storedRecordForWrite({ collection, id, doc, lwt, indexes, indexSignatur
     collection,
     id,
     lwt,
-    deleted: Boolean(doc._deleted),
+    deleted: normalizedDoc._deleted,
     replicationOriginRole,
     pushable: replicationOriginRole ? 0 : 1,
-    indexValues: indexValuesFor(indexes, doc),
+    indexValues: indexValuesFor(indexes, normalizedDoc),
     schemaIndexSignature: indexSignature,
-    schemaIndexEntries: schemaIndexEntriesFor(indexes, doc, id, collection),
+    schemaIndexEntries: schemaIndexEntriesFor(indexes, normalizedDoc, id, collection),
     doc: normalizedDoc,
   };
   // Merge base (field-merge collections only): the last master-confirmed
@@ -2056,4 +2056,5 @@ export const ctoxIndexedDbStorageTestInternals = {
   selectBestIndex,
   shouldUsePushableReplicationIndex,
   shouldAcceptDocumentWrite,
+  storedRecordForWrite,
 };

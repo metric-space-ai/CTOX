@@ -1,4 +1,4 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260714-chat-queue-v56';
+import { CtoxResizer } from './shared/resizer.js?v=20260723-resizer-pointer-capture-v1';
 import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260721-pane-grammar-v2';
 import { createAppActions } from './shared/app-actions.js?v=20260715-runtime-v2';
 import {
@@ -7,7 +7,7 @@ import {
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260714-chat-queue-v56';
+} from './shared/app-lifecycle.js?v=20260727-local-module-visibility-v1';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
@@ -39,7 +39,7 @@ import {
   shouldRenderModuleSourceAction,
 } from './shared/shell-permissions-ui.js?v=20260714-chat-queue-v56';
 import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260717-chat-overlay-v126';
-import { createDocumentsFacade } from './shared/documents.js?v=20260721-documents-facade-v17';
+import { createDocumentsFacade } from './shared/documents.js?v=20260726-documents-facade-v19';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -71,7 +71,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260727-knowledge-table-budget-v80';
+const APP_BUILD = '20260727-knowledge-table-budget-v80-local-module-visibility-v1';
 
 ensureShellStylesheets();
 
@@ -242,6 +242,9 @@ const state = {
   maintenanceAckLeaseId: '',
   workspaceSessionRestored: false,
   workspaceSessionRestoring: false,
+  preferredDesktopAppFocusId: '',
+  preferredDesktopAppFocusUntilMs: 0,
+  preferredDesktopAppFocusTimers: [],
   ctoxUpdateCheck: null,
   ctoxUpdateCheckRunning: false,
   ctoxUpdateCheckedAtMs: 0,
@@ -1063,8 +1066,9 @@ async function bootstrap() {
   try {
     const workspaceSession = readWorkspaceSessionSnapshot();
     const explicitModule = location.hash.replace(/^#/, '').trim();
+    beginPreferredDesktopAppFocus(explicitModule);
     await openModule(explicitModule || workspaceSession?.activeModuleId || initialModuleRefAfterLogin());
-    await restoreWorkspaceSession(workspaceSession);
+    await restoreWorkspaceSession(workspaceSession, { preferredAppId: explicitModule });
     markBootTiming('shellVisibleMs');
     setWorkspaceStatus();
     scheduleBusinessCompanions();
@@ -1076,7 +1080,11 @@ async function bootstrap() {
       setStatus(`Module startup failed: ${error.message || error}`);
     }
   } finally {
-    state.initialModuleOpened = Boolean(state.activeModule?.id);
+    // Catalog refreshes are deferred only while the shell itself is being
+    // constructed. A requested runtime app can legitimately arrive just after
+    // the first open attempt; keeping this false when no fallback module opened
+    // would strand every later catalog notification in the deferred queue.
+    state.initialModuleOpened = true;
     flushDeferredCatalogRefresh();
   }
   // Phase 2: no critical-sync warmup choreography here anymore — replication
@@ -1440,7 +1448,7 @@ function persistWorkspaceSession() {
   writeScopedLocalStorage(WORKSPACE_SESSION_KEY, JSON.stringify(snapshot));
 }
 
-async function restoreWorkspaceSession(snapshot) {
+async function restoreWorkspaceSession(snapshot, options = {}) {
   state.workspaceSessionRestoring = true;
   try {
     for (const entry of snapshot?.windows || []) {
@@ -1460,10 +1468,65 @@ async function restoreWorkspaceSession(snapshot) {
       ? state.windowManager?.listWindows?.().find((entry) => entry.ownerId === focusedOwner)
       : null;
     if (focused) state.windowManager?.focus?.(focused.id);
+    schedulePreferredDesktopAppFocus(options.preferredAppId);
   } finally {
     state.workspaceSessionRestoring = false;
     state.workspaceSessionRestored = true;
     persistWorkspaceSession();
+  }
+}
+
+function focusExplicitDesktopAppRoute(preferredAppId = '') {
+  const routeId = String(preferredAppId || currentHashModuleId() || '').split('?')[0];
+  if (!routeId) return false;
+  const mod = state.modules.find((item) => item.id === routeId);
+  if (!mod || !moduleLaunchesAsDesktopApp(mod)) return false;
+  const win = findDesktopWindow(routeId);
+  if (!win) return false;
+  restoreAndFocusWindow(win);
+  return true;
+}
+
+function beginPreferredDesktopAppFocus(preferredAppId = '') {
+  const routeId = String(preferredAppId || '').split('?')[0];
+  if (!routeId) return false;
+  const mod = state.modules.find((item) => item.id === routeId);
+  if (!mod || !moduleLaunchesAsDesktopApp(mod)) return false;
+  state.preferredDesktopAppFocusId = routeId;
+  state.preferredDesktopAppFocusUntilMs = Date.now() + 45000;
+  schedulePreferredDesktopAppFocus(routeId);
+  return true;
+}
+
+function schedulePreferredDesktopAppFocus(preferredAppId = '') {
+  const routeId = String(preferredAppId || state.preferredDesktopAppFocusId || '').split('?')[0];
+  if (!routeId) return;
+  if (Date.now() > state.preferredDesktopAppFocusUntilMs) {
+    clearPreferredDesktopAppFocus();
+    return;
+  }
+  clearPreferredDesktopAppFocusTimers();
+  for (const delay of [0, 120, 350, 900, 1800, 3500, 7000, 12000, 20000, 30000, 42000]) {
+    const timer = window.setTimeout(() => {
+      if (Date.now() > state.preferredDesktopAppFocusUntilMs) {
+        clearPreferredDesktopAppFocus();
+        return;
+      }
+      focusExplicitDesktopAppRoute(routeId);
+    }, delay);
+    state.preferredDesktopAppFocusTimers.push(timer);
+  }
+}
+
+function clearPreferredDesktopAppFocus() {
+  clearPreferredDesktopAppFocusTimers();
+  state.preferredDesktopAppFocusId = '';
+  state.preferredDesktopAppFocusUntilMs = 0;
+}
+
+function clearPreferredDesktopAppFocusTimers() {
+  for (const timer of state.preferredDesktopAppFocusTimers.splice(0)) {
+    window.clearTimeout(timer);
   }
 }
 
@@ -1644,6 +1707,13 @@ function wireShellWindowGestures() {
       'window:restored',
       'window:title_changed',
     ].forEach((eventName) => state.eventBus.on(eventName, renderTabs));
+    [
+      'window:opened',
+      'window:restored',
+    ].forEach((eventName) => state.eventBus.on(eventName, () => {
+      if (!state.preferredDesktopAppFocusId) return;
+      schedulePreferredDesktopAppFocus(state.preferredDesktopAppFocusId);
+    }));
     [
       'window:opened',
       'window:closed',
@@ -5461,7 +5531,8 @@ function createModuleContext(mod, overrides = {}) {
       db: moduleDb,
       openApp: openDesktopApp,
       sync: moduleSync,
-      appId: documentsWorkspaceAppId,
+      creatorAppId: mod.id,
+      workspaceAppId: documentsWorkspaceAppId,
     }),
     permissions: createModulePermissionFacade(mod),
     runtimeCapabilities: createRuntimeCapabilityFacade(mod),
@@ -6606,7 +6677,7 @@ function moduleRevisionQuery(moduleLike) {
     : String(moduleLike?.id || moduleLike?.module_id || '').trim();
   const mod = typeof moduleLike === 'object' && moduleLike ? moduleLike : null;
   const lifecycle = mod?.lifecycle && typeof mod.lifecycle === 'object' ? mod.lifecycle : {};
-  const candidates = [
+  const releaseCandidates = [
     state.moduleRevisions?.[moduleId],
     mod?.asset_revision,
     mod?.assetRevision,
@@ -6620,14 +6691,15 @@ function moduleRevisionQuery(moduleLike) {
     mod?.updatedAtMs,
     mod?.modified_at_ms,
     mod?.modifiedAtMs,
-    mod?.version,
     lifecycle.last_released_at_ms,
     lifecycle.last_reviewed_at_ms,
     lifecycle.last_release_id,
   ];
-  const rev = candidates
+  const releaseRevision = releaseCandidates
     .map((value) => String(value || '').trim())
     .find(Boolean);
+  const version = String(mod?.version || '').trim();
+  const rev = [...new Set([releaseRevision, version].filter(Boolean))].join('_');
   return rev ? `_${encodeURIComponent(rev).replace(/%/g, '')}` : '';
 }
 

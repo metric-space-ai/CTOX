@@ -12808,7 +12808,12 @@ mod tests {
         config.egress_allow_hosts = vec!["127.0.0.1".to_string()];
         let error = build_evidence_doc(&config, "over limit", &fixture_hit(&url))
             .expect_err("over-limit response must be rejected");
-        assert!(error.to_string().contains("rejected without truncation"));
+        let error_message = format!("{error:#}");
+        assert!(
+            error_message.contains("declared 52 bytes")
+                && error_message.contains("exceeding the 8 byte research limit"),
+            "{error_message}"
+        );
         assert_eq!(server.join().expect("fixture server"), 1);
     }
 

@@ -306,6 +306,20 @@ if (core.CTOX_RXDB_PROTOCOL !== CTOX_RXDB_PROTOCOL || typeof core.replicateWebRT
   if (completedResumeAck?.kind !== 'ack' || completedResumeAck?.resume !== true || completedResumeAck?.final !== true || completedResumeAck?.ackSeq !== chunks.length - 1) {
     throw new Error('WebRTC frame resume must replay completed transfer ACKs');
   }
+  await peer.handleTransportFrame('ctox-peer', {
+    ctoxFrame: 'ctox-rxdb-frame-v1',
+    kind: 'chunk',
+    transferId: 'transfer-1',
+    seq: chunks.length - 1,
+    data: chunks.at(-1),
+  });
+  const duplicateChunkAck = acks.at(-1);
+  if (duplicateChunkAck?.kind !== 'ack' || duplicateChunkAck?.final !== true || duplicateChunkAck?.ackSeq !== chunks.length - 1) {
+    throw new Error('WebRTC duplicate chunks for completed transfers must replay the final ACK');
+  }
+  if (payloads.length !== 1) {
+    throw new Error('WebRTC duplicate chunks must not deliver a completed payload twice');
+  }
   const transportStatus = peer.getTransportStatus();
   if (
     transportStatus.protocol !== 'ctox-rxdb-frame-v1'

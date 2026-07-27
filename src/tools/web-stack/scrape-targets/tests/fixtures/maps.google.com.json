@@ -1,7 +1,7 @@
 {
-  "input": { "source_id": "maps.google.com", "company": "WITTENSTEIN SE", "country": "DE" },
-  "expected": { "firma_name": "WITTENSTEIN SE", "firma_telefon": "+49 7931 4930", "firma_plz": "97999" },
-  "browser": { "ok": true, "result": { "ok": true, "url": "https://www.google.com/maps/place/WITTENSTEIN+SE", "title": "WITTENSTEIN SE - Google Maps", "page_text_excerpt": "WITTENSTEIN SE Walter-Wittenstein-Strasse 1 97999 Igersheim", "extracted_fields": { "fields": [{ "field": "firma_telefon", "value": "+49 7931 4930", "confidence": "high", "note": "Google Maps detail panel" }, { "field": "firma_anschrift", "value": "Walter-Wittenstein-Strasse 1, 97999 Igersheim", "confidence": "high", "note": "Google Maps detail panel" }] } } },
-  "search": { "results": [{ "title": "WITTENSTEIN SE", "url": "https://www.google.com/maps/place/WITTENSTEIN+SE", "summary": "97999 Igersheim" }] },
-  "read": { "ok": true, "url": "https://www.google.com/maps/place/WITTENSTEIN+SE", "title": "WITTENSTEIN SE - Google Maps", "page_text_excerpt": "WITTENSTEIN SE 97999 Igersheim +49 7931 4930" }
+  "input": { "source_id": "maps.google.com", "company": "Example Manufacturing AG", "country": "DE" },
+  "expected": { "firma_name": "Example Manufacturing AG", "firma_telefon": "+49 30 5550100", "firma_plz": "10115" },
+  "browser": { "ok": true, "result": { "ok": true, "url": "https://www.google.com/maps/search/?api=1&query=Example%20Manufacturing%20AG%2C%20Berlin", "title": "Example Manufacturing AG - Google Maps", "page_text_excerpt": "Example Manufacturing AG Beispielstrasse 10 10115 Berlin", "extracted_fields": { "fields": [{ "field": "firma_telefon", "value": "+49 30 5550100", "confidence": "high", "note": "Google Maps detail panel" }, { "field": "firma_anschrift", "value": "Beispielstrasse 10, 10115 Berlin", "confidence": "high", "note": "Google Maps detail panel" }, { "field": "firma_plz", "value": "10115", "confidence": "high", "note": "Google Maps address" }, { "field": "firma_ort", "value": "Berlin", "confidence": "high", "note": "Google Maps address" }] } } },
+  "search": { "results": [{ "title": "Example Manufacturing AG", "url": "https://www.google.com/maps/search/?api=1&query=Example%20Manufacturing%20AG%2C%20Berlin", "summary": "10115 Berlin" }] },
+  "read": { "ok": true, "url": "https://www.google.com/maps/search/?api=1&query=Example%20Manufacturing%20AG%2C%20Berlin", "title": "Example Manufacturing AG - Google Maps", "page_text_excerpt": "Example Manufacturing AG 10115 Berlin +49 30 5550100" }
 }

@@ -1114,16 +1114,16 @@ export async function mount(ctx) {
         ...iconSeedForEntry(entry, index, grid, launcherRef),
         hidden: shouldUnhideDefaults ? false : undefined,
       }));
-      for (const seed of seeds) {
+      await Promise.all(seeds.map(async (seed) => {
         const existingDoc = existingById.get(seed.id);
         if (existingDoc && !force) {
           const patch = normalizeIconPatch(existingDoc, seed, grid, shouldUnhideDefaults);
           clearUnpersistedIconFields(existingDoc, patch);
           if (Object.keys(patch).length) await existingDoc.incrementalPatch(patch);
-          continue;
+          return;
         }
-        await upsertSeed(collection, seed.id, { ...seed, hidden: false });
-      }
+        await insertMissingSeed(collection, seed.id, { ...seed, hidden: false });
+      }));
       await normalizeIconLayoutIfNeeded(collection, launcherRef);
     } catch (error) {
       if (!isDatabaseClosingError(error)) throw error;
@@ -1231,6 +1231,17 @@ export async function mount(ctx) {
       await existing.incrementalPatch(seed);
       return;
     }
+    try {
+      await collection.insert(seed);
+    } catch (error) {
+      if (!isConflictError(error)) throw error;
+      const conflicted = await collection.findOne(id).exec();
+      if (!conflicted) throw error;
+      await conflicted.incrementalPatch(seed);
+    }
+  }
+
+  async function insertMissingSeed(collection, id, seed) {
     try {
       await collection.insert(seed);
     } catch (error) {

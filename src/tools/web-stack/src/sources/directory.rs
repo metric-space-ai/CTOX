@@ -37,7 +37,10 @@ impl SourceModule for Google {
         "google.de"
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["google"]
+        &["google", "google-search"]
+    }
+    fn host_suffixes(&self) -> &'static [&'static str] {
+        &["google.com"]
     }
     fn scrape_target_key(&self) -> Option<&'static str> {
         Some("google-de")
@@ -49,10 +52,10 @@ impl SourceModule for Google {
         &[Country::De, Country::At, Country::Ch]
     }
     fn authoritative_for(&self) -> &'static [FieldKey] {
-        &[FieldKey::FirmaDomain]
+        &[FieldKey::FirmaName, FieldKey::FirmaDomain]
     }
     fn shape_query(&self, query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
-        shaped(query, &[])
+        shaped(&format!("\"{query}\" offizielle Website"), &[])
     }
 }
 
@@ -79,10 +82,12 @@ impl SourceModule for GoogleMaps {
     }
     fn authoritative_for(&self) -> &'static [FieldKey] {
         &[
+            FieldKey::FirmaName,
             FieldKey::FirmaAnschrift,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
             FieldKey::FirmaTelefon,
+            FieldKey::FirmaDomain,
         ]
     }
     fn shape_query(&self, query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
@@ -101,6 +106,9 @@ impl SourceModule for Moneyhouse {
     }
     fn aliases(&self) -> &'static [&'static str] {
         &["moneyhouse"]
+    }
+    fn host_suffixes(&self) -> &'static [&'static str] {
+        &["moneyhouse.ch"]
     }
     fn scrape_target_key(&self) -> Option<&'static str> {
         Some("moneyhouse-ch")
@@ -139,6 +147,9 @@ impl SourceModule for RocketReach {
     fn aliases(&self) -> &'static [&'static str] {
         &["rocketreach"]
     }
+    fn host_suffixes(&self) -> &'static [&'static str] {
+        &["rocketreach.co"]
+    }
     fn scrape_target_key(&self) -> Option<&'static str> {
         Some("rocketreach-com")
     }
@@ -171,6 +182,9 @@ impl SourceModule for Experte {
     fn aliases(&self) -> &'static [&'static str] {
         &["experte", "email-pruefen"]
     }
+    fn host_suffixes(&self) -> &'static [&'static str] {
+        &["experte.de"]
+    }
     fn scrape_target_key(&self) -> Option<&'static str> {
         Some("experte-de")
     }
@@ -183,8 +197,8 @@ impl SourceModule for Experte {
     fn authoritative_for(&self) -> &'static [FieldKey] {
         &[FieldKey::PersonEmailValidation]
     }
-    fn shape_query(&self, query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
-        shaped(query, &["experte.de"])
+    fn shape_query(&self, _query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
+        None
     }
 }
 
@@ -246,6 +260,20 @@ mod tests {
         assert!(google_maps()
             .authoritative_for()
             .contains(&FieldKey::FirmaTelefon));
+        assert!(google_maps()
+            .authoritative_for()
+            .contains(&FieldKey::FirmaDomain));
+        assert!(google().authoritative_for().contains(&FieldKey::FirmaName));
+        assert!(google().host_suffixes().contains(&"google.com"));
+        assert!(google()
+            .shape_query("WITTENSTEIN SE", &ctx(Country::De))
+            .unwrap()
+            .query
+            .contains("offizielle Website"));
+        assert!(experte()
+            .shape_query("person@example.test", &ctx(Country::De))
+            .is_none());
+        assert!(rocketreach().host_suffixes().contains(&"rocketreach.co"));
         assert_eq!(
             experte().authoritative_for(),
             &[FieldKey::PersonEmailValidation]

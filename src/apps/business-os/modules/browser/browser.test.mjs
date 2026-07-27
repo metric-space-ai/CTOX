@@ -12,12 +12,31 @@ assert.equal(
   __browserTestHooks.userSessionPrefix({ user: { id: 'Michael.Welsch@example.com' } }),
   'browser_session_michael-welsch-example-com',
 );
+assert.deepEqual(
+  __browserTestHooks.browserActorIds({
+    user: {
+      id: 'user-1',
+      email: 'michael@example.com',
+      login: 'michael',
+    },
+  }),
+  ['user-1', 'michael@example.com', 'michael'],
+);
 assert.deepEqual(__browserTestHooks.selectedViewport({ value: '390x844' }), { width: 390, height: 844 });
 assert.equal(
   __browserTestHooks.browserSessionIdFromArgs({ session_id: 'browser_session_web_stack_auth_xing-com' }),
   'browser_session_web_stack_auth_xing-com',
 );
 assert.equal(__browserTestHooks.browserSessionIdFromArgs({ session_id: 'not-a-browser-session' }), '');
+assert.equal(__browserTestHooks.browserSessionNeedsStart(null), true);
+assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'disconnected' }), true);
+assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'error' }), true);
+assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'starting' }), false);
+assert.equal(__browserTestHooks.browserSessionNeedsStart({ id: 'browser_session_a', runtime_status: 'active' }), false);
+assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'active' }), true);
+assert.equal(__browserTestHooks.browserSessionIsLive({ id: 'browser_session_a', runtime_status: 'starting' }), false);
+assert.equal(__browserTestHooks.browserStartErrorIsRetryable({ code: 'sync_unavailable' }), true);
+assert.equal(__browserTestHooks.browserStartErrorIsRetryable({ code: 'auth_required' }), false);
 assert.equal(__browserTestHooks.browserCommandRequiresController('browser.navigate', { id: 'browser_session_test' }), true);
 assert.equal(__browserTestHooks.browserCommandRequiresController('browser.controller.acquire', { id: 'browser_session_test' }), false);
 assert.equal(__browserTestHooks.browserCommandRequiresController('browser.session.start', null), false);
@@ -118,6 +137,20 @@ assert.equal(
   true,
 );
 assert.equal(
+  __browserTestHooks.browserSurfaceCanControl({
+    session: { user: { id: 'user-1', email: 'michael@example.com' } },
+    host: { closest: () => ({ classList: { contains: (name) => name === 'is-focused' } }) },
+  }, {
+    latestSession: {
+      ...activeSession,
+      controller_user_id: 'michael@example.com',
+    },
+    controllerLeaseId: 'lease-local',
+  }, 1_000_000),
+  true,
+  'the capability actor email must control a session even when the shell user also has an opaque id',
+);
+assert.equal(
   __browserTestHooks.browserSurfaceCanControl(focusedCtx, {
     latestSession: activeSession,
     controllerLeaseId: 'lease-other',
@@ -185,7 +218,21 @@ assert.match(html, /data-browser-controller-release/);
 assert.match(html, /data-browser-clipboard-copy/);
 assert.match(html, /data-browser-clipboard-paste/);
 assert.match(html, /data-browser-downloads/);
-assert.match(js, /dispatch\(command, \{ until: 'accepted' \}\)/);
+assert.match(js, /waitsForRuntime \? 'terminal' : 'accepted'/);
+assert.match(
+  js.match(/async function dispatchBrowserCommand[\s\S]*?\n\}/)?.[0] || '',
+  /await startCommandSync\(ctx\);[\s\S]*?dispatch\(command,[\s\S]*?waitsForRuntime \? 'terminal' : 'accepted'/,
+  'every browser command must await the replicated command collection before dispatch',
+);
+assert.match(
+  js.match(/async function dispatchBrowserCommand[\s\S]*?\n\}/)?.[0] || '',
+  /browser\.session\.start[\s\S]*?refreshBrowserProjections\(ctx\)/,
+  'session start must refresh its projections after native runtime completion',
+);
+assert.match(
+  js.match(/async function refreshBrowserProjections[\s\S]*?\n\}/)?.[0] || '',
+  /restartCollection\(collection, \{ forceDirect: true \}\)/,
+);
 assert.match(js, /state\.latestSession = requestedSessionPending\s*\? null/);
 assert.match(js, /\[refs\.go, refs\.stop,/);
 assert.match(js, /templateUrl\.search = moduleUrl\.search/);
@@ -196,6 +243,16 @@ assert.doesNotMatch(desktopWrapperJs, /modules\/browser\/index\.js\?v=/);
 assert.match(js, /lease_id: state\.controllerLeaseId/);
 assert.match(js, /if \(requiresController\) payload\.lease_id = state\.controllerLeaseId/);
 assert.match(js, /session\.controller_lease_id === state\.controllerLeaseId/);
+assert.match(
+  js.match(/async function fillWebStackCredential[\s\S]*?\n\}/)?.[0] || '',
+  /lease_id: state\.controllerLeaseId/,
+  'credential fill must be bound to the active browser controller lease',
+);
+assert.doesNotMatch(
+  js.match(/async function fillWebStackCredential[\s\S]*?\n\}/)?.[0] || '',
+  /credential_value|secret_value\s*:/,
+  'credential fill must never place secret values on the RxDB command bus',
+);
 assert.match(syncJs, /isReadOnlyProjectionCollection[\s\S]{0,500}browser_sessions/);
 assert.doesNotMatch(js, /upsertDoc\(browserCollection\(ctx, 'browser_sessions'\)/);
 assert.doesNotMatch(html, /data-browser-(?:seed|clear|reset)/);
@@ -269,6 +326,36 @@ const sampleSessions = [
   { id: 'browser_session_b', runtime_status: 'starting', profile_mode: 'private', title: 'Login', updated_at_ms: 2 },
   { id: 'browser_session_c', runtime_status: 'stopped', profile_mode: 'persistent', current_url: 'https://old.example', updated_at_ms: 1 },
 ];
+
+assert.deepEqual(
+  hooks.mergeRequestedSession(sampleSessions, {
+    id: 'browser_session_requested',
+    runtime_status: 'active',
+    updated_at_ms: 4,
+  }).map((session) => session.id),
+  ['browser_session_requested', 'browser_session_a', 'browser_session_b', 'browser_session_c'],
+);
+assert.equal(
+  hooks.mergeRequestedSession(sampleSessions, {
+    ...sampleSessions[1],
+    runtime_status: 'active',
+    updated_at_ms: 5,
+  }).filter((session) => session.id === 'browser_session_b').length,
+  1,
+  'the targeted requested session must replace its stale list entry',
+);
+assert.deepEqual(
+  hooks.mergeRequestedDocument(
+    [{ id: 'browser_tab_old', updated_at_ms: 1 }],
+    { id: 'browser_tab_requested', updated_at_ms: 2 },
+  ).map((document) => document.id),
+  ['browser_tab_requested', 'browser_tab_old'],
+);
+assert.match(
+  js.match(/async function fillWebStackCredential[\s\S]*?\n\}/)?.[0] || '',
+  /until: 'terminal'[\s\S]*?refreshBrowserProjections\(ctx\)/,
+  'credential fill must wait for native completion and refresh its projections',
+);
 
 // Band counts: zeros included; the band ignores its own selection.
 assert.deepEqual(hooks.browserSessionViewCounts(sampleSessions, { band: 'active' }), { all: 3, active: 2, closed: 1 });

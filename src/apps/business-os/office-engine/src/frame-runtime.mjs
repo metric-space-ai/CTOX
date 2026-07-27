@@ -42,7 +42,11 @@ window.addEventListener('message', async (event) => {
 
 async function loadRuntime(config, peer) {
   const runtimeName = config.kind === 'spreadsheet' ? 'ctox-spreadsheets' : 'ctox-documents';
-  const defaultModule = new URL(`./runtime/${runtimeName}.mjs`, import.meta.url).href;
+  const productName = config.productName || (config.kind === 'spreadsheet' ? 'CTOX Spreadsheets' : 'CTOX Documents');
+  const defaultModuleUrl = new URL(`./runtime/${runtimeName}.mjs`, import.meta.url);
+  const assetRevision = new URL(import.meta.url).searchParams.get('v');
+  if (assetRevision) defaultModuleUrl.searchParams.set('v', assetRevision);
+  const defaultModule = defaultModuleUrl.href;
   const moduleUrl = config.launchArgs?.runtimeModule
     ? new URL(config.launchArgs.runtimeModule, location.href).href
     : defaultModule;

@@ -211,6 +211,9 @@
   ],
   "browser_runtime_types": [
     "browser.back",
+    "browser.controller.acquire",
+    "browser.controller.release",
+    "browser.controller.renew",
     "browser.forward",
     "browser.navigate",
     "browser.reload",

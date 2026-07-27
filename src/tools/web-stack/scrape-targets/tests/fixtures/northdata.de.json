@@ -1,38 +1,39 @@
 {
   "input": {
     "source_id": "northdata.de",
-    "company": "WITTENSTEIN SE",
+    "company": "Beispiel Maschinenbau SE",
     "country": "DE",
-    "url": "https://www.northdata.de/WITTENSTEIN+SE,+Igersheim/Amtsgericht+Ulm+HRB+680782"
+    "url": "https://www.northdata.de/Beispiel+Maschinenbau+SE"
   },
   "expected": {
-    "firma_name": "WITTENSTEIN SE",
-    "firma_anschrift": "Walter-Wittenstein-Strasse 1",
-    "firma_plz": "97999",
-    "firma_ort": "Igersheim"
+    "firma_name": "Beispiel Maschinenbau SE",
+    "firma_anschrift": "Musterstrasse 1",
+    "firma_plz": "12345",
+    "firma_ort": "Musterstadt"
   },
   "search": {
     "results": [{
-      "title": "WITTENSTEIN SE, Igersheim",
-      "url": "https://www.northdata.de/WITTENSTEIN+SE,+Igersheim/Amtsgericht+Ulm+HRB+680782",
+      "title": "Beispiel Maschinenbau SE, Musterstadt",
+      "url": "https://www.northdata.de/Beispiel+Maschinenbau+SE,+Musterstadt/Amtsgericht+Musterstadt+HRB+12345",
       "summary": "Unternehmensprofil"
     }]
   },
   "read": {
     "ok": false,
-    "url": "https://www.northdata.de/WITTENSTEIN+SE,+Igersheim/Amtsgericht+Ulm+HRB+680782"
+    "url": "https://www.northdata.de/Beispiel+Maschinenbau+SE"
   },
   "browser": {
     "ok": true,
     "result": {
-      "url": "https://www.northdata.de/WITTENSTEIN+SE,+Igersheim/Amtsgericht+Ulm+HRB+680782",
-      "title": "WITTENSTEIN SE, Igersheim",
-      "body_text": "WITTENSTEIN SE\nWalter-Wittenstein-Strasse 1, 97999 Igersheim",
+      "url": "https://www.northdata.de/Beispiel+Maschinenbau+SE",
+      "canonical_url": "https://www.northdata.de/Beispiel+Maschinenbau+SE,+Musterstadt/Amtsgericht+Musterstadt+HRB+12345",
+      "title": "Beispiel Maschinenbau SE, Musterstadt",
+      "body_text": "Beispiel Maschinenbau SE\nMusterstrasse 1, 12345 Musterstadt",
       "profile": {
-        "name": "WITTENSTEIN SE",
-        "address": "Walter-Wittenstein-Strasse 1, 97999 Igersheim"
+        "name": "Beispiel Maschinenbau SE",
+        "address": "Musterstrasse 1, 12345 Musterstadt"
       },
-      "html": "<h1 class=\"qualified\">WITTENSTEIN SE, Igersheim</h1><h3 class=\"ribbon label\">Name</h3><div class=\"general-information\"><div class=\"content\">WITTENSTEIN SE</div></div><h3 class=\"ribbon label\">Adresse</h3><div class=\"general-information\"><div class=\"content\">Walter-Wittenstein-Strasse 1, 97999 Igersheim</div></div><h3 class=\"ribbon label\">Status</h3>"
+      "html": "<link rel=\"canonical\" href=\"https://www.northdata.de/Beispiel+Maschinenbau+SE,+Musterstadt/Amtsgericht+Musterstadt+HRB+12345\"><h1 class=\"qualified\">Beispiel Maschinenbau SE, Musterstadt</h1><h3 class=\"ribbon label\">Name</h3><div class=\"general-information\"><div class=\"content\">Beispiel Maschinenbau SE</div></div><h3 class=\"ribbon label\">Adresse</h3><div class=\"general-information\"><div class=\"content\">Musterstrasse 1, 12345 Musterstadt</div></div><h3 class=\"ribbon label\">Status</h3>"
     },
     "detection": { "markers": [] }
   }

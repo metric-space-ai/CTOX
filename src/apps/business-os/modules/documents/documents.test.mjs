@@ -59,13 +59,151 @@ test('active editor teardown is awaited once across concurrent renders', async (
   assert.equal(state.editorDestroyPromise, null);
 });
 
-test('only transient Office startup failures are retryable', () => {
+test('editor target identity keeps repeated realtime renders on the same document version', async () => {
+  const key = hooks.editorRenderKey({ id: 'letter_1' }, { id: 'letter_1_recipient_7' }, 'ctox_documents');
+  assert.equal(key, 'letter_1:letter_1_recipient_7:ctox_documents');
+  assert.equal(hooks.editorRenderKey({ id: 'letter_1' }, null, 'ctox_documents'), '');
+
+  let releaseMount;
+  const mountPromise = new Promise((resolve) => { releaseMount = resolve; });
+  const state = { editorHandle: null, editorMountKey: '', editorMountPromise: null };
+  const tracked = hooks.trackEditorMount(state, key, mountPromise);
+
+  assert.equal(hooks.currentEditorTarget(state, key), tracked);
+  assert.equal(hooks.currentEditorTarget(state, 'letter_1:letter_1_recipient_8:ctox_documents'), null);
+
+  releaseMount({ kind: 'ctox-documents', renderKey: key });
+  await tracked;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(state.editorMountKey, '');
+  assert.equal(state.editorMountPromise, null);
+
+  state.editorHandle = { kind: 'ctox-documents', renderKey: key };
+  assert.deepEqual(await hooks.currentEditorTarget(state, key), state.editorHandle);
+  assert.equal(hooks.isCurrentEditorRender({ renderSerial: 7, disposed: false }, 7), true);
+  assert.equal(hooks.isCurrentEditorRender({ renderSerial: 7, disposed: true }, 7), false);
+  assert.equal(hooks.isCurrentEditorRender({ renderSerial: 8, disposed: false }, 7), false);
+});
+
+test('only transient Office startup and load-version failures are retryable', () => {
   assert.equal(hooks.isTransientOfficeStartupError(new Error('CTOX product iframe load timed out')), true);
   assert.equal(hooks.isTransientOfficeStartupError(new Error('Office RPC timed out: editor.ready')), true);
+  assert.equal(hooks.isTransientOfficeStartupError(new Error('Office RPC timed out: bridge.loadVersion')), true);
+  assert.equal(hooks.isTransientOfficeStartupError(Object.assign(new Error('Office RPC timed out'), {
+    code: 'rpc_timeout',
+    details: { method: 'editor.open' },
+  })), true);
+  assert.equal(hooks.isTransientOfficeStartupError(Object.assign(new Error('Office RPC peer is closed'), {
+    code: 'rpc_closed',
+  })), true);
   assert.equal(hooks.isTransientOfficeStartupError(new Error('CTOX Documents app-ready timed out')), true);
   assert.equal(hooks.isTransientOfficeStartupError(new Error('CTOX document fork SDK load timed out')), true);
+  assert.equal(hooks.isTransientOfficeStartupError(new Error('WebRTC replication cancelled')), true);
+  assert.equal(hooks.isTransientOfficeStartupError(new Error('QUERY_CANCELLED while reading the document version')), true);
   assert.equal(hooks.isTransientOfficeStartupError(new Error('Document SHA-256 mismatch')), false);
+  assert.equal(hooks.isTransientOfficeStartupError(new Error('Document blob was not found')), false);
+  assert.equal(hooks.isTransientOfficeStartupError(Object.assign(new Error('Read access denied'), {
+    code: 'permission_denied',
+  })), false);
   assert.equal(hooks.isTransientOfficeStartupError(new Error('Unsupported editor protocol')), false);
+});
+
+test('transient loadVersion timeout reinitializes the Office editor once and continues', async () => {
+  const instances = [];
+  const destroyedInstances = [];
+  const listenerCleanup = [];
+  const retryFeedback = [];
+  const waits = [];
+  const result = await hooks.initializeOfficeEditorWithRecovery({
+    initialize: async () => {
+      const instance = {
+        id: instances.length + 1,
+        async open() {
+          if (this.id === 1) {
+            throw Object.assign(new Error('Office RPC timed out: bridge.loadVersion'), {
+              code: 'rpc_timeout',
+              details: { method: 'bridge.loadVersion' },
+            });
+          }
+        },
+        async destroy() { destroyedInstances.push(this.id); },
+      };
+      instances.push(instance);
+      await hooks.openOfficeEditorInstance(instance, { recordId: 'merge_1', versionId: 'merge_1_v2' }, [
+        () => listenerCleanup.push(instance.id),
+      ]);
+    },
+    isCurrent: () => true,
+    shouldRetry: hooks.isTransientOfficeStartupError,
+    onRetry: async (error, attempt) => retryFeedback.push({ message: error.message, attempt }),
+    wait: async (ms) => waits.push(ms),
+    retryDelayMs: 25,
+    maxRecoveryAttempts: 1,
+  });
+
+  assert.deepEqual(instances.map(({ id }) => id), [1, 2]);
+  assert.deepEqual(destroyedInstances, [1]);
+  assert.deepEqual(listenerCleanup, [1]);
+  assert.deepEqual(retryFeedback, [{ message: 'Office RPC timed out: bridge.loadVersion', attempt: 1 }]);
+  assert.deepEqual(waits, [25]);
+  assert.deepEqual(result, { recovered: true, recoveryAttempts: 1 });
+});
+
+test('document versions open from local state before waiting for full replication', async () => {
+  const events = [];
+  const localVersion = { id: 'merge_1_recipient_1' };
+  const result = await hooks.resolveLocalFirst(
+    async () => {
+      events.push('local');
+      return localVersion;
+    },
+    async () => events.push('sync'),
+  );
+
+  assert.equal(result, localVersion);
+  assert.deepEqual(events, ['local']);
+});
+
+test('missing or transient local document versions wait for replication once', async () => {
+  const events = [];
+  let localReads = 0;
+  const result = await hooks.resolveLocalFirst(
+    async () => {
+      localReads += 1;
+      events.push(`local-${localReads}`);
+      if (localReads === 1) throw new Error('WebRTC replication cancelled');
+      return { id: 'merge_1_recipient_2' };
+    },
+    async () => events.push('sync'),
+  );
+
+  assert.deepEqual(result, { id: 'merge_1_recipient_2' });
+  assert.deepEqual(events, ['local-1', 'sync', 'local-2']);
+});
+
+test('non-retryable Office load failures fail closed without reinitialization', async () => {
+  let initializeCalls = 0;
+  let retryCalls = 0;
+  const integrityError = Object.assign(new Error('Document SHA-256 mismatch'), {
+    code: 'blob_sha256_mismatch',
+  });
+
+  await assert.rejects(
+    hooks.initializeOfficeEditorWithRecovery({
+      initialize: async () => {
+        initializeCalls += 1;
+        throw integrityError;
+      },
+      shouldRetry: hooks.isTransientOfficeStartupError,
+      onRetry: async () => { retryCalls += 1; },
+      wait: async () => {},
+      retryDelayMs: 0,
+      maxRecoveryAttempts: 1,
+    }),
+    integrityError,
+  );
+  assert.equal(initializeCalls, 1);
+  assert.equal(retryCalls, 0);
 });
 
 test('documents module declares the shared Knowledge collections', async () => {
@@ -370,6 +508,102 @@ test('mail merge and series letter records remain one list entry while normal do
   assert.deepEqual(grouped.filter((entry) => !entry.is_mail_merge).map((entry) => entry.id).sort(), ['letter_1', 'note_1']);
 });
 
+test('typed campaign mail merges group export revisions by campaign and template identity', () => {
+  const records = [100, 200, 300].map((updatedAt, index) => hooks.normalizeDocumentRecord({
+    id: `merge_revision_${index + 1}`,
+    title: 'MURRELEKTRONIK 2022 - Welle 3 - Brief Erstkontakt - Serienbrief',
+    filename: `murrel-serienbrief-${index + 1}.docx`,
+    document_type: 'mail_merge',
+    status: 'Created',
+    idempotency_key: `crm-app:campaign-mail-merge:revision-${index + 1}`,
+    mail_merge: { recipient_count: index === 0 ? 18 : 19, requested_count: 19 },
+    template_ref: { template_id: 'brief-erstkontakt', version: 4 },
+    provenance: {
+      app_id: 'crm',
+      source: 'campaign-mail-merge',
+      selection_id: 4711,
+    },
+    updated_at_ms: updatedAt,
+  }));
+
+  const grouped = hooks.groupDocumentRecords(records);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].is_mail_merge, true);
+  assert.equal(grouped[0].recipient_count, 19);
+  assert.equal(grouped[0].id, 'merge_revision_3');
+  assert.deepEqual(grouped[0].record_ids, [
+    'merge_revision_1',
+    'merge_revision_2',
+    'merge_revision_3',
+  ]);
+  assert.equal(
+    grouped[0].bundle_key,
+    'mail_merge:crm:campaign-mail-merge:4711:brief-erstkontakt:4',
+  );
+});
+
+test('explicit mail merge run ids keep separate runs apart while grouping each retry', () => {
+  const records = [
+    ['run-a-v1', 'run-a', 100],
+    ['run-a-v2', 'run-a', 200],
+    ['run-b-v1', 'run-b', 300],
+  ].map(([id, bundleId, updatedAt]) => hooks.normalizeDocumentRecord({
+    id,
+    title: 'Sommerkampagne - Serienbrief',
+    filename: `${id}.docx`,
+    document_type: 'mail_merge',
+    status: 'Created',
+    mail_merge: { bundle_id: bundleId, recipient_count: 19 },
+    provenance: { app_id: 'crm', source: 'campaign-mail-merge' },
+    updated_at_ms: updatedAt,
+  }));
+
+  const grouped = hooks.groupDocumentRecords(records);
+
+  assert.equal(grouped.length, 2);
+  assert.deepEqual(
+    grouped.map(({ bundle_key: key }) => key).sort(),
+    ['mail_merge:run-a', 'mail_merge:run-b'],
+  );
+  assert.deepEqual(
+    grouped.find(({ bundle_key: key }) => key === 'mail_merge:run-a').record_ids,
+    ['run-a-v1', 'run-a-v2'],
+  );
+});
+
+test('campaign export run provenance is kept as revision metadata, not a separate sidebar bundle', () => {
+  const records = [
+    ['run-a-v1', 'run-a', 100],
+    ['run-a-v2', 'run-a', 200],
+    ['run-b-v1', 'run-b', 300],
+  ].map(([id, exportRunId, updatedAt]) => hooks.normalizeDocumentRecord({
+    id,
+    title: 'Sommerkampagne - Serienbrief',
+    filename: `${id}.docx`,
+    document_type: 'mail_merge',
+    status: 'Created',
+    mail_merge: { recipient_count: 19 },
+    template_ref: { template_id: 'brief-erstkontakt', version: 4 },
+    provenance: {
+      app_id: 'crm',
+      source: 'campaign-mail-merge',
+      selection_id: 4711,
+      export_run_id: exportRunId,
+    },
+    updated_at_ms: updatedAt,
+  }));
+
+  const grouped = hooks.groupDocumentRecords(records);
+
+  assert.equal(grouped.length, 1);
+  assert.equal(
+    grouped[0].bundle_key,
+    'mail_merge:crm:campaign-mail-merge:4711:brief-erstkontakt:4',
+  );
+  assert.deepEqual(grouped[0].record_ids, ['run-a-v1', 'run-a-v2', 'run-b-v1']);
+});
+
 test('legacy per-recipient campaign documents group by stable provenance and template identity', () => {
   const records = ['Bjarne Schäfer', 'Daniel Floris', 'Markus H. Niedermayer'].map((recipient, index) => (
     hooks.normalizeDocumentRecord({
@@ -396,6 +630,41 @@ test('legacy per-recipient campaign documents group by stable provenance and tem
   assert.equal(grouped[0].recipient_count, 3);
   assert.equal(grouped[0].title, 'MURRELEKTRONIK 2022 - Welle 3 - GT - 12.10.2022');
   assert.deepEqual(grouped[0].record_ids, ['legacy_1', 'legacy_2', 'legacy_3']);
+});
+
+test('legacy mail merge groups count and navigate duplicate exports once per CRM recipient', async () => {
+  const documents = [100, 200, 300].map((updatedAt, index) => hooks.normalizeDocumentRecord({
+    id: `duplicate_${index + 1}`,
+    title: `Sommerkampagne - Ada Lovelace - Brief Erstkontakt ${index + 1}`,
+    filename: `duplicate-${index + 1}.docx`,
+    document_type: 'word_document',
+    status: 'Draft',
+    current_version_id: `duplicate_${index + 1}_v1`,
+    template_ref: { template_id: 'brief-erstkontakt', version: 1 },
+    provenance: {
+      app_id: 'crm-app',
+      source: 'campaign-mail-merge',
+      selection_id: 1734,
+      selectionmember_id: 42,
+      recipient_label: 'Ada Lovelace',
+    },
+    updated_at_ms: updatedAt,
+  }));
+  const grouped = hooks.groupDocumentRecords(documents);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].recipient_count, 1);
+  assert.deepEqual(grouped[0].record_ids, ['duplicate_1', 'duplicate_2', 'duplicate_3']);
+
+  const state = {
+    ctx: { db: {} },
+    documents,
+    selectedId: 'duplicate_3',
+    selectedVersion: { id: 'duplicate_3_v1' },
+  };
+  const navigation = await hooks.refreshMailMergeNavigation(state);
+  assert.equal(navigation.entries.length, 1);
+  assert.equal(navigation.entries[0].documentId, 'duplicate_3');
+  assert.equal(navigation.entries[0].label, 'Ada Lovelace');
 });
 
 test('mail merge navigator loads recipient versions and resolves recipient search', async () => {
@@ -455,6 +724,86 @@ test('mail merge navigator loads recipient versions and resolves recipient searc
   assert.equal(hooks.findMailMergeRecipientIndex(navigation.entries, 'nicht vorhanden'), -1);
 });
 
+test('mail merge recipient selection keeps the rendered navigator during async refresh', () => {
+  const rendered = {
+    groupId: 'campaign-268',
+    activeIndex: 0,
+    entries: [
+      { documentId: 'merge_1', versionId: 'merge_1_v1', label: 'Peter Mehrle' },
+      { documentId: 'merge_1', versionId: 'merge_1_v2', label: 'Isabell Dapper' },
+    ],
+  };
+  assert.deepEqual(
+    hooks.resolveMailMergeRecipientSelection(null, rendered, 1),
+    {
+      navigation: rendered,
+      index: 1,
+      entry: rendered.entries[1],
+    },
+  );
+  assert.equal(hooks.resolveMailMergeRecipientSelection(null, null, 1), null);
+});
+
+test('mail merge navigator uses the selected typed export when grouped revisions exist', async () => {
+  const requestedDocumentIds = [];
+  const versions = {
+    merge_old: [{
+      id: 'merge_old_v1',
+      document_id: 'merge_old',
+      source_kind: 'mail_merge_recipient',
+      mail_merge_recipient: { id: 'old-person', label: 'Alte Revision', index: 0, total: 1 },
+    }],
+    merge_current: [
+      {
+        id: 'merge_current_v1',
+        document_id: 'merge_current',
+        source_kind: 'mail_merge_recipient',
+        mail_merge_recipient: { id: 'person-1', label: 'Peter Mehrle', index: 0, total: 2 },
+      },
+      {
+        id: 'merge_current_v2',
+        document_id: 'merge_current',
+        source_kind: 'mail_merge_recipient',
+        mail_merge_recipient: { id: 'person-2', label: 'Isabell Dapper', index: 1, total: 2 },
+      },
+    ],
+  };
+  const common = {
+    title: 'MURRELEKTRONIK 2022 - Brief Erstkontakt - Serienbrief',
+    filename: 'murrel-serienbrief.docx',
+    document_type: 'mail_merge',
+    mail_merge: { recipient_count: 2 },
+    template_ref: { template_id: 'letter-first-contact', version: 1 },
+    provenance: { app_id: 'crm-app', source: 'campaign-mail-merge', selection_id: 268 },
+  };
+  const state = {
+    ctx: {
+      db: {
+        collection(name) {
+          if (name !== 'document_versions') return null;
+          return {
+            find({ selector }) {
+              requestedDocumentIds.push(selector.document_id);
+              return { exec: async () => versions[selector.document_id] || [] };
+            },
+          };
+        },
+      },
+    },
+    documents: [
+      hooks.normalizeDocumentRecord({ ...common, id: 'merge_old', current_version_id: 'merge_old_v1', updated_at_ms: 100 }),
+      hooks.normalizeDocumentRecord({ ...common, id: 'merge_current', current_version_id: 'merge_current_v1', updated_at_ms: 200 }),
+    ],
+    selectedId: 'merge_current',
+    selectedVersion: { id: 'merge_current_v1' },
+  };
+
+  const navigation = await hooks.refreshMailMergeNavigation(state);
+  assert.deepEqual(requestedDocumentIds, ['merge_current']);
+  assert.deepEqual(navigation.entries.map(({ label }) => label), ['Peter Mehrle', 'Isabell Dapper']);
+  assert.equal(navigation.activeIndex, 0);
+});
+
 test('document management searches grouped recipient text and filters type, status, and provenance source', () => {
   const documents = [
     hooks.normalizeDocumentRecord({
@@ -511,6 +860,8 @@ test('document management searches grouped recipient text and filters type, stat
   assert.deepEqual(hooks.visibleDocuments(state).map(({ id }) => id), ['word_1', 'note_1', 'merge_1']);
   state.sortBy = 'title_asc';
   assert.deepEqual(hooks.visibleDocuments(state).map(({ id }) => id), ['word_1', 'merge_1', 'note_1']);
+  state.sortBy = 'creator_app';
+  assert.deepEqual(hooks.visibleDocuments(state).map(({ id }) => id), ['merge_1', 'word_1', 'note_1']);
 });
 
 test('mail merge and series letter records use the DOCX render, save, and export path', () => {
@@ -520,7 +871,7 @@ test('mail merge and series letter records use the DOCX render, save, and export
   assert.equal(hooks.isDocxDocumentRecord({ document_type: 'markdown_document', filename: 'notes.md' }), false);
 });
 
-test('Documents UI exposes a real list resizer, collapsed actions drawer, and product name Dokumente', async () => {
+test('Documents UI exposes resizable library and actions columns with a collapsed actions default', async () => {
   const [html, css, source, moduleJson, deMessages] = await Promise.all([
     readFile(new URL('./index.html', import.meta.url), 'utf8'),
     readFile(new URL('./index.css', import.meta.url), 'utf8'),
@@ -532,12 +883,24 @@ test('Documents UI exposes a real list resizer, collapsed actions drawer, and pr
   assert.match(html, /data-resize-frame/);
   assert.match(html, /class="ctox-column-resizer documents-library-resizer"/);
   assert.match(html, /data-resizer-var="--documents-library-width"/);
+  assert.match(html, /class="ctox-column-resizer documents-actions-resizer"/);
+  assert.match(html, /data-resizer="right"/);
+  assert.match(html, /data-resizer-var="--documents-actions-width"/);
   assert.match(css, /\.documents-library-resizer[\s\S]*cursor:\s*col-resize/);
+  assert.match(css, /\.documents-module\.is-actions-open\s*\{[\s\S]*grid-template-columns:[^;]*var\(--documents-actions-width\)/);
+  assert.match(css, /\.documents-actions-resizer[\s\S]*cursor:\s*col-resize/);
+  assert.match(css, /\.documents-workbench\s*\{[\s\S]*container-type:\s*inline-size/);
+  assert.match(css, /@container documents-workbench \(max-width: 560px\)[\s\S]*\.documents-actions-toggle span[\s\S]*display:\s*none/);
+  assert.match(css, /@container documents-workbench \(max-width: 560px\)[\s\S]*\.documents-recipient-navigator[\s\S]*minmax\(0, 1fr\)/);
+  assert.match(css, /\.documents-strip-leading\s*\{[\s\S]*overflow:\s*hidden/);
   assert.match(source, /new ResizeObserver/);
-  assert.match(source, /root\.classList\.toggle\('is-compact', width <= 720\)/);
+  assert.match(source, /root\.classList\.toggle\('is-compact', width <= 1048\)/);
+  assert.match(source, /root\.classList\.toggle\('is-actions-overlay', width < 1616\)/);
   assert.match(css, /\.documents-module\.is-compact \.documents-library-resizer[\s\S]*display:\s*none/);
+  assert.match(css, /\.documents-module\.is-compact \.documents-actions-drawer[\s\S]*position:\s*absolute/);
   assert.match(html, /data-documents-actions-drawer[\s\S]*aria-hidden="true"[\s\S]*hidden/);
-  assert.match(css, /\.documents-actions-drawer\s*\{[\s\S]*position:\s*absolute/);
+  assert.match(html, /data-documents-actions-resizer[\s\S]*hidden/);
+  assert.match(source, /actionsResizer\.hidden = !state\.actionsOpen/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.html'\)/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.css'\)/);
   assert.equal(moduleJson.title, 'Dokumente');

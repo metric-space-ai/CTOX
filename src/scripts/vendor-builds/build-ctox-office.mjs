@@ -127,6 +127,13 @@ else if (reusedUpstreamRoot) {
       : input
   )));
 }
+if (upstreamBuildRoot || reusedUpstreamRoot) {
+  await extendUpstreamStartupBudget();
+  upstreamStaticInputs = await Promise.all(upstreamStaticInputs.map(async (input) => ({
+    ...input,
+    sha256: await fileSha256(path.join(outputRoot, input.staged_path)),
+  })));
+}
 
 for (const input of bundledInputs) {
   const normalized = input.toLowerCase().replaceAll('\\', '/');
@@ -323,4 +330,30 @@ async function stageOfficeUpstream(buildRoot) {
     staged_path: path.relative(outputRoot, file).replaceAll('\\', '/'),
     sha256: await fileSha256(file),
   })));
+}
+
+async function extendUpstreamStartupBudget() {
+  const entries = [
+    'web-apps/apps/documenteditor/main/index.html',
+    'web-apps/apps/documenteditor/main/index_loader.html',
+    'web-apps/apps/spreadsheeteditor/main/index.html',
+    'web-apps/apps/spreadsheeteditor/main/index_loader.html',
+    'web-apps/apps/spreadsheeteditor/main/index_internal.html',
+  ];
+  for (const relative of entries) {
+    const target = path.join(outputRoot, 'upstream', relative);
+    let html = await readFile(target, 'utf8');
+    html = html
+      .replace(
+        /(var requireTimeoutID = setTimeout\(function\(\)\{[\s\S]*?window\.location\.reload\(\);\s*\}, )30000(\);)/,
+        '$1120000$2',
+      )
+      .replace(/waitSeconds:\s*30/g, 'waitSeconds: 120');
+    if (!html.includes('var requireTimeoutID = setTimeout(function(){')
+      || !html.includes('}, 120000);')
+      || !/waitSeconds:\s*120/.test(html)) {
+      throw new Error(`Unable to apply CTOX Office startup budget to ${relative}`);
+    }
+    await writeFile(target, html);
+  }
 }

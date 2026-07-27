@@ -110,6 +110,24 @@ export async function mount(ctx) {
   const cleanups = [];
   let mounted = true;
   const scheduleRefresh = debounce(safeLoadAndRender, 80);
+  const requestedStartTimers = new Set();
+
+  function openRequestedBrowserSession(args, attempt = 0) {
+    state.notice = 'Browser-Anmeldung wird geöffnet.';
+    scheduleRefresh();
+    ensureRequestedBrowserSession(ctx, state, args)
+      .then(scheduleRefresh)
+      .catch((error) => {
+        state.notice = browserStartErrorMessage(error);
+        scheduleRefresh();
+        if (!browserStartErrorIsRetryable(error) || attempt >= 3 || !mounted) return;
+        const timer = globalThis.setTimeout(() => {
+          requestedStartTimers.delete(timer);
+          openRequestedBrowserSession(args, attempt + 1);
+        }, Math.min(8_000, 1_000 * (2 ** attempt)));
+        requestedStartTimers.add(timer);
+      });
+  }
 
   const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
     const sessionId = browserSessionIdFromArgs(detail);
@@ -118,12 +136,7 @@ export async function mount(ctx) {
     state.selectedSessionId = sessionId;
     state.requestedSessionId = sessionId;
     scheduleRefresh();
-    ensureRequestedBrowserSession(ctx, state, detail)
-      .then(scheduleRefresh)
-      .catch((error) => {
-        state.notice = browserStartErrorMessage(error);
-        scheduleRefresh();
-      });
+    openRequestedBrowserSession(detail);
   });
   if (sessionSelectionToken && ctx.eventBus?.off) {
     cleanups.push(() => ctx.eventBus.off('browser:select-session', sessionSelectionToken));
@@ -375,15 +388,12 @@ export async function mount(ctx) {
   const leaseRenewTimer = globalThis.setInterval(renewControllerLeaseIfNeeded, 30_000);
   cleanups.push(() => globalThis.clearInterval(leaseRenewTimer));
   safeLoadAndRender();
-  ensureRequestedBrowserSession(ctx, state, ctx.args)
-    .then(scheduleRefresh)
-    .catch((error) => {
-      state.notice = browserStartErrorMessage(error);
-      scheduleRefresh();
-    });
+  openRequestedBrowserSession(ctx.args);
 
   return () => {
     mounted = false;
+    for (const timer of requestedStartTimers) globalThis.clearTimeout(timer);
+    requestedStartTimers.clear();
     for (const cleanup of cleanups) {
       try { cleanup(); } catch (error) { console.error('[browser] cleanup failed', error); }
     }
@@ -392,9 +402,9 @@ export async function mount(ctx) {
 
   function renewControllerLeaseIfNeeded() {
     const session = state.latestSession;
-    const actorId = String(ctx.session?.user?.id || ctx.session?.userId || '');
+    const actorIds = browserActorIds(ctx.session);
     const surface = ctx.host?.closest?.('.shell-window');
-    if (!shouldRenewControllerLease(session, actorId, Date.now(), {
+    if (!shouldRenewControllerLease(session, actorIds, Date.now(), {
       documentVisible: globalThis.document?.visibilityState !== 'hidden',
       documentFocused: globalThis.document?.hasFocus?.() !== false,
       surfaceFocused: Boolean(surface?.classList.contains('is-focused')),
@@ -436,21 +446,28 @@ export async function mount(ctx) {
 
   async function loadAndRender() {
     if (!mounted) return;
-    const [commands, sessions, tabs, inputs, handoffTasks] = await Promise.all([
+    const [commands, sessions, requestedSession, initialTabs, inputs, handoffTasks] = await Promise.all([
       readCollection(browserCollection(ctx, 'business_commands'), { limit: 50 }),
-      readCollection(browserCollection(ctx, 'browser_sessions'), { limit: 20 }),
+      readCollection(browserCollection(ctx, 'browser_sessions'), { limit: 200 }),
+      readDocument(browserCollection(ctx, 'browser_sessions'), state.requestedSessionId),
       readCollection(browserCollection(ctx, 'browser_tabs'), { limit: 40 }),
       readCollection(browserCollection(ctx, 'browser_input_events'), { limit: 80 }),
       readCollection(browserCollection(ctx, 'ctox_queue_tasks'), { limit: 50 }),
     ]);
-    const actorId = String(ctx.session?.user?.id || ctx.session?.userId || '');
-    const visibleSessions = sessions.filter((session) => session.owner_user_id === actorId);
+    const actorIds = browserActorIds(ctx.session);
+    const visibleSessions = mergeRequestedSession(sessions, requestedSession)
+      .filter((session) => actorIds.includes(String(session.owner_user_id || '')));
     if (state.selectedSessionId
       && state.selectedSessionId !== state.requestedSessionId
       && !visibleSessions.some((session) => session.id === state.selectedSessionId)) {
       state.selectedSessionId = '';
     }
     const selectedSession = state.selectedSessionId ? latestSession(visibleSessions, state.selectedSessionId) : null;
+    const requestedTab = await readDocument(
+      browserCollection(ctx, 'browser_tabs'),
+      selectedSession?.current_tab_id || requestedSession?.current_tab_id || '',
+    );
+    const tabs = mergeRequestedDocument(initialTabs, requestedTab);
     const requestedSessionPending = Boolean(state.requestedSessionId && !selectedSession);
     const frameSessionId = selectedSession?.id || state.selectedSessionId || '';
     const frames = frameSessionId
@@ -466,7 +483,10 @@ export async function mount(ctx) {
       : selectedSession || latestSession(visibleSessions, newestFrame?.session_id) || latestSession(visibleSessions);
     if (!requestedSessionPending) {
       state.selectedSessionId = state.latestSession?.id || '';
-      if (state.latestSession?.id === state.requestedSessionId) state.requestedSessionId = '';
+      if (state.latestSession?.id === state.requestedSessionId
+        && browserSessionIsLive(state.latestSession)) {
+        state.requestedSessionId = '';
+      }
     }
     state.latestFrame = latestFrame(frames, state.latestSession?.id);
     state.latestTab = latestTab(tabs, state.latestFrame?.tab_id || state.latestSession?.current_tab_id);
@@ -554,9 +574,9 @@ async function dispatchBrowserCommand(ctx, state, commandType, payloadPatch = {}
   if (requiresController) payload.lease_id = state.controllerLeaseId;
   delete payload.new_session;
   if (payload.url) payload.url = normalizeUrl(payload.url);
-  // The shell owns the live replication lifecycle and the command bus performs
-  // its own command-collection flush. Awaiting another five-collection startup
-  // here can deadlock submission while an existing peer is resyncing.
+  // Browser commands must not race the command collection during a freshly
+  // mounted window. Only await the command path here; awaiting all browser
+  // projections can deadlock while an existing peer is resyncing.
   const command = {
     id: commandId,
     command_id: commandId,
@@ -577,8 +597,14 @@ async function dispatchBrowserCommand(ctx, state, commandType, payloadPatch = {}
     updated_at_ms: now,
     sync_queue_tasks: false,
   };
+  await startCommandSync(ctx);
   const commandBus = requireCommandBus(ctx);
-  await commandBus.dispatch(command, { until: 'accepted' });
+  const waitsForRuntime = commandType === 'browser.session.start';
+  await commandBus.dispatch(command, {
+    until: waitsForRuntime ? 'terminal' : 'accepted',
+    ...(waitsForRuntime ? { timeoutMs: 150_000 } : {}),
+  });
+  if (waitsForRuntime) await refreshBrowserProjections(ctx);
   return { commandId, sessionId, tabId, opensNewSession };
 }
 
@@ -590,7 +616,8 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
   if (state.requestedSessionStarts.has(request.session_id)) return false;
 
   const existing = await browserCollection(ctx, 'browser_sessions')?.findOne(request.session_id).exec();
-  if (existing) return false;
+  const existingData = existing?.toJSON?.() || existing;
+  if (!browserSessionNeedsStart(existingData)) return false;
 
   state.requestedSessionStarts.add(request.session_id);
   try {
@@ -599,7 +626,6 @@ async function ensureRequestedBrowserSession(ctx, state, args = {}) {
       ...request,
       lease_id: state.controllerLeaseId,
     });
-    state.notice = 'Browser-Anmeldung wird geöffnet.';
     return true;
   } catch (error) {
     state.requestedSessionStarts.delete(request.session_id);
@@ -646,6 +672,22 @@ function browserStartErrorMessage(error) {
   return message
     ? `Die Browser-Anmeldung konnte nicht geöffnet werden: ${message}`
     : 'Die Browser-Anmeldung konnte nicht geöffnet werden.';
+}
+
+function browserSessionIsLive(session) {
+  const status = String(session?.runtime_status || session?.status || '').toLowerCase();
+  return status === 'active';
+}
+
+function browserSessionNeedsStart(session) {
+  if (!session?.id) return true;
+  const status = String(session.runtime_status || session.status || '').toLowerCase();
+  return !['active', 'starting'].includes(status);
+}
+
+function browserStartErrorIsRetryable(error) {
+  const code = String(error?.code || '').toLowerCase();
+  return ['projection_delayed', 'sync_unavailable', 'native_unavailable'].includes(code);
 }
 
 function userSessionPrefix(session) {
@@ -861,10 +903,11 @@ async function fillWebStackCredential(ctx, state) {
   const payload = {
     session_id: session.id,
     tab_id: state.latestTab?.id || session.current_tab_id || '',
+    lease_id: state.controllerLeaseId,
     source_id: session.payload?.source_id || '',
     secret_scope: 'credentials',
     secret_name: secretName,
-    field_role: session.payload?.credential_field_role || 'password',
+    field_role: session.payload?.credential_field_role || 'both',
     confirmed: true,
     browser_stream: 'rxdb',
     secret_value_in_rxdb: false,
@@ -884,14 +927,21 @@ async function fillWebStackCredential(ctx, state) {
         module_id: 'browser',
         actor: actorContext(ctx.session),
       },
-    });
-  state.notice = selector
-    ? 'CTOX setzt die gespeicherten Zugangsdaten in das passende Feld ein.'
-    : 'CTOX setzt die gespeicherten Zugangsdaten in das aktive Feld ein.';
+    }, { until: 'terminal', timeoutMs: 150_000 });
+  await refreshBrowserProjections(ctx);
+  state.notice = 'Zugangsdaten wurden eingesetzt.';
 }
 
 async function startCommandSync(ctx) {
   return startBrowserRuntimeSync(ctx, ['business_commands']);
+}
+
+async function refreshBrowserProjections(ctx) {
+  if (!ctx.sync?.restartCollection) return;
+  await Promise.all(
+    ['browser_sessions', 'browser_tabs', 'browser_frames']
+      .map((collection) => ctx.sync.restartCollection(collection, { forceDirect: true })),
+  );
 }
 
 async function startBrowserRuntimeSync(ctx, collections = [
@@ -1003,7 +1053,7 @@ async function writeInputEvent(ctx, state, type, patch) {
     id: `${sessionId}:input:${seq}:${type}`,
     tenant_id: browserTenantId(ctx),
     owner_user_id: session?.owner_user_id || '',
-    controller_user_id: ctx.session?.user?.id || ctx.session?.userId || '',
+    controller_user_id: session?.controller_user_id || browserActorIds(ctx.session)[0] || '',
     session_id: sessionId,
     tab_id: state.latestTab?.id || frame?.tab_id || '',
     seq,
@@ -1064,6 +1114,25 @@ async function readCollection(collection, options = {}) {
   return docs
     .map((doc) => doc?.toJSON?.() || doc)
     .filter((doc) => doc && doc._deleted !== true);
+}
+
+async function readDocument(collection, id) {
+  if (!collection?.findOne || !id) return null;
+  const doc = await collection.findOne(id).exec();
+  const data = doc?.toJSON?.() || doc;
+  return data && data._deleted !== true ? data : null;
+}
+
+function mergeRequestedSession(sessions, requestedSession) {
+  return mergeRequestedDocument(sessions, requestedSession);
+}
+
+function mergeRequestedDocument(documents, requestedDocument) {
+  if (!requestedDocument?.id) return documents;
+  return [
+    requestedDocument,
+    ...documents.filter((document) => document.id !== requestedDocument.id),
+  ];
 }
 
 function browserCollection(ctx, name) {
@@ -1820,12 +1889,12 @@ function browserSurfaceIsFocused(ctx) {
 function browserSurfaceCanControl(ctx, state, now = Date.now()) {
   if (!browserSurfaceIsFocused(ctx)) return false;
   const session = state?.latestSession;
-  const actorId = String(ctx?.session?.user?.id || ctx?.session?.userId || '');
+  const actorIds = browserActorIds(ctx?.session);
   const expiresAt = Number(session?.controller_lease_expires_at_ms || 0);
   return Boolean(
     session?.id
-      && actorId
-      && session.controller_user_id === actorId
+      && actorIds.length
+      && actorIds.includes(String(session.controller_user_id || ''))
       && String(session.controller_lease_id || '').trim()
       && session.controller_lease_id === state.controllerLeaseId
       && Number.isFinite(expiresAt)
@@ -1852,7 +1921,10 @@ function shouldRenewControllerLease(session, actorId, now = Date.now(), options 
     controllerLeaseId = '',
   } = options;
   if (!documentVisible || !documentFocused || !surfaceFocused || renewInFlight) return false;
-  if (!session?.id || !actorId || session.controller_user_id !== actorId) return false;
+  const actorIds = Array.isArray(actorId)
+    ? actorId.map((value) => String(value || '')).filter(Boolean)
+    : [String(actorId || '')].filter(Boolean);
+  if (!session?.id || !actorIds.includes(String(session.controller_user_id || ''))) return false;
   if (!String(session.controller_lease_id || '').trim()) return false;
   if (session.controller_lease_id !== controllerLeaseId) return false;
   const expiresAt = Number(session.controller_lease_expires_at_ms || 0);
@@ -1863,6 +1935,16 @@ function shouldRenewControllerLease(session, actorId, now = Date.now(), options 
 function newBrowserControllerLeaseId() {
   return globalThis.crypto?.randomUUID?.()
     || `browser-lease-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
+function browserActorIds(session) {
+  const user = session?.user && typeof session.user === 'object' ? session.user : {};
+  return [...new Set([
+    user.id,
+    user.email,
+    user.login,
+    session?.userId,
+  ].map((value) => String(value || '').trim()).filter(Boolean))];
 }
 
 function debounce(fn, delayMs) {
@@ -1915,6 +1997,12 @@ export const __browserTestHooks = {
   browserCommandRequiresController,
   browserSurfaceIsFocused,
   browserSurfaceCanControl,
+  browserActorIds,
+  mergeRequestedSession,
+  mergeRequestedDocument,
+  browserSessionIsLive,
+  browserSessionNeedsStart,
+  browserStartErrorIsRetryable,
   newBrowserControllerLeaseId,
   filterSessionsForView,
   browserSessionViewCounts,

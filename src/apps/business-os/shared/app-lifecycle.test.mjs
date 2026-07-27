@@ -209,6 +209,34 @@ test('tenant-local module is private instead of packaged system UI', () => {
   assert.equal(canSeeModuleForAppVersion(local), true, 'local app is present only in this instance catalog');
 });
 
+test('native catalog keeps an instance-local module visible when runtime_installed is true', () => {
+  const local = {
+    id: 'private-crm',
+    title: 'Private CRM',
+    version: '0.4.77',
+    source: 'local',
+    install_scope: 'local',
+    entry: 'local-modules/private-crm/index.html',
+    lifecycle: {
+      source: 'native_catalog_projection',
+      runtime_installed: true,
+      local_module: true,
+      visibility_state: 'private',
+      audience: 'instance',
+      public: false,
+      current_semver: '0.4.77',
+    },
+  };
+  assert.equal(
+    canSeeModuleForAppVersion(local, {
+      session: session('team_member', 'user'),
+      governance,
+    }),
+    true,
+    'the native local-module boundary is authoritative for instance visibility'
+  );
+});
+
 test('projected preview audience display still requires exact app view access', () => {
   const preview = {
     ...draftApp,

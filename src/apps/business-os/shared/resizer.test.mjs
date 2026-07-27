@@ -18,12 +18,16 @@ class ElementStub {
       setProperty: (key, value) => this.style.values.set(key, value),
       getPropertyValue: (key) => this.style.values.get(key) || '',
     };
+    this.capturedPointers = new Set();
   }
   addEventListener(type, listener) { this.listeners.set(type, listener); }
   removeEventListener(type) { this.listeners.delete(type); }
   hasAttribute(name) { return this.attributes.has(name); }
   setAttribute(name, value) { this.attributes.set(name, String(value)); }
   getAttribute(name) { return this.attributes.get(name) || null; }
+  setPointerCapture(pointerId) { this.capturedPointers.add(pointerId); }
+  hasPointerCapture(pointerId) { return this.capturedPointers.has(pointerId); }
+  releasePointerCapture(pointerId) { this.capturedPointers.delete(pointerId); }
 }
 
 const body = new ElementStub();
@@ -62,10 +66,12 @@ const horizontal = fixture({ orientation: 'horizontal', side: 'bottom', cssVar: 
 horizontal.resizer.onKeyDown({ key: 'ArrowUp', preventDefault() {} });
 assert.equal(horizontal.container.style.getPropertyValue('--bottom'), '244px');
 assert.equal(horizontal.handle.getAttribute('aria-orientation'), 'horizontal');
-horizontal.resizer.onPointerDown({ clientX: 0, clientY: 300, preventDefault() {} });
+horizontal.resizer.onPointerDown({ pointerId: 7, clientX: 0, clientY: 300, preventDefault() {} });
+assert.equal(horizontal.handle.capturedPointers.has(7), true);
 horizontal.resizer.onPointerMove({ clientX: 0, clientY: 260 });
 assert.equal(horizontal.container.style.getPropertyValue('--bottom'), '284px');
 horizontal.resizer.onPointerUp();
+assert.equal(horizontal.handle.capturedPointers.has(7), false);
 assert.equal(body.classList.values.has('is-resizing-horizontal'), false);
 
 // Releasing the pointer before the scheduled animation frame must still

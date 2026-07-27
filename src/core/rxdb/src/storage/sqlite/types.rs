@@ -1,12 +1,14 @@
 //! Types for the SQLite storage backend.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
@@ -16,11 +18,7 @@ use crate::rx_error::{new_rx_error, RxResult};
 pub const SQLITE_IN_MEMORY_DB_NAME: &str = ":memory:";
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 const SQLITE_EXTERNAL_DATABASE_POLL_ACTIVE_INTERVAL: Duration = Duration::from_secs(1);
-// One persistent PRAGMA data_version read is the cross-process wake source for
-// every collection in this database. Keeping that cheap database-wide watcher
-// responsive lets latency-sensitive consumers sleep instead of reopening
-// SQLite and querying their collection every second.
-const SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL: Duration = Duration::from_millis(1_500);
+const SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const SQLITE_EXTERNAL_DATABASE_POLL_BACKOFF_AFTER_IDLE_READS: u32 = 3;
 const SQLITE_CHANGED_TABLES_TABLE: &str = "__rxdb_changed_tables";
 
@@ -182,6 +180,7 @@ fn start_external_database_poll(path: PathBuf, database_key: String, stop: Arc<A
     let _ = thread::Builder::new()
         .name("rxdb-sqlite-external-poll".to_string())
         .spawn(move || {
+            let file_watcher = sqlite_file_watcher(&path);
             let mut last_version: Option<i64> = None;
             let mut changed_tables: HashMap<String, i64>;
             let mut local_hook_generations: HashMap<String, u64>;
@@ -195,7 +194,19 @@ fn start_external_database_poll(path: PathBuf, database_key: String, stop: Arc<A
                         local_hook_generations =
                             current_local_hook_generations(&database_key, changed_tables.keys());
                         while !stop.load(Ordering::SeqCst) {
-                            sleep_external_poll(&stop, poll_interval);
+                            if poll_interval == SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL {
+                                if let Some((_, file_events)) = &file_watcher {
+                                    wait_for_sqlite_file_change(
+                                        &stop,
+                                        poll_interval,
+                                        file_events,
+                                    );
+                                } else {
+                                    sleep_external_poll(&stop, poll_interval);
+                                }
+                            } else {
+                                sleep_external_poll(&stop, poll_interval);
+                            }
                             if stop.load(Ordering::SeqCst) {
                                 break;
                             }
@@ -295,6 +306,69 @@ fn sleep_external_poll(stop: &AtomicBool, duration: Duration) {
         thread::sleep(sleep_for);
         remaining = remaining.saturating_sub(sleep_for);
     }
+}
+
+fn sqlite_file_watcher(
+    database_path: &Path,
+) -> Option<(RecommendedWatcher, Receiver<notify::Result<notify::Event>>)> {
+    let (sender, receiver) = mpsc::channel();
+    let watched_database = database_path.to_path_buf();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let should_wake = event
+            .as_ref()
+            .map(|event| {
+                event
+                    .paths
+                    .iter()
+                    .any(|path| is_sqlite_database_file(path, &watched_database))
+            })
+            .unwrap_or(true);
+        if should_wake {
+            let _ = sender.send(event);
+        }
+    })
+    .ok()?;
+    let parent = database_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    watcher.watch(parent, RecursiveMode::NonRecursive).ok()?;
+    Some((watcher, receiver))
+}
+
+fn wait_for_sqlite_file_change(
+    stop: &AtomicBool,
+    duration: Duration,
+    file_events: &Receiver<notify::Result<notify::Event>>,
+) {
+    let mut remaining = duration;
+    let chunk = Duration::from_secs(1);
+    while !stop.load(Ordering::SeqCst) && remaining > Duration::ZERO {
+        let wait_for = remaining.min(chunk);
+        match file_events.recv_timeout(wait_for) {
+            Ok(_) | Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                remaining = remaining.saturating_sub(wait_for);
+            }
+        }
+    }
+}
+
+fn is_sqlite_database_file(path: &Path, database_path: &Path) -> bool {
+    if path == database_path {
+        return true;
+    }
+    let Some(database_name) = database_path.file_name() else {
+        return false;
+    };
+    let Some(path_name) = path.file_name() else {
+        return false;
+    };
+    let database_name = database_name.to_string_lossy();
+    let path_name = path_name.to_string_lossy();
+    path_name == database_name
+        || path_name == format!("{database_name}-wal")
+        || path_name == format!("{database_name}-shm")
 }
 
 fn current_local_hook_generations<'a>(
@@ -481,8 +555,8 @@ mod tests {
             SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL
         );
         assert!(
-            SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL <= Duration::from_secs(2),
-            "cross-process collection writes must wake consumers within two seconds"
+            SQLITE_EXTERNAL_DATABASE_POLL_STANDBY_INTERVAL >= Duration::from_secs(30 * 60),
+            "standby poll must not be a frequent daemon idle heartbeat"
         );
     }
 
@@ -526,6 +600,25 @@ mod tests {
             runtime_counter("external_poll_active_resets") > active_resets_before,
             "resetting the DB-wide poll to active mode must be visible in runtime counters"
         );
+    }
+
+    #[test]
+    fn sqlite_database_file_matching_includes_wal_and_shm() {
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("ctox.sqlite3");
+        assert!(is_sqlite_database_file(&database_path, &database_path));
+        assert!(is_sqlite_database_file(
+            &dir.path().join("ctox.sqlite3-wal"),
+            &database_path
+        ));
+        assert!(is_sqlite_database_file(
+            &dir.path().join("ctox.sqlite3-shm"),
+            &database_path
+        ));
+        assert!(!is_sqlite_database_file(
+            &dir.path().join("other.sqlite3"),
+            &database_path
+        ));
     }
 }
 

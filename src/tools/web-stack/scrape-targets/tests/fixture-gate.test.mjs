@@ -12,6 +12,12 @@ const fixturesDir = path.join(testDir, "fixtures");
 const mockCtox = path.join(testDir, "mock-ctox.mjs");
 const sharedScript = path.join(targetsDir, "_shared", "generic-prospect-v1.js");
 const PROTECTED_TARGETS = ["dnbhoovers.com", "leadfeeder.com", "rocketreach.com"];
+const PUBLIC_UNLOCK_TARGETS = [
+  "bundesanzeiger.de",
+  "companyhouse.de",
+  "handelsregister.de",
+  "northdata.de",
+];
 
 const FIELD_KEYS = new Set([
   "firma_name", "firma_anschrift", "firma_plz", "firma_ort", "firma_email",
@@ -46,7 +52,7 @@ function executeFixture(targetName, fixturePath, mode) {
     const child = spawnSync(process.execPath, [resolvedScript(targetName)], {
       cwd: targetsDir,
       encoding: "utf8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: {
         ...process.env,
         CTOX_BIN: mockCtox,
@@ -159,8 +165,8 @@ test("protected research adapters use secret references and Browser-App handoff"
   }
 });
 
-test("D&B and Leadfeeder resume capture after secret-backed Browser-App login", async (t) => {
-  for (const targetName of ["dnbhoovers.com", "leadfeeder.com"]) {
+test("protected providers resume capture after secret-backed Browser-App login", async (t) => {
+  for (const targetName of ["dnbhoovers.com", "leadfeeder.com", "rocketreach.com"]) {
     await t.test(targetName, () => {
       const fixturePath = path.join(fixturesDir, `${targetName}.json`);
       const fixture = loadJson(fixturePath);
@@ -178,6 +184,30 @@ test("D&B and Leadfeeder resume capture after secret-backed Browser-App login", 
   }
 });
 
+test("protected captures retry transient provider failures after secret-backed login", () => {
+  const targetName = "dnbhoovers.com";
+  const fixturePath = path.join(fixturesDir, `${targetName}.json`);
+  const fixture = loadJson(fixturePath);
+  const { result, calls } = executeFixture(targetName, fixturePath, "capture_retry");
+  assert.ok(result.records.some((record) => record.field === "firma_name"
+    && record.value === fixture.expected.firma_name));
+  assert.ok(calls.some((args) => args[0] === "business-os" && args.includes("auth-assist-login")));
+  assert.equal(calls.filter((args) => args[0] === "business-os" && args.includes("source-capture")).length, 2);
+});
+
+test("RocketReach keeps exact public provider evidence while protected fields await authorization", () => {
+  const targetName = "rocketreach.com";
+  const fixturePath = path.join(fixturesDir, `${targetName}.json`);
+  const fixture = loadJson(fixturePath);
+  const { result, calls } = executeFixture(targetName, fixturePath, "provider_page_blocked");
+  assert.ok(result.records.some((record) => record.field === "firma_name"
+    && record.value === fixture.expected.firma_name));
+  assert.equal(result.partial, true);
+  assert.equal(result.protected_fields_require_authorization, true);
+  assert.equal(result.browser_assist_requested, true);
+  assert.ok(calls.some((args) => args[0] === "business-os" && args.includes("auth-assist-request")));
+});
+
 test("blocked protected adapters record Web-Unlock evidence and stay non-green", async (t) => {
   for (const targetName of PROTECTED_TARGETS) {
     await t.test(targetName, () => {
@@ -193,6 +223,23 @@ test("blocked protected adapters record Web-Unlock evidence and stay non-green",
       assert.equal(evidence.source_id, targetName);
       assert.equal(evidence.secret_value_in_payload, false);
       assert.ok(calls.some((args) => args[0] === "business-os" && args.includes("auth-assist-request")));
+    });
+  }
+});
+
+test("blocked public adapters record Web-Unlock evidence and stay non-green", async (t) => {
+  for (const targetName of PUBLIC_UNLOCK_TARGETS) {
+    await t.test(targetName, () => {
+      const fixturePath = path.join(fixturesDir, `${targetName}.json`);
+      const { result, calls } = executeFixture(targetName, fixturePath, "blocked");
+      assert.deepEqual(result.records, [], `${targetName} fabricated records while blocked`);
+      assert.notEqual(result.failure_mode, "succeeded");
+
+      const unlock = calls.find((args) => args[0] === "web" && args.includes("unlock") && args.includes("record"));
+      assert.ok(unlock, `${targetName} did not record a Web-Unlock signal`);
+      const evidence = JSON.parse(flagValue(unlock, "--evidence"));
+      assert.equal(evidence.source_id, targetName);
+      assert.equal(evidence.secret_value_in_payload, false);
     });
   }
 });

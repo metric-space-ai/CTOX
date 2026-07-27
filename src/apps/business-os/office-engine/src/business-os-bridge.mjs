@@ -1,3 +1,4 @@
+// 20260726-office-demand-file-loader-v220
 const KIND_CONFIG = Object.freeze({
   document: {
     module: 'documents',
@@ -17,6 +18,9 @@ const KIND_CONFIG = Object.freeze({
   },
 });
 
+const DEMAND_FILE_LOADER_READY_TIMEOUT_MS = 30_000;
+const DEMAND_FILE_LOADER_RETRY_MS = 100;
+
 export function createBusinessOsOfficeBridge(ctx, kind) {
   const config = KIND_CONFIG[kind];
   if (!config) throw new TypeError(`Unsupported CTOX product bridge kind: ${kind}`);
@@ -32,9 +36,8 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
 
   return Object.freeze({
     async loadVersion({ recordId, versionId } = {}) {
-      await ensureNativeCollectionsStarted(ctx, [config.records, config.versions]);
       return withChunkLease(ctx, config, `${config.module}-load-version`, async (lease) => {
-        const fileLoader = demandFileLoaderFromLease(lease);
+        const fileLoader = lazyDemandFileLoader(ctx, lease, config.chunks);
         const recordDoc = await collection(config.records).findOne(String(recordId || '')).exec();
         const record = toJson(recordDoc);
         if (!record) throw new Error(`${kind} record was not found: ${recordId}`);
@@ -52,7 +55,6 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
     },
 
     async prepare({ recordId, versionId } = {}) {
-      await ensureNativeCollectionsStarted(ctx, [config.records, config.versions]);
       return withChunkLease(ctx, config, `${config.module}-prepare`, async () => {
         const outcome = await dispatch(ctx, config, 'prepare', recordId, {
           [`${kind}_id`]: recordId,
@@ -91,19 +93,17 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
     },
 
     async export({ recordId, versionId, format } = {}) {
-      await ensureNativeCollectionsStarted(ctx, [config.records, config.versions]);
       return withChunkLease(ctx, config, `${config.module}-export`, async (lease) => {
         const result = await dispatch(ctx, config, 'export', recordId, {
           [`${kind}_id`]: recordId,
           version_id: versionId,
           format,
         });
-        await awaitBridgeSync(lease, config.chunks);
         const bytes = await loadBlob(
           collection(config.chunks),
           result.blob_id,
           result.source_sha256,
-          demandFileLoaderFromLease(lease),
+          lazyDemandFileLoader(ctx, lease, config.chunks),
         );
         return { ...result, bytes };
       });
@@ -185,17 +185,8 @@ function mergePreparedVersion(version, prepared) {
 
 async function loadBlob(chunks, blobId, expectedSha256 = '', fileLoader = null) {
   if (!blobId) return null;
-  let rows = await queryBlobChunks(chunks, blobId);
+  const rows = await queryBlobChunks(chunks, blobId);
   let localError = null;
-  try {
-    return await assembleBlob(rows, blobId, expectedSha256);
-  } catch (error) {
-    if (!isRecoverableBlobReadError(error)) throw error;
-    localError = error;
-  }
-  rows = await queryBlobChunks(chunks, blobId, {
-    requireRevision: `blob:${blobId}:${String(expectedSha256 || 'current').toLowerCase()}`,
-  });
   try {
     return await assembleBlob(rows, blobId, expectedSha256);
   } catch (error) {
@@ -325,12 +316,6 @@ async function sha256Hex(bytes) {
 function permissionError(message) { const error = new Error(message); error.code = 'permission_denied'; return error; }
 function integrityError(message, code) { const error = new Error(message); error.code = code; return error; }
 
-async function ensureNativeCollectionsStarted(ctx, collectionNames) {
-  for (const collectionName of collectionNames) {
-    await ctx?.sync?.startCollection?.(collectionName);
-  }
-}
-
 async function withChunkLease(ctx, config, reason, operation) {
   if (typeof ctx?.sync?.leaseCollection !== 'function') {
     const error = new Error(`${config.chunks} requires sync.leaseCollection().`);
@@ -339,30 +324,71 @@ async function withChunkLease(ctx, config, reason, operation) {
   }
   const lease = await ctx.sync.leaseCollection(config.chunks, reason);
   try {
-    if (!demandFileLoaderFromLease(lease) && lease?.bridge?.mode === 'follower') {
-      lease.bridge = await ctx.sync.startCollection(config.chunks, { pin: false, forceDirect: true });
-    }
-    await awaitBridgeSync(lease, config.chunks);
     return await operation(lease);
   } finally {
     await lease?.release?.().catch(() => null);
   }
 }
 
+function lazyDemandFileLoader(ctx, lease, collectionName) {
+  return {
+    async fetchFile(fileId, options) {
+      const loader = await ensureDemandFileLoader(ctx, lease, collectionName);
+      if (typeof loader?.fetchFile !== 'function') {
+        const error = new Error(`Demand file loader did not become ready: ${collectionName}`);
+        error.code = 'demand_file_loader_unavailable';
+        error.retryable = true;
+        throw error;
+      }
+      return loader.fetchFile(fileId, options);
+    },
+  };
+}
+
+async function ensureDemandFileLoader(ctx, lease, collectionName) {
+  const deadline = Date.now() + DEMAND_FILE_LOADER_READY_TIMEOUT_MS;
+  const restartAfter = Date.now() + 5_000;
+  let restarted = false;
+  while (Date.now() < deadline) {
+    const existing = demandFileLoaderFromLease(lease);
+    if (typeof existing?.fetchFile === 'function') return existing;
+
+    const bridge = lease?.bridge || null;
+    if (bridge?.mode === 'follower' || bridge?.mode === 'pending' || !bridge?.state) {
+      const next = await ctx.sync.startCollection(collectionName, {
+        pin: false,
+        forceDirect: true,
+      });
+      if (next) lease.bridge = next;
+    } else {
+      await bridge.state.enableDemandLoading?.();
+    }
+
+    const ready = demandFileLoaderFromLease(lease);
+    if (typeof ready?.fetchFile === 'function') return ready;
+    if (!restarted && Date.now() >= restartAfter && typeof ctx?.sync?.restartCollection === 'function') {
+      const restartedBridge = await ctx.sync.restartCollection(collectionName, { forceDirect: true }).catch(() => null);
+      if (restartedBridge) lease.bridge = restartedBridge;
+      if (!restartedBridge || restartedBridge?.mode === 'follower' || restartedBridge?.mode === 'pending') {
+        const directBridge = await ctx.sync.startCollection(collectionName, {
+          pin: false,
+          forceDirect: true,
+        }).catch(() => null);
+        if (directBridge) lease.bridge = directBridge;
+      }
+      restarted = true;
+    }
+    await delay(DEMAND_FILE_LOADER_RETRY_MS);
+  }
+  const error = new Error(`Demand file loader did not become ready: ${collectionName}`);
+  error.code = 'demand_file_loader_timeout';
+  error.retryable = true;
+  throw error;
+}
+
 function demandFileLoaderFromLease(lease) {
   const bridge = lease?.bridge || lease || null;
   return bridge?.state?.demandFileLoader || lease?.state?.demandFileLoader || null;
-}
-
-async function awaitBridgeSync(value, collectionName) {
-  const bridge = value?.bridge || value || null;
-  const state = bridge?.state || value?.state || null;
-  if (!state) return;
-  await withSyncTimeout(
-    () => state.awaitInSync?.() || state.awaitInitialReplication?.(),
-    30000,
-    `CTOX product sync timed out: ${collectionName}`,
-  );
 }
 
 async function flushBridgeSync(value, collectionName) {
@@ -404,6 +430,10 @@ async function withSyncTimeout(operation, timeoutMs, message) {
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export const __officeBridgeTestHooks = { loadBlob, saveBlob };

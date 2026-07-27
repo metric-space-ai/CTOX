@@ -66,6 +66,14 @@ type list or infer command mode from `task_id`. Lifecycle v2 uses
 `execution_task_id` for the executing queue task and `target_task_id` or
 `target_record_id` for domain targets.
 
+A native control command can request a user-visible progress surface by setting
+`response_channel` to `business_os_chat` in its payload or client context. The
+command remains a queue-free control effect: the native lifecycle writer opens
+an RxDB-synchronized chat immediately, updates its tracking message from
+control progress, and writes the terminal summary into the same chat. This is
+an observability channel, not a second executor, and does not turn deterministic
+control work into an LLM task.
+
 ## Service Boot
 
 `run_service` initializes the durable stores, opens the LCM engine on

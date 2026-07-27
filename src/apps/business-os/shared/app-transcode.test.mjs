@@ -86,6 +86,22 @@ test("transcodeFile resolves directory-relative imports across folders", () => {
   assert.doesNotMatch(code, /type Item/, "types are stripped");
 });
 
+test("transcodeFile turns Vite asset imports into browser-native URLs", () => {
+  const files = {
+    ...FIXTURE,
+    "src/hero.png": "binary-placeholder",
+  };
+  const source = `import hero from "./hero.png";\nexport const src = hero;`;
+  const { code, bareImports } = transcodeFile(
+    sucrase,
+    "src/assets.ts",
+    source,
+    new Set(Object.keys(files)),
+  );
+  assert.match(code, /const hero = new URL\(["']\.\/hero\.png["'], import\.meta\.url\)\.href/);
+  assert.deepEqual(bareImports, []);
+});
+
 test("buildImportMap maps only vendored specifiers", () => {
   const map = buildImportMap(["react", "react-dom/client", "axios"], "../../vendor/app-importer");
   assert.equal(map.imports.react, "../../vendor/app-importer/react.mjs");
@@ -104,6 +120,15 @@ test("transcodeApp end to end: valid app passes with import map and css", () => 
   assert.deepEqual(result.report.unsupported, []);
   assert.deepEqual(result.cssFiles, ["src/app.css"]);
   assert.ok(result.importMap.imports["react/jsx-runtime"], "automatic runtime is mapped");
+});
+
+test("transcodeApp exposes Vite public assets at the module root", () => {
+  const result = transcodeApp(sucrase, {
+    ...FIXTURE,
+    "public/icons.svg": "<svg/>",
+  });
+  assert.equal(result.files["icons.svg"], "<svg/>");
+  assert.equal(result.files["public/icons.svg"], undefined);
 });
 
 test("transcodeApp reports unsupported bare dependencies instead of guessing", () => {
@@ -137,7 +162,7 @@ test("transcodeApp fails honestly without an entry", () => {
   assert.equal(result.report.error, "entry_not_found");
 });
 
-test("scaffoldModule emits module.json, import map html and app files", () => {
+test("scaffoldModule emits a windowed CTOX adapter, runnable html and app files", () => {
   const transcoded = transcodeApp(sucrase, FIXTURE);
   const moduleFiles = scaffoldModule(
     { id: "po-tracker", title: "PO Tracker", description: "Imported test app" },
@@ -147,6 +172,13 @@ test("scaffoldModule emits module.json, import map html and app files", () => {
   assert.equal(manifest.id, "po-tracker");
   assert.equal(manifest.entry, "local-modules/po-tracker/index.html");
   assert.equal(manifest.install_scope, "local");
+  assert.deepEqual(manifest.collections, []);
+  assert.equal(manifest.launch_kind, "desktop-app");
+  assert.equal(manifest.layout.shell, "windowed");
+  assert.equal(manifest.presentation.default_mode, "window");
+  assert.match(moduleFiles["index.js"], /export function mount/);
+  assert.match(moduleFiles["index.js"], /new URL\('\.\/index\.html', import\.meta\.url\)/);
+  assert.equal(moduleFiles["schema.js"], "export const collections = {};\n");
   assert.match(moduleFiles["index.html"], /<script type="importmap">/);
   assert.match(moduleFiles["index.html"], /react-dom-client\.mjs/);
   assert.match(moduleFiles["index.html"], /<link rel="stylesheet" href="\.\/src\/app\.css">/);

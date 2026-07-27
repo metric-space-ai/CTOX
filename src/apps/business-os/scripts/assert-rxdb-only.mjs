@@ -88,8 +88,8 @@ function assertBusinessOsShellBuildKeyIsCurrent() {
   if (!/app\.css\?v=\$\{APP_BUILD\}/.test(appContent)) {
     offenders.push('src/apps/business-os/app.js: stylesheet fallback must load app.css with APP_BUILD');
   }
-  if (!/shared\/base\.css\?v=20260609-base1/.test(appContent)) {
-    offenders.push('src/apps/business-os/app.js: stylesheet fallback must load shared/base.css');
+  if (!/shared\/base\.css\?v=\$\{APP_BUILD\}/.test(appContent)) {
+    offenders.push('src/apps/business-os/app.js: stylesheet fallback must load shared/base.css with APP_BUILD');
   }
 }
 
@@ -126,9 +126,10 @@ function assertBusinessOsStaticImportsResolve() {
 
 function staticImports(content) {
   const imports = [];
+  const source = sourceOutsideTemplatesAndComments(content);
   const importPattern = /(^|\n)\s*import\s+([\s\S]*?)\s+from\s+['"]([^'"]+)['"]/g;
   let match;
-  while ((match = importPattern.exec(content))) {
+  while ((match = importPattern.exec(source))) {
     const clause = match[2] || '';
     imports.push({
       specifier: match[3],
@@ -136,6 +137,79 @@ function staticImports(content) {
     });
   }
   return imports;
+}
+
+function sourceOutsideTemplatesAndComments(content) {
+  const source = String(content || '');
+  const masked = source.split('');
+  let state = 'code';
+
+  const mask = (index) => {
+    if (masked[index] !== '\n' && masked[index] !== '\r') masked[index] = ' ';
+  };
+
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index];
+    const next = source[index + 1];
+
+    if (state === 'code') {
+      if (current === "'") state = 'single-quote';
+      else if (current === '"') state = 'double-quote';
+      else if (current === '`') {
+        state = 'template';
+        mask(index);
+      } else if (current === '/' && next === '/') {
+        state = 'line-comment';
+        mask(index);
+        mask(index + 1);
+        index += 1;
+      } else if (current === '/' && next === '*') {
+        state = 'block-comment';
+        mask(index);
+        mask(index + 1);
+        index += 1;
+      }
+      continue;
+    }
+
+    if (state === 'single-quote' || state === 'double-quote') {
+      if (current === '\\') {
+        index += 1;
+      } else if (
+        (state === 'single-quote' && current === "'")
+        || (state === 'double-quote' && current === '"')
+      ) {
+        state = 'code';
+      }
+      continue;
+    }
+
+    if (state === 'line-comment') {
+      mask(index);
+      if (current === '\n' || current === '\r') state = 'code';
+      continue;
+    }
+
+    if (state === 'block-comment') {
+      mask(index);
+      if (current === '*' && next === '/') {
+        mask(index + 1);
+        index += 1;
+        state = 'code';
+      }
+      continue;
+    }
+
+    mask(index);
+    if (current === '\\') {
+      mask(index + 1);
+      index += 1;
+    } else if (current === '`') {
+      state = 'code';
+    }
+  }
+
+  return masked.join('');
 }
 
 function namedImportsFromClause(clause) {

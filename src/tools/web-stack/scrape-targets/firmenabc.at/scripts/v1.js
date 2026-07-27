@@ -7,9 +7,8 @@ const { execFileSync } = require("child_process");
 const SOURCE_ID = "firmenabc.at";
 const ALLOWED_HOST = "firmenabc.at";
 const MAX_HITS = 6;
-const KNOWN_PROFILES = new Map([
-  ["kapsch components", "https://www.firmenabc.at/kapsch-components-gmbh-co-kg_XVn"],
-]);
+const BROWSER_TIMEOUT_MS = 45_000;
+const UNLOCK_TIMEOUT_MS = 90_000;
 
 function readInput() {
   try {
@@ -27,11 +26,17 @@ function runCtox(args, input) {
       input,
       stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       maxBuffer: 32 * 1024 * 1024,
-      timeout: 95_000,
+      timeout: 125_000,
     });
     return JSON.parse(stdout);
-  } catch (_err) {
-    return null;
+  } catch (err) {
+    const detail = String(err?.stderr || err?.message || "");
+    const status = detail.match(/status code\s+(\d{3})/i)?.[1];
+    return {
+      ok: false,
+      command_error: detail.slice(0, 4000),
+      http_status: status ? Number(status) : null,
+    };
   }
 }
 
@@ -87,18 +92,35 @@ function isAllowedUrl(value) {
   }
 }
 
-function isBlockedPage(page) {
+function blockingMarkers(page) {
   const detection = Array.isArray(page?.detection?.markers)
-    ? page.detection.markers.join(" ")
-    : "";
+    ? page.detection.markers.map(String)
+    : [];
   const corpus = normalized([
     page?.title,
     page?.body_text,
     page?.page_text_excerpt,
     page?.raw_html_excerpt,
-    detection,
+    page?.command_error,
+    detection.join(" "),
   ].filter(Boolean).join(" "));
-  return /einen moment|one moment please|captcha|cloudflare|challenge|verify you are human|access denied|request blocked|too many requests/.test(corpus);
+  const markers = detection.filter((marker) =>
+    /captcha|cloudflare|challenge|human|access.?denied|blocked|rate.?limit|too.?many/i.test(marker)
+  );
+  if ([401, 403, 429].includes(Number(page?.http_status))) {
+    markers.push(`http-${page.http_status}`);
+  }
+  for (const phrase of [
+    "einen moment", "one moment please", "captcha", "cloudflare", "challenge",
+    "verify you are human", "access denied", "request blocked", "too many requests",
+  ]) {
+    if (corpus.includes(phrase)) markers.push(phrase.replace(/\s+/g, "-"));
+  }
+  return [...new Set(markers)];
+}
+
+function isBlockedPage(page) {
+  return blockingMarkers(page).length > 0;
 }
 
 function isPortalPage(page) {
@@ -138,8 +160,13 @@ function searchHits(company, country) {
     if (country) args.push("--country", country);
     const payload = runCtox(args);
     for (const hit of payload?.results || []) {
-      if (isAllowedUrl(hit?.url)) hits.push(hit.url);
+      if (isAllowedUrl(hit?.url)
+          && identityMatches(company, hit?.title)
+          && legalFormMatches(company, hit?.title)) {
+        hits.push(hit.url);
+      }
     }
+    if (hits.length > 0) break;
   }
   return [...new Set(hits)].slice(0, MAX_HITS);
 }
@@ -147,8 +174,6 @@ function searchHits(company, country) {
 function candidateUrls(input, company, country) {
   const explicit = [input.url, input.source_url, input.profile_url].filter(isAllowedUrl);
   if (explicit.length > 0) return [...new Set(explicit)];
-  const known = KNOWN_PROFILES.get(identityTokens(company).join(" "));
-  if (known) return [known];
   return searchHits(company, country);
 }
 
@@ -158,27 +183,114 @@ function readPage(url, country) {
   return runCtox(args);
 }
 
-function browserPage(url) {
-  const source = `
-    await page.goto(${JSON.stringify(url)}, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(2500);
-    return await page.evaluate(() => ({
-      url: location.href,
-      title: document.title,
-      body_text: (document.body?.innerText || "").slice(0, 80000),
-      json_ld: Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
-        .map((node) => node.textContent || "").slice(0, 20),
-    }));
-  `;
-  const payload = runCtox(
-    ["web", "browser-automation", "--timeout-ms", "90000"],
-    source,
-  );
+function providerBrowserSource(url, unlockMode = false) {
+  if (!isAllowedUrl(url)) return null;
+  return `// ctox-browser: timeout_ms=${unlockMode ? UNLOCK_TIMEOUT_MS : BROWSER_TIMEOUT_MS}
+const targetUrl = ${JSON.stringify(url)};
+const homeUrl = "https://www.firmenabc.at/";
+const unlockMode = ${JSON.stringify(unlockMode)};
+const challenge = async () => {
+  const title = await page.title().catch(() => "");
+  const text = await page.locator("body").innerText({ timeout: 3000 }).catch(() => "");
+  const html = await page.content().catch(() => "");
+  const corpus = (title + " " + text + " " + html.slice(0, 64000)).toLowerCase();
+  return /einen moment|one moment please|captcha|cloudflare|cf-chl-|challenge-platform|turnstile|verify (?:that )?you are human|access denied|request blocked|too many requests|zu viele anfragen/.test(corpus);
+};
+const dismissConsent = async () => {
+  const button = page.getByRole("button", { name: /^(alle akzeptieren|akzeptieren|accept all|zustimmen)$/i }).first();
+  if (await button.isVisible({ timeout: 1500 }).catch(() => false)) {
+    await button.click({ timeout: 3000 }).catch(() => {});
+    await page.waitForTimeout(600);
+  }
+};
+const settleChallenge = async () => {
+  for (const delay of [3000, 5000]) {
+    if (!(await challenge())) return true;
+    await page.waitForTimeout(delay);
+    if (!(await challenge())) return true;
+    await page.reload({ waitUntil: "domcontentloaded", timeout: 12000 }).catch(() => null);
+  }
+  return !(await challenge());
+};
+if (unlockMode) {
+  await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+  await page.waitForTimeout(1800);
+  await dismissConsent();
+  if (globalThis.humanlike?.humanScroll) {
+    await globalThis.humanlike.humanScroll(page, 360, { scrollOvershootChance: 0 }).catch(() => {});
+  }
+}
+let response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
+await page.waitForTimeout(unlockMode ? 3000 : 2500);
+await dismissConsent();
+if (unlockMode && await challenge()) {
+  await settleChallenge();
+  response = await page.waitForLoadState("domcontentloaded", { timeout: 5000 })
+    .then(() => response).catch(() => response);
+}
+return await page.evaluate(() => ({
+  url: location.href,
+  title: document.title,
+  body_text: (document.body?.innerText || "").slice(0, 120000),
+  json_ld: Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+    .map((node) => node.textContent || "").slice(0, 20),
+})).then(async (result) => ({
+  ...result,
+  http_status: response?.status?.() || null,
+  blocked: await challenge(),
+  unlock_attempted: unlockMode,
+}));
+`;
+}
+
+function browserSessionId(value) {
+  const candidate = String(value || "").trim();
+  return /^[A-Za-z0-9._:-]{1,180}$/.test(candidate) ? candidate : null;
+}
+
+function browserPage(url, unlockMode = false, sessionId = null) {
+  const source = providerBrowserSource(url, unlockMode);
+  if (!source) return null;
+  const args = [
+    "web", "browser-automation", "--timeout-ms",
+    String(unlockMode ? UNLOCK_TIMEOUT_MS : BROWSER_TIMEOUT_MS),
+  ];
+  const safeSessionId = browserSessionId(sessionId);
+  if (safeSessionId) args.push("--session-id", safeSessionId);
+  const payload = runCtox(args, source);
   if (!payload) return null;
   return {
     ...(payload.result || {}),
     ok: payload.ok === true,
     detection: payload.detection,
+    unlock_attempted: unlockMode,
+  };
+}
+
+function recordUnlockSignal(url, markers) {
+  return runCtox([
+    "web", "unlock", "signals", "record",
+    "--source", `scrape-target:${SOURCE_ID}`,
+    "--url", isAllowedUrl(url) ? url : `https://www.${ALLOWED_HOST}/`,
+    "--evidence", JSON.stringify({
+      source_id: SOURCE_ID,
+      detection: "access_challenge",
+      markers: [...new Set(markers.map(String))].slice(0, 12),
+      secret_value_in_payload: false,
+    }),
+  ]);
+}
+
+function failureResult(markers, matchingPageSeen = false) {
+  const blocked = markers.length > 0;
+  return {
+    records: [],
+    failure_mode: blocked ? "blocked" : matchingPageSeen ? "portal_drift" : "temporary_unreachable",
+    detail: blocked
+      ? "FirmenABC access challenge persisted after provider browser unlock retry"
+      : matchingPageSeen
+        ? "company-matching FirmenABC page did not match current provider selectors"
+        : "no origin- and identity-verified FirmenABC profile data",
   };
 }
 
@@ -267,20 +379,30 @@ function recordsFromPage(page) {
   return records;
 }
 
-(function main() {
+function main() {
   const input = readInput();
   const company = String(input.company || "").trim();
   const country = String(input.country || "AT").trim() || "AT";
+  const persistentSessionId = browserSessionId(input.browser_session_id || input.session_id);
   if (!company) {
     process.stdout.write(JSON.stringify({ records: [], failure_mode: "portal_drift", detail: "company missing" }));
     return;
   }
 
-  let blocked = false;
-  for (const url of candidateUrls(input, company, country)) {
+  const candidates = candidateUrls(input, company, country);
+  let blockedUrl = candidates[0] || `https://www.${ALLOWED_HOST}/`;
+  const blockedMarkers = [];
+  let matchingPageSeen = false;
+  let unlockSignalRecorded = false;
+  for (const url of candidates) {
     const browser = browserPage(url);
-    blocked ||= isBlockedPage(browser) || (browser?.detection?.markers || []).length > 0;
+    const browserMarkers = blockingMarkers(browser);
+    if (browserMarkers.length > 0) {
+      blockedUrl = browser?.url || url;
+      blockedMarkers.push(...browserMarkers);
+    }
     const validBrowser = validatedPage(company, browser, url);
+    matchingPageSeen ||= Boolean(validBrowser);
     const browserRecords = validBrowser ? recordsFromPage(validBrowser) : [];
     if (browserRecords.length > 0) {
       process.stdout.write(JSON.stringify({ records: browserRecords }));
@@ -288,20 +410,64 @@ function recordsFromPage(page) {
     }
 
     const direct = readPage(url, country);
-    blocked ||= isBlockedPage(direct);
+    const directMarkers = blockingMarkers(direct);
+    if (directMarkers.length > 0) {
+      blockedUrl = direct?.url || url;
+      blockedMarkers.push(...directMarkers);
+    }
     const validDirect = validatedPage(company, direct, url);
+    matchingPageSeen ||= Boolean(validDirect);
     const directRecords = validDirect ? recordsFromPage(validDirect) : [];
     if (directRecords.length > 0) {
       process.stdout.write(JSON.stringify({ records: directRecords }));
       return;
     }
+
+    if (browserMarkers.length > 0 || directMarkers.length > 0) {
+      if (!unlockSignalRecorded) {
+        recordUnlockSignal(blockedUrl, [...browserMarkers, ...directMarkers]);
+        unlockSignalRecorded = true;
+      }
+      const unlocked = browserPage(url, true);
+      const unlockMarkers = blockingMarkers(unlocked);
+      blockedMarkers.push(...unlockMarkers);
+      const validUnlocked = validatedPage(company, unlocked, url);
+      matchingPageSeen ||= Boolean(validUnlocked);
+      const unlockedRecords = validUnlocked ? recordsFromPage(validUnlocked) : [];
+      if (unlockedRecords.length > 0) {
+        process.stdout.write(JSON.stringify({ records: unlockedRecords }));
+        return;
+      }
+      if (persistentSessionId) {
+        const persistent = browserPage(url, true, persistentSessionId);
+        const persistentMarkers = blockingMarkers(persistent);
+        blockedMarkers.push(...persistentMarkers);
+        const validPersistent = validatedPage(company, persistent, url);
+        matchingPageSeen ||= Boolean(validPersistent);
+        const persistentRecords = validPersistent ? recordsFromPage(validPersistent) : [];
+        if (persistentRecords.length > 0) {
+          process.stdout.write(JSON.stringify({ records: persistentRecords }));
+          return;
+        }
+      }
+    }
   }
 
-  process.stdout.write(JSON.stringify({
-    records: [],
-    failure_mode: blocked ? "blocked" : "temporary_unreachable",
-    detail: blocked
-      ? "FirmenABC challenge recorded by CTOX browser automation for web-unlock"
-      : "no origin- and identity-verified FirmenABC profile data",
-  }));
-})();
+  process.stdout.write(JSON.stringify(failureResult(blockedMarkers, matchingPageSeen)));
+}
+
+if (require.main === module) main();
+
+module.exports = {
+  blockingMarkers,
+  browserSessionId,
+  bodyProfile,
+  failureResult,
+  identityMatches,
+  isAllowedUrl,
+  legalFormMatches,
+  organizationObjects,
+  providerBrowserSource,
+  recordsFromPage,
+  validatedPage,
+};

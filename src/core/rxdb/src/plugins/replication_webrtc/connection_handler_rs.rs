@@ -140,6 +140,7 @@ impl WebRTCRsConfig {
 }
 
 struct PeerEntry {
+    generation: u64,
     peer_connection: Arc<dyn PeerConnection>,
     data_channel: Option<Arc<dyn DataChannel>>,
     data_channel_open: bool,
@@ -434,6 +435,7 @@ pub struct WebRTCRsConnectionHandler {
     response_subject: RxSubject<PeerWithResponse<WebRTCRsPeer>>,
     error_subject: RxSubject<RxError>,
     peers: Arc<Mutex<HashMap<WebRTCRsPeer, PeerEntry>>>,
+    peer_lifecycle: Arc<Mutex<()>>,
     /// FIX 5: per-peer in-flight build slots. `ensure_peer_connection` is
     /// called concurrently from the peer-list task and `handle_signal`; both
     /// could see an empty `peers` map, build a connection, and the second
@@ -473,6 +475,7 @@ pub struct WebRTCRsConnectionHandler {
     presence_dirty: Arc<std::sync::atomic::AtomicBool>,
     transport_status: Arc<Mutex<WebRtcFrameTransportStatus>>,
     frame_counter: AtomicU64,
+    peer_generation_counter: AtomicU64,
     /// Phase 1: per-peer send-buffer backpressure (see `PeerBackpressure`).
     backpressure: Arc<Mutex<HashMap<WebRTCRsPeer, Arc<PeerBackpressure>>>>,
     /// #12c per-collection sync read-authz. When `collection_authz` is set,
@@ -519,6 +522,7 @@ impl WebRTCRsConnectionHandler {
             response_subject: RxSubject::new(),
             error_subject: RxSubject::new(),
             peers: Arc::new(Mutex::new(HashMap::new())),
+            peer_lifecycle: Arc::new(Mutex::new(())),
             building: Arc::new(Mutex::new(HashMap::new())),
             signaling,
             ice_servers,
@@ -534,6 +538,7 @@ impl WebRTCRsConnectionHandler {
             presence_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport_status: Arc::new(Mutex::new(WebRtcFrameTransportStatus::default())),
             frame_counter: AtomicU64::new(0),
+            peer_generation_counter: AtomicU64::new(0),
             backpressure: Arc::new(Mutex::new(HashMap::new())),
             collection_authz: Arc::new(Mutex::new(None)),
             collection_write_authz: Arc::new(Mutex::new(None)),
@@ -644,6 +649,20 @@ impl WebRTCRsConnectionHandler {
         let mut cache = self.completed_frame_acks.lock();
         cache.insert(transfer_id, ack);
         Self::prune_completed_frame_acks(&mut cache, now_ms());
+    }
+
+    fn completed_frame_ack_for(
+        &self,
+        transfer_id: &str,
+        peer: &WebRTCRsPeer,
+    ) -> Option<(i64, usize)> {
+        self.completed_frame_acks
+            .lock()
+            .get(transfer_id)
+            .and_then(|completed| {
+                (completed.peer == *peer)
+                    .then_some((completed.ack_seq as i64, completed.received_frames))
+            })
     }
 
     /// Evict completed-frame-ack entries older than `COMPLETED_FRAME_ACK_TTL_MS`
@@ -910,28 +929,42 @@ impl WebRTCRsConnectionHandler {
             )
         })?;
 
+        let generation = self
+            .peer_generation_counter
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
         let pc = build_peer_connection(
             Arc::clone(self),
             Arc::clone(&signaling),
             remote_peer_id.clone(),
+            generation,
         )
         .await?;
-        self.peers.lock().insert(
-            remote_peer_id.clone(),
-            PeerEntry {
-                peer_connection: Arc::clone(&pc),
-                data_channel: None,
-                data_channel_open: false,
-                tasks: Vec::new(),
-            },
-        );
+        {
+            let _lifecycle = self.peer_lifecycle.lock();
+            self.peers.lock().insert(
+                remote_peer_id.clone(),
+                PeerEntry {
+                    generation,
+                    peer_connection: Arc::clone(&pc),
+                    data_channel: None,
+                    data_channel_open: false,
+                    tasks: Vec::new(),
+                },
+            );
+        }
 
         if initiator {
             let data_channel = pc
                 .create_data_channel(&self.data_channel_label, None)
                 .await
                 .map_err(|e| webrtc_error("create data channel", e))?;
-            install_data_channel(Arc::clone(self), remote_peer_id.clone(), data_channel);
+            install_data_channel(
+                Arc::clone(self),
+                remote_peer_id.clone(),
+                generation,
+                data_channel,
+            );
             let offer = pc
                 .create_offer(None)
                 .await
@@ -1919,23 +1952,14 @@ impl WebRTCRsConnectionHandler {
         }
 
         if kind == "resume" {
-            let completed_ack =
-                self.completed_frame_acks
-                    .lock()
-                    .get(&transfer_id)
-                    .and_then(|completed| {
-                        if completed.peer != *peer {
-                            return None;
-                        }
-                        Some((completed.ack_seq as i64, completed.received_frames, true))
-                    });
-            if let Some((ack_seq, received_frames, final_ack)) = completed_ack {
+            let completed_ack = self.completed_frame_ack_for(&transfer_id, peer);
+            if let Some((ack_seq, received_frames)) = completed_ack {
                 send_transport_ack(
                     &data_channel,
                     &transfer_id,
                     ack_seq,
                     received_frames,
-                    final_ack,
+                    true,
                     true,
                 )
                 .await?;
@@ -2008,6 +2032,22 @@ impl WebRTCRsConnectionHandler {
             .unwrap_or("")
             .to_string();
         let attempt = frame.get("attempt").and_then(Value::as_u64).unwrap_or(0);
+
+        let completed_ack = self.completed_frame_ack_for(&transfer_id, peer);
+        if let Some((ack_seq, received_frames)) = completed_ack {
+            // The sender can repeat the final window when our ACK was lost.
+            // Re-ACK without decoding the already delivered payload again.
+            send_transport_ack(
+                &data_channel,
+                &transfer_id,
+                ack_seq,
+                received_frames,
+                true,
+                false,
+            )
+            .await?;
+            return Ok(None);
+        }
 
         let frame_status = {
             let mut incoming = self.incoming_frames.lock();
@@ -2277,6 +2317,7 @@ struct RsPeerConnectionEvents {
     handler: Arc<WebRTCRsConnectionHandler>,
     signaling: Arc<SignalingClient>,
     remote_peer_id: PeerId,
+    generation: u64,
 }
 
 #[async_trait]
@@ -2309,7 +2350,7 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
         // for observability but do not remove the peer.
         match state {
             RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
-                remove_peer(&self.handler, &self.remote_peer_id);
+                remove_peer_generation(&self.handler, &self.remote_peer_id, self.generation);
             }
             RTCPeerConnectionState::Disconnected => {
                 tracing::debug!(
@@ -2325,6 +2366,7 @@ impl PeerConnectionEventHandler for RsPeerConnectionEvents {
         install_data_channel(
             Arc::clone(&self.handler),
             self.remote_peer_id.clone(),
+            self.generation,
             data_channel,
         );
     }
@@ -2334,11 +2376,13 @@ async fn build_peer_connection(
     handler: Arc<WebRTCRsConnectionHandler>,
     signaling: Arc<SignalingClient>,
     remote_peer_id: PeerId,
+    generation: u64,
 ) -> RxResult<Arc<dyn PeerConnection>> {
     let event_handler = Arc::new(RsPeerConnectionEvents {
         handler: Arc::clone(&handler),
         signaling,
         remote_peer_id,
+        generation,
     });
 
     let mut media_engine = MediaEngine::default();
@@ -2376,12 +2420,19 @@ async fn build_peer_connection(
 fn install_data_channel(
     handler: Arc<WebRTCRsConnectionHandler>,
     remote_peer_id: PeerId,
+    generation: u64,
     data_channel: Arc<dyn DataChannel>,
 ) {
     {
         let mut peers = handler.peers.lock();
         if let Some(entry) = peers.get_mut(&remote_peer_id) {
-            entry.data_channel = Some(Arc::clone(&data_channel));
+            if entry.generation == generation {
+                entry.data_channel = Some(Arc::clone(&data_channel));
+            } else {
+                return;
+            }
+        } else {
+            return;
         }
     }
 
@@ -2405,10 +2456,15 @@ fn install_data_channel(
             .set_buffered_amount_high_threshold(DATA_CHANNEL_BUFFERED_HIGH_WATER)
             .await;
         while let Some(event) = data_channel.poll().await {
+            if !is_current_peer_generation(&handler_for_task, &peer_for_task, generation) {
+                break;
+            }
             match event {
                 DataChannelEvent::OnOpen => {
                     if let Some(entry) = handler_for_task.peers.lock().get_mut(&peer_for_task) {
-                        entry.data_channel_open = true;
+                        if entry.generation == generation {
+                            entry.data_channel_open = true;
+                        }
                     }
                     // Presence join snapshot: broadcasts fire on CHANGE, peer
                     // close and TTL sweep — a peer that connects while other
@@ -2558,7 +2614,9 @@ fn install_data_channel(
                     // otherwise a re-offer after a channel close hit the
                     // stale pc and could never converge.
                     if let Some(entry) = handler_for_task.peers.lock().get_mut(&peer_for_task) {
-                        entry.data_channel_open = false;
+                        if entry.generation == generation {
+                            entry.data_channel_open = false;
+                        }
                     }
                     // A closed tab's presence hints must not linger on the
                     // other peers until the TTL sweep — drop them now and
@@ -2587,56 +2645,104 @@ fn install_data_channel(
         // Channel ended: release any sender parked on backpressure and drop the
         // per-peer signal so it cannot leak across reconnects.
         backpressure_for_task.clear_high();
-        handler_for_task.backpressure.lock().remove(&peer_for_task);
+        if is_current_peer_generation(&handler_for_task, &peer_for_task, generation) {
+            handler_for_task.backpressure.lock().remove(&peer_for_task);
+        }
     });
 
     if let Some(entry) = handler.peers.lock().get_mut(&remote_peer_id) {
-        entry.tasks.push(task);
+        if entry.generation == generation {
+            entry.tasks.push(task);
+        } else {
+            task.abort();
+        }
+    } else {
+        task.abort();
     }
 }
 
 fn remove_peer(handler: &WebRTCRsConnectionHandler, peer: &str) {
-    remove_peer_inner(handler, peer, None);
+    remove_peer_inner(handler, peer, None, None);
 }
 
 fn remove_peer_with_error(handler: &WebRTCRsConnectionHandler, peer: &str, error: RxError) {
-    remove_peer_inner(handler, peer, Some(error));
+    remove_peer_inner(handler, peer, None, Some(error));
 }
 
-fn remove_peer_inner(handler: &WebRTCRsConnectionHandler, peer: &str, error: Option<RxError>) {
-    // Clear every per-peer registry even when the peer entry already vanished
-    // in a concurrent close path. This makes teardown idempotent and ensures
-    // no queue/ack/capacity waiter survives a terminal send-buffer stall.
-    handler.active_collections.lock().remove(peer);
-    if handler
-        .presence
-        .lock()
-        .remove(peer)
-        .is_some_and(|report| !report.entries.is_empty())
-    {
-        handler.presence_dirty.store(true, Ordering::SeqCst);
+fn remove_peer_generation(handler: &WebRTCRsConnectionHandler, peer: &str, generation: u64) {
+    remove_peer_inner(handler, peer, Some(generation), None);
+}
+
+fn is_current_peer_generation(
+    handler: &WebRTCRsConnectionHandler,
+    peer: &str,
+    generation: u64,
+) -> bool {
+    peer_generation_matches(
+        handler.peers.lock().get(peer).map(|entry| entry.generation),
+        Some(generation),
+    )
+}
+
+fn peer_generation_matches(current: Option<u64>, expected: Option<u64>) -> bool {
+    match expected {
+        Some(expected) => current == Some(expected),
+        None => true,
     }
-    handler.peer_capability_tokens.lock().remove(peer);
-    if let Some(bp) = handler.backpressure.lock().remove(peer) {
-        bp.clear_high();
-    }
-    if let Some(mut queue) = handler.send_queues.lock().remove(peer) {
-        if let Some(error) = error {
-            for item in queue.high.drain(..) {
-                let _ = item.result.send(Err(error.clone()));
+}
+
+fn remove_peer_inner(
+    handler: &WebRTCRsConnectionHandler,
+    peer: &str,
+    expected_generation: Option<u64>,
+    error: Option<RxError>,
+) {
+    let removed_entry = {
+        let _lifecycle = handler.peer_lifecycle.lock();
+        let removed_entry = {
+            let mut peers = handler.peers.lock();
+            let current_generation = peers.get(peer).map(|entry| entry.generation);
+            if !peer_generation_matches(current_generation, expected_generation) {
+                return;
             }
-            for item in queue.normal.drain(..) {
-                let _ = item.result.send(Err(error.clone()));
-            }
-            for item in queue.low.drain(..) {
-                let _ = item.result.send(Err(error.clone()));
+            peers.remove(peer)
+        };
+
+        // Clear every per-peer registry before a replacement generation can
+        // register. Otherwise delayed teardown from the old connection can
+        // erase the new generation's capability token or send state.
+        handler.active_collections.lock().remove(peer);
+        if handler
+            .presence
+            .lock()
+            .remove(peer)
+            .is_some_and(|report| !report.entries.is_empty())
+        {
+            handler.presence_dirty.store(true, Ordering::SeqCst);
+        }
+        handler.peer_capability_tokens.lock().remove(peer);
+        if let Some(bp) = handler.backpressure.lock().remove(peer) {
+            bp.clear_high();
+        }
+        if let Some(mut queue) = handler.send_queues.lock().remove(peer) {
+            if let Some(error) = error {
+                for item in queue.high.drain(..) {
+                    let _ = item.result.send(Err(error.clone()));
+                }
+                for item in queue.normal.drain(..) {
+                    let _ = item.result.send(Err(error.clone()));
+                }
+                for item in queue.low.drain(..) {
+                    let _ = item.result.send(Err(error.clone()));
+                }
             }
         }
-    }
-    handler.clear_peer_transfer_state(&peer.to_string());
-    handler.refresh_send_queue_status();
+        handler.clear_peer_transfer_state(&peer.to_string());
+        handler.refresh_send_queue_status();
+        removed_entry
+    };
 
-    if let Some(mut entry) = handler.peers.lock().remove(peer) {
+    if let Some(mut entry) = removed_entry {
         for task in entry.tasks.drain(..) {
             task.abort();
         }
@@ -3600,6 +3706,15 @@ mod tests {
     }
 
     #[test]
+    fn stale_peer_generation_cannot_remove_replacement() {
+        assert!(peer_generation_matches(Some(2), Some(2)));
+        assert!(!peer_generation_matches(Some(2), Some(1)));
+        assert!(!peer_generation_matches(None, Some(1)));
+        assert!(peer_generation_matches(Some(2), None));
+        assert!(peer_generation_matches(None, None));
+    }
+
+    #[test]
     fn frame_transport_status_exposes_send_queue_depths() {
         let handler = WebRTCRsConnectionHandler::new();
         let (high_tx, _high_rx) = tokio::sync::oneshot::channel();
@@ -3891,6 +4006,30 @@ mod tests {
         assert_eq!(fresh.received_frames, 8);
         assert_eq!(fresh.peer, peer);
         assert!(cache.contains_key("newest"));
+    }
+
+    #[test]
+    fn completed_frame_ack_lookup_only_replays_for_the_original_peer() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer = "peer-completed".to_string();
+        handler.record_completed_frame_ack(
+            "transfer-completed".to_string(),
+            CompletedFrameAck {
+                peer: peer.clone(),
+                ack_seq: 5,
+                received_frames: 6,
+                inserted_at_ms: now_ms(),
+            },
+        );
+
+        assert_eq!(
+            handler.completed_frame_ack_for("transfer-completed", &peer),
+            Some((5, 6))
+        );
+        assert_eq!(
+            handler.completed_frame_ack_for("transfer-completed", &"other-peer".to_string()),
+            None
+        );
     }
 
     #[test]

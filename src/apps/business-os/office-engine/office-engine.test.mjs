@@ -60,29 +60,24 @@ test('blob helper rejects a hash mismatch and recovers after replicated chunks a
   assert.deepEqual(await __officeBridgeTestHooks.loadBlob(chunks, 'blob_1', expected), good);
 });
 
-test('blob helper strictly revalidates an empty cached selector before failing', async () => {
+test('blob helper streams an empty local selector without requesting full collection replication', async () => {
   const bytes = new TextEncoder().encode('replicated-office-data');
   const queries = [];
   const chunks = {
     find(query) {
       queries.push(query);
-      return {
-        async exec() {
-          if (!query.requireRevision) return [];
-          return [{
-            id: 'blob_1_0000',
-            blob_id: 'blob_1',
-            idx: 0,
-            total: 1,
-            data: Buffer.from(bytes).toString('base64'),
-          }];
-        },
-      };
+      return { async exec() { return []; } };
     },
   };
-  assert.deepEqual(await __officeBridgeTestHooks.loadBlob(chunks, 'blob_1'), bytes);
-  assert.equal(queries.length, 2);
-  assert.match(queries[1].requireRevision, /^blob:blob_1:/);
+  const fileLoader = {
+    async fetchFile(blobId) {
+      assert.equal(blobId, 'blob_1');
+      return [{ sequence: 0, bytesBase64: Buffer.from(bytes).toString('base64') }];
+    },
+  };
+  assert.deepEqual(await __officeBridgeTestHooks.loadBlob(chunks, 'blob_1', '', fileLoader), bytes);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].requireRevision, undefined);
 });
 
 test('blob helper recovers missing structured chunks through the WebRTC file stream', async () => {
@@ -112,7 +107,7 @@ test('blob helper recovers missing structured chunks through the WebRTC file str
     },
   };
   assert.deepEqual(await __officeBridgeTestHooks.loadBlob(chunks, 'editor_blob_1', '', fileLoader), bytes);
-  assert.equal(queries, 2);
+  assert.equal(queries, 1);
   assert.deepEqual(fileIds, ['editor_blob_1']);
 });
 
@@ -133,7 +128,7 @@ test('blob helper rejects a streamed chunk that fails transport verification', a
   );
 });
 
-test('blob helper refreshes stale local chunks before using the file stream', async () => {
+test('blob helper replaces stale local chunks through the file stream without a strict query', async () => {
   const staleBytes = new TextEncoder().encode('stale-local-blob');
   const currentBytes = new TextEncoder().encode('current-local-blob');
   const expectedSha256 = createHash('sha256').update(currentBytes).digest('hex');
@@ -143,13 +138,12 @@ test('blob helper refreshes stale local chunks before using the file stream', as
       queries.push(query);
       return {
         async exec() {
-          const bytes = query.requireRevision ? currentBytes : staleBytes;
           return [{
             id: 'blob_refresh_0000',
             blob_id: 'blob_refresh',
             idx: 0,
             total: 1,
-            data: Buffer.from(bytes).toString('base64'),
+            data: Buffer.from(staleBytes).toString('base64'),
           }];
         },
       };
@@ -157,18 +151,23 @@ test('blob helper refreshes stale local chunks before using the file stream', as
   };
   let streams = 0;
   const fileLoader = {
-    async fetchFile() {
+    async fetchFile(blobId) {
       streams += 1;
-      return [];
+      assert.equal(blobId, 'blob_refresh');
+      return [{
+        sequence: 0,
+        bytesBase64: Buffer.from(currentBytes).toString('base64'),
+        hash: expectedSha256,
+      }];
     },
   };
   assert.deepEqual(
     await __officeBridgeTestHooks.loadBlob(chunks, 'blob_refresh', expectedSha256, fileLoader),
     currentBytes,
   );
-  assert.equal(queries.length, 2);
-  assert.match(queries[1].requireRevision, /^blob:blob_refresh:/);
-  assert.equal(streams, 0);
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].requireRevision, undefined);
+  assert.equal(streams, 1);
 });
 
 test('bridge blocks writes without collection permission before staging any bytes', async () => {
@@ -210,9 +209,7 @@ test('bridge preserves native stale-base conflicts without waiting for full meta
   await assert.rejects(bridge.prepare({ recordId: 'sheet_1', versionId: 'v1' }),
     (error) => error.code === 'version_conflict');
   assert.deepEqual(events, [
-    'start:spreadsheets',
-    'start:spreadsheet_versions',
-    'lease:spreadsheet_blob_chunks:spreadsheets-prepare', 'synced:spreadsheet_blob_chunks',
+    'lease:spreadsheet_blob_chunks:spreadsheets-prepare',
     'dispatch',
     'release:spreadsheet_blob_chunks',
   ]);
@@ -386,6 +383,172 @@ test('prepare result is immediately readable before the native version projectio
   assert.deepEqual(streamed, ['editor_1']);
 });
 
+test('demand-file chunk leases do not wait for complete collection replication', async () => {
+  let awaitedFullReplication = 0;
+  let dispatched = 0;
+  let released = 0;
+  let metadataStarts = 0;
+  const bridge = createBusinessOsOfficeBridge({
+    db: { collection() { return {}; } },
+    sync: {
+      async startCollection() { metadataStarts += 1; throw new Error('metadata sync must remain shell-owned'); },
+      async leaseCollection() {
+        return {
+          bridge: {
+            state: {
+              demandFileLoader: { async fetchFile() { return []; } },
+              async awaitInSync() { awaitedFullReplication += 1; },
+            },
+          },
+          async release() { released += 1; },
+        };
+      },
+    },
+    commandBus: {
+      async dispatch() {
+        dispatched += 1;
+        return { status: 'completed', result: { ok: true, version_id: 'doc_1_v1', editor_blob_id: 'editor_1' } };
+      },
+    },
+  }, 'document');
+
+  const result = await bridge.prepare({ recordId: 'doc_1', versionId: 'doc_1_v1' });
+
+  assert.equal(result.editor_blob_id, 'editor_1');
+  assert.equal(awaitedFullReplication, 0);
+  assert.equal(metadataStarts, 0);
+  assert.equal(dispatched, 1);
+  assert.equal(released, 1);
+});
+
+test('pending demand-file leases wait for a direct bridge before opening a document', async () => {
+  const source = new TextEncoder().encode('mail-merge-recipient');
+  const sourceSha = createHash('sha256').update(source).digest('hex');
+  const streamed = [];
+  let starts = 0;
+  let released = 0;
+  const fileLoader = {
+    async fetchFile(blobId) {
+      streamed.push(blobId);
+      return [{ sequence: 0, bytesBase64: Buffer.from(source).toString('base64') }];
+    },
+  };
+  const collection = (name) => ({
+    findOne(id) {
+      return {
+        async exec() {
+          if (name === 'documents' && id === 'merge_1') {
+            return { id: 'merge_1', current_version_id: 'merge_1_v1' };
+          }
+          if (name === 'document_versions' && id === 'merge_1_v1') {
+            return {
+              id: 'merge_1_v1',
+              document_id: 'merge_1',
+              blob_id: 'merge_1_v1_blob',
+              source_sha256: sourceSha,
+            };
+          }
+          return null;
+        },
+      };
+    },
+    find() {
+      return { async exec() { return []; } };
+    },
+  });
+  const bridge = createBusinessOsOfficeBridge({
+    db: { collection },
+    sync: {
+      async leaseCollection() {
+        return {
+          bridge: { mode: 'pending', state: null },
+          async release() { released += 1; },
+        };
+      },
+      async startCollection(_collection, options) {
+        starts += 1;
+        assert.equal(options.forceDirect, true);
+        return {
+          mode: 'leader',
+          state: {
+            demandFileLoader: fileLoader,
+            async awaitInSync() {
+              throw new Error('demand-only collection must not await full replication');
+            },
+          },
+        };
+      },
+    },
+  }, 'document');
+
+  const loaded = await bridge.loadVersion({
+    recordId: 'merge_1',
+    versionId: 'merge_1_v1',
+  });
+
+  assert.deepEqual(loaded.canonicalBytes, source);
+  assert.deepEqual(streamed, ['merge_1_v1_blob']);
+  assert.equal(starts, 1);
+  assert.equal(released, 1);
+});
+
+test('demand-file leases wait until enableDemandLoading exposes fetchFile', async () => {
+  const source = new TextEncoder().encode('late-file-loader-docx');
+  const sourceSha = createHash('sha256').update(source).digest('hex');
+  const docs = new Map([
+    ['doc_late', { id: 'doc_late', current_version_id: 'doc_late_v1' }],
+    ['doc_late_v1', {
+      id: 'doc_late_v1',
+      document_id: 'doc_late',
+      blob_id: 'doc_late_blob',
+      source_sha256: sourceSha,
+    }],
+  ]);
+  let enableCalls = 0;
+  let fullSyncWaits = 0;
+  const fileLoader = {
+    async fetchFile(blobId) {
+      assert.equal(blobId, 'doc_late_blob');
+      return [{ sequence: 0, bytesBase64: Buffer.from(source).toString('base64') }];
+    },
+  };
+  const state = {
+    demandFileLoader: null,
+    async enableDemandLoading() {
+      enableCalls += 1;
+      setTimeout(() => { state.demandFileLoader = fileLoader; }, 20);
+      return null;
+    },
+    async awaitInSync() {
+      fullSyncWaits += 1;
+      throw new Error('demand-only document blobs must not await full replication');
+    },
+  };
+  const bridge = createBusinessOsOfficeBridge({
+    db: {
+      collection() {
+        return {
+          findOne(id) { return { async exec() { return docs.get(id) || null; } }; },
+          find() { return { async exec() { return []; } }; },
+        };
+      },
+    },
+    sync: {
+      async leaseCollection() {
+        return {
+          bridge: { mode: 'leader', state },
+          async release() {},
+        };
+      },
+    },
+  }, 'document');
+
+  const loaded = await bridge.loadVersion({ recordId: 'doc_late', versionId: 'doc_late_v1' });
+  assert.deepEqual(loaded.canonicalBytes, source);
+  assert.equal(enableCalls, 1);
+  assert.equal(fullSyncWaits, 0);
+});
+
 test('office bridge resumes an inserted command after a retryable push timeout', async () => {
   let dispatches = 0;
   let resumes = 0;
@@ -478,12 +641,47 @@ test('Office RPC budgets all storage-backed editor operations for live replicati
   const capsule = await readFile(new URL('./src/capsule.mjs', import.meta.url), 'utf8');
   const frameRuntime = await readFile(new URL('./src/frame-runtime.mjs', import.meta.url), 'utf8');
   assert.match(capsule, /const OFFICE_OPERATION_TIMEOUT_MS = 120000/);
+  assert.match(capsule, /const OFFICE_STARTUP_TIMEOUT_MS = 120000/);
+  assert.match(capsule, /appReadyTimeoutMs: Math\.max\(10000, readyTimeoutMs - 5000\)/);
+  assert.match(frameRuntime, /const productName = config\.productName/);
   for (const method of ['open', 'save', 'export']) {
     assert.match(capsule, new RegExp(`editor\\.${method}[^\\n]+timeoutMs: OFFICE_OPERATION_TIMEOUT_MS`));
   }
   for (const method of ['loadVersion', 'prepare', 'commit', 'export']) {
     assert.match(frameRuntime, new RegExp(`bridge\\.${method}[^\\n]+timeoutMs: OFFICE_OPERATION_TIMEOUT_MS`));
   }
+});
+
+test('Office asset revision propagates through every iframe and runtime boundary', async () => {
+  const revision = '20260723-office-runtime-v197';
+  const capsule = await readFile(new URL('./src/capsule.mjs', import.meta.url), 'utf8');
+  const frameHtml = await readFile(new URL('./src/frame.html', import.meta.url), 'utf8');
+  const frameRuntime = await readFile(new URL('./src/frame-runtime.mjs', import.meta.url), 'utf8');
+  const documentsRuntime = await readFile(new URL('./src/runtime/ctox-documents.mjs', import.meta.url), 'utf8');
+  const spreadsheetsRuntime = await readFile(new URL('./src/runtime/ctox-spreadsheets.mjs', import.meta.url), 'utf8');
+  const forkRuntime = await readFile(new URL('./src/runtime/ctox-fork-core.mjs', import.meta.url), 'utf8');
+
+  assert.match(frameHtml, new RegExp(`frame-runtime\\.mjs\\?v=${revision}`));
+  assert.match(capsule, /frameUrl\.searchParams\.set\('v', assetRevision\)/);
+  assert.match(frameRuntime, /defaultModuleUrl\.searchParams\.set\('v', assetRevision\)/);
+  assert.match(documentsRuntime, /coreUrl\.searchParams\.set\('v', assetRevision\)/);
+  assert.match(spreadsheetsRuntime, /coreUrl\.searchParams\.set\('v', assetRevision\)/);
+  assert.match(forkRuntime, /entry\.searchParams\.set\('v', assetRevision\)/);
+});
+
+test('Office fork startup budget is bounded and supports a cold production load', () => {
+  assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(undefined), 115000);
+  assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(55000), 55000);
+  assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(999999), 295000);
+  assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(5000), 115000);
+});
+
+test('vendored Office entrypoints do not reload a cold editor after 30 seconds', async () => {
+  const entry = await readFile(new URL('../vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index.html', import.meta.url), 'utf8');
+  assert.match(entry, /\}, 120000\);/);
+  assert.match(entry, /waitSeconds:\s*120/);
+  assert.doesNotMatch(entry, /\}, 30000\);/);
+  assert.doesNotMatch(entry, /waitSeconds:\s*30/);
 });
 
 test('CTOX Spreadsheets production lifecycle uses the Business OS wrapper and fork UI', async () => {

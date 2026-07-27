@@ -32,6 +32,7 @@ export class CtoxResizer {
     this.startWidth = 0;
     this.resizeRaf = 0;
     this.pendingPointerPosition = null;
+    this.activePointerId = null;
     this.step = 24;
 
     // Binde Event-Methoden fest an die Instanz
@@ -58,6 +59,11 @@ export class CtoxResizer {
 
   onPointerDown(e) {
     e.preventDefault();
+    if (this.activePointerId !== null) this.onPointerUp();
+    this.activePointerId = Number.isFinite(e.pointerId) ? e.pointerId : null;
+    if (this.activePointerId !== null) {
+      try { this.resizerEl.setPointerCapture?.(this.activePointerId); } catch {}
+    }
     this.startPosition = this.orientation === 'horizontal' ? e.clientY : e.clientX;
 
     // Hole die aktuelle Breite
@@ -100,6 +106,15 @@ export class CtoxResizer {
     window.removeEventListener('pointermove', this.onPointerMove);
     window.removeEventListener('pointerup', this.onPointerUp);
     window.removeEventListener('pointercancel', this.onPointerUp);
+    const pointerId = this.activePointerId;
+    this.activePointerId = null;
+    if (pointerId !== null) {
+      try {
+        if (this.resizerEl.hasPointerCapture?.(pointerId)) {
+          this.resizerEl.releasePointerCapture?.(pointerId);
+        }
+      } catch {}
+    }
   }
 
   applyPendingPointerPosition() {

@@ -31,6 +31,25 @@ Current ownership boundary:
 - the durable scrape runtime/database still stays in the wider CTOX scrape
   subsystem, so the root injects only that executor.
 
+## Public scrape fallback
+
+Registered public scrape adapters have one bounded browser fallback for access
+failures. When an adapter classifies a run as `blocked` or
+`temporary_unreachable`, the Web Stack opens the source's public start page in
+a source-bound Business OS browser session, handles an ordinary consent button
+when present, and checks whether the browser reached a usable page. A
+successful warm-up passes that session identifier to exactly one retry of the
+same registered adapter.
+
+The fallback is restricted to the canonical source host and its declared host
+suffixes, passes no credentials or page content to the adapter, rejects
+cross-domain redirects, and does not solve or evade CAPTCHAs. A remaining
+challenge ends the fallback without another adapter attempt. Other
+classifications such as `portal_drift` and `partial_output` never open this
+path and continue through their existing repair/evidence handling. Research
+results expose the attempt count, initial classification, and redacted browser
+outcome for auditability.
+
 ## Deep research
 
 `ctox web deep-research` runs a multi-query evidence gathering workflow over the

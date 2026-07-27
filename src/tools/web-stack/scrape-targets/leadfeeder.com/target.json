@@ -1,9 +1,9 @@
 {
   "target_key": "leadfeeder-com",
   "display_name": "Leadfeeder Intent Research",
-  "start_url": "https://app.leadfeeder.com/",
+  "start_url": "https://app.leadfeeder.com/f/sign/in",
   "target_kind": "prospect-research",
   "status": "active",
-  "config": { "expected_provider": "leadfeeder.com", "country_hints": ["DE", "AT", "CH"], "tier": "C", "expected_min_records": 1, "record_key_fields": ["field", "source_url"] },
+  "config": { "expected_provider": "leadfeeder.com", "country_hints": ["DE", "AT", "CH"], "tier": "C", "adapter_version": "v1", "expected_min_records": 1, "record_key_fields": ["field", "source_url"], "access_mode": "authenticated_browser", "provider_owned_only": true, "login_url": "https://app.leadfeeder.com/f/sign/in", "allowed_domains": ["leadfeeder.com", "app.leadfeeder.com", "api.leadfeeder.com"], "credential_ref": "ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN", "secret_values_allowed": false, "challenge_detection": true, "persistent_browser_session_input": "browser_session_id", "auth_verification": "provider_owned_post_login_capture", "failure_modes": ["auth_required", "blocked", "portal_drift", "temporary_unreachable"] },
   "output_schema": { "schema_key": "prospect.v1", "primary_artifact_kind": "field_records_json", "record_key_fields": ["field", "source_url"] }
 }

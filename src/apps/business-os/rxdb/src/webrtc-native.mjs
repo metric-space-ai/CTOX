@@ -1315,6 +1315,21 @@ export class CtoxWebRtcNativePeer {
     const transferId = String(payload.transferId || '');
     const entry = this.incomingFrames.get(transferId);
     if (!entry || entry.peerId !== peerId) {
+      const completed = this.completedFrameAcks.get(transferId);
+      if (completed && completed.peerId === peerId) {
+        // The sender can repeat the last window when our final ACK was lost.
+        // Re-ACK the completed transfer instead of tearing down the shared
+        // multiplexed peer; the payload has already been delivered exactly once.
+        this.send(peerId, {
+          ctoxFrame: CTOX_FRAME_PROTOCOL,
+          kind: 'ack',
+          transferId,
+          ackSeq: completed.ackSeq,
+          receivedFrames: completed.receivedFrames,
+          final: true,
+        });
+        return;
+      }
       this.events.emit('error', {
         code: 'ctox_webrtc_frame_chunk_without_start',
         peerId,
@@ -1494,6 +1509,10 @@ export class CtoxWebRtcNativePeer {
 
   removeConnection(remotePeerId, reason = 'closed', pendingError = null, { reconnect = true } = {}) {
     const peerId = String(remotePeerId || '');
+    this.clearObservedRequestsForPeer(
+      peerId,
+      pendingError || createPeerClosedError(peerId, reason),
+    );
     const connection = this.connections.get(peerId);
     if (!connection) return;
     this.connections.delete(peerId);
@@ -1509,6 +1528,21 @@ export class CtoxWebRtcNativePeer {
     this.events.emit('peer-close', { peerId, reason });
     if (reconnect && reason !== 'peer-close') {
       this.scheduleReconnect(peerId, reason);
+    }
+  }
+
+  clearObservedRequestsForPeer(peerId, error = null) {
+    const prefix = `${String(peerId || '')}|`;
+    for (const key of [...this.observedRequests.keys()]) {
+      if (key.startsWith(prefix)) this.observedRequests.delete(key);
+    }
+    for (const [key, waiters] of [...this.requestWaiters.entries()]) {
+      if (!key.startsWith(prefix)) continue;
+      this.requestWaiters.delete(key);
+      for (const waiter of waiters) {
+        clearTimeout(waiter.timer);
+        waiter.reject(error || createPeerClosedError(peerId, 'peer-close'));
+      }
     }
   }
 

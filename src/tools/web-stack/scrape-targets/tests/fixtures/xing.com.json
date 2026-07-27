@@ -1,8 +1,8 @@
 {
-  "input": { "source_id": "xing.com", "company": "WITTENSTEIN SE", "country": "DE" },
-  "expected": { "firma_name": "WITTENSTEIN SE", "person_xing": "https://www.xing.com/profile/Anna_Wittenstein" },
-  "capture": { "ok": true, "company": "WITTENSTEIN SE", "source_status": "succeeded", "records": [{ "field": "firma_name", "value": "WITTENSTEIN SE", "confidence": "medium", "source_url": "https://www.xing.com/pages/wittensteinse/about_us", "note": "authenticated search result" }, { "field": "person_xing", "value": "https://www.xing.com/profile/Anna_Wittenstein", "confidence": "high", "source_url": "https://www.xing.com/profile/Anna_Wittenstein", "note": "profile URL" }] },
-  "browser": { "ok": true, "result": { "ok": true, "url": "https://www.xing.com/pages/wittensteinse/about_us", "title": "WITTENSTEIN SE | XING", "page_text_excerpt": "WITTENSTEIN SE Unternehmensprofil" } },
-  "search": { "results": [{ "title": "WITTENSTEIN SE", "url": "https://www.xing.com/pages/wittensteinse/about_us", "summary": "Unternehmensprofil" }] },
-  "read": { "ok": true, "url": "https://www.xing.com/pages/wittensteinse/about_us", "title": "WITTENSTEIN SE | XING", "page_text_excerpt": "WITTENSTEIN SE Unternehmensprofil" }
+  "input": { "source_id": "xing.com", "company": "Example Manufacturing AG", "country": "DE", "task_id": "fixture-xing", "credential_ref": "ctox-secret://credentials/XING_BROWSER_LOGIN" },
+  "expected": { "firma_name": "Example Manufacturing AG", "person_funktion": "Leiterin Einkauf", "person_xing": "https://www.xing.com/profile/Erika_Beispiel" },
+  "browser_allowed_domains": ["xing.com", "www.xing.com", "login.xing.com", "api.xing.com"],
+  "login_url": "https://login.xing.com/",
+  "capture": { "ok": true, "company": "Example Manufacturing AG", "source_status": "succeeded", "records": [{ "field": "firma_name", "value": "Example Manufacturing AG", "confidence": "high", "source_url": "https://www.xing.com/pages/examplemanufacturingag/about_us", "note": "XING company search result" }, { "field": "person_funktion", "value": "Leiterin Einkauf", "confidence": "medium", "source_url": "https://www.xing.com/profile/Erika_Beispiel", "note": "XING member result employment context" }, { "field": "person_xing", "value": "https://www.xing.com/profile/Erika_Beispiel", "confidence": "high", "source_url": "https://www.xing.com/profile/Erika_Beispiel", "note": "XING canonical profile URL" }] },
+  "search": { "results": [] }
 }

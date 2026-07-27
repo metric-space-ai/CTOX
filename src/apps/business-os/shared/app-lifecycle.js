@@ -336,6 +336,11 @@ export function appLifecycleState(moduleLike, options = {}) {
 }
 
 export function canSeeModuleForAppVersion(moduleLike, options = {}) {
+  // Operator-managed local modules are already instance-scoped by their
+  // filesystem location and the native catalog projection. They must remain
+  // visible independently of the public release lifecycle used by installed
+  // and marketplace apps.
+  if (isLocalModule(moduleLike)) return true;
   const lifecycle = appLifecycleState(moduleLike, options);
   if (!lifecycle.runtimeInstalled) return true;
   if (lifecycle.public) return true;

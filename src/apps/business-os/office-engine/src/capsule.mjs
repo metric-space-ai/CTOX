@@ -2,6 +2,7 @@ import { OfficeRpcPeer } from './rpc.mjs';
 
 const VALID_KINDS = new Set(['document', 'spreadsheet']);
 const OFFICE_OPERATION_TIMEOUT_MS = 120000;
+const OFFICE_STARTUP_TIMEOUT_MS = 120000;
 
 export async function createCtoxOfficeEditor(options = {}) {
   const kind = String(options.kind || '');
@@ -15,7 +16,11 @@ export async function createCtoxOfficeEditor(options = {}) {
   frame.dataset.ctoxOfficeKind = kind;
   frame.style.cssText = 'display:block;width:100%;height:100%;border:0;background:transparent';
   frame.setAttribute('referrerpolicy', 'no-referrer');
-  frame.src = new URL(`./frame.html?kind=${encodeURIComponent(kind)}`, import.meta.url).href;
+  const frameUrl = new URL('./frame.html', import.meta.url);
+  frameUrl.searchParams.set('kind', kind);
+  const assetRevision = new URL(import.meta.url).searchParams.get('v');
+  if (assetRevision) frameUrl.searchParams.set('v', assetRevision);
+  frame.src = frameUrl.href;
   options.host.replaceChildren(frame);
 
   await waitForFrameLoad(frame, options.loadTimeoutMs);
@@ -31,6 +36,7 @@ export async function createCtoxOfficeEditor(options = {}) {
   const offEvent = rpc.on('editor.event', ({ name, detail } = {}) => {
     for (const listener of listeners.get(name) || []) listener(detail);
   });
+  const readyTimeoutMs = normalizeStartupTimeout(options.readyTimeoutMs);
   frame.contentWindow.postMessage({
     type: 'ctox-office-connect',
     kind,
@@ -38,11 +44,11 @@ export async function createCtoxOfficeEditor(options = {}) {
     locale: options.locale === 'en' ? 'en' : 'de',
     theme: options.theme || 'system',
     permissions: normalizePermissions(options.permissions),
-    launchArgs: sanitizeLaunchArgs(options.launchArgs),
+    launchArgs: sanitizeLaunchArgs(options.launchArgs, readyTimeoutMs),
   }, location.origin, [channel.port2]);
 
   try {
-    await rpc.call('editor.ready', null, { timeoutMs: options.readyTimeoutMs || 30000 });
+    await rpc.call('editor.ready', null, { timeoutMs: readyTimeoutMs });
   } catch (error) {
     offEvent();
     rpc.close();
@@ -107,13 +113,21 @@ function normalizePermissions(permissions = {}) {
   });
 }
 
-function sanitizeLaunchArgs(args = {}) {
+function sanitizeLaunchArgs(args = {}, readyTimeoutMs = OFFICE_STARTUP_TIMEOUT_MS) {
   return {
     runtimeModule: typeof args.runtimeModule === 'string' ? args.runtimeModule : '',
     testMode: args.testMode === true,
     recordId: typeof args.recordId === 'string' ? args.recordId : '',
     versionId: typeof args.versionId === 'string' ? args.versionId : '',
+    appReadyTimeoutMs: Math.max(10000, readyTimeoutMs - 5000),
   };
+}
+
+function normalizeStartupTimeout(value) {
+  const timeoutMs = Number(value);
+  return Number.isFinite(timeoutMs) && timeoutMs >= 10000
+    ? Math.min(timeoutMs, 300000)
+    : OFFICE_STARTUP_TIMEOUT_MS;
 }
 
 function waitForFrameLoad(frame, timeoutValue) {

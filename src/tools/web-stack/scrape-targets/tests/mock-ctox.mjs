@@ -42,6 +42,8 @@ function modeResponse(value) {
       response.title = title;
       if (response.result && typeof response.result === "object") {
         response.result.title = title;
+        if (Array.isArray(response.result.entries)) response.result.entries = [];
+        if ("results_page" in response.result) response.result.results_page = false;
       }
       if (Array.isArray(response.results)) {
         response.results = response.results.map((hit) => ({ ...hit, title }));
@@ -64,15 +66,15 @@ if (args[0] === "business-os" && args.includes("source-capture")) {
       .filter((call) => call[0] === "business-os" && call.includes("source-capture"))
       .length
     : 1;
-  response = mode === "auth_recovery" && captureCalls > 1
+  response = ["auth_recovery", "capture_retry"].includes(mode) && captureCalls > 1
     ? modeResponse(fixture.capture || { ok: false, source_status: "failed", records: [] })
     : mode === "blocked"
       ? { ok: false, source_status: "blocked", source_url: fixture.login_url, records: [] }
-      : ["portal", "login", "auth_required", "auth_recovery"].includes(mode)
-    ? { ok: false, source_status: "auth_required", records: [] }
+      : ["portal", "login", "auth_required", "auth_recovery", "capture_retry", "provider_page_blocked"].includes(mode)
+    ? { ok: false, source_status: mode === "capture_retry" ? "failed" : "auth_required", records: [] }
     : modeResponse(fixture.capture || { ok: false, source_status: "failed", records: [] });
 } else if (args[0] === "business-os" && args.includes("auth-assist-login")) {
-  response = mode === "auth_recovery"
+  response = ["auth_recovery", "capture_retry"].includes(mode)
     ? {
         ok: true,
         status: "completed",
@@ -105,7 +107,7 @@ if (args[0] === "business-os" && args.includes("source-capture")) {
     secret_value_in_payload: false,
   };
 } else if (args[0] === "web" && args[1] === "browser-automation") {
-  response = mode === "blocked"
+  response = ["blocked", "provider_page_blocked", "browser_blocked"].includes(mode)
     ? { ok: false, result: null, detection: { markers: ["fixture-access-challenge"] } }
     : modeResponse(fixture.browser || { ok: false, result: null });
 } else if (args[0] === "web" && args[1] === "search") {
@@ -116,7 +118,7 @@ if (args[0] === "business-os" && args.includes("source-capture")) {
       : modeResponse(fixture.search || { results: [] });
 } else if (args[0] === "web" && args[1] === "read") {
   const url = flagValue("--url");
-  response = mode === "blocked"
+  response = ["blocked", "provider_page_blocked"].includes(mode)
     ? { ok: false, url }
     : modeResponse(fixture.pages?.[url] || fixture.read || { ok: false, url });
 } else if (args[0] === "web" && args[1] === "unlock" && args[2] === "signals") {

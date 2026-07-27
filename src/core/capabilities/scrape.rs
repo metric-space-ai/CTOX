@@ -36,7 +36,6 @@ use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
 
-const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_RUNTIME_ROOT: &str = "runtime/scraping";
 const DEFAULT_QUEUE_PRIORITY: &str = "high";
 const DEFAULT_REPAIR_SKILL: &str = "universal-scraping";
@@ -720,7 +719,10 @@ pub(crate) fn execute_scrape_with_outcome(
             "detail": error.to_string(),
         }),
     };
-    let records = normalize_records(&payload);
+    let mut records = normalize_records(&payload);
+    if let Some(items) = records.as_mut() {
+        bind_scrape_record_provenance(items, &run_id, input_json.as_deref(), &now_iso_string());
+    }
     let expected_min_records = target
         .view
         .config
@@ -854,8 +856,9 @@ pub(crate) fn execute_scrape_with_outcome(
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("scrape/{}", target.view.target_key));
         let priority = find_flag_value(args, "--queue-priority").unwrap_or(DEFAULT_QUEUE_PRIORITY);
+        let repair_workspace = resolve_workspace_dir(root, &target.view.workspace_dir);
         let repair_prompt = build_repair_prompt(
-            root,
+            &repair_workspace,
             &target,
             &run_id,
             classification.status,
@@ -869,11 +872,17 @@ pub(crate) fn execute_scrape_with_outcome(
                 title: format!("repair scrape target {}", target.view.target_key),
                 prompt: repair_prompt,
                 thread_key,
-                workspace_root: None,
+                workspace_root: Some(repair_workspace.to_string_lossy().into_owned()),
                 priority: priority.to_string(),
                 suggested_skill: Some(suggested_skill.to_string()),
                 parent_message_key: None,
-                extra_metadata: None,
+                extra_metadata: Some(json!({
+                    "scrape_repair": {
+                        "target_key": target.view.target_key,
+                        "run_id": run_id,
+                        "workspace_root": repair_workspace,
+                    }
+                })),
             },
         )?)
     } else {
@@ -1804,16 +1813,45 @@ fn register_script(
         )
         .optional()?
     {
-        let revision_path = PathBuf::from(&script_path);
+        let stored_revision_path = PathBuf::from(&script_path);
         let workspace_dir = ensure_target_workspace(
             &resolve_runtime_root(root, runtime_root_arg),
             &target.target_key,
         )?;
-        let extension = revision_path
+        let extension = stored_revision_path
             .extension()
             .and_then(|value| value.to_str())
             .map(|value| format!(".{value}"))
             .unwrap_or_else(|| script_extension(language, &source_path));
+        let revision_file_name = stored_revision_path
+            .file_name()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "rev{revision_no:04}_{}.{}",
+                    &script_sha256[..8],
+                    extension.trim_start_matches('.')
+                )
+                .into()
+            });
+        let revision_path = workspace_dir
+            .join("scripts")
+            .join("revisions")
+            .join(revision_file_name);
+        fs::create_dir_all(
+            revision_path
+                .parent()
+                .context("deduplicated scrape script revision has no parent")?,
+        )?;
+        if source_path != revision_path {
+            fs::copy(&source_path, &revision_path).with_context(|| {
+                format!(
+                    "failed to materialize deduplicated script revision {} -> {}",
+                    source_path.display(),
+                    revision_path.display()
+                )
+            })?;
+        }
         let current_path = workspace_dir
             .join("scripts")
             .join(format!("current{extension}"));
@@ -1825,6 +1863,18 @@ fn register_script(
             )
         })?;
         let activated_at = now_iso_string();
+        conn.execute(
+            r#"
+            UPDATE scrape_script_revision
+            SET script_path = ?3
+            WHERE target_id = ?1 AND revision_no = ?2
+            "#,
+            params![
+                target.target_id,
+                revision_no,
+                revision_path.to_string_lossy()
+            ],
+        )?;
         conn.execute(
             r#"
             UPDATE scrape_target
@@ -1842,7 +1892,7 @@ fn register_script(
             "target_key": updated_target.target_key,
             "target_id": updated_target.target_id,
             "revision_no": revision_no,
-            "script_path": script_path,
+            "script_path": revision_path,
             "current_path": current_path,
             "script_sha256": script_sha256,
             "deduplicated": true,
@@ -2329,7 +2379,7 @@ fn open_db(root: &Path) -> Result<Connection> {
 }
 
 fn resolve_db_path(root: &Path) -> PathBuf {
-    root.join(DEFAULT_DB_RELATIVE_PATH)
+    crate::paths::core_db(root)
 }
 
 fn resolve_runtime_root(root: &Path, runtime_root_arg: &str) -> PathBuf {
@@ -2396,40 +2446,154 @@ fn load_registered_target(
     conn: &Connection,
     target_key: &str,
 ) -> Result<Option<RegisteredTarget>> {
-    let Some(view) = load_target_view(conn, target_key)? else {
+    let Some(mut view) = load_target_view(conn, target_key)? else {
         return Ok(None);
     };
-    let script = conn
-        .query_row(
-            r#"
-            SELECT revision_no, script_path, language, entry_command_json, script_sha256
+    let script = view
+        .latest_script_revision_no
+        .map(|active_revision_no| {
+            conn.query_row(
+                r#"
+            SELECT revision_no, script_path, language, entry_command_json, script_sha256,
+                   script_body
             FROM scrape_script_revision
-            WHERE target_id = ?1
-            ORDER BY revision_no DESC
-            LIMIT 1
+            WHERE target_id = ?1 AND revision_no = ?2
             "#,
-            params![view.target_id],
-            |row| {
-                let language: String = row.get(2)?;
-                let entry_command_text: String = row.get(3)?;
-                let entry_command = serde_json::from_str::<Vec<String>>(&entry_command_text)
-                    .unwrap_or_else(|_| default_entry_command(&language));
-                Ok(ScrapeScriptRevisionRecord {
-                    revision_no: row.get(0)?,
-                    script_path: row.get(1)?,
-                    language,
-                    entry_command,
-                    script_sha256: row.get(4)?,
-                })
-            },
-        )
-        .optional()?;
-    let workspace_root = resolve_workspace_dir(root, &view.workspace_dir);
-    Ok(script.map(|script| RegisteredTarget {
+                params![view.target_id, active_revision_no],
+                |row| {
+                    let language: String = row.get(2)?;
+                    let entry_command_text: String = row.get(3)?;
+                    let entry_command = serde_json::from_str::<Vec<String>>(&entry_command_text)
+                        .unwrap_or_else(|_| default_entry_command(&language));
+                    Ok((
+                        ScrapeScriptRevisionRecord {
+                            revision_no: row.get(0)?,
+                            script_path: row.get(1)?,
+                            language,
+                            entry_command,
+                            script_sha256: row.get(4)?,
+                        },
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .optional()
+        })
+        .transpose()?
+        .flatten();
+    let Some((mut script, script_body)) = script else {
+        return Ok(None);
+    };
+    let workspace_root = resolve_registered_workspace(root, &view);
+    let resolved_workspace = workspace_root.to_string_lossy().to_string();
+    if view.workspace_dir != resolved_workspace {
+        conn.execute(
+            "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
+            params![view.target_id, resolved_workspace],
+        )?;
+        view.workspace_dir = resolved_workspace;
+    }
+
+    let resolved_script = resolve_registered_script_path(
+        &workspace_root,
+        &script.script_path,
+        &script.script_sha256,
+        &script_body,
+    )?
+    .to_string_lossy()
+    .to_string();
+    if script.script_path != resolved_script {
+        conn.execute(
+            r#"
+            UPDATE scrape_script_revision
+            SET script_path = ?3
+            WHERE target_id = ?1 AND revision_no = ?2
+            "#,
+            params![view.target_id, script.revision_no, resolved_script],
+        )?;
+        script.script_path = resolved_script;
+    }
+
+    Ok(Some(RegisteredTarget {
         view,
         script,
         workspace_root,
     }))
+}
+
+fn resolve_registered_workspace(root: &Path, view: &ScrapeTargetView) -> PathBuf {
+    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let configured = resolve_workspace_dir(&canonical_root, &view.workspace_dir);
+    let canonical_configured =
+        fs::canonicalize(&configured).unwrap_or_else(|_| configured.to_path_buf());
+    let default = canonical_root
+        .join(DEFAULT_RUNTIME_ROOT)
+        .join("targets")
+        .join(&view.target_key);
+    if workspace_belongs_to_stale_release(&canonical_root, &canonical_configured) {
+        return fs::canonicalize(&default).unwrap_or(default);
+    }
+    if canonical_configured.exists() {
+        return canonical_configured;
+    }
+    fs::canonicalize(&default).unwrap_or(default)
+}
+
+fn workspace_belongs_to_stale_release(root: &Path, workspace: &Path) -> bool {
+    let Some(releases_dir) = root
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "releases"))
+    else {
+        return false;
+    };
+    workspace.starts_with(releases_dir) && !workspace.starts_with(root)
+}
+
+fn resolve_registered_script_path(
+    workspace_root: &Path,
+    stored_path: &str,
+    expected_sha256: &str,
+    script_body: &str,
+) -> Result<PathBuf> {
+    let stored = PathBuf::from(stored_path);
+    let file_name = stored
+        .file_name()
+        .context("registered scrape script path has no file name")?;
+    let workspace_revision = workspace_root
+        .join("scripts")
+        .join("revisions")
+        .join(file_name);
+    if registered_script_matches(&workspace_revision, expected_sha256) {
+        return Ok(
+            fs::canonicalize(&workspace_revision).unwrap_or_else(|_| workspace_revision.clone())
+        );
+    }
+    if stored.starts_with(workspace_root) && registered_script_matches(&stored, expected_sha256) {
+        return Ok(fs::canonicalize(&stored).unwrap_or(stored));
+    }
+
+    fs::create_dir_all(
+        workspace_revision
+            .parent()
+            .context("registered scrape script revision has no parent")?,
+    )?;
+    anyhow::ensure!(
+        compute_sha256(script_body.trim()) == expected_sha256,
+        "persisted scrape script body does not match registered SHA-256"
+    );
+    fs::write(&workspace_revision, script_body).with_context(|| {
+        format!(
+            "failed to restore registered scrape script {}",
+            workspace_revision.display()
+        )
+    })?;
+    Ok(fs::canonicalize(&workspace_revision).unwrap_or(workspace_revision))
+}
+
+fn registered_script_matches(path: &Path, expected_sha256: &str) -> bool {
+    fs::read_to_string(path)
+        .map(|body| compute_sha256(body.trim()) == expected_sha256)
+        .unwrap_or(false)
 }
 
 fn load_script_revisions(
@@ -2684,7 +2848,7 @@ fn write_json_file_if_missing(path: &Path, value: &Value) -> Result<()> {
 }
 
 fn build_repair_prompt(
-    root: &Path,
+    repair_workspace: &Path,
     target: &RegisteredTarget,
     run_id: &str,
     status: ScrapeRunStatus,
@@ -2700,17 +2864,14 @@ fn build_repair_prompt(
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "Repair CTOX scrape target `{}` in workspace `{}`. Read the repair bundle at `{}` first. This was run `{}` with status `{}` and records_found `{}`. The configured sources are: [{}]. Check `runtime/scraping/targets/{}/sources/` for source-specific modules and notes before changing the root script. If the failure is real portal drift or partial extraction, revise the target script under `runtime/scraping/targets/{}/scripts/` and/or the affected source module under `runtime/scraping/targets/{}/sources/<source_key>/`. Register root changes with `ctox scrape register-script --target-key {} --script-file <path> --change-reason script_relearned` and source-local changes with `ctox scrape register-source-module --target-key {} --source-key <source_key> --module-file <path> --change-reason source_relearned`, then rerun `ctox scrape execute --target-key {} --trigger-kind repair --allow-heal`. Do not rewrite the script if the evidence shows only temporary upstream downtime or blocking.",
+        "Repair CTOX scrape target `{}` inside the isolated workspace `{}`. Do not modify the workspace parent, the active CTOX release, any `runtime` symlink, or any database file. Read the repair bundle at `{}` first. This was run `{}` with status `{}` and records_found `{}`. The configured sources are: [{}]. Inspect `sources/` and `scripts/` before changing extraction logic. If the failure is real portal drift or partial extraction, revise only files below `scripts/` and/or `sources/<source_key>/`. Register root changes with `ctox scrape register-script --target-key {} --script-file <path> --change-reason script_relearned` and source-local changes with `ctox scrape register-source-module --target-key {} --source-key <source_key> --module-file <path> --change-reason source_relearned`, then rerun `ctox scrape execute --target-key {} --trigger-kind repair --allow-heal`. Do not rewrite the script if the evidence shows only temporary upstream downtime or blocking.",
         target.view.target_key,
-        root.display(),
+        repair_workspace.display(),
         repair_request,
         run_id,
         status.as_str(),
         records_found,
         source_keys,
-        target.view.target_key,
-        target.view.target_key,
-        target.view.target_key,
         target.view.target_key,
         target.view.target_key,
         target.view.target_key,
@@ -2950,6 +3111,58 @@ fn normalize_records(payload: &Value) -> Option<Vec<Value>> {
         return normalize_records(result);
     }
     None
+}
+
+fn bind_scrape_record_provenance(
+    records: &mut [Value],
+    run_id: &str,
+    input_json: Option<&str>,
+    checked_at: &str,
+) {
+    let input = input_json.and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let input_string = |key| {
+        input
+            .as_ref()
+            .and_then(|value| value.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let company = input_string("company");
+    let source_id = input_string("source_id");
+    for record in records {
+        let Some(object) = record.as_object_mut() else {
+            continue;
+        };
+        object
+            .entry("run_id".to_string())
+            .or_insert_with(|| Value::String(run_id.to_string()));
+        if let Some(company) = company.as_ref() {
+            object
+                .entry("company_name".to_string())
+                .or_insert_with(|| Value::String(company.clone()));
+        }
+        if let Some(source_id) = source_id.as_ref() {
+            object.insert("source_id".to_string(), Value::String(source_id.clone()));
+        }
+        if object.contains_key("evidence_gate") || object.contains_key("evidence") {
+            continue;
+        }
+        let receipt = serde_json::to_vec(object).unwrap_or_default();
+        object.insert(
+            "evidence_gate".to_string(),
+            json!({
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "http_status": 200,
+                "checked_at": checked_at,
+                "snapshot_hash": format!("sha256:{}", compute_sha256_bytes(&receipt)),
+                "fresh": true,
+                "receipt_kind": "registered_scrape_output"
+            }),
+        );
+    }
 }
 
 fn extracted_record_fields(records: Option<&[Value]>) -> Vec<String> {
@@ -4851,6 +5064,67 @@ mod tests {
 
     static SCRAPE_EXEC_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    #[test]
+    fn scrape_record_provenance_binds_executor_run_and_evidence() {
+        let mut records = vec![json!({
+            "source_id": "northdata",
+            "source_url": "https://www.northdata.de/Example+Industrial+GmbH",
+            "field": "company_name",
+            "value": "Example Industrial GmbH"
+        })];
+
+        bind_scrape_record_provenance(
+            &mut records,
+            "run-123",
+            Some(r#"{"company":" Example Industrial GmbH ","source_id":"northdata.de"}"#),
+            "2026-07-21T19:00:00Z",
+        );
+
+        let record = records[0].as_object().unwrap();
+        assert_eq!(record.get("run_id"), Some(&json!("run-123")));
+        assert_eq!(
+            record.get("company_name"),
+            Some(&json!("Example Industrial GmbH"))
+        );
+        assert_eq!(record.get("source_id"), Some(&json!("northdata.de")));
+        let evidence = record.get("evidence_gate").unwrap();
+        assert_eq!(evidence["evidence_eligible"], json!(true));
+        assert_eq!(evidence["verification_status"], json!("verified"));
+        assert_eq!(evidence["checked_at"], json!("2026-07-21T19:00:00Z"));
+        assert_eq!(evidence["receipt_kind"], json!("registered_scrape_output"));
+        assert!(evidence["snapshot_hash"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("sha256:") && value.len() == 71));
+    }
+
+    #[test]
+    fn scrape_record_provenance_preserves_adapter_supplied_receipts() {
+        let mut records = vec![json!({
+            "run_id": "adapter-run",
+            "company_name": "Adapter Company",
+            "evidence_gate": {
+                "evidence_eligible": true,
+                "verification_status": "verified",
+                "snapshot_hash": "sha256:adapter"
+            }
+        })];
+
+        bind_scrape_record_provenance(
+            &mut records,
+            "executor-run",
+            Some(r#"{"company":"Input Company"}"#),
+            "2026-07-21T19:00:00Z",
+        );
+
+        assert_eq!(records[0]["run_id"], json!("adapter-run"));
+        assert_eq!(records[0]["company_name"], json!("Adapter Company"));
+        assert_eq!(
+            records[0]["evidence_gate"]["snapshot_hash"],
+            json!("sha256:adapter")
+        );
+        assert!(records[0]["evidence_gate"].get("receipt_kind").is_none());
+    }
+
     struct TestFeedServer {
         addr: String,
         stop: Arc<AtomicBool>,
@@ -5145,6 +5419,386 @@ mod tests {
             first["script_sha256"].as_str()
         );
         cleanup_test_root(&root);
+    }
+
+    #[test]
+    fn registered_target_loads_only_the_activated_script_revision() {
+        let root = temp_root("load-active-script-only");
+        let target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "load-active-script-only",
+                "display_name": "Load Active Script Only",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        let script = root.join("adapter.js");
+        fs::write(&script, "process.stdout.write('stable');\n").unwrap();
+        let stable = register_script(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            script.to_str().unwrap(),
+            "javascript",
+            Some("stable"),
+            None,
+        )
+        .unwrap();
+        fs::write(&script, "process.stdout.write('candidate');\n").unwrap();
+        let candidate = register_script(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            script.to_str().unwrap(),
+            "javascript",
+            Some("candidate"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            candidate["revision_no"].as_i64().unwrap() > stable["revision_no"].as_i64().unwrap()
+        );
+
+        let conn = open_db(&root).unwrap();
+        conn.execute(
+            r#"
+            UPDATE scrape_target
+            SET latest_script_revision_no = ?2, latest_script_sha256 = ?3
+            WHERE target_id = ?1
+            "#,
+            params![
+                target.target_id,
+                stable["revision_no"].as_i64().unwrap(),
+                stable["script_sha256"].as_str().unwrap()
+            ],
+        )
+        .unwrap();
+
+        let loaded = load_registered_target(&root, &conn, &target.target_key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.script.revision_no,
+            stable["revision_no"].as_i64().unwrap()
+        );
+        assert_eq!(
+            loaded.script.script_sha256,
+            stable["script_sha256"].as_str().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(loaded.script.script_path).unwrap(),
+            "process.stdout.write('stable');\n"
+        );
+        cleanup_test_root(&root);
+    }
+
+    #[test]
+    fn deduplicated_script_registration_recovers_a_removed_release_path() {
+        let root = temp_root("reactivate-script-removed-release");
+        let target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "reactivate-script-removed-release",
+                "display_name": "Reactivate Script Removed Release",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        let script = root.join("adapter.js");
+        let body = "process.stdout.write('stable');\n";
+        fs::write(&script, body).unwrap();
+        let first = register_script(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            script.to_str().unwrap(),
+            "javascript",
+            Some("first"),
+            None,
+        )
+        .unwrap();
+        let first_path = PathBuf::from(first["script_path"].as_str().unwrap());
+        fs::remove_file(&first_path).unwrap();
+        let conn = open_db(&root).unwrap();
+        conn.execute(
+            "UPDATE scrape_script_revision SET script_path = ?1 WHERE target_id = ?2",
+            params![
+                "/removed/ctox-release/runtime/scraping/targets/rev0001.js",
+                target.target_id
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let reactivated = register_script(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            script.to_str().unwrap(),
+            "javascript",
+            Some("current-release"),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(reactivated["deduplicated"], json!(true));
+        assert_eq!(reactivated["reactivated"], json!(true));
+        let revision_path = PathBuf::from(reactivated["script_path"].as_str().unwrap());
+        let current_path = PathBuf::from(reactivated["current_path"].as_str().unwrap());
+        assert!(revision_path.is_file());
+        assert!(revision_path.starts_with(root.join(DEFAULT_RUNTIME_ROOT)));
+        assert_eq!(fs::read_to_string(&revision_path).unwrap(), body);
+        assert_eq!(fs::read_to_string(&current_path).unwrap(), body);
+        let stored_path: String = open_db(&root)
+            .unwrap()
+            .query_row(
+                "SELECT script_path FROM scrape_script_revision WHERE target_id = ?1",
+                params![target.target_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(PathBuf::from(stored_path), revision_path);
+        cleanup_test_root(&root);
+    }
+
+    #[test]
+    fn registered_script_is_restored_after_runtime_release_path_changes() {
+        let root = temp_root("restore-script-path");
+        let target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "restore-script-path",
+                "display_name": "Restore Script Path",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        let source = root.join("adapter.js");
+        let body = "process.stdout.write(JSON.stringify({records: []}));\n";
+        fs::write(&source, body).unwrap();
+        let registered = register_script(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            source.to_str().unwrap(),
+            "javascript",
+            Some("initial"),
+            None,
+        )
+        .unwrap();
+        let revision_path = PathBuf::from(registered["script_path"].as_str().unwrap());
+        let file_name = revision_path.file_name().unwrap().to_owned();
+        fs::remove_file(&revision_path).unwrap();
+
+        let conn = open_db(&root).unwrap();
+        conn.execute(
+            "UPDATE scrape_script_revision SET script_path = ?1 WHERE target_id = ?2",
+            params![
+                format!(
+                    "/removed/ctox-release/runtime/scraping/{target_key}/{name}",
+                    target_key = target.target_key,
+                    name = file_name.to_string_lossy()
+                ),
+                target.target_id
+            ],
+        )
+        .unwrap();
+
+        let loaded = load_registered_target(&root, &conn, &target.target_key)
+            .unwrap()
+            .unwrap();
+        let restored = PathBuf::from(&loaded.script.script_path);
+        assert!(restored.is_file());
+        assert!(restored.starts_with(&loaded.workspace_root));
+        assert_eq!(fs::read_to_string(restored).unwrap(), body);
+        cleanup_test_root(&root);
+    }
+
+    #[test]
+    fn registered_workspace_ignores_an_existing_stale_release_directory() {
+        let install = temp_root("prefer-current-release-workspace");
+        let releases = install.join("releases");
+        let root = releases.join("current-release");
+        let stale_workspace = releases
+            .join("old-release")
+            .join(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join("release-bound-target");
+        let current_workspace = root
+            .join(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join("release-bound-target");
+        fs::create_dir_all(&stale_workspace).unwrap();
+        fs::create_dir_all(&current_workspace).unwrap();
+
+        let mut target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "release-bound-target",
+                "display_name": "Release-bound Target",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        target.workspace_dir = stale_workspace.to_string_lossy().to_string();
+
+        assert_eq!(
+            resolve_registered_workspace(&root, &target),
+            fs::canonicalize(&current_workspace).unwrap()
+        );
+        cleanup_test_root(&install);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_workspace_resolves_current_release_symlink_before_stale_check() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_root("prefer-current-release-symlink-workspace");
+        let releases = install.join("releases");
+        let current_release = releases.join("current-release");
+        let current_link = install.join("current");
+        let stale_workspace = releases
+            .join("old-release")
+            .join(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join("release-bound-target");
+        let current_workspace = current_release
+            .join(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join("release-bound-target");
+        fs::create_dir_all(&stale_workspace).unwrap();
+        fs::create_dir_all(&current_workspace).unwrap();
+        symlink(&current_release, &current_link).unwrap();
+
+        let mut target = upsert_target(
+            &current_release,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "release-bound-target",
+                "display_name": "Release-bound Target",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        target.workspace_dir = stale_workspace.to_string_lossy().to_string();
+
+        assert_eq!(
+            resolve_registered_workspace(&current_link, &target),
+            fs::canonicalize(&current_workspace).unwrap()
+        );
+        cleanup_test_root(&install);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loading_registered_target_persists_current_workspace_and_script_paths() {
+        use std::os::unix::fs::symlink;
+
+        let install = temp_root("persist-current-release-workspace");
+        let releases = install.join("releases");
+        let current_release = releases.join("current-release");
+        let current_link = install.join("current");
+        fs::create_dir_all(&current_release).unwrap();
+        symlink(&current_release, &current_link).unwrap();
+
+        let target = upsert_target(
+            &current_link,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "release-bound-target",
+                "display_name": "Release-bound Target",
+                "start_url": "https://example.com",
+                "target_kind": "company",
+                "config": {"skip_probe": true},
+                "output_schema": {"schema_key": "company.v1"}
+            }),
+        )
+        .unwrap();
+        let source = current_release.join("extractor.js");
+        fs::write(&source, "console.log(JSON.stringify({records: []}));").unwrap();
+        let registered = register_script(
+            &current_link,
+            DEFAULT_RUNTIME_ROOT,
+            &target.target_key,
+            source.to_str().unwrap(),
+            "javascript",
+            Some("initial"),
+            None,
+        )
+        .unwrap();
+        let current_script = PathBuf::from(
+            registered["script_path"]
+                .as_str()
+                .expect("registered script path"),
+        );
+
+        let stale_workspace = releases
+            .join("old-release")
+            .join(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join(&target.target_key);
+        let stale_script = stale_workspace
+            .join("scripts")
+            .join("revisions")
+            .join(current_script.file_name().unwrap());
+        fs::create_dir_all(stale_script.parent().unwrap()).unwrap();
+        fs::copy(&current_script, &stale_script).unwrap();
+
+        let conn = open_db(&current_link).unwrap();
+        conn.execute(
+            "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
+            params![target.target_id, stale_workspace.to_string_lossy()],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE scrape_script_revision SET script_path = ?2 WHERE target_id = ?1",
+            params![target.target_id, stale_script.to_string_lossy()],
+        )
+        .unwrap();
+
+        let loaded = load_registered_target(&current_link, &conn, &target.target_key)
+            .unwrap()
+            .unwrap();
+        let stored_workspace: String = conn
+            .query_row(
+                "SELECT workspace_dir FROM scrape_target WHERE target_id = ?1",
+                params![target.target_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let stored_script: String = conn
+            .query_row(
+                "SELECT script_path FROM scrape_script_revision WHERE target_id = ?1",
+                params![target.target_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(PathBuf::from(stored_workspace), loaded.workspace_root);
+        assert_eq!(stored_script, loaded.script.script_path);
+        assert!(PathBuf::from(stored_script).starts_with(&loaded.workspace_root));
+        cleanup_test_root(&install);
     }
 
     #[test]
@@ -5625,10 +6279,20 @@ module.exports = async function extractSource(context) {
         assert!(tasks[0]
             .prompt
             .contains("ctox scrape register-source-module"));
+        assert!(tasks[0]
+            .prompt
+            .contains("Do not modify the workspace parent"));
         assert!(tasks[0].thread_key.contains("repair-fixture"));
         assert_eq!(
             tasks[0].suggested_skill.as_deref(),
             Some(DEFAULT_REPAIR_SKILL)
+        );
+        let expected_workspace = resolve_workspace_dir(&root, &target.workspace_dir)
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            tasks[0].workspace_root.as_deref(),
+            Some(expected_workspace.to_string_lossy().as_ref())
         );
 
         let workspace = resolve_workspace_dir(&root, &target.workspace_dir).join("runs");

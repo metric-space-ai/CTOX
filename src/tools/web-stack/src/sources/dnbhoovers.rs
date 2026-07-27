@@ -44,7 +44,7 @@ const PROFILE_BASE: &str = "https://plus.dnb.com/data/duns";
 const SECRET_NAME: &str = "DNB_DIRECT_API_KEY";
 const BROWSER_SECRET_NAME: &str = "DNB_HOOVERS_BROWSER_LOGIN";
 const LOGIN_URL: &str = "https://app.dnbhoovers.com/login";
-const VERIFY_SELECTOR: &str = "[data-testid=\"global-search\"], input[type=\"search\"]";
+const VERIFY_SELECTOR: &str = "[data-testid=\"global-search\"], input[type=\"search\"], [aria-label*=\"Search\" i], [aria-label*=\"Suchen\" i], a[href*=\"/search\"]";
 const CREDENTIAL_SELECTOR: &str =
     "input[name=\"password\"], input#password, input[type=\"password\"]";
 const CAPTURE_SCRIPT: &str = "dnbhoovers.company_capture.v1";

@@ -28,6 +28,75 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
+test('business chat stage renders only the active chat window', () => {
+  const active = { id: 'chat-active' };
+  assert.deepEqual(__businessChatTestInternals.stageWindowChats(active), [active]);
+  assert.deepEqual(__businessChatTestInternals.stageWindowChats(null), []);
+});
+
+test('business chat does not restore terminal task windows over app content', () => {
+  const state = {
+    activeChatId: 'chat-terminal',
+    dockCollapsed: false,
+    preCollapseExpandedChatIds: ['chat-terminal'],
+    chats: [{
+      id: 'chat-terminal',
+      open: true,
+      minimized: false,
+      lastTrackingId: 'task-failed',
+      messages: [{
+        id: 'status-task-failed',
+        taskId: 'task-failed',
+        status: 'failed',
+      }],
+    }],
+  };
+
+  __businessChatTestInternals.collapseRestoredTerminalChat(state);
+
+  assert.equal(state.activeChatId, '');
+  assert.equal(state.dockCollapsed, true);
+  assert.equal(state.preCollapseExpandedChatIds.length, 0);
+  assert.equal(state.chats[0].minimized, true);
+});
+
+test('business chat keeps running restored task windows visible', () => {
+  const state = {
+    activeChatId: 'chat-running',
+    dockCollapsed: false,
+    preCollapseExpandedChatIds: ['chat-running'],
+    chats: [{
+      id: 'chat-running',
+      open: true,
+      minimized: false,
+      lastTrackingId: 'task-running',
+      messages: [{
+        id: 'status-task-running',
+        taskId: 'task-running',
+        status: 'running',
+      }],
+    }],
+  };
+
+  __businessChatTestInternals.collapseRestoredTerminalChat(state);
+
+  assert.equal(state.activeChatId, 'chat-running');
+  assert.equal(state.dockCollapsed, false);
+  assert.equal(state.chats[0].minimized, false);
+});
+
+test('business chat forces a full window render when terminal tracking changes the task state', () => {
+  const chat = {
+    lastTrackingId: 'task-1',
+    messages: [{ taskId: 'task-1', status: 'completed' }],
+  };
+  const staleWindow = { classList: { contains: (name) => name === 'is-task-running' } };
+  const currentWindow = { classList: { contains: (name) => name === 'is-task-success' } };
+
+  assert.equal(__businessChatTestInternals.windowTaskStateMatches(staleWindow, chat), false);
+  assert.equal(__businessChatTestInternals.windowTaskStateMatches(currentWindow, chat), true);
+});
+
 test('business chat task submission returns the real queue id after rendering pending feedback', async () => {
   const previousDocument = globalThis.document;
   const previousLocation = globalThis.location;
@@ -240,6 +309,95 @@ test('business chat tracking sync batches command and queue lookups', async () =
   assert.deepEqual(queue.stats.requestedIds[0].sort(), Array.from({ length: 40 }, (_, index) => `task-${index}`).sort());
   assert.equal(state.chats.every((chat, index) => chat.messages[0].taskId === `task-${index}`), true);
   assert.equal(state.chats.every((chat) => chat.messages[0].status === 'completed'), true);
+});
+
+test('business chat tracking sync follows business command execution phase', async () => {
+  const commands = makeBatchCollection([{
+    id: 'cmd-running',
+    task_id: 'queue:system::running',
+    execution_phase: 'running',
+    terminal_status: 'none',
+  }]);
+  const queue = makeBatchCollection([{
+    id: 'queue:system::running',
+    command_id: 'cmd-running',
+    status: 'queued',
+  }]);
+  const state = {
+    chats: [{
+      id: 'chat-running',
+      lastTrackingId: 'cmd-running',
+      messages: [{
+        id: 'message-running',
+        commandId: 'cmd-running',
+        status: 'queued',
+        createdAt: Date.now(),
+      }],
+    }],
+  };
+
+  const changed = await __businessChatTestInternals.syncTrackedMessages({
+    state,
+    db: { raw: { business_commands: commands, ctox_queue_tasks: queue } },
+  });
+
+  assert.equal(changed, true);
+  assert.equal(state.chats[0].messages[0].taskId, 'queue:system::running');
+  assert.equal(state.chats[0].messages[0].status, 'running');
+});
+
+test('business chat tracking sync flushes command collections before reading status', async () => {
+  const calls = [];
+  const commands = makeBatchCollection([{
+    id: 'cmd-flushed',
+    task_id: 'queue:system::flushed',
+    execution_phase: 'running',
+    terminal_status: 'none',
+  }]);
+  const queue = makeBatchCollection([{
+    id: 'queue:system::flushed',
+    command_id: 'cmd-flushed',
+    status: 'queued',
+  }]);
+  const sync = {
+    async startCollection(collection) {
+      calls.push(collection);
+      return {
+        collection,
+        state: {
+          async awaitInSync() {
+            calls.push(`${collection}:awaitInSync`);
+          },
+        },
+      };
+    },
+  };
+  const state = {
+    chats: [{
+      id: 'chat-flushed',
+      messages: [{
+        id: 'message-flushed',
+        commandId: 'cmd-flushed',
+        status: 'queued',
+        createdAt: Date.now(),
+      }],
+    }],
+  };
+
+  const changed = await __businessChatTestInternals.syncTrackedMessages({
+    state,
+    sync,
+    db: { raw: { business_commands: commands, ctox_queue_tasks: queue } },
+  });
+
+  assert.equal(changed, true);
+  assert.deepEqual(calls, [
+    'business_commands',
+    'ctox_queue_tasks',
+    'business_commands:awaitInSync',
+    'ctox_queue_tasks:awaitInSync',
+  ]);
+  assert.equal(state.chats[0].messages[0].status, 'running');
 });
 
 test('business chat resolves failed queue task by command id when command has no task id', async () => {
@@ -693,6 +851,188 @@ test('business chat dock opens the latest substantive chat instead of an old emp
   assert.equal(state.selectedDate, __businessChatTestInternals.getLocalDateString(visible.createdAt));
   assert.equal(visible.minimized, false);
   assert.equal(state.dockCollapsed, false);
+});
+
+test('business chat open resolves the already submitted task instead of creating a duplicate chat', () => {
+  const submitted = {
+    id: 'chat-current-task',
+    lastTrackingId: 'queue-current-task',
+    messages: [{
+      id: 'status-current-task',
+      commandId: 'cmd-current-task',
+      taskId: 'queue-current-task',
+      status: 'queued',
+    }],
+  };
+  const historical = {
+    id: 'chat-historical',
+    lastTrackingId: 'queue-historical',
+    messages: [{ commandId: 'cmd-historical', taskId: 'queue-historical' }],
+  };
+  const state = {
+    ownerUserId: 'user-1',
+    selectedDate: __businessChatTestInternals.getLocalDateString(Date.now()),
+    chats: [historical, submitted],
+  };
+
+  const byTask = __businessChatTestInternals.resolveChatForOpenDetail(
+    state,
+    { user: { id: 'user-1' } },
+    { focus: { task_id: 'queue-current-task' } },
+  );
+  assert.equal(byTask, submitted);
+  assert.equal(state.chats.length, 2);
+
+  const byCommand = __businessChatTestInternals.resolveChatForOpenDetail(
+    state,
+    { user: { id: 'user-1' } },
+    { commandId: 'cmd-current-task' },
+  );
+  assert.equal(byCommand, submitted);
+  assert.equal(state.chats.length, 2);
+
+  const created = __businessChatTestInternals.resolveChatForOpenDetail(
+    state,
+    { user: { id: 'user-1' } },
+    { command_id: 'cmd-missing' },
+  );
+  assert.notEqual(created, submitted);
+  assert.equal(state.chats.length, 3);
+});
+
+test('first remote hydration keeps a newly submitted chat focused', async () => {
+  const previousLocalStorage = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  const now = Date.now();
+  const active = {
+    id: 'chat-new-task',
+    owner_user_id: 'user-1',
+    createdAt: now,
+    updated_at_ms: now,
+    open: true,
+    minimized: false,
+    messages: [{
+      id: 'status-new-task',
+      commandId: 'cmd-new-task',
+      status: 'pending_sync',
+      createdAt: now,
+    }],
+  };
+  const historical = {
+    id: 'chat-historical-task',
+    owner_user_id: 'user-1',
+    createdAt: now - 60_000,
+    updated_at_ms: now - 60_000,
+    open: true,
+    minimized: false,
+    messages: [{ id: 'old-message', role: 'ctox', text: 'Alt', createdAt: now - 60_000 }],
+  };
+  const state = {
+    ownerUserId: 'user-1',
+    activeChatId: active.id,
+    selectedDate: __businessChatTestInternals.getLocalDateString(now),
+    lastUiMutationMs: now,
+    remoteHydrationComplete: false,
+    chats: [historical, active],
+  };
+  const docs = [historical].map((row) => ({ toJSON: () => ({ ...row }) }));
+
+  try {
+    await __businessChatTestInternals.hydrateChatsFromRxDb({
+      state,
+      db: { raw: { business_chats: { find: () => ({ exec: async () => docs }) } } },
+      session: { user: { id: 'user-1' } },
+    });
+
+    assert.equal(state.activeChatId, active.id);
+    assert.equal(state.chats.find((chat) => chat.id === active.id)?.minimized, false);
+    assert.equal(state.chats.find((chat) => chat.id === historical.id)?.minimized, true);
+    assert.equal(state.dockCollapsed, false);
+  } finally {
+    globalThis.localStorage = previousLocalStorage;
+  }
+});
+
+test('remote reply from an old task cannot steal focus from a newly submitted chat', async () => {
+  const previousLocalStorage = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  };
+  const now = Date.now();
+  const active = {
+    id: 'chat-avt-new-task',
+    owner_user_id: 'user-1',
+    createdAt: now,
+    updated_at_ms: now,
+    open: true,
+    minimized: false,
+    messages: [{
+      id: 'status-avt-new-task',
+      role: 'ctox',
+      commandId: 'cmd-avt-new-task',
+      status: 'queued',
+      createdAt: now,
+    }],
+  };
+  const historicalLocal = {
+    id: 'chat-wittenstein-old-task',
+    owner_user_id: 'user-1',
+    createdAt: now - 60_000,
+    updated_at_ms: now - 60_000,
+    open: true,
+    minimized: true,
+    messages: [{
+      id: 'status-wittenstein-old-task',
+      role: 'ctox',
+      commandId: 'cmd-wittenstein-old-task',
+      status: 'queued',
+      createdAt: now - 60_000,
+    }],
+  };
+  const historicalRemote = {
+    ...historicalLocal,
+    updated_at_ms: now + 1,
+    messages: [
+      ...historicalLocal.messages,
+      {
+        id: 'reply-wittenstein-old-task',
+        role: 'ctox',
+        text: 'Der alte Task ist fehlgeschlagen.',
+        commandId: 'cmd-wittenstein-old-task',
+        status: 'failed',
+        createdAt: now,
+      },
+    ],
+  };
+  const state = {
+    ownerUserId: 'user-1',
+    activeChatId: active.id,
+    selectedDate: __businessChatTestInternals.getLocalDateString(now),
+    lastUiMutationMs: now,
+    remoteHydrationComplete: true,
+    chats: [historicalLocal, active],
+  };
+  const docs = [historicalRemote].map((row) => ({ toJSON: () => ({ ...row }) }));
+
+  try {
+    await __businessChatTestInternals.hydrateChatsFromRxDb({
+      state,
+      db: { raw: { business_chats: { find: () => ({ exec: async () => docs }) } } },
+      session: { user: { id: 'user-1' } },
+    });
+
+    assert.equal(state.activeChatId, active.id);
+    assert.equal(state.chats.find((chat) => chat.id === active.id)?.minimized, false);
+    assert.equal(state.chats.find((chat) => chat.id === historicalLocal.id)?.minimized, true);
+  } finally {
+    globalThis.localStorage = previousLocalStorage;
+  }
 });
 
 test('business chat persistence timeout is treated as volatile', async () => {

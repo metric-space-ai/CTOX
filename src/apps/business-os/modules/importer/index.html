@@ -1,54 +1,120 @@
-<main class="ctox-workspace ctox-workspace--single importer-module" data-importer-root>
-  <section class="ctox-pane ctox-record-workbench" aria-label="App Importer">
-    <header class="ctox-pane-header ctox-pane-band ctox-record-workbench__header">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">CTOX</span>
-          <h2 class="ctox-pane-title" data-imp-title>App Importer</h2>
-        </div>
-      </div>
-      <p class="ctox-record-workbench__subtitle" data-imp-subtitle>
-        Conceived in a prompt. Born with the first deploy. Raised in CTOX.
-      </p>
+<main class="importer-module" data-importer-root data-imp-stage="source">
+  <aside class="imp-rail">
+    <header class="imp-brand">
+      <span class="imp-brand-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none">
+          <path d="M12 3v10m0 0 4-4m-4 4L8 9" />
+          <path d="M5 14v3.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V14" />
+        </svg>
+      </span>
+      <span class="imp-brand-copy">
+        <span class="imp-brand-kicker">CTOX</span>
+        <strong data-imp-title>App Importer</strong>
+      </span>
     </header>
-    <div class="ctox-pane-scroll ctox-record-workbench__body">
-      <div class="ctox-callout" data-imp-notice hidden></div>
 
-      <section class="ctox-card" data-imp-source-section>
-        <div class="ctox-card-body imp-card-body">
-          <div class="imp-source-row">
-            <button type="button" class="ctox-button is-primary" data-imp-pick-folder>Choose folder…</button>
-            <span class="imp-or" data-imp-or>or</span>
-            <form class="imp-github" data-imp-github-form>
-              <input type="url" class="ctox-input" data-imp-github-url placeholder="https://github.com/owner/repo" spellcheck="false" />
-              <button type="submit" class="ctox-button" data-imp-github-btn>Fetch from GitHub</button>
-            </form>
-          </div>
-          <p class="imp-hint" data-imp-source-hint></p>
-        </div>
-      </section>
+    <ol class="imp-steps" aria-label="Import progress">
+      <li data-imp-step="source">
+        <span>1</span>
+        <span><strong data-imp-source-step>Source</strong><small data-imp-source-step-note>Choose an app</small></span>
+      </li>
+      <li data-imp-step="review">
+        <span>2</span>
+        <span><strong data-imp-review-step>Review</strong><small data-imp-review-step-note>Check portability</small></span>
+      </li>
+      <li data-imp-step="done">
+        <span>3</span>
+        <span><strong data-imp-done-step>Install</strong><small data-imp-done-step-note>Open in CTOX</small></span>
+      </li>
+    </ol>
 
-      <section class="ctox-card" data-imp-report-section hidden>
-        <div class="ctox-card-body imp-card-body">
-          <dl class="ctox-fields" data-imp-report></dl>
-          <p class="imp-hint" data-imp-report-hint hidden></p>
-          <div class="ctox-compact-form" data-imp-details hidden>
-            <div class="ctox-compact-form__fields">
-              <label class="ctox-compact-field"><span data-imp-id-label>Module id</span><input type="text" class="ctox-input" data-imp-module-id spellcheck="false" /></label>
-              <label class="ctox-compact-field"><span data-imp-title-label>Title</span><input type="text" class="ctox-input" data-imp-module-title /></label>
-            </div>
-            <div class="ctox-compact-form__actions">
-              <button type="button" class="ctox-button is-primary" data-imp-install>Install into local-modules…</button>
-            </div>
-          </div>
-        </div>
-      </section>
+    <p class="imp-rail-claim" data-imp-subtitle>
+      Conceived in a prompt. Born with the first deploy. Raised in CTOX.
+    </p>
+  </aside>
 
-      <section class="ctox-card" data-imp-done-section hidden>
-        <div class="ctox-card-body imp-card-body">
-          <div data-imp-done></div>
+  <section class="imp-workspace">
+    <div class="imp-notice" data-imp-notice hidden role="status"></div>
+
+    <section class="imp-stage imp-source-stage" data-imp-source-section>
+      <header class="imp-stage-header">
+        <span class="imp-eyebrow" data-imp-source-eyebrow>Import source</span>
+        <h2 data-imp-source-heading>Bring an existing app into CTOX.</h2>
+        <p data-imp-source-intro>Use a public GitHub repository or choose the project folder from this computer.</p>
+      </header>
+
+      <form class="imp-github" data-imp-github-form>
+        <label for="imp-github-url" data-imp-github-label>GitHub repository</label>
+        <div class="imp-input-row">
+          <span class="imp-input-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1.1 1.1" />
+              <path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1.1-1.1" />
+            </svg>
+          </span>
+          <input id="imp-github-url" type="url" class="ctox-input" data-imp-github-url placeholder="https://github.com/owner/repo" spellcheck="false" />
+          <button type="submit" class="ctox-button is-primary imp-submit" data-imp-github-btn>Analyze repo</button>
         </div>
-      </section>
-    </div>
+      </form>
+
+      <div class="imp-divider"><span data-imp-or>or</span></div>
+
+      <button type="button" class="imp-folder" data-imp-pick-folder>
+        <span class="imp-folder-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none">
+            <path d="M3 7.5A2.5 2.5 0 0 1 5.5 5H10l2 2h6.5A2.5 2.5 0 0 1 21 9.5v7A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5v-9Z" />
+          </svg>
+        </span>
+        <span>
+          <strong data-imp-folder-heading>Choose project folder</strong>
+          <small data-imp-source-hint></small>
+        </span>
+        <span class="imp-folder-arrow" aria-hidden="true">→</span>
+      </button>
+    </section>
+
+    <section class="imp-stage imp-review-stage" data-imp-report-section hidden>
+      <header class="imp-stage-header">
+        <span class="imp-eyebrow" data-imp-review-eyebrow>Import review</span>
+        <h2 data-imp-review-heading>Ready to become a CTOX app.</h2>
+        <p data-imp-review-intro>Review the detected entry point and runtime dependencies before installation.</p>
+      </header>
+
+      <div class="imp-report">
+        <div class="imp-report-status">
+          <span class="imp-status-icon" aria-hidden="true">✓</span>
+          <span><strong data-imp-report-status>Portable</strong><small data-imp-report-status-note>The app can run in CTOX.</small></span>
+        </div>
+        <dl class="ctox-fields imp-fields" data-imp-report></dl>
+        <p class="imp-hint" data-imp-report-hint hidden></p>
+      </div>
+
+      <div class="imp-details" data-imp-details hidden>
+        <label>
+          <span data-imp-id-label>Module id</span>
+          <input type="text" class="ctox-input" data-imp-module-id spellcheck="false" />
+        </label>
+        <label>
+          <span data-imp-title-label>Title</span>
+          <input type="text" class="ctox-input" data-imp-module-title />
+        </label>
+      </div>
+
+      <div class="imp-actions">
+        <button type="button" class="ctox-button imp-back" data-imp-back>Back</button>
+        <button type="button" class="ctox-button is-primary imp-install" data-imp-install>Install app</button>
+      </div>
+    </section>
+
+    <section class="imp-stage imp-done-stage" data-imp-done-section hidden>
+      <div class="imp-done-mark" aria-hidden="true">✓</div>
+      <span class="imp-eyebrow" data-imp-done-eyebrow>Import complete</span>
+      <h2 data-imp-done-heading>Your app is in CTOX.</h2>
+      <div class="imp-done-copy" data-imp-done></div>
+      <button type="button" class="ctox-button is-primary imp-open" data-imp-open>
+        <span data-imp-open-label>Open app</span>
+        <span aria-hidden="true">→</span>
+      </button>
+    </section>
   </section>
 </main>

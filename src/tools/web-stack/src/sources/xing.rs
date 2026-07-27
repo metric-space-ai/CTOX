@@ -1,12 +1,24 @@
 //! `xing.com` — Tier C, DACH (Schwerpunkt DE).
 //!
-//! XING-API (TalentManager / E-Recruiting / Profile-API) als Phase-2-API-Adapter.
-//! Die Quelle ist laut [`EXCEL_MATRIX`](./EXCEL_MATRIX.md) autoritativ für
+//! Die produktive Recherche nutzt die authentifizierte XING-Weboberfläche über
+//! das reparierbare Scrape-Target `xing-com`. Die aktuelle Mitgliedersuche lebt
+//! unter `/search/members`, die Firmensuche unter `/search/companies`; der alte
+//! Pfad `/search/people` liefert 404 und darf nicht mehr verwendet werden.
+//!
+//! Ein vorhandener XING-Partner-API-Token bleibt als optionaler Fast Path
+//! nutzbar. Fehlt er, fällt die Quelle auf das Browser-Target zurück, statt eine
+//! irreführende `credential_missing`-Meldung für die veraltete API-Integration
+//! auszugeben. Die Quelle ist laut [`EXCEL_MATRIX`](./EXCEL_MATRIX.md) autoritativ für
 //! `person_funktion` (aktuelle Funktionsbezeichnung aus dem Primärbeschäftiger)
 //! und `person_xing` (Permalink auf das XING-Profil) — sowohl im Modus
 //! `UpdatePerson` als auch in `NewRecord` für alle drei DACH-Länder.
 //!
-//! ## Endpoints
+//! ## Browser-Endpunkte
+//!
+//! * `GET https://www.xing.com/search/members?keywords=<firma+name>`
+//! * `GET https://www.xing.com/search/companies?keywords=<firma+name>`
+//!
+//! ## Optionaler API-Fallback
 //!
 //! XING-Partner-Programm (`https://dev.xing.com`), OAuth2 Bearer-Token:
 //!
@@ -29,12 +41,10 @@
 //!
 //! ## TOS / Browser-Assist
 //!
-//! Der automatische Pfad (`fetch_direct`) nutzt ausschliesslich die
-//! authentifizierte XING-API und scrapt `xing.com` nie selbsttätig. Zusätzlich
-//! existiert ein operator-initiierter, einwilligungsbasierter Browser-Assist-
-//! Pfad ([`browser_recipe`](Xing::browser_recipe), `capture_script =
-//! xing.profile_capture.v1`): der Operator loggt sich mit **eigenen**
-//! Zugangsdaten ein. Dieser Pfad ist über denselben Tier-C-Opt-in
+//! Der Browser-Pfad ist operator-initiiert und einwilligungsbasiert
+//! ([`browser_recipe`](Xing::browser_recipe), `capture_script =
+//! `xing.authenticated_search.v2`): der Operator meldet sich mit **eigenen**
+//! Zugangsdaten an. Dieser Pfad ist über denselben Tier-C-Opt-in
 //! (`--include-private`) gegated, ist kein automatisches Scraping, trägt aber
 //! ToS-/Rechts-Exposition und braucht eine gültige Rechtsgrundlage. Siehe
 //! Hardening-Plan WS2-04.
@@ -55,13 +65,294 @@ const API_BASE: &str = "https://api.xing.com/v1";
 const SECRET_NAME: &str = "XING_API_TOKEN";
 const BROWSER_SECRET_NAME: &str = "XING_BROWSER_LOGIN";
 const LOGIN_URL: &str = "https://login.xing.com/";
-const VERIFY_SELECTOR: &str = "a[href*=\"/profile/\"], [data-testid=\"user-menu\"]";
+const VERIFY_SELECTOR: &str = "a[href*=\"/profile/\"], [data-testid=\"user-menu\"], a[href*=\"/jobs\"], a[href*=\"/network\"]";
 const CREDENTIAL_SELECTOR: &str =
     "input[name=\"password\"], input#password, input[type=\"password\"]";
-const CAPTURE_SCRIPT: &str = "xing.profile_capture.v1";
+const CAPTURE_SCRIPT: &str = "xing.authenticated_search.v2";
+const MEMBER_SEARCH_URL: &str = "https://www.xing.com/search/members";
+const COMPANY_SEARCH_URL: &str = "https://www.xing.com/search/companies";
 const MAX_HITS: usize = 8;
 const TIMEOUT_MS: u64 = 12_000;
 const USER_AGENT: &str = "ctox-web-stack/0.1 (+https://ctox.local)";
+
+/// Builds the XING-specific continuation executed inside an authenticated
+/// Browser-App session. Credentials stay inside the generic login boundary;
+/// this continuation receives only the research query and country.
+pub fn build_authenticated_browser_capture(company: &str, country: &str) -> anyhow::Result<String> {
+    let company = serde_json::to_string(company)?;
+    let country = serde_json::to_string(country)?;
+    let member_search_url = serde_json::to_string(MEMBER_SEARCH_URL)?;
+    let company_search_url = serde_json::to_string(COMPANY_SEARCH_URL)?;
+
+    Ok(XING_BROWSER_CAPTURE_TEMPLATE
+        .replace("__COMPANY_JSON__", &company)
+        .replace("__COUNTRY_JSON__", &country)
+        .replace("__MEMBER_SEARCH_URL_JSON__", &member_search_url)
+        .replace("__COMPANY_SEARCH_URL_JSON__", &company_search_url)
+        .replace("__RECORD_PARSER__", XING_BROWSER_RECORD_PARSER))
+}
+
+const XING_BROWSER_RECORD_PARSER: &str = r#"const parseXingRecords = (companyName, companySearch, memberSearch) => {
+  const clean = (value, max = 240) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+  const normalize = (value) => clean(value, 2000)
+    .toLocaleLowerCase("de-DE")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/ß/g, "ss")
+    .replace(/[^a-z0-9äöüß]+/g, " ")
+    .trim();
+  const ignoredCompanyTokens = new Set([
+    "ag", "se", "gmbh", "kg", "ohg", "gbr", "mbh", "inc", "ltd", "llc",
+    "gesellschaft", "aktiengesellschaft", "holding", "group", "gruppe",
+  ]);
+  const companyTokens = normalize(companyName).split(/\s+/).filter((token) =>
+    token.length >= 3 && !ignoredCompanyTokens.has(token)
+  );
+  const relevantCompanyText = (value) => {
+    const haystack = normalize(value);
+    const required = companyTokens.slice(0, Math.min(2, companyTokens.length));
+    return required.length > 0 && required.every((token) => haystack.includes(token));
+  };
+  const providerUrl = (raw) => {
+    try {
+      const url = new URL(raw);
+      const host = url.hostname.toLowerCase();
+      return host === "xing.com" || host.endsWith(".xing.com") ? url : null;
+    } catch { return null; }
+  };
+  const canonicalProfile = (raw) => {
+    const url = providerUrl(raw);
+    if (!url) return null;
+    const match = url.pathname.match(/^\/profile\/([^/]+)\/?$/i);
+    if (!match) return null;
+    let slug;
+    try { slug = decodeURIComponent(match[1]); } catch { return null; }
+    if (!slug || /^(?:contacts?|network)$/i.test(slug)) return null;
+    return {
+      slug,
+      url: `https://www.xing.com/profile/${encodeURIComponent(slug).replace(/%5F/gi, "_").replace(/%2D/gi, "-")}`,
+    };
+  };
+  const validNameToken = (value) => /\p{L}/u.test(value)
+    && !/\d/u.test(value)
+    && /^[\p{L}][\p{L}.'’\-]*$/u.test(value);
+  const nameFromSlug = (slug) => {
+    const parts = slug.split("_").map((part) => clean(part)).filter(Boolean);
+    if (parts.length < 2 || parts.length > 6) return "";
+    parts[parts.length - 1] = parts[parts.length - 1].replace(/\d+$/, "");
+    return parts.every(validNameToken) ? parts.join(" ") : "";
+  };
+  const nameFromVisibleResult = (link) => {
+    const candidates = [link.text, ...(link.contextLines || []).slice(0, 4)];
+    for (const candidate of candidates) {
+      const value = clean(candidate)
+        .replace(/^(?:profil von|profile of)\s+/i, "")
+        .replace(/\s*[|·]\s*XING\s*$/i, "")
+        .replace(/^(?:(?:dr|prof)\.?\s+)+/i, "");
+      const parts = value.split(/\s+/).filter(Boolean);
+      if (parts.length >= 2 && parts.length <= 5
+          && parts.every(validNameToken)
+          && !relevantCompanyText(value)
+          && !/^(?:profil|profile|kontakt|contacts?|network|xing)\b/i.test(value)) {
+        return value;
+      }
+    }
+    return "";
+  };
+  const formerEmployment = /\b(?:ehemalige[snr]?\s+unternehmen|ehemalig|former\s+(?:company|employer)|previous\s+(?:company|employer))\b/i;
+  const currentCompanyIndex = (lines) => {
+    const matches = lines.map((line, index) => relevantCompanyText(line) ? index : -1).filter((index) => index >= 0);
+    return matches.find((index) => {
+      const employmentLabel = lines.slice(Math.max(0, index - 2), index + 1).join(" ");
+      return !formerEmployment.test(employmentLabel);
+    }) ?? -1;
+  };
+  const locationLine = (value) => /(?:^|[,\s])(?:deutschland|germany|österreich|austria|schweiz|switzerland)\s*$/i.test(clean(value));
+  const ignoredFunctionLine = /^(?:profil|profil ansehen|ganzes profil ansehen|kontakt|vernetzen|nachricht|folgen|basis|premium|xing|aktuelles? unternehmen|derzeitiges unternehmen|current company)\s*:?\s*$/i;
+  const contactMetadataLine = (value) => {
+    const text = clean(value);
+    const contactTerm = /\b(?:kontakte|contacts?|connections?|followers?|gemeinsame[rsn]?\s+kontakt|mutual\s+contacts?)\b/i;
+    return contactTerm.test(text) && /\d/.test(text);
+  };
+  const labelOnlyLine = (value) => /^[^:]{2,80}:\s*$/.test(clean(value));
+  const personNameKey = (value) => normalize(value)
+    .replace(/ae/g, "a")
+    .replace(/oe/g, "o")
+    .replace(/ue/g, "u");
+  const plausibleFunctionLine = (value, personName) => {
+    const text = clean(value);
+    return text.length >= 2 && text.length <= 160
+      && /\p{L}/u.test(text)
+      && personNameKey(text) !== personNameKey(personName)
+      && !relevantCompanyText(text)
+      && !formerEmployment.test(text)
+      && !locationLine(text)
+      && !ignoredFunctionLine.test(text)
+      && !contactMetadataLine(text)
+      && !labelOnlyLine(text);
+  };
+  const records = [];
+  const push = (field, value, confidence, note, url) => {
+    const cleanValue = clean(value, 500);
+    if (!cleanValue || !providerUrl(url)) return;
+    if (field === "person_vorname" && (!validNameToken(cleanValue) || /^\d+$/.test(cleanValue))) return;
+    if (records.some((record) => record.field === field && record.value === cleanValue && record.source_url === url)) return;
+    records.push({ field, value: cleanValue, confidence, source_url: url, note });
+  };
+  const providerLinks = (snapshot) => (snapshot?.links || []).filter((link) => providerUrl(link.url));
+  const companyHit = providerLinks(companySearch).find((link) => {
+    const url = providerUrl(link.url);
+    return url && /^\/(?:pages|companies)\/[^/]+(?:\/.*)?$/i.test(url.pathname)
+      && relevantCompanyText(`${link.text || ""} ${(link.contextLines || []).join(" ")}`);
+  });
+  if (companyHit) {
+    const visibleName = (companyHit.contextLines || []).find((line) => relevantCompanyText(line))
+      || companyHit.text || companyName;
+    push("firma_name", visibleName, "high", "XING company search result", companyHit.url);
+  }
+
+  const profiles = [];
+  for (const link of providerLinks(memberSearch)) {
+    const profile = canonicalProfile(link.url);
+    if (!profile || profiles.some((entry) => entry.profile.url === profile.url)) continue;
+    const lines = (link.contextLines || []).map((line) => clean(line)).filter(Boolean);
+    const companyIndex = currentCompanyIndex(lines);
+    if (companyIndex < 0) continue;
+    const name = nameFromSlug(profile.slug) || nameFromVisibleResult(link);
+    const nameParts = name.split(/\s+/).filter(Boolean);
+    if (nameParts.length < 2 || !nameParts.every(validNameToken)) continue;
+    profiles.push({ link, lines, companyIndex, profile, name, nameParts });
+    if (profiles.length >= 8) break;
+  }
+  if (!companyHit && profiles.length > 0) {
+    push("firma_name", companyName, "medium", "XING member results match company", memberSearch.sourceUrl);
+  }
+  for (const { lines, companyIndex, profile, name, nameParts } of profiles) {
+    push("person_vorname", nameParts[0], "medium", "XING member search result", profile.url);
+    push("person_nachname", nameParts.slice(1).join(" "), "medium", "XING member search result", profile.url);
+    push("person_xing", profile.url, "high", "XING canonical profile URL", profile.url);
+
+    const candidateIndexes = [companyIndex - 1, companyIndex - 2, companyIndex + 1, companyIndex + 2]
+      .filter((index) => index >= 0 && index < lines.length);
+    const functionLine = candidateIndexes.map((index) => lines[index])
+      .find((line) => plausibleFunctionLine(line, name));
+    if (functionLine) {
+      push("person_funktion", functionLine, "medium", "XING member result employment context", profile.url);
+    }
+  }
+  return records;
+};"#;
+
+const XING_BROWSER_CAPTURE_TEMPLATE: &str = r#"const sourceId = "xing.com";
+const company = __COMPANY_JSON__;
+const country = __COUNTRY_JSON__;
+const memberSearchUrl = __MEMBER_SEARCH_URL_JSON__;
+const companySearchUrl = __COMPANY_SEARCH_URL_JSON__;
+__RECORD_PARSER__
+const allowedHosts = ["xing.com", "www.xing.com"];
+const hostAllowed = (raw) => {
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    return allowedHosts.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+  } catch { return false; }
+};
+const normalized = (value) => String(value || "")
+  .toLocaleLowerCase("de-DE")
+  .normalize("NFKD")
+  .replace(/[\u0300-\u036f]/g, "")
+  .replace(/[^a-z0-9äöüß]+/g, " ")
+  .trim();
+const companyTokens = normalized(company).split(/\s+/).filter((token) =>
+  token.length >= 3 && ![
+    "ag", "se", "gmbh", "kg", "ohg", "gbr", "mbh", "inc", "ltd", "llc",
+    "gesellschaft", "aktiengesellschaft", "holding", "group", "gruppe",
+  ].includes(token)
+);
+const relevantCompanyText = (value) => {
+  const haystack = normalized(value);
+  const required = companyTokens.slice(0, Math.min(2, companyTokens.length));
+  return required.length > 0 && required.every((token) => haystack.includes(token));
+};
+const authRequired = async () => {
+  if (/login\.xing\.com|\/login(?:[/?#]|$)|\/signin(?:[/?#]|$)/i.test(page.url())) return true;
+  return (await page.locator('input[type="password"], form[action*="login" i]').count().catch(() => 0)) > 0;
+};
+const captureSearch = async (kind, baseUrl) => {
+  const targetUrl = `${baseUrl}?keywords=${encodeURIComponent(company)}`;
+  let response = null;
+  try {
+    response = await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+  } catch (error) {
+    return { kind, status: "navigation_failed", sourceUrl: page.url(), title: "", text: "", links: [] };
+  }
+  if (await authRequired()) {
+    return { kind, status: "auth_required", sourceUrl: page.url(), title: "", text: "", links: [] };
+  }
+  await page.waitForLoadState("networkidle", { timeout: 12000 }).catch(() => null);
+  await page.locator('a[href*="/profile/"], a[href*="/pages/"], a[href*="/companies/"]')
+    .first().waitFor({ state: "visible", timeout: 8000 }).catch(() => null);
+  await page.waitForTimeout(500);
+  const snapshot = await page.evaluate(({ companyName, searchKind }) => {
+    const clean = (value, max = 2000) => String(value || "").replace(/\s+/g, " ").trim().slice(0, max);
+    const lines = (value) => String(value || "").split(/\n+/).map((line) => clean(line, 240)).filter(Boolean);
+    const contextFor = (link) => {
+      const preferred = link.closest('li, article, [role="listitem"], [data-testid*="result" i], [data-testid*="card" i]');
+      let node = preferred || link.parentElement;
+      let contextLines = lines(node?.innerText || node?.textContent || link.innerText || "");
+      for (let depth = 0; node && depth < 6 && contextLines.join(" ").length < 80; depth += 1) {
+        node = node.parentElement;
+        const candidate = lines(node?.innerText || node?.textContent || "");
+        if (candidate.join(" ").length <= 2000) contextLines = candidate;
+      }
+      return contextLines;
+    };
+    const bodyText = String(document.body?.innerText || "").slice(0, 100000);
+    const links = Array.from(document.querySelectorAll("a[href]"))
+      .map((link) => ({
+        url: link.href,
+        text: clean(link.innerText || link.textContent || "", 240),
+        contextLines: contextFor(link),
+      }))
+      .filter((link) => link.url)
+      .slice(0, 600);
+    return { title: document.title, text: bodyText, links, companyName, searchKind };
+  }, { companyName: company, searchKind: kind });
+  const httpStatus = response?.status?.() || 0;
+  const pageSignal = normalized(`${snapshot.title} ${snapshot.text.slice(0, 5000)}`);
+  const blocked = [401, 403, 429].includes(httpStatus)
+    || /captcha|ungewohnliche aktivitat|unusual activity|zugriff verweigert|access denied/.test(pageSignal);
+  const notFound = httpStatus === 404
+    || /seite nicht gefunden|page not found|fehler 404|error 404/.test(pageSignal);
+  return {
+    ...snapshot,
+    kind,
+    sourceUrl: page.url(),
+    status: blocked ? "blocked" : (notFound ? "not_found" : "completed"),
+  };
+};
+
+if (await authRequired()) {
+  return { status: "auth_required", source_url: page.url(), country, records: [] };
+}
+const companySearch = await captureSearch("companies", companySearchUrl);
+if (companySearch.status === "auth_required") {
+  return { status: "auth_required", source_url: companySearch.sourceUrl, country, records: [] };
+}
+const memberSearch = await captureSearch("members", memberSearchUrl);
+if (memberSearch.status === "auth_required") {
+  return { status: "auth_required", source_url: memberSearch.sourceUrl, country, records: [] };
+}
+if ([companySearch.status, memberSearch.status].every((status) => status === "blocked")) {
+  return { status: "blocked", source_url: memberSearch.sourceUrl, country, records: [] };
+}
+
+const records = parseXingRecords(company, companySearch, memberSearch);
+return {
+  status: records.length > 0 ? "succeeded" : "no_match",
+  source_url: memberSearch.status === "completed" ? memberSearch.sourceUrl : companySearch.sourceUrl,
+  country,
+  records,
+};"#;
 
 struct Xing;
 
@@ -78,6 +369,10 @@ impl SourceModule for Xing {
         &["api.xing.com"]
     }
 
+    fn scrape_target_key(&self) -> Option<&'static str> {
+        Some("xing-com")
+    }
+
     fn tier(&self) -> Tier {
         Tier::C
     }
@@ -91,7 +386,7 @@ impl SourceModule for Xing {
     }
 
     fn requires_credential(&self) -> Option<&'static str> {
-        Some(SECRET_NAME)
+        Some(BROWSER_SECRET_NAME)
     }
 
     fn browser_recipe(&self) -> Option<BrowserSourceRecipe> {
@@ -111,9 +406,15 @@ impl SourceModule for Xing {
         })
     }
 
-    fn shape_query(&self, _query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
-        // API-Quelle: kein Search-Engine-Fallback.
-        None
+    fn shape_query(&self, query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
+        let query = query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        Some(ShapedQuery {
+            query: format!("{query} site:xing.com/profile OR site:xing.com/pages"),
+            domains: vec!["xing.com".to_string()],
+        })
     }
 
     fn fetch_direct(
@@ -133,14 +434,9 @@ impl SourceModule for Xing {
             return Some(Err(SourceError::NoMatch));
         }
 
-        let token = match runtime_config::get(ctx.root, SECRET_NAME) {
-            Some(value) => value,
-            None => {
-                return Some(Err(SourceError::CredentialMissing {
-                    secret_name: SECRET_NAME,
-                }));
-            }
-        };
+        // The member-search API is optional. Browser authentication is the
+        // supported default and is executed by the `xing-com` scrape target.
+        let token = runtime_config::get(ctx.root, SECRET_NAME)?;
 
         let agent = build_agent();
         Some(perform_search(&agent, &token, trimmed))
@@ -402,9 +698,10 @@ mod tests {
     use super::*;
     use crate::sources::{ResearchMode, SourceCtx};
     use std::path::Path;
+    use std::process::Command;
 
     const SEARCH_FIXTURE: &str =
-        include_str!("../../fixtures/sources/xing/users_find_wittenstein.json");
+        include_str!("../../fixtures/sources/xing/users_find_example_industrial.json");
     const DETAIL_FIXTURE: &str =
         include_str!("../../fixtures/sources/xing/users_detail_10368_abcdef.json");
 
@@ -421,6 +718,42 @@ mod tests {
         }
     }
 
+    fn parse_browser_records(member_links: Value) -> Value {
+        let company_search = serde_json::json!({
+            "sourceUrl": "https://www.xing.com/search/companies?keywords=Example%20Industrial%20GmbH",
+            "links": []
+        });
+        let member_search = serde_json::json!({
+            "sourceUrl": "https://www.xing.com/search/members?keywords=Example%20Industrial%20GmbH",
+            "links": member_links
+        });
+        let company = serde_json::to_string("Example Industrial GmbH").expect("company json");
+        let script = format!(
+            "{}\nconst result = parseXingRecords({}, {}, {});\nprocess.stdout.write(JSON.stringify(result));",
+            XING_BROWSER_RECORD_PARSER, company, company_search, member_search
+        );
+        let output = Command::new("node")
+            .args(["--input-type=module", "--eval", &script])
+            .output()
+            .expect("Node.js is required for authenticated-browser parser tests");
+        assert!(
+            output.status.success(),
+            "XING browser parser failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("browser parser result json")
+    }
+
+    fn values_for_field<'a>(records: &'a Value, field: &str) -> Vec<&'a str> {
+        records
+            .as_array()
+            .expect("records array")
+            .iter()
+            .filter(|record| record.get("field").and_then(Value::as_str) == Some(field))
+            .filter_map(|record| record.get("value").and_then(Value::as_str))
+            .collect()
+    }
+
     #[test]
     fn module_metadata() {
         let m = module();
@@ -428,7 +761,10 @@ mod tests {
         assert_eq!(m.aliases(), &["xing"]);
         assert!(matches!(m.tier(), Tier::C));
         assert_eq!(m.countries(), &[Country::De, Country::At, Country::Ch]);
-        assert_eq!(m.requires_credential(), Some("XING_API_TOKEN"));
+        assert_eq!(m.requires_credential(), Some("XING_BROWSER_LOGIN"));
+        assert_eq!(m.scrape_target_key(), Some("xing-com"));
+        let recipe = m.browser_recipe().expect("browser recipe");
+        assert_eq!(recipe.required_secret_name, Some("XING_BROWSER_LOGIN"));
         assert!(m
             .authoritative_for()
             .iter()
@@ -440,36 +776,226 @@ mod tests {
     }
 
     #[test]
-    fn shape_query_is_none_for_api_source() {
+    fn shape_query_falls_back_to_provider_scoped_profile_search() {
         let ctx = SourceCtx {
             root: Path::new("/tmp/ctox-test"),
             country: Some(Country::De),
             mode: ResearchMode::NewRecord,
         };
-        assert!(module().shape_query("WITTENSTEIN SE", &ctx).is_none());
+        let shaped = module()
+            .shape_query("Example Industrial GmbH", &ctx)
+            .expect("browser-backed source should expose a provider-scoped fallback");
+        assert!(shaped.query.contains("site:xing.com/profile"));
+        assert_eq!(shaped.domains, vec!["xing.com"]);
     }
 
     #[test]
-    fn fetch_direct_engages_for_de_without_token_reports_credential_missing() {
-        // The `Country` enum currently only carries DE/AT/CH, so the
-        // non-DACH guard branch is defensive (forward-compatible). For
-        // each in-DACH country we instead exercise the credential branch:
-        // without a token in the runtime config, we MUST surface
-        // `CredentialMissing` so person-research can skip the source.
+    fn browser_capture_uses_current_company_and_member_searches() -> anyhow::Result<()> {
+        let source = build_authenticated_browser_capture("Example Industrial GmbH", "DE")?;
+
+        assert!(source.contains("https://www.xing.com/search/companies"));
+        assert!(source.contains("https://www.xing.com/search/members"));
+        assert!(!source.contains("https://www.xing.com/search/people"));
+        assert!(source.contains("companySearch"));
+        assert!(source.contains("memberSearch"));
+        assert!(source.contains("(?:pages|companies)"));
+        assert!(source.contains("^\\/profile\\/([^/]+)\\/?$"));
+        assert!(source.contains("auth_required"));
+        assert!(source.contains("not_found"));
+        assert!(source.contains("blocked"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn browser_capture_json_quotes_query_and_contains_no_secret_logging() -> anyhow::Result<()> {
+        let source = build_authenticated_browser_capture(
+            "Example \"Quoted\" AG; return globalThis.secret",
+            "DE",
+        )?;
+
+        assert!(source
+            .contains(r#"const company = "Example \"Quoted\" AG; return globalThis.secret";"#));
+        assert!(!source.contains("console."));
+        assert!(!source.contains("credentialValue"));
+        assert!(!source.contains("localStorage"));
+        assert!(!source.contains("sessionStorage"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn browser_capture_rejects_numeric_names_and_profile_contacts_links() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/1/contacts",
+                "text": "1",
+                "contextLines": ["1", "Example Industrial GmbH", "Harthausen, Deutschland"]
+            },
+            {
+                "url": "https://www.xing.com/profile/2",
+                "text": "2",
+                "contextLines": ["2", "Example Industrial GmbH", "Harthausen, Deutschland"]
+            }
+        ]));
+
+        assert!(values_for_field(&records, "person_vorname").is_empty());
+        assert!(values_for_field(&records, "person_nachname").is_empty());
+        assert!(values_for_field(&records, "person_xing").is_empty());
+    }
+
+    #[test]
+    fn browser_capture_uses_canonical_profile_slug_and_rejects_location_as_function() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/Anna_Schmidt10?sc_o=search_result",
+                "text": "1",
+                "contextLines": [
+                    "1",
+                    "Leiterin Einkauf",
+                    "Example Industrial GmbH",
+                    "Harthausen, Deutschland"
+                ]
+            },
+            {
+                "url": "https://www.xing.com/profile/Bernd_Mueller7",
+                "text": "2",
+                "contextLines": ["2", "Example Industrial GmbH", "Harthausen, Deutschland"]
+            }
+        ]));
+
+        assert_eq!(
+            values_for_field(&records, "person_vorname"),
+            ["Anna", "Bernd"]
+        );
+        assert_eq!(
+            values_for_field(&records, "person_nachname"),
+            ["Schmidt", "Mueller"]
+        );
+        assert_eq!(
+            values_for_field(&records, "person_xing"),
+            [
+                "https://www.xing.com/profile/Anna_Schmidt10",
+                "https://www.xing.com/profile/Bernd_Mueller7"
+            ]
+        );
+        assert_eq!(
+            values_for_field(&records, "person_funktion"),
+            ["Leiterin Einkauf"]
+        );
+        assert!(!values_for_field(&records, "person_funktion").contains(&"Harthausen, Deutschland"));
+    }
+
+    #[test]
+    fn browser_capture_rejects_former_company_as_current_person_evidence() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/Claudia_Hofer3",
+                "text": "Claudia Hofer",
+                "contextLines": [
+                    "Claudia Hofer",
+                    "Ehemaliges Unternehmen",
+                    "Example Industrial GmbH",
+                    "Harthausen, Deutschland"
+                ]
+            }
+        ]));
+
+        for field in [
+            "person_vorname",
+            "person_nachname",
+            "person_funktion",
+            "person_xing",
+        ] {
+            assert!(
+                values_for_field(&records, field).is_empty(),
+                "former-company result emitted {field}: {records}"
+            );
+        }
+    }
+
+    #[test]
+    fn browser_capture_rejects_ui_metadata_and_person_name_as_function() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/Nadine_Hehn2",
+                "text": "Nadine Hehn",
+                "contextLines": [
+                    "Nadine Hehn",
+                    "Kontakte: 493 davon 1 gemeinsamer Kontakt",
+                    "Example Industrial GmbH",
+                    "Igersheim, Deutschland"
+                ]
+            },
+            {
+                "url": "https://www.xing.com/profile/Malte_Schober2",
+                "text": "Malte Schober",
+                "contextLines": [
+                    "Malte Schober",
+                    "Kontakte: 613",
+                    "Example Industrial GmbH",
+                    "Igersheim, Deutschland"
+                ]
+            },
+            {
+                "url": "https://www.xing.com/profile/Ronald_Gleich2",
+                "text": "Ronald Gleich",
+                "contextLines": [
+                    "Ronald Gleich",
+                    "Derzeitiges Unternehmen:",
+                    "Example Industrial GmbH",
+                    "Igersheim, Deutschland"
+                ]
+            },
+            {
+                "url": "https://www.xing.com/profile/Michael_Roessler2",
+                "text": "Michael Rößler",
+                "contextLines": [
+                    "Michael Rößler",
+                    "Example Industrial GmbH",
+                    "Michael Rößler",
+                    "Igersheim, Deutschland"
+                ]
+            }
+        ]));
+
+        assert!(
+            values_for_field(&records, "person_funktion").is_empty(),
+            "UI metadata was emitted as a function: {records}"
+        );
+        assert_eq!(values_for_field(&records, "person_xing").len(), 4);
+    }
+
+    #[test]
+    fn browser_capture_skips_metadata_and_keeps_next_plausible_function() {
+        let records = parse_browser_records(serde_json::json!([
+            {
+                "url": "https://www.xing.com/profile/Anna_Schmidt10",
+                "text": "Anna Schmidt",
+                "contextLines": [
+                    "Anna Schmidt",
+                    "Leiterin Einkauf",
+                    "Kontakte: 284",
+                    "Example Industrial GmbH",
+                    "Derzeitiges Unternehmen:"
+                ]
+            }
+        ]));
+
+        assert_eq!(
+            values_for_field(&records, "person_funktion"),
+            ["Leiterin Einkauf"]
+        );
+    }
+
+    #[test]
+    fn fetch_direct_without_api_token_falls_back_to_browser_for_de() {
         let ctx = SourceCtx {
             root: Path::new("/tmp/ctox-test-xing-no-secret"),
             country: Some(Country::De),
             mode: ResearchMode::NewRecord,
         };
-        let result = module()
-            .fetch_direct(&ctx, "WITTENSTEIN SE")
-            .expect("DACH context must engage");
-        assert!(matches!(
-            result,
-            Err(SourceError::CredentialMissing {
-                secret_name: "XING_API_TOKEN"
-            })
-        ));
+        assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
     }
 
     #[test]
@@ -489,39 +1015,25 @@ mod tests {
     }
 
     #[test]
-    fn fetch_direct_credential_missing_for_at_and_ch() {
+    fn fetch_direct_without_api_token_falls_back_to_browser_for_at_and_ch() {
         for country in [Country::At, Country::Ch] {
             let ctx = SourceCtx {
                 root: Path::new("/tmp/ctox-test-xing-no-secret"),
                 country: Some(country),
                 mode: ResearchMode::NewRecord,
             };
-            let result = module()
-                .fetch_direct(&ctx, "WITTENSTEIN SE")
-                .expect("DACH context must engage");
-            assert!(matches!(
-                result,
-                Err(SourceError::CredentialMissing {
-                    secret_name: "XING_API_TOKEN"
-                })
-            ));
+            assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
         }
     }
 
     #[test]
-    fn fetch_direct_with_unknown_country_engages() {
-        // country=None means "orchestrator did not yet bind a country" —
-        // we still engage and report credential_missing rather than
-        // returning None.
+    fn fetch_direct_with_unknown_country_falls_back_to_browser() {
         let ctx = SourceCtx {
             root: Path::new("/tmp/ctox-test-xing-no-secret"),
             country: None,
             mode: ResearchMode::NewRecord,
         };
-        let result = module()
-            .fetch_direct(&ctx, "WITTENSTEIN SE")
-            .expect("country=None must engage");
-        assert!(matches!(result, Err(SourceError::CredentialMissing { .. })));
+        assert!(module().fetch_direct(&ctx, "Example Industrial GmbH").is_none());
     }
 
     #[test]
@@ -540,7 +1052,7 @@ mod tests {
             anna.snippet
         );
         assert!(
-            anna.snippet.contains("WITTENSTEIN SE"),
+            anna.snippet.contains("Example Industrial GmbH"),
             "expected company in snippet, got: {}",
             anna.snippet
         );
@@ -673,7 +1185,7 @@ mod tests {
             mode: ResearchMode::NewRecord,
         };
         let result = module()
-            .fetch_direct(&ctx, "WITTENSTEIN SE")
+            .fetch_direct(&ctx, "Example Industrial GmbH")
             .expect("DACH context must engage");
         assert!(
             matches!(

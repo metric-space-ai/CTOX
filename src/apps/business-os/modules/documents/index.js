@@ -1,15 +1,17 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js';
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260717-documents-blob-integrity-v6';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260723-office-demand-ready-v217';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
 const CTOX_DOCUMENTS_LOAD_TIMEOUT_MS = 60000;
-const CTOX_DOCUMENTS_READY_TIMEOUT_MS = 60000;
+const CTOX_DOCUMENTS_READY_TIMEOUT_MS = 120000;
+const CTOX_DOCUMENTS_RECOVERY_DELAY_MS = 1200;
+const CTOX_DOCUMENTS_MAX_RECOVERY_ATTEMPTS = 3;
 const CHUNK_SIZE = 256000;
 const DOCX_TOOLBAR_VISIBILITY_KEY = 'ctox.businessOs.documents.docxToolbarVisible';
 const DOCUMENT_RENDER_DEBOUNCE_MS = 80;
-const DOCUMENTS_ASSET_REVISION = '20260717-documents-workspace-v1018';
+const DOCUMENTS_ASSET_REVISION = '20260723-documents-workspace-v1034';
 const MAIL_MERGE_SOURCE_NAMES = new Set([
   'campaign-mail-merge',
   'mail-merge',
@@ -166,6 +168,8 @@ export async function mount(ctx) {
     mailMergeNavigation: null,
     editorHandle: null,
     editorDestroyPromise: null,
+    editorMountKey: '',
+    editorMountPromise: null,
     superdocSaveTimer: null,
     superdocSavePromise: null,
     renderSerial: 0,
@@ -298,7 +302,7 @@ async function loadSuperDocModule(state) {
 
 async function loadCtoxDocumentsModule(state) {
   if (!state.ctoxDocumentsModule) {
-    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260715-documents-editor-v4');
+    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260723-office-runtime-v197');
   }
   return state.ctoxDocumentsModule;
 }
@@ -348,7 +352,6 @@ function wireModule(state) {
 function wireDocumentPanes(state) {
   const root = state.ctx.host.querySelector('[data-documents-module]');
   const backdrop = root?.querySelector('[data-documents-drawer-backdrop]');
-  let responsiveMode = '';
   const closeDrawers = () => {
     state.actionsOpen = false;
     state.libraryOpen = false;
@@ -361,13 +364,12 @@ function wireDocumentPanes(state) {
     closeDrawers();
   };
   const updateResponsiveMode = (width = root?.getBoundingClientRect?.().width || 0) => {
-    const nextMode = width <= 440 ? 'phone' : width <= 620 ? 'narrow' : width <= 720 ? 'compact' : 'wide';
-    if (!root || nextMode === responsiveMode) return;
-    responsiveMode = nextMode;
-    root.classList.toggle('is-compact', width <= 720);
+    if (!root) return;
+    root.classList.toggle('is-compact', width <= 1048);
     root.classList.toggle('is-narrow', width <= 620);
     root.classList.toggle('is-phone', width <= 440);
-    if (width > 720 && state.libraryOpen) {
+    root.classList.toggle('is-actions-overlay', width < 1616);
+    if (width > 1048 && state.libraryOpen) {
       state.libraryOpen = false;
       renderPaneVisibility(state);
     }
@@ -393,6 +395,7 @@ function wireDocumentPanes(state) {
 function renderPaneVisibility(state) {
   const root = state.ctx.host.querySelector('[data-documents-module]');
   const actions = root?.querySelector('[data-documents-actions-drawer]');
+  const actionsResizer = root?.querySelector('[data-documents-actions-resizer]');
   const backdrop = root?.querySelector('[data-documents-drawer-backdrop]');
   const anyDrawerOpen = Boolean(state.actionsOpen || state.libraryOpen);
   root?.classList.toggle('is-actions-open', Boolean(state.actionsOpen));
@@ -401,6 +404,7 @@ function renderPaneVisibility(state) {
     actions.hidden = !state.actionsOpen;
     actions.setAttribute('aria-hidden', String(!state.actionsOpen));
   }
+  if (actionsResizer) actionsResizer.hidden = !state.actionsOpen;
   if (backdrop) backdrop.hidden = !anyDrawerOpen;
 }
 
@@ -821,19 +825,20 @@ async function loadSelectedVersion(state) {
     state.selectedVersion = null;
     return null;
   }
-  await ensureDocumentVersionReplication(state.ctx);
+  const replication = await startDocumentVersionReplication(state.ctx);
   const requestedVersionId = state.requestedVersionId && state.requestedVersionDocumentId === record.id
     ? state.requestedVersionId
     : '';
   const targetVersionId = requestedVersionId || record.current_version_id;
-  let doc = targetVersionId
-    ? await withTimeout(
-      documentCollection(state.ctx, 'document_versions').findOne(targetVersionId).exec(),
-      4500,
-      `Version ${targetVersionId} konnte nicht geladen werden.`,
-    )
-    : null;
-  if (!doc) {
+  const readLocalVersion = async () => {
+    let localDoc = targetVersionId
+      ? await withTimeout(
+        documentCollection(state.ctx, 'document_versions').findOne(targetVersionId).exec(),
+        4500,
+        `Version ${targetVersionId} konnte nicht geladen werden.`,
+      )
+      : null;
+    if (localDoc) return localDoc;
     const fallback = await withTimeout(
       documentCollection(state.ctx, 'document_versions').find({
         selector: { document_id: record.id },
@@ -843,13 +848,17 @@ async function loadSelectedVersion(state) {
       4500,
       `Keine Versionen für ${record.id} gefunden.`,
     );
-    doc = fallback[0] || null;
-    if (doc && !requestedVersionId) {
-      const versionJson = doc.toJSON();
-      const recordDoc = await documentCollection(state.ctx, 'documents').findOne(record.id).exec();
-      await recordDoc?.incrementalPatch({ current_version_id: versionJson.id });
-      record.current_version_id = versionJson.id;
-    }
+    return fallback[0] || null;
+  };
+  const doc = await resolveLocalFirst(
+    readLocalVersion,
+    () => awaitDocumentVersionReplication(replication),
+  );
+  if (doc && !requestedVersionId && doc.toJSON().id !== targetVersionId) {
+    const versionJson = doc.toJSON();
+    const recordDoc = await documentCollection(state.ctx, 'documents').findOne(record.id).exec();
+    await recordDoc?.incrementalPatch({ current_version_id: versionJson.id });
+    record.current_version_id = versionJson.id;
   }
   state.selectedVersion = doc?.toJSON() || null;
   state.dirty = false;
@@ -857,9 +866,12 @@ async function loadSelectedVersion(state) {
   return state.selectedVersion;
 }
 
-async function ensureDocumentVersionReplication(ctx) {
-  if (typeof ctx?.sync?.startCollection !== 'function') return;
-  const bridge = await ctx.sync.startCollection('document_versions');
+async function startDocumentVersionReplication(ctx) {
+  if (typeof ctx?.sync?.startCollection !== 'function') return null;
+  return ctx.sync.startCollection('document_versions');
+}
+
+async function awaitDocumentVersionReplication(bridge) {
   const replication = bridge?.state || bridge || null;
   if (!replication) return;
   if (typeof replication.awaitInitialReplication === 'function') {
@@ -878,6 +890,26 @@ async function ensureDocumentVersionReplication(ctx) {
   }
 }
 
+async function resolveLocalFirst(readLocal, awaitReplication) {
+  try {
+    const localValue = await readLocal();
+    if (localValue) return localValue;
+  } catch (error) {
+    if (!isTransientDocumentReadError(error)) throw error;
+  }
+  await awaitReplication();
+  return readLocal();
+}
+
+function isTransientDocumentReadError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('webrtc replication cancelled')
+    || message.includes('query_cancelled')
+    || message.includes('replication-cancel')
+    || message.includes('database connection is closing')
+    || (message.includes('idbdatabase') && message.includes('closing'));
+}
+
 async function refreshMailMergeNavigation(state) {
   const group = selectedDocumentGroup(state);
   if (!group?.is_mail_merge) {
@@ -885,10 +917,17 @@ async function refreshMailMergeNavigation(state) {
     return null;
   }
   let entries;
-  if (group.records.length === 1 && ['mail_merge', 'series_letter'].includes(group.records[0].document_type)) {
+  const typedMailMergeRecord = group.records
+    .filter((record) => ['mail_merge', 'series_letter'].includes(record.document_type))
+    .sort((left, right) => (
+      Number(right.id === state.selectedId) - Number(left.id === state.selectedId)
+      || Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0)
+      || right.id.localeCompare(left.id)
+    ))[0] || null;
+  if (typedMailMergeRecord) {
     const collection = documentCollection(state.ctx, 'document_versions');
     const docs = collection
-      ? await collection.find({ selector: { document_id: group.records[0].id } }).exec()
+      ? await collection.find({ selector: { document_id: typedMailMergeRecord.id } }).exec()
       : [];
     entries = docs
       .map((doc) => typeof doc?.toJSON === 'function' ? doc.toJSON() : doc)
@@ -902,14 +941,14 @@ async function refreshMailMergeNavigation(state) {
         - Number(right.mail_merge_recipient?.index ?? right.version ?? 0)
       ))
       .map((version, index) => ({
-        documentId: group.records[0].id,
+        documentId: typedMailMergeRecord.id,
         versionId: version.id,
         recipientId: firstText(version.mail_merge_recipient?.id, version.provenance?.recipient_id, version.id),
         label: firstText(version.mail_merge_recipient?.label, version.provenance?.recipient_label, `Empfänger ${index + 1}`),
         index,
       }));
   } else {
-    entries = group.records.map((record, index) => ({
+    entries = uniqueMailMergeRecipientRecords(group.records, group.title).map((record, index) => ({
       documentId: record.id,
       versionId: record.current_version_id,
       recipientId: firstText(
@@ -982,16 +1021,35 @@ function renderDocumentStrip(state) {
       state.ctx.host.querySelector('[data-documents-actions-close]')?.focus({ preventScroll: true });
     }
   });
-  host.querySelector('[data-documents-recipient-previous]')?.addEventListener('click', () => {
-    selectMailMergeRecipient(state, navigation.activeIndex - 1);
+  const navigateRecipient = (requestedIndex, trigger) => {
+    trigger?.setAttribute('aria-busy', 'true');
+    trigger?.setAttribute('disabled', '');
+    selectMailMergeRecipient(state, requestedIndex, navigation)
+      .catch((error) => {
+        console.error('[documents] mail merge recipient could not be opened', error);
+        renderError(
+          state,
+          `${state.t('documentLoadFailed', 'Dokument konnte nicht geladen werden:')} ${error?.message || error}`,
+        );
+      })
+      .finally(() => {
+        if (!trigger?.isConnected) return;
+        trigger.removeAttribute('aria-busy');
+        trigger.removeAttribute('disabled');
+      });
+  };
+  host.querySelector('[data-documents-recipient-previous]')?.addEventListener('click', (event) => {
+    navigateRecipient(navigation.activeIndex - 1, event.currentTarget);
   });
-  host.querySelector('[data-documents-recipient-next]')?.addEventListener('click', () => {
-    selectMailMergeRecipient(state, navigation.activeIndex + 1);
+  host.querySelector('[data-documents-recipient-next]')?.addEventListener('click', (event) => {
+    navigateRecipient(navigation.activeIndex + 1, event.currentTarget);
   });
   const search = host.querySelector('[data-documents-recipient-search]');
   const chooseSearchResult = () => {
     const index = findMailMergeRecipientIndex(navigation.entries, search?.value);
-    if (index >= 0 && index !== navigation.activeIndex) selectMailMergeRecipient(state, index);
+    if (index >= 0 && index !== navigation.activeIndex) {
+      navigateRecipient(index, search);
+    }
   };
   search?.addEventListener('change', chooseSearchResult);
   search?.addEventListener('keydown', (event) => {
@@ -1001,12 +1059,29 @@ function renderDocumentStrip(state) {
   });
 }
 
-async function selectMailMergeRecipient(state, requestedIndex) {
-  const navigation = state.mailMergeNavigation;
-  if (!navigation?.entries?.length) return;
+async function selectMailMergeRecipient(state, requestedIndex, renderedNavigation = null) {
+  const selection = resolveMailMergeRecipientSelection(
+    state.mailMergeNavigation,
+    renderedNavigation,
+    requestedIndex,
+  );
+  if (!selection) return;
+  await switchSelectedDocument(
+    state,
+    selection.entry.documentId,
+    { versionId: selection.entry.versionId },
+  );
+}
+
+function resolveMailMergeRecipientSelection(currentNavigation, renderedNavigation, requestedIndex) {
+  const navigation = renderedNavigation?.entries?.length
+    ? renderedNavigation
+    : currentNavigation?.entries?.length
+      ? currentNavigation
+      : null;
+  if (!navigation) return null;
   const index = clampNumber(Number(requestedIndex) || 0, 0, navigation.entries.length - 1);
-  const entry = navigation.entries[index];
-  await switchSelectedDocument(state, entry.documentId, { versionId: entry.versionId });
+  return { navigation, index, entry: navigation.entries[index] };
 }
 
 function findMailMergeRecipientIndex(entries = [], query = '') {
@@ -1046,6 +1121,7 @@ function renderLeft(state) {
             <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Zuletzt geändert'))}</option>
             <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
             <option value="title_asc" ${state.sortBy === 'title_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByTitle', 'Titel A-Z'))}</option>
+            <option value="creator_app" ${state.sortBy === 'creator_app' ? 'selected' : ''}>${escapeHtml(state.t('sortByCreatorApp', 'Ersteller-App'))}</option>
             <option value="status" ${state.sortBy === 'status' ? 'selected' : ''}>${escapeHtml(state.t('sortByStatus', 'Status'))}</option>
           </select>
           <button class="ctox-button documents-filter-toggle" type="button" data-documents-filter-toggle aria-expanded="${String(state.filtersOpen)}">
@@ -2351,6 +2427,10 @@ function visibleDocuments(state) {
     .sort((left, right) => {
       if (state.sortBy === 'updated_asc') return left.updated_at_ms - right.updated_at_ms;
       if (state.sortBy === 'title_asc') return left.title.localeCompare(right.title, 'de');
+      if (state.sortBy === 'creator_app') {
+        return (left.source_labels[0] || '').localeCompare(right.source_labels[0] || '', 'de')
+          || left.title.localeCompare(right.title, 'de');
+      }
       if (state.sortBy === 'status') {
         return left.status.localeCompare(right.status, 'de') || left.title.localeCompare(right.title, 'de');
       }
@@ -2374,7 +2454,10 @@ function finalizeDocumentGroup(group) {
     recipientLabelFromRecord(left).localeCompare(recipientLabelFromRecord(right), 'de')
     || left.id.localeCompare(right.id)
   ));
-  const primary = records[0];
+  const primary = [...records].sort((left, right) => (
+    Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0)
+    || right.id.localeCompare(left.id)
+  ))[0];
   const isMailMerge = Boolean(group.bundle);
   const statuses = [...new Set(records.map((record) => record.status).filter(Boolean))];
   const tags = [...new Set(records.flatMap(documentTags))];
@@ -2385,8 +2468,10 @@ function finalizeDocumentGroup(group) {
   const title = isMailMerge ? mailMergeGroupTitle(records, group.bundle) : primary.title;
   const recipientCount = isMailMerge
     ? Math.max(
-      records.length,
-      Number(primary.mail_merge?.recipient_count || primary.series_letter?.recipient_count || 0),
+      uniqueMailMergeRecipientRecords(records).length,
+      ...records.map((record) => Number(
+        record.mail_merge?.recipient_count || record.series_letter?.recipient_count || 0,
+      )),
     )
     : 0;
   const searchValues = records.flatMap((record) => [
@@ -2428,39 +2513,14 @@ function mailMergeBundleDescriptor(record = {}) {
   const explicit = mailMerge || seriesLetter;
   const provenance = plainObject(record.provenance) ? record.provenance : {};
   const source = String(provenance.source || '').trim().toLowerCase();
-  const isTypedBundle = record.document_type === 'mail_merge'
-    || record.document_type === 'series_letter'
-    || Boolean(explicit);
-  if (isTypedBundle) {
-    const bundleId = firstText(
-      explicit?.bundle_id,
-      explicit?.id,
-      provenance.mail_merge_id,
-      provenance.series_letter_id,
-      record.idempotency_key,
-      record.id,
-    );
-    return bundleId ? {
-      key: `mail_merge:${bundleId}`,
-      kind: record.document_type === 'series_letter' ? 'series_letter' : 'mail_merge',
-      id: bundleId,
-      explicit: true,
-    } : null;
-  }
-  if (!MAIL_MERGE_SOURCE_NAMES.has(source)) return null;
   const explicitBundleId = firstText(
+    explicit?.bundle_id,
+    explicit?.id,
     provenance.bundle_id,
     provenance.mail_merge_id,
     provenance.series_letter_id,
   );
-  if (explicitBundleId) {
-    return {
-      key: `mail_merge:${explicitBundleId}`,
-      kind: 'mail_merge',
-      id: explicitBundleId,
-      explicit: false,
-    };
-  }
+  const exportRunId = firstText(provenance.export_run_id, provenance.exportRunId);
   const appId = firstText(provenance.app_id, provenance.appId);
   const campaignId = firstText(
     provenance.selection_id,
@@ -2472,10 +2532,40 @@ function mailMergeBundleDescriptor(record = {}) {
     record.template_ref?.id,
     provenance.template_id,
   );
-  if (!campaignId || !templateId) return null;
   const templateVersion = firstText(record.template_ref?.version, provenance.template_version, '1');
+  const stableCampaignBundle = MAIL_MERGE_SOURCE_NAMES.has(source) && campaignId && templateId
+    ? `${appId || 'unknown'}:${source}:${campaignId}:${templateId}:${templateVersion}`
+    : '';
+  const isTypedBundle = record.document_type === 'mail_merge'
+    || record.document_type === 'series_letter'
+    || Boolean(explicit);
+  if (isTypedBundle) {
+    const bundleId = firstText(
+      explicitBundleId,
+      stableCampaignBundle,
+      exportRunId,
+      record.idempotency_key,
+      record.id,
+    );
+    return bundleId ? {
+      key: `mail_merge:${bundleId}`,
+      kind: record.document_type === 'series_letter' ? 'series_letter' : 'mail_merge',
+      id: bundleId,
+      explicit: true,
+    } : null;
+  }
+  if (!MAIL_MERGE_SOURCE_NAMES.has(source)) return null;
+  if (explicitBundleId) {
+    return {
+      key: `mail_merge:${explicitBundleId}`,
+      kind: 'mail_merge',
+      id: explicitBundleId,
+      explicit: false,
+    };
+  }
+  if (!campaignId || !templateId) return null;
   return {
-    key: `mail_merge:${appId || 'unknown'}:${source}:${campaignId}:${templateId}:${templateVersion}`,
+    key: `mail_merge:${stableCampaignBundle}`,
     kind: 'mail_merge',
     id: `${campaignId}:${templateId}:${templateVersion}`,
     explicit: false,
@@ -2526,6 +2616,32 @@ function recipientLabelFromRecord(record, groupTitle = '') {
   const parts = title.split(/\s+-\s+/).filter(Boolean);
   if (groupTitle && parts.length > 1) parts.pop();
   return parts.join(' - ') || title || record.id;
+}
+
+function mailMergeRecipientKey(record, groupTitle = '') {
+  return firstText(
+    record.mail_merge_recipient?.id,
+    record.provenance?.selectionmember_id,
+    record.provenance?.recipient_id,
+    record.provenance?.person_id,
+    normalizeSearchText(recipientLabelFromRecord(record, groupTitle)),
+    record.id,
+  );
+}
+
+function uniqueMailMergeRecipientRecords(records = [], groupTitle = '') {
+  const byRecipient = new Map();
+  for (const record of records) {
+    const key = mailMergeRecipientKey(record, groupTitle);
+    const current = byRecipient.get(key);
+    if (!current || Number(record.updated_at_ms || 0) >= Number(current.updated_at_ms || 0)) {
+      byRecipient.set(key, record);
+    }
+  }
+  return [...byRecipient.values()].sort((left, right) => (
+    recipientLabelFromRecord(left, groupTitle).localeCompare(recipientLabelFromRecord(right, groupTitle), 'de')
+    || left.id.localeCompare(right.id)
+  ));
 }
 
 function documentSourceIdentity(record = {}) {
@@ -2909,6 +3025,10 @@ async function renderCenter(state) {
   const host = state.ctx.host.querySelector('[data-documents-editor]');
   const record = selectedRecord(state);
   renderDocumentStrip(state);
+  const version = state.selectedVersion;
+  const renderKey = editorRenderKey(record, version, state.officeEngine);
+  const reusableTarget = currentEditorTarget(state, renderKey);
+  if (reusableTarget) return reusableTarget;
   const renderSerial = (state.renderSerial || 0) + 1;
   state.renderSerial = renderSerial;
   if (state.superdocSaveTimer) {
@@ -2924,7 +3044,6 @@ async function renderCenter(state) {
     host.innerHTML = `<div class="documents-empty"><strong>${escapeHtml(state.t('noDocumentSelected', 'Kein Dokument ausgewählt.'))}</strong><span>${escapeHtml(state.t('noDocumentSelectedPrompt', 'Links ein DOCX importieren oder auswählen.'))}</span></div>`;
     return;
   }
-  const version = state.selectedVersion;
   if (!version) {
     host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('versionLoading', 'Version wird gelesen.'))}</span></div>`;
     loadSelectedVersion(state)
@@ -2951,43 +3070,111 @@ async function renderCenter(state) {
     const useCtoxDocuments = state.officeEngine === 'ctox_documents';
     host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade Word-Editor'))}</strong><span>${escapeHtml(useCtoxDocuments ? state.t('documentEditorInitializing', 'Dokumenteditor wird initialisiert.') : state.t('superdocInitializing', 'SuperDoc wird initialisiert.'))}</span></div>`;
     const mountEditor = useCtoxDocuments ? mountCtoxDocuments : mountSuperDocDocument;
-    mountWordEditor(state, host, record, version, renderSerial, mountEditor, useCtoxDocuments);
-    return;
+    const mountPromise = mountWordEditor(state, host, record, version, renderSerial, renderKey, mountEditor, useCtoxDocuments);
+    return trackEditorMount(state, renderKey, mountPromise);
   }
 
   host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingEditor', 'Lade Editor'))}</strong><span>${escapeHtml(state.t('documentPreparing', 'Dokument wird vorbereitet.'))}</span></div>`;
   ensureDocumentFormatModule(state).then((formatModule) => {
     if (state.renderSerial !== renderSerial) return;
-    mountMarkdownDocument(state, host, version, formatModule);
+    mountMarkdownDocument(state, host, version, formatModule, renderKey);
   }).catch((error) => {
     if (state.renderSerial !== renderSerial) return;
     renderError(state, `${state.t('editorLoadFailed', 'Editor konnte nicht geladen werden:')} ${error?.message || error}`);
   });
 }
 
-async function mountWordEditor(state, host, record, version, renderSerial, mountEditor, useCtoxDocuments, attempt = 0) {
+function editorRenderKey(record, version, officeEngine = '') {
+  if (!record?.id || !version?.id) return '';
+  return `${record.id}:${version.id}:${String(officeEngine || 'default')}`;
+}
+
+function currentEditorTarget(state, renderKey) {
+  if (!renderKey) return null;
+  if (state.editorHandle?.renderKey === renderKey) return Promise.resolve(state.editorHandle);
+  if (state.editorMountKey === renderKey && state.editorMountPromise) return state.editorMountPromise;
+  return null;
+}
+
+function isCurrentEditorRender(state, renderSerial) {
+  return !state.disposed && state.renderSerial === renderSerial;
+}
+
+function trackEditorMount(state, renderKey, mountPromise) {
+  const trackedPromise = Promise.resolve(mountPromise);
+  state.editorMountKey = renderKey;
+  state.editorMountPromise = trackedPromise;
+  const clearTrackedMount = () => {
+    if (state.editorMountPromise !== trackedPromise) return;
+    state.editorMountKey = '';
+    state.editorMountPromise = null;
+  };
+  trackedPromise.then(clearTrackedMount, clearTrackedMount);
+  return trackedPromise;
+}
+
+async function mountWordEditor(state, host, record, version, renderSerial, renderKey, mountEditor, useCtoxDocuments) {
   try {
-    await mountEditor(state, host, record, version, renderSerial);
+    await initializeOfficeEditorWithRecovery({
+      initialize: () => mountEditor(state, host, record, version, renderSerial, renderKey),
+      isCurrent: () => isCurrentEditorRender(state, renderSerial),
+      shouldRetry: (error) => useCtoxDocuments && isTransientOfficeStartupError(error),
+      onRetry: async () => {
+        host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade DOCX Editor'))}</strong><span>${escapeHtml(state.t('officeEditorRetry', 'Verbindung wird wiederhergestellt. Dokument wird erneut geöffnet.'))}</span></div>`;
+      },
+      wait: delay,
+      retryDelayMs: CTOX_DOCUMENTS_RECOVERY_DELAY_MS,
+      maxRecoveryAttempts: CTOX_DOCUMENTS_MAX_RECOVERY_ATTEMPTS,
+    });
   } catch (error) {
     if (state.renderSerial !== renderSerial) return;
-    if (useCtoxDocuments && attempt === 0 && isTransientOfficeStartupError(error)) {
-      host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade DOCX Editor'))}</strong><span>${escapeHtml(state.t('officeEditorRetry', 'Editor wird erneut gestartet.'))}</span></div>`;
-      await delay(1200);
-      if (state.renderSerial !== renderSerial) return;
-      await mountWordEditor(state, host, record, version, renderSerial, mountEditor, useCtoxDocuments, attempt + 1);
-      return;
-    }
     console.error(`[documents] ${useCtoxDocuments ? 'CTOX Documents' : 'SuperDoc'} mount failed`, error);
     renderError(state, `${state.t('docxEditorLoadFailed', 'DOCX editor konnte nicht geladen werden:')} ${error?.message || error}`);
   }
 }
 
+async function initializeOfficeEditorWithRecovery(options = {}) {
+  const initialize = options.initialize;
+  if (typeof initialize !== 'function') throw new TypeError('Office editor initialization is required');
+  const isCurrent = typeof options.isCurrent === 'function' ? options.isCurrent : () => true;
+  const shouldRetry = typeof options.shouldRetry === 'function' ? options.shouldRetry : () => false;
+  const onRetry = typeof options.onRetry === 'function' ? options.onRetry : async () => {};
+  const wait = typeof options.wait === 'function' ? options.wait : delay;
+  const retryDelayMs = Math.max(0, Number(options.retryDelayMs) || 0);
+  const maxRecoveryAttempts = Math.max(0, Number(options.maxRecoveryAttempts) || 0);
+  let recoveryAttempts = 0;
+
+  while (isCurrent()) {
+    try {
+      await initialize();
+      return { recovered: recoveryAttempts > 0, recoveryAttempts };
+    } catch (error) {
+      if (!isCurrent()) return { cancelled: true, recovered: false, recoveryAttempts };
+      if (recoveryAttempts >= maxRecoveryAttempts || !shouldRetry(error)) throw error;
+      recoveryAttempts += 1;
+      await onRetry(error, recoveryAttempts);
+      if (retryDelayMs > 0) await wait(retryDelayMs);
+    }
+  }
+  return { cancelled: true, recovered: false, recoveryAttempts };
+}
+
 function isTransientOfficeStartupError(error) {
   const message = String(error?.message || error || '').toLowerCase();
+  const code = String(error?.code || '').toLowerCase();
+  const method = String(error?.details?.method || error?.method || '').toLowerCase();
+  const retryableRpcMethod = ['bridge.loadversion', 'editor.open', 'editor.ready'].includes(method);
   return message.includes('iframe load timed out')
     || message.includes('editor.ready')
     || message.includes('app-ready timed out')
-    || message.includes('fork sdk load timed out');
+    || message.includes('fork sdk load timed out')
+    || message.includes('webrtc replication cancelled')
+    || message.includes('replication-cancel')
+    || message.includes('query_cancelled')
+    || message.includes('office rpc timed out: bridge.loadversion')
+    || message.includes('office rpc timed out: editor.open')
+    || (code === 'rpc_timeout' && retryableRpcMethod)
+    || code === 'rpc_closed';
 }
 
 async function destroyActiveEditor(state) {
@@ -3016,7 +3203,7 @@ async function destroyActiveEditor(state) {
   }
 }
 
-function mountMarkdownDocument(state, host, version, formatModule) {
+function mountMarkdownDocument(state, host, version, formatModule, renderKey = '') {
   host.replaceChildren();
   const wrap = document.createElement('div');
   wrap.className = 'documents-markdown-editor';
@@ -3070,6 +3257,7 @@ function mountMarkdownDocument(state, host, version, formatModule) {
 
   state.editorHandle = {
     kind: 'markdown',
+    renderKey,
     destroy() {
       host.replaceChildren();
     },
@@ -3138,9 +3326,9 @@ function renderInlineMarkdown(value) {
     .replace(/\*([^*]+)\*/g, '<em>$1</em>');
 }
 
-async function mountCtoxDocuments(state, host, record, version, renderSerial) {
+async function mountCtoxDocuments(state, host, record, version, renderSerial, renderKey) {
   const { createCtoxDocumentsEditor } = await loadCtoxDocumentsModule(state);
-  if (state.renderSerial !== renderSerial) return;
+  if (!isCurrentEditorRender(state, renderSerial)) return;
   host.replaceChildren();
   const mount = document.createElement('div');
   mount.className = 'documents-superdoc-frame documents-ctox-documents-frame';
@@ -3155,7 +3343,7 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial) {
     loadTimeoutMs: CTOX_DOCUMENTS_LOAD_TIMEOUT_MS,
     readyTimeoutMs: CTOX_DOCUMENTS_READY_TIMEOUT_MS,
   });
-  if (state.renderSerial !== renderSerial) {
+  if (!isCurrentEditorRender(state, renderSerial)) {
     await editor.destroy();
     return;
   }
@@ -3170,8 +3358,12 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial) {
     record.current_version_id = versionId;
     state.dirty = false;
   });
-  await editor.open({ recordId: record.id, versionId: version.id });
-  if (state.renderSerial !== renderSerial) {
+  await openOfficeEditorInstance(
+    editor,
+    { recordId: record.id, versionId: version.id },
+    [removeDirtyListener, removeSavedListener],
+  );
+  if (!isCurrentEditorRender(state, renderSerial)) {
     removeDirtyListener();
     removeSavedListener();
     await editor.destroy();
@@ -3179,6 +3371,7 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial) {
   }
   state.editorHandle = {
     kind: 'ctox-documents',
+    renderKey,
     editor,
     async destroy() {
       removeDirtyListener();
@@ -3191,6 +3384,26 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial) {
     focus: () => editor.focus(),
     inspect: () => editor.inspect(),
   };
+}
+
+async function openOfficeEditorInstance(editor, request, cleanupCallbacks = []) {
+  try {
+    await editor.open(request);
+  } catch (error) {
+    for (const cleanup of cleanupCallbacks) {
+      try {
+        cleanup?.();
+      } catch (cleanupError) {
+        console.warn('[documents] failed Office editor listener cleanup after open error', cleanupError);
+      }
+    }
+    try {
+      await editor.destroy();
+    } catch (destroyError) {
+      console.warn('[documents] failed Office editor cleanup after open error', destroyError);
+    }
+    throw error;
+  }
 }
 
 function ctoxDocumentsPermissions(ctx) {
@@ -3240,12 +3453,12 @@ function flushActiveEditorDraft(state, record = selectedRecord(state), options =
   return flushActiveSuperDocDraft(state, record, options);
 }
 
-async function mountSuperDocDocument(state, host, record, version, renderSerial) {
+async function mountSuperDocDocument(state, host, record, version, renderSerial, renderKey) {
   const bytes = await loadBlobBytes(state.ctx, version.blob_id);
-  if (state.renderSerial !== renderSerial) return;
+  if (!isCurrentEditorRender(state, renderSerial)) return;
   if (!bytes) throw new Error(`Missing DOCX blob ${version.blob_id}`);
   const { SuperDoc } = await loadSuperDocModule(state);
-  if (state.renderSerial !== renderSerial) return;
+  if (!isCurrentEditorRender(state, renderSerial)) return;
   host.replaceChildren();
   const frame = document.createElement('div');
   frame.className = 'documents-superdoc-frame';
@@ -3284,7 +3497,7 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial)
   frame.append(controls, toolbar, ruler, editorHost);
   host.append(frame);
   const file = new File([bytes], version.filename || record.filename || 'document.docx', { type: DOCX_MIME });
-  if (state.renderSerial !== renderSerial) return;
+  if (!isCurrentEditorRender(state, renderSerial)) return;
   const superdoc = new SuperDoc({
     selector: mount,
     document: file,
@@ -3327,12 +3540,13 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial)
       console.error('[documents] SuperDoc exception', event);
     },
   });
-  if (state.renderSerial !== renderSerial) {
+  if (!isCurrentEditorRender(state, renderSerial)) {
     superdoc.destroy?.();
     return;
   }
   state.editorHandle = {
     kind: 'superdoc',
+    renderKey,
     superdoc,
     destroy() {
       superdoc.destroy?.();
@@ -3812,6 +4026,7 @@ export const __documentsTestHooks = {
   mailMergeBundleDescriptor,
   refreshMailMergeNavigation,
   findMailMergeRecipientIndex,
+  resolveMailMergeRecipientSelection,
   documentSourceIdentity,
   documentFilterCount,
   isDocxDocumentRecord,
@@ -3825,8 +4040,15 @@ export const __documentsTestHooks = {
   saveBlobChunks,
   documentIdFromLaunchArgs,
   versionIdFromLaunchArgs,
+  editorRenderKey,
+  currentEditorTarget,
+  isCurrentEditorRender,
+  trackEditorMount,
   destroyActiveEditor,
+  initializeOfficeEditorWithRecovery,
   isTransientOfficeStartupError,
+  resolveLocalFirst,
+  openOfficeEditorInstance,
 };
 
 function escapeHtml(value) {

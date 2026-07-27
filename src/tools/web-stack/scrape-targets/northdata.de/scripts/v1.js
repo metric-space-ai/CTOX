@@ -17,10 +17,7 @@ const { execFileSync } = require("child_process");
 
 const SOURCE_ID = "northdata.de";
 const ALLOWED_HOST = "northdata.de";
-const MAX_HITS = 6;
-const KNOWN_PROFILES = new Map([
-  ["wittenstein", "https://www.northdata.de/WITTENSTEIN+SE,+Igersheim/Amtsgericht+Ulm+HRB+680782"],
-]);
+const MAX_HITS = 2;
 
 function readInput() {
   const raw = process.env.CTOX_SCRAPE_INPUT_JSON;
@@ -39,14 +36,14 @@ function ctoxBin() {
   return process.env.CTOX_BIN || "ctox";
 }
 
-function runCtox(args, input) {
+function runCtox(args, input, timeout = 35_000) {
   try {
     const out = execFileSync(ctoxBin(), args, {
       encoding: "utf8",
       input,
       stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       maxBuffer: 32 * 1024 * 1024,
-      timeout: 95_000,
+      timeout,
     });
     return JSON.parse(out);
   } catch (err) {
@@ -117,16 +114,18 @@ function searchHits(company, country) {
     for (const hit of payload?.results || []) {
       if (isAllowedUrl(hit?.url)) hits.push(hit.url);
     }
+    if (hits.length > 0) break;
   }
-  return [...new Set(hits)].slice(0, MAX_HITS);
+  const unique = [...new Set(hits)];
+  const exactRoutes = unique.filter((url) => requestedPathMatches(company, url));
+  return [...exactRoutes, ...unique.filter((url) => !exactRoutes.includes(url))].slice(0, MAX_HITS);
 }
 
 function candidateUrls(input, company, country) {
   const explicit = [input.url, input.source_url, input.profile_url].filter(isAllowedUrl);
   if (explicit.length > 0) return [...new Set(explicit)];
-  const known = KNOWN_PROFILES.get(identityTokens(company).join(" "));
-  if (known) return [known];
-  return searchHits(company, country);
+  const portalSearchUrl = `https://www.northdata.de/${encodeURIComponent(company).replace(/%20/g, "+")}`;
+  return [portalSearchUrl];
 }
 
 function readPage(url, country) {
@@ -134,36 +133,194 @@ function readPage(url, country) {
   if (country) {
     args.push("--country", country);
   }
-  return runCtox(args);
+  return runCtox(args, undefined, 20_000);
 }
 
-function browserPage(url) {
-  const source = `
-    await page.goto(${JSON.stringify(url)}, { waitUntil: "domcontentloaded", timeout: 60000 });
-    await page.waitForTimeout(1800);
-    return await page.evaluate(() => ({
+function browserSessionId(value) {
+  const candidate = String(value || "").trim();
+  return /^[A-Za-z0-9._:-]{1,180}$/.test(candidate) ? candidate : null;
+}
+
+function browserAutomationArgs(timeoutMs, sessionId = null) {
+  const args = ["web", "browser-automation", "--timeout-ms", String(timeoutMs)];
+  const safeSessionId = browserSessionId(sessionId);
+  if (safeSessionId) args.push("--session-id", safeSessionId);
+  return args;
+}
+
+function northdataBrowserSource(url, company) {
+  if (!isAllowedUrl(url)) return null;
+  return `
+    const targetUrl = ${JSON.stringify(url)};
+    const expectedCompany = ${JSON.stringify(company)};
+    const installPageHelpers = async () => page.evaluate((companyName) => {
+      const normalize = (value) => String(value || "").normalize("NFKD")
+        .replace(/[\\u0300-\\u036f]/g, "").toLowerCase().replace(/ß/g, "ss")
+        .replace(/[^a-z0-9]+/g, " ").trim();
+      const legalTokens = new Set(["ag", "gmbh", "kg", "mbh", "se", "und"]);
+      const identityTokens = (value) => normalize(value).split(/\\s+/)
+        .filter((token) => token.length >= 3 && !legalTokens.has(token));
+      const identityMatches = (value) => {
+        const tokens = identityTokens(companyName);
+        const corpus = normalize(value);
+        return tokens.length > 0 && corpus.length > 0
+          && tokens.filter((token) => corpus.includes(token)).length >= Math.max(1, Math.ceil(tokens.length * 0.75));
+      };
+      const legalForm = (value) => {
+        const tokens = new Set(normalize(value).split(/\\s+/));
+        if (tokens.has("gmbh") && tokens.has("kg")) return "gmbh-kg";
+        return ["kgaa", "gmbh", "sarl", "srl", "se", "ag", "kg", "og", "sa"]
+          .find((form) => tokens.has(form)) || null;
+      };
+      const legalFormMatches = (value) => {
+        const expected = legalForm(companyName);
+        return expected === null || legalForm(value) === expected;
+      };
+      const canonicalProfileRoute = (value) => {
+        try {
+          const candidate = new URL(value, location.href);
+          const segments = candidate.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+          return candidate.protocol === "https:"
+            && candidate.hostname.toLowerCase().replace(/^www\\./, "") === "northdata.de"
+            && segments.length >= 2
+            && identityMatches(segments[0])
+            && legalFormMatches(segments[0]);
+        } catch (_err) {
+          return false;
+        }
+      };
+      const nextElement = (start) => {
+        if (start?.firstElementChild) return start.firstElementChild;
+        let node = start;
+        while (node) {
+          if (node.nextElementSibling) return node.nextElementSibling;
+          node = node.parentElement;
+        }
+        return null;
+      };
+      const normalizedLabel = (value) => normalize(value).replace(/\\s+/g, " ");
+      const ribbonValue = (label) => {
+        const expectedLabel = normalizedLabel(label);
+        const headings = Array.from(document.querySelectorAll("h3.ribbon, h3[class*='ribbon'], dt, [data-label]"));
+        const heading = headings.find((node) => normalizedLabel(
+          node.getAttribute("data-label") || node.textContent || "",
+        ) === expectedLabel);
+        if (!heading) return null;
+
+        const controlledId = heading.getAttribute("aria-controls");
+        if (controlledId) {
+          const controlled = document.getElementById(controlledId);
+          const controlledValue = controlled?.querySelector(".content, dd, li, [data-value]")?.textContent
+            || controlled?.textContent;
+          if (controlledValue?.trim()) return controlledValue.replace(/\\s+/g, " ").trim();
+        }
+
+        let node = nextElement(heading);
+        for (let inspected = 0; node && inspected < 80; inspected += 1) {
+          if (node.matches("h3.ribbon, h3[class*='ribbon'], dt, [data-label]")) break;
+          let valueNode = null;
+          if (node.matches(".content, dd, [data-value]")) valueNode = node;
+          if (node.matches(".general-information, li")) {
+            valueNode = node.querySelector(".content, dd, [data-value]") || node;
+          }
+          const value = valueNode?.getAttribute?.("data-value") || valueNode?.textContent;
+          if (value?.trim()) return value.replace(/\\s+/g, " ").trim();
+          node = nextElement(node);
+        }
+        return null;
+      };
+      const heading = () => document.querySelector("h1.qualified")?.textContent
+        ?.replace(/\\s+/g, " ").trim() || null;
+      const exactProfileLink = () => Array.from(document.querySelectorAll("a[href]"))
+        .map((anchor) => anchor.href)
+        .find((href) => canonicalProfileRoute(href)) || null;
+      const canonicalProfileUrl = () => {
+        const declared = document.querySelector('link[rel~="canonical"]')?.href
+          || document.querySelector('meta[property="og:url"]')?.content
+          || null;
+        if (declared && canonicalProfileRoute(declared)) return declared;
+        if (canonicalProfileRoute(location.href)) return location.href;
+        return exactProfileLink();
+      };
+      const snapshot = () => {
+        const profileHeading = heading();
+        const ribbonName = ribbonValue("Name");
+        const name = ribbonName || profileHeading?.split(",")[0]?.trim() || null;
+        const canonicalUrl = canonicalProfileUrl();
+        const canonicalRoute = Boolean(canonicalUrl);
+        return {
+          url: location.href,
+          canonical_url: canonicalUrl,
+          title: document.title,
+          body_text: (document.body?.innerText || "").slice(0, 140000),
+          html: document.documentElement.outerHTML.slice(0, 300000),
+          profile: {
+            heading: profileHeading,
+            name,
+            address: ribbonValue("Adresse") || ribbonValue("Anschrift"),
+            canonical_route: canonicalRoute,
+            identity_matches: canonicalRoute
+              && identityMatches(name || profileHeading)
+              && legalFormMatches(name || profileHeading),
+          },
+        };
+      };
+      globalThis.__ctoxNorthdata = {
+        canonicalProfileRoute,
+        canonicalProfileUrl,
+        profileMarkerReady: () => Boolean(heading() || ribbonValue("Name")),
+        snapshot,
+      };
+    }, expectedCompany);
+
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    await installPageHelpers();
+    await page.waitForFunction(() => {
+      const helper = globalThis.__ctoxNorthdata;
+      return Boolean(helper?.canonicalProfileUrl());
+    }, null, { timeout: 8000 }).catch(() => null);
+    const resolvedProfileUrl = await page.evaluate(() => {
+      const helper = globalThis.__ctoxNorthdata;
+      return helper?.canonicalProfileUrl() || null;
+    });
+    if (resolvedProfileUrl && resolvedProfileUrl !== page.url()) {
+      await page.goto(resolvedProfileUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await installPageHelpers();
+    }
+    await page.waitForFunction(
+      () => Boolean(globalThis.__ctoxNorthdata?.profileMarkerReady()),
+      null,
+      { timeout: 10000 },
+    ).catch(() => null);
+    return await page.evaluate(() => globalThis.__ctoxNorthdata?.snapshot() || {
       url: location.href,
       title: document.title,
-      body_text: (document.body?.innerText || "").slice(0, 80000),
-      profile: (() => {
-        const valueAfter = (label) => {
-          const heading = Array.from(document.querySelectorAll("h3"))
-            .find((node) => (node.textContent || "").trim().toLocaleLowerCase("de-DE") === label);
-          let node = heading?.nextElementSibling;
-          while (node && !node.matches("h3")) {
-            const value = node.querySelector?.(".content")?.textContent?.replace(/\s+/g, " ").trim();
-            if (value) return value;
-            node = node.nextElementSibling;
-          }
-          return null;
-        };
-        return { name: valueAfter("name"), address: valueAfter("adresse") || valueAfter("anschrift") };
-      })(),
-    }));
+      body_text: (document.body?.innerText || "").slice(0, 140000),
+      html: document.documentElement.outerHTML.slice(0, 300000),
+      profile: null,
+    });
   `;
-  const payload = runCtox(["web", "browser-automation", "--timeout-ms", "90000"], source);
+}
+
+function browserPage(url, company, sessionId = null) {
+  const source = northdataBrowserSource(url, company);
+  const payload = runCtox(browserAutomationArgs(85_000, sessionId), source, 90_000);
   if (!payload) return null;
   return { ...(payload.result || {}), ok: payload.ok === true, detection: payload.detection };
+}
+
+function recordUnlockSignal(url, markers) {
+  return runCtox([
+    "web", "unlock", "signals", "record",
+    "--source", "scrape-target:northdata.de",
+    "--url", isAllowedUrl(url) ? url : "https://www.northdata.de/",
+    "--evidence", JSON.stringify({
+      source_id: "northdata.de",
+      detection: "access_challenge",
+      markers: [...new Set((markers || []).map(String))].slice(0, 12),
+      secret_value_in_payload: false,
+    }),
+  ]);
 }
 
 function isBlockedPage(page) {
@@ -172,10 +329,90 @@ function isBlockedPage(page) {
     page?.title, page?.body_text, page?.page_text_excerpt, page?.raw_html_excerpt,
     page?.raw_html, page?.html, markers,
   ].filter(Boolean).join(" "));
-  return /captcha|cloudflare|challenge|verify you are human|access denied|request blocked|too many requests/.test(corpus);
+  return /captcha|cloudflare|challenge|turnstile|verify you are human|access denied|request blocked|too many requests|wurden gesperrt|sicherheitsuberprufung/.test(corpus);
 }
 
-function pageMatchesCompany(company, page) {
+function hasBlockedDetection(page) {
+  const markers = Array.isArray(page?.detection?.markers) ? page.detection.markers.join(" ") : "";
+  return /captcha|cloudflare|challenge|turnstile|access[_ -]?denied|request[_ -]?blocked|rate[_ -]?limit/i.test(markers);
+}
+
+function htmlToText(value) {
+  return String(value || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function requestedPathMatches(company, value) {
+  try {
+    const url = new URL(value);
+    const segments = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (!isAllowedUrl(value) || segments.length < 2) return false;
+    const firstSegment = segments[0];
+    return identityMatches(company, firstSegment) && legalFormMatches(company, firstSegment);
+  } catch (_err) {
+    return false;
+  }
+}
+
+function tagAttribute(tag, name) {
+  const escaped = name.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
+  const match = String(tag || "").match(new RegExp(`\\b${escaped}\\s*=\\s*(["'])(.*?)\\1`, "i"));
+  return match?.[2] || null;
+}
+
+function declaredCanonicalUrls(page) {
+  const candidates = [
+    page?.canonical_url,
+    page?.profile?.canonical_url,
+  ];
+  const html = String(page?.raw_html_excerpt || page?.raw_html || page?.html || "");
+  for (const match of html.matchAll(/<link\b[^>]*>/gi)) {
+    const rel = normalized(tagAttribute(match[0], "rel"));
+    if (rel.split(/\s+/).includes("canonical")) candidates.push(tagAttribute(match[0], "href"));
+  }
+  for (const match of html.matchAll(/<meta\b[^>]*>/gi)) {
+    if (normalized(tagAttribute(match[0], "property")) === "og url") {
+      candidates.push(tagAttribute(match[0], "content"));
+    }
+  }
+  return [...new Set(candidates.filter(isAllowedUrl))];
+}
+
+function verifiedProfileUrl(company, page) {
+  const declared = declaredCanonicalUrls(page)
+    .find((url) => requestedPathMatches(company, url));
+  if (declared) return new URL(declared).href;
+  return requestedPathMatches(company, page?.url) ? new URL(page.url).href : null;
+}
+
+function publishedIdentityName(company, country, page) {
+  if (!verifiedProfileUrl(company, page)) return null;
+  const corpus = htmlToText([
+    page?.body_text, page?.page_text_excerpt, page?.raw_html_excerpt,
+    page?.raw_html, page?.html,
+  ].filter(Boolean).join(" "));
+  if (!corpus) return null;
+
+  const companyPattern = String(company || "").trim().split(/\s+/)
+    .map((part) => part.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&"))
+    .join("\\s+");
+  if (!companyPattern) return null;
+  const countryNames = { DE: "Deutschland", AT: "Österreich", CH: "Schweiz" };
+  const countryPattern = countryNames[String(country || "").toUpperCase()]
+    || "(?:Deutschland|Österreich|Schweiz)";
+  const match = corpus.match(new RegExp(`\\bals\\s+(${companyPattern})\\s+in\\s+${countryPattern}\\b`, "iu"));
+  return match ? match[1].replace(/\s+/g, " ").trim() : null;
+}
+
+function pageMatchesCompany(company, page, country = "") {
   const title = String(page?.title || "").replace(/\s+/g, " ").trim();
   if (/\b(?:log[ -]?in|sign[ -]?in|anmeld(?:en|ung)|authentication|authentifizierung|kundenportal|customer portal)\b/i.test(title)
       || /^(?:portal|startseite|home|willkommen)(?:\s*[-|:]\s*.*)?$/i.test(title)) {
@@ -184,18 +421,23 @@ function pageMatchesCompany(company, page) {
   if (/^suche nach\b/i.test(title) || /^search for\b/i.test(title) || isBlockedPage(page)) return false;
   const finalUrl = page?.url;
   if (!isAllowedUrl(finalUrl)) return false;
-  if (!identityMatches(company, title) || !legalFormMatches(company, title)) return false;
   const corpus = [page?.title, page?.summary, page?.body_text, page?.page_text_excerpt,
-    page?.raw_html_excerpt, page?.raw_html, page?.html, page?.profile?.name,
+    page?.raw_html_excerpt, page?.raw_html, page?.html, page?.profile?.heading, page?.profile?.name,
     page?.profile?.address].filter(Boolean).join(" ");
-  return identityMatches(company, corpus);
+  const sourceHtml = page?.raw_html_excerpt || page?.raw_html || page?.html || "";
+  const profileIdentity = page?.profile?.name || page?.profile?.heading || parseHeading(sourceHtml) || title;
+  const exactProfile = Boolean(verifiedProfileUrl(company, page))
+    && identityMatches(company, profileIdentity)
+    && legalFormMatches(company, profileIdentity)
+    && identityMatches(company, corpus);
+  return exactProfile || publishedIdentityName(company, country, page) !== null;
 }
 
-function recordsFromBrowserProfile(page) {
+function recordsFromBrowserProfile(page, sourceUrl = page?.url) {
   const records = [];
   const push = (field, value, confidence, note) => {
     const clean = String(value || "").replace(/\s+/g, " ").trim();
-    if (clean) records.push({ field, value: clean, confidence, source_url: page.url, note });
+    if (clean) records.push({ field, value: clean, confidence, source_url: sourceUrl, note });
   };
   push("firma_name", page?.profile?.name, "high", "Northdata profile: Name");
   if (page?.profile?.address) {
@@ -205,6 +447,72 @@ function recordsFromBrowserProfile(page) {
     push("firma_ort", address.ort, "high", "Northdata profile: Adresse");
   }
   return records;
+}
+
+const PROVIDER_FIELD_KEYS = new Set([
+  "firma_name",
+  "firma_anschrift",
+  "firma_plz",
+  "firma_ort",
+  "person_position",
+  "person_vorname",
+  "person_nachname",
+]);
+
+function recordsFromProviderFields(page, sourceUrl = null) {
+  if (page?.extracted_fields?.source_id !== SOURCE_ID) return [];
+  const pageUrl = String(sourceUrl || page?.canonical_url || page?.final_url || page?.url || "");
+  if (!isAllowedUrl(pageUrl)) return [];
+  const allowedEvidenceUrls = new Set([
+    pageUrl,
+    page?.url,
+    page?.canonical_url,
+    page?.final_url,
+  ].filter(isAllowedUrl).map((url) => new URL(url).href));
+  const records = [];
+  for (const record of page.extracted_fields.fields || []) {
+    const sourceUrl = String(record?.source_url || "");
+    const value = String(record?.value || "").replace(/\s+/g, " ").trim();
+    if (!PROVIDER_FIELD_KEYS.has(record?.field) || !value || !isAllowedUrl(sourceUrl)) continue;
+    if (!allowedEvidenceUrls.has(new URL(sourceUrl).href)) continue;
+    records.push({
+      field: record.field,
+      value,
+      confidence: ["low", "medium", "high", "user_provided"].includes(record.confidence)
+        ? record.confidence
+        : "medium",
+      source_url: pageUrl,
+      note: String(record.note || "Northdata provider extraction").replace(/\s+/g, " ").trim(),
+    });
+  }
+  return records;
+}
+
+function recordsForPage(page, company, country) {
+  const sourceUrl = verifiedProfileUrl(company, page);
+  if (!sourceUrl) return [];
+  const sourceHtml = page?.raw_html_excerpt || page?.raw_html || page?.html || "";
+  const candidates = [
+    sourceHtml ? extractRecords(sourceUrl, sourceHtml) : [],
+    recordsFromProviderFields(page, sourceUrl),
+    page?.profile?.name ? recordsFromBrowserProfile(page, sourceUrl) : [],
+  ];
+  const profileRecords = candidates.find((records) => records.some((record) =>
+    record.field === "firma_name"
+      && identityMatches(company, record.value)
+      && legalFormMatches(company, record.value)
+  ));
+  if (profileRecords) return profileRecords;
+
+  const publishedName = publishedIdentityName(company, country, page);
+  if (!publishedName) return [];
+  return [{
+    field: "firma_name",
+    value: publishedName,
+    confidence: "high",
+    source_url: sourceUrl,
+    note: `Northdata publication: exact company identity in ${country || "DACH"}`,
+  }];
 }
 
 // ---------------------------------------------------------------------------
@@ -217,25 +525,44 @@ function parseGeneralInfoItem(html, label) {
   // Northdata renders ribbon sections as
   //   <h3 class="... ribbon ... label">Adresse</h3>
   //   <div class="general-information"><ul><li><div class="content">Grenzacherstrasse 124, 4058 Basel</div></li></ul>
-  const labelEscaped = label.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
-  const re = new RegExp(
-    "<h3[^>]*ribbon[^>]*>\\s*" +
-      labelEscaped +
-      "\\s*<\\/h3>([\\s\\S]*?)<h3",
-    "i",
-  );
-  const block = html.match(re);
-  if (!block) return null;
-  const contentRe = /class=\"[^\"]*content[^\"]*\"[^>]*>([\s\S]*?)<\//i;
-  const content = block[1].match(contentRe);
-  if (!content) return null;
-  return content[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  const ribbons = [];
+  const headingRe = /<h3\b([^>]*)>([\s\S]*?)<\/h3>/gi;
+  for (const match of html.matchAll(headingRe)) {
+    const classValue = match[1].match(/\bclass\s*=\s*(["'])(.*?)\1/i)?.[2] || "";
+    if (!classValue.split(/\s+/).some((token) => token.toLowerCase() === "ribbon")) continue;
+    ribbons.push({ index: match.index, end: match.index + match[0].length, label: htmlToText(match[2]) });
+  }
+  const ribbonIndex = ribbons.findIndex((ribbon) => normalized(ribbon.label) === normalized(label));
+  if (ribbonIndex < 0) return null;
+
+  const ribbon = ribbons[ribbonIndex];
+  const blockEnd = ribbons[ribbonIndex + 1]?.index ?? html.length;
+  const block = html.slice(ribbon.end, blockEnd);
+  const openingTagRe = /<([a-z0-9:-]+)\b([^>]*)>/gi;
+  for (const match of block.matchAll(openingTagRe)) {
+    const classValue = match[2].match(/\bclass\s*=\s*(["'])(.*?)\1/i)?.[2] || "";
+    if (!classValue.split(/\s+/).some((token) => token.toLowerCase() === "content")) continue;
+    const contentStart = match.index + match[0].length;
+    const closingTag = new RegExp(`<\\/${match[1]}\\s*>`, "i");
+    const close = closingTag.exec(block.slice(contentStart));
+    if (!close) continue;
+    const value = htmlToText(block.slice(contentStart, contentStart + close.index));
+    if (value) return value;
+  }
+
+  const fallback = block.match(/<(?:dd|li)\b[^>]*>([\s\S]*?)<\/(?:dd|li)>/i);
+  return fallback ? htmlToText(fallback[1]) : null;
 }
 
 function parseHeading(html) {
-  const m = html.match(/<h1[^>]*class=\"[^\"]*qualified[^\"]*\"[^>]*>([\s\S]*?)<\/h1>/i);
-  if (!m) return null;
-  return m[1].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+  const headingRe = /<h1\b([^>]*)>([\s\S]*?)<\/h1>/gi;
+  for (const match of html.matchAll(headingRe)) {
+    const classValue = match[1].match(/\bclass\s*=\s*(["'])(.*?)\1/i)?.[2] || "";
+    if (!classValue.split(/\s+/).some((token) => token.toLowerCase() === "qualified")) continue;
+    const value = htmlToText(match[2]);
+    if (value) return value;
+  }
+  return null;
 }
 
 function parseAddressLine(line) {
@@ -338,10 +665,11 @@ function extractRecords(url, html) {
 // main
 // ---------------------------------------------------------------------------
 
-(function main() {
+function main() {
   const input = readInput();
   const company = (input.company || "").trim();
   const country = (input.country || "").trim();
+  const persistentSessionId = browserSessionId(input.browser_session_id || input.session_id);
   if (!company) {
     process.stdout.write(
       JSON.stringify({
@@ -354,31 +682,35 @@ function extractRecords(url, html) {
   }
 
   let blocked = false;
+  let blockedUrl = "";
   for (const url of candidateUrls(input, company, country)) {
-    const browser = browserPage(url);
-    blocked ||= isBlockedPage(browser) || (browser?.detection?.markers || []).length > 0;
-    if (pageMatchesCompany(company, browser)) {
-      const records = browser?.profile?.name
-        ? recordsFromBrowserProfile(browser)
-        : extractRecords(browser.url, browser.html || "");
-      if (records.length > 0 && records.some((record) => record.field === "firma_name" && identityMatches(company, record.value))) {
+    const direct = readPage(url, country);
+    const directBlocked = isBlockedPage(direct) || hasBlockedDetection(direct);
+    blocked ||= directBlocked;
+    if (directBlocked) blockedUrl ||= url;
+    if (direct?.ok && !direct.url) direct.url = url;
+    if (pageMatchesCompany(company, direct, country)) {
+      const records = recordsForPage(direct, company, country);
+      if (records.length > 0) {
         process.stdout.write(JSON.stringify({ records }));
         return;
       }
     }
 
-    const direct = readPage(url, country);
-    blocked ||= isBlockedPage(direct);
-    if (direct?.ok && !direct.url) direct.url = url;
-    if (pageMatchesCompany(company, direct)) {
-      const html = direct.raw_html_excerpt || direct.raw_html || direct.html || "";
-      const records = extractRecords(direct.url, html);
-      if (records.length > 0 && records.some((record) => record.field === "firma_name" && identityMatches(company, record.value))) {
+    const browser = browserPage(url, company, persistentSessionId);
+    const browserBlocked = isBlockedPage(browser) || hasBlockedDetection(browser);
+    blocked ||= browserBlocked;
+    if (browserBlocked) blockedUrl ||= browser?.url || url;
+    if (pageMatchesCompany(company, browser, country)) {
+      const records = recordsForPage(browser, company, country);
+      if (records.length > 0) {
         process.stdout.write(JSON.stringify({ records }));
         return;
       }
     }
   }
+
+  if (blocked) recordUnlockSignal(blockedUrl, ["access_challenge"]);
 
   process.stdout.write(JSON.stringify({
     records: [],
@@ -387,4 +719,24 @@ function extractRecords(url, html) {
       ? "Northdata challenge recorded by CTOX browser automation for web-unlock"
       : "no origin- and identity-verified Northdata profile data",
   }));
-})();
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  browserAutomationArgs,
+  browserSessionId,
+  candidateUrls,
+  extractRecords,
+  hasBlockedDetection,
+  htmlToText,
+  northdataBrowserSource,
+  pageMatchesCompany,
+  publishedIdentityName,
+  recordsFromProviderFields,
+  recordsForPage,
+  requestedPathMatches,
+  verifiedProfileUrl,
+};
