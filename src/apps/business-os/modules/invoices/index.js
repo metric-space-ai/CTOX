@@ -35,6 +35,7 @@ import {
   buildXRechnungXml,
 } from './commands/builders.js';
 import { validateInvoice } from './core/invoice-validate.js';
+import { renderListOrState } from '../../shared/list-state.js';
 
 const BUILD = '20260721-invoices-ia-two-pane';
 const MODULE_ID = 'invoices';
@@ -63,6 +64,7 @@ const COPY = {
     stateDraft: 'Entwurf', statePosted: 'Gebucht', statePartiallyPaid: 'Teilweise bezahlt', statePaid: 'Bezahlt', stateOverdue: 'Überfällig', stateCancelled: 'Storniert', stateCredited: 'Gutgeschrieben',
     pos: 'Pos', quantity: 'Menge (‰)', unit: 'Einheit', unitPrice: 'Einzelpreis (Cent)',
     importInvalid: 'Ungültige JSON-Datei.', importEmpty: 'Keine gültigen Rechnungen (Kunde + Positionen) in der Datei.', imported: '{count} importiert',
+    syncingHint: 'Daten werden synchronisiert.',
   },
   en: {
     invoices: 'Invoices', kicker: 'CTOX', all: 'All', overdue: 'Overdue', open: 'Open', paid: 'Paid',
@@ -86,6 +88,7 @@ const COPY = {
     stateDraft: 'Draft', statePosted: 'Posted', statePartiallyPaid: 'Partially paid', statePaid: 'Paid', stateOverdue: 'Overdue', stateCancelled: 'Cancelled', stateCredited: 'Credited',
     pos: 'Pos', quantity: 'Quantity (‰)', unit: 'Unit', unitPrice: 'Unit price (cents)',
     importInvalid: 'Invalid JSON file.', importEmpty: 'No valid invoices (customer + line items) in the file.', imported: '{count} imported',
+    syncingHint: 'Syncing data.',
   },
 };
 
@@ -160,6 +163,7 @@ const STATE = {
   lastError: null,
   locale: 'de',
   frame: null,
+  invoiceReadiness: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -294,12 +298,15 @@ export function renderInvoiceRow(inv, opts = {}) {
 }
 
 export function renderInvoiceListMarkup(rows, opts = {}) {
-  const list = Array.isArray(rows) ? rows : [];
-  if (!list.length) {
-    return `<div class="ctox-empty">${escapeHtml(opts.emptyText || t('emptyHint'))}</div>`;
-  }
   const selectedId = opts.selectedId ?? null;
-  return list.map((inv) => renderInvoiceRow(inv, { view: opts.view, selected: inv.id === selectedId })).join('');
+  // Data-driven empty: only when the caller passes a readiness snapshot (i.e.
+  // the unfiltered collection is empty) does an unready state show the
+  // syncing shell; filter/search empties keep the plain empty hint.
+  return renderListOrState(Array.isArray(rows) ? rows : [], opts.readiness ?? null, {
+    renderRows: (list) => list.map((inv) => renderInvoiceRow(inv, { view: opts.view, selected: inv.id === selectedId })).join(''),
+    empty: opts.emptyText || t('emptyHint'),
+    syncing: opts.syncingText || t('syncingHint'),
+  });
 }
 
 export function computeInvoiceTotals(inv) {
@@ -423,6 +430,7 @@ export async function mount(ctx) {
   await refresh();
   render();
   STATE.cleanup.push(wireRealtime());
+  STATE.cleanup.push(wireInvoiceReadiness());
   // Cross-module signal: a customer edit elsewhere must refresh the folded-in
   // party snapshot. eventBus survives schema-drift recovery.
   if (ctx.eventBus?.on) {
@@ -454,6 +462,7 @@ function resetState(ctx) {
   STATE.lastError = null;
   STATE.locale = String(ctx.locale || globalThis.document?.documentElement?.lang || 'de').toLowerCase().startsWith('en') ? 'en' : 'de';
   STATE.frame = null;
+  STATE.invoiceReadiness = null;
 }
 
 function isReady() {
@@ -477,6 +486,20 @@ function wireRealtime() {
   return () => subscriptions.forEach((sub) => {
     try { sub.unsubscribe?.(); } catch {}
   });
+}
+
+// Canonical sync readiness for the list's backing collection: while
+// accounting_invoices has not completed its initial replication, an empty
+// list must render the syncing shell instead of "no data". The listener
+// re-renders only the list (readiness never affects the detail/editor).
+function wireInvoiceReadiness() {
+  const subscribe = STATE.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribe = subscribe.call(STATE.ctx.sync, 'accounting_invoices', (snapshot) => {
+    STATE.invoiceReadiness = snapshot || null;
+    renderList();
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : () => {};
 }
 
 function scheduleRefresh() {
@@ -755,7 +778,13 @@ function renderList() {
   const rows = visibleInvoices();
   if (STATE.view === 'list') f.listEl.classList.add('is-list-view');
   else f.listEl.classList.remove('is-list-view');
-  f.listEl.innerHTML = renderInvoiceListMarkup(rows, { view: STATE.view, selectedId: STATE.selectedInvoiceId });
+  f.listEl.innerHTML = renderInvoiceListMarkup(rows, {
+    view: STATE.view,
+    selectedId: STATE.selectedInvoiceId,
+    // Gate the syncing shell on the UNFILTERED source: a filter/search empty
+    // (rows empty while STATE.invoices has records) must keep the plain hint.
+    readiness: STATE.invoices.length === 0 ? STATE.invoiceReadiness : null,
+  });
   writeCounts(countsFor(STATE.invoices));
   writeFooter(`${rows.length} ${t('entries')} · ${bandLabel(STATE.band)}`);
 }

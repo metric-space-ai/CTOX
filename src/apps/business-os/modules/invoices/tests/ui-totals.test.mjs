@@ -128,6 +128,27 @@ test('renderInvoiceListMarkup keeps the same rows/order when the selection chang
   assert.deepEqual(selectedIds(b), ['inv_overdue']);
 });
 
+test('renderInvoiceListMarkup gates the empty state on collection readiness', () => {
+  const notReady = { collection: 'accounting_invoices', state: 'catching-up', ready: false, syncing: true, updatedAt: 0 };
+  const live = { collection: 'accounting_invoices', state: 'live', ready: true, syncing: false, updatedAt: 1 };
+  // Empty + not yet replicated → syncing shell (role=status), never "no data".
+  const syncing = renderInvoiceListMarkup([], { readiness: notReady });
+  assert.match(syncing, /class="ctox-syncing"/);
+  assert.match(syncing, /role="status"/);
+  assert.doesNotMatch(syncing, /ctox-empty/);
+  // Empty + live → the honest empty hint.
+  const empty = renderInvoiceListMarkup([], { readiness: live });
+  assert.match(empty, /class="ctox-empty"/);
+  assert.doesNotMatch(empty, /ctox-syncing/);
+  // No readiness passed (filter/search empty) → plain empty hint.
+  const filterEmpty = renderInvoiceListMarkup([], {});
+  assert.match(filterEmpty, /class="ctox-empty"/);
+  assert.doesNotMatch(filterEmpty, /ctox-syncing/);
+  // Rows always win over readiness.
+  const withRows = renderInvoiceListMarkup(SAMPLE, { readiness: notReady });
+  assert.deepEqual(rowIds(withRows), SAMPLE.map((i) => i.id));
+});
+
 test('renderInvoiceRow stamps the agent right-click context trio', () => {
   const html = renderInvoiceRow(SAMPLE[0], { view: 'cards', selected: false });
   assert.match(html, /data-context-record-id="inv_posted"/);
