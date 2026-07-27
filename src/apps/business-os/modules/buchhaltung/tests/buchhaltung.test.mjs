@@ -91,3 +91,29 @@ test('primary and secondary accounting rows carry the full context trio', () => 
   assert.match(js, /data-travel-click-id=[^\n]+data-context-record-type="accounting_journal_entry"[^\n]+data-context-label=/);
   assert.match(js, /data-mileage-click-id=[^\n]+data-context-record-type="accounting_journal_entry"[^\n]+data-context-label=/);
 });
+
+test('data-driven empty states are gated by canonical collection readiness', () => {
+  // Canonical shell API is consumed, not rebuilt.
+  assert.match(js, /state\.ctx\?\.sync\?\.collectionReadiness/, 'readiness snapshot comes from the shell sync API');
+  assert.match(js, /state\.ctx\?\.sync\?\.subscribeCollectionReadiness/, 'readiness changes are subscribed');
+  assert.match(js, /state\.readinessCleanup = wireReadinessSubscriptions\(\)/, 'subscription is wired during mount');
+  assert.match(js, /state\.readinessCleanup\(\)/, 'readiness subscription is cleaned up on unmount');
+  assert.match(js, /ready !== false/, 'only ready === false gates the empty state (offline-pending keeps syncing)');
+  // Syncing shell uses the canonical kit class with status semantics.
+  assert.match(js, /<div class="ctox-syncing" role="status" aria-live="polite">/, 'syncing state uses the canonical kit class');
+  assert.match(js, /t\('syncingData'\)/, 'syncing copy goes through module i18n');
+  // Every backing collection whose empty state is gated is subscribed.
+  for (const name of ['accounting_accounts', 'accounting_journal_entries', 'accounting_receipts', 'accounting_bank_statement_lines']) {
+    assert.ok(js.includes(`'${name}'`), `readiness wired for ${name}`);
+  }
+  // Gating requires the unfiltered source to be empty — filtered/searched
+  // views with existing data keep their classic empty copy.
+  assert.match(js, /allRecords\.length === 0 && !fibuSourcesReady\(\['accounting_receipts', 'accounting_journal_entries'\]\)/);
+  assert.match(js, /state\.accounts\.length === 0 && !fibuSourcesReady\(\['accounting_accounts'\]\)/);
+  assert.match(js, /state\.journalEntries\.length === 0 && !fibuSourcesReady\(\['accounting_journal_entries'\]\)/);
+  assert.match(js, /!fibuSourcesReady\(\['accounting_receipts'\]\)/);
+  assert.match(js, /!fibuSourcesReady\(\['accounting_bank_statement_lines'\]\)/);
+  // Selection- and match-driven empties stay readiness-free.
+  assert.match(js, /Keine Belegevidenz für diese Banktransaktion verknüpft\./);
+  assert.match(js, /Keine Hauptbuchungen für dieses Sachkonto vorhanden\./);
+});

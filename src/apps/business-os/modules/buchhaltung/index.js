@@ -61,6 +61,7 @@ const state = {
 
   // Subscription cleaners
   rxCleanup: null,
+  readinessCleanup: null,
   contextMenu: null,
   contextMenuCleanup: null,
 
@@ -132,6 +133,60 @@ function isBusinessOsPermissionDenied(error) {
     || /permission denied|keine datenfreigabe|datenzugriff|data\.read|data\.write/i.test(message);
 }
 
+// --- Canonical collection readiness (shell sync API) ---
+// Collections whose initial replication gates the data-driven empty states.
+const FIBU_READINESS_COLLECTIONS = Object.freeze([
+  'accounting_accounts',
+  'accounting_journal_entries',
+  'accounting_receipts',
+  'accounting_bank_statement_lines',
+]);
+
+function fibuReadiness(name) {
+  const read = state.ctx?.sync?.collectionReadiness;
+  if (typeof read !== 'function') return null;
+  try {
+    return read.call(state.ctx.sync, name) || null;
+  } catch (error) {
+    console.warn(`[fibu] readiness for ${name} unavailable`, error);
+    return null;
+  }
+}
+
+// False as soon as one backing collection reports `ready === false` (initial
+// replication still pending, incl. offline-pending). A missing sync API
+// (tests, legacy hosts) never gates rendering.
+function fibuSourcesReady(names) {
+  return names.every((name) => fibuReadiness(name)?.ready !== false);
+}
+
+function fibuSyncingBlock() {
+  return `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(t('syncingData'))}</div>`;
+}
+
+function fibuSyncingTableRow(colspan) {
+  return `<tr><td colspan="${colspan}" class="fibu-empty-state">${fibuSyncingBlock()}</td></tr>`;
+}
+
+// Re-render lists whenever a backing collection flips its sync state, so the
+// syncing shell resolves into real rows or the true empty state on its own.
+function wireReadinessSubscriptions() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return null;
+  const rerender = () => {
+    renderBookingList();
+    renderActiveView();
+  };
+  const unsubscribes = FIBU_READINESS_COLLECTIONS
+    .map((name) => subscribe.call(state.ctx.sync, name, rerender))
+    .filter((fn) => typeof fn === 'function');
+  return () => {
+    unsubscribes.forEach((fn) => {
+      try { fn(); } catch {}
+    });
+  };
+}
+
 const ASSETS_MOCK = [
   { nr: 'ANL-2026-01', name: 'MacBook Pro 16 M3 Max', date: '2026-01-15', cost: 420000, life: 3, method: 'Lineaer', prev: 58333, book: 361667 },
   { nr: 'ANL-2026-02', name: 'Herman Miller Aeron Chair', date: '2026-02-10', cost: 160000, life: 13, method: 'Lineaer', prev: 4102, book: 155898 },
@@ -154,6 +209,7 @@ const labels = {
     balancedAlert: 'Ausgeglichen (Soll = Haben)',
     unbalancedAlert: 'Ungleichgewicht! Soll und Haben müssen übereinstimmen.',
     gobdLockAlert: 'Dieses Dokument ist GoBD-festgeschrieben und schreibgeschützt.',
+    syncingData: 'Daten werden synchronisiert.',
   },
   en: {
     skrExplorer: 'Chart of Accounts Explorer',
@@ -169,6 +225,7 @@ const labels = {
     balancedAlert: 'Balanced (Debit = Credit)',
     unbalancedAlert: 'Imbalance! Debit and Credit must match.',
     gobdLockAlert: 'This document is GoBD-locked and read-only.',
+    syncingData: 'Syncing data.',
   }
 };
 
@@ -247,6 +304,7 @@ export async function mount(ctx) {
       await seedMockDataIfEmpty();
       if (disposed || state.ctx !== ctx) return;
       state.rxCleanup = wireRealtimeSubscriptions();
+      state.readinessCleanup = wireReadinessSubscriptions();
       renderBookingList();
       renderActiveView();
     })
@@ -264,6 +322,10 @@ export async function mount(ctx) {
     state.mountGeneration += 1;
     state.els.root?.removeAttribute('data-mount-ready');
     if (state.rxCleanup) state.rxCleanup();
+    if (state.readinessCleanup) {
+      state.readinessCleanup();
+      state.readinessCleanup = null;
+    }
     state.contextMenuCleanup?.();
     state.contextMenu?.remove();
     state.contextMenu = null;
@@ -970,7 +1032,9 @@ function renderBookingList() {
 
   container.classList.toggle('is-compact', grammar.view === 'list');
   if (filtered.length === 0) {
-    container.innerHTML = '<div class="ctox-empty">Keine Belege oder Buchungen in dieser Ansicht.</div>';
+    container.innerHTML = allRecords.length === 0 && !fibuSourcesReady(['accounting_receipts', 'accounting_journal_entries'])
+      ? fibuSyncingBlock()
+      : '<div class="ctox-empty">Keine Belege oder Buchungen in dieser Ansicht.</div>';
   } else {
     container.innerHTML = filtered.map((record) => `
       <button type="button" class="ctox-list-item fibu-booking-row ${grammar.view === 'list' ? 'is-compact' : ''} ${state.selectedBookingKey === record.key ? 'is-selected' : ''}"
@@ -1138,7 +1202,9 @@ function renderAccountsList(acctsArray) {
   updateListCount(state.els.accountsCount, acctsArray.length, state.accounts.length, 'Konten');
 
   if (acctsArray.length === 0) {
-    container.innerHTML = `<tr><td colspan="6" class="fibu-empty-state">Keine Konten gefunden. Bitte initialisieren.</td></tr>`;
+    container.innerHTML = state.accounts.length === 0 && !fibuSourcesReady(['accounting_accounts'])
+      ? fibuSyncingTableRow(6)
+      : `<tr><td colspan="6" class="fibu-empty-state">Keine Konten gefunden. Bitte initialisieren.</td></tr>`;
     return;
   }
 
@@ -1260,7 +1326,9 @@ function renderJournalRows(entries) {
   updateListCount(state.els.journalCount, entries.length, state.journalEntries.length, 'Buchungen');
 
   if (entries.length === 0) {
-    container.innerHTML = `<tr><td colspan="7" class="fibu-empty-state">Keine Buchungen im Journal vorhanden.</td></tr>`;
+    container.innerHTML = state.journalEntries.length === 0 && !fibuSourcesReady(['accounting_journal_entries'])
+      ? fibuSyncingTableRow(7)
+      : `<tr><td colspan="7" class="fibu-empty-state">Keine Buchungen im Journal vorhanden.</td></tr>`;
     return;
   }
 
@@ -1346,7 +1414,9 @@ function renderReceiptsList() {
   if (!container) return;
 
   if (state.receipts.length === 0) {
-    container.innerHTML = `<tr><td colspan="9" class="fibu-empty-state">Keine Belege vorhanden. Ziehen Sie Dokumente per Drag & Drop in den Importer.</td></tr>`;
+    container.innerHTML = !fibuSourcesReady(['accounting_receipts'])
+      ? fibuSyncingTableRow(9)
+      : `<tr><td colspan="9" class="fibu-empty-state">Keine Belege vorhanden. Ziehen Sie Dokumente per Drag & Drop in den Importer.</td></tr>`;
     return;
   }
 
@@ -1482,7 +1552,9 @@ function renderBankingList() {
   if (!container) return;
 
   if (state.bankStatementLines.length === 0) {
-    container.innerHTML = `<tr><td colspan="7" class="fibu-empty-state">Keine Banktransaktionen vorhanden. Importieren Sie eine camt.053 XML-Datei.</td></tr>`;
+    container.innerHTML = !fibuSourcesReady(['accounting_bank_statement_lines'])
+      ? fibuSyncingTableRow(7)
+      : `<tr><td colspan="7" class="fibu-empty-state">Keine Banktransaktionen vorhanden. Importieren Sie eine camt.053 XML-Datei.</td></tr>`;
     return;
   }
 
@@ -3604,7 +3676,9 @@ window.renderTravelList = function() {
   const travels = state.journalEntries.filter(e => e.type === 'travel');
 
   if (travels.length === 0) {
-    container.innerHTML = `<tr><td colspan="5" class="fibu-empty-state">Keine Reisekostenabrechnungen erfasst.</td></tr>`;
+    container.innerHTML = state.journalEntries.length === 0 && !fibuSourcesReady(['accounting_journal_entries'])
+      ? fibuSyncingTableRow(5)
+      : `<tr><td colspan="5" class="fibu-empty-state">Keine Reisekostenabrechnungen erfasst.</td></tr>`;
     return;
   }
 
@@ -3884,7 +3958,9 @@ window.renderMileageList = function() {
   const trips = state.journalEntries.filter(e => e.type === 'mileage');
 
   if (trips.length === 0) {
-    actualContainer.innerHTML = `<tr><td colspan="8" class="fibu-empty-state">Keine Fahrten im Fahrtenbuch eingetragen.</td></tr>`;
+    actualContainer.innerHTML = state.journalEntries.length === 0 && !fibuSourcesReady(['accounting_journal_entries'])
+      ? fibuSyncingTableRow(8)
+      : `<tr><td colspan="8" class="fibu-empty-state">Keine Fahrten im Fahrtenbuch eingetragen.</td></tr>`;
     updateMileageDashboard();
     return;
   }
