@@ -219,10 +219,21 @@ impl RxReplicationState {
 
         let _start_guard = self.start_lock.lock().await;
         if self.was_started.swap(true, Ordering::SeqCst) {
+            let was_paused = self.paused.get_value();
             if let Some(state) = self.internal_state.lock().await.as_ref() {
                 state.events.paused.next(false);
             }
             self.paused.next(false);
+            if was_paused {
+                // ref: rxdb/src/plugins/replication/index.ts pause/start —
+                // upstream RxDB cancels the internal replication on pause and
+                // restarts it on start(), which re-syncs from the persisted
+                // checkpoint. This port keeps the protocol tasks alive and
+                // drops change events while paused (upstream fork loop and the
+                // paused pull/push envelopes), so resume must trigger the same
+                // checkpoint catch-up explicitly for both directions.
+                self.re_sync();
+            }
             return Ok(());
         }
         if self.wait_for_leadership && self.collection.database.multi_instance {
@@ -925,6 +936,114 @@ mod tests {
             .and_then(|storages| storages.as_array())
             .unwrap();
         assert!(connected_after.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resume_after_pause_resyncs_missed_master_changes() {
+        let storage: Arc<dyn RxStorage> = get_rx_storage_memory(());
+        let database = create_rx_database(RxDatabaseCreator {
+            name: "replication-resume-resync-db".to_string(),
+            storage,
+            multi_instance: false,
+            password: None,
+            hash_function: Arc::new(TestHashFunction),
+            options: HashMap::new(),
+            ignore_duplicate: false,
+            close_duplicates: false,
+            event_reduce: true,
+            allow_slow_count: false,
+        })
+        .await
+        .unwrap();
+        let collections = database
+            .add_collections(HashMap::from([(
+                "humans".to_string(),
+                RxCollectionCreator {
+                    schema: test_schema(),
+                    conflict_handler: None,
+                    options: HashMap::new(),
+                },
+            )]))
+            .await
+            .unwrap();
+        let collection = collections.get("humans").unwrap().clone();
+
+        // Master-side document log: (sequence, document). The pull handler
+        // serves everything above the requested checkpoint, so changes that
+        // land while the replication is paused are only recoverable through a
+        // checkpoint resync — there is no live stream in this test on purpose.
+        let master_docs: Arc<parking_lot::Mutex<Vec<(u64, Value)>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let master_docs_for_handler = Arc::clone(&master_docs);
+        let pull_handler: PullHandler = Arc::new(move |checkpoint, _batch_size| {
+            let master_docs = Arc::clone(&master_docs_for_handler);
+            Box::pin(async move {
+                let since = checkpoint
+                    .as_ref()
+                    .and_then(|value| value.get("sequence"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let docs = master_docs.lock();
+                let documents: Vec<Value> = docs
+                    .iter()
+                    .filter(|(sequence, _)| *sequence > since)
+                    .map(|(_, document)| document.clone())
+                    .collect();
+                let max_sequence = docs
+                    .iter()
+                    .map(|(sequence, _)| *sequence)
+                    .max()
+                    .unwrap_or(since);
+                Ok(ReplicationPullHandlerResult {
+                    checkpoint: if documents.is_empty() {
+                        Value::Null
+                    } else {
+                        json!({ "sequence": max_sequence })
+                    },
+                    documents,
+                })
+            })
+        });
+        let mut opts = default_replication_options("remote", Arc::clone(&collection));
+        opts.pull = Some(ReplicationPullOptions {
+            handler: pull_handler,
+            stream_factory: None,
+            batch_size: 10,
+            modifier: None,
+            initial_checkpoint: None,
+        });
+        let state = replicate_rx_collection(opts).await.unwrap();
+
+        state.start().await.unwrap();
+        state.await_initial_replication().await.unwrap();
+
+        state.pause().await.unwrap();
+        master_docs
+            .lock()
+            .push((1, json!({ "id": "missed-during-pause", "_deleted": false })));
+
+        // Resume. Without the resume-triggered RESYNC the change above is
+        // gone: it was never emitted on any stream and no future event will
+        // re-deliver it.
+        state.start().await.unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let found = collection
+                    .storage_instance
+                    .find_documents_by_id(&["missed-during-pause".to_string()], false)
+                    .await
+                    .unwrap();
+                if !found.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("resume must resync master changes missed while paused");
+
+        state.cancel().await;
     }
 
     #[tokio::test]
