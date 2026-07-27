@@ -17,11 +17,13 @@ export const COPY = {
     document: 'Dokument-ID', subjectKind: 'Vertragstyp', employment: 'Arbeitsvertrag', placement: 'Vermittlungsvertrag', staffing: 'Überlassungsvertrag', signers: 'Unterzeichner-IDs (Komma-getrennt)', create: 'Anlegen', entries: 'Einträge', empty: 'Noch keine Anfragen.', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', signatureCaptured: 'Signatur erfasst.', request: 'Anfrage', signer: 'Unterzeichner', status: 'Status', blocked: 'Blockiert.', documentRequired: 'Dokument-ID erforderlich.', requestCreated: 'Signatur-Anfrage angelegt.', sign: 'Signieren', artifact: 'Artefakt',
     kicker: 'E-SIGNATUR', listTitle: 'Anfragen', allKinds: 'Alle Typen', viewAll: 'Alle', viewOpen: 'Offen', viewDone: 'Abgeschlossen', composerKicker: 'NEUE ANFRAGE', composerTitle: 'Signatur anfordern', composerHint: 'Eintrag wählen oder neue Anfrage anlegen.', recordKicker: 'ANFRAGE', signersHead: 'Unterzeichner', noSigners: 'Keine Unterzeichner erfasst.', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusCreated: 'angelegt', statusSent: 'gesendet', statusPartial: 'teilweise signiert', statusCompleted: 'abgeschlossen', statusDeclined: 'abgelehnt', statusExpired: 'abgelaufen',
+    syncing: 'Daten werden synchronisiert.',
   },
   en: {
     document: 'Document ID', subjectKind: 'Agreement type', employment: 'Employment contract', placement: 'Placement agreement', staffing: 'Staffing agreement', signers: 'Signer IDs (comma-separated)', create: 'Create', entries: 'records', empty: 'No signature requests yet.', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', signatureCaptured: 'Signature recorded.', request: 'Request', signer: 'Signer', status: 'Status', blocked: 'Blocked.', documentRequired: 'Document ID is required.', requestCreated: 'Signature request created.', sign: 'Sign', artifact: 'Artifact',
     kicker: 'E-SIGNATURE', listTitle: 'Requests', allKinds: 'All types', viewAll: 'All', viewOpen: 'Open', viewDone: 'Closed', composerKicker: 'NEW REQUEST', composerTitle: 'Request signature', composerHint: 'Select a record or start a new request.', recordKicker: 'REQUEST', signersHead: 'Signers', noSigners: 'No signers recorded.', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusCreated: 'created', statusSent: 'sent', statusPartial: 'partially signed', statusCompleted: 'completed', statusDeclined: 'declined', statusExpired: 'expired',
+    syncing: 'Syncing data.',
   },
 };
 let text = COPY.de;
@@ -50,8 +52,16 @@ export async function mount(ctx) {
   const importBtn = root?.querySelector('[data-action="import"]');
   const exportBtn = root?.querySelector('[data-action="export"]');
 
-  const state = { records: [], visible: [], selectedId: '', userCollapsed: false, grammar: readGrammarState(listPane) };
+  const state = { records: [], visible: [], selectedId: '', userCollapsed: false, grammar: readGrammarState(listPane), readiness: null };
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
+
+  // Sync readiness for the primary collection: as long as it has not
+  // completed its initial replication, an empty source means "syncing",
+  // never "no data". Absent sync API ⇒ readiness stays null ⇒ old behaviour.
+  const readReadiness = ctx.sync?.collectionReadiness;
+  if (typeof readReadiness === 'function') {
+    try { state.readiness = readReadiness.call(ctx.sync, PRIMARY) || null; } catch {}
+  }
 
   // Gate feedback renders in the kit callout; kinds map onto its variants.
   const GATE_VARIANTS = { ok: 'is-success', block: 'is-danger', offline: 'is-warning' };
@@ -69,7 +79,10 @@ export async function mount(ctx) {
   function renderListRegion() {
     const counts = bandCounts(state.records);
     state.visible = filterRecords(state.records, state.grammar);
-    if (listEl) listEl.innerHTML = renderList(state.visible, { view: state.grammar.view, selectedId: state.selectedId }, text);
+    // Readiness gates only the source-empty branch; a filter empty (records
+    // exist, none visible) keeps the plain ctox-empty.
+    const readiness = state.records.length ? null : state.readiness;
+    if (listEl) listEl.innerHTML = renderList(state.visible, { view: state.grammar.view, selectedId: state.selectedId, readiness }, text);
     writeCounts(listPane, counts);
     writeFooter(listPane, `${state.visible.length} ${text.entries} · ${bandLabel(state.grammar, text)}`);
   }
@@ -310,10 +323,21 @@ export async function mount(ctx) {
   let sub = null;
   const col = collection();
   if (col?.find) { try { sub = col.find({ selector: {} }).$?.subscribe?.(() => { refresh().catch(() => {}); }); } catch {} }
+  let readinessUnsub = null;
+  const subscribeReadiness = ctx.sync?.subscribeCollectionReadiness;
+  if (typeof subscribeReadiness === 'function') {
+    try {
+      readinessUnsub = subscribeReadiness.call(ctx.sync, PRIMARY, (snapshot) => {
+        state.readiness = snapshot || null;
+        renderListRegion();
+      });
+    } catch {}
+  }
   await refresh();
 
   return () => {
     try { sub?.unsubscribe?.(); } catch {}
+    try { readinessUnsub?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     listEl?.removeEventListener('click', onListClick);
     detailEl?.removeEventListener('click', onDetailClick);
@@ -388,7 +412,14 @@ export function normalizeSignatureRequest(raw, opts = {}) {
 }
 
 export function renderList(records, opts = {}, t = text) {
-  if (!records || !records.length) return `<div class="ctox-empty">${esc(t.empty)}</div>`;
+  if (!records || !records.length) {
+    // Rows always win; the syncing shell only applies when the caller says the
+    // source is empty AND its collection is not initially replicated yet.
+    if (opts.readiness?.ready === false) {
+      return `<div class="ctox-syncing" role="status" aria-live="polite">${esc(t.syncing)}</div>`;
+    }
+    return `<div class="ctox-empty">${esc(t.empty)}</div>`;
+  }
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selectedId = opts.selectedId || '';
   return records.map((r) => (view === 'list' ? shardCompact(r, selectedId, t) : shardCard(r, selectedId, t))).join('');

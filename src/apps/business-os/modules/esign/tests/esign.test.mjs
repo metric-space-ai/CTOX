@@ -90,6 +90,27 @@ test('esign: renders a shard list from a stub doc array with the context trio', 
   assert.match(renderList([], { view: 'cards' }), /ctox-empty/);
 });
 
+test('esign: empty source list follows collection readiness', () => {
+  // Empty + not ready (never-synced / catching-up / offline-pending) ⇒ syncing shell.
+  const syncing = renderList([], { view: 'cards', readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncing, /ctox-syncing/);
+  assert.match(syncing, /role="status"/);
+  assert.doesNotMatch(syncing, /ctox-empty/);
+  // Empty + ready (live) ⇒ the real empty state.
+  const empty = renderList([], { view: 'cards', readiness: { ready: true, state: 'live' } });
+  assert.match(empty, /ctox-empty/);
+  assert.doesNotMatch(empty, /ctox-syncing/);
+  // No readiness hint (sync API absent) ⇒ legacy empty state.
+  assert.match(renderList([], { view: 'cards', readiness: null }), /ctox-empty/);
+  // Rows always win, even while not ready.
+  const rows = renderList(
+    [{ id: 'r1', document_id: 'DOC-1', status: 'created', signers: [] }],
+    { view: 'cards', readiness: { ready: false, state: 'never-synced' } },
+  );
+  assert.match(rows, /DOC-1/);
+  assert.doesNotMatch(rows, /ctox-syncing/);
+});
+
 test('esign: band counts and filtering derive from the status field', () => {
   const docs = [
     { id: 'a', document_id: 'ALPHA', status: 'created', subject_kind: 'arbeitsvertrag' },
