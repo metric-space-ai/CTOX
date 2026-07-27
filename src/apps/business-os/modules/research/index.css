@@ -985,6 +985,13 @@
   color: var(--research-muted);
 }
 
+.research-run-panel .ctox-fields dd {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .research-run-state {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1526,9 +1533,9 @@
 }
 
 .research-tabs-container {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   border-bottom: 1px solid var(--research-line);
   padding: 8px;
@@ -1537,8 +1544,37 @@
 }
 
 .research-tabs-container > .ctox-pane-tabs:first-child {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(74px, 1fr));
+  width: 100%;
   min-width: 0;
   overflow-x: auto;
+}
+
+.research-counted-tab {
+  display: flex;
+  min-width: 0;
+  max-width: none;
+  justify-content: center;
+  overflow: hidden;
+  padding-inline: 7px;
+}
+
+.research-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.research-tab-count {
+  flex: none;
+  margin-left: 4px;
+  color: var(--research-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.research-counted-tab.is-active .research-tab-count {
+  color: currentColor;
 }
 
 /* Icon-only view-switch tabs can be narrower than text tabs. */

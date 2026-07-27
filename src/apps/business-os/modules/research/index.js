@@ -2081,11 +2081,11 @@ function renderCenter() {
       <section class="research-workbench">
         <div class="research-tabs-container">
           <div class="ctox-pane-tabs" role="tablist" aria-label="Research views">
-            ${tabButton('sources', `${state.t('sources', 'Sources')} (${evidenceRankedSources().length})`)}
-            ${tabButton('candidates', `${state.t('candidates', 'Candidates')} (${state.candidateModels.length})`)}
-            ${tabButton('measurements', `${state.t('measurements', 'Measurements')} (${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length})`)}
-            ${tabButton('knowledge', `${state.t('knowledge', 'Knowledge')} (${state.curatedRows.length})`)}
-            ${tabButton('reports', `${state.t('reports', 'Fachberichte')} (${researchReportsForTask(task).length})`)}
+            ${countedTabButton('sources', state.t('sources', 'Sources'), evidenceRankedSources().length)}
+            ${countedTabButton('candidates', state.t('candidates', 'Candidates'), state.candidateModels.length)}
+            ${countedTabButton('measurements', state.t('measurements', 'Measurements'), filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length)}
+            ${countedTabButton('knowledge', state.t('knowledge', 'Knowledge'), state.curatedRows.length)}
+            ${countedTabButton('reports', state.t('reports', 'Fachberichte'), researchReportsForTask(task).length)}
           </div>
           ${state.activeTab === 'sources' ? `
             <div class="ctox-pane-tabs research-view-toggle">
@@ -3530,7 +3530,7 @@ function renderRunPanel(runInfo) {
         <dl class="ctox-fields">
           <dt>${escapeHtml(state.t('command', 'Command'))}</dt><dd>${escapeHtml(shortId(runInfo.commandId))}</dd>
           <dt>${escapeHtml(state.t('queue', 'Queue'))}</dt><dd>${escapeHtml(shortId(runInfo.taskQueueId))}</dd>
-          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd>${escapeHtml(runInfo.threadKey || '-')}</dd>
+          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
         </dl>
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
@@ -4949,6 +4949,11 @@ function axisSelect(axis, selected, variant = 'toolbar') {
 
 function tabButton(id, label) {
   return `<button type="button" class="ctox-pane-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}">${escapeHtml(label)}</button>`;
+}
+
+function countedTabButton(id, label, count) {
+  const accessibleLabel = `${label} (${count})`;
+  return `<button type="button" class="ctox-pane-tab research-counted-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}"><span class="research-tab-label">${escapeHtml(label)}</span><span class="research-tab-count">${escapeHtml(count)}</span></button>`;
 }
 
 function disabledTabButton(id, label) {

@@ -611,14 +611,36 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     };
   };
 
+  const droneRunbooks = runbookItems.filter(isDroneBearingKnowledge);
+  const droneRunbookIds = new Set(droneRunbooks.map((entry) => normaliseRunbookId(entry.id || entry.runbook_id)));
+  const droneSkillbooks = skillbookItems.filter((skillbook) => {
+    if (isDroneBearingKnowledge(skillbook)) return true;
+    if (bareKnowledgeId(skillbook.id) === 'drone-bearing-design-verified-v1') return true;
+    return extractRunbookIds(skillbook.linked_runbook_ids ?? skillbook.linked_runbooks_json ?? skillbook.linked_runbooks)
+      .map(normaliseRunbookId)
+      .some((id) => droneRunbookIds.has(id));
+  });
+  const droneSkillbookIds = new Set(droneSkillbooks.map((entry) => bareKnowledgeId(entry.id)));
+  const linkedDroneRunbookIds = new Set(droneSkillbooks.flatMap((skillbook) => (
+    extractRunbookIds(skillbook.linked_runbook_ids ?? skillbook.linked_runbooks_json ?? skillbook.linked_runbooks)
+      .map(normaliseRunbookId)
+  )));
+  const linkedDroneRunbooks = runbookItems.filter((entry) => (
+    droneRunbookIds.has(normaliseRunbookId(entry.id || entry.runbook_id))
+    || linkedDroneRunbookIds.has(normaliseRunbookId(entry.id || entry.runbook_id))
+    || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))
+  ));
   const droneEntries = uniqueById([
-    ...skillItems.filter(isDroneBearingKnowledge),
-    ...skillbookItems.filter(isDroneBearingKnowledge),
-    ...runbookItems.filter(isDroneBearingKnowledge),
-    ...resourceItems.filter(isDroneBearingKnowledge),
+    ...skillItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
+    ...droneSkillbooks,
+    ...linkedDroneRunbooks,
+    ...resourceItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
     ...tableItems.filter((item) => {
       const table = tableForItem(item, tables);
-      return isDroneBearingKnowledge(item) || isDroneBearingTable(table);
+      const domain = table?.domain || item.domain || item.payload?.domain || '';
+      return isDroneBearingKnowledge(item)
+        || isDroneBearingTable(table)
+        || domain === 'drone_bearing_design_verified';
     }),
   ]);
   const groups = [];
@@ -627,10 +649,13 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       id: 'research/drone-design/drone-bearing-loads',
       title: 'Drone Bearing Loads',
       domainLabel: 'Research / Drone Design',
-      domain: 'drone_design',
+      domain: 'drone_bearing_design_verified',
       summary: 'Skill, Skillbook, Runbook und DataFrames für Drone-Bearing-Load-Recherche.',
       entries: droneEntries,
-      runbookIds: runbooks.filter(isDroneBearingKnowledge).map((runbook) => `runbook:${runbook.id}`),
+      runbookIds: uniqueStrings([
+        ...linkedDroneRunbooks.map((runbook) => runbook.id || runbook.runbook_id),
+        ...runbooks.filter(isDroneBearingKnowledge).map((runbook) => runbook.id),
+      ]),
       primaryItemId: droneEntries.find((entry) => entry.kind === 'skillbook')?.id || droneEntries[0]?.id,
     }));
   }

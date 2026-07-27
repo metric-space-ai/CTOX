@@ -95,6 +95,50 @@ test('matches a Research handoff to a Knowledge group by entry domain', () => {
   assert.equal(knowledgeGroupMatchesDomain(group, 'unrelated_domain'), false);
 });
 
+test('groups linked SKF skillbooks, runbooks, resources, and tables into one domain hub', () => {
+  const groups = buildKnowledgeBundles([
+    {
+      id: 'skillbook:drone-bearing-design-verified-v1',
+      kind: 'skillbook',
+      title: 'Verified propeller input evidence',
+      linked_runbook_ids: ['runbook:verification'],
+    },
+    {
+      id: 'runbook:verification',
+      kind: 'runbook',
+      title: 'Prüf- und Validierungsverfahren',
+      problem_domain: 'UAS bearing verification',
+    },
+    {
+      id: 'resource:source-001',
+      kind: 'resource',
+      title: 'Source without domain keywords',
+      skillbook_id: 'drone-bearing-design-verified-v1',
+    },
+  ], [], [{
+    id: 'table:verified-measurements',
+    kind: 'dataframe',
+    title: 'Measurements',
+    payload: {
+      domain: 'drone_bearing_design_verified',
+      rows: [{ measurement_id: 'M-001' }],
+      schema: { columns: [{ name: 'measurement_id', type: 'string' }] },
+    },
+  }]);
+
+  const hub = groups.find((group) => group.id === 'research/drone-design/drone-bearing-loads');
+  assert.ok(hub);
+  assert.equal(hub.domain, 'drone_bearing_design_verified');
+  assert.deepEqual(new Set(hub.entries.map((entry) => entry.id)), new Set([
+    'skillbook:drone-bearing-design-verified-v1',
+    'runbook:verification',
+    'resource:source-001',
+    'table:verified-measurements',
+  ]));
+  assert.ok(hub.runbookIds.includes('runbook:verification'));
+  assert.equal(groups.some((group) => group.id === 'bundle/drone-bearing-design-verified-v1'), false);
+});
+
 test('normalizes RxDB payload records without dropping table rows or schema', () => {
   const record = normalizeStoredKnowledgeRecord({
     id: 'table:source-catalog',
