@@ -1,0 +1,39 @@
+{
+  "version": "ctox.appsec.coverage.v1",
+  "generated_at": "2026-07-13T11:05:00Z",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "stage_terminal_status": "explicitly_blocked_with_evidence",
+  "workstreams": {
+    "ws-authenticated-multi-user-authz-2": {
+      "status": "blocked-with-evidence",
+      "blocked_at": "2026-07-13T11:05:00Z",
+      "blockers_mirrored_from_disk": [
+        "logged-out-protected-access-case-required",
+        "owner-baseline-allow-required",
+        "scanner-evidence-missing"
+      ],
+      "evidence": {
+        "subjects": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-subjects.json",
+        "unauthenticated": {
+          "auth_assist": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/unauthenticated/auth-assist-redacted.json",
+          "same_origin_api_map": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/unauthenticated/same-origin-api-map.json"
+        },
+        "user-a": {
+          "auth_assist": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/auth-assist-redacted.json",
+          "auth_login": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/auth-login-redacted.json",
+          "same_origin_api_map": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/same-origin-api-map.json"
+        },
+        "user-b": {
+          "auth_assist": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/auth-assist-redacted.json",
+          "auth_login": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/auth-login-redacted.json",
+          "same_origin_api_map": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/same-origin-api-map.json"
+        },
+        "matrix_built": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-matrix-built-1783937936679.json",
+        "credential_proof": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-credential-proof-1783937624552.json"
+      },
+      "totals": { "cases": 38, "pass": 18, "fail": 0, "blocked": 20 },
+      "totals_source": "matrix_built.json (read-only mirror)"
+    }
+  }
+}

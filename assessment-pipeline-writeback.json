@@ -1,0 +1,34 @@
+{
+  "version": "ctox.appsec.assessment_pipeline_writeback.v1",
+  "generated_at": "2026-07-13T11:05:00Z",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "state_dir": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state",
+  "writeback_status": "blocked",
+  "workstreams": [
+    {
+      "id": "ws-authenticated-multi-user-authz-2",
+      "status": "blocked-with-evidence",
+      "blocked_at": "2026-07-13T11:05:00Z",
+      "blockers": [
+        "logged-out-protected-access-case-required",
+        "owner-baseline-allow-required",
+        "scanner-evidence-missing"
+      ],
+      "runtime_blockers": [
+        "ctox service socket unreachable at /Users/michaelwelsch/.local/lib/ctox/current/runtime/ctox_service.sock",
+        "configured state-dir mount rejects writes with Operation not permitted (os error 1)"
+      ],
+      "totals": { "cases": 38, "pass": 18, "fail": 0, "blocked": 20 },
+      "evidence": {
+        "subjects": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-subjects.json",
+        "matrix_built": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-matrix-built-1783937936679.json",
+        "credential_proof": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-credential-proof-1783937624552.json",
+        "auth_assist_user_a": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/auth-assist-redacted.json",
+        "auth_login_user_a": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/auth-login-redacted.json",
+        "auth_assist_user_b": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/auth-assist-redacted.json",
+        "auth_login_user_b": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/auth-login-redacted.json"
+      }
+    }
+  ]
+}

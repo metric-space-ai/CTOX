@@ -11468,40 +11468,42 @@ fn materialize_systematic_research_seed_inputs(
             .file_name()
             .context("managed research seed has no filename")?;
         let destination = destination_root.join(filename);
-        std::fs::copy(&source, &destination).with_context(|| {
-            format!(
-                "stage managed research seed {} at {}",
-                source.display(),
+        let source_metadata = std::fs::metadata(&source)?;
+        let source_sha256 = sha256_file(&source)?;
+        if destination.exists() {
+            let destination_metadata = std::fs::symlink_metadata(&destination)?;
+            anyhow::ensure!(
+                destination_metadata.file_type().is_file(),
+                "managed research seed conflict at {}: existing staged input is not a regular file",
                 destination.display()
-            )
-        })?;
-        let mut file = std::fs::File::open(&destination)?;
-        let mut hasher = {
-            use sha2::Digest;
-            sha2::Sha256::new()
-        };
-        let mut buffer = [0_u8; 64 * 1024];
-        loop {
-            let read = file.read(&mut buffer)?;
-            if read == 0 {
-                break;
+            );
+            let destination_sha256 = sha256_file(&destination)?;
+            anyhow::ensure!(
+                source_metadata.len() == destination_metadata.len()
+                    && source_sha256 == destination_sha256,
+                "managed research seed conflict at {}: existing staged input does not match {}",
+                destination.display(),
+                source.display()
+            );
+        } else {
+            std::fs::copy(&source, &destination).with_context(|| {
+                format!(
+                    "stage managed research seed {} at {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o444))?;
             }
-            use sha2::Digest;
-            hasher.update(&buffer[..read]);
-        }
-        use sha2::Digest;
-        let sha256 = format!("{:x}", hasher.finalize());
-        let metadata = std::fs::metadata(&destination)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o444))?;
         }
         staged.push(StagedResearchInput {
             original_path: source.to_string_lossy().into_owned(),
             staged_path: destination.to_string_lossy().into_owned(),
-            byte_size: metadata.len(),
-            sha256,
+            byte_size: source_metadata.len(),
+            sha256: source_sha256,
         });
     }
     std::fs::write(
@@ -11509,6 +11511,25 @@ fn materialize_systematic_research_seed_inputs(
         serde_json::to_vec_pretty(&staged)?,
     )?;
     Ok(staged)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = {
+        use sha2::Digest;
+        sha2::Sha256::new()
+    };
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        use sha2::Digest;
+        hasher.update(&buffer[..read]);
+    }
+    use sha2::Digest;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn business_os_app_validation_may_own_completion(job: &QueuedPrompt) -> bool {
@@ -26050,6 +26071,32 @@ mod tests {
         let manifest_json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
         assert_eq!(manifest_json.as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn systematic_research_seed_staging_is_idempotent_and_fail_closed() {
+        let root = temp_root("research-managed-seeds-retry");
+        let imports = root.join("imports");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&imports).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let approved = imports.join("baseline.tar.gz");
+        std::fs::write(&approved, b"approved research seed").unwrap();
+        let mut job = systematic_research_test_job(&workspace);
+        job.prompt
+            .push_str(&format!("\nManaged seed: {}", approved.display()));
+
+        let initial = materialize_systematic_research_seed_inputs(&root, &job).unwrap();
+        let retried = materialize_systematic_research_seed_inputs(&root, &job).unwrap();
+        assert_eq!(initial[0].sha256, retried[0].sha256);
+        assert_eq!(initial[0].staged_path, retried[0].staged_path);
+
+        std::fs::write(&approved, b"changed research seed").unwrap();
+        let error = materialize_systematic_research_seed_inputs(&root, &job).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("existing staged input does not match"));
         let _ = std::fs::remove_dir_all(root);
     }
 

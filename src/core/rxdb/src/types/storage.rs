@@ -374,9 +374,9 @@ pub trait RxStorageInstance: Send + Sync {
     // ref: rxdb/src/types/rx-storage-instance.d.ts underlyingPersistentStorage
     /// For wrapping storage instances (validate/encryption/key-compression):
     /// return the inner instance one level down. `None` means this is the
-    /// terminal (persistent) storage. Used by
-    /// [`crate::replication_protocol::helper::get_underlying_persistent_storage`]
-    /// to walk to the bottom of the wrapping chain.
+    /// terminal (persistent) storage. The upstream walk-to-bottom helper is
+    /// not ported: production never builds a wrapping chain (see
+    /// plugins/replication/index_mod.rs).
     fn underlying_persistent_storage(&self) -> Option<std::sync::Arc<dyn RxStorageInstance>> {
         None
     }

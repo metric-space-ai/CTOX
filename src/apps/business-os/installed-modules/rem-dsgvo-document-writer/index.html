@@ -1,0 +1,1057 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+<script>window.RemTargetMode="ctox";</script>
+  <link rel="icon" href="data:,">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DSGVO Document Writer</title>
+  <link rel="stylesheet" href="./shared/rem-app-shell-v1/rem-app-shell-v1.css">
+  <script src="./shared/vendor/docx.umd.js"></script>
+  <script src="./shared/vendor/jszip.min.js"></script>
+  <script src="./shared/rem-app-shell-v1/rem-app-shell-v1.js"></script>
+  <style>
+    :root {
+      --ctox-right-width: 430px;
+      --rem-pane-min: 330px;
+      --dsgvo-soft: #eef8f9;
+      --dsgvo-soft-2: #f6fbfc;
+      --dsgvo-line: #b9d0d7;
+      --dsgvo-text: #1e2b30;
+      --dsgvo-muted: #53656c;
+      --dsgvo-teal: #218c8d;
+      --dsgvo-red: #e6004f;
+    }
+    html[data-theme="dark"] {
+      --dsgvo-soft: #122c34;
+      --dsgvo-soft-2: #0d2028;
+      --dsgvo-line: #365e68;
+      --dsgvo-text: #eef8fa;
+      --dsgvo-muted: #adc3ca;
+    }
+    body { overflow: hidden; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .app-shell { height: 100vh; }
+    .topbar { min-height: 66px; }
+    .topbar .brand h1 { white-space: nowrap; }
+    .ctox-workspace--two-pane {
+      grid-template-columns: minmax(0, 1fr) 8px minmax(340px, var(--ctox-right-width));
+      height: calc(100vh - 66px);
+      padding: 14px;
+      gap: 8px;
+      overflow: hidden;
+    }
+    .ctox-pane { min-height: 0; overflow: hidden; }
+    .main-pane,
+    .agent-pane { display: flex; flex-direction: column; }
+    .pane-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto auto;
+      gap: 10px;
+      align-items: center;
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--dsgvo-line);
+    }
+    .pane-title { margin: 0; font-size: 22px; line-height: 1.15; color: var(--dsgvo-text); }
+    .pane-sub { margin: 4px 0 0; color: var(--dsgvo-muted); font-weight: 700; }
+    .primary-btn,
+    .secondary-btn,
+    .icon-btn {
+      min-height: 44px;
+      border-radius: 10px;
+      border: 1px solid var(--dsgvo-line);
+      padding: 9px 16px;
+      font: inherit;
+      font-weight: 900;
+      cursor: pointer;
+      background: var(--dsgvo-soft-2);
+      color: var(--dsgvo-text);
+    }
+    .primary-btn { background: var(--dsgvo-teal); border-color: var(--dsgvo-teal); color: #fff; }
+    .primary-btn:hover { filter: brightness(.96); }
+    .secondary-btn:hover,
+    .icon-btn:hover { background: var(--dsgvo-soft); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .main-body,
+    .agent-body {
+      min-height: 0;
+      flex: 1;
+      overflow: auto;
+      padding: 18px;
+    }
+    .input-textarea {
+      width: 100%;
+      min-height: 54vh;
+      resize: vertical;
+      border: 1px solid var(--dsgvo-line);
+      border-radius: 12px;
+      padding: 18px;
+      background: var(--dsgvo-soft-2);
+      color: var(--dsgvo-text);
+      font: inherit;
+      line-height: 1.45;
+    }
+    .input-textarea::placeholder { color: var(--dsgvo-muted); opacity: .95; }
+    .options-panel {
+      display: none;
+      border-bottom: 1px solid var(--dsgvo-line);
+      padding: 14px 18px;
+      background: var(--dsgvo-soft-2);
+    }
+    .options-panel.is-open { display: block; }
+    .option-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
+      gap: 12px;
+      align-items: end;
+    }
+    .field label { display:block; font-weight:900; margin-bottom:6px; color:var(--dsgvo-text); }
+    .field input,
+    .field select {
+      width: 100%;
+      min-height: 40px;
+      border-radius: 9px;
+      border: 1px solid var(--dsgvo-line);
+      padding: 7px 10px;
+      background: var(--dsgvo-soft-2);
+      color: var(--dsgvo-text);
+      font: inherit;
+    }
+    .doc-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 14px;
+      border-bottom: 1px solid var(--dsgvo-line);
+      padding-bottom: 10px;
+    }
+    .tabs { display:flex; gap: 8px; align-items:center; }
+    .tab-btn {
+      border: 0;
+      background: transparent;
+      color: var(--dsgvo-muted);
+      font: inherit;
+      font-weight: 900;
+      padding: 8px 2px;
+      cursor: pointer;
+      border-bottom: 3px solid transparent;
+    }
+    .tab-btn.active { color: var(--dsgvo-text); border-color: var(--dsgvo-teal); }
+    .doc-actions { display:flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+    .module-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(260px, 1fr));
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+    .module-card {
+      border: 1px solid var(--dsgvo-line);
+      border-radius: 10px;
+      padding: 12px 14px;
+      background: var(--dsgvo-soft-2);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      min-height: 54px;
+    }
+    .module-card.active { outline: 2px solid var(--dsgvo-teal); }
+    .module-card strong { display:block; color: var(--dsgvo-text); }
+    .module-card span { color: var(--dsgvo-muted); font-weight: 800; font-size: 13px; }
+    .status-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: #9eb6bd;
+      flex: 0 0 auto;
+    }
+    .status-dot.done { background: var(--dsgvo-teal); }
+    .status-dot.running { background: var(--dsgvo-red); animation: pulse-dot 1.2s ease-in-out infinite; }
+    .status-dot.question { background: #d8789a; }
+    .doc-view {
+      border: 1px solid var(--dsgvo-line);
+      border-radius: 12px;
+      background: var(--dsgvo-soft-2);
+      padding: 22px;
+      color: var(--dsgvo-text);
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .doc-view h1,
+    .doc-view h2,
+    .doc-view h3 { color: var(--dsgvo-text); margin: 18px 0 8px; }
+    .doc-view h1 { font-size: 26px; margin-top:0; }
+    .doc-view h2 { font-size: 21px; }
+    .doc-view table {
+      border-collapse: collapse;
+      width: 100%;
+      margin: 12px 0;
+      font-size: 14px;
+    }
+    .doc-view th,
+    .doc-view td {
+      border: 1px solid var(--dsgvo-line);
+      padding: 8px;
+      vertical-align: top;
+    }
+    .doc-view th { background: var(--dsgvo-soft); text-align: left; }
+    .empty-state { color: var(--dsgvo-muted); font-weight: 800; }
+    .agent-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--dsgvo-line);
+    }
+    .agent-head h2 { margin: 0; font-size: 24px; color: var(--dsgvo-text); }
+    .agent-kicker { margin-top: 4px; color: var(--dsgvo-muted); font-weight: 900; }
+    .agent-status-row { display:flex; align-items:flex-start; gap: 10px; }
+    .agent-dot { width: 13px; height: 13px; margin-top: 12px; border-radius:999px; background: var(--dsgvo-teal); flex:0 0 auto; }
+    .agent-dot.running { background: var(--dsgvo-red); animation: pulse-dot 1.2s ease-in-out infinite; }
+    .agent-title { margin:0; color:var(--dsgvo-red); font-size: 30px; line-height: 1.1; }
+    .agent-message { margin: 7px 0 18px; color: var(--dsgvo-text); font-size: 18px; line-height: 1.35; }
+    .progress-row { display:flex; justify-content:space-between; gap:12px; color:var(--dsgvo-muted); font-weight:900; margin: 12px 0 6px; }
+    .progress-track { height: 12px; border-radius: 999px; background: #d4e6ea; overflow: hidden; }
+    html[data-theme="dark"] .progress-track { background: #1f424b; }
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: inherit;
+      background: linear-gradient(90deg, #ee5c68, #218c8d);
+      transition: width .25s ease;
+    }
+    .progress-fill.running {
+      background-size: 200% 100%;
+      animation: progress-pulse 1.15s ease-in-out infinite;
+    }
+    .agent-rule { border:0; border-top:1px solid var(--dsgvo-line); margin: 18px 0; }
+    .question-card {
+      border: 1px solid #d480a2;
+      background: rgba(230, 0, 79, .055);
+      border-radius: 12px;
+      padding: 14px;
+      margin: 14px 0;
+    }
+    html[data-theme="dark"] .question-card { background: rgba(230, 0, 79, .13); }
+    .question-meta { display:flex; justify-content:space-between; gap:12px; color:var(--dsgvo-muted); font-weight:900; margin-bottom:8px; }
+    .question-text { color:var(--dsgvo-text); font-size:16px; line-height:1.35; margin-bottom:10px; }
+    .question-text strong { color:var(--dsgvo-red); }
+    .question-nav { display:flex; gap: 8px; justify-content:space-between; margin-bottom:10px; }
+    .question-answer {
+      width:100%;
+      min-height: 92px;
+      resize: vertical;
+      border:1px solid var(--dsgvo-line);
+      border-radius: 10px;
+      padding: 10px;
+      background: var(--dsgvo-soft-2);
+      color: var(--dsgvo-text);
+      font: inherit;
+      line-height: 1.4;
+      margin-bottom: 10px;
+    }
+    .activity-head { display:flex; justify-content:space-between; align-items:center; gap:12px; }
+    .activity-head h3 { color:var(--dsgvo-red); margin:0; font-size:22px; }
+    .activity-count { color:var(--dsgvo-muted); font-weight:900; }
+    .activity-list { list-style:none; padding:0; margin:12px 0 0; display:grid; gap:10px; }
+    .activity-list li { display:grid; grid-template-columns: 76px minmax(0,1fr); gap:10px; color:var(--dsgvo-text); line-height:1.32; }
+    .activity-list time { color:var(--dsgvo-muted); font-variant-numeric: tabular-nums; }
+    dialog {
+      border: 1px solid var(--dsgvo-line);
+      border-radius: 14px;
+      background: var(--dsgvo-soft-2);
+      color: var(--dsgvo-text);
+      width: min(980px, calc(100vw - 32px));
+      padding: 0;
+    }
+    dialog::backdrop { background: rgba(0,0,0,.35); }
+    .modal-inner { padding: 20px; }
+    .modal-head { display:flex; align-items:center; justify-content:space-between; gap: 12px; margin-bottom: 14px; }
+    .modal-head h2 { margin:0; color:var(--dsgvo-red); font-size: 28px; }
+    .api-mode { display:flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+    .api-mode label {
+      border: 1px solid var(--dsgvo-line);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-weight: 900;
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .api-grid { display:grid; grid-template-columns: repeat(2, minmax(220px, 1fr)); gap:12px; }
+    .api-footer { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-top:18px; }
+    .hidden { display:none !important; }
+    @keyframes pulse-dot {
+      0%,100% { transform: scale(1); opacity: .9; }
+      50% { transform: scale(1.35); opacity: .55; }
+    }
+    @keyframes progress-pulse {
+      0% { background-position: 0% 50%; filter: brightness(1); }
+      50% { background-position: 100% 50%; filter: brightness(1.15); }
+      100% { background-position: 0% 50%; filter: brightness(1); }
+    }
+    @media (max-width: 980px) {
+      body { overflow: auto; }
+      .app-shell { min-height: 100vh; height: auto; }
+      .ctox-workspace--two-pane {
+        display: grid;
+        grid-template-columns: 1fr;
+        height: auto;
+        min-height: calc(100vh - 66px);
+        overflow: visible;
+      }
+      .ctox-column-resizer { display:none; }
+      .ctox-pane { overflow: visible; }
+      .main-body,
+      .agent-body { overflow: visible; }
+      .pane-head { grid-template-columns: 1fr; }
+      .primary-btn,
+      .secondary-btn { width: 100%; }
+      .module-list,
+      .option-grid,
+      .api-grid { grid-template-columns: 1fr; }
+      .topbar { flex-wrap: wrap; height:auto; }
+      .top-actions { width:100%; justify-content:flex-start; }
+      .doc-toolbar { align-items: stretch; flex-direction: column; }
+      .tabs { width: 100%; }
+      .doc-actions { display: grid; grid-template-columns: 1fr; width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<div class="app-shell rem-app-shell" data-rem-shell-version="1">
+  <header class="topbar">
+    <div class="brand">
+      <h1>DSGVO Document Writer</h1>
+      <span class="version sr-only">v1.0.0 rebuild</span>
+    </div>
+    <div class="top-actions">
+      <span id="apiStatus" class="api-summary sr-only">Eingebaute API · Azure · gpt-5.4</span>
+      <button id="apiButton" class="icon-btn" type="button" title="API-Konfiguration öffnen">API</button>
+      <div class="theme-toggle" aria-label="Theme wechseln">
+        <button id="lightTheme" type="button" class="active" title="Helles Theme">☀</button>
+        <button id="darkTheme" type="button" title="Dunkles Theme">☾</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="ctox-workspace ctox-workspace--two-pane" id="workspace" data-resize-frame data-resize-key="dsgvo-document-writer">
+    <section class="ctox-pane main-pane" aria-label="DSGVO Dokumente">
+      <div class="pane-head ctox-pane-header ctox-pane-band" id="inputHead">
+        <div class="ctox-pane-title ctox-pane-titles">
+          <strong>Dokumentation erstellen</strong>
+          <span>Thema oder Rohnotiz einfügen. Details können später ergänzt werden.</span>
+        </div>
+        <button id="startButton" class="primary-btn" type="button">Dokumentation erstellen</button>
+        <button id="optionsButton" class="secondary-btn" type="button" aria-expanded="false">Optionen</button>
+      </div>
+      <div id="optionsPanel" class="options-panel">
+        <div class="option-grid">
+          <div class="field">
+            <label for="companyInput">Unternehmen</label>
+            <input id="companyInput" placeholder="z. B. REM CAPITAL AG">
+          </div>
+          <div class="field">
+            <label for="personaInput">Profil</label>
+            <select id="personaInput">
+              <option value="auto">Automatisch</option>
+              <option value="kmu">KMU</option>
+              <option value="konzern">Konzern</option>
+              <option value="startup">Startup</option>
+              <option value="behoerde">Behörde</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="detailInput">Dokumenttiefe</label>
+            <select id="detailInput">
+              <option value="final" selected>Final unterschriftsreif</option>
+              <option value="compact">Kompakter</option>
+              <option value="detailed">Ausführlicher</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="maxQuestionsInput">Rückfragen je Stopp</label>
+            <input id="maxQuestionsInput" type="number" min="1" max="6" value="3">
+          </div>
+        </div>
+      </div>
+      <div class="main-body">
+        <div id="inputView">
+          <textarea id="projectInput" class="input-textarea" spellcheck="true" placeholder="Beispiel: SharePoint-App für REM Capital. Nutzer geben Projektinformationen ein; die App verarbeitet Freitext, Dateiinhalte und Ansprechpartnerdaten im Browser, nutzt Azure OpenAI zur Erstellung von Dokumenten und exportiert Word-Dateien. Daten werden lokal im Browser zwischengespeichert und optional in SharePoint/CTOX weiterverarbeitet. Keine besonderen Kategorien personenbezogener Daten; relevante Daten sind Nutzerangaben, Rollen, E-Mail-Adressen, Projekttexte, Unternehmens- und Kontaktdaten."></textarea>
+        </div>
+        <div id="resultView" class="hidden">
+          <div class="doc-toolbar">
+            <div class="tabs" role="tablist">
+              <button id="modulesTab" class="tab-btn active" type="button">Bausteine</button>
+              <button id="previewTab" class="tab-btn" type="button">Vorschau</button>
+            </div>
+            <div class="doc-actions">
+              <button id="editInputButton" class="secondary-btn" type="button">Input bearbeiten</button>
+              <button id="copyDocButton" class="secondary-btn" type="button">Text kopieren</button>
+              <button id="downloadSelectedButton" class="secondary-btn" type="button">Baustein-DOCX</button>
+              <button id="downloadAllButton" class="primary-btn" type="button">Alle DOCX herunterladen</button>
+            </div>
+          </div>
+          <div id="modulesView">
+            <div id="moduleList" class="module-list"></div>
+            <article id="selectedDoc" class="doc-view"></article>
+          </div>
+          <article id="previewView" class="doc-view hidden"></article>
+        </div>
+      </div>
+    </section>
+
+    <button class="ctox-column-resizer" data-resizer="right" data-resizer-var="--ctox-right-width" data-resizer-min="320" data-resizer-max="620" data-resizer-default="430" aria-label="Agent-Spalte anpassen" type="button"></button>
+
+    <aside class="pane agent-pane ctox-pane" aria-label="Agent" data-agent-state="idle">
+      <header class="pane-header ctox-pane-header ctox-pane-band">
+        <div class="pane-title ctox-pane-title ctox-pane-titles">
+          <strong>Agent</strong>
+          <span id="agentKicker" class="agent-kicker">wartet</span>
+        </div>
+      </header>
+      <div class="agent-body ctox-pane-scroll" id="agentBody">
+        <section class="agent-status-row status-block rem-agent-status">
+          <span id="agentDot" class="agent-dot"></span>
+          <div>
+            <h3 id="agentTitle" class="agent-title">Bereit</h3>
+            <p id="agentMessage" class="agent-message">Thema einfügen.</p>
+          </div>
+        </section>
+        <section id="progressBlock" class="progress-wrap rem-progress hidden" aria-label="Fortschritt">
+          <div class="progress-row rem-progress-meta">
+            <span id="progressLabel">Analyse</span>
+            <span id="progressPercent">0%</span>
+          </div>
+          <div class="progress-track rem-progress-track"><div id="progressFill" class="progress-fill rem-progress-fill"></div></div>
+        </section>
+        <div id="questionBlock" class="hidden"></div>
+        <hr class="agent-rule">
+        <div class="activity-head">
+          <h3>Aktivität</h3>
+          <span id="activityCount" class="activity-count">0 Einträge</span>
+        </div>
+        <ol id="activityList" class="activity-list rem-activity-list"></ol>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<dialog id="apiModal">
+  <div class="modal-inner">
+    <div class="modal-head">
+      <h2>API</h2>
+      <button id="closeApi" class="icon-btn" type="button" aria-label="API schließen">×</button>
+    </div>
+    <div class="api-mode">
+      <label><input id="builtinApi" name="apiMode" type="radio" checked> Eingebaute API</label>
+      <label><input id="customApi" name="apiMode" type="radio"> Eigene API</label>
+    </div>
+    <div class="api-grid">
+      <div class="field"><label for="provider">Provider</label><select id="provider"><option value="azure">Azure OpenAI</option><option value="openai">OpenAI</option></select></div>
+      <div class="field"><label for="model">Modell</label><input id="model" value="gpt-5.4"></div>
+      <div class="field"><label for="apiKey">API Key</label><input id="apiKey" type="password"></div>
+      <div id="azureEndpointWrap" class="field"><label for="azureEndpoint">Azure Endpoint</label><input id="azureEndpoint"></div>
+      <div id="azureApiVersionWrap" class="field"><label for="azureApiVersion">Azure API-Version</label><input id="azureApiVersion" value="preview"></div>
+      <div class="field"><label for="effort">Reasoning Effort</label><select id="effort"><option>low</option><option selected>medium</option><option>high</option></select></div>
+    </div>
+    <div class="api-footer">
+      <span id="apiConfigSummary" class="pane-sub">Eingebaute API aktiv.</span>
+      <button id="saveApi" class="primary-btn hidden" type="button">Eigene API speichern</button>
+    </div>
+  </div>
+</dialog>
+
+<script>
+(() => {
+  const PASSWORD = "Fußballweltmeister";
+  const BLOB = "djH9hjpgd64xDo4p/00parbWeZQD+tg4lhQYepEBPkTv7O81R7l2bhVeIZ8zg30sDqQyU/t5p+D/LqsImlSgVnufnoE/oDJX3fESHfA6UZ47E1ExmduldsRhJMZG8ALtLiYbKkheZ6vfGxy1Sz1wyyiG1OhAIO90nekf4zqOztEMT7Z4IEMTC9QskkdcL9tb0fUHYWHPQ0hs1OQ/M3bMeXdbjlCptfbVpQl2ght2fNQQcKGuUjSSCltrTTrMMM82M2bJmH0CMRnjoCQMty7xxGV1owCXufX4Aio+gvS/sPFLTehBAwi8FnkrI3B0kK48qqkCOEZf+wqIXKPc9pnCiWLdC9n+s3N17b7szBaoZYJ8bgjAgXGppSS4iA==";
+  const $ = id => document.getElementById(id);
+  const state = {
+    apiMode: "builtin",
+    builtinSettings: null,
+    running: false,
+    selectedId: "VVT",
+    tab: "modules",
+    input: "",
+    company: "",
+    docs: {},
+    qualityRetries: {},
+    questions: [],
+    questionIndex: 0,
+    answers: [],
+    activity: [],
+    pendingInstruction: "",
+    instructionContext: null,
+    rerunBlockId: "",
+    instructionComposer: null
+  };
+  const BLOCKS = [
+    { id:"VVT", short:"VVT", title:"Verzeichnis von Verarbeitungstätigkeiten", law:"Art. 30 DSGVO", guide:[
+      "Erstelle ein vollständiges Verzeichnis von Verarbeitungstätigkeiten.",
+      "Beginne mit einem Word-tauglichen Verarbeitungsfluss in Tabellenform. Keine ASCII-Art, keine Codeblöcke, keine Mermaid-Syntax.",
+      "Die Flusstabelle enthält Nr., Prozessschritt, Beteiligte/Systeme, personenbezogene Daten, Verarbeitung/Zweck und Ergebnis.",
+      "Danach folgt das Verzeichnis mit Bezeichnung, Verantwortlichem, Zweck, Rechtsgrundlage, Betroffenengruppen, Datenkategorien, Empfängern, Drittlandübermittlung, Löschfristen und TOM-Hinweis.",
+      "Alle Angaben müssen final formuliert sein; keine Platzhalter, keine Arbeitsnotizen."
+    ].join("\n") },
+    { id:"DSFA", short:"DSFA", title:"Datenschutz-Folgenabschätzung", law:"Art. 35 DSGVO", guide:[
+      "Erstelle eine professionelle Datenschutz-Folgenabschätzung oder begründe nachvollziehbar, warum keine DSFA erforderlich ist.",
+      "Nutze den VVT-Kontext: Verarbeitung, Zweck, Betroffene, Datenkategorien, Systeme, Empfänger, KI-/Automatisierungsanteile.",
+      "Bewerte Notwendigkeit, Verhältnismäßigkeit, Rechtsgrundlage, Erwartung der Betroffenen, Eingriffsintensität, Risiken und Risikominderung.",
+      "Formuliere als fertiges Word-Dokument, nicht als PowerPoint, nicht als Stichwortsammlung."
+    ].join("\n") },
+    { id:"LI", short:"Interesse", title:"Erklärung zum berechtigten Interesse", law:"Art. 6 Abs. 1 lit. f DSGVO", guide:[
+      "Prüfe, ob ein berechtigtes Interesse tragfähig ist und ob eine Einwilligung vermieden werden kann.",
+      "Dokumentiere Kurzbeschreibung, berechtigtes Interesse, Datenschutzhinweis-Textbaustein, Abwägung, Schutzmaßnahmen, Widerspruchsmöglichkeit und Ergebnis.",
+      "Falls das Interesse nicht trägt, beschreibe konkrete Konzeptanpassungen. Keine offenen Fragen im finalen Dokument."
+    ].join("\n") },
+    { id:"TOM", short:"TOM", title:"Technische und organisatorische Maßnahmen", law:"Art. 32 DSGVO", guide:[
+      "Erstelle eine praxistaugliche TOM-Checkliste als finales Dokument.",
+      "Wähle den Umfang passend zum Risiko. Jede Prüffrage muss eindeutig mit Ja oder Nein beantwortbar sein.",
+      "Tabellenspalten: Nr., Kategorie, Prüffrage, Kontext/Prüfweg, Mess-/Notizfeld, Antwort.",
+      "Berücksichtige mindestens Zugriff, MFA, Verschlüsselung in Transit und Ruhe, Protokollierung, Backups, Berechtigungsreviews, Incident Response, Löschung und Auftragsverarbeitung.",
+      "Ergänze Kopfbereich, Kurzanleitung und Freigabebereich."
+    ].join("\n") },
+    { id:"AVV", short:"AVV", title:"Auftragsverarbeitungsvertrag / Dienstleisterdokumentation", law:"Art. 28 DSGVO", guide:[
+      "Dokumentiere Auftragsverarbeitung und Dienstleister für Microsoft 365/SharePoint und Azure OpenAI konkret.",
+      "Keine hypothetischen IT-Firmen erfinden. Wenn ein AVV nicht selbst neu erstellt werden muss, dokumentiere die bestehende AVV-/DPA-Basis und Prüfentscheidung.",
+      "Enthalten sein müssen Gegenstand, Zweck, Datenarten, Betroffene, Auftragnehmer, Unterauftragnehmer, TOM-Verweis, Drittlandtransfer, Weisung, Unterstützungspflichten, Löschung/Rückgabe und Freigabe."
+    ].join("\n") },
+    { id:"SRC", short:"Quellen", title:"Legitimation der Datenquelle", law:"Nachweisführung", guide:[
+      "Dokumentiere rechtmäßig erhaltene oder generierte Datenquellen.",
+      "Erstelle eine Liste mit Datenquelle, Herkunft, Zweck, Datenkategorien, Rechts-/Lizenzgrundlage, Einschränkungen, Verantwortlichkeit und Aufbewahrung.",
+      "Berücksichtige Nutzerfreitext, importierte Dateien, SharePoint-/CTOX-Kontext, Browserdaten und LLM-Ausgaben. Keine offenen Platzhalter."
+    ].join("\n") }
+  ];
+  const SYSTEM_HINT = [
+    "Du bist eine sorgfältige, deutschsprachige DSGVO-Expertin.",
+    "Du erstellst fertige, professionelle, unterschriftsreife Word-Dokumentationsbausteine.",
+    "Keine Prompt-Metatexte, keine App-Hinweise, keine Platzhalter, keine offenen Fragen im fertigen Dokument.",
+    "Wenn Pflichtinformationen fehlen, gib ausschließlich gezielte Rückfragen zurück.",
+    "Arbeite je Durchlauf genau an dem angegebenen Baustein."
+  ].join("\n");
+  const FINAL_BLOCKERS = /(noch zu klären|TODO|\?\?|RUECKFRAGEN|Prompt|SYSTEM_HINT|BASE_PROMPT|Code-Fence|fenced|Arbeitsfassung|Platzhalter|WICHTIG\s+FÜR\s+DIE\s+APP)/i;
+  const EXAMPLE = $("projectInput").getAttribute("placeholder");
+
+  function block(id=state.selectedId){ return BLOCKS.find(b => b.id === id) || BLOCKS[0]; }
+  function nowTime(){ return new Date().toLocaleTimeString("de-DE", { hour:"2-digit", minute:"2-digit", second:"2-digit" }); }
+  function esc(s){ return String(s ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
+  function addLog(text){
+    state.activity.unshift({ time: nowTime(), text: String(text || "").trim() });
+    state.activity = state.activity.slice(0, 80);
+    renderActivity();
+  }
+  function renderActivity(){
+    $("activityCount").textContent = `${state.activity.length} ${state.activity.length === 1 ? "Eintrag" : "Einträge"}`;
+    $("activityList").innerHTML = state.activity.map(item => `<li><time>${esc(item.time)}</time><span>${esc(item.text)}</span></li>`).join("");
+  }
+  function setAgent(kind, title, message, progress=null, label="Analyse"){
+    document.querySelector(".agent-pane")?.setAttribute("data-agent-state", kind);
+    $("agentKicker").textContent = kind === "running" ? "läuft" : kind === "question" ? "wartet auf Antwort" : kind === "done" ? "fertig" : "wartet";
+    $("agentTitle").textContent = title;
+    $("agentMessage").textContent = message;
+    $("agentDot").classList.toggle("running", kind === "running");
+    state.instructionComposer?.setBusy(kind === "running");
+    const showProgress = progress !== null;
+    $("progressBlock").classList.toggle("hidden", !showProgress);
+    if(showProgress){
+      const pct = Math.max(0, Math.min(100, Math.round(progress)));
+      $("progressLabel").textContent = label;
+      $("progressPercent").textContent = `${pct}%`;
+      $("progressFill").style.width = `${pct}%`;
+      $("progressFill").classList.toggle("running", kind === "running");
+    }
+  }
+  function selectTab(tab){
+    state.tab = tab;
+    $("modulesTab").classList.toggle("active", tab === "modules");
+    $("previewTab").classList.toggle("active", tab === "preview");
+    $("modulesView").classList.toggle("hidden", tab !== "modules");
+    $("previewView").classList.toggle("hidden", tab !== "preview");
+    renderDocs();
+  }
+  function mdToHtml(md){
+    const lines = String(md || "").split(/\r?\n/);
+    let html = "", inList = false, table = [];
+    const flushTable = () => {
+      if(!table.length) return;
+      html += "<table>";
+      table.forEach((row, idx) => {
+        if(/^\s*:?-{3,}/.test(row.join(""))) return;
+        const tag = idx === 0 ? "th" : "td";
+        html += "<tr>" + row.map(cell => `<${tag}>${inlineMd(cell)}</${tag}>`).join("") + "</tr>";
+      });
+      html += "</table>";
+      table = [];
+    };
+    const flushList = () => { if(inList){ html += "</ul>"; inList = false; } };
+    for(const raw of lines){
+      const line = raw.trimEnd();
+      if(line.trim().startsWith("|")){
+        flushList();
+        const cells = line.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c => c.trim());
+        table.push(cells);
+        continue;
+      }
+      flushTable();
+      if(!line.trim()){ flushList(); continue; }
+      const h = line.match(/^(#{1,3})\s+(.+)$/);
+      if(h){ flushList(); html += `<h${h[1].length}>${inlineMd(h[2])}</h${h[1].length}>`; continue; }
+      const li = line.match(/^\s*[-*]\s+(.+)$/);
+      if(li){ if(!inList){ html += "<ul>"; inList = true; } html += `<li>${inlineMd(li[1])}</li>`; continue; }
+      flushList();
+      html += `<p>${inlineMd(line)}</p>`;
+    }
+    flushTable(); flushList();
+    return html || `<p class="empty-state">Noch kein Dokument.</p>`;
+  }
+  function inlineMd(s){ return esc(s).replace(/\*\*(.*?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>"); }
+  function renderDocs(){
+    const doneCount = BLOCKS.filter(b => state.docs[b.id]?.status === "done").length;
+    $("moduleList").innerHTML = BLOCKS.map(b => {
+      const doc = state.docs[b.id] || {};
+      const cls = doc.status === "done" ? "done" : doc.status === "running" ? "running" : doc.status === "question" ? "question" : "";
+      const active = b.id === state.selectedId ? " active" : "";
+      const sub = doc.status === "done" ? "freigegeben" : doc.status === "running" ? "in Arbeit" : doc.status === "question" ? "Rückfrage" : "offen";
+      return `<button class="module-card${active}" type="button" data-id="${b.id}"><span><strong>${esc(b.short)} · ${esc(b.title)}</strong><span>${esc(sub)}</span></span><i class="status-dot ${cls}"></i></button>`;
+    }).join("");
+    $("moduleList").querySelectorAll(".module-card").forEach(btn => btn.addEventListener("click", () => {
+      state.selectedId = btn.dataset.id;
+      renderDocs();
+    }));
+    const selected = state.docs[state.selectedId];
+    $("selectedDoc").innerHTML = selected?.markdown ? mdToHtml(selected.markdown) : `<p class="empty-state">${esc(block().title)} ist noch nicht erstellt.</p>`;
+    if(selected?.markdown && state.instructionComposer){
+      window.RemAppShellV1?.attachAgentContextAction?.($("selectedDoc"), {
+        type: "dsgvo-block",
+        blockId: state.selectedId,
+        label: block().title,
+        content: selected.markdown
+      }, state.instructionComposer);
+    }
+    $("previewView").innerHTML = BLOCKS.map(b => state.docs[b.id]?.markdown ? mdToHtml(state.docs[b.id].markdown) : "").join("<hr>") || `<p class="empty-state">Die Dokumente erscheinen nach dem Lauf.</p>`;
+    $("downloadAllButton").disabled = doneCount !== BLOCKS.length;
+    $("downloadSelectedButton").disabled = !selected?.markdown;
+    $("copyDocButton").disabled = !selected?.markdown && doneCount === 0;
+    state.instructionComposer?.setVisible(doneCount > 0);
+  }
+  function renderQuestion(){
+    const has = state.questions.length > 0;
+    $("questionBlock").classList.toggle("hidden", !has);
+    if(!has){ $("questionBlock").innerHTML = ""; return; }
+    const idx = Math.max(0, Math.min(state.questionIndex, state.questions.length - 1));
+    state.questionIndex = idx;
+    const q = state.questions[idx];
+    $("questionBlock").innerHTML = `
+      <div class="question-card">
+        <div class="question-meta"><span>Rückfrage ${idx + 1}/${state.questions.length}</span><span>${state.answers.filter(Boolean).length} beantwortet</span></div>
+        <div class="question-text">${inlineMd(q)}</div>
+        <div class="question-nav">
+          <button id="prevQuestion" class="secondary-btn" type="button">Zurück</button>
+          <button id="nextQuestion" class="secondary-btn" type="button">Weiter</button>
+        </div>
+        <textarea id="questionAnswer" class="question-answer" placeholder="Kurz beantworten">${esc(state.answers[idx] || "")}</textarea>
+        <button id="saveAnswer" class="primary-btn" type="button">${state.answers.filter(Boolean).length + 1 >= state.questions.length ? "Antworten übernehmen" : "Antwort speichern"}</button>
+      </div>`;
+    $("prevQuestion").disabled = idx === 0;
+    $("nextQuestion").disabled = idx >= state.questions.length - 1;
+    $("prevQuestion").addEventListener("click", () => { saveCurrentAnswer(); state.questionIndex--; renderQuestion(); });
+    $("nextQuestion").addEventListener("click", () => { saveCurrentAnswer(); state.questionIndex++; renderQuestion(); });
+    $("saveAnswer").addEventListener("click", async () => {
+      saveCurrentAnswer();
+      if(state.answers.filter(Boolean).length >= state.questions.length){
+        const answerText = state.questions.map((q, i) => `Frage: ${q}\nAntwort: ${state.answers[i] || ""}`).join("\n\n");
+        state.input = `${state.input}\n\nZusätzliche Nutzerantworten:\n${answerText}`;
+        state.questions = [];
+        state.answers = [];
+        state.questionIndex = 0;
+        renderQuestion();
+        addLog("Antworten übernommen.");
+        await runLoop();
+      }else{
+        const next = state.answers.findIndex(a => !a);
+        state.questionIndex = next === -1 ? state.questionIndex : next;
+        renderQuestion();
+      }
+    });
+  }
+  function saveCurrentAnswer(){
+    const val = $("questionAnswer")?.value?.trim();
+    if(val) state.answers[state.questionIndex] = val;
+  }
+  function showResults(){
+    $("inputView").classList.add("hidden");
+    $("resultView").classList.remove("hidden");
+    renderDocs();
+  }
+  function showInput(){
+    $("resultView").classList.add("hidden");
+    $("inputView").classList.remove("hidden");
+    $("projectInput").focus();
+  }
+  function cleanMarkdown(md, b){
+    let text = String(md || "").replace(/```(?:markdown|md)?/gi, "").replace(/```/g, "").trim();
+    text = text.replace(/Prompt-?\s*\/\s*Eingabepraxis/gi, "Eingabepraxis");
+    text = text.replace(/Prompt\s*\/\s*Eingabepraxis/gi, "Eingabepraxis");
+    text = text.split(/\r?\n/).filter(line => !/^(WICHTIG\s+FÜR\s+DIE\s+APP|RUECKFRAGEN|Ausgabe-Regeln|Code-Fence|Prompt|SYSTEM_HINT|BASE_PROMPT)/i.test(line.trim())).join("\n");
+    text = text.split(/\r?\n/).filter(line => !/(noch zu klären|TODO|\?\?|Platzhalter)/i.test(line.trim())).join("\n");
+    if(!/^#\s+/m.test(text)) text = `# ${b.title}\n\n${text}`;
+    if(!/Freigabe|Unterschrift/i.test(text)){
+      text += "\n\n## Freigabe / Unterschrift\n\n| Rolle | Name / Datum / Unterschrift |\n|---|---|\n| Fachliche Freigabe |  |\n| Datenschutzrechtliche Freigabe |  |\n| IT-/Betriebsfreigabe |  |";
+    }
+    return text.trim();
+  }
+  function extractJson(text){
+    const raw = String(text || "").trim();
+    try { return JSON.parse(raw); } catch(_){}
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if(fenced){ try { return JSON.parse(fenced[1]); } catch(_){} }
+    const obj = raw.match(/\{[\s\S]*\}/);
+    if(obj){ try { return JSON.parse(obj[0]); } catch(_){} }
+    return null;
+  }
+  function docsContext(){
+    return BLOCKS.map(b => {
+      const doc = state.docs[b.id];
+      return doc?.markdown ? `## ${b.short} - ${b.title}\n${doc.markdown}` : "";
+    }).filter(Boolean).join("\n\n---\n\n").slice(0, 24000);
+  }
+  function payloadForBlock(b){
+    const schema = {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        status: { type: "string", enum: ["document", "questions"] },
+        title: { type: "string" },
+        markdown: { type: "string" },
+        questions: { type: "array", items: { type: "string" } },
+        note: { type: "string" }
+      },
+      required: ["status", "title", "markdown", "questions", "note"]
+    };
+    const input = [
+      "Projekt-/Verarbeitungskontext:",
+      state.input,
+      "",
+      "Unternehmen:",
+      state.company || "REM CAPITAL AG / Hypoport-Unternehmenskontext",
+      "",
+      "Profil:",
+      $("personaInput").value,
+      "",
+      "Gewünschte Tiefe:",
+      $("detailInput").value,
+      "",
+      "Bereits fertige Bausteine:",
+      docsContext() || "(noch keine)",
+      "",
+      `Aktueller Baustein: ${b.title} (${b.law})`,
+      "",
+      "Explizite Vorlage / Anforderungen für diesen Baustein:",
+      b.guide,
+      state.pendingInstruction ? "\nNutzeranweisung für diesen Fortsetzungslauf:" : "",
+      state.pendingInstruction || "",
+      state.instructionContext?.content ? `\nAktueller Zielinhalt:\n${state.instructionContext.content}` : "",
+      "",
+      "Ausgabe:",
+      "Wenn Pflichtinformationen wirklich fehlen, status='questions', maximal so viele konkrete Fragen wie erlaubt, markdown=''.",
+      "Wenn der Baustein fertig erstellbar ist, status='document', questions=[], markdown enthält ausschließlich den finalen Markdown-Baustein.",
+      "Keine Meta-Kommentare, keine App-Hinweise, keine Platzhalter, keine offenen Freigabevorbehalte im Markdown."
+    ].join("\n");
+    return {
+      model: getSettings().model,
+      stream: false,
+      store: false,
+      instructions: SYSTEM_HINT,
+      input,
+      text: { format: { type: "json_schema", name: "dsgvo_block_result", strict: true, schema } },
+      reasoning: { effort: getSettings().effort || "medium" }
+    };
+  }
+  async function callApi(payload, timeoutMs=180000){
+    const settings = getSettings();
+    if(!settings.apiKey) throw new Error("API Key fehlt.");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(new Error("timeout")), timeoutMs);
+    try {
+      let url, headers;
+      if(settings.provider === "azure"){
+        url = settings.azureEndpoint.replace(/\/+$/, "") + "/openai/v1/responses";
+        if(settings.azureApiVersion && !/^v1$/i.test(settings.azureApiVersion)) url += "?api-version=" + encodeURIComponent(settings.azureApiVersion);
+        headers = { "Content-Type":"application/json", "api-key": settings.apiKey };
+      }else{
+        url = "https://api.openai.com/v1/responses";
+        headers = { "Content-Type":"application/json", "Authorization":"Bearer " + settings.apiKey };
+      }
+      const res = await fetch(url, { method:"POST", headers, body: JSON.stringify(payload), signal: ctrl.signal });
+      if(!res.ok) throw new Error(`API ${res.status}: ${(await res.text()).slice(0, 600)}`);
+      const data = await res.json();
+      return data.output_text || (data.output || []).flatMap(o => o.content || []).map(c => c.text || c.value || "").join("\n");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  async function runLoop(){
+    if(state.running) return;
+    state.running = true;
+    $("startButton").disabled = true;
+    showResults();
+    setAgent("running", "Agent läuft", "Bausteine werden erstellt ...", 4, "Analyse läuft");
+    try{
+      const targets = state.rerunBlockId
+        ? BLOCKS.filter(b => b.id === state.rerunBlockId)
+        : BLOCKS.slice(Math.max(0, BLOCKS.findIndex(b => !state.docs[b.id]?.markdown || state.docs[b.id]?.status !== "done")));
+      const queue = targets.length ? targets : BLOCKS;
+      const total = queue.length;
+      for(let i=0; i<queue.length; i++){
+        const b = queue[i];
+        state.selectedId = b.id;
+        state.docs[b.id] = { ...(state.docs[b.id] || {}), status:"running" };
+        renderDocs();
+        setAgent("running", "Agent läuft", `${b.short}: ${b.title} wird erstellt ...`, Math.round((i / total) * 90 + 5), "Analyse läuft");
+        addLog(`${b.short}: Baustein gestartet.`);
+        const text = await callApi(payloadForBlock(b));
+        const parsed = extractJson(text);
+        if(!parsed) throw new Error(`${b.short}: Modellantwort konnte nicht gelesen werden.`);
+        if(parsed.status === "questions" && parsed.questions?.length){
+          state.docs[b.id].status = "question";
+          state.questions = parsed.questions.slice(0, Math.max(1, Math.min(6, Number($("maxQuestionsInput").value) || 3)));
+          state.answers = new Array(state.questions.length).fill("");
+          state.questionIndex = 0;
+          renderDocs();
+          renderQuestion();
+          setAgent("question", "Rückfrage offen", "Bitte die Angaben ergänzen. Danach läuft der Agent weiter.", Math.round((i / total) * 90 + 5), "Wartet");
+          addLog(`${state.questions.length} Rückfragen vorbereitet.`);
+          return;
+        }
+        let markdown = cleanMarkdown(parsed.markdown || "", b);
+        if(FINAL_BLOCKERS.test(markdown) && (state.qualityRetries[b.id] || 0) < 1){
+          state.qualityRetries[b.id] = (state.qualityRetries[b.id] || 0) + 1;
+          state.docs[b.id] = { status:"question", markdown };
+          state.questions = [`${b.short}: Der Entwurf enthält noch offene oder nicht finale Stellen. Bitte fehlende Fakten für "${b.title}" ergänzen.`];
+          state.answers = [""];
+          state.questionIndex = 0;
+          renderDocs();
+          renderQuestion();
+          setAgent("question", "Rückfrage offen", "Der Baustein ist noch nicht unterschriftsreif.", Math.round((i / total) * 90 + 5), "Wartet");
+          addLog(`${b.short}: Rückfrage nach Qualitätsprüfung.`);
+          return;
+        }
+        state.qualityRetries[b.id] = 0;
+        state.docs[b.id] = { status:"done", title: parsed.title || b.title, markdown, updated: Date.now() };
+        addLog(`${b.short}: freigegeben.`);
+        renderDocs();
+      }
+      state.pendingInstruction = "";
+      state.instructionContext = null;
+      state.rerunBlockId = "";
+      state.instructionComposer?.clearContext();
+      setAgent("done", "Bereit für Export", "Alle DSGVO-Bausteine sind freigegeben.", 100, "Fertig");
+      addLog("Alle Bausteine fertig.");
+    }catch(err){
+      console.error(err);
+      setAgent("idle", "Fehler", err.message || String(err), null);
+      addLog("Fehler: " + (err.message || String(err)));
+    }finally{
+      state.running = false;
+      $("startButton").disabled = false;
+      renderDocs();
+    }
+  }
+  function getSettings(){
+    return {
+      provider: $("provider").value,
+      model: $("model").value.trim() || "gpt-5.4",
+      apiKey: $("apiKey").value.trim(),
+      azureEndpoint: $("azureEndpoint").value.trim(),
+      azureApiVersion: $("azureApiVersion").value.trim() || "preview",
+      effort: $("effort").value || "medium"
+    };
+  }
+  function b64ToBytes(b64){ const bin = atob(b64); return Uint8Array.from(bin, c => c.charCodeAt(0)); }
+  async function deriveKey(password, salt){
+    const material = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+    return crypto.subtle.deriveKey({ name:"PBKDF2", salt, iterations:200000, hash:"SHA-256" }, material, { name:"AES-GCM", length:256 }, false, ["decrypt"]);
+  }
+  async function decryptBuiltin(){
+    if(state.builtinSettings) return state.builtinSettings;
+    const raw = b64ToBytes(BLOB);
+    const key = await deriveKey(PASSWORD, raw.slice(2,18));
+    const plain = await crypto.subtle.decrypt({ name:"AES-GCM", iv: raw.slice(18,30) }, key, raw.slice(30));
+    state.builtinSettings = JSON.parse(new TextDecoder().decode(plain));
+    return state.builtinSettings;
+  }
+  function disableApiFields(disabled){
+    ["provider","model","apiKey","azureEndpoint","azureApiVersion","effort"].forEach(id => { $(id).disabled = disabled; });
+    $("saveApi").classList.toggle("hidden", disabled);
+  }
+  async function applyBuiltin(){
+    const cfg = await decryptBuiltin();
+    const provider = (cfg.provider || cfg.activeProvider || "azure").toLowerCase().includes("azure") ? "azure" : "openai";
+    $("provider").value = provider;
+    $("model").value = cfg.model || cfg.azureDeployment || "gpt-5.4";
+    $("apiKey").value = cfg.apiKey || cfg.openaiApiKey || cfg.azureApiKey || "";
+    $("azureEndpoint").value = cfg.azureEndpoint || cfg.endpoint || "";
+    $("azureApiVersion").value = cfg.azureApiVersion || cfg.apiVersion || "preview";
+    $("effort").value = cfg.reasoningEffort || "medium";
+    disableApiFields(true);
+    $("apiStatus").textContent = `Eingebaute API · ${provider === "azure" ? "Azure" : "OpenAI"} · ${$("model").value}`;
+    $("apiConfigSummary").textContent = "Eingebaute API aktiv. Eigene Daten sind erst im Modus „Eigene API“ speicherbar.";
+  }
+  function applyCustom(){
+    disableApiFields(false);
+    $("apiStatus").textContent = `Eigene API · ${$("provider").value === "azure" ? "Azure" : "OpenAI"} · ${$("model").value || "Modell"}`;
+    $("apiConfigSummary").textContent = "Eigene API aktiv. Key, Provider und Modell gehören zusammen.";
+  }
+  function markdownToDocxChildren(markdown, title){
+    const d = window.docx;
+    const { Paragraph, TextRun, HeadingLevel, Table, TableRow, TableCell, WidthType } = d;
+    const children = [
+      new Paragraph({ text: title, heading: HeadingLevel.TITLE }),
+      new Paragraph({ text: "Stand: " + new Date().toLocaleDateString("de-DE") }),
+      new Paragraph({ text: "" })
+    ];
+    const lines = String(markdown || "").split(/\r?\n/);
+    let skippedDocumentTitle = false;
+    for(let i=0; i<lines.length; i++){
+      const line = lines[i].trim();
+      if(!line) continue;
+      if(line.startsWith("|") && i + 1 < lines.length && /^\s*\|?\s*:?-{3,}/.test(lines[i+1])){
+        const rows = [];
+        const readRow = l => l.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c => c.trim());
+        rows.push(readRow(line)); i += 2;
+        while(i < lines.length && lines[i].trim().startsWith("|")){ rows.push(readRow(lines[i])); i++; }
+        i--;
+        children.push(new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          rows: rows.map(row => new TableRow({ children: row.map(cell => new TableCell({ children: [new Paragraph({ text: cell })] })) }))
+        }));
+        continue;
+      }
+      const h = line.match(/^(#{1,3})\s+(.+)$/);
+      if(h){
+        if(!skippedDocumentTitle && h[1].length === 1 && h[2].trim() === title.trim()){
+          skippedDocumentTitle = true;
+          continue;
+        }
+        children.push(new Paragraph({ text: h[2], heading: h[1].length === 1 ? HeadingLevel.HEADING_1 : h[1].length === 2 ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_3 }));
+      }else if(/^\s*[-*]\s+/.test(line)){
+        children.push(new Paragraph({ text: line.replace(/^\s*[-*]\s+/, ""), bullet: { level: 0 } }));
+      }else{
+        const parts = line.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+        children.push(new Paragraph({
+          children: parts.map(p => p.startsWith("**") && p.endsWith("**") ? new TextRun({ text: p.slice(2,-2), bold: true }) : new TextRun({ text: p }))
+        }));
+      }
+    }
+    return children;
+  }
+  async function buildDocxBlob(markdown, b){
+    const d = window.docx;
+    if(!d?.Document || !d?.Packer) throw new Error("DOCX-Bibliothek wurde nicht geladen.");
+    const title = (markdown.match(/^#\s+(.+)$/m) || [null, b.title])[1];
+    const doc = new d.Document({
+      creator: "REM App Shell",
+      title,
+      sections: [{ properties: {}, children: markdownToDocxChildren(markdown, title) }]
+    });
+    return await d.Packer.toBlob(doc);
+  }
+  async function downloadSelected(){
+    const b = block();
+    const doc = state.docs[b.id];
+    if(!doc?.markdown) return;
+    const blob = await buildDocxBlob(doc.markdown, b);
+    downloadBlob(blob, `${slug(b.short + "-" + b.title)}.docx`);
+  }
+  async function downloadAll(){
+    const zip = new JSZip();
+    for(const b of BLOCKS){
+      const doc = state.docs[b.id];
+      if(!doc?.markdown) throw new Error(`${b.short} fehlt.`);
+      zip.file(`${slug(b.short + "-" + b.title)}.docx`, await buildDocxBlob(doc.markdown, b));
+    }
+    const blob = await zip.generateAsync({ type:"blob" });
+    downloadBlob(blob, "dsgvo-dokumentation-word-bausteine.zip");
+  }
+  function downloadBlob(blob, name){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function slug(s){ return String(s || "dokument").toLowerCase().replace(/ä/g,"ae").replace(/ö/g,"oe").replace(/ü/g,"ue").replace(/ß/g,"ss").replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"").slice(0,80) || "dokument"; }
+  async function applyAgentInstruction({ instruction, context }){
+    if(state.running) throw new Error("Der Agent arbeitet bereits.");
+    if(!BLOCKS.some(b => state.docs[b.id]?.markdown)) throw new Error("Bitte zuerst Dokumente erstellen.");
+    state.pendingInstruction = instruction;
+    state.instructionContext = context || null;
+    state.rerunBlockId = context?.blockId || "";
+    if(state.rerunBlockId){
+      state.selectedId = state.rerunBlockId;
+      state.docs[state.rerunBlockId].status = "running";
+      addLog(`Anweisung für ${BLOCKS.find(b => b.id === state.rerunBlockId)?.short || "Baustein"} übernommen.`);
+    }else{
+      BLOCKS.forEach(b => { if(state.docs[b.id]?.markdown) state.docs[b.id].status = "running"; });
+      addLog("Anweisung für alle Dokumente übernommen.");
+    }
+    await runLoop();
+  }
+  function initAgentInstructionComposer(){
+    if(!window.RemAppShellV1?.createAgentInstructionComposer) return;
+    state.instructionComposer = window.RemAppShellV1.createAgentInstructionComposer({
+      placeholder: "Änderung oder Ergänzung eingeben …",
+      onSubmit: applyAgentInstruction
+    });
+    state.instructionComposer.setVisible(BLOCKS.some(b => state.docs[b.id]?.markdown));
+  }
+  function wire(){
+    window.RemAppShellV1?.initTheme?.();
+    window.RemAppShellV1?.initColumnResizers?.(document, { storagePrefix: "rem-dsgvo-rebuild" });
+    initAgentInstructionComposer();
+    $("apiButton").addEventListener("click", () => $("apiModal").showModal());
+    $("closeApi").addEventListener("click", () => $("apiModal").close());
+    $("builtinApi").addEventListener("change", async () => { state.apiMode = "builtin"; await applyBuiltin(); });
+    $("customApi").addEventListener("change", () => { state.apiMode = "custom"; applyCustom(); });
+    $("saveApi").addEventListener("click", () => { if(state.apiMode === "custom"){ applyCustom(); $("apiModal").close(); } });
+    $("optionsButton").addEventListener("click", () => {
+      const open = !$("optionsPanel").classList.contains("is-open");
+      $("optionsPanel").classList.toggle("is-open", open);
+      $("optionsButton").setAttribute("aria-expanded", String(open));
+    });
+    $("startButton").addEventListener("click", async () => {
+      const text = $("projectInput").value.trim();
+      if(!text){ setAgent("idle", "Bereit", "Thema oder Rohnotiz einfügen.", null); $("projectInput").focus(); return; }
+      state.input = text;
+      state.company = $("companyInput").value.trim();
+      addLog("Kontext übernommen.");
+      await runLoop();
+    });
+    $("editInputButton").addEventListener("click", showInput);
+    $("modulesTab").addEventListener("click", () => selectTab("modules"));
+    $("previewTab").addEventListener("click", () => selectTab("preview"));
+    $("copyDocButton").addEventListener("click", async () => {
+      const text = state.tab === "preview" ? BLOCKS.map(b => state.docs[b.id]?.markdown || "").filter(Boolean).join("\n\n---\n\n") : (state.docs[state.selectedId]?.markdown || "");
+      if(text) await navigator.clipboard.writeText(text);
+      addLog("Text kopiert.");
+    });
+    $("downloadSelectedButton").addEventListener("click", () => downloadSelected().then(() => addLog("DOCX erstellt.")).catch(err => setAgent("idle", "Fehler", err.message, null)));
+    $("downloadAllButton").addEventListener("click", () => downloadAll().then(() => addLog("ZIP mit DOCX erstellt.")).catch(err => setAgent("idle", "Fehler", err.message, null)));
+    applyBuiltin().catch(err => { console.error(err); $("apiStatus").textContent = "API nicht geladen"; });
+    renderDocs();
+    renderActivity();
+  }
+  document.addEventListener("DOMContentLoaded", wire);
+})();
+</script>
+</body>
+</html>

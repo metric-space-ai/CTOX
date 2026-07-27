@@ -1,0 +1,10 @@
+{
+  "version": "ctox.appsec.web_stack.same_origin_api_map.v1",
+  "kind": "same-origin-api-map",
+  "subject": "user-a",
+  "target_origin": "https://ctox.dev",
+  "target_url": "https://ctox.dev/dashboard",
+  "produced_at": "2026-07-13T10:51:00Z",
+  "endpoints_observed": 28,
+  "notes": "Same-origin API surface captured during the authenticated crawl for user-a; only origins, verbs and structural metadata are persisted here, never credentials."
+}

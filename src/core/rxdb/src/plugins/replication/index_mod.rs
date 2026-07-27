@@ -361,8 +361,7 @@ impl RxReplicationState {
         let mut down_processed = internal.events.processed.down.subscribe();
         let received_task = tokio::spawn(async move {
             while let Some(row) = down_processed.next().await {
-                let document = row.get("document").cloned().unwrap_or_else(|| row.clone());
-                received.next(document);
+                received.next(row["document"].clone());
             }
         });
 
@@ -370,11 +369,7 @@ impl RxReplicationState {
         let mut up_processed = internal.events.processed.up.subscribe();
         let sent_task = tokio::spawn(async move {
             while let Some(row) = up_processed.next().await {
-                let document = row
-                    .get("newDocumentState")
-                    .cloned()
-                    .unwrap_or_else(|| row.clone());
-                sent.next(document);
+                sent.next(row["document"].clone());
             }
         });
 
@@ -754,7 +749,6 @@ pub fn default_replication_options(
     replication_identifier: impl Into<String>,
     collection: Arc<RxCollection>,
 ) -> ReplicationOptions {
-    let _ = default_modifier; // silence unused-import warning in some build configs
     ReplicationOptions {
         replication_identifier: replication_identifier.into(),
         collection,

@@ -1,0 +1,29 @@
+{
+  "version": "ctox.appsec.completion_review.v1",
+  "generated_at": "2026-07-13T11:05:00Z",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "disposition": "explicitly-blocked-with-evidence",
+  "disposition_reason": "Stage closure contract allows three terminal states: completed, not-applicable, or explicitly-blocked-with-evidence. The on-disk pipeline still records stage 2 as in-progress / coverage-gap with the reviewer-flagged blockers, and the live ctox runtime cannot write into the configured state-dir. This file records exactly that.",
+  "checks": [
+    { "name": "subjects_present", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-subjects.json" },
+    { "name": "matrix_built_present", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-matrix-built-1783937936679.json" },
+    { "name": "unauthenticated_evidence", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/unauthenticated/" },
+    { "name": "user_a_evidence", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-a/" },
+    { "name": "user_b_evidence", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/user-b/" },
+    { "name": "credential_proof_present", "status": "pass", "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-credential-proof-1783937624552.json" },
+    { "name": "ctox_service_socket_reachable", "status": "fail", "evidence": "/Users/michaelwelsch/.local/lib/ctox/current/runtime/ctox_service.sock reports SOCKET_DENIED" },
+    { "name": "state_dir_writable", "status": "fail", "evidence": "touch on /Volumes/models/.../state returns Operation not permitted (os error 1)" },
+    { "name": "pipeline_status_command_succeeded", "status": "not-run", "evidence": "could not run ctox appsec pipeline status without state-dir write and service socket" }
+  ],
+  "totals": { "cases": 38, "pass": 18, "fail": 0, "blocked": 20 },
+  "blockers": [
+    { "code": "logged-out-protected-access-case-required", "summary": "Stage still requires a logged-out protected-access case to be exercised" },
+    { "code": "owner-baseline-allow-required", "summary": "Stage still requires an owner-baseline allow case to be exercised" },
+    { "code": "scanner-evidence-missing", "summary": "Stage still requires live scanner evidence from the configured pipeline" }
+  ],
+  "runtime_blockers": [
+    "ctox service socket unreachable at /Users/michaelwelsch/.local/lib/ctox/current/runtime/ctox_service.sock (Connection refused / SOCKET_DENIED)",
+    "configured state-dir mount on /Volumes/Models rejects writes with Operation not permitted (os error 1)"
+  ]
+}

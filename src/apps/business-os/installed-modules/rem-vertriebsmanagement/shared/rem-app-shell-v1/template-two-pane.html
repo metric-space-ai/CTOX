@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>REM App</title>
+  <link rel="stylesheet" href="./rem-app-shell-v1.css">
+</head>
+<body>
+  <div class="app-shell rem-app-shell" data-rem-shell-version="1">
+    <header class="topbar">
+      <div class="brand topbar-left-group">
+        <h1>REM App</h1>
+        <span class="version topbar-version">v1</span>
+      </div>
+      <div class="top-actions topbar-actions">
+        <span class="api-status topbar-status">Eingebaute API · Azure · gpt-5.4</span>
+        <button class="ctox-button" type="button">API</button>
+        <div class="theme-toggle" aria-label="Darstellung">
+          <button id="lightTheme" type="button" aria-label="Light Mode">☀</button>
+          <button id="darkTheme" type="button" aria-label="Dark Mode">☾</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="ctox-workspace ctox-workspace--two-pane" data-resize-frame>
+      <section class="ctox-pane" aria-label="Hauptansicht">
+        <header class="ctox-pane-header">
+          <div class="ctox-pane-title">
+            <strong>Hauptansicht</strong>
+            <span>Input, Ergebnis und Export liegen hier.</span>
+          </div>
+          <div class="ctox-pane-actions">
+            <button class="ctox-button ctox-button--primary" type="button">Starten</button>
+            <button class="ctox-button" type="button">Optionen</button>
+          </div>
+        </header>
+        <div class="ctox-pane-body">
+          <div class="ctox-pane-scroll"></div>
+        </div>
+      </section>
+
+      <button class="ctox-column-resizer"
+        data-resizer="right"
+        data-resizer-var="--ctox-right-width"
+        data-resizer-min="300"
+        data-resizer-max="560"
+        type="button"
+        aria-label="Agent-Spalte anpassen"></button>
+
+      <aside class="ctox-pane" aria-label="Agent">
+        <header class="ctox-pane-header">
+          <div class="ctox-pane-title">
+            <strong>Agent</strong>
+          </div>
+        </header>
+        <div class="ctox-pane-body">
+          <div class="ctox-pane-scroll"></div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="./rem-app-shell-v1.js"></script>
+  <script>
+    RemAppShellV1.initTheme();
+    RemAppShellV1.initColumnResizers();
+  </script>
+</body>
+</html>

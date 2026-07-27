@@ -42,6 +42,7 @@ const {
   normalizeColumns,
   normalizeStoredKnowledgeRecord,
   sourceScopeFor,
+  sortKnowledgeRecords,
   valueForColumn,
 } = hooks;
 
@@ -95,6 +96,50 @@ test('matches a Research handoff to a Knowledge group by entry domain', () => {
   assert.equal(knowledgeGroupMatchesDomain(group, 'unrelated_domain'), false);
 });
 
+test('groups linked SKF skillbooks, runbooks, resources, and tables into one domain hub', () => {
+  const groups = buildKnowledgeBundles([
+    {
+      id: 'skillbook:drone-bearing-design-verified-v1',
+      kind: 'skillbook',
+      title: 'Verified propeller input evidence',
+      linked_runbook_ids: ['runbook:verification'],
+    },
+    {
+      id: 'runbook:verification',
+      kind: 'runbook',
+      title: 'Prüf- und Validierungsverfahren',
+      problem_domain: 'UAS bearing verification',
+    },
+    {
+      id: 'resource:source-001',
+      kind: 'resource',
+      title: 'Source without domain keywords',
+      skillbook_id: 'drone-bearing-design-verified-v1',
+    },
+  ], [], [{
+    id: 'table:verified-measurements',
+    kind: 'dataframe',
+    title: 'Measurements',
+    payload: {
+      domain: 'drone_bearing_design_verified',
+      rows: [{ measurement_id: 'M-001' }],
+      schema: { columns: [{ name: 'measurement_id', type: 'string' }] },
+    },
+  }]);
+
+  const hub = groups.find((group) => group.id === 'research/drone-design/drone-bearing-loads');
+  assert.ok(hub);
+  assert.equal(hub.domain, 'drone_bearing_design_verified');
+  assert.deepEqual(new Set(hub.entries.map((entry) => entry.id)), new Set([
+    'skillbook:drone-bearing-design-verified-v1',
+    'runbook:verification',
+    'resource:source-001',
+    'table:verified-measurements',
+  ]));
+  assert.ok(hub.runbookIds.includes('runbook:verification'));
+  assert.equal(groups.some((group) => group.id === 'bundle/drone-bearing-design-verified-v1'), false);
+});
+
 test('normalizes RxDB payload records without dropping table rows or schema', () => {
   const record = normalizeStoredKnowledgeRecord({
     id: 'table:source-catalog',
@@ -112,6 +157,16 @@ test('normalizes RxDB payload records without dropping table rows or schema', ()
   assert.equal(record.has_table, true);
   assert.equal(localDataFrameRows(record).length, 1);
   assert.equal(localDataFrameSchema(record).columns[0].key, 'source_id');
+});
+
+test('sorts locally loaded records without requiring an RxDB query index', () => {
+  const records = sortKnowledgeRecords([
+    { id: 'older', updated_at_ms: 100 },
+    { id: 'same-b', updated_at_ms: 200 },
+    { id: 'same-a', updated_at_ms: 200 },
+  ]);
+
+  assert.deepEqual(records.map((record) => record.id), ['same-a', 'same-b', 'older']);
 });
 
 test('assembles only complete contiguous knowledge table chunks', () => {
@@ -356,7 +411,10 @@ test('pane chrome follows the canonical data-pg-* grammar contract', async () =>
   // The counted band keeps ≥2 real views with zeros rendered by the grammar.
   assert.match(html, /data-pg-band="skill"/);
   assert.match(html, /data-pg-band="runbooks"/);
+  assert.match(html, /data-pg-band="resources"/);
   assert.match(html, /data-pg-band="data"/);
+  assert.match(html, /data-skillbook-switcher/);
+  assert.match(html, /data-resource-switcher/);
   // Per-pane one-line footers; no module-wide app floor.
   assert.doesNotMatch(html, /knowledge-footer/);
   assert.doesNotMatch(css, /\.knowledge-footer\b/);

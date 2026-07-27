@@ -47,6 +47,7 @@ const RUN_STATUS_VOCABULARY: &[&str] = &[
     "temporary_unreachable",
     "portal_drift",
     "partial_output",
+    "authorization_required",
 ];
 const COMPLETION_CONDITION: &str = "every configured adapter is either live_success, or has an explicit operator_auth_required state followed by a successful post-auth retry";
 
@@ -261,8 +262,15 @@ impl RunRow {
         self.result.get("failure_mode").and_then(Value::as_str)
     }
 
+    /// Session-expiry / reauthorization state (capability 10): either the new
+    /// typed `authorization_required` status/failure mode, or the legacy
+    /// script-emitted `auth_required` failure mode (persisted as `blocked`).
     fn is_auth_required(&self) -> bool {
-        self.failure_mode() == Some("auth_required")
+        self.status == "authorization_required"
+            || matches!(
+                self.failure_mode(),
+                Some("auth_required") | Some("authorization_required")
+            )
     }
 
     fn is_challenge_blocked(&self) -> bool {
@@ -274,6 +282,14 @@ impl RunRow {
             .get("browser_assist_requested")
             .and_then(Value::as_bool)
             .unwrap_or(false)
+    }
+
+    /// The persisted typed reauthorization action (source id, safe login URL,
+    /// allowed domains, credential reference), when the run emitted one.
+    fn reauthorization(&self) -> Option<&Value> {
+        self.result
+            .get("reauthorization")
+            .filter(|value| value.is_object())
     }
 }
 
@@ -832,6 +848,18 @@ fn check_challenge_classification(adapter: &Adapter, state: &PersistedState) -> 
             );
         }
     }
+    if latest.status == "authorization_required"
+        && !latest.browser_assist_requested()
+        && latest.reauthorization().is_none()
+    {
+        return Check::fail(
+            format!(
+                "authorization_required run {} persisted neither a reauthorization action nor a browser-assist handoff",
+                latest.run_id
+            ),
+            "expired-session runs must persist the typed reauthorization action and emit the auth-assist handoff; deploy the fixed executor and rerun the adapter",
+        );
+    }
     let mut check = Check::pass(
         format!(
             "latest run classified `{}`{}",
@@ -865,6 +893,12 @@ fn check_authorization_handoff(adapter: &Adapter, state: &PersistedState) -> Che
     if let Some(run) = state.runs.iter().find(|r| r.browser_assist_requested()) {
         return Check::pass(
             "a persisted run emitted browser_assist_requested=true (auth-assist-request handoff fired)",
+            vec![run.run_id.clone()],
+        );
+    }
+    if let Some(run) = state.runs.iter().find(|r| r.reauthorization().is_some()) {
+        return Check::pass(
+            "a persisted run carries the typed reauthorization action (source id, safe login URL, allowed domains, credential reference; no secrets)",
             vec![run.run_id.clone()],
         );
     }
@@ -1694,6 +1728,146 @@ const SOURCE_CONFIG = Object.freeze({
         assert_eq!(row["checks"]["post_auth_extraction"]["status"], "pass");
         assert_eq!(row["checks"]["session_reuse"]["status"], "pass");
         assert_eq!(report["gate"]["ok"], true);
+    }
+
+    #[test]
+    fn authorization_required_run_maps_to_capability_ten_checks() {
+        let fx = FixtureRoot::new();
+        fx.write_shared(SHARED_JS);
+        fx.write_adapter(
+            "protected.example",
+            &manifest_json("protected-example", "protected.example"),
+            None,
+        );
+        let conn = fx.init_db();
+        seed_run(
+            &conn,
+            "protected-example",
+            "scrape_run-exp1",
+            "authorization_required",
+            "2026-07-27T08:00:00Z",
+            json!({
+                "records": [],
+                "failure_mode": "authorization_required",
+                "detail": "protected.example session expired or invalid; reauthorization required",
+                "browser_assist_requested": true,
+                "reauthorization": {
+                    "kind": "auth-assist-request",
+                    "source_id": "protected.example",
+                    "login_url": "https://app.protected.example/login",
+                    "allowed_domains": ["protected.example", "app.protected.example"],
+                    "credential_ref": "ctox-secret://credentials/PROTECTED_EXAMPLE_LOGIN",
+                    "reason": "session_expired_or_invalid",
+                    "secret_value_in_payload": false,
+                },
+            }),
+        );
+        drop(conn);
+
+        let report = generate_acceptance_report(&fx.root, &fx.adapters_dir, None).unwrap();
+        let row = adapter_row(&report, "protected.example");
+        assert_eq!(row["final_status"], "operator_auth_required");
+        assert_eq!(
+            row["checks"]["challenge_classification"]["status"], "pass",
+            "typed authorization_required status is in the run-status vocabulary: {}",
+            row["checks"]["challenge_classification"]["reason"]
+        );
+        assert_eq!(
+            row["checks"]["authorization_handoff"]["status"], "pass",
+            "persisted reauthorization/handoff evidences the capability-10 handoff"
+        );
+        assert_eq!(
+            row["checks"]["post_auth_extraction"]["status"], "fail",
+            "no successful post-auth retry yet"
+        );
+        let action = row["required_action"].as_str().unwrap();
+        assert!(action.contains("authorize"), "action: {action}");
+        assert_eq!(report["gate"]["ok"], false);
+        // The serialized report carries no secret values and stays redacted.
+        let serialized = serde_json::to_string(&report).unwrap();
+        assert!(!serialized.contains("password"));
+        assert_eq!(report["gate"]["redaction_self_check"]["passed"], true);
+    }
+
+    #[test]
+    fn authorization_required_without_handoff_evidence_fails_classification_contract() {
+        let fx = FixtureRoot::new();
+        fx.write_shared(SHARED_JS);
+        fx.write_adapter(
+            "protected.example",
+            &manifest_json("protected-example", "protected.example"),
+            None,
+        );
+        let conn = fx.init_db();
+        seed_run(
+            &conn,
+            "protected-example",
+            "scrape_run-exp2",
+            "authorization_required",
+            "2026-07-27T08:00:00Z",
+            json!({"records": [], "failure_mode": "authorization_required"}),
+        );
+        drop(conn);
+
+        let report = generate_acceptance_report(&fx.root, &fx.adapters_dir, None).unwrap();
+        let row = adapter_row(&report, "protected.example");
+        assert_eq!(
+            row["checks"]["challenge_classification"]["status"], "fail",
+            "authorization_required runs must persist the reauthorization action or handoff"
+        );
+        assert_eq!(row["final_status"], "operator_auth_required");
+        assert_eq!(report["gate"]["ok"], false);
+    }
+
+    #[test]
+    fn post_auth_success_after_authorization_required_passes() {
+        let fx = FixtureRoot::new();
+        fx.write_shared(SHARED_JS);
+        fx.write_adapter(
+            "protected.example",
+            &manifest_json("protected-example", "protected.example"),
+            None,
+        );
+        let conn = fx.init_db();
+        seed_run(
+            &conn,
+            "protected-example",
+            "scrape_run-exp3",
+            "authorization_required",
+            "2026-07-27T08:00:00Z",
+            json!({
+                "records": [],
+                "failure_mode": "authorization_required",
+                "browser_assist_requested": true,
+                "reauthorization": {
+                    "kind": "auth-assist-request",
+                    "source_id": "protected.example",
+                    "login_url": "https://app.protected.example/login",
+                    "allowed_domains": ["protected.example", "app.protected.example"],
+                    "credential_ref": "ctox-secret://credentials/PROTECTED_EXAMPLE_LOGIN",
+                    "reason": "session_expired_or_invalid",
+                    "secret_value_in_payload": false,
+                },
+            }),
+        );
+        seed_run(
+            &conn,
+            "protected-example",
+            "scrape_run-exp4",
+            "succeeded",
+            "2026-07-27T09:00:00Z",
+            json!({"records": [{"field": "firma_name", "value": "Fixture GmbH"}]}),
+        );
+        drop(conn);
+
+        let report = generate_acceptance_report(&fx.root, &fx.adapters_dir, None).unwrap();
+        let row = adapter_row(&report, "protected.example");
+        assert_eq!(
+            row["checks"]["post_auth_extraction"]["status"], "pass",
+            "succeeded run postdates the authorization_required run: {}",
+            row["checks"]["post_auth_extraction"]["reason"]
+        );
+        assert_eq!(row["checks"]["authorization_handoff"]["status"], "pass");
     }
 
     #[test]

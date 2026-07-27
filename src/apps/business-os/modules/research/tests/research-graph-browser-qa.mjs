@@ -268,12 +268,37 @@ try {
   }
   await page.waitForSelector('[data-research-graph-host] canvas', { state: 'visible', timeout: 180000 });
   await page.waitForTimeout(3200);
-  assert.equal(await page.locator('[data-evidence-status="http_error"]').count(), 1);
-  assert.equal(await page.locator('[data-evidence-status="metadata_only"]').count(), 1);
-  assert.equal(await page.locator('[data-evidence-status="rejected"]').count(), 1);
+  assert.equal(await page.locator('[data-evidence-status="http_error"]').count(), 0);
+  assert.equal(await page.locator('[data-evidence-status="metadata_only"]').count(), 0);
+  assert.equal(await page.locator('[data-evidence-status="rejected"]').count(), 0);
   assert.equal(await page.locator('.research-ranking-list .research-rank-row').count(), 25);
   assert.equal(await page.locator('.research-graph-dimension').textContent(), '3D');
+  assert.equal(await page.locator('.research-graph-insights').count(), 0);
+  await page.locator('[data-graph-command="panel"]').click();
   assert.ok(await page.locator('.research-graph-topics li').count() >= 5);
+  const graphLayout = await page.evaluate(() => {
+    const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect().toJSON();
+    const overlaps = (left, right) => Boolean(left && right
+      && left.left < right.right && left.right > right.left
+      && left.top < right.bottom && left.bottom > right.top);
+    const canvas = rect('.research-graph-canvas');
+    const insights = rect('.research-graph-insights');
+    const rail = rect('.research-graph-rail');
+    const search = rect('.research-graph-search');
+    const meta = rect('.research-graph-meta');
+    const layers = rect('.research-graph-layer-switch');
+    return {
+      canvas, insights, rail, search, meta, layers,
+      canvasOverlapsInsights: overlaps(canvas, insights),
+      railOverlapsInsights: overlaps(rail, insights),
+      searchOverlapsMeta: overlaps(search, meta),
+      layersOverlapMeta: overlaps(layers, meta),
+    };
+  });
+  assert.equal(graphLayout.canvasOverlapsInsights, false, JSON.stringify(graphLayout));
+  assert.equal(graphLayout.railOverlapsInsights, false, JSON.stringify(graphLayout));
+  assert.equal(graphLayout.searchOverlapsMeta, false, JSON.stringify(graphLayout));
+  assert.equal(graphLayout.layersOverlapMeta, false, JSON.stringify(graphLayout));
   assert.ok(await page.locator('[data-research-graph-host] canvas').boundingBox());
   assert.ok(await canvasPixelCount(page) > 100, 'initial graph canvas is blank');
   const contract = await page.evaluate(() => ({ nodes: window.__researchQa.graphNodes, edges: window.__researchQa.graphEdges }));
@@ -343,13 +368,14 @@ try {
   await page.setViewportSize({ width: 720, height: 900 });
   await page.waitForTimeout(900);
   assert.ok(await page.locator('.research-graph-stage').isVisible());
-  assert.equal(await page.locator('[data-graph-command="zoom-in"]').evaluate((node) => getComputedStyle(node).display), 'none');
+  assert.equal(await page.locator('[data-graph-command="zoom-in"]').count(), 0);
   await page.screenshot({ path: resolve(outputDir, 'compact.png'), fullPage: true, timeout: 90000 });
 
   const touchPage = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true });
   touchPage.setDefaultTimeout(60000);
   await touchPage.goto(`http://127.0.0.1:${port}/qa`, { waitUntil: 'networkidle' });
   await touchPage.waitForSelector('[data-research-graph-host] canvas', { state: 'visible', timeout: 60000 });
+  await touchPage.waitForTimeout(3200);
   const touchLayout = await touchPage.evaluate(() => {
     const stage = document.querySelector('.research-graph-stage')?.getBoundingClientRect();
     const rail = document.querySelector('.research-graph-rail')?.getBoundingClientRect();
@@ -358,6 +384,7 @@ try {
   });
   assert.ok(touchLayout.rail.height <= touchLayout.stage.height * 0.35, `touch control rail consumes too much stage height: ${JSON.stringify(touchLayout)}`);
   assert.ok(touchLayout.controls.every(({ rect, clipped }) => rect.width >= 40 && rect.width <= 48 && rect.height >= 40 && rect.height <= 48 && !clipped), JSON.stringify(touchLayout.controls));
+  await touchPage.screenshot({ path: resolve(outputDir, 'touch.png'), fullPage: true, timeout: 90000 });
   assert.ok(await canvasPixelCount(touchPage) > 100, 'touch graph canvas is blank');
   await touchPage.close();
 
@@ -383,7 +410,7 @@ try {
   assert.equal(await invalidPage.locator('[data-research-graph-host] canvas').count(), 0);
   assert.equal(await invalidPage.evaluate(() => window.__researchQa.commands.length), 0);
   await invalidPage.close();
-  process.stdout.write(JSON.stringify({ ok: true, url: `http://127.0.0.1:${port}/qa`, screenshots: ['desktop-3d.png', 'desktop-2d-analytics.png', 'compact.png'], failures }, null, 2) + '\n');
+  process.stdout.write(JSON.stringify({ ok: true, url: `http://127.0.0.1:${port}/qa`, screenshots: ['desktop-3d.png', 'desktop-2d-analytics.png', 'compact.png', 'touch.png'], failures }, null, 2) + '\n');
 } finally {
   await browser.close();
   await new Promise((resolveClose) => server.close(resolveClose));

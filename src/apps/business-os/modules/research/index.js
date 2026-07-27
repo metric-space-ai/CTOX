@@ -406,7 +406,7 @@ const state = {
     detailLevel: 'standard',
     visibleLimit: GRAPH_DETAIL_LEVELS.standard,
     layer: 'all',
-    panel: 'topics',
+    panel: 'hidden',
     query: '',
     autoRotate: false,
     busyAction: '',
@@ -766,9 +766,7 @@ async function loadLocalState({ mountToken = null } = {}) {
   ]);
   if (mountToken && state.mountToken !== mountToken) return;
   if (tasks.length || !state.tasks.length) {
-    state.tasks = tasks
-      .filter((task) => isVisibleResearchTask(task))
-      .sort((a, b) => Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0));
+    state.tasks = collapseResearchTaskLineages(tasks.filter((task) => isVisibleResearchTask(task)));
   }
   if (runs.length || !state.runs.length) state.runs = runs;
   if (notes.length || !state.notes.length) state.notes = notes;
@@ -888,6 +886,27 @@ function isVisibleResearchTask(task) {
   if (!task?.payload?.seeded_from_knowledge) return true;
   const base = state.knowledgeBases.find((item) => item.domain === task.knowledge_domain);
   return Boolean(base && isResearchKnowledgeBase(base));
+}
+
+function collapseResearchTaskLineages(tasks = []) {
+  const byDomain = new Map();
+  for (const task of tasks) {
+    const key = String(task.knowledge_domain || task.domain || task.id || '').trim();
+    const bucket = byDomain.get(key) || [];
+    bucket.push(task);
+    byDomain.set(key, bucket);
+  }
+  return [...byDomain.values()]
+    .map((bucket) => {
+      const sorted = [...bucket].sort((a, b) => (
+        Number(b.updated_at_ms || b.created_at_ms || 0) - Number(a.updated_at_ms || a.created_at_ms || 0)
+      ));
+      return {
+        ...sorted[0],
+        lineage_task_ids: sorted.map((task) => task.id).filter(Boolean),
+      };
+    })
+    .sort((a, b) => Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0));
 }
 
 async function ensureTasksFromKnowledgeBases() {
@@ -1487,6 +1506,7 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
     const dimensions = gate.eligible
       ? scoreDimensions(row, curated, agg, task, axisDefs)
       : emptyScoreDimensions(axisDefs);
+    const auditedGrade = sourceTierGrade(row);
     return {
       id,
       rank: index + 1,
@@ -1504,11 +1524,14 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
       evidenceStatusLabel: gate.label,
       dimensions,
       score: gate.eligible ? dimensions.portfolio_priority : null,
-      grade: gate.eligible ? gradeForScore(dimensions.portfolio_priority) : '—',
+      grade: gate.eligible ? (auditedGrade || gradeForScore(dimensions.portfolio_priority)) : '—',
     };
   }).sort((a, b) => {
     if (a.evidenceEligible !== b.evidenceEligible) return a.evidenceEligible ? -1 : 1;
-    if (a.evidenceEligible) return b.score - a.score;
+    if (a.evidenceEligible) {
+      const gradeOrder = { A: 4, B: 3, C: 2, D: 1 };
+      return (gradeOrder[b.grade] || 0) - (gradeOrder[a.grade] || 0) || b.score - a.score;
+    }
     return 0;
   }).map((item, index, items) => ({
     ...item,
@@ -1819,12 +1842,15 @@ function aggregateMeasurements(rows, sourceModels = null) {
 
 function scoreDimensions(row, curated, measurements, task, axisDefs = BASE_AXES) {
   const text = [row.title, row.name, row.description, row.summary, row.contribution_note, row.relevance_to_bearing_design, row.bucket, row.source_class, row.record_type, curated?.use, curated?.fields].join(' ').toLowerCase();
-  const sourceClass = String(row.source_class || row.bucket || curated?.record_type || '').toLowerCase();
-  let evidence = 38;
-  if (/dataset|repository|zenodo|figshare|dataverse|csv|xlsx|parquet/.test(text)) evidence = 88;
-  else if (/agency|standard|regulatory|nasa|faa|easa|dod|osti|dtic/.test(text)) evidence = 78;
-  else if (/scholarly|paper|doi|springer|ieee|aiaa|semantic/.test(sourceClass + text)) evidence = 66;
-  else if (/web|manufacturer|vendor|datasheet/.test(sourceClass + text)) evidence = 52;
+  const sourceClass = String(row.source_type || row.type || row.source_class || row.bucket || curated?.record_type || '').toLowerCase();
+  const auditedGrade = sourceTierGrade(row);
+  let evidence = ({ A: 94, B: 82, C: 64, D: 42 })[auditedGrade] || 38;
+  if (!auditedGrade) {
+    if (/dataset|repository|zenodo|figshare|dataverse|csv|xlsx|parquet/.test(text)) evidence = 88;
+    else if (/agency|standard|regulatory|nasa|faa|easa|dod|osti|dtic/.test(text)) evidence = 78;
+    else if (/scholarly|article|journal|conference|proceedings|dissertation|thesis|preprint|paper|doi|springer|ieee|aiaa|semantic/.test(sourceClass + text)) evidence = 78;
+    else if (/web|manufacturer|vendor|datasheet/.test(sourceClass + text)) evidence = 52;
+  }
   if (row.doi || /\bdoi\b|openalex|arxiv/.test(text)) evidence += 6;
   if (row.source_url || row.url) evidence += 4;
   if (measurements?.count) evidence += 15; // High-fidelity boost for sources with active telemetry/measured data points!
@@ -1840,7 +1866,10 @@ function scoreDimensions(row, curated, measurements, task, axisDefs = BASE_AXES)
   const sourceQuality = Math.min(96, evidence * 0.78 + (hasUrl(row) ? 10 : 0) + (/official|customer|case|docs|security|compliance|api|integration/.test(text) ? 8 : 0));
   const actionability = Math.min(96, 30 + (/pricing|demo|contact|docs|api|integration|onboard|trial|workflow|use case|customer|case/.test(text) ? 28 : 0) + (curated ? 18 : 0) + (hasUrl(row) ? 8 : 0));
   const coverage = Math.min(96, 28 + Math.min(32, text.length / 18) + (measurements?.count ? 14 : 0) + (curated ? 12 : 0));
-  const topicFit = topicFitScore(task, text, row);
+  const auditedRelevance = Number(row?.evidence_relevance_score);
+  const topicFit = Number.isFinite(auditedRelevance)
+    ? normalizeScoreScale(auditedRelevance)
+    : topicFitScore(task, text, row);
   const overlap = Math.min(96, topicFit + (/competitor|platform|agent|employee|worker|enterprise|autonomous|managed|team|workflow/.test(text) ? 12 : 0));
   const buyerClarity = Math.min(96, 30 + (/buyer|persona|enterprise|team|department|role|use case|solution|customer|sales|support|operations|hr|it/.test(text) ? 28 : 0) + (/official|homepage|product|pricing|case/.test(text) ? 12 : 0));
   const autonomousAgentDepth = Math.min(96, 24 + (/autonomous|agentic|agent|worker|employee|multi-agent|workflow|orchestration|tool use|executes|delegates|team/.test(text) ? 36 : 0) + (/copilot|assistant/.test(text) ? -8 : 0));
@@ -2052,11 +2081,11 @@ function renderCenter() {
       <section class="research-workbench">
         <div class="research-tabs-container">
           <div class="ctox-pane-tabs" role="tablist" aria-label="Research views">
-            ${tabButton('sources', `${state.t('sources', 'Sources')} (${evidenceRankedSources().length})`)}
-            ${tabButton('candidates', `${state.t('candidates', 'Candidates')} (${state.candidateModels.length})`)}
-            ${tabButton('measurements', `${state.t('measurements', 'Measurements')} (${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length})`)}
-            ${tabButton('knowledge', `${state.t('knowledge', 'Knowledge')} (${state.curatedRows.length})`)}
-            ${tabButton('reports', `${state.t('reports', 'Fachberichte')} (${researchReportsForTask(task).length})`)}
+            ${countedTabButton('sources', state.t('sources', 'Sources'), evidenceRankedSources().length)}
+            ${countedTabButton('candidates', state.t('candidates', 'Candidates'), state.candidateModels.length)}
+            ${countedTabButton('measurements', state.t('measurements', 'Measurements'), filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length)}
+            ${countedTabButton('knowledge', state.t('knowledge', 'Knowledge'), state.curatedRows.length)}
+            ${countedTabButton('reports', state.t('reports', 'Fachberichte'), researchReportsForTask(task).length)}
           </div>
           ${state.activeTab === 'sources' ? `
             <div class="ctox-pane-tabs research-view-toggle">
@@ -2095,7 +2124,7 @@ function renderSemanticGraph(task, projection) {
   const live = ['queued', 'running'].includes(runInfo.statusKind);
   return `
     <section class="research-graph-shell" aria-label="${escapeHtml(state.t('semanticResearchGraph', 'Semantischer Research-Graph'))}">
-      <div class="research-graph-stage">
+      <div class="research-graph-stage${state.graph.panel === 'hidden' ? '' : ' has-insights'}">
         <div class="research-graph-canvas" data-research-graph-host role="img" aria-label="${escapeHtml(state.t('graphCanvasLabel', 'Interaktiver semantischer Graph. Ziehen dreht die Szene, Scrollen zoomt.'))}"></div>
         <div class="research-graph-loading" data-research-graph-loading role="status">
           <span class="research-spinner" aria-hidden="true"></span>
@@ -2115,16 +2144,12 @@ function renderSemanticGraph(task, projection) {
         </label>
         <div class="research-graph-rail" aria-label="${escapeHtml(state.t('graphControls', 'Graph-Steuerung'))}">
           <button type="button" data-action="graph-command" data-graph-command="panel" class="research-graph-tool${state.graph.panel !== 'hidden' ? ' is-active' : ''}" aria-label="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}" title="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}">${iconSvg('layers')}</button>
-          <button type="button" data-action="graph-command" data-graph-command="reset" class="research-graph-tool" aria-label="${escapeHtml(state.t('resetGraph', 'Ansicht zurücksetzen'))}" title="${escapeHtml(state.t('resetGraph', 'Ansicht zurücksetzen'))}">${iconSvg('refresh')}</button>
           <div class="research-graph-detail" role="group" aria-label="${escapeHtml(state.t('graphDetail', 'Detailstufe'))}">
             ${graphDetailButton('overview', state.t('detailOverview', 'Übersicht'))}
             ${graphDetailButton('standard', state.t('detailStandard', 'Standard'))}
             ${graphDetailButton('deep', state.t('detailDeep', 'Tief'))}
           </div>
           <button type="button" data-action="graph-dimension" class="research-graph-tool research-graph-dimension" aria-label="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}" title="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}">${state.graph.dimensions}D</button>
-          <button type="button" data-action="graph-command" data-graph-command="rotate" class="research-graph-tool${state.graph.autoRotate ? ' is-active' : ''}" aria-pressed="${state.graph.autoRotate}" aria-label="${escapeHtml(state.t('autoRotate', 'Automatische Rotation'))}" title="${escapeHtml(state.t('autoRotate', 'Automatische Rotation'))}">${iconSvg('refresh')}</button>
-          <button type="button" data-action="graph-command" data-graph-command="zoom-in" class="research-graph-tool" aria-label="${escapeHtml(state.t('zoomIn', 'Vergrößern'))}" title="${escapeHtml(state.t('zoomIn', 'Vergrößern'))}">+</button>
-          <button type="button" data-action="graph-command" data-graph-command="zoom-out" class="research-graph-tool" aria-label="${escapeHtml(state.t('zoomOut', 'Verkleinern'))}" title="${escapeHtml(state.t('zoomOut', 'Verkleinern'))}">−</button>
           <button type="button" data-action="graph-command" data-graph-command="fit" class="research-graph-tool" aria-label="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}" title="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}">${iconSvg('focus')}</button>
         </div>
         <div class="research-graph-layer-switch" role="group" aria-label="${escapeHtml(state.t('graphLayer', 'Graph-Ebene'))}">
@@ -2391,14 +2416,6 @@ function handleGraphCommand(command) {
     renderCenter();
     return;
   }
-  if (command === 'rotate') {
-    state.graph.autoRotate = !state.graph.autoRotate;
-    state.graphSurface?.setAutoRotate?.(state.graph.autoRotate);
-    const button = pane('center')?.querySelector('[data-graph-command="rotate"]');
-    button?.classList.toggle('is-active', state.graph.autoRotate);
-    button?.setAttribute('aria-pressed', String(state.graph.autoRotate));
-    return;
-  }
   if (command === 'zoom-in') state.graphSurface?.zoomIn?.();
   else if (command === 'zoom-out') state.graphSurface?.zoomOut?.();
   else if (command === 'fit') state.graphSurface?.fit?.();
@@ -2411,6 +2428,7 @@ function updateGraphInsights() {
   const existing = stage?.querySelector('.research-graph-insights');
   const toggle = stage?.querySelector('[data-graph-command="panel"]');
   if (!stage || !state.graphProjection) return;
+  stage.classList.toggle('has-insights', state.graph.panel !== 'hidden');
   if (state.graph.panel === 'hidden') {
     existing?.remove();
     toggle?.classList.remove('is-active');
@@ -3444,11 +3462,7 @@ function renderRight() {
   if (!root) return;
   const task = selectedTask();
   const source = selectedSource();
-  const latestRun = latestRunForTask(task?.id);
   const runInfo = researchRunInfo(task);
-  const notes = computedDecisionNotes(source);
-  const axisPair = normalizedAxisPair(task);
-  const canRun = canRunResearchTask(task);
   const canBuildKnowledge = canBuildKnowledgeFromResearch(task);
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band">
@@ -3463,92 +3477,34 @@ function renderRight() {
       <section class="research-context-block">
         <span class="ctox-pane-kicker">Knowledge Base</span>
         <strong>${escapeHtml(task?.knowledge_domain || state.t('noDomain', 'Keine Domain'))}</strong>
-        <p>${escapeHtml(task?.prompt || state.t('defaultTaskDesc', 'Research-Dashboard auf Basis einer vorhandenen Knowledge Base.'))}</p>
-        ${task?.criteria ? `<small>${escapeHtml(task.criteria)}</small>` : ''}
-        ${task ? `<button type="button" class="ctox-button" data-action="edit-task">${escapeHtml(state.t('editScoring', 'Scoring bearbeiten'))}</button>` : ''}
-        ${task ? `<button type="button" class="ctox-button" data-action="build-knowledge" ${canBuildKnowledge ? '' : 'disabled aria-disabled="true"'} title="${escapeHtml(canBuildKnowledge ? '' : knowledgeUnavailableReason())}">${escapeHtml(task.payload?.knowledge_refresh?.command_id ? state.t('updateKnowledge', 'Knowledge aktualisieren') : state.t('buildKnowledge', 'Knowledge aufbauen'))}</button>` : ''}
+        <p>${escapeHtml(state.t('defaultTaskDesc', 'Research, Knowledge und Berichte teilen eine gemeinsame, nachvollziehbare Lineage.'))}</p>
+        ${task ? `<div class="research-context-actions">
+          <button type="button" class="ctox-button" data-action="build-knowledge" ${canBuildKnowledge ? '' : 'disabled aria-disabled="true"'} title="${escapeHtml(canBuildKnowledge ? '' : knowledgeUnavailableReason())}">${escapeHtml(task.payload?.knowledge_refresh?.command_id ? state.t('updateKnowledge', 'Knowledge aktualisieren') : state.t('buildKnowledge', 'Knowledge aufbauen'))}</button>
+          <button type="button" class="ctox-button" data-action="edit-task">${escapeHtml(state.t('editScoring', 'Methode & Scoring'))}</button>
+        </div>` : ''}
       </section>
-      ${renderScoringModel(task)}
       <section class="research-metric-grid">
         <div><strong>${state.candidateModels.length}</strong><span>${escapeHtml(state.t('candidates', 'Candidates'))}</span></div>
         <div><strong>${evidenceRankedSources().length}</strong><span>${escapeHtml(state.t('sources', 'Sources'))}</span></div>
         <div><strong>${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length}</strong><span>${escapeHtml(state.t('measurements', 'Measurements'))}</span></div>
-        <div><strong>${avgScore()}</strong><span>${escapeHtml(state.t('avgScore', 'Avg score'))}</span></div>
-        <div><strong>${runInfo.status || latestRun?.status || task?.status || 'ready'}</strong><span>${escapeHtml(state.t('status', 'Status'))}</span></div>
+        <div><strong>${researchReportsForTask(task).length}</strong><span>${escapeHtml(state.t('reports', 'Fachberichte'))}</span></div>
       </section>
       ${renderRunPanel(runInfo)}
       <section class="research-context-block">
         <span class="ctox-pane-kicker">${escapeHtml(state.t('selectedSource', 'Selected Source'))}</span>
         ${source ? `
-          <strong style="font-size: 13px; display: block; margin-bottom: 8px; color: var(--research-text);">${escapeHtml(source.title)}</strong>
-          <p style="font-size: 11.5px; line-height: 1.4; color: var(--research-muted); margin-bottom: 12px;">${escapeHtml(source.note || state.t('noSummaryAvailable', 'Keine Zusammenfassung vorhanden.'))}</p>
-          <div class="research-source-card-status ${source.evidenceEligible ? 'is-verified' : 'is-discovery'}" data-evidence-status="${escapeHtml(source.evidenceStatus)}">${escapeHtml(source.evidenceStatusLabel)} · ${source.evidenceEligible ? 'Score verfügbar' : 'Score —'}</div>
-          
-          <div class="research-metric-profile" style="margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px;">
-            <!-- Overall Score Progress -->
-            <div class="research-metric-progress-wrapper" style="margin-bottom: 4px;">
-              <div class="research-metric-progress-label" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-bottom: 4px;">
-                <span>Overall Score</span>
-                <span>${formatPortfolioScore(source.score)}${source.evidenceEligible ? '%' : ''}</span>
-              </div>
-              <div class="research-metric-progress-bar-bg" style="height: 6px; background: var(--research-surface-2); border-radius: 3px; overflow: hidden;">
-                <div class="research-metric-progress-bar-fill ${source.evidenceEligible && source.score / 10 > 75 ? 'good' : source.evidenceEligible && source.score / 10 > 45 ? 'accent' : 'warn'}" style="height: 100%; border-radius: 3px; transition: width 0.3s ease; width: ${source.evidenceEligible ? (source.score / 10).toFixed(1) : '0'}%;"></div>
-              </div>
-            </div>
-            
-            <!-- Source Quality Progress -->
-            <div class="research-metric-progress-wrapper" style="margin-bottom: 4px;">
-              <div class="research-metric-progress-label" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-bottom: 4px;">
-                <span>Source Quality</span>
-                <span>${formatDimensionScore(source.dimensions.source_quality)}${source.evidenceEligible ? '%' : ''}</span>
-              </div>
-              <div class="research-metric-progress-bar-bg" style="height: 6px; background: var(--research-surface-2); border-radius: 3px; overflow: hidden;">
-                <div class="research-metric-progress-bar-fill ${source.evidenceEligible && source.dimensions.source_quality > 75 ? 'good' : source.evidenceEligible && source.dimensions.source_quality > 45 ? 'accent' : 'warn'}" style="height: 100%; border-radius: 3px; transition: width 0.3s ease; width: ${source.evidenceEligible ? Math.round(source.dimensions.source_quality) : 0}%;"></div>
-              </div>
-            </div>
-            
-            <!-- Evidence Strength Progress -->
-            <div class="research-metric-progress-wrapper" style="margin-bottom: 4px;">
-              <div class="research-metric-progress-label" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-bottom: 4px;">
-                <span>Evidence Strength</span>
-                <span>${formatDimensionScore(source.dimensions.evidence_strength)}${source.evidenceEligible ? '%' : ''}</span>
-              </div>
-              <div class="research-metric-progress-bar-bg" style="height: 6px; background: var(--research-surface-2); border-radius: 3px; overflow: hidden;">
-                <div class="research-metric-progress-bar-fill ${source.evidenceEligible && source.dimensions.evidence_strength > 75 ? 'good' : source.evidenceEligible && source.dimensions.evidence_strength > 45 ? 'accent' : 'warn'}" style="height: 100%; border-radius: 3px; transition: width 0.3s ease; width: ${source.evidenceEligible ? Math.round(source.dimensions.evidence_strength) : 0}%;"></div>
-              </div>
-            </div>
-            
-            <!-- Topic Fit Progress -->
-            <div class="research-metric-progress-wrapper" style="margin-bottom: 4px;">
-              <div class="research-metric-progress-label" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-bottom: 4px;">
-                <span>Topic Fit</span>
-                <span>${formatDimensionScore(source.dimensions.topic_fit)}${source.evidenceEligible ? '%' : ''}</span>
-              </div>
-              <div class="research-metric-progress-bar-bg" style="height: 6px; background: var(--research-surface-2); border-radius: 3px; overflow: hidden;">
-                <div class="research-metric-progress-bar-fill ${source.evidenceEligible && source.dimensions.topic_fit > 75 ? 'good' : source.evidenceEligible && source.dimensions.topic_fit > 45 ? 'accent' : 'warn'}" style="height: 100%; border-radius: 3px; transition: width 0.3s ease; width: ${source.evidenceEligible ? Math.round(source.dimensions.topic_fit) : 0}%;"></div>
-              </div>
-            </div>
-            
-            <!-- Actionability Progress -->
-            <div class="research-metric-progress-wrapper" style="margin-bottom: 4px;">
-              <div class="research-metric-progress-label" style="display: flex; justify-content: space-between; font-size: 11px; font-weight: 700; margin-bottom: 4px;">
-                <span>Actionability</span>
-                <span>${formatDimensionScore(source.dimensions.actionability)}${source.evidenceEligible ? '%' : ''}</span>
-              </div>
-              <div class="research-metric-progress-bar-bg" style="height: 6px; background: var(--research-surface-2); border-radius: 3px; overflow: hidden;">
-                <div class="research-metric-progress-bar-fill ${source.evidenceEligible && source.dimensions.actionability > 75 ? 'good' : source.evidenceEligible && source.dimensions.actionability > 45 ? 'accent' : 'warn'}" style="height: 100%; border-radius: 3px; transition: width 0.3s ease; width: ${source.evidenceEligible ? Math.round(source.dimensions.actionability) : 0}%;"></div>
-              </div>
-            </div>
+          <strong>${escapeHtml(source.title)}</strong>
+          <p>${escapeHtml(source.note || state.t('noSummaryAvailable', 'Keine Zusammenfassung vorhanden.'))}</p>
+          <div class="research-source-card-status ${source.evidenceEligible ? 'is-verified' : 'is-discovery'}" data-evidence-status="${escapeHtml(source.evidenceStatus)}">${escapeHtml(source.evidenceStatusLabel)}</div>
+          <dl class="ctox-fields">
+            <dt>${escapeHtml(state.t('quality', 'Qualität'))}</dt><dd>${escapeHtml(source.grade)} · ${escapeHtml(formatPortfolioScore(source.score))}</dd>
+            <dt>${escapeHtml(state.t('sourceType', 'Quellentyp'))}</dt><dd>${escapeHtml(source.sourceClass)}</dd>
+          </dl>
+          <div class="research-context-actions">
+            <button type="button" class="ctox-button" data-action="source-detail" data-source-id="${escapeHtml(source.id)}">${escapeHtml(state.t('details', 'Details'))}</button>
+            ${source.evidenceEligible && source.canonicalUrl ? `<a class="ctox-button" href="${escapeHtml(source.canonicalUrl)}" target="_blank" rel="noreferrer">${escapeHtml(state.t('openOriginal', 'Original öffnen'))}</a>` : ''}
           </div>
-          
-          <button type="button" class="ctox-button" data-action="source-detail" data-source-id="${escapeHtml(source.id)}" style="width: 100%; text-align: center;">${escapeHtml(state.t('details', 'Details'))}</button>
         ` : `<p>${escapeHtml(state.t('selectSourcePrompt', 'Wähle eine Quelle aus.'))}</p>`}
-      </section>
-      <section class="research-context-block">
-        <div class="research-section-head flush"><strong>${escapeHtml(state.t('decisionNotes', 'Decision notes'))}</strong><span>${escapeHtml(state.t('auto', 'auto'))}</span></div>
-        <div class="research-note-stack">
-          ${notes.map((note) => `<div class="research-note research-note-${note.kind}"><strong>${escapeHtml(note.title)}</strong><span>${escapeHtml(note.body)}</span></div>`).join('')}
-        </div>
       </section>
     </div>
   `;
@@ -3574,7 +3530,7 @@ function renderRunPanel(runInfo) {
         <dl class="ctox-fields">
           <dt>${escapeHtml(state.t('command', 'Command'))}</dt><dd>${escapeHtml(shortId(runInfo.commandId))}</dd>
           <dt>${escapeHtml(state.t('queue', 'Queue'))}</dt><dd>${escapeHtml(shortId(runInfo.taskQueueId))}</dd>
-          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd>${escapeHtml(runInfo.threadKey || '-')}</dd>
+          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
         </dl>
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
@@ -3927,22 +3883,43 @@ async function runSelectedResearch() {
   const requireDerivedBearingLoads = existingTables.has('derived_bearing_loads')
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
-  const candidateRows = candidateTable ? await fetchTableRows(candidateTable.id) : [];
+  const sourceTable = tableForKey(base, task.source_catalog_key || 'source_catalog');
+  const [candidateRows, authoritativeSourceRows] = await Promise.all([
+    candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
+    sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
+  ]);
+  const declaredSourceRows = firstPositiveNumber(sourceTable, [
+    'row_count',
+    'rowCount',
+    'total_row_count',
+    'totalRows',
+    'projected_row_count',
+  ]);
+  if (sourceTable && declaredSourceRows && authoritativeSourceRows.length < declaredSourceRows) {
+    setStatus(`Der Quellenkatalog wird noch synchronisiert (${authoritativeSourceRows.length}/${declaredSourceRows}). Research wurde nicht gestartet.`);
+    renderRight();
+    return;
+  }
   const knowledgeTableRefs = compactKnowledgeTableReferences(base?.tables || []);
-  const rawVerifiedSourceModels = (state.sourceModels || [])
+  const launchSourceModels = sourceTable
+    ? buildSourceModels(task, authoritativeSourceRows, [], state.measurementRows || [])
+    : state.sourceModels || [];
+  const rawVerifiedSourceModels = launchSourceModels
     .filter((source) => source.evidenceEligible);
   const verifiedSourceModels = uniqueSourceModels(rawVerifiedSourceModels);
+  const verifiedSourceCount = boundedVerifiedSourceCount(verifiedSourceModels, sourceTable);
   const verifiedSourceUrls = [...new Set(sourceUrlsFromRows(
     verifiedSourceModels.map((source) => source.row),
   ))];
   const excludedSourceUrls = [...new Set([
     ...sourceUrlsFromRows(candidateRows),
-    ...sourceUrlsFromRows((state.sourceModels || []).map((source) => source.row)),
+    ...sourceUrlsFromRows(launchSourceModels.map((source) => source.row)),
   ])];
   const targetVerifiedSources = effectiveTargetVerifiedSources(
     task?.payload?.target_verified_sources,
     rawVerifiedSourceModels.length,
     verifiedSourceModels.length,
+    verifiedSourceCount,
   );
   const minimumCandidateSources = Math.max(
     targetVerifiedSources * 2,
@@ -3973,7 +3950,7 @@ async function runSelectedResearch() {
     `Scoring-Modell:\n${scoringDimensions.map((axis) => `- ${axis.id}: ${axis.label}; weight=${axis.weight || scoringWeights(scoringDimensions)[axis.id] || 1}`).join('\n')}`,
     `Portfolio axes: x=${normalizedAxisPair(task).x}, y=${normalizedAxisPair(task).y}`,
     '',
-    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceModels.length}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
+    `Bekannte Quellen: ${excludedSourceUrls.length}; davon bereits evidence-eligible: ${verifiedSourceCount}. Die vollständige kanonische Exclude-Liste steht in web_stack_plan.exclude_urls.`,
     'Arbeite iterativ mit den typisierten Web-Stack-Werkzeugen, folge bei wissenschaftlichen Quellen den Referenzen und führe zwei orthogonale Nulltreffer-Runden durch. Behandle Discovery nur als Kandidatenmenge. Evidence, Knowledge, Graph und Reports dürfen ausschließlich aus gelesenen, gesnapshotpten und vom Evidence-Gate zugelassenen Originalquellen entstehen.',
     'Nutze die vom System materialisierte Skill-Anleitung und den serverseitigen Writeback-Vertrag. Erzeuge keine parallelen Tabellen, schreibe nicht direkt in Business-OS-Datenbanken und starte keine Child Agents.',
   ].filter(Boolean).join('\n');
@@ -4110,32 +4087,84 @@ function sourceUrlsFromRows(rows = []) {
     .filter((url) => /^https?:\/\//i.test(url));
 }
 
-function sourceModelIdentity(source) {
+function normalizedSourceIdentityUrl(value) {
+  const raw = String(value || '').trim();
+  if (!/^https?:\/\//i.test(raw)) return '';
+  try {
+    const url = new URL(raw);
+    url.hash = '';
+    url.protocol = url.protocol.toLowerCase();
+    url.hostname = url.hostname.toLowerCase();
+    if (url.pathname !== '/') url.pathname = url.pathname.replace(/\/+$/, '');
+    return url.toString();
+  } catch {
+    return raw.replace(/#.*$/, '').replace(/\/+$/, '').toLowerCase();
+  }
+}
+
+function sourceModelIdentities(source) {
   const row = source?.row || {};
-  const id = String(source?.id || sourceId(row) || '').trim();
-  if (id) return `id:${id}`;
-  const canonicalUrl = firstString(row, ['canonical_url', 'source_url', 'url', 'direct_url', 'doi'])
+  const identities = [];
+  for (const value of [
+    firstString(row, ['canonical_url']),
+    firstString(row, ['source_url', 'url', 'direct_url']),
+  ]) {
+    const url = normalizedSourceIdentityUrl(value);
+    if (url) identities.push(`url:${url}`);
+  }
+  const doi = firstString(row, ['doi'])
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '')
     .trim()
-    .replace(/\/+$/, '')
     .toLowerCase();
-  return canonicalUrl ? `url:${canonicalUrl}` : '';
+  if (doi) identities.push(`doi:${doi}`);
+  const contentHash = firstString(row, ['content_hash', 'snapshot_hash', 'snapshot_sha256'])
+    .replace(/^sha256:/i, '')
+    .trim()
+    .toLowerCase();
+  if (/^[0-9a-f]{64}$/.test(contentHash)) identities.push(`sha256:${contentHash}`);
+  const id = String(sourceId(row) || source?.id || '').trim();
+  if (id) identities.push(`id:${id}`);
+  return [...new Set(identities)];
 }
 
 function uniqueSourceModels(sourceModels = []) {
   const seen = new Set();
   return (sourceModels || []).filter((source, index) => {
-    const identity = sourceModelIdentity(source) || `anonymous:${index}`;
-    if (seen.has(identity)) return false;
-    seen.add(identity);
+    const identities = sourceModelIdentities(source);
+    if (identities.some((identity) => seen.has(identity))) return false;
+    for (const identity of identities.length ? identities : [`anonymous:${index}`]) seen.add(identity);
     return true;
   });
 }
 
-function effectiveTargetVerifiedSources(configuredTarget, rawVerifiedCount, uniqueVerifiedCount) {
+function boundedVerifiedSourceCount(sourceModels = [], sourceTable = null) {
+  const modelCount = sourceModels.length;
+  const declaredCount = firstPositiveNumber(sourceTable, [
+    'row_count',
+    'rowCount',
+    'total_row_count',
+    'totalRows',
+    'projected_row_count',
+  ]);
+  return declaredCount ? Math.min(modelCount, declaredCount) : modelCount;
+}
+
+function effectiveTargetVerifiedSources(
+  configuredTarget,
+  rawVerifiedCount,
+  uniqueVerifiedCount,
+  authoritativeVerifiedCount = uniqueVerifiedCount,
+) {
   const configured = Number(configuredTarget || 0);
-  const duplicatedProjectionTarget = rawVerifiedCount > uniqueVerifiedCount
+  const verifiedCount = Math.min(
+    Number(uniqueVerifiedCount || 0),
+    Number(authoritativeVerifiedCount || uniqueVerifiedCount || 0),
+  );
+  const duplicatedProjectionTarget = rawVerifiedCount > verifiedCount
     && configured === rawVerifiedCount;
-  return Math.max(100, duplicatedProjectionTarget ? 0 : configured);
+  const duplicatedAliasTarget = verifiedCount > 0
+    && configured === verifiedCount * 2;
+  return Math.max(100, duplicatedProjectionTarget || duplicatedAliasTarget ? 0 : configured);
 }
 
 function researchScoringContract(scoringDimensions) {
@@ -4671,8 +4700,10 @@ function selectedSource() {
 
 function latestRunForTask(taskId) {
   if (!taskId) return null;
+  const task = state.tasks.find((entry) => entry.id === taskId);
+  const lineageIds = new Set(task?.lineage_task_ids?.length ? task.lineage_task_ids : [taskId]);
   return state.runs
-    .filter((run) => run.task_id === taskId)
+    .filter((run) => lineageIds.has(run.task_id))
     .sort((a, b) => Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0))[0] || null;
 }
 
@@ -4918,6 +4949,11 @@ function axisSelect(axis, selected, variant = 'toolbar') {
 
 function tabButton(id, label) {
   return `<button type="button" class="ctox-pane-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}">${escapeHtml(label)}</button>`;
+}
+
+function countedTabButton(id, label, count) {
+  const accessibleLabel = `${label} (${count})`;
+  return `<button type="button" class="ctox-pane-tab research-counted-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}"><span class="research-tab-label">${escapeHtml(label)}</span><span class="research-tab-count">${escapeHtml(count)}</span></button>`;
 }
 
 function disabledTabButton(id, label) {
@@ -5234,6 +5270,12 @@ function gradeForScore(score) {
   if (score >= 66) return 'B';
   if (score >= 48) return 'C';
   return 'D';
+}
+
+function sourceTierGrade(row) {
+  const tier = firstString(row, ['source_tier', 'evidence_tier', 'quality_tier']).trim().toUpperCase();
+  const match = tier.match(/(?:^|[^A-D])([A-D])(?:$|[^A-D])/);
+  return match?.[1] || (/^[A-D]$/.test(tier) ? tier : '');
 }
 
 function clampScore(value) {
@@ -5728,16 +5770,18 @@ function researchReportsForTask(task, documents = state.documents) {
 }
 
 function documentLinksToResearch(document, task) {
+  const taskIds = new Set([task.id, ...(task.lineage_task_ids || [])].filter(Boolean).map(String));
   return (document.linked_records || []).some((record) => {
     const kind = String(record?.kind || record?.type || record?.record_type || '').toLowerCase();
     const id = String(record?.id || record?.record_id || record?.value || '');
-    return (kind === 'research_task' && id === task.id)
+    return (kind === 'research_task' && taskIds.has(id))
       || (kind === 'knowledge_domain' && id === task.knowledge_domain);
   });
 }
 
 export const __researchTestHooks = {
   buildSourceModels,
+  collapseResearchTaskLineages,
   collectionDiagnosticRows,
   diagnosticRows,
   disabledTabButton,
@@ -5764,7 +5808,9 @@ export const __researchTestHooks = {
   normalizeKnowledgeTableRows,
   renderNoTaskCenter,
   researchDomainFromFormValue,
+  sourceTierGrade,
   metricPropellerLength,
+  boundedVerifiedSourceCount,
   effectiveTargetVerifiedSources,
   shouldRetryEmptyKnowledgeTables,
   tangentialEquivalentForce,

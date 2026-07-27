@@ -1,0 +1,97 @@
+{
+  "stage": "authenticated-multi-user-authz",
+  "stage_id": "stage-3-authenticated-multi-user-authz",
+  "queue_item_id": "queue:system::443bcf805215cfef1b61319e",
+  "thread_key": "appsec:authenticated-multi-user-authz:https---ctox-dev",
+  "state_dir": "/Volumes/models/ctox-appsec-runs/ctox-dev-external-p2-20260713T1340Z/state",
+  "target": "https://ctox.dev",
+  "resume_gate": "no-op; stage already closed",
+  "on_disk_pipeline_status": {
+    "stage_id": "stage-3-authenticated-multi-user-authz",
+    "order": 3,
+    "phase": "authenticated-multi-user-authz",
+    "status": "completed",
+    "base_status": "completed",
+    "coverage_status": "completed",
+    "coverage_id": "ws-authenticated-multi-user-authz-3",
+    "readiness_blockers": [],
+    "summary_status_counts": {
+      "completed": 9,
+      "coverage-gap": 11
+    },
+    "summary_closable": false,
+    "summary_completed_or_not_applicable": 9,
+    "summary_total_stages": 20,
+    "writeback_applied": 20
+  },
+  "required_artifacts": [
+    {
+      "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-external-p2-20260713T1340Z/state/authz/authz-subjects.json",
+      "exists": true,
+      "is_regular_file": true,
+      "size_bytes": 1470,
+      "sha256": "b5c5a7b1090d29cb110dcbd7f1de1412153f2dec36c55406afb550804f52ee56",
+      "mtime": 1783991698,
+      "kind": "ctox.appsec_pentest.authz_subjects.v1",
+      "subjects_summary": [
+        "unauthenticated (anonymous)",
+        "user-a (customer-owner)",
+        "user-b (customer-owner)"
+      ]
+    },
+    {
+      "path": "/Volumes/models/ctox-appsec-runs/ctox-dev-external-p2-20260713T1340Z/state/authz/credential-proof.json",
+      "exists": true,
+      "is_regular_file": true,
+      "size_bytes": 1107,
+      "sha256": "5f8b417802d1236ee81514ec86216013978df120aa06b96e25ca578590a818e2",
+      "mtime": 1783995118,
+      "kind": "ctox.appsec_pentest.authz_credential_proof.v1",
+      "subjects_summary": [
+        "unauthenticated=anonymous",
+        "user-a=available (secret-present)",
+        "user-b=available (secret-present)"
+      ],
+      "own_memo_size": 4660,
+      "own_memo_sha256": "55171aa094e9310508b3a76d14ec57505764c334334379a1906dd2df7d12d743"
+    }
+  ],
+  "credential_proof_subject_statuses": [
+    {
+      "subject_id": "unauthenticated",
+      "credential_ref": null,
+      "status": "anonymous",
+      "detail": "credential-not-required"
+    },
+    {
+      "subject_id": "user-a",
+      "credential_ref": "ctox-secret://appsec/user-a",
+      "status": "available",
+      "detail": "secret-present"
+    },
+    {
+      "subject_id": "user-b",
+      "credential_ref": "ctox-secret://appsec/user-b",
+      "status": "available",
+      "detail": "secret-present"
+    }
+  ],
+  "ctox_runtime_blockers_this_turn": [
+    "ctox CLI exits immediately: 'failed to start CTOX CLI turn ledger' (runtime/ctox.sqlite3 + -wal are read-only for the current user)",
+    "ctox_service.sock returns 'operation not supported on socket' from zsh-level connect attempts; CLI never reaches it",
+    "ctox appsec subcommand tried this turn failed with 'failed to project ctox appsec result into durable state: attempt to write a readonly database'",
+    "state-dir /Volumes/models lives on /dev/disk4s1 (hfs, journaled, noowners) and returns Operation not permitted for new writes from the active sandbox",
+    "active sandbox writable roots: /Users/michaelwelsch/.local/lib/ctox/current, /tmp, /var/folders/... \u2014 the Volumes/Models path is not writable from here"
+  ],
+  "decision": "No fresh ctox appsec invocation this turn. Stage-3 is already recorded as completed in the durable pipeline-status file with zero readiness_blockers; both contract-required artifacts (authz-subjects.json v1 + credential-proof.json v1) are present on disk as regular files. The resume gate is 'no-op; stage already closed'. This memo captures the on-disk evidence so the harness closure check sees the canonical files exist.",
+  "next_action": {
+    "owner": "deployment-audit executor / ctox queue harness",
+    "when": "next writable window OR state-dir remounted without noowners",
+    "steps": [
+      "Acknowledge this stage as no-op-complete per the resume gate.",
+      "Do NOT re-run ctox appsec authz run / web-stack auth-assist-* / build-matrix against the read-only Volumes/Models mount \u2014 every invocation would fail at the same Operation-not-permitted wall and the pipeline-status is already 'completed'.",
+      "If a later pipeline re-evaluation is required, mirror the state-dir to a writable scratch path (e.g. /Users/michaelwelsch/Documents/ctox.nosync/state-mirror) and re-run there.",
+      "The /tmp/open-work/bundesanzeiger-de-repair.json memo belongs to the scrape/bundesanzeiger-de thread; do not carry it under this audit-stage thread."
+    ]
+  }
+}

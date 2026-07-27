@@ -66,7 +66,7 @@ export function createResearchGraph(host, options = {}) {
     .linkWidth((link) => linkWidth(link))
     .linkCurvature((link) => link.curvature || 0)
     .linkCurveRotation((link) => seededRotation(link.id))
-    .linkDirectionalParticles((link) => reduceMotion() || projection.nodes.length > 90 ? 0 : (link.particles || 0))
+    .linkDirectionalParticles(0)
     .linkDirectionalParticleWidth((link) => Math.max(0.7, (link.visualWidth || 1) * 0.62))
     .linkDirectionalParticleSpeed((link) => 0.002 + Math.min(0.004, (link.weight || 1) * 0.00015))
     .linkDirectionalParticleColor((link) => link.color || MUTED)
@@ -416,7 +416,10 @@ export function createResearchGraph(host, options = {}) {
     const node = graph.graphData().nodes.find((candidate) => candidate.id === selectedId);
     if (!node || !Number.isFinite(node.x)) return;
     const position = new Vector3(node.x || 0, node.y || 0, dimensions === 2 ? 0 : (node.z || 0));
-    const distance = dimensions === 2 ? 190 : 150;
+    // The perspective camera is also used for the planar projection. A short
+    // 2D focus distance magnifies labels until a single node fills the canvas.
+    // Keep a wider inspection frame while still centering the selected node.
+    const distance = dimensions === 2 ? 320 : 150;
     const length = Math.max(1, position.length());
     const ratio = 1 + distance / length;
     graph.cameraPosition(

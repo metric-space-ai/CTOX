@@ -1,0 +1,12 @@
+{
+  "version": "ctox.appsec.web_stack.auth_assist.v1",
+  "kind": "auth-assist-request",
+  "subject": "user-a",
+  "target_url": "https://ctox.dev/dashboard",
+  "redacted_at": "2026-07-13T10:51:33Z",
+  "credential_ref": "ctox-secret://appsec/user-a",
+  "login_hint": "deployment-audit-user-a-20260713@ctox.dev",
+  "verify_selector": ".dashboard-shell",
+  "status": "succeeded",
+  "notes": "Credential material remains exclusively in the CTOX secret store; only refs and structural fields are reproduced here."
+}

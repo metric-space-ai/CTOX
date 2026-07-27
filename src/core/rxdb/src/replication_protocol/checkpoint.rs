@@ -3,9 +3,10 @@
 use serde_json::{json, Value};
 
 use crate::plugins::utils::utils_document::{get_default_revision, get_default_rx_document_meta};
+use crate::plugins::utils::utils_object_deep_equal::deep_equal;
 use crate::plugins::utils::utils_revision::create_revision;
 use crate::plugins::utils::utils_time::now;
-use crate::rx_error::{new_rx_error, RxError, RxResult};
+use crate::rx_error::{new_rx_error, RxResult};
 use crate::rx_schema_helper::get_composed_primary_key_of_document_data;
 use crate::rx_storage_helper::{get_written_documents_from_bulk_write_response, stack_checkpoints};
 use crate::types::{
@@ -43,6 +44,22 @@ pub async fn get_last_checkpoint_doc(
     }
 }
 
+/// Writes a configured initial checkpoint only when the direction has no
+/// persisted checkpoint yet.
+pub async fn set_initial_checkpoint(
+    state: &RxStorageInstanceReplicationState,
+    direction: RxStorageReplicationDirection,
+    checkpoint: Option<&Value>,
+) -> RxResult<()> {
+    let Some(checkpoint) = checkpoint else {
+        return Ok(());
+    };
+    if get_last_checkpoint_doc(state, direction).await?.is_none() {
+        set_checkpoint(state, direction, checkpoint.clone()).await?;
+    }
+    Ok(())
+}
+
 // ref: rxdb/src/replication-protocol/checkpoint.ts:46-143
 /// Sets the checkpoint, automatically resolving conflicts that appear.
 pub async fn set_checkpoint(
@@ -60,7 +77,7 @@ pub async fn set_checkpoint(
         None => true,
         Some(prev) => {
             let prev_cp = prev.get("checkpointData").cloned().unwrap_or(Value::Null);
-            serde_json::to_string(&prev_cp).ok() != serde_json::to_string(&checkpoint).ok()
+            !deep_equal(&prev_cp, &checkpoint)
         }
     };
 
@@ -173,14 +190,6 @@ pub async fn set_checkpoint(
             }
         };
         previous_checkpoint_doc = Some(in_db);
-        let prev_rev = previous_checkpoint_doc
-            .as_ref()
-            .and_then(|p| p.get("_rev"))
-            .and_then(|v| v.as_str());
-        let rev = create_revision(&state.checkpoint_key, prev_rev).unwrap_or_default();
-        if let Some(obj) = new_doc.as_object_mut() {
-            obj.insert("_rev".to_string(), Value::String(rev));
-        }
     }
 }
 
@@ -194,10 +203,4 @@ pub async fn get_checkpoint_key(input: &RxStorageInstanceReplicationInput) -> St
     );
     let hash = input.hash_function.hash(combined).await;
     format!("rx_storage_replication_{hash}")
-}
-
-// quiet unused warning if any
-#[allow(dead_code)]
-fn _phantom_err_clone() -> RxError {
-    new_rx_error("SNH", None)
 }

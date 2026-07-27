@@ -86,10 +86,12 @@
           <div class="ctox-pane-tabs" role="tablist" aria-label="Knowledge Ansicht">
             <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="skill" aria-selected="true">Skill<span class="view-count" data-pg-count="skill"></span></button>
             <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="runbooks" aria-selected="false">Runbooks<span class="view-count" data-pg-count="runbooks"></span></button>
+            <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="resources" aria-selected="false">Quellen<span class="view-count" data-pg-count="resources"></span></button>
             <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="data" aria-selected="false">Tabellen<span class="view-count" data-pg-count="data"></span></button>
           </div>
         </div>
         <div class="knowledge-tab-panel" data-panel="skill">
+          <div class="knowledge-secondary-switcher" data-skillbook-switcher></div>
           <div class="knowledge-content-actions">
             <span class="knowledge-edit-status" data-skill-status></span>
             <button class="ctox-pane-icon is-confirm" type="button" data-action="save-markdown" hidden aria-label="An CTOX geben" title="An CTOX geben"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l5 5L19 7"/></svg></button>
@@ -115,6 +117,10 @@
             <input class="ctox-input" data-runbook-title placeholder="Runbook-Titel" />
             <textarea class="ctox-textarea" data-runbook-prompt placeholder="Runbook-Anweisung"></textarea>
           </form>
+        </div>
+        <div class="knowledge-tab-panel" data-panel="resources" hidden>
+          <div class="knowledge-secondary-switcher" data-resource-switcher></div>
+          <article class="markdown-document" data-resource-view></article>
         </div>
         <div class="knowledge-tab-panel" data-panel="data" hidden>
           <div class="table-switcher" data-table-switcher></div>

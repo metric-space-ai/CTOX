@@ -1,0 +1,1167 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+<script>window.RemTargetMode="ctox";</script>
+  <link rel="icon" href="data:,">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Vertriebsmanagement</title>
+  <link rel="stylesheet" href="./shared/rem-app-shell-v1/rem-app-shell-v1.css">
+  <style>
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+    .vm-main { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; }
+    .vm-actionbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 10px; align-items: center; }
+    .vm-actionbar .ctox-button--primary { min-height: 42px; font-size: 15px; }
+    .vm-content { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; }
+    .vm-options-grid,
+    .vm-import-grid,
+    .vm-kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .vm-options-grid { grid-template-columns: repeat(4, minmax(120px, 1fr)); align-items: end; }
+    .vm-import-card,
+    .vm-kpi-card {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: var(--panel-radius);
+      background: color-mix(in srgb, var(--surface-2) 50%, var(--surface));
+      padding: 12px;
+    }
+    .vm-import-card strong,
+    .vm-kpi-card strong { color: var(--text-strong); font-size: 14px; }
+    .vm-kpi-card span { color: var(--danger); font-size: 22px; font-weight: 850; line-height: 1; }
+    .vm-import-card small,
+    .vm-kpi-card small { color: var(--muted); font-size: 12px; font-weight: 650; }
+    .vm-file-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .vm-file-row input[type="file"] { position: absolute; inline-size: 1px; block-size: 1px; opacity: 0; pointer-events: none; }
+    .vm-tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--hairline); padding: 0 14px; }
+    .vm-tab {
+      min-height: 38px;
+      border-bottom: 3px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      padding: 0 10px;
+      font-weight: 800;
+      cursor: pointer;
+    }
+    .vm-tab[aria-selected="true"] { border-bottom-color: var(--accent); color: var(--text-strong); }
+    .vm-view { display: none; min-width: 0; min-height: 0; overflow: auto; padding: 14px; }
+    .vm-view.is-active { display: block; }
+    .vm-table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: var(--panel-radius); background: var(--surface); }
+    .vm-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .vm-table th,
+    .vm-table td { border-bottom: 1px solid var(--hairline); padding: 8px 10px; text-align: left; vertical-align: top; }
+    .vm-table th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--surface-2);
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    .vm-table tr:last-child td { border-bottom: 0; }
+    .vm-pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 780;
+      white-space: nowrap;
+    }
+    .vm-pill--ok { border-color: color-mix(in srgb, var(--success) 34%, var(--line)); background: var(--success-soft); color: var(--success); }
+    .vm-pill--warn { border-color: color-mix(in srgb, var(--warning) 40%, var(--line)); background: var(--warning-soft); color: var(--warning); }
+    .vm-pill--open { border-color: color-mix(in srgb, var(--danger) 34%, var(--line)); background: var(--danger-soft); color: var(--danger); }
+    .vm-empty {
+      display: grid;
+      place-items: center;
+      min-height: 220px;
+      color: var(--muted);
+      text-align: center;
+      border: 1px dashed var(--line);
+      border-radius: var(--panel-radius);
+      background: color-mix(in srgb, var(--surface-2) 30%, transparent);
+      padding: 24px;
+    }
+    .vm-filter-row { display: grid; grid-template-columns: minmax(0, 1fr) 160px 160px; gap: 8px; margin-bottom: 10px; }
+    .vm-agent-body { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; overflow: hidden; }
+    .vm-agent-scroll { display: grid; align-content: start; gap: 16px; min-height: 0; overflow: auto; padding: 14px; }
+    .vm-agent-headline { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+    .vm-agent-state { display: grid; gap: 8px; }
+    .vm-agent-title { color: var(--danger); font-size: 23px; font-weight: 860; line-height: 1.05; }
+    .vm-agent-copy { color: var(--text); }
+    .vm-blockers { display: grid; gap: 8px; }
+    .vm-blocker {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--control-radius);
+      background: var(--surface);
+      padding: 9px 10px;
+    }
+    .vm-modal-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .vm-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+    .vm-export-band {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-top: 12px;
+      border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+      border-radius: var(--panel-radius);
+      background: var(--accent-soft);
+      padding: 12px;
+    }
+    .vm-export-band[hidden] { display: none; }
+    .vm-stack { display: grid; gap: 12px; }
+    .vm-map-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+    .vm-agent-muted { color: var(--muted); font-weight: 700; }
+
+    @media (max-width: 860px) {
+      .vm-actionbar { grid-template-columns: minmax(0, 1fr); }
+      .vm-import-grid,
+      .vm-kpi-grid,
+      .vm-options-grid,
+      .vm-map-grid,
+      .vm-filter-row,
+      .vm-modal-grid { grid-template-columns: minmax(0, 1fr); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app-shell rem-app-shell" data-rem-shell-version="1">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Vertriebsmanagement</h1>
+        <span class="version sr-only">v0.4.0 rebuild</span>
+      </div>
+      <div class="top-actions">
+        <span id="apiStatus" class="api-status sr-only">Eingebaute API · Azure · gpt-5.4</span>
+        <button id="apiButton" class="ctox-button" type="button">API</button>
+        <div class="theme-toggle" aria-label="Theme">
+          <button id="lightTheme" type="button" aria-label="Helles Theme" aria-pressed="true">☀</button>
+          <button id="darkTheme" type="button" aria-label="Dunkles Theme" aria-pressed="false">◑</button>
+        </div>
+      </div>
+    </header>
+
+    <main id="workspace" class="ctox-workspace ctox-workspace--two-pane" data-resize-frame data-resize-key="vertrieb">
+      <section class="ctox-pane vm-main">
+        <div class="ctox-pane-header ctox-pane-band">
+          <div class="ctox-pane-title ctox-pane-titles">
+            <strong>Daten vorbereiten</strong>
+            <span id="mainSubtitle">Leads, Accounts und PLZ-Zuweisung importieren.</span>
+          </div>
+          <div class="ctox-pane-actions vm-actionbar">
+            <button id="startButton" class="ctox-button ctox-button--primary" type="button" disabled>Leads anreichern und zuweisen</button>
+            <button id="optionsButton" class="ctox-button" type="button" aria-expanded="false">Optionen</button>
+          </div>
+        </div>
+
+        <div id="optionsPanel" class="rem-options-panel">
+          <div class="vm-options-grid">
+            <label>
+              <span class="ctox-field-label">SF-Match Schwelle</span>
+              <input id="matchThreshold" class="ctox-input" type="number" min="60" max="100" value="88">
+            </label>
+            <label>
+              <span class="ctox-field-label">Batch-Groesse</span>
+              <input id="batchSize" class="ctox-input" type="number" min="10" max="500" value="80">
+            </label>
+            <label>
+              <span class="ctox-field-label">Recherche</span>
+              <select id="researchMode" class="ctox-select">
+                <option value="off">Aus</option>
+                <option value="missing">Nur fehlende Adressen markieren</option>
+              </select>
+            </label>
+            <label>
+              <span class="ctox-field-label">Export</span>
+              <select id="exportMode" class="ctox-select">
+                <option value="zip">ZIP und Excel</option>
+                <option value="xlsx">Nur Excel</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="vm-content">
+          <nav class="vm-tabs" aria-label="Ansichten">
+            <button class="vm-tab" type="button" data-view="import" aria-selected="true">Import</button>
+            <button class="vm-tab" type="button" data-view="leads">Leads</button>
+            <button class="vm-tab" type="button" data-view="results">Ergebnis</button>
+            <button class="vm-tab" type="button" data-view="mapping">Mapping</button>
+          </nav>
+
+          <div class="ctox-pane-body">
+            <section id="view-import" class="vm-view is-active">
+              <div class="vm-stack">
+                <div class="vm-import-grid">
+                  <article class="vm-import-card">
+                    <strong>Leads</strong>
+                    <small>Excel oder CSV mit Unternehmensliste.</small>
+                    <div class="vm-file-row">
+                      <label class="ctox-button" for="leadsFile">Leads importieren</label>
+                      <input id="leadsFile" type="file" accept=".xlsx,.xls,.csv">
+                    </div>
+                  </article>
+                  <article class="vm-import-card">
+                    <strong>Accounts</strong>
+                    <small>Salesforce-Accountbasis mit Inhaber.</small>
+                    <div class="vm-file-row">
+                      <label class="ctox-button" for="accountsFile">Accounts laden</label>
+                      <input id="accountsFile" type="file" accept=".xlsx,.xls,.csv">
+                    </div>
+                  </article>
+                  <article class="vm-import-card">
+                    <strong>PLZ-Zuweisung</strong>
+                    <small>PLZ oder Prefix plus zuständiger MA.</small>
+                    <div class="vm-file-row">
+                      <label class="ctox-button" for="plzFile">PLZ laden</label>
+                      <input id="plzFile" type="file" accept=".xlsx,.xls,.csv">
+                    </div>
+                  </article>
+                </div>
+
+                <div class="vm-import-card">
+                  <strong>Kombinierte Datei</strong>
+                  <small>Optional: Eine Arbeitsmappe mit Tabellen für Leads, Accounts und PLZ-Zuweisung.</small>
+                  <div class="vm-file-row">
+                    <label class="ctox-button" for="combinedFile">Arbeitsmappe importieren</label>
+                    <input id="combinedFile" type="file" accept=".xlsx,.xls,.csv">
+                    <button id="clearButton" class="ctox-button" type="button">Zurücksetzen</button>
+                  </div>
+                </div>
+
+                <div class="vm-kpi-grid">
+                  <div class="vm-kpi-card"><strong>Leads</strong><span id="leadCount">0</span><small id="leadMeta">nicht geladen</small></div>
+                  <div class="vm-kpi-card"><strong>Accounts</strong><span id="accountCount">0</span><small id="accountMeta">nicht geladen</small></div>
+                  <div class="vm-kpi-card"><strong>PLZ</strong><span id="plzCount">0</span><small id="plzMeta">nicht geladen</small></div>
+                </div>
+              </div>
+            </section>
+
+            <section id="view-leads" class="vm-view">
+              <div class="vm-filter-row">
+                <input id="leadFilter" class="ctox-input" type="search" placeholder="Firma, PLZ, Ort oder Notiz filtern">
+                <select id="statusFilter" class="ctox-select">
+                  <option value="">Alle Stati</option>
+                  <option value="Offen">Offen</option>
+                  <option value="Gefunden">Gefunden</option>
+                  <option value="Review">Review</option>
+                </select>
+                <select id="ownerFilter" class="ctox-select">
+                  <option value="">Alle MA</option>
+                </select>
+              </div>
+              <div id="leadsTable" class="vm-table-wrap"></div>
+            </section>
+
+            <section id="view-results" class="vm-view">
+              <div id="exportBand" class="vm-export-band" hidden>
+                <div>
+                  <strong>Export bereit</strong><br>
+                  <span id="exportSummary" class="vm-agent-muted"></span>
+                </div>
+                <div class="ctox-pane-actions">
+                  <button id="xlsxButton" class="ctox-button" type="button">Excel herunterladen</button>
+                  <button id="zipButton" class="ctox-button ctox-button--primary" type="button">ZIP herunterladen</button>
+                </div>
+              </div>
+              <div id="resultsTable" class="vm-table-wrap" style="margin-top:12px;"></div>
+            </section>
+
+            <section id="view-mapping" class="vm-view">
+              <div class="vm-stack">
+                <div class="vm-map-grid" id="mappingGrid"></div>
+                <button id="applyMapping" class="ctox-button" type="button">Mapping übernehmen</button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </section>
+
+      <button class="ctox-column-resizer" data-resizer="right" data-resizer-var="--ctox-right-width" data-resizer-min="300" data-resizer-max="560" data-resizer-default="360" aria-label="Agent-Spalte anpassen"></button>
+
+      <aside class="pane agent-pane ctox-pane ctox-pane--glass" data-agent-state="idle">
+        <header class="pane-header ctox-pane-header ctox-pane-band">
+          <div class="pane-title ctox-pane-title ctox-pane-titles">
+            <strong>Agent</strong>
+            <span id="agentKicker">bereit</span>
+          </div>
+        </header>
+        <div class="vm-agent-body agent-body">
+          <div class="vm-agent-scroll ctox-pane-scroll">
+            <section class="vm-agent-state status-block rem-agent-status">
+              <div class="vm-agent-headline">
+                <div id="agentTitle" class="vm-agent-title">Bereit</div>
+              </div>
+              <div id="agentCopy" class="vm-agent-copy">Importiere Leads, Accounts und PLZ-Zuweisung.</div>
+            </section>
+            <section id="progressBlock" class="progress-wrap rem-progress" hidden aria-label="Fortschritt">
+              <div class="rem-progress-meta"><span id="progressLabel">Lauf</span><span id="progressPercent">0%</span></div>
+              <div class="rem-progress-track"><div id="progressFill" class="rem-progress-fill"></div></div>
+            </section>
+
+            <section id="blockerSection" class="vm-blockers"></section>
+
+            <section id="questionSection" hidden>
+              <div class="rem-question-card">
+                <strong>Rückfrage</strong>
+                <div id="questionText"></div>
+                <textarea id="questionAnswer" class="ctox-textarea" rows="4" placeholder="Kurz beantworten"></textarea>
+                <button id="applyQuestion" class="ctox-button ctox-button--primary" type="button">Antwort übernehmen</button>
+              </div>
+            </section>
+
+            <section class="activity" aria-label="Aktivität">
+              <div class="vm-agent-headline" style="border-top:1px solid var(--hairline); padding-top:12px;">
+                <strong style="color:var(--danger);">Aktivität</strong>
+                <span id="activityCount" class="vm-agent-muted">0 Einträge</span>
+              </div>
+              <ul id="activityList" class="rem-activity-list" style="margin-top:10px;"></ul>
+            </section>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <dialog id="apiDialog" class="rem-modal">
+    <form method="dialog" style="padding:18px;">
+      <div class="vm-agent-headline">
+        <h2 style="margin:0;color:var(--danger);">API</h2>
+        <button class="ctox-icon-button" value="cancel" type="submit" aria-label="Schließen">×</button>
+      </div>
+      <div style="display:flex;gap:8px;margin:16px 0;">
+        <button id="builtinApiMode" class="ctox-button" type="button">Eingebaute API</button>
+        <button id="customApiMode" class="ctox-button" type="button">Eigene API</button>
+      </div>
+      <div class="vm-modal-grid">
+        <label><span class="ctox-field-label">Provider</span><select id="apiProvider" class="ctox-select"><option>Azure OpenAI</option><option>OpenAI</option></select></label>
+        <label><span class="ctox-field-label">Modell</span><input id="apiModel" class="ctox-input" value="gpt-5.4"></label>
+        <label><span class="ctox-field-label">API Key</span><input id="apiKey" class="ctox-input" type="password" value="eingebettet"></label>
+        <label><span class="ctox-field-label">Azure Endpoint</span><input id="apiEndpoint" class="ctox-input" value="eingebettet"></label>
+        <label><span class="ctox-field-label">Azure API-Version</span><input id="apiVersion" class="ctox-input" value="preview"></label>
+      </div>
+      <div class="vm-modal-actions">
+        <button id="saveApiButton" class="ctox-button ctox-button--primary" type="button">Eigene API speichern</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="./shared/vendor/xlsx.full.min.js"></script>
+  <script src="./shared/vendor/jszip.min.js"></script>
+  <script src="./shared/rem-app-shell-v1/rem-app-shell-v1.js"></script>
+  <script>
+    (() => {
+      'use strict';
+
+      const state = {
+        datasets: { leads: null, accounts: null, plz: null },
+        mappings: {},
+        results: [],
+        runLog: [],
+        running: false,
+        completed: false,
+        apiMode: 'built-in',
+        activeView: 'import',
+        exportBuffers: null,
+        instructionComposer: null,
+      };
+      const BUILTIN_PASSWORD = 'Fußballweltmeister';
+      const BUILTIN_BLOB = 'djESu6PN18S//hoDRXD92+P67klyazJa7ZHn+IRT3z8dGnG5Q1tRplWwvXGs9VSwUn4J/kGWcc+hrg17/jaMmurkv6O2xFzvjIN2+EPinfyAz5/yed8430w5pHs790X4VGCjGb6952WmcRfV1k1QS9azHswnVnOOU8U4rvxUX3M65v2E8l2dI7rhNedXnpU8twjUOlACQVfjXkGyWoe4w2X13C9rIhDJTTblmOHFAcRNvSfvQkr2UF9nrwQfplkes4RyiDxS9D0rUi6cgSsROdHsnh0JTTf+In5V4vnNv2DOOT/Il0I7emUBH6w39Zoz/URQBT3BBKn+v3ASUdAppMtxq1UTvteesqQijUPtq1l3iEc=';
+
+      const selectors = {
+        leads: {
+          company: ['unternehmen', 'firma', 'company', 'accountname', 'name'],
+          zip: ['plz', 'postleitzahl', 'zip', 'postal code'],
+          city: ['ort', 'stadt', 'city'],
+          street: ['strasse', 'straße', 'adresse', 'street'],
+          country: ['land', 'country'],
+          website: ['website', 'webseite', 'url'],
+          email: ['email', 'e-mail', 'mail'],
+          phone: ['telefon', 'phone'],
+          note: ['notiz', 'notes', 'beschreibung']
+        },
+        accounts: {
+          company: ['accountname', 'unternehmen', 'firma', 'name'],
+          owner: ['accountinhaber', 'inhaber', 'zuständiger ma', 'zustaendiger ma', 'owner', 'vertriebler'],
+          zip: ['plz', 'postleitzahl', 'zip'],
+          city: ['stadt', 'ort', 'city'],
+          street: ['strasse', 'straße', 'adresse']
+        },
+        plz: {
+          zip: ['plz', 'postleitzahl', 'prefix', 'leitregion'],
+          owner: ['vertriebler', 'zuständiger ma', 'zustaendiger ma', 'mitarbeiter', 'owner']
+        }
+      };
+
+      const requiredMappings = {
+        leads: ['company'],
+        accounts: ['company', 'owner'],
+        plz: ['zip', 'owner']
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      function nowTime() {
+        return new Date().toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      }
+
+      function log(message) {
+        state.runLog.unshift({ time: nowTime(), message });
+        renderAgent();
+      }
+
+      function normalize(text) {
+        return String(text || '')
+          .toLowerCase()
+          .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          .replace(/&/g, ' und ')
+          .replace(/\b(gmbh|ag|kg|ug|se|ltd|co|ohg|mbh|sarl|inc|corp|llc|kgaa|e\.k\.|eg)\b/g, ' ')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim()
+          .replace(/\s+/g, ' ');
+      }
+
+      function tokens(text) {
+        return normalize(text).split(' ').filter((token) => token.length > 2);
+      }
+
+      function value(row, key) {
+        if (!row || !key) return '';
+        return row[key] == null ? '' : String(row[key]).trim();
+      }
+
+      function toDisplayValue(rawValue) {
+        if (rawValue == null) return '';
+        if (rawValue instanceof Date) return rawValue.toISOString().slice(0, 10);
+        return String(rawValue).trim();
+      }
+
+      function normalizeHeaderName(rawValue) {
+        return toDisplayValue(rawValue)
+          .toLowerCase()
+          .replace(/ä/g, 'ae')
+          .replace(/ö/g, 'oe')
+          .replace(/ü/g, 'ue')
+          .replace(/ß/g, 'ss')
+          .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-z0-9]+/g, ' ')
+          .trim();
+      }
+
+      function makeUniqueHeaders(rawHeaders) {
+        const seen = new Map();
+        return rawHeaders.map((rawValue, index) => {
+          const base = toDisplayValue(rawValue) || `Spalte ${index + 1}`;
+          const count = seen.get(base) || 0;
+          seen.set(base, count + 1);
+          return count ? `${base} ${count + 1}` : base;
+        });
+      }
+
+      function scoreHeaderRow(cells, datasetKey) {
+        const normalized = cells.map(normalizeHeaderName);
+        const nonEmpty = normalized.filter(Boolean);
+        if (!nonEmpty.length) return -999;
+        let score = nonEmpty.length * 0.25;
+        const joined = normalized.join(' | ');
+        const keywords = datasetKey === 'leads'
+          ? ['unternehmen', 'firma', 'company', 'aussteller', 'exhibitor', 'plz', 'name']
+          : datasetKey === 'accounts'
+            ? ['account', 'owner', 'inhaber', 'plz', 'name', 'salesforce']
+            : ['plz', 'postleitzahl', 'vertrieb', 'owner', 'gebiet', 'zustaendig', 'mitarbeiter'];
+        keywords.forEach((keyword) => {
+          if (joined.includes(keyword)) score += 2.25;
+        });
+        score += nonEmpty.filter((value) => /[a-z]/.test(value)).length * 0.22;
+        score -= nonEmpty.filter((value) => /^\d+$/.test(value)).length * 0.45;
+        return score;
+      }
+
+      function detectHeaderRow(matrix, datasetKey) {
+        const limit = Math.min(matrix.length, 25);
+        let bestIndex = 0;
+        let bestScore = -Infinity;
+        for (let i = 0; i < limit; i += 1) {
+          const score = scoreHeaderRow(Array.isArray(matrix[i]) ? matrix[i] : [], datasetKey);
+          if (score > bestScore) {
+            bestScore = score;
+            bestIndex = i;
+          }
+        }
+        return bestIndex;
+      }
+
+      function guessColumn(headers, candidates) {
+        const normalized = headers.map((header) => ({ original: header, norm: normalize(header) }));
+        for (const candidate of candidates) {
+          const cand = normalize(candidate);
+          const exact = normalized.find((item) => item.norm === cand);
+          if (exact) return exact.original;
+        }
+        for (const candidate of candidates) {
+          const cand = normalize(candidate);
+          const partial = normalized.find((item) => item.norm.includes(cand) || cand.includes(item.norm));
+          if (partial) return partial.original;
+        }
+        return '';
+      }
+
+      function detectMappings(datasetKey, headers) {
+        const result = {};
+        const spec = selectors[datasetKey] || {};
+        Object.entries(spec).forEach(([field, candidates]) => {
+          result[field] = guessColumn(headers, candidates);
+        });
+        return result;
+      }
+
+      function getMapping(datasetKey, field) {
+        return (state.mappings[datasetKey] && state.mappings[datasetKey][field]) || '';
+      }
+
+      function parseSheet(sheet, datasetKey) {
+        const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '' });
+        const headerIndex = raw.length ? detectHeaderRow(raw, datasetKey) : -1;
+        if (headerIndex < 0) return { headers: [], rows: [] };
+        const headers = makeUniqueHeaders(raw[headerIndex]);
+        const rows = raw.slice(headerIndex + 1)
+          .filter((row) => Array.isArray(row) && row.some((cell) => toDisplayValue(cell)))
+          .map((row, rowIndex) => {
+            const obj = Object.fromEntries(headers.map((header, index) => [header, toDisplayValue(row[index])]));
+            obj.__rowNumber = headerIndex + rowIndex + 2;
+            return obj;
+          });
+        return { headers, rows };
+      }
+
+      async function readWorkbook(file) {
+        const name = (file.name || '').toLowerCase();
+        if (name.endsWith('.csv') || name.endsWith('.tsv')) {
+          const text = await file.text();
+          return XLSX.read(text, { type: 'string', raw: false });
+        }
+        const buffer = await file.arrayBuffer();
+        return XLSX.read(buffer, { type: 'array', raw: false, cellDates: true });
+      }
+
+      function scoreSheet(headers, datasetKey) {
+        const map = detectMappings(datasetKey, headers);
+        const requiredHits = Object.values(map).filter(Boolean).length;
+        const headerScore = scoreHeaderRow(headers, datasetKey);
+        return requiredHits * 5 + headerScore;
+      }
+
+      function setDataset(datasetKey, dataset, filename) {
+        state.datasets[datasetKey] = { ...dataset, filename };
+        state.mappings[datasetKey] = detectMappings(datasetKey, dataset.headers);
+        log(`${labelFor(datasetKey)} geladen (${dataset.rows.length}).`);
+        renderAll();
+      }
+
+      function labelFor(datasetKey) {
+        return datasetKey === 'leads' ? 'Leads' : datasetKey === 'accounts' ? 'Accounts' : 'PLZ-Zuweisung';
+      }
+
+      async function importSingle(datasetKey, file) {
+        if (!file) return;
+        const workbook = await readWorkbook(file);
+        const sheets = workbook.SheetNames.map((name) => ({ name, data: parseSheet(workbook.Sheets[name], datasetKey) }));
+        const best = sheets.sort((a, b) => scoreSheet(b.data.headers, datasetKey) - scoreSheet(a.data.headers, datasetKey))[0];
+        setDataset(datasetKey, best.data, file.name);
+      }
+
+      async function importCombined(file) {
+        if (!file) return;
+        const workbook = await readWorkbook(file);
+        ['leads', 'accounts', 'plz'].forEach((key) => {
+          const sheets = workbook.SheetNames.map((name) => ({ name, data: parseSheet(workbook.Sheets[name], key) }));
+          const best = [...sheets].sort((a, b) => {
+            const nameBonusA = normalize(a.name).includes(key === 'plz' ? 'plz' : key === 'accounts' ? 'account' : 'lead') ? 4 : 0;
+            const nameBonusB = normalize(b.name).includes(key === 'plz' ? 'plz' : key === 'accounts' ? 'account' : 'lead') ? 4 : 0;
+            return scoreSheet(b.data.headers, key) + nameBonusB - scoreSheet(a.data.headers, key) - nameBonusA;
+          })[0];
+          if (best && best.data.rows.length) setDataset(key, best.data, `${file.name} / ${best.name}`);
+        });
+      }
+
+      function prerequisites() {
+        const missing = [];
+        if (!state.datasets.leads?.rows.length) missing.push('Leads importieren');
+        if (!state.datasets.accounts?.rows.length) missing.push('Accounts laden');
+        if (!state.datasets.plz?.rows.length) missing.push('PLZ-Zuweisung laden');
+        return { missing, canStart: missing.length === 0 };
+      }
+
+      function validateMappings() {
+        const missing = [];
+        Object.entries(requiredMappings).forEach(([datasetKey, fields]) => {
+          fields.forEach((field) => {
+            if (!getMapping(datasetKey, field)) missing.push(`${labelFor(datasetKey)}: ${field}`);
+          });
+        });
+        return missing;
+      }
+
+      function buildAccountIndex() {
+        return state.datasets.accounts.rows.map((row) => {
+          const name = value(row, getMapping('accounts', 'company'));
+          return {
+            row,
+            name,
+            norm: normalize(name),
+            tokens: tokens(name),
+            owner: value(row, getMapping('accounts', 'owner')),
+            zip: value(row, getMapping('accounts', 'zip')),
+            city: value(row, getMapping('accounts', 'city')),
+            street: value(row, getMapping('accounts', 'street'))
+          };
+        }).filter((item) => item.norm);
+      }
+
+      function buildPlzMap() {
+        const map = new Map();
+        state.datasets.plz.rows.forEach((row) => {
+          const raw = value(row, getMapping('plz', 'zip')).replace(/\D/g, '');
+          const owner = value(row, getMapping('plz', 'owner'));
+          if (!raw || !owner) return;
+          map.set(raw.padStart(raw.length <= 2 ? 2 : 5, '0'), owner);
+        });
+        return map;
+      }
+
+      function findPlzOwner(plzMap, zip) {
+        const clean = String(zip || '').replace(/\D/g, '');
+        if (!clean) return '';
+        const padded = clean.padStart(5, '0');
+        return plzMap.get(padded) || plzMap.get(padded.slice(0, 4)) || plzMap.get(padded.slice(0, 3)) || plzMap.get(padded.slice(0, 2)) || '';
+      }
+
+      function matchAccount(leadName, leadZip, index, threshold) {
+        const norm = normalize(leadName);
+        if (!norm) return null;
+        let best = null;
+        const leadTokens = tokens(leadName);
+        const leadSet = new Set(leadTokens);
+        for (const candidate of index) {
+          let score = candidate.norm === norm ? 1 : 0;
+          if (!score) {
+            const common = candidate.tokens.filter((token) => leadSet.has(token)).length;
+            const denom = Math.max(leadTokens.length, candidate.tokens.length, 1);
+            score = common / denom;
+            if (candidate.norm.includes(norm) || norm.includes(candidate.norm)) score = Math.max(score, 0.86);
+            if (leadZip && candidate.zip && String(leadZip).slice(0, 2) === String(candidate.zip).slice(0, 2)) score += 0.06;
+          }
+          if (!best || score > best.score) best = { ...candidate, score: Math.min(score, 1) };
+        }
+        return best && best.score >= threshold ? best : null;
+      }
+
+      function buildResultRow(lead, accountMatch, ownerFromPlz) {
+        const company = value(lead, getMapping('leads', 'company'));
+        const zip = value(lead, getMapping('leads', 'zip'));
+        const inSalesforce = accountMatch ? 'Ja' : 'Nein';
+        const owner = accountMatch?.owner || ownerFromPlz || '';
+        const status = owner ? 'Gefunden' : 'Review';
+        return {
+          Status: status,
+          Unternehmen: company,
+          'Account in Salesforce': inSalesforce,
+          'SF-Account': accountMatch?.name || '',
+          'Match-Score': accountMatch ? Math.round(accountMatch.score * 100) : '',
+          Strasse: value(lead, getMapping('leads', 'street')) || accountMatch?.street || '',
+          PLZ: zip || accountMatch?.zip || '',
+          Ort: value(lead, getMapping('leads', 'city')) || accountMatch?.city || '',
+          Land: value(lead, getMapping('leads', 'country')),
+          Website: value(lead, getMapping('leads', 'website')),
+          'E-Mail': value(lead, getMapping('leads', 'email')),
+          Telefon: value(lead, getMapping('leads', 'phone')),
+          'Zuständiger MA': owner,
+          Notiz: value(lead, getMapping('leads', 'note'))
+        };
+      }
+
+      async function runProcessing() {
+        const pre = prerequisites();
+        if (!pre.canStart) {
+          renderAgent();
+          return;
+        }
+        const missingMappings = validateMappings();
+        if (missingMappings.length) {
+          showQuestion(`Bitte Mapping prüfen: ${missingMappings.join(', ')}`);
+          return;
+        }
+
+        state.running = true;
+        state.completed = false;
+        state.results = [];
+        state.exportBuffers = null;
+        setView('results');
+        log('Lauf gestartet.');
+        renderAll();
+
+        const accountIndex = buildAccountIndex();
+        const plzMap = buildPlzMap();
+        const leads = state.datasets.leads.rows;
+        const threshold = Math.max(0.6, Math.min(1, Number($('matchThreshold').value || 88) / 100));
+        const batch = Math.max(10, Number($('batchSize').value || 80));
+
+        for (let i = 0; i < leads.length; i += batch) {
+          const chunk = leads.slice(i, i + batch);
+          chunk.forEach((lead) => {
+            const company = value(lead, getMapping('leads', 'company'));
+            const zip = value(lead, getMapping('leads', 'zip'));
+            const match = matchAccount(company, zip, accountIndex, threshold);
+            const ownerFromPlz = findPlzOwner(plzMap, zip);
+            state.results.push(buildResultRow(lead, match, ownerFromPlz));
+          });
+          const pct = Math.round(Math.min(96, ((i + chunk.length) / leads.length) * 96));
+          updateProgress('Leads werden verarbeitet', pct);
+          if (i === 0 || i + chunk.length >= leads.length) log(`${Math.min(i + chunk.length, leads.length)} von ${leads.length} Leads verarbeitet.`);
+          renderTables();
+          await new Promise((resolve) => setTimeout(resolve, 16));
+        }
+
+        updateProgress('Export wird vorbereitet', 98);
+        await buildExports();
+        state.running = false;
+        state.completed = true;
+        updateProgress('Fertig', 100);
+        log('Export bereit.');
+        renderAll();
+      }
+
+      function updateProgress(label, pct) {
+        $('progressLabel').textContent = label;
+        $('progressPercent').textContent = `${pct}%`;
+        $('progressFill').style.width = `${pct}%`;
+        $('progressBlock').hidden = false;
+        $('progressBlock').classList.toggle('is-running', state.running);
+      }
+
+      async function buildExports() {
+        const workbook = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(state.results), 'Ergebnisse');
+        const summary = summarizeResults();
+        XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet([summary]), 'Zusammenfassung');
+        const xlsxArray = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+        const zip = new JSZip();
+        zip.file('alle_ergebnisse.xlsx', xlsxArray);
+        zip.file('laufprotokoll.json', JSON.stringify({ createdAt: new Date().toISOString(), summary, log: state.runLog, results: state.results }, null, 2));
+        const byOwner = groupBy(state.results, 'Zuständiger MA');
+        Object.entries(byOwner).forEach(([owner, rows]) => {
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), 'Leads');
+          zip.file(`zustandiger_ma_${safeName(owner || 'review')}.xlsx`, XLSX.write(wb, { bookType: 'xlsx', type: 'array' }));
+        });
+        state.exportBuffers = {
+          xlsx: new Blob([xlsxArray], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }),
+          zip: await zip.generateAsync({ type: 'blob' })
+        };
+      }
+
+      function summarizeResults() {
+        return {
+          Leads: state.results.length,
+          'Account in Salesforce': state.results.filter((row) => row['Account in Salesforce'] === 'Ja').length,
+          'Zugewiesen': state.results.filter((row) => row['Zuständiger MA']).length,
+          Review: state.results.filter((row) => row.Status === 'Review').length
+        };
+      }
+
+      function groupBy(rows, key) {
+        return rows.reduce((acc, row) => {
+          const group = row[key] || 'Review';
+          (acc[group] ||= []).push(row);
+          return acc;
+        }, {});
+      }
+
+      function safeName(name) {
+        return normalize(name).replace(/\s+/g, '_') || 'export';
+      }
+
+      function downloadBlob(blob, filename) {
+        if (!blob) return;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      function setView(view) {
+        state.activeView = view;
+        document.querySelectorAll('.vm-tab').forEach((tab) => tab.setAttribute('aria-selected', String(tab.dataset.view === view)));
+        document.querySelectorAll('.vm-view').forEach((panel) => panel.classList.toggle('is-active', panel.id === `view-${view}`));
+      }
+
+      function renderAll() {
+        renderCounts();
+        renderMapping();
+        renderTables();
+        renderAgent();
+      }
+
+      function renderCounts() {
+        const leadRows = state.datasets.leads?.rows.length || 0;
+        const accountRows = state.datasets.accounts?.rows.length || 0;
+        const plzRows = state.datasets.plz?.rows.length || 0;
+        $('leadCount').textContent = leadRows;
+        $('accountCount').textContent = accountRows;
+        $('plzCount').textContent = plzRows;
+        $('leadMeta').textContent = state.datasets.leads?.filename || 'nicht geladen';
+        $('accountMeta').textContent = state.datasets.accounts?.filename || 'nicht geladen';
+        $('plzMeta').textContent = state.datasets.plz?.filename || 'nicht geladen';
+        const pre = prerequisites();
+        $('startButton').disabled = !pre.canStart || state.running;
+        $('mainSubtitle').textContent = pre.canStart ? 'Bereit für den Lauf.' : 'Leads, Accounts und PLZ-Zuweisung importieren.';
+      }
+
+      function renderAgent() {
+        const pre = prerequisites();
+        const agentPane = document.querySelector('.agent-pane');
+        const hasProgress = state.running || state.completed;
+        $('progressBlock').hidden = !hasProgress;
+        $('progressBlock').classList.toggle('is-running', state.running);
+        if (state.running) {
+          if (agentPane) agentPane.dataset.agentState = 'running';
+          $('agentKicker').textContent = 'läuft';
+          $('agentTitle').textContent = 'Agent läuft';
+          $('agentCopy').textContent = $('progressLabel').textContent || 'Leads werden verarbeitet.';
+        } else if (state.completed) {
+          if (agentPane) agentPane.dataset.agentState = 'done';
+          $('agentKicker').textContent = 'fertig';
+          $('agentTitle').textContent = 'Fertig';
+          $('agentCopy').textContent = 'Ergebnisse und Exporte sind bereit.';
+        } else if (!pre.canStart) {
+          if (agentPane) agentPane.dataset.agentState = 'idle';
+          $('agentKicker').textContent = 'bereit';
+          $('agentTitle').textContent = 'Datenbasis vorbereiten';
+          $('agentCopy').textContent = 'Nach dem Import startet der Lauf mit einem Klick.';
+        } else {
+          if (agentPane) agentPane.dataset.agentState = 'ready';
+          $('agentKicker').textContent = 'bereit';
+          $('agentTitle').textContent = 'Startbereit';
+          $('agentCopy').textContent = 'Alle Daten sind geladen.';
+        }
+        $('blockerSection').innerHTML = pre.missing.length ? pre.missing.map((item) => `<div class="vm-blocker"><span>${escapeHtml(item)}</span><span class="vm-pill vm-pill--open">offen</span></div>`).join('') : '';
+        $('activityCount').textContent = `${state.runLog.length} ${state.runLog.length === 1 ? 'Eintrag' : 'Einträge'}`;
+        $('activityList').innerHTML = state.runLog.slice(0, 18).map((entry) => `<li><span class="rem-activity-time">${entry.time}</span><span>${escapeHtml(entry.message)}</span></li>`).join('');
+      }
+
+      function showQuestion(text) {
+        $('questionSection').hidden = false;
+        $('questionText').textContent = text;
+        $('agentKicker').textContent = 'wartet';
+        $('agentTitle').textContent = 'Rückfrage offen';
+        $('agentCopy').textContent = 'Bitte die fehlende Information ergänzen.';
+        log('Rückfrage erstellt.');
+      }
+
+      function renderMapping() {
+        const grid = $('mappingGrid');
+        const rows = [];
+        Object.entries(selectors).forEach(([datasetKey, fields]) => {
+          if (!state.datasets[datasetKey]) return;
+          Object.keys(fields).forEach((field) => {
+            const id = `map-${datasetKey}-${field}`;
+            const current = getMapping(datasetKey, field);
+            rows.push(`<label><span class="ctox-field-label">${labelFor(datasetKey)} · ${field}</span><select id="${id}" class="ctox-select" data-dataset="${datasetKey}" data-field="${field}"><option value="">Nicht zugeordnet</option>${state.datasets[datasetKey].headers.map((header) => `<option value="${escapeAttr(header)}" ${header === current ? 'selected' : ''}>${escapeHtml(header)}</option>`).join('')}</select></label>`);
+          });
+        });
+        grid.innerHTML = rows.join('') || '<div class="vm-empty">Nach dem Import erscheint hier das Spalten-Mapping.</div>';
+      }
+
+      function renderTables() {
+        renderLeadsTable();
+        renderResultsTable();
+        renderOwnerFilter();
+        $('exportBand').hidden = !state.completed;
+        if (state.completed) {
+          const summary = summarizeResults();
+          $('exportSummary').textContent = `${summary.Leads} Leads · ${summary['Account in Salesforce']} in Salesforce · ${summary.Zugewiesen} zugewiesen · ${summary.Review} Review`;
+        }
+      }
+
+      function renderOwnerFilter() {
+        const owners = Array.from(new Set(state.results.map((row) => row['Zuständiger MA']).filter(Boolean))).sort();
+        const current = $('ownerFilter').value;
+        $('ownerFilter').innerHTML = '<option value="">Alle MA</option>' + owners.map((owner) => `<option value="${escapeAttr(owner)}">${escapeHtml(owner)}</option>`).join('');
+        $('ownerFilter').value = owners.includes(current) ? current : '';
+      }
+
+      function renderLeadsTable() {
+        const ds = state.datasets.leads;
+        if (!ds?.rows.length) {
+          $('leadsTable').innerHTML = '<div class="vm-empty">Noch keine Leads geladen.</div>';
+          return;
+        }
+        const rows = ds.rows.slice(0, 500).map((row) => ({
+          Unternehmen: value(row, getMapping('leads', 'company')),
+          PLZ: value(row, getMapping('leads', 'zip')),
+          Ort: value(row, getMapping('leads', 'city')),
+          Land: value(row, getMapping('leads', 'country')),
+          Notiz: value(row, getMapping('leads', 'note'))
+        }));
+        $('leadsTable').innerHTML = tableHtml(rows, ['Unternehmen', 'PLZ', 'Ort', 'Land', 'Notiz']);
+      }
+
+      function filteredResults() {
+        const query = normalize($('leadFilter').value);
+        const status = $('statusFilter').value;
+        const owner = $('ownerFilter').value;
+        return state.results.filter((row) => {
+          if (status && row.Status !== status) return false;
+          if (owner && row['Zuständiger MA'] !== owner) return false;
+          if (!query) return true;
+          return normalize(Object.values(row).join(' ')).includes(query);
+        });
+      }
+
+      function renderResultsTable() {
+        if (!state.results.length) {
+          $('resultsTable').innerHTML = '<div class="vm-empty">Nach dem Lauf erscheinen hier die Ergebnisse.</div>';
+          return;
+        }
+        const rows = filteredResults();
+        const columns = ['Status', 'Unternehmen', 'Account in Salesforce', 'SF-Account', 'Match-Score', 'PLZ', 'Ort', 'Zuständiger MA', 'Notiz'];
+        const body = rows.map((row) => {
+          const index = state.results.indexOf(row);
+          return `<tr data-result-index="${index}">${columns.map((col) => `<td>${cellHtml(row[col], col, true)}</td>`).join('')}<td class="vm-row-action"></td></tr>`;
+        }).join('');
+        $('resultsTable').innerHTML = `<table class="vm-table"><thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join('')}<th><span class="sr-only">Anweisung</span></th></tr></thead><tbody>${body}</tbody></table>`;
+        $('resultsTable').querySelectorAll('tr[data-result-index]').forEach((tr) => {
+          const index = Number(tr.dataset.resultIndex);
+          const row = state.results[index];
+          window.RemAppShellV1?.attachAgentContextAction?.(tr.querySelector('.vm-row-action'), {
+            type: 'lead-result',
+            rowIndex: index,
+            label: row.Unternehmen || `Lead ${index + 1}`,
+            content: JSON.stringify(row)
+          }, state.instructionComposer);
+        });
+        state.instructionComposer?.setVisible(state.results.length > 0 && state.completed);
+      }
+
+      function tableHtml(rows, columns, statusPills = false) {
+        const body = rows.map((row) => `<tr>${columns.map((col) => `<td>${cellHtml(row[col], col, statusPills)}</td>`).join('')}</tr>`).join('');
+        return `<table class="vm-table"><thead><tr>${columns.map((col) => `<th>${escapeHtml(col)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table>`;
+      }
+
+      function cellHtml(value, col, statusPills) {
+        if (statusPills && col === 'Status') {
+          const cls = value === 'Gefunden' ? 'vm-pill--ok' : value === 'Review' ? 'vm-pill--warn' : 'vm-pill--open';
+          return `<span class="vm-pill ${cls}">${escapeHtml(value || '')}</span>`;
+        }
+        if (statusPills && col === 'Account in Salesforce') {
+          const cls = value === 'Ja' ? 'vm-pill--ok' : 'vm-pill--open';
+          return `<span class="vm-pill ${cls}">${escapeHtml(value || 'Nein')}</span>`;
+        }
+        return escapeHtml(value == null ? '' : value);
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+      }
+
+      function escapeAttr(value) {
+        return escapeHtml(value).replace(/"/g, '&quot;');
+      }
+
+      function b64ToBytes(value) {
+        const binary = atob(value);
+        return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+      }
+
+      async function decryptBuiltinSettings() {
+        const raw = b64ToBytes(BUILTIN_BLOB);
+        const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(BUILTIN_PASSWORD), 'PBKDF2', false, ['deriveKey']);
+        const key = await crypto.subtle.deriveKey({ name:'PBKDF2', salt:raw.slice(2,18), iterations:200000, hash:'SHA-256' }, material, { name:'AES-GCM', length:256 }, false, ['decrypt']);
+        const plain = await crypto.subtle.decrypt({ name:'AES-GCM', iv:raw.slice(18,30) }, key, raw.slice(30));
+        return JSON.parse(new TextDecoder().decode(plain));
+      }
+
+      async function currentApiSettings() {
+        if (state.apiMode === 'built-in') return decryptBuiltinSettings();
+        return {
+          provider: /azure/i.test($('apiProvider').value) ? 'azure' : 'openai',
+          model: $('apiModel').value.trim(),
+          apiKey: $('apiKey').value.trim(),
+          azureEndpoint: $('apiEndpoint').value.trim(),
+          azureApiVersion: $('apiVersion').value.trim() || 'preview'
+        };
+      }
+
+      function responseText(data) {
+        if (data.output_text) return data.output_text;
+        return (data.output || []).flatMap((item) => item.content || []).map((item) => item.text || item.value || '').join('\n');
+      }
+
+      async function applyAgentInstruction({ instruction, context }) {
+        if (state.running) throw new Error('Der Prozess läuft bereits.');
+        if (!state.results.length) throw new Error('Bitte zuerst Leads verarbeiten.');
+        const settings = await currentApiSettings();
+        if (!settings.apiKey || !settings.model) throw new Error('API-Zugang oder Modell fehlt.');
+        const targetIndex = Number.isInteger(context?.rowIndex) ? context.rowIndex : null;
+        const targetRows = targetIndex == null ? state.results : [state.results[targetIndex]].filter(Boolean);
+        state.running = true;
+        state.instructionComposer?.setBusy(true);
+        log(targetIndex == null ? 'Nutzeranweisung wird auf die Ergebnisliste angewendet.' : `Nutzeranweisung für ${targetRows[0]?.Unternehmen || 'Lead'} wird angewendet.`);
+        updateProgress('Anweisung wird verarbeitet', 35);
+        try {
+          const endpoint = settings.provider === 'azure'
+            ? settings.azureEndpoint.replace(/\/+$/, '') + '/openai/v1/responses?api-version=' + encodeURIComponent(settings.azureApiVersion || 'preview')
+            : 'https://api.openai.com/v1/responses';
+          const headers = settings.provider === 'azure'
+            ? { 'Content-Type':'application/json', 'api-key':settings.apiKey }
+            : { 'Content-Type':'application/json', Authorization:`Bearer ${settings.apiKey}` };
+          const prompt = [
+            'Wende die Nutzeranweisung auf die gelieferten Lead-Ergebniszeilen an.',
+            'Ändere nur fachlich betroffene Werte. Erhalte alle Spaltennamen und alle nicht betroffenen Werte.',
+            'Antworte ausschließlich als JSON: {"rows":[{"index":0,"patch":{"Spaltenname":"Wert"}}]}.',
+            `Nutzeranweisung: ${instruction}`,
+            `Zeilen: ${JSON.stringify(targetRows.map((row) => ({ index:state.results.indexOf(row), row })))}`
+          ].join('\n\n');
+          const response = await fetch(endpoint, {
+            method:'POST', headers,
+            body:JSON.stringify({ model:settings.model, input:prompt })
+          });
+          if (!response.ok) throw new Error(`API ${response.status}: ${(await response.text()).slice(0,400)}`);
+          const text = responseText(await response.json());
+          const parsed = JSON.parse((text.match(/\{[\s\S]*\}/) || [text])[0]);
+          (parsed.rows || []).forEach((entry) => {
+            if (!state.results[entry.index] || !entry.patch || typeof entry.patch !== 'object') return;
+            const allowed = new Set(Object.keys(state.results[entry.index]));
+            Object.entries(entry.patch).forEach(([key, value]) => { if (allowed.has(key)) state.results[entry.index][key] = value; });
+          });
+          await buildExports();
+          log('Nutzeranweisung eingearbeitet. Export aktualisiert.');
+          updateProgress('Fertig', 100);
+        } finally {
+          state.running = false;
+          state.instructionComposer?.setBusy(false);
+          renderAll();
+        }
+      }
+
+      function initAgentInstructionComposer() {
+        state.instructionComposer = window.RemAppShellV1?.createAgentInstructionComposer?.({
+          placeholder: 'Änderung oder Ergänzung eingeben …',
+          onSubmit: applyAgentInstruction
+        }) || null;
+        state.instructionComposer?.setVisible(state.results.length > 0 && state.completed);
+      }
+
+      function bindEvents() {
+        RemAppShellV1.initTheme();
+        RemAppShellV1.initColumnResizers();
+        RemAppShellV1.initDisclosure($('optionsButton'), $('optionsPanel'));
+        initAgentInstructionComposer();
+        document.querySelectorAll('.vm-tab').forEach((tab) => tab.addEventListener('click', () => setView(tab.dataset.view)));
+        $('leadsFile').addEventListener('change', (event) => importSingle('leads', event.target.files[0]));
+        $('accountsFile').addEventListener('change', (event) => importSingle('accounts', event.target.files[0]));
+        $('plzFile').addEventListener('change', (event) => importSingle('plz', event.target.files[0]));
+        $('combinedFile').addEventListener('change', (event) => importCombined(event.target.files[0]));
+        $('startButton').addEventListener('click', runProcessing);
+        $('leadFilter').addEventListener('input', renderResultsTable);
+        $('statusFilter').addEventListener('change', renderResultsTable);
+        $('ownerFilter').addEventListener('change', renderResultsTable);
+        $('applyMapping').addEventListener('click', () => {
+          document.querySelectorAll('#mappingGrid select').forEach((select) => {
+            state.mappings[select.dataset.dataset] ||= {};
+            state.mappings[select.dataset.dataset][select.dataset.field] = select.value;
+          });
+          log('Mapping aktualisiert.');
+          renderAll();
+        });
+        $('clearButton').addEventListener('click', () => {
+          state.datasets = { leads: null, accounts: null, plz: null };
+          state.mappings = {};
+          state.results = [];
+          state.completed = false;
+          state.running = false;
+          state.exportBuffers = null;
+          log('Daten zurückgesetzt.');
+          setView('import');
+          renderAll();
+        });
+        $('xlsxButton').addEventListener('click', () => downloadBlob(state.exportBuffers?.xlsx, 'vertriebsmanagement_ergebnisse.xlsx'));
+        $('zipButton').addEventListener('click', () => downloadBlob(state.exportBuffers?.zip, 'vertriebsmanagement_export.zip'));
+        $('apiButton').addEventListener('click', () => {
+          renderApiMode();
+          $('apiDialog').showModal();
+        });
+        $('builtinApiMode').addEventListener('click', () => {
+          state.apiMode = 'built-in';
+          renderApiMode();
+        });
+        $('customApiMode').addEventListener('click', () => {
+          state.apiMode = 'custom';
+          renderApiMode();
+        });
+        $('saveApiButton').addEventListener('click', () => {
+          if (state.apiMode !== 'custom') return;
+          $('apiStatus').textContent = `Eigene API · ${$('apiProvider').value} · ${$('apiModel').value || 'Modell fehlt'}`;
+          $('apiDialog').close();
+        });
+        $('applyQuestion').addEventListener('click', () => {
+          $('questionSection').hidden = true;
+          log('Rückfrage beantwortet.');
+          renderAgent();
+        });
+      }
+
+      function renderApiMode() {
+        const builtIn = state.apiMode === 'built-in';
+        $('builtinApiMode').classList.toggle('ctox-button--primary', builtIn);
+        $('customApiMode').classList.toggle('ctox-button--primary', !builtIn);
+        ['apiProvider', 'apiModel', 'apiKey', 'apiEndpoint', 'apiVersion'].forEach((id) => {
+          $(id).disabled = builtIn;
+        });
+        $('saveApiButton').disabled = builtIn;
+        $('saveApiButton').hidden = builtIn;
+        if (builtIn) {
+          $('apiProvider').value = 'Azure OpenAI';
+          $('apiModel').value = 'gpt-5.4';
+          $('apiKey').value = 'eingebettet';
+          $('apiEndpoint').value = 'eingebettet';
+          $('apiVersion').value = 'preview';
+          $('apiStatus').textContent = 'Eingebaute API · Azure · gpt-5.4';
+        }
+      }
+
+      bindEvents();
+      renderAll();
+    })();
+  </script>
+</body>
+</html>

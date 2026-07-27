@@ -302,6 +302,19 @@ function requestBrowserAuthorization(sourceId, config, credentialRef, input) {
   return result;
 }
 
+function reauthorizationAction(sourceId, config, credentialRef) {
+  if (!config || !isAllowedSourceUrl(sourceId, config.login_url)) return null;
+  return {
+    kind: "auth-assist-request",
+    source_id: sourceId,
+    login_url: config.login_url,
+    allowed_domains: config.allowed_domains,
+    credential_ref: credentialRef || null,
+    reason: "session_expired_or_invalid",
+    secret_value_in_payload: false,
+  };
+}
+
 function recordUnlockSignal(sourceId, url, markers) {
   const sourceUrl = isAllowedSourceUrl(sourceId, url)
     ? url
@@ -914,9 +927,10 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
         && !protectedConfig.public_fields) {
       process.stdout.write(JSON.stringify({
         records: [],
-        failure_mode: "auth_required",
-        detail: `${sourceId} requires an authenticated CTOX browser session`,
+        failure_mode: "authorization_required",
+        detail: `${sourceId} session expired or invalid; reauthorization required (authenticated CTOX browser session)`,
         browser_assist_requested: Boolean(browserAssist),
+        reauthorization: reauthorizationAction(sourceId, protectedConfig, credentialRef),
       }));
       return;
     }
@@ -1041,9 +1055,10 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
   if (protectedConfig && (authFailure || protectedAuthFailure)) {
     process.stdout.write(JSON.stringify({
       records: [],
-      failure_mode: "auth_required",
-      detail: `${sourceId} requires an authenticated CTOX browser session`,
+      failure_mode: "authorization_required",
+      detail: `${sourceId} session expired or invalid; reauthorization required (authenticated CTOX browser session)`,
       browser_assist_requested: Boolean(browserAssist),
+      reauthorization: reauthorizationAction(sourceId, protectedConfig, credentialRef),
     }));
     return;
   }
@@ -1073,14 +1088,15 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
     return;
   }
   if (clean.length === 0) {
+    const reauthRequired = authFailure || protectedAuthFailure;
     process.stdout.write(JSON.stringify({
       records: [],
       failure_mode: accessBlocked ? "blocked"
-        : (authFailure || protectedAuthFailure) ? "auth_required" : "temporary_unreachable",
+        : reauthRequired ? (protectedConfig ? "authorization_required" : "auth_required") : "temporary_unreachable",
       detail: !googleProviderVerified
         ? "google.de target rejected results from a non-Google search provider"
-        : (authFailure || protectedAuthFailure)
-        ? `${sourceId} requires an authenticated CTOX browser session`
+        : reauthRequired
+        ? `${sourceId} session expired or invalid; reauthorization required (authenticated CTOX browser session)`
         : BLOCKED_DETECTIONS.length > 0
           ? `${sourceId} browser challenge: ${[...new Set(BLOCKED_DETECTIONS)].join(", ")}`
         : commandBlocked
@@ -1089,6 +1105,9 @@ function appendSearchHitEvidence(records, sourceId, hit, company) {
           ? COMMAND_ERRORS.join(" | ")
           : `${sourceId} returned no extractable records`,
       browser_assist_requested: Boolean(browserAssist),
+      ...(protectedConfig && reauthRequired
+        ? { reauthorization: reauthorizationAction(sourceId, protectedConfig, credentialRef) }
+        : {}),
     }));
     return;
   }

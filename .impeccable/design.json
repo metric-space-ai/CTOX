@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-11T08:15:00+02:00",
+  "title": "Design System: CTOX Business OS",
+  "extensions": {
+    "colorMeta": {
+      "light-workspace": {
+        "role": "neutral",
+        "displayName": "Paper Graphite Workspace",
+        "canonical": "oklch(95.8% 0.006 235)",
+        "tonalRamp": ["oklch(18% 0.006 235)", "oklch(28% 0.006 235)", "oklch(40% 0.006 235)", "oklch(53% 0.006 235)", "oklch(66% 0.006 235)", "oklch(78% 0.006 235)", "oklch(88% 0.006 235)", "oklch(96% 0.006 235)"]
+      },
+      "light-accent": {
+        "role": "primary",
+        "displayName": "Operational Teal",
+        "canonical": "oklch(52% 0.09 185)",
+        "tonalRamp": ["oklch(18% 0.04 185)", "oklch(27% 0.06 185)", "oklch(37% 0.075 185)", "oklch(47% 0.085 185)", "oklch(58% 0.08 185)", "oklch(70% 0.065 185)", "oklch(82% 0.04 185)", "oklch(94% 0.018 185)"]
+      },
+      "dark-workspace": {
+        "role": "neutral",
+        "displayName": "Instrument Graphite Workspace",
+        "canonical": "oklch(20% 0.008 235)",
+        "tonalRamp": ["oklch(15% 0.006 235)", "oklch(20% 0.008 235)", "oklch(27% 0.009 235)", "oklch(36% 0.009 235)", "oklch(48% 0.008 235)", "oklch(62% 0.007 235)", "oklch(78% 0.006 235)", "oklch(93% 0.005 235)"]
+      },
+      "dark-accent": {
+        "role": "primary",
+        "displayName": "Dark Operational Teal",
+        "canonical": "oklch(72% 0.08 185)",
+        "tonalRamp": ["oklch(18% 0.035 185)", "oklch(28% 0.05 185)", "oklch(39% 0.065 185)", "oklch(51% 0.075 185)", "oklch(63% 0.08 185)", "oklch(72% 0.08 185)", "oklch(83% 0.055 185)", "oklch(94% 0.02 185)"]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Operational Headline",
+        "purpose": "Rare app and major-surface headings."
+      },
+      "body": {
+        "displayName": "Working Body",
+        "purpose": "Operational copy, values, and record detail."
+      },
+      "label": {
+        "displayName": "Control Label",
+        "purpose": "Buttons, tabs, filters, columns, and compact status."
+      },
+      "mono": {
+        "displayName": "Machine Value",
+        "purpose": "Identifiers, hashes, code, timestamps, and technical state."
+      }
+    },
+    "shadows": [
+      {
+        "name": "window-lift",
+        "value": "0 14px 36px rgba(9, 15, 20, 0.22)",
+        "purpose": "Movable desktop windows only."
+      },
+      {
+        "name": "popover-lift",
+        "value": "0 8px 20px rgba(9, 15, 20, 0.18)",
+        "purpose": "Context menus, popovers, and blocking overlays only."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fast",
+        "value": "150ms cubic-bezier(0.25, 1, 0.5, 1)",
+        "purpose": "Hover, focus, selection, and compact state feedback."
+      },
+      {
+        "name": "surface-standard",
+        "value": "220ms cubic-bezier(0.22, 1, 0.36, 1)",
+        "purpose": "Drawer, inspector, and window state transitions."
+      }
+    ],
+    "breakpoints": [
+      { "name": "mobile-floor", "value": "360px" },
+      { "name": "mobile-sheet-max", "value": "600px" },
+      { "name": "floating-window-min", "value": "640px" },
+      { "name": "pane-stack", "value": "760px" },
+      { "name": "wide-min", "value": "1200px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Utility Button",
+      "kind": "button",
+      "refersTo": "button-utility",
+      "description": "Compact neutral action for routine work.",
+      "html": "<button class=\"ds-utility-button\" type=\"button\">Filter</button>",
+      "css": ".ds-utility-button { height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); color: var(--text); font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; transition: background 150ms cubic-bezier(.25,1,.5,1), border-color 150ms cubic-bezier(.25,1,.5,1); } .ds-utility-button:hover { background: var(--surface-2); } .ds-utility-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; } .ds-utility-button:active { background: var(--accent-soft); }"
+    },
+    {
+      "name": "Run Control",
+      "kind": "custom",
+      "refersTo": "button-run",
+      "description": "The single prominent domain-named AI automation action; never a generic CRUD or Ask AI button.",
+      "html": "<button class=\"ds-run-control\" type=\"button\"><svg viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"m8 5 11 7-11 7V5Z\"/></svg>Recherche starten</button>",
+      "css": ".ds-run-control { display: inline-flex; align-items: center; gap: 7px; height: 34px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 3px; background: var(--accent); color: var(--accent-foreground); font: 650 12px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; transition: filter 150ms cubic-bezier(.25,1,.5,1); } .ds-run-control svg { width: 15px; height: 15px; fill: currentColor; } .ds-run-control:hover { filter: brightness(.94); } .ds-run-control:focus-visible { outline: 2px solid var(--text-strong); outline-offset: 2px; } .ds-run-control:active { filter: brightness(.88); }"
+    },
+    {
+      "name": "Compact Input",
+      "kind": "input",
+      "refersTo": "input-compact",
+      "description": "Dense field with explicit focus and error affordance.",
+      "html": "<label class=\"ds-field\"><span>Suche</span><input placeholder=\"Datensätze filtern\" /></label>",
+      "css": ".ds-field { display: grid; gap: 4px; color: var(--muted); font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; } .ds-field input { height: 30px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface-2); color: var(--text); font: 400 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; } .ds-field input:hover { border-color: var(--line-strong, var(--line)); } .ds-field input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }"
+    },
+    {
+      "name": "Filter Chip",
+      "kind": "chip",
+      "refersTo": "status-chip",
+      "description": "A compact filter or status, one of the few pill-shaped elements.",
+      "html": "<button class=\"ds-filter-chip\" type=\"button\" aria-pressed=\"true\">Offen <span>12</span></button>",
+      "css": ".ds-filter-chip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; background: var(--accent-soft); color: var(--text); font: 600 12px/1.2 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; } .ds-filter-chip span { color: var(--muted); font-size: 11px; } .ds-filter-chip:hover { border-color: var(--accent); } .ds-filter-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }"
+    },
+    {
+      "name": "Connected Pane",
+      "kind": "card",
+      "refersTo": "pane",
+      "description": "Flat work surface separated by a crisp mechanical line.",
+      "html": "<section class=\"ds-pane\"><header><strong>Vorgänge</strong><span>24 offen</span></header><div>Arbeitsinhalt</div></section>",
+      "css": ".ds-pane { overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text); font: 400 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; } .ds-pane header { display: flex; align-items: center; justify-content: space-between; min-height: 34px; padding: 0 10px; border-bottom: 1px solid var(--line); } .ds-pane header strong { font-size: 14px; font-weight: 650; } .ds-pane header span { color: var(--muted); font-size: 12px; } .ds-pane > div { padding: 10px; }"
+    },
+    {
+      "name": "Window Lifecycle Header",
+      "kind": "navigation",
+      "refersTo": "shell-window-header",
+      "description": "Compact shell-owned identity, version/status, source/version actions, and native window controls.",
+      "html": "<header class=\"ds-window-header\"><strong>App</strong><span>v1.2</span><button>Privat</button><button aria-label=\"Source öffnen\">&lt;/&gt;</button><button aria-label=\"Versionen öffnen\">↺</button><button aria-label=\"Schließen\">×</button></header>",
+      "css": ".ds-window-header { display:flex; align-items:center; gap:4px; height:32px; padding:0 6px; border-bottom:1px solid var(--line); background:var(--surface-2); color:var(--text); font:600 11px/1.2 -apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif; } .ds-window-header > strong { min-width:44px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .ds-window-header > span,.ds-window-header > button { height:22px; padding:0 5px; border:1px solid var(--line); border-radius:3px; background:transparent; color:var(--muted); } @media (pointer:coarse) { .ds-window-header { height:44px; } .ds-window-header > button { min-width:36px; height:36px; } }"
+    },
+    {
+      "name": "Responsive Resizable Workbench",
+      "kind": "custom",
+      "refersTo": "responsive-panes",
+      "description": "Wide resizable panes that stack or use a visible shared drawer path when the app container narrows.",
+      "html": "<main class=\"ds-workbench\"><aside>Liste</aside><button class=\"ds-resizer\" aria-label=\"Spaltenbreite anpassen\"></button><section>Arbeit</section><aside>Kontext</aside></main>",
+      "css": ".ds-workbench { container-type:inline-size; display:grid; grid-template-columns:280px 8px minmax(0,1fr) 300px; min-height:0; } .ds-resizer { width:8px; border:0; border-inline:1px solid var(--line); background:transparent; } @container (max-width:760px) { .ds-workbench { grid-template-columns:minmax(0,1fr); grid-template-rows:auto minmax(360px,1fr) auto; overflow:auto; } .ds-resizer { display:none; } }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Operational Instrument",
+    "overview": "CTOX Business OS feels like a precise Ableton-dense instrument built for repeated professional work. Routine controls remain visually quiet while each visible work surface may elevate at most one domain-named, typed-command AI automation through a clearly named Run Control. Floating windows resize to 640×480; at 600px and below the shell switches to a mobile sheet supported to 360px. The system rejects glossy SaaS dashboards, landing-page composition, generic AI surfaces, hidden compact panes, and app-specific reinventions of common controls.",
+    "keyCharacteristics": [
+      "compact operational density",
+      "flat connected work surfaces",
+      "restrained color with one functional accent",
+      "stable pane and window geometry",
+      "mobile-sheet continuity with reachable shell controls",
+      "explicit selection, permission, sync, and run state",
+      "keyboard-first interaction with visible focus"
+    ],
+    "rules": [
+      { "name": "The One Surface Rule", "body": "An app opens directly into its real workbench.", "section": "overview" },
+      { "name": "The Functional Color Rule", "body": "Accent communicates action, selection, or state and never ambient decoration.", "section": "colors" },
+      { "name": "The Flat-by-Default Rule", "body": "Stationary work surfaces remain shadowless.", "section": "elevation" },
+      { "name": "The No Glass Rule", "body": "Backdrop blur, translucent glass cards, radial gradients, and ambient glow are prohibited by default.", "section": "elevation" }
+      ,{ "name": "The Signature Automation Rule", "body": "At most one real domain-named AI automation may consume prominent color or space per visible work surface.", "section": "components" }
+      ,{ "name": "The Responsive Shell Rule", "body": "Window, pane, header, Start, chat, and task switching remain operable from wide desktop through the 360px mobile floor.", "section": "layout" }
+    ],
+    "dos": [
+      "Do build routine UI from the existing canonical .ctox-* kit names.",
+      "Do use one-pixel separators, 3px control radii, 4px surface radii, and connected panes.",
+      "Do reserve the solid accent for focus, selection, and one signature Run Control.",
+      "Do prove real mouse window/pane resize and mobile-sheet interaction in the Business OS shell.",
+      "Do support keyboard operation, visible focus, Reduced Motion, and WCAG 2.2 AA contrast."
+    ],
+    "donts": [
+      "Don't create glossy dark SaaS dashboards with gradients, glow, glass cards, oversized radii, or heavy workspace shadows.",
+      "Don't use landing-page composition inside authenticated apps.",
+      "Don't build generic AI interfaces that hide records, scope, permissions, commands, or results.",
+      "Don't reinvent common controls inside an app.",
+      "Don't hide panes without a visible stack, tab, drawer, or back path.",
+      "Don't promote Create, Save, Export, Settings, or generic Ask AI into hero controls.",
+      "Don't hand-author a full-app loading skeleton."
+    ]
+  }
+}

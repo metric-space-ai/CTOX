@@ -1,0 +1,24 @@
+{
+  "version": "ctox.appsec.finish.v1",
+  "generated_at": "2026-07-13T11:05:00Z",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "finished": false,
+  "closed": false,
+  "stage_terminal_status": "explicitly_blocked_with_evidence",
+  "pipeline_status": "blocked-with-evidence",
+  "coverage_ref": "/Users/michaelwelsch/Documents/ctox.nosync/coverage.json",
+  "writeback_ref": "/Users/michaelwelsch/Documents/ctox.nosync/assessment-pipeline-writeback.json",
+  "completion_review_ref": "/Users/michaelwelsch/Documents/ctox.nosync/completion-review.json",
+  "blocked_at": "2026-07-13T11:05:00Z",
+  "blockers": [
+    "logged-out-protected-access-case-required",
+    "owner-baseline-allow-required",
+    "scanner-evidence-missing"
+  ],
+  "runtime_blockers": [
+    "ctox service socket unreachable",
+    "configured state-dir mount rejects writes"
+  ],
+  "notes": "Stage closure is honestly recorded as explicitly-blocked-with-evidence. Workspace closure files mirror the on-disk pipeline evidence; the canonical state-dir is the read-only /Volumes/Models mount and cannot be written from this environment."
+}

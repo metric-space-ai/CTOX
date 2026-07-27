@@ -1,0 +1,51 @@
+{
+  "version": "ctox.appsec_pentest.authz_subjects.v1",
+  "generated_at": "2026-07-13T10:40:00+00:00",
+  "target": "https://ctox.dev/dashboard",
+  "subjects": [
+    {
+      "id": "unauthenticated",
+      "role": "anonymous",
+      "credential_ref": null,
+      "login_hint": null,
+      "verify_url": "https://ctox.dev/dashboard",
+      "verify_selector": ".dashboard-shell",
+      "allowed_resource_hints": []
+    },
+    {
+      "id": "user-a",
+      "role": "customer-owner",
+      "credential_ref": "ctox-secret://appsec/user-a",
+      "login_hint": "deployment-audit-user-a-20260713@ctox.dev",
+      "verify_url": "https://ctox.dev/dashboard",
+      "verify_selector": ".dashboard-shell",
+      "allowed_resource_hints": [
+        "65fd1b50-3f75-4acb-ae41-84de2e25ab7d",
+        "deployment-audit-a-20260713",
+        "deployment-audit-a-20260713.ctox.dev"
+      ]
+    },
+    {
+      "id": "user-b",
+      "role": "customer-owner",
+      "credential_ref": "ctox-secret://appsec/user-b",
+      "login_hint": "deployment-audit-user-b-20260713@ctox.dev",
+      "verify_url": "https://ctox.dev/dashboard",
+      "verify_selector": ".dashboard-shell",
+      "allowed_resource_hints": [
+        "e703ae97-8f1b-49d4-89b2-3a29c807334d",
+        "deployment-audit-b-20260713",
+        "deployment-audit-b-20260713.ctox.dev"
+      ]
+    }
+  ],
+  "secret_policy": "credential values are stored only in the CTOX secret store; this artifact contains refs and login hints only",
+  "current_status": "completed",
+  "last_check": "2026-07-13T10:51:33Z",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "stage_outcome": {
+    "final_status": "completed-on-disk",
+    "note": "Pipeline closure status file lives at /Users/michaelwelsch/Documents/ctox.nosync/assessment-pipeline-status.json because the original state-dir (/Volumes/models/ctox-appsec-runs/.../state) is mounted read-only (HFS, noowners). All Web-Stack evidence, matrix, credential proof and per-session captures remain at the original read-only state-dir."
+  }
+}

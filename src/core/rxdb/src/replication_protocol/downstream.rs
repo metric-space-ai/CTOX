@@ -23,14 +23,14 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde_json::{json, Value};
 
-use crate::replication_protocol::checkpoint::{get_last_checkpoint_doc, set_checkpoint};
+use crate::replication_protocol::checkpoint::{
+    get_last_checkpoint_doc, set_checkpoint, set_initial_checkpoint,
+};
 use crate::replication_protocol::helper::{
     doc_state_to_write_doc, remote_revision_height_marker_matches,
-    strip_attachments_data_from_meta_write_rows, write_doc_to_doc_state,
+    strip_attachments_data_from_meta_write_rows, wait_for_cancel, write_doc_to_doc_state,
 };
-use crate::replication_protocol::meta_instance::{
-    get_assumed_master_state, get_meta_write_row, AssumedMaster,
-};
+use crate::replication_protocol::meta_instance::{get_assumed_master_state, get_meta_write_row};
 use crate::rx_storage_helper::stack_checkpoints;
 use crate::types::{
     BulkWriteRow, RxReplicationMasterChange, RxStorageInstanceReplicationState,
@@ -40,31 +40,23 @@ use crate::types::{
 // ref: rxdb/src/replication-protocol/downstream.ts:51-167
 pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicationState>) {
     // 1. Initial checkpoint write.
-    if let Some(initial) = state.input.initial_checkpoint.as_ref() {
-        if let Some(cp) = initial.downstream.as_ref() {
-            match get_last_checkpoint_doc(&state, RxStorageReplicationDirection::Down).await {
-                Ok(None) => {
-                    if let Err(e) =
-                        set_checkpoint(&state, RxStorageReplicationDirection::Down, cp.clone())
-                            .await
-                    {
-                        tracing::error!(
-                            target: "ctox_rxdb::replication_protocol::downstream",
-                            "initial checkpoint write failed: {e}",
-                        );
-                        return;
-                    }
-                }
-                Ok(Some(_)) => {}
-                Err(e) => {
-                    tracing::error!(
-                        target: "ctox_rxdb::replication_protocol::downstream",
-                        "get_last_checkpoint_doc failed: {e}",
-                    );
-                    return;
-                }
-            }
-        }
+    let initial_checkpoint = state
+        .input
+        .initial_checkpoint
+        .as_ref()
+        .and_then(|initial| initial.downstream.as_ref());
+    if let Err(e) = set_initial_checkpoint(
+        &state,
+        RxStorageReplicationDirection::Down,
+        initial_checkpoint,
+    )
+    .await
+    {
+        tracing::error!(
+            target: "ctox_rxdb::replication_protocol::downstream",
+            "initial checkpoint write failed: {e}",
+        );
+        return;
     }
 
     // 2. Spawn ongoing master.change_stream subscription early.
@@ -108,7 +100,7 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
                 // Back off bounded and stay responsive to cancel.
                 tokio::select! {
                     _ = tokio::time::sleep(initial_sync_retry_delay) => {}
-                    _ = wait_for_cancel_down(&state) => break,
+                    _ = wait_for_cancel(&state) => break,
                 }
                 initial_sync_retry_delay =
                     (initial_sync_retry_delay * 2).min(std::time::Duration::from_secs(5));
@@ -117,7 +109,7 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
     }
 
     // 4. Stay alive until canceled, then drop the subscription.
-    wait_for_cancel_down(&state).await;
+    wait_for_cancel(&state).await;
     ongoing.abort();
 }
 
@@ -223,11 +215,17 @@ async fn process_downstream_master_change_tasks(
     if docs.is_empty() && checkpoints.is_empty() {
         return Ok(());
     }
+    // Both directions collect accepted task checkpoints and stack exactly once.
+    // The merge is order-preserving, so the newest value for each shard wins
+    // without direction-specific intermediate checkpoint shapes.
+    let checkpoint = stack_checkpoints(&checkpoints);
+    // Count source stream emissions, not coalesced drains. A buffered drain can
+    // contain multiple accepted tasks and uses the same per-task semantics in
+    // both replication directions.
     {
         let mut stats = state.stats.down.lock();
         stats.master_change_stream_emit += emit_count;
     }
-    let checkpoint = stack_checkpoints(&checkpoints);
     let _g = state.stream_queue.down.lock().await;
     state.events.active.down.next(true);
     let result = persist_from_master(state, docs, checkpoint).await;
@@ -259,18 +257,6 @@ async fn wait_until_upstream_inactive(state: &RxStorageInstanceReplicationState)
     let mut upstream_active = state.events.active.up.subscribe();
     while let Some(is_active) = upstream_active.next().await {
         if !is_active {
-            return;
-        }
-    }
-}
-
-async fn wait_for_cancel_down(state: &Arc<RxStorageInstanceReplicationState>) {
-    if state.events.canceled.get_value() {
-        return;
-    }
-    let mut s = state.events.canceled.subscribe();
-    while let Some(v) = s.next().await {
-        if v {
             return;
         }
     }
@@ -533,11 +519,6 @@ async fn persist_from_master(
     )
     .await?;
     Ok(())
-}
-
-#[allow(dead_code)]
-fn _phantom_use(_a: &AssumedMaster) -> Value {
-    json!({})
 }
 
 #[cfg(test)]

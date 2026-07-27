@@ -1,0 +1,51 @@
+{
+  "state": {
+    "title": "Desktop · CTOX Business OS (2A75D5)",
+    "authState": null,
+    "moduleLoading": null,
+    "hasSmoke": false,
+    "hasApp": false,
+    "modules": 0,
+    "wm": false,
+    "scripts": [
+      "http://127.0.0.1:8901/business-os/app.js?v=20260721-shell-finishing-v1"
+    ],
+    "bodyChildren": 12
+  },
+  "failed": [
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/auth/capability",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/auth/capability",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance",
+    "HTTP 404 http://127.0.0.1:8901/api/business-os/ctox/maintenance"
+  ],
+  "errors": [
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)",
+    "Failed to load resource: the server responded with a status of 404 (Not Found)"
+  ]
+}

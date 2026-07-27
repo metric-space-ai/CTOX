@@ -6221,6 +6221,126 @@ pub(crate) fn import_ticket_source_skill_bundle(
     }))
 }
 
+pub(crate) fn import_ticket_source_skill_resources(
+    root: &Path,
+    skillbook_id: &str,
+    resources_file: &str,
+    replace: bool,
+) -> Result<Value> {
+    let skillbook_id = skillbook_id.trim();
+    anyhow::ensure!(!skillbook_id.is_empty(), "skillbook_id must not be empty");
+    let resources_path = {
+        let path = Path::new(resources_file);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        }
+    };
+    anyhow::ensure!(
+        resources_path.is_file(),
+        "resources file not found at {}",
+        resources_path.display()
+    );
+    let resources: Vec<TicketSourceKnowledgeResourceRecord> = read_jsonl_file(&resources_path)?;
+    anyhow::ensure!(
+        !resources.is_empty(),
+        "resources file {} is empty",
+        resources_path.display()
+    );
+
+    let now = now_iso_string();
+    let mut conn = open_ticket_db(root)?;
+    let imported_resource_ids;
+    {
+        let tx = conn.transaction()?;
+        let skillbook_exists = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM knowledge_skillbooks WHERE skillbook_id = ?1)",
+            params![skillbook_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        anyhow::ensure!(
+            skillbook_exists,
+            "knowledge skillbook {} does not exist",
+            skillbook_id
+        );
+
+        let known_item_ids = tx
+            .prepare("SELECT item_id FROM knowledge_runbook_items WHERE skillbook_id = ?1")?
+            .query_map(params![skillbook_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+        let mut resource_ids = BTreeSet::new();
+        for resource in &resources {
+            anyhow::ensure!(
+                !resource.resource_id.trim().is_empty(),
+                "resources file contains an empty resource_id"
+            );
+            anyhow::ensure!(
+                !resource.title.trim().is_empty(),
+                "resource {} has an empty title",
+                resource.resource_id
+            );
+            anyhow::ensure!(
+                resource_ids.insert(resource.resource_id.as_str()),
+                "resources file contains duplicate resource {}",
+                resource.resource_id
+            );
+            for item_id in &resource.linked_runbook_items {
+                anyhow::ensure!(
+                    known_item_ids.contains(item_id),
+                    "resource {} references runbook item {} outside skillbook {}",
+                    resource.resource_id,
+                    item_id,
+                    skillbook_id
+                );
+            }
+        }
+        validate_ticket_source_skill_id_ownership(&tx, skillbook_id, &[], &[], Some(&resources))?;
+
+        if replace {
+            tx.execute(
+                "DELETE FROM knowledge_resources WHERE skillbook_id = ?1",
+                params![skillbook_id],
+            )?;
+        }
+        for resource in &resources {
+            upsert_ticket_source_knowledge_resource(&tx, skillbook_id, resource, &now)?;
+        }
+        imported_resource_ids = resources
+            .iter()
+            .map(|resource| resource.resource_id.clone())
+            .collect::<Vec<_>>();
+        record_audit(
+            &tx,
+            AuditRequest {
+                ticket_key: &format!("*knowledge-skillbook:{}*", skillbook_id),
+                case_id: None,
+                actor_type: "knowledge_importer",
+                action_type: "skillbook_resource_import",
+                label: None,
+                bundle_label: None,
+                bundle_version: None,
+                details: json!({
+                    "skillbook_id": skillbook_id,
+                    "resource_count": resources.len(),
+                    "replace": replace,
+                    "resources_file": resources_path.display().to_string(),
+                }),
+            },
+        )?;
+        tx.commit()?;
+    }
+
+    Ok(json!({
+        "ok": true,
+        "skillbook_id": skillbook_id,
+        "resource_count": imported_resource_ids.len(),
+        "resource_ids": imported_resource_ids,
+        "replace": replace,
+        "resources_file": resources_path.display().to_string(),
+    }))
+}
+
 fn validate_ticket_source_skill_bundle(
     main_skill: &TicketSourceMainSkillRecord,
     skillbook: &TicketSourceSkillbookRecord,
@@ -13451,6 +13571,101 @@ mod tests {
         )?;
         assert_eq!(preserved_embedding_count, 1);
         assert_eq!(preserved_resource_count, 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn source_skill_resources_import_without_replacing_runbooks() -> Result<()> {
+        let root = temp_root("source-skill-resource-import");
+        create_or_update_skillbook(
+            &root,
+            "resource.skillbook.v1",
+            "Resource Skillbook",
+            "v1",
+            "Use verified resources.",
+            "",
+            "",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["resource.runbook.v1".to_owned()],
+        )?;
+        create_or_update_runbook(
+            &root,
+            "resource.runbook.v1",
+            "resource.skillbook.v1",
+            "Resource Runbook",
+            "v1",
+            "active",
+            "evidence",
+            vec!["RESOURCE-01".to_owned()],
+        )?;
+        add_or_update_runbook_item(
+            &root,
+            "resource.item.v1",
+            "resource.runbook.v1",
+            "resource.skillbook.v1",
+            "RESOURCE-01",
+            "Use source receipt",
+            "evidence",
+            "Use the verified source receipt.",
+            "v1",
+            "active",
+            None,
+            true,
+        )?;
+
+        let resources_file = root.join("runtime/resources.jsonl");
+        std::fs::create_dir_all(resources_file.parent().context("resources parent")?)?;
+        std::fs::write(
+            &resources_file,
+            format!(
+                "{}\n",
+                serde_json::to_string(&json!({
+                    "resource_id": "resource.one",
+                    "title": "Verified source",
+                    "kind": "primary_source",
+                    "source_id": "SRC-001",
+                    "role": "evidence",
+                    "canonical_url": "https://example.com/source",
+                    "snapshot_hash": "abc123",
+                    "evidence_eligible": true,
+                    "linked_runbook_items": ["resource.item.v1"],
+                }))?
+            ),
+        )?;
+
+        let imported = import_ticket_source_skill_resources(
+            &root,
+            "resource.skillbook.v1",
+            resources_file.to_str().context("resources path utf-8")?,
+            true,
+        )?;
+        assert_eq!(
+            imported.get("resource_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        let conn = open_ticket_db(&root)?;
+        let runbook_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_runbooks WHERE skillbook_id = 'resource.skillbook.v1'",
+            [],
+            |row| row.get(0),
+        )?;
+        let item_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_runbook_items WHERE skillbook_id = 'resource.skillbook.v1'",
+            [],
+            |row| row.get(0),
+        )?;
+        let resource_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM knowledge_resources WHERE skillbook_id = 'resource.skillbook.v1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(runbook_count, 1);
+        assert_eq!(item_count, 1);
+        assert_eq!(resource_count, 1);
 
         let _ = std::fs::remove_dir_all(&root);
         Ok(())

@@ -25,10 +25,13 @@ use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio_stream::StreamExt;
 
-use crate::replication_protocol::checkpoint::{get_last_checkpoint_doc, set_checkpoint};
+use crate::replication_protocol::checkpoint::{
+    get_last_checkpoint_doc, set_checkpoint, set_initial_checkpoint,
+};
 use crate::replication_protocol::conflicts::resolve_conflict_error;
 use crate::replication_protocol::helper::{
     remote_revision_height_marker_matches, strip_attachments_data_from_meta_write_rows,
+    wait_for_cancel,
 };
 use crate::rx_storage_helper::{get_written_documents_from_bulk_write_response, stack_checkpoints};
 use crate::types::{
@@ -40,30 +43,23 @@ use crate::types::{
 // ref: rxdb/src/replication-protocol/upstream.ts:54-end
 pub async fn start_replication_upstream(state: Arc<RxStorageInstanceReplicationState>) {
     // 1. Initial-checkpoint write (single op, no lock needed).
-    if let Some(initial) = state.input.initial_checkpoint.as_ref() {
-        if let Some(cp) = initial.upstream.as_ref() {
-            match get_last_checkpoint_doc(&state, RxStorageReplicationDirection::Up).await {
-                Ok(None) => {
-                    if let Err(e) =
-                        set_checkpoint(&state, RxStorageReplicationDirection::Up, cp.clone()).await
-                    {
-                        tracing::error!(
-                            target: "ctox_rxdb::replication_protocol::upstream",
-                            "initial checkpoint write failed: {e}",
-                        );
-                        return;
-                    }
-                }
-                Ok(Some(_)) => {}
-                Err(e) => {
-                    tracing::error!(
-                        target: "ctox_rxdb::replication_protocol::upstream",
-                        "get_last_checkpoint_doc failed: {e}",
-                    );
-                    return;
-                }
-            }
-        }
+    let initial_checkpoint = state
+        .input
+        .initial_checkpoint
+        .as_ref()
+        .and_then(|initial| initial.upstream.as_ref());
+    if let Err(e) = set_initial_checkpoint(
+        &state,
+        RxStorageReplicationDirection::Up,
+        initial_checkpoint,
+    )
+    .await
+    {
+        tracing::error!(
+            target: "ctox_rxdb::replication_protocol::upstream",
+            "initial checkpoint write failed: {e}",
+        );
+        return;
     }
 
     // 2. Spawn ongoing fork.changeStream subscription EARLY so events that
@@ -272,10 +268,6 @@ fn spawn_ongoing_upstream_with_timing(
                 state.events.active.up.next(false);
                 continue;
             }
-            {
-                let mut stats = state.stats.up.lock();
-                stats.fork_change_stream_emit += 1;
-            }
             if let Err(e) = process_upstream_event_tasks(
                 &state,
                 &downstream_flag,
@@ -299,10 +291,12 @@ async fn process_upstream_event_tasks(
     initial_sync_start_time: &AtomicI64,
     tasks: Vec<(i64, EventBulk)>,
 ) -> Result<(), crate::rx_error::RxError> {
+    let cutoff = initial_sync_start_time.load(AtomicOrdering::SeqCst);
     let mut docs: Vec<Value> = Vec::new();
-    let mut checkpoint: Option<Value> = None;
+    let mut checkpoints = Vec::new();
+    let mut emit_count = 0;
     for (task_time, event_bulk) in tasks {
-        if task_time < initial_sync_start_time.load(AtomicOrdering::SeqCst) {
+        if task_time < cutoff {
             continue;
         }
         if event_bulk.context.as_deref() != Some(downstream_flag) {
@@ -313,14 +307,23 @@ async fn process_upstream_event_tasks(
                     .filter_map(|ev| ev.document_data.clone()),
             );
         }
-        checkpoint = Some(stack_checkpoints(&[
-            checkpoint,
-            event_bulk.checkpoint.clone(),
-        ]));
+        checkpoints.push(event_bulk.checkpoint.clone());
+        emit_count += 1;
     }
-    let Some(checkpoint) = checkpoint else {
+    if checkpoints.is_empty() {
         return Ok(());
-    };
+    }
+    // Both directions collect accepted task checkpoints and stack exactly once.
+    // The merge is order-preserving, so the newest value for each shard wins
+    // without direction-specific intermediate checkpoint shapes.
+    let checkpoint = stack_checkpoints(&checkpoints);
+    // Count source stream emissions, not coalesced drains. A buffered drain can
+    // contain multiple accepted tasks and uses the same per-task semantics in
+    // both replication directions.
+    {
+        let mut stats = state.stats.up.lock();
+        stats.fork_change_stream_emit += emit_count;
+    }
     let _g = state.stream_queue.up.lock().await;
     state.events.active.up.next(true);
     let result = persist_to_master(state, docs, checkpoint).await;
@@ -362,18 +365,6 @@ fn spawn_upstream_resync_listener_with_timing(
             state.events.active.up.next(false);
         }
     })
-}
-
-async fn wait_for_cancel(state: &Arc<RxStorageInstanceReplicationState>) {
-    if state.events.canceled.get_value() {
-        return;
-    }
-    let mut s = state.events.canceled.subscribe();
-    while let Some(v) = s.next().await {
-        if v {
-            return;
-        }
-    }
 }
 
 // ref: rxdb/src/replication-protocol/upstream.ts:274-end (persistToMaster, conflict-aware)
@@ -502,11 +493,9 @@ async fn persist_to_master(
             .and_then(|v| v.as_str())
             .unwrap_or_default();
         if !conflict_ids.contains(doc_id) {
-            state
-                .events
-                .processed
-                .up
-                .next(serde_json::to_value(row).unwrap_or(serde_json::Value::Null));
+            state.events.processed.up.next(serde_json::json!({
+                "document": row.new_document_state.clone(),
+            }));
         }
     }
 

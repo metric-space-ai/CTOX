@@ -1,13 +1,12 @@
 //! Port of `src/replication-protocol/helper.ts`.
 
-use std::sync::Arc;
-
+use futures::StreamExt;
 use serde_json::{json, Value};
 
 use crate::plugins::utils::utils_revision::{create_revision, get_height_of_revision};
 use crate::plugins::utils::utils_time::now;
 use crate::rx_storage_helper::strip_attachments_data_from_document;
-use crate::types::{BulkWriteRow, RxStorageInstance, RxStorageInstanceReplicationState};
+use crate::types::{BulkWriteRow, RxStorageInstanceReplicationState};
 
 // ref: rxdb/src/replication-protocol/helper.ts:19-49
 pub fn doc_state_to_write_doc(
@@ -153,15 +152,16 @@ fn json_number_as_u64(value: &Value) -> Option<u64> {
     })
 }
 
-// ref: rxdb/src/replication-protocol/helper.ts:87-98
-pub fn get_underlying_persistent_storage(
-    instance: Arc<dyn RxStorageInstance>,
-) -> Arc<dyn RxStorageInstance> {
-    let mut current = instance;
-    while let Some(next) = current.underlying_persistent_storage() {
-        current = next;
+pub async fn wait_for_cancel(state: &RxStorageInstanceReplicationState) {
+    if state.events.canceled.get_value() {
+        return;
     }
-    current
+    let mut canceled = state.events.canceled.subscribe();
+    while let Some(is_canceled) = canceled.next().await {
+        if is_canceled {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -173,8 +173,11 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
 
+    use std::sync::Arc;
+
     use crate::rx_error::{new_rx_error, RxError};
     use crate::rxjs_compat::RxStream;
+    use crate::types::RxStorageInstance;
     use crate::types::{
         EventBulk, HashFunction, HashOutput, RxConflictHandler, RxConflictHandlerInput,
         RxJsonSchema, RxReplicationHandler, RxStorageBulkWriteResponse,
@@ -463,15 +466,5 @@ mod tests {
             }),
             "replication-test"
         ));
-    }
-
-    #[test]
-    fn walks_to_underlying_persistent_storage() {
-        let persistent = NoopStorageInstance::new("persistent", None);
-        let middle = NoopStorageInstance::new("middle", Some(persistent.clone()));
-        let top = NoopStorageInstance::new("top", Some(middle));
-
-        let found = get_underlying_persistent_storage(top);
-        assert_eq!(found.collection_name(), "persistent");
     }
 }

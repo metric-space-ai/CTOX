@@ -1,0 +1,32 @@
+{
+  "version": "ctox.appsec.assessment_pipeline_status.v1",
+  "generated_at": "2026-07-13T11:05:00Z",
+  "state_dir": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state",
+  "stage": "authenticated-multi-user-authz",
+  "target_url": "https://ctox.dev/dashboard",
+  "status": "explicitly_blocked_with_evidence",
+  "terminal_status": "blocked",
+  "execution_phase": "blocked-writeback",
+  "closable": false,
+  "stages": {
+    "authenticated-multi-user-authz": {
+      "status": "in-progress",
+      "effective_status": "blocked-with-evidence",
+      "blocked_at": "2026-07-13T11:05:00Z",
+      "blockers": [
+        "logged-out-protected-access-case-required",
+        "owner-baseline-allow-required",
+        "scanner-evidence-missing"
+      ],
+      "runtime_blockers": [
+        "ctox service socket unreachable at /Users/michaelwelsch/.local/lib/ctox/current/runtime/ctox_service.sock",
+        "configured state-dir mount rejects writes with Operation not permitted (os error 1)"
+      ],
+      "workstream": "ws-authenticated-multi-user-authz-2",
+      "coverage_ref": "/Users/michaelwelsch/Documents/ctox.nosync/coverage.json",
+      "subjects_ref": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-subjects.json",
+      "matrix_ref": "/Volumes/models/ctox-appsec-runs/ctox-dev-deployment-audit-unified-session-20260713/state/authz/authz-matrix-built-1783937936679.json"
+    }
+  },
+  "notes": "Closure status persisted in the writable workspace because /Volumes/Models/.../state is read-only for the runtime user (mount HFS, noowners) and the ctox service socket is not contactable. Stage is therefore classified as explicitly_blocked_with_evidence per the stage-closure contract."
+}
