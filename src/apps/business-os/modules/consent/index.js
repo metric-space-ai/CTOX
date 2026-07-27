@@ -16,6 +16,7 @@ const COPY = {
     exportArticle15: 'Auskunft (Art. 15)', eraseArticle17: 'Löschen (Art. 17)',
     exportTitle: 'Recht auf Auskunft (DSGVO Art. 15)', eraseTitle: 'Recht auf Löschung (DSGVO Art. 17)',
     entries: 'Einträge', entriesEmpty: 'Noch keine Einträge.', emptyFiltered: 'Kein Eintrag passt zum Filter.',
+    syncing: 'Daten werden synchronisiert.',
     statusAll: 'Alle Status', commandOffline: 'Offline: Befehlsdienst nicht verfügbar.',
     dataLocked: 'Datenzugriff gesperrt.',
     dataLockedHint: 'Die App ist installiert. Gib business_consents im App Store frei, um vorhandene Einwilligungen zu sehen.',
@@ -39,6 +40,7 @@ const COPY = {
     exportArticle15: 'Access request (Art. 15)', eraseArticle17: 'Erase (Art. 17)',
     exportTitle: 'Right of access (GDPR Art. 15)', eraseTitle: 'Right to erasure (GDPR Art. 17)',
     entries: 'entries', entriesEmpty: 'No entries yet.', emptyFiltered: 'No entry matches the filter.',
+    syncing: 'Syncing data.',
     statusAll: 'All statuses', commandOffline: 'Offline: command service unavailable.',
     dataLocked: 'Data access is locked.',
     dataLockedHint: 'The app is installed. Grant business_consents in the App Store to view existing consent records.',
@@ -147,10 +149,18 @@ export function consentRow(r, opts = {}) {
     + '</div>';
 }
 
-// The list body markup (shards or compact rows), or the empty state.
+// The list body markup (shards or compact rows), or the empty/sync state.
+// Readiness gates ONLY the data-driven empty (unfiltered source empty): while
+// the backing collection has not finished its initial replication
+// (ready === false) we show the kit syncing shell instead of "no entries".
 export function renderRecordList(rows, opts = {}) {
   const list = Array.isArray(rows) ? rows : [];
   if (!list.length) {
+    if (opts.readiness?.ready === false) {
+      return '<div class="ctox-syncing" role="status" aria-live="polite">'
+        + '<strong>' + esc(opts.syncingText || text.syncing) + '</strong>'
+        + '</div>';
+    }
     return '<div class="ctox-empty"><strong>' + esc(opts.emptyText || text.entriesEmpty) + '</strong></div>';
   }
   return list.map((r) => consentRow(r, { view: opts.view, nowMs: opts.nowMs, selected: r.id && r.id === opts.selectedId })).join('');
@@ -252,6 +262,7 @@ export async function mount(ctx) {
   let rowsCache = [];
   let selectedId = null;
   let userCollapsed = false;
+  let consentReadiness = readConsentReadiness();
   const nowMs = () => Date.now();
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
   const canReadCollection = () => {
@@ -261,6 +272,22 @@ export async function mount(ctx) {
   function isPermissionDenied(error) {
     return error?.code === 'CTOX_BUSINESS_OS_PERMISSION_DENIED'
       || error?.name === 'BusinessOsPermissionError';
+  }
+
+  // Canonical shell readiness for the backing collection (render hint only —
+  // never a mount blocker). Missing sync API ⇒ null ⇒ treated as ready.
+  function readConsentReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    return typeof read === 'function' ? read.call(ctx.sync, PRIMARY) : null;
+  }
+  function wireConsentReadiness() {
+    const subscribe = ctx.sync?.subscribeCollectionReadiness;
+    if (typeof subscribe !== 'function') return () => {};
+    const unsubscribe = subscribe.call(ctx.sync, PRIMARY, (snapshot) => {
+      consentReadiness = snapshot;
+      render();
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : () => {};
   }
 
   // Gate callout → kit .ctox-callout variants (base.css).
@@ -333,7 +360,10 @@ export async function mount(ctx) {
     const filtered = filterRows(rowsCache, g, now);
     if (listEl) {
       const emptyText = rowsCache.length ? t('emptyFiltered') : t('entriesEmpty');
-      listEl.innerHTML = renderRecordList(filtered, { view: g.view, selectedId, nowMs: now, emptyText });
+      // Readiness gates only the data-driven empty (source empty); a filter
+      // empty (source has rows, none match) always shows the filter text.
+      const readiness = rowsCache.length ? null : consentReadiness;
+      listEl.innerHTML = renderRecordList(filtered, { view: g.view, selectedId, nowMs: now, emptyText, readiness });
     }
     writeCounts(countsFor(rowsCache, now));
     const scope = { all: t('bandAll'), valid: t('bandValid'), open: t('bandOpen'), ended: t('bandEnded') }[g.band] || t('bandAll');
@@ -596,11 +626,13 @@ export async function mount(ctx) {
     try { subscription = col.find({ selector: {} }).$?.subscribe?.(() => { load().then(render).catch(() => {}); }); }
     catch { /* live sync optional */ }
   }
+  const stopReadiness = wireConsentReadiness();
   await load();
   render();
 
   return () => {
     try { subscription?.unsubscribe?.(); } catch {}
+    try { stopReadiness(); } catch {}
     formEl?.removeEventListener('submit', onCheckSubmit);
     subjectFormEl?.removeEventListener('submit', onSubjectSubmit);
     toggleRightsEl?.removeEventListener('click', onToggleRights);

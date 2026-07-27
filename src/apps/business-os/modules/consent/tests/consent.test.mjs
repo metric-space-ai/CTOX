@@ -111,6 +111,27 @@ test('consent: record list renders selector rows from a stub doc array', async (
   assert.match(empty, /ctox-empty/, 'empty state renders the kit empty class');
 });
 
+test('consent: collection readiness gates the data-driven empty state', async () => {
+  const mod = await import('../index.js');
+  const now = 1_781_990_000_000;
+  // Empty source + not yet initially replicated ⇒ syncing shell, not empty.
+  const syncing = mod.renderRecordList([], { view: 'cards', nowMs: now, readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncing, /ctox-syncing/, 'unready empty source renders the syncing shell');
+  assert.match(syncing, /role="status"/, 'syncing shell is a polite status region');
+  assert.ok(!/ctox-empty/.test(syncing), 'syncing shell is not the empty state');
+  // Empty source + live ⇒ the real empty state.
+  const empty = mod.renderRecordList([], { view: 'cards', nowMs: now, readiness: { ready: true, state: 'live' } });
+  assert.match(empty, /ctox-empty/, 'ready empty source renders the empty state');
+  // Rows always win over readiness.
+  const rows = [{ id: 'c1', subject_id: 's', purpose: 'p', granted_at_ms: now - 1000 }];
+  const out = mod.renderRecordList(rows, { view: 'cards', nowMs: now, readiness: { ready: false, state: 'never-synced' } });
+  assert.match(out, /data-context-record-id="c1"/, 'rows render regardless of readiness');
+  assert.ok(!/ctox-syncing/.test(out), 'no syncing shell when rows exist');
+  // Mount wires the canonical readiness subscription with teardown.
+  assert.match(indexJs, /subscribeCollectionReadiness/, 'readiness subscription wired');
+  assert.match(indexJs, /collectionReadiness/, 'readiness snapshot read');
+});
+
 test('consent: band + counts derive from the derived consent status', async () => {
   const mod = await import('../index.js');
   const now = 1_781_990_000_000;
