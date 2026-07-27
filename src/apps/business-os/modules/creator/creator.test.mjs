@@ -23,6 +23,8 @@ const {
 const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
 const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
 const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+const localeDe = JSON.parse(await readFile(new URL('./locales/de.json', import.meta.url), 'utf8'));
+const localeEn = JSON.parse(await readFile(new URL('./locales/en.json', import.meta.url), 'utf8'));
 const presentationSource = `${css}\n${html}`;
 const forbiddenSurfacePattern = new RegExp(['ctox-pane--gla' + 'ss', 'Prem' + 'ium', 'gla' + 'ss'].join('|'), 'i');
 
@@ -322,4 +324,23 @@ test('composer flow is preserved: app select prefills upgrade, request adopts te
   assert.match(html, /<details class="creator-options">/);
   assert.doesNotMatch(html, /<details class="creator-options" open>/);
   assert.match(html, /id="btn-deploy-app"/);
+});
+
+test('data-driven library empties are gated on canonical collection readiness', () => {
+  // Both bands subscribe to their backing collection's readiness and re-render
+  // the well on state transitions.
+  assert.match(js, /subscribeCollectionReadiness\(ctx, 'business_module_catalog'/);
+  assert.match(js, /subscribeCollectionReadiness\(ctx, 'business_commands'/);
+  // Empty + unready renders the kit syncing shell; empty + ready stays ctox-empty.
+  assert.match(js, /bandTotal === 0 && readiness\?\.ready === false/);
+  assert.match(js, /class="ctox-syncing" role="status" aria-live="polite"/);
+  assert.match(js, /class="ctox-empty"/);
+  // Readiness subscriptions are cleaned up on unmount.
+  assert.match(js, /cleanupSubscription\(state\.catalogReadinessSubscription\)/);
+  assert.match(js, /cleanupSubscription\(state\.commandReadinessSubscription\)/);
+  // Sync hint is translated in both locales.
+  assert.equal(localeDe.libSyncing, 'Daten werden synchronisiert.');
+  assert.equal(localeEn.libSyncing, 'Syncing data.');
+  // Filter-empties (band has data, filter hides it) are NOT gated.
+  assert.match(js, /state\.t\('libEmptyFiltered'/);
 });

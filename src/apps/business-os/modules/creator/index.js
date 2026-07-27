@@ -14,6 +14,10 @@ const state = {
   appVersion: '0.1.0',
   catalogSubscription: null,
   commandSubscription: null,
+  catalogReadiness: null,
+  commandReadiness: null,
+  catalogReadinessSubscription: null,
+  commandReadinessSubscription: null,
   streamGeneration: 0,
   installedApps: [],
   creatorRequests: [],
@@ -297,6 +301,22 @@ export async function mount(ctx) {
   wireUi(ctx.host);
   wireLibrary(ctx.host);
 
+  // 3b. Track collection readiness so the library wells show a sync state
+  // instead of "no data" while their backing collection has not finished the
+  // initial replication. Re-emit only happens on state transitions.
+  state.catalogReadiness = null;
+  state.commandReadiness = null;
+  state.catalogReadinessSubscription = subscribeCollectionReadiness(ctx, 'business_module_catalog', (snapshot) => {
+    if (streamGeneration !== state.streamGeneration) return;
+    state.catalogReadiness = snapshot;
+    renderLibrary(ctx.host);
+  });
+  state.commandReadinessSubscription = subscribeCollectionReadiness(ctx, 'business_commands', (snapshot) => {
+    if (streamGeneration !== state.streamGeneration) return;
+    state.commandReadiness = snapshot;
+    renderLibrary(ctx.host);
+  });
+
   // 4. Render the operable shell immediately. Catalog and command hydration
   // can wait for a cold WebRTC lease without blocking the window from opening.
   renderLibrary(ctx.host);
@@ -309,8 +329,14 @@ export async function mount(ctx) {
     if (streamGeneration === state.streamGeneration) state.streamGeneration += 1;
     cleanupSubscription(state.catalogSubscription);
     cleanupSubscription(state.commandSubscription);
+    cleanupSubscription(state.catalogReadinessSubscription);
+    cleanupSubscription(state.commandReadinessSubscription);
     state.catalogSubscription = null;
     state.commandSubscription = null;
+    state.catalogReadinessSubscription = null;
+    state.commandReadinessSubscription = null;
+    state.catalogReadiness = null;
+    state.commandReadiness = null;
     console.log('[creator] Module unmounted and cleaned up.');
   };
 }
@@ -380,6 +406,15 @@ function cleanupSubscription(subscription) {
     return;
   }
   subscription?.unsubscribe?.();
+}
+
+// Canonical shell readiness: immediate snapshot + re-emit on state change.
+// Returns an unsubscribe function or null when the shell exposes no sync API.
+function subscribeCollectionReadiness(ctx, name, listener) {
+  const subscribe = ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return null;
+  const unsubscribe = subscribe.call(ctx.sync, name, listener);
+  return typeof unsubscribe === 'function' ? unsubscribe : null;
 }
 
 // Merge server-synced requests with locally imported drafts (imports never
@@ -467,9 +502,20 @@ function renderLibrary(host) {
   const bandTotal = g.band === 'auftraege' ? requests.length : apps.length;
   const emptyKey = g.band === 'auftraege' ? 'requestsEmpty' : 'installedEmpty';
   const emptyText = bandTotal === 0 ? state.t(emptyKey) : state.t('libEmptyFiltered', 'Kein Eintrag passt zum Filter.');
-  listEl.innerHTML = items.length
-    ? items.map((item) => renderLibraryShard(item, g.view)).join('')
-    : `<div class="ctox-empty"><strong>${escapeHtml(emptyText)}</strong></div>`;
+  // Data-driven empty (the band's backing collection is truly empty) is gated
+  // on that collection's readiness: while the initial replication is pending,
+  // show a sync state instead of "no data". Filter-empties (bandTotal > 0)
+  // stay plain — data exists, the filter just hides it.
+  const readiness = g.band === 'auftraege' ? state.commandReadiness : state.catalogReadiness;
+  let listHtml;
+  if (items.length) {
+    listHtml = items.map((item) => renderLibraryShard(item, g.view)).join('');
+  } else if (bandTotal === 0 && readiness?.ready === false) {
+    listHtml = `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(state.t('libSyncing', 'Daten werden synchronisiert.'))}</div>`;
+  } else {
+    listHtml = `<div class="ctox-empty"><strong>${escapeHtml(emptyText)}</strong></div>`;
+  }
+  listEl.innerHTML = listHtml;
 
   applyLibrarySelection(listEl);
   writeLibraryCounts(rail, creatorLibraryCounts(apps, requests));
