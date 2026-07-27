@@ -45,6 +45,7 @@ const FALLBACK_LABELS = {
   de: {
     moduleTitle: 'Desktop',
     emptyDesktop: 'Keine Icons auf dem Desktop.',
+    syncingData: 'Daten werden synchronisiert.',
     openInModule: 'Öffnen',
     chatWithCtox: 'Mit CTOX chatten',
     askCtox: 'Frage stellen',
@@ -81,6 +82,7 @@ const FALLBACK_LABELS = {
   en: {
     moduleTitle: 'Desktop',
     emptyDesktop: 'No icons on the desktop.',
+    syncingData: 'Syncing data.',
     openInModule: 'Open',
     chatWithCtox: 'Chat with CTOX',
     askCtox: 'Ask question',
@@ -197,10 +199,12 @@ export async function mount(ctx) {
 
   const layout = await ensureLayout(layoutCollection, launcher);
   let iconPositionCache = readIconPositionCache();
+  let iconsReadiness = readIconsReadiness();
   await ensureIcons(iconsCollection, launcher);
   await renderIcons();
 
   cleanups.push(subscribeIcons());
+  cleanups.push(subscribeIconsReadiness());
   cleanups.push(subscribeModuleCatalogChanges());
   if (commandsCollection) cleanups.push(subscribeCommandStream());
 
@@ -439,6 +443,15 @@ export async function mount(ctx) {
     }
     refs.icons.innerHTML = '';
     if (!docs.length) {
+      if (!usingFallbackDocs && iconsReadiness?.ready === false) {
+        const syncing = document.createElement('div');
+        syncing.className = 'ctox-syncing';
+        syncing.setAttribute('role', 'status');
+        syncing.setAttribute('aria-live', 'polite');
+        syncing.textContent = t('syncingData', 'Daten werden synchronisiert.');
+        refs.icons.appendChild(syncing);
+        return;
+      }
       const empty = document.createElement('div');
       empty.className = 'desktop-icon-empty';
       empty.textContent = t('emptyDesktop', 'Keine Icons auf dem Desktop.');
@@ -893,6 +906,25 @@ export async function mount(ctx) {
       });
     });
     return () => sub.unsubscribe?.();
+  }
+
+  function readIconsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    return typeof read === 'function' ? read.call(ctx.sync, 'desktop_icons') : null;
+  }
+
+  function subscribeIconsReadiness() {
+    const subscribe = ctx.sync?.subscribeCollectionReadiness;
+    if (typeof subscribe !== 'function') return () => {};
+    const unsubscribe = subscribe.call(ctx.sync, 'desktop_icons', (snapshot) => {
+      iconsReadiness = snapshot;
+      renderIcons().catch((error) => {
+        if (isDatabaseClosingError(error)) return;
+        if (showManagedAuthorizationError(error)) return;
+        console.error('[desktop] icon render failed:', error);
+      });
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : () => {};
   }
 
   function isDatabaseClosingError(error) {

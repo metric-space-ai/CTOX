@@ -1,6 +1,7 @@
 {
   "moduleTitle": "Desktop",
   "emptyDesktop": "Keine Icons auf dem Desktop.",
+  "syncingData": "Daten werden synchronisiert.",
   "startButton": "Start",
   "showDesktop": "Desktop anzeigen",
   "newFolder": "Neuer Ordner",

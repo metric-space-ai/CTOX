@@ -144,6 +144,22 @@ assert.ok(
   desktopSource.includes('return /IDBDatabase.*closing|database connection is closing/i.test(message);'),
   'Desktop transient IndexedDB shutdown detection must not depend on DOMException prototype shape'
 );
+assert.ok(
+  desktopSource.includes("read.call(ctx.sync, 'desktop_icons')"),
+  'Desktop icon empty state must read the canonical desktop_icons collection readiness'
+);
+assert.ok(
+  desktopSource.includes("subscribe.call(ctx.sync, 'desktop_icons'"),
+  'Desktop must re-render icons on desktop_icons readiness changes via canonical subscription'
+);
+assert.ok(
+  desktopSource.includes("syncing.className = 'ctox-syncing';"),
+  'Desktop must render the canonical syncing shell while desktop_icons is empty and not ready'
+);
+assert.ok(
+  desktopSource.includes('!usingFallbackDocs && iconsReadiness?.ready === false'),
+  'Desktop syncing shell must only gate the replicated-collection path, not transient launcher fallbacks'
+);
 
 for (const requiredSnippet of [
   'isLaunchableModule',
