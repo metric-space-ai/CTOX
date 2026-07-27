@@ -43366,6 +43366,11 @@ fn project_appsec_findings(
             "source_tool": payload.get("source_tool").cloned().unwrap_or(Value::Null),
             "signal": payload.get("signal").cloned().unwrap_or(Value::Null),
             "validation_state": payload.get("validation_state").cloned().unwrap_or(Value::Null),
+            "cve": payload.get("cve").cloned().unwrap_or(Value::Null),
+            "installed_version": payload.get("installed_version").cloned().unwrap_or(Value::Null),
+            "affected_versions": payload.get("affected_versions").cloned().unwrap_or(Value::Null),
+            "fixed_versions": payload.get("fixed_versions").cloned().unwrap_or(Value::Null),
+            "reachability": payload.get("reachability").cloned().unwrap_or(Value::Null),
             "updated_at": updated_at,
             "source": "ctox-appsec-core-projection",
         });
