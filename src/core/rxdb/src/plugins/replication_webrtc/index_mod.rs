@@ -200,6 +200,9 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     pub error_subject: RxSubject<RxError>,
     pub query_fetch_registry: Arc<super::query_fetch_handler::QueryFetchRegistry>,
     pub file_fetch_registry: Arc<super::file_fetch_handler::FileFetchRegistry>,
+    /// Legacy compatibility must not hide an unverifiable multiplex handshake;
+    /// this counter keeps every allowed or rejected omission operator-visible.
+    missing_collection_schemas_warning_count: std::sync::atomic::AtomicU64,
     /// Every collection multiplexed onto this connection, keyed by name.
     collections: HashMap<String, Arc<RxCollection>>,
     /// Short-lived shared room payload for the `ctoxProtocol` handshake.
@@ -288,6 +291,7 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             error_subject: RxSubject::new(),
             query_fetch_registry: registry,
             file_fetch_registry: file_registry,
+            missing_collection_schemas_warning_count: std::sync::atomic::AtomicU64::new(0),
             collections: collection_map,
             protocol_room_payload_cache: AsyncMutex::new(ProtocolRoomPayloadCache::default()),
             master_pull_semaphore: Semaphore::new(MAX_CONCURRENT_MASTER_PULLS),
@@ -300,6 +304,12 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
     /// All collections multiplexed onto this connection.
     pub fn collections(&self) -> Vec<Arc<RxCollection>> {
         self.collections.values().cloned().collect()
+    }
+
+    /// Snapshot the number of unverifiable multiplex schema handshakes seen.
+    pub fn count_missing_collection_schemas_warnings(&self) -> u64 {
+        self.missing_collection_schemas_warning_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     fn collection_by_name(&self, name: &str) -> Option<Arc<RxCollection>> {
@@ -1072,10 +1082,18 @@ where
                     let mut schema_mismatch_collections: std::collections::HashSet<String> =
                         std::collections::HashSet::new();
                     if multiplexed {
-                        schema_mismatch_collections = collect_collection_schema_mismatches(
+                        schema_mismatch_collections = match validate_multiplex_collection_schemas(
                             local_collection_schemas.as_ref(),
                             &protocol_response.result,
-                        );
+                            &pool_clone.missing_collection_schemas_warning_count,
+                        ) {
+                            Ok(mismatches) => mismatches,
+                            Err(error) => {
+                                pool_clone.error_subject.next(error);
+                                handler.close_peer(&peer).await;
+                                return;
+                            }
+                        };
                         for collection in collections.iter() {
                             if let Some(err) = schema_mismatch_error_for(
                                 &schema_mismatch_collections,
@@ -1589,6 +1607,73 @@ fn validate_ctox_protocol_response(
     Ok(())
 }
 
+fn remote_is_multiplex_schema_capable(remote_protocol: &Value) -> bool {
+    let has_checkpoint_generation_capability = remote_protocol
+        .get("capabilities")
+        .and_then(Value::as_array)
+        .map(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability.as_str() == Some(CTOX_CHECKPOINT_GENERATION_CAPABILITY)
+            })
+        })
+        .unwrap_or(false);
+
+    // The schema-hash capability predates multiplexing and cannot distinguish a
+    // legacy peer. These checkpoint/clock fields belong to the multiplex-aware
+    // payload shape, whose invariant is to carry collectionSchemas as well.
+    has_checkpoint_generation_capability
+        || ["collectionCheckpoints", "storageGeneration", "nativeTimeMs"]
+            .iter()
+            .any(|field| remote_protocol.get(*field).is_some())
+}
+
+fn validate_multiplex_collection_schemas(
+    local_collection_schemas: Option<&Value>,
+    remote_protocol: &Value,
+    missing_warning_count: &std::sync::atomic::AtomicU64,
+) -> Result<std::collections::HashSet<String>, RxError> {
+    if remote_protocol
+        .get("collectionSchemas")
+        .and_then(Value::as_object)
+        .is_none()
+    {
+        let remote_schema_capable = remote_is_multiplex_schema_capable(remote_protocol);
+        let warning_count =
+            missing_warning_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let disposition = if remote_schema_capable {
+            "rejecting schema-capable peer"
+        } else {
+            "allowing legacy peer"
+        };
+        tracing::warn!(
+            target: "ctox_rxdb::replication_webrtc",
+            warning_count,
+            remote_schema_capable,
+            disposition,
+            "multiplex WebRTC handshake omitted collectionSchemas"
+        );
+        if remote_schema_capable {
+            return Err(ctox_protocol_error(
+                CTOX_PROTOCOL_ERROR_CAPABILITY_MISSING,
+                "schema-capable CTOX RxDB peer omitted collectionSchemas in multiplex handshake",
+                Some(Value::String("collectionSchemas object".to_string())),
+                Some(
+                    remote_protocol
+                        .get("collectionSchemas")
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+                None,
+            ));
+        }
+    }
+
+    Ok(collect_collection_schema_mismatches(
+        local_collection_schemas,
+        remote_protocol,
+    ))
+}
+
 /// Phase 3 schema-validation hardening: compare the local `collectionSchemas`
 /// map against the remote protocol response's `collectionSchemas` map and
 /// return the set of collection names whose schema hash / version mismatched.
@@ -1607,9 +1692,8 @@ fn collect_collection_schema_mismatches(
         .get("collectionSchemas")
         .and_then(Value::as_object);
     let Some(remote_map) = remote_map else {
-        // The remote did not advertise per-collection schemas (older peer or
-        // single-collection room on its side). Fall back to no per-collection
-        // flagging — the room-level protocol/capability check already passed.
+        // Only the wrapper's legacy branch may reach this fallback; a peer with
+        // multiplex-aware markers is rejected before collection paths exist.
         return mismatches;
     };
     for (name, local_entry) in local_map.iter() {
@@ -2740,15 +2824,46 @@ mod tests {
     }
 
     #[test]
-    fn missing_remote_collection_schemas_map_skips_per_collection_check() {
+    fn legacy_remote_without_collection_schemas_is_allowed_and_warning_counted() {
         let local = local_schemas_two();
-        // Older/single-collection remote: no `collectionSchemas` key at all.
         let remote = serde_json::json!({
             "protocol": CTOX_RXDB_PROTOCOL,
             "capabilities": CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
         });
-        let mismatches = collect_collection_schema_mismatches(Some(&local), &remote);
+        let warning_count = std::sync::atomic::AtomicU64::new(0);
+
+        let mismatches =
+            validate_multiplex_collection_schemas(Some(&local), &remote, &warning_count)
+                .expect("a peer without multiplex-aware markers remains legacy-compatible");
+
         assert!(mismatches.is_empty());
+        assert_eq!(
+            warning_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the compatibility exception must remain observable"
+        );
+    }
+
+    #[test]
+    fn schema_capable_remote_without_collection_schemas_is_rejected_and_warning_counted() {
+        let local = local_schemas_two();
+        let remote = serde_json::json!({
+            "protocol": CTOX_RXDB_PROTOCOL,
+            "capabilities": CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
+            "nativeTimeMs": 1_722_000_000_000_u64,
+        });
+        let warning_count = std::sync::atomic::AtomicU64::new(0);
+
+        assert_protocol_error(
+            validate_multiplex_collection_schemas(Some(&local), &remote, &warning_count)
+                .map(|_| ()),
+            CTOX_PROTOCOL_ERROR_CAPABILITY_MISSING,
+        );
+        assert_eq!(
+            warning_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "rejected omissions must be counted before teardown"
+        );
     }
 
     #[tokio::test]
