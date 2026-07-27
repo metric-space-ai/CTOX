@@ -41,6 +41,7 @@ const {
   normalizeColumns,
   normalizeStoredKnowledgeRecord,
   sourceScopeFor,
+  sortKnowledgeRecords,
   valueForColumn,
 } = hooks;
 
@@ -111,6 +112,16 @@ test('normalizes RxDB payload records without dropping table rows or schema', ()
   assert.equal(record.has_table, true);
   assert.equal(localDataFrameRows(record).length, 1);
   assert.equal(localDataFrameSchema(record).columns[0].key, 'source_id');
+});
+
+test('sorts locally loaded records without requiring an RxDB query index', () => {
+  const records = sortKnowledgeRecords([
+    { id: 'older', updated_at_ms: 100 },
+    { id: 'same-b', updated_at_ms: 200 },
+    { id: 'same-a', updated_at_ms: 200 },
+  ]);
+
+  assert.deepEqual(records.map((record) => record.id), ['same-a', 'same-b', 'older']);
 });
 
 test('assembles only complete contiguous knowledge table chunks', () => {

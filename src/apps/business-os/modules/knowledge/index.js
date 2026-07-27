@@ -428,17 +428,16 @@ function knowledgeGroupMatchesDomain(group, domain) {
 
 async function readLocalKnowledgeSnapshot() {
   const missingCollections = [];
-  let items = [];
-  let runbooks = [];
-  let tables = [];
-  let error = '';
-  try {
-    [items, runbooks, tables] = await Promise.all(KNOWLEDGE_DATA_COLLECTIONS.map((collectionName) => (
-      loadLocalKnowledgeRecords(collectionName, missingCollections)
-    )));
-  } catch (err) {
-    error = err?.message || String(err);
-  }
+  const results = await Promise.allSettled(KNOWLEDGE_DATA_COLLECTIONS.map((collectionName) => (
+    loadLocalKnowledgeRecords(collectionName, missingCollections)
+  )));
+  const [items = [], runbooks = [], tables = []] = results.map((result) => (
+    result.status === 'fulfilled' ? result.value : []
+  ));
+  const error = results
+    .filter((result) => result.status === 'rejected')
+    .map((result) => result.reason?.message || String(result.reason))
+    .join('; ');
   return { items, runbooks, tables, missingCollections, error };
 }
 
@@ -448,10 +447,17 @@ async function loadLocalKnowledgeRecords(collectionName, missingCollections = st
     missingCollections.push(collectionName);
     return [];
   }
-  const docs = await collection.find({ sort: [{ updated_at_ms: 'desc' }] }).exec();
-  return docs
+  const docs = await collection.find().exec();
+  return sortKnowledgeRecords(docs
     .map((doc) => normalizeStoredKnowledgeRecord(doc.toJSON()))
-    .filter(isActiveKnowledgeRecord);
+    .filter(isActiveKnowledgeRecord));
+}
+
+function sortKnowledgeRecords(records) {
+  return [...records].sort((left, right) => (
+    Number(right?.updated_at_ms || 0) - Number(left?.updated_at_ms || 0)
+      || String(left?.id || '').localeCompare(String(right?.id || ''))
+  ));
 }
 
 function normalizeStoredKnowledgeRecord(record) {
@@ -2962,5 +2968,6 @@ export const __knowledgeTestHooks = {
   normalizeStoredKnowledgeRecord,
   normalizeColumns,
   sourceScopeFor,
+  sortKnowledgeRecords,
   valueForColumn,
 };
