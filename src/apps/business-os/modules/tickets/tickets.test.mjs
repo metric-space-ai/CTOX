@@ -9,6 +9,7 @@ import {
   countsForTickets,
   ticketOpsFlowActive,
   resolveOpsVisible,
+  resolveTicketListState,
   renderTicketList,
   ticketRowHtml,
 } from './index.js';
@@ -31,7 +32,31 @@ test('tickets: agent record context + command-failure contract', () => {
   assert.equal(context['data-context-label'], 'Login unavailable');
 
   assert.equal(__ticketTestHooks.commandFailureMessage({ status: 'failed', error: 'denied' }), 'denied');
-  assert.equal(__ticketTestHooks.isCollectionDiagnosticsReady({ connectionStatus: 'connected' }), true);
+});
+
+test('tickets: canonical collection readiness separates syncing from true empty', () => {
+  assert.equal(
+    resolveTicketListState({ sourceCount: 0, readiness: { ready: false, state: 'catching-up' } }),
+    'syncing',
+    'an empty unready source remains in the syncing state',
+  );
+  assert.equal(
+    resolveTicketListState({ sourceCount: 0, readiness: { ready: true, state: 'live' } }),
+    'empty',
+    'an empty ready source is a true empty state',
+  );
+  assert.equal(
+    resolveTicketListState({ sourceCount: 2, readiness: { ready: false, state: 'catching-up' } }),
+    'content',
+    'readiness does not gate filter-empty rendering once source tickets exist',
+  );
+  assert.match(indexJs, /sync\?\.subscribeCollectionReadiness/, 'canonical readiness changes are subscribed');
+  assert.match(indexJs, /subscribe\.call\(state\.ctx\.sync, TICKET_PRIMARY_COLLECTION/, 'primary collection is wired to readiness');
+  assert.match(indexJs, /stopReadiness\(\)/, 'readiness subscription is cleaned up');
+  assert.match(indexJs, /ctox-empty ctox-syncing/, 'syncing state uses the canonical kit class');
+  assert.doesNotMatch(indexJs, /sync\.diagnostics|frameTransport|initialReplicationState/, 'private diagnostics heuristics are removed');
+  const detailRenderer = indexJs.slice(indexJs.indexOf('function renderDetail('), indexJs.indexOf('function renderOps('));
+  assert.doesNotMatch(detailRenderer, /ticketReadiness|resolveTicketListState/, 'selection empty is not readiness-gated');
 });
 
 test('tickets: presentation stays within the kit guard rails', () => {

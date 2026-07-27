@@ -12,7 +12,7 @@ const bundledModule = await build({
 });
 
 const [{ text: bundledSource }] = bundledModule.outputFiles;
-const { __ticketTestHooks } = await import(
+const { __ticketTestHooks, resolveTicketListState } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
@@ -50,18 +50,18 @@ assert(
 );
 
 assert(
-  __ticketTestHooks.isCollectionDiagnosticsReady({ connectionStatus: 'connected' }) === true,
-  'connected ticket collection diagnostics are ready',
+  resolveTicketListState({ sourceCount: 0, readiness: { ready: false, state: 'catching-up' } }) === 'syncing',
+  'empty unready ticket source renders syncing',
 );
 
 assert(
-  __ticketTestHooks.isCollectionDiagnosticsReady({ frameTransport: { activePeerCount: 1, receivedFrames: 2 } }) === true,
-  'active ticket frame transport is ready',
+  resolveTicketListState({ sourceCount: 0, readiness: { ready: true, state: 'live' } }) === 'empty',
+  'empty ready ticket source renders true empty',
 );
 
 assert(
-  __ticketTestHooks.isCollectionDiagnosticsReady({ connectionStatus: 'connecting' }) === false,
-  'connecting ticket collection diagnostics are not ready',
+  resolveTicketListState({ sourceCount: 1, readiness: { ready: false, state: 'catching-up' } }) === 'content',
+  'existing ticket source is not readiness-gated',
 );
 
 const recordContext = __ticketTestHooks.ticketRecordContextForSmoke({

@@ -3,9 +3,6 @@ import { showBusinessPrompt } from '../../shared/dialogs.js';
 
 const REFRESH_DEBOUNCE_MS = 80;
 const TICKET_PRIMARY_COLLECTION = 'ctox_ticket_items';
-const TICKET_SYNC_START_TIMEOUT_MS = 8000;
-const TICKET_HYDRATION_TIMEOUT_MS = 12000;
-const TICKET_HYDRATION_POLL_MS = 350;
 
 const labels = {
   de: {
@@ -213,6 +210,7 @@ const state = {
   renderTimer: null,
   cleanup: null,
   loading: false,
+  ticketReadiness: null,
   data: Object.fromEntries(collectionNames.map((name) => [name, []])),
 };
 
@@ -315,6 +313,12 @@ export function renderTicketList(rows, opts = {}) {
   return list.map((row) => ticketRowHtml(row, { view: opts.view, selected: row.id && row.id === opts.selectedId })).join('');
 }
 
+export function resolveTicketListState({ loading = false, sourceCount = 0, readiness = null } = {}) {
+  if (loading) return 'loading';
+  if (Number(sourceCount) > 0) return 'content';
+  return readiness?.ready === false ? 'syncing' : 'empty';
+}
+
 // ---------------------------------------------------------------------------
 // Mount
 // ---------------------------------------------------------------------------
@@ -334,13 +338,19 @@ export async function mount(ctx) {
   ctx.left.replaceChildren();
   ctx.right.replaceChildren();
   state.loading = true;
+  state.ticketReadiness = readPrimaryTicketReadiness();
   applyStaticLabels();
   seedGrammarState();
   wireUi();
+  const stopReadiness = wireTicketReadiness();
+  state.cleanup = stopReadiness;
   render();
-  await waitForPrimaryTicketDataOrReady();
   await refreshTickets();
-  state.cleanup = wireRealtime();
+  const stopRealtime = wireRealtime();
+  state.cleanup = () => {
+    stopReadiness();
+    stopRealtime();
+  };
   return () => {
     state.cleanup?.();
     if (state.renderTimer) window.clearTimeout(state.renderTimer);
@@ -476,6 +486,23 @@ function wireRealtime() {
   });
 }
 
+function readPrimaryTicketReadiness() {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function'
+    ? read.call(state.ctx.sync, TICKET_PRIMARY_COLLECTION)
+    : null;
+}
+
+function wireTicketReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return () => {};
+  const unsubscribe = subscribe.call(state.ctx.sync, TICKET_PRIMARY_COLLECTION, (snapshot) => {
+    state.ticketReadiness = snapshot;
+    render();
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+}
+
 function scheduleRefresh() {
   if (state.renderTimer) return;
   state.renderTimer = window.setTimeout(() => {
@@ -497,42 +524,6 @@ async function loadCollection(name) {
   if (!collection) return [];
   const docs = await collection.find().exec();
   return docs.map((doc) => doc.toJSON()).filter((doc) => !doc.is_deleted && !doc._deleted);
-}
-
-async function waitForPrimaryTicketDataOrReady(timeoutMs = TICKET_HYDRATION_TIMEOUT_MS) {
-  if (typeof state.ctx.sync?.startCollection !== 'function') return;
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const tickets = await loadCollection(TICKET_PRIMARY_COLLECTION);
-    if (tickets.length) {
-      state.data = { ...state.data, [TICKET_PRIMARY_COLLECTION]: tickets };
-      return;
-    }
-    if (isCollectionSyncReady(TICKET_PRIMARY_COLLECTION)) return;
-    await delay(TICKET_HYDRATION_POLL_MS);
-  }
-}
-
-function isCollectionSyncReady(collection) {
-  const diagnostics = state.ctx.sync?.diagnostics?.collections?.[collection];
-  return isCollectionDiagnosticsReady(diagnostics);
-}
-
-function isCollectionDiagnosticsReady(diagnostics) {
-  if (!diagnostics) return false;
-  const status = diagnostics.connectionStatus || diagnostics.status || '';
-  if (['connected', 'running', 'reused'].includes(status)) return true;
-  if (diagnostics.connectedAt || diagnostics.initialReplicationAt) return true;
-  if (diagnostics.initialReplicationState === 'complete') return true;
-  const transport = diagnostics.frameTransport || {};
-  return Number(transport.activePeerCount || 0) > 0
-    && (Number(transport.sentFrames || 0) > 0 || Number(transport.receivedFrames || 0) > 0);
-}
-
-function shouldShowTicketSyncState() {
-  if (state.data.ctox_ticket_items.length) return false;
-  if (typeof state.ctx.sync?.startCollection !== 'function') return false;
-  return !ticketCollection(TICKET_PRIMARY_COLLECTION) || !isCollectionSyncReady(TICKET_PRIMARY_COLLECTION);
 }
 
 // ---------------------------------------------------------------------------
@@ -636,8 +627,13 @@ function renderCountsAndFooter() {
 function renderList() {
   const list = state.ctx.host.querySelector('[data-ticket-list]');
   if (!list) return;
-  if (state.loading || shouldShowTicketSyncState()) {
-    list.innerHTML = renderTicketLoadingState();
+  const listState = resolveTicketListState({
+    loading: state.loading,
+    sourceCount: state.data.ctox_ticket_items.length,
+    readiness: state.ticketReadiness,
+  });
+  if (listState === 'loading' || listState === 'syncing') {
+    list.innerHTML = renderTicketLoadingState(listState);
     return;
   }
   const rows = visibleTickets().map(shapeTicket);
@@ -653,8 +649,8 @@ function renderDetail() {
   const ticket = selectedTicket();
   if (!ticket) {
     clearRecordContext(detail);
-    detail.innerHTML = (state.loading || shouldShowTicketSyncState())
-      ? renderTicketLoadingState()
+    detail.innerHTML = state.loading
+      ? renderTicketLoadingState('loading')
       : renderEmptyState(
         state.t('selectTicket', 'Wähle links ein Ticket aus.'),
         state.t('selectTicketDetail', 'Verlauf, Nachweise und Operationen erscheinen danach hier.'),
@@ -1166,10 +1162,6 @@ function randomId() {
     || `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 }
 
-function delay(ms) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
-}
-
 function selectedTicket() {
   return state.data.ctox_ticket_items.find((ticket) => ticket.id === state.selectedId)
     || visibleTickets()[0]
@@ -1230,17 +1222,19 @@ function renderEmptyState(title, body = '') {
   `;
 }
 
-function renderTicketLoadingState() {
-  if (state.loading) {
+function renderTicketLoadingState(kind) {
+  if (kind === 'loading') {
     return renderEmptyState(
       state.t('loadingTickets', 'Tickets werden geladen...'),
       state.t('loadingTicketsDetail', 'Die Ticket-Projektionen werden vorbereitet.'),
     );
   }
-  return renderEmptyState(
-    state.t('syncingTickets', 'Tickets werden synchronisiert.'),
-    state.t('syncingTicketsDetail', 'Die Ticketdaten werden gerade aus dem CTOX-Datenstrom geladen.'),
-  );
+  return `
+    <div class="ctox-empty ctox-syncing">
+      <strong>${escapeHtml(state.t('syncingTickets', 'Tickets werden synchronisiert.'))}</strong>
+      <span>${escapeHtml(state.t('syncingTicketsDetail', 'Die Ticketdaten werden gerade aus dem CTOX-Datenstrom geladen.'))}</span>
+    </div>
+  `;
 }
 
 function applyTicketContext(element, ticket, submodule) {
@@ -1342,7 +1336,6 @@ function escapeAttr(value) {
 
 export const __ticketTestHooks = {
   commandFailureMessage,
-  isCollectionDiagnosticsReady,
   ticketRecordContextForSmoke: (ticket) => recordContextObject({
     type: 'ticket',
     id: ticketRecordId(ticket),
