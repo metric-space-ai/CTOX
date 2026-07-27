@@ -505,4 +505,15 @@ const sigA = hooks.accountListSignature(customerFixtures.customer_accounts, 'car
 assert.equal(sigA, hooks.accountListSignature(customerFixtures.customer_accounts, 'cards'));
 assert.notEqual(sigA, hooks.accountListSignature(customerFixtures.customer_accounts, 'list'));
 
+// Sync readiness gate: the syncing shell replaces data-driven empties only
+// when the unfiltered source is empty AND the collection reports
+// ready === false. Rows and ready collections keep the existing empty copy.
+assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: false }), true);
+assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: true }), false);
+assert.equal(hooks.dataEmptyShowsSyncing(false, { ready: false }), false);
+assert.equal(hooks.dataEmptyShowsSyncing(true, undefined), false);
+assert.match(indexSource, /subscribeCollectionReadiness/);
+assert.match(indexSource, /class="ctox-syncing" role="status" aria-live="polite"/);
+assert.match(html, /data-customers-account-syncing/);
+
 console.log('customers schema and IA smoke OK');

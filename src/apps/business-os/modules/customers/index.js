@@ -5,7 +5,7 @@ import {
   openUniversalImporter,
 } from '../../shared/universal-importer.js';
 
-const BUILD = '20260721-account-workbench-1';
+const BUILD = '20260727-sync-readiness-1';
 const CUSTOMERS_COLLECTIONS = Object.freeze([
   'business_commands',
   'customer_accounts',
@@ -19,6 +19,17 @@ const CUSTOMERS_COLLECTIONS = Object.freeze([
   'customer_view_filters',
   'customer_view_sorts',
   'customer_import_batches',
+  'customer_dedupe_candidates',
+]);
+// Collections whose replication readiness gates a data-driven empty state:
+// while one of these has not finished its initial sync (ready === false), an
+// empty unfiltered source renders the kit syncing shell instead of a false
+// "no data" empty. Filter/selection empties stay untouched.
+const READINESS_GATED_COLLECTIONS = Object.freeze([
+  'customer_accounts',
+  'customer_contacts',
+  'customer_opportunities',
+  'outbound_companies',
   'customer_dedupe_candidates',
 ]);
 const OUTBOUND_HANDOFF_COLLECTIONS = Object.freeze([
@@ -254,6 +265,7 @@ const labels = {
     commandFailed: 'Änderung konnte nicht gespeichert werden: {0}',
     commandUnavailable: 'Änderungen sind gerade nicht verfügbar.',
     loadingStatus: 'Aktualisiert...',
+    syncingData: 'Daten werden synchronisiert.',
     permissionReadOnly: 'Nur Lesen',
     permissionReadOnlyBody: 'Deine Rolle darf Kundendaten ansehen, aber nicht bearbeiten.',
     permissionDenied: 'Keine Berechtigung für Kunden-Änderungen.',
@@ -416,6 +428,7 @@ const labels = {
     commandFailedStatus: 'Failed',
     commandFailed: 'Command could not be recorded: {0}',
     commandUnavailable: 'Command bus unavailable.',
+    syncingData: 'Syncing data.',
     permissionReadOnly: 'Read-only',
     permissionReadOnlyBody: 'Your role can inspect customer data, but cannot modify it.',
     permissionDenied: 'No permission for customer changes.',
@@ -505,6 +518,23 @@ export async function mount(ctx) {
       render();
     }));
     state.cleanup.push(() => { try { ctx.presence.clear(); } catch {} });
+  }
+  // Collection readiness (shell-owned sync contract): re-render when a gated
+  // collection flips its replication state so empty lists swap between the
+  // syncing shell and the real empty state without waiting for data changes.
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    const unsubscribers = READINESS_GATED_COLLECTIONS
+      .map((name) => {
+        try {
+          return ctx.sync.subscribeCollectionReadiness(name, () => render());
+        } catch {
+          return null;
+        }
+      })
+      .filter((unsubscribe) => typeof unsubscribe === 'function');
+    state.cleanup.push(() => unsubscribers.forEach((unsubscribe) => {
+      try { unsubscribe(); } catch {}
+    }));
   }
   state.diagnostics.loading = true;
   render();
@@ -1259,6 +1289,48 @@ function resolveCollection(name) {
   return state.ctx?.db?.collection?.(name) || null;
 }
 
+// Sync readiness is a render hint, never a mount blocker: when the shell
+// exposes no readiness API (older shells, tests) collections count as ready
+// and the previous empty-state behaviour is preserved.
+function collectionSyncReadiness(name) {
+  const sync = state.ctx?.sync;
+  if (typeof sync?.collectionReadiness !== 'function') return null;
+  try {
+    return sync.collectionReadiness(name) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Pure gate: only an empty unfiltered source (no rows at all) on a collection
+// whose initial replication has not finished (ready === false) may show the
+// syncing shell. Rows always win; filter/selection empties keep their copy.
+function dataEmptyShowsSyncing(sourceEmpty, readiness) {
+  return Boolean(sourceEmpty) && readiness?.ready === false;
+}
+
+function renderSyncingState() {
+  return `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(state.t('syncingData', labels.de.syncingData))}</div>`;
+}
+
+// Data-driven empty branch: rendered only when the visible list is empty. If
+// the backing collection itself holds no rows and is still syncing, show the
+// kit syncing shell; otherwise the existing empty copy. `gate: false` skips
+// the readiness check (e.g. permission-denied optional collections, which can
+// never become ready for this user).
+function renderDataEmptyState(collectionName, titleKey, bodyKey, { gate = true } = {}) {
+  const sourceEmpty = (state.collections[collectionName] || []).length === 0;
+  if (gate && dataEmptyShowsSyncing(sourceEmpty, collectionSyncReadiness(collectionName))) {
+    return renderSyncingState();
+  }
+  return `
+    <div class="ctox-empty">
+      <strong>${escapeHtml(state.t(titleKey, labels.de[titleKey]))}</strong>
+      <span>${escapeHtml(state.t(bodyKey, labels.de[bodyKey]))}</span>
+    </div>
+  `;
+}
+
 function canWriteCustomerCollection(name) {
   const permissionCheck = state.ctx?.permissions?.canWriteCollection;
   return typeof permissionCheck === 'function' ? permissionCheck(name) : true;
@@ -1497,7 +1569,17 @@ function renderAccountList() {
     list.innerHTML = accounts.map(accountShardMarkup).join('');
   }
   const empty = pane.querySelector('[data-customers-account-empty]');
-  if (empty) empty.hidden = accounts.length > 0;
+  const syncingNode = pane.querySelector('[data-customers-account-syncing]');
+  // Data-driven empty only: the account list is filtered, so the syncing
+  // shell shows solely when the customer_accounts source itself is empty.
+  const sourceEmpty = (state.collections.customer_accounts || []).length === 0;
+  const syncing = accounts.length === 0
+    && dataEmptyShowsSyncing(sourceEmpty, collectionSyncReadiness('customer_accounts'));
+  if (syncingNode) {
+    syncingNode.hidden = !syncing;
+    if (syncing) syncingNode.textContent = state.t('syncingData', labels.de.syncingData);
+  }
+  if (empty) empty.hidden = syncing || accounts.length > 0;
   markSelectedAccountRows();
 }
 
@@ -1947,12 +2029,7 @@ function renderCenterSearchInput() {
 
 function renderAccountTable(accounts) {
   if (!accounts.length) {
-    return `
-      <div class="ctox-empty">
-        <strong>${escapeHtml(state.t('noCustomers', labels.de.noCustomers))}</strong>
-        <span>${escapeHtml(state.t('noCustomersBody', labels.de.noCustomersBody))}</span>
-      </div>
-    `;
+    return renderDataEmptyState('customer_accounts', 'noCustomers', 'noCustomersBody');
   }
   return `
     <table class="ctox-table customers-table" aria-label="${escapeAttribute(state.t('accounts', labels.de.accounts))}">
@@ -1973,12 +2050,7 @@ function renderAccountTable(accounts) {
 
 function renderContactTable(contacts) {
   if (!contacts.length) {
-    return `
-      <div class="ctox-empty">
-        <strong>${escapeHtml(state.t('noContacts', labels.de.noContacts))}</strong>
-        <span>${escapeHtml(state.t('noContactsBody', labels.de.noContactsBody))}</span>
-      </div>
-    `;
+    return renderDataEmptyState('customer_contacts', 'noContacts', 'noContactsBody');
   }
   return `
     <table class="ctox-table customers-table customers-contact-table" aria-label="${escapeAttribute(state.t('contacts', labels.de.contacts))}">
@@ -1999,12 +2071,7 @@ function renderContactTable(contacts) {
 
 function renderOpportunityWorkbench(opportunities) {
   if (!opportunities.length) {
-    return `
-      <div class="ctox-empty">
-        <strong>${escapeHtml(state.t('noOpportunities', labels.de.noOpportunities))}</strong>
-        <span>${escapeHtml(state.t('noOpportunitiesBody', labels.de.noOpportunitiesBody))}</span>
-      </div>
-    `;
+    return renderDataEmptyState('customer_opportunities', 'noOpportunities', 'noOpportunitiesBody');
   }
   if (state.opportunityMode === 'table') return renderOpportunityTable(opportunities);
   return renderOpportunityBoard(opportunities);
@@ -2012,12 +2079,10 @@ function renderOpportunityWorkbench(opportunities) {
 
 function renderOutboundHandoffTable(rows) {
   if (!rows.length) {
-    return `
-      <div class="ctox-empty">
-        <strong>${escapeHtml(state.t('noOutbound', labels.de.noOutbound))}</strong>
-        <span>${escapeHtml(state.t('noOutboundBody', labels.de.noOutboundBody))}</span>
-      </div>
-    `;
+    // Outbound collections are optional: a permission-denied read can never
+    // become ready, so the readiness gate stays off for that case.
+    const denied = (state.diagnostics.optionalDeniedCollections || []).includes('outbound_companies');
+    return renderDataEmptyState('outbound_companies', 'noOutbound', 'noOutboundBody', { gate: !denied });
   }
   return `
     <table class="ctox-table customers-table customers-handoff-table" aria-label="${escapeAttribute(state.t('handoff', labels.de.handoff))}">
@@ -2038,12 +2103,7 @@ function renderOutboundHandoffTable(rows) {
 
 function renderDedupeTable(rows) {
   if (!rows.length) {
-    return `
-      <div class="ctox-empty">
-        <strong>${escapeHtml(state.t('noDedupe', labels.de.noDedupe))}</strong>
-        <span>${escapeHtml(state.t('noDedupeBody', labels.de.noDedupeBody))}</span>
-      </div>
-    `;
+    return renderDataEmptyState('customer_dedupe_candidates', 'noDedupe', 'noDedupeBody');
   }
   return `
     <table class="ctox-table customers-table customers-dedupe-table" aria-label="${escapeAttribute(state.t('dedupe', labels.de.dedupe))}">
@@ -4591,6 +4651,7 @@ export const __customersTestHooks = {
   canMutateCustomersContext,
   commandMatchesContext,
   commandStatusTone,
+  dataEmptyShowsSyncing,
   recordLinkParams,
   filterAndSortAccounts,
   filterAndSortContacts,
