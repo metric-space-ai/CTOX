@@ -13,6 +13,7 @@ use serde_json::Value;
 use crate::rx_error::{new_rx_error, RxResult};
 use crate::types::{BulkWriteRow, FilledMangoQuery, RxJsonSchema, RxQueryPlan};
 
+use super::metrics::timed_sqlite_statement;
 use super::types::sqlite_error;
 
 const CHANGED_TABLES_TABLE: &str = "__rxdb_changed_tables";
@@ -79,7 +80,7 @@ pub fn ensure_collection_table(conn: &Connection, table: &str) -> RxResult<()> {
     let insert_trigger = quote_identifier(&format!("{table}__rxdb_changed_insert"));
     let update_trigger = quote_identifier(&format!("{table}__rxdb_changed_update"));
     let delete_trigger = quote_identifier(&format!("{table}__rxdb_changed_delete"));
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     conn.execute_batch(&format!(
         r#"
         CREATE TABLE IF NOT EXISTS {quoted}(
@@ -172,7 +173,7 @@ fn ensure_schema_index(
         table,
         sanitize_index_name(&index_key)
     ));
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     conn.execute_batch(&format!(
         "CREATE INDEX IF NOT EXISTS {index_name}
          ON {quoted_table}({});",
@@ -385,7 +386,7 @@ pub fn for_each_document_with_compiled_sql<F>(
 where
     F: FnMut(Value) -> RxResult<bool>,
 {
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     let mut statement = conn.prepare(&compiled.sql).map_err(sqlite_error)?;
     let rows = statement
         .query_map(params_from_iter(compiled.params.iter()), |row| {
@@ -403,7 +404,7 @@ where
 }
 
 pub fn count_with_compiled_sql(conn: &Connection, compiled: &CompiledSqliteQuery) -> RxResult<u64> {
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     let count: i64 = conn
         .query_row(
             &compiled.sql,
@@ -568,17 +569,16 @@ fn is_index_max(value: &Value) -> bool {
     value.as_str() == Some("\u{ffff}")
 }
 
-pub fn insert_document(
-    conn: &Connection,
-    table: &str,
-    primary_path: &str,
+fn document_columns(
     document: &Value,
-) -> RxResult<()> {
+    primary_path: &str,
+) -> RxResult<(String, String, bool, f64, String)> {
     let id = document_id(document, primary_path)?;
     let revision = document
         .get("_rev")
         .and_then(Value::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
     let deleted = document
         .get("_deleted")
         .and_then(Value::as_bool)
@@ -590,7 +590,17 @@ pub fn insert_document(
             Some(serde_json::json!({ "message": err.to_string() })),
         )
     })?;
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    Ok((id, revision, deleted, lwt, data))
+}
+
+pub fn insert_document(
+    conn: &Connection,
+    table: &str,
+    primary_path: &str,
+    document: &Value,
+) -> RxResult<()> {
+    let (id, revision, deleted, lwt, data) = document_columns(document, primary_path)?;
+    let _statement_timer = timed_sqlite_statement();
     conn.execute(
         &format!(
             "INSERT INTO {} (id, revision, deleted, lastWriteTime, data) VALUES (?, ?, ?, ?, ?)",
@@ -609,23 +619,8 @@ pub fn update_document(
     row: &BulkWriteRow,
 ) -> RxResult<()> {
     let document = &row.document;
-    let id = document_id(document, primary_path)?;
-    let revision = document
-        .get("_rev")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let deleted = document
-        .get("_deleted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let lwt = last_write_time(document);
-    let data = serde_json::to_string(document).map_err(|err| {
-        new_rx_error(
-            "SQLITE_JSON",
-            Some(serde_json::json!({ "message": err.to_string() })),
-        )
-    })?;
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let (id, revision, deleted, lwt, data) = document_columns(document, primary_path)?;
+    let _statement_timer = timed_sqlite_statement();
     conn.execute(
         &format!(
             "UPDATE {} SET revision = ?, deleted = ?, lastWriteTime = ?, data = ? WHERE id = ?",
@@ -637,15 +632,6 @@ pub fn update_document(
     Ok(())
 }
 
-pub fn all_documents(conn: &Connection, table: &str) -> RxResult<Vec<Value>> {
-    let mut ret = Vec::new();
-    for_each_document(conn, table, |doc| {
-        ret.push(doc);
-        Ok(true)
-    })?;
-    Ok(ret)
-}
-
 /// Walks every row of the table without first materializing the full Vec.
 /// The visitor returns `Ok(true)` to continue or `Ok(false)` to stop early.
 /// V1.5 query streaming relies on this for bounded-memory reads on large
@@ -654,7 +640,7 @@ pub fn for_each_document<F>(conn: &Connection, table: &str, mut visit: F) -> RxR
 where
     F: FnMut(Value) -> RxResult<bool>,
 {
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     let mut stmt = conn
         .prepare(&format!("SELECT data FROM {}", quote_identifier(table)))
         .map_err(sqlite_error)?;
@@ -672,7 +658,7 @@ where
 pub fn document_by_id(conn: &Connection, table: &str, id: &str) -> RxResult<Option<Value>> {
     #[cfg(test)]
     SQLITE_DOCUMENT_BY_ID_CALL_COUNT.fetch_add(1, Ordering::SeqCst);
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     let data: Option<String> = conn
         .query_row(
             &format!("SELECT data FROM {} WHERE id = ?", quote_identifier(table)),
@@ -710,7 +696,7 @@ pub fn documents_by_ids(
                 "SELECT id, data FROM {quoted_table} WHERE id IN ({placeholders}) AND deleted = 0"
             )
         };
-        let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+        let _statement_timer = timed_sqlite_statement();
         let mut statement = conn.prepare(&sql).map_err(sqlite_error)?;
         let rows = statement
             .query_map(params_from_iter(chunk.iter().map(String::as_str)), |row| {
@@ -728,7 +714,7 @@ pub fn documents_by_ids(
 }
 
 pub fn drop_table(conn: &Connection, table: &str) -> RxResult<()> {
-    let _statement_timer = crate::storage::sqlite::instance::timed_sqlite_statement();
+    let _statement_timer = timed_sqlite_statement();
     conn.execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_identifier(table)))
         .map_err(sqlite_error)
 }

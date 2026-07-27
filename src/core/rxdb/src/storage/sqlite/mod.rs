@@ -8,6 +8,7 @@
 pub mod cleanup;
 pub mod index_mod;
 pub mod instance;
+pub(crate) mod metrics;
 pub mod sql;
 pub mod types;
 

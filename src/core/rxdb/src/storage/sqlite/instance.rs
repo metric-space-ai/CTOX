@@ -1,6 +1,6 @@
 //! SQLite [`crate::types::RxStorageInstance`] implementation.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap};
 use std::ops::{Deref, DerefMut};
 use std::path::Path;
 #[cfg(test)]
@@ -32,13 +32,30 @@ use crate::types::{
 };
 
 use super::cleanup::cleanup_deleted_documents;
+use super::metrics::{
+    record_query_fallback_attribution, record_query_fallback_rows,
+    record_sqlite_external_poll_drain, record_sqlite_external_poll_drain_failure,
+    record_sqlite_writer_lock_acquire, record_sqlite_writer_lock_held,
+    record_sqlite_writer_lock_wait, SQLITE_BULK_WRITE_CALLS, SQLITE_BULK_WRITE_ROWS,
+    SQLITE_CHANGED_DOCUMENTS_SINCE_CALLS, SQLITE_CHANGED_DOCUMENTS_SINCE_RESULTS,
+    SQLITE_COUNT_CALLS, SQLITE_COUNT_FALLBACK_QUERY_CALLS, SQLITE_FIND_DOCUMENTS_BY_ID_CALLS,
+    SQLITE_FIND_DOCUMENTS_BY_ID_REQUESTED, SQLITE_FIND_DOCUMENTS_BY_ID_RESULTS, SQLITE_QUERY_CALLS,
+    SQLITE_QUERY_FALLBACK_CALLS, SQLITE_QUERY_FALLBACK_INDEXED_CANDIDATE_CALLS,
+    SQLITE_QUERY_FALLBACK_TOO_BROAD_CALLS, SQLITE_QUERY_RESULTS, SQLITE_QUERY_STREAM_CALLS,
+    SQLITE_QUERY_STREAM_RESULTS, SQLITE_QUERY_STREAM_UNSUPPORTED_CALLS,
+    SQLITE_READ_ONLY_OPEN_CALLS, SQLITE_READ_ONLY_OPEN_FAILURES, SQLITE_WRITER_FALLBACKS,
+    SQLITE_WRITE_TRANSACTIONS_COMMITTED, SQLITE_WRITE_TRANSACTIONS_FAILED,
+    SQLITE_WRITE_TRANSACTIONS_STARTED,
+};
 use super::sql::{
     compile_count_sql, compile_query_plan_candidate_sql, compile_query_sql,
     count_with_compiled_sql, documents_by_ids, drop_table, for_each_document,
     for_each_document_with_compiled_sql, insert_document, query_documents_with_compiled_sql,
     quote_identifier, update_document, CompiledSqliteQuery,
 };
-use super::types::{sqlite_error, SharedSqliteConnection};
+use super::types::{
+    sqlite_concurrent_reader_error, sqlite_error, sqlite_path_is_in_memory, SharedSqliteConnection,
+};
 
 const SQLITE_EXTERNAL_POLL_FILE_CHUNK_LIMIT: u64 = 2;
 const SQLITE_EXTERNAL_POLL_DEFAULT_LIMIT: u64 = 50;
@@ -51,115 +68,6 @@ const SQLITE_QUERY_FALLBACK_TOO_BROAD: &str = "SQLITE_QUERY_FALLBACK_TOO_BROAD";
 const SQLITE_QUERY_STREAM_UNSUPPORTED: &str = "SQLITE_QUERY_STREAM_UNSUPPORTED";
 
 static INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
-static SQLITE_BULK_WRITE_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_BULK_WRITE_ROWS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_FIND_DOCUMENTS_BY_ID_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_FIND_DOCUMENTS_BY_ID_REQUESTED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_FIND_DOCUMENTS_BY_ID_RESULTS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_CHANGED_DOCUMENTS_SINCE_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_CHANGED_DOCUMENTS_SINCE_RESULTS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_RESULTS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_ROWS_VISITED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_INDEXED_CANDIDATE_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_TOO_BROAD_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_FALLBACK_BY_COLLECTION: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_BY_OPERATOR: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_BY_COLLECTION_OPERATOR: OnceLock<
-    StdMutex<HashMap<String, HashMap<String, u64>>>,
-> = OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_OPERATOR: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_OPERATOR: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION_OPERATOR: OnceLock<
-    StdMutex<HashMap<String, HashMap<String, u64>>>,
-> = OnceLock::new();
-static SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION_OPERATOR: OnceLock<
-    StdMutex<HashMap<String, HashMap<String, u64>>>,
-> = OnceLock::new();
-static SQLITE_COUNT_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_COUNT_FALLBACK_QUERY_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_STREAM_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_STREAM_RESULTS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_QUERY_STREAM_UNSUPPORTED_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_READ_ONLY_OPEN_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_READ_ONLY_OPEN_FAILURES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_FALLBACKS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENTS_EXECUTED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_NS_MAX: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_GE_1MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_GE_10MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_GE_100MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_STATEMENT_ELAPSED_GE_1000MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITE_TRANSACTIONS_STARTED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITE_TRANSACTIONS_COMMITTED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITE_TRANSACTIONS_FAILED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_ACQUIRE_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_NS_MAX: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_GE_1MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_GE_10MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_GE_100MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_WAIT_GE_1000MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_NS_MAX: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_GE_1MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_GE_10MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_GE_100MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_WRITER_LOCK_HELD_GE_1000MS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DATA_VERSION_READS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CONNECTION_OPENS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CONNECTION_OPEN_FAILURES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_WAKEUPS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_ACTIVE_WAKEUPS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_STANDBY_WAKEUPS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_STANDBY_ENTRIES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_ACTIVE_RESETS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DATA_VERSION_CHANGES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DATA_VERSION_READ_FAILURES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READ_FAILURES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CHANGED_TABLE_ROWS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_CHANGED_TABLE_NOTIFICATIONS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSED_NOTIFICATIONS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_CALLS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_BATCHES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_EMPTY_BATCHES: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_VISITED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_MAX: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_MAX: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS: AtomicU64 = AtomicU64::new(0);
-static SQLITE_EXTERNAL_POLL_DRAIN_FAILURES: AtomicU64 = AtomicU64::new(0);
-// Per-database wakeup counter for the external write poll. Global counters
-// are shared across parallel tests, so the idle-budget guard keys on the
-// database path to observe ONLY its own poll thread.
-static SQLITE_EXTERNAL_POLL_WAKEUPS_BY_DATABASE: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_EXTERNAL_POLL_NOTIFICATIONS_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSIONS_BY_TABLE: OnceLock<
-    StdMutex<HashMap<String, u64>>,
-> = OnceLock::new();
-static SQLITE_EXTERNAL_POLL_DRAIN_ROWS_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
-static SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS_BY_TABLE: OnceLock<
-    StdMutex<HashMap<String, u64>>,
-> = OnceLock::new();
-static SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE: OnceLock<StdMutex<HashMap<String, u64>>> =
-    OnceLock::new();
 #[cfg(test)]
 static CHANGED_DOCUMENTS_SINCE_TABLE_CALLS: OnceLock<StdMutex<HashMap<String, usize>>> =
     OnceLock::new();
@@ -223,651 +131,8 @@ fn set_test_external_poll_safety_interval_ms(ms: u64) {
     TEST_EXTERNAL_POLL_SAFETY_INTERVAL_MS.store(ms, Ordering::SeqCst);
 }
 
-pub fn sqlite_runtime_counters_snapshot() -> Value {
-    let mut out = serde_json::Map::new();
-    out.insert(
-        "schema".to_string(),
-        Value::String("ctox.rxdb.sqlite.runtime_counters.v1".to_string()),
-    );
-    macro_rules! counter {
-        ($name:literal, $value:expr) => {
-            out.insert(
-                $name.to_string(),
-                Value::from($value.load(Ordering::Relaxed)),
-            );
-        };
-    }
-    counter!("bulk_write_calls", SQLITE_BULK_WRITE_CALLS);
-    counter!("bulk_write_rows", SQLITE_BULK_WRITE_ROWS);
-    counter!(
-        "find_documents_by_id_calls",
-        SQLITE_FIND_DOCUMENTS_BY_ID_CALLS
-    );
-    counter!(
-        "find_documents_by_id_requested",
-        SQLITE_FIND_DOCUMENTS_BY_ID_REQUESTED
-    );
-    counter!(
-        "find_documents_by_id_results",
-        SQLITE_FIND_DOCUMENTS_BY_ID_RESULTS
-    );
-    counter!(
-        "changed_documents_since_calls",
-        SQLITE_CHANGED_DOCUMENTS_SINCE_CALLS
-    );
-    counter!(
-        "changed_documents_since_results",
-        SQLITE_CHANGED_DOCUMENTS_SINCE_RESULTS
-    );
-    counter!("query_calls", SQLITE_QUERY_CALLS);
-    counter!("query_results", SQLITE_QUERY_RESULTS);
-    counter!("query_fallback_calls", SQLITE_QUERY_FALLBACK_CALLS);
-    counter!(
-        "query_fallback_rows_visited",
-        SQLITE_QUERY_FALLBACK_ROWS_VISITED
-    );
-    counter!(
-        "query_fallback_rows_decoded",
-        SQLITE_QUERY_FALLBACK_ROWS_DECODED
-    );
-    counter!(
-        "query_fallback_indexed_candidate_calls",
-        SQLITE_QUERY_FALLBACK_INDEXED_CANDIDATE_CALLS
-    );
-    counter!(
-        "query_fallback_too_broad_calls",
-        SQLITE_QUERY_FALLBACK_TOO_BROAD_CALLS
-    );
-    out.insert(
-        "query_fallback_by_collection".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_BY_COLLECTION),
-    );
-    out.insert(
-        "query_fallback_by_operator".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_BY_OPERATOR),
-    );
-    out.insert(
-        "query_fallback_by_collection_operator".to_string(),
-        snapshot_nested_counter_map(&SQLITE_QUERY_FALLBACK_BY_COLLECTION_OPERATOR),
-    );
-    out.insert(
-        "query_fallback_rows_visited_by_collection".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION),
-    );
-    out.insert(
-        "query_fallback_rows_decoded_by_collection".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION),
-    );
-    out.insert(
-        "query_fallback_rows_visited_by_operator".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_OPERATOR),
-    );
-    out.insert(
-        "query_fallback_rows_decoded_by_operator".to_string(),
-        snapshot_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_OPERATOR),
-    );
-    out.insert(
-        "query_fallback_rows_visited_by_collection_operator".to_string(),
-        snapshot_nested_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION_OPERATOR),
-    );
-    out.insert(
-        "query_fallback_rows_decoded_by_collection_operator".to_string(),
-        snapshot_nested_counter_map(&SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION_OPERATOR),
-    );
-    counter!("count_calls", SQLITE_COUNT_CALLS);
-    counter!(
-        "count_fallback_query_calls",
-        SQLITE_COUNT_FALLBACK_QUERY_CALLS
-    );
-    counter!("query_stream_calls", SQLITE_QUERY_STREAM_CALLS);
-    counter!("query_stream_results", SQLITE_QUERY_STREAM_RESULTS);
-    counter!(
-        "query_stream_unsupported_calls",
-        SQLITE_QUERY_STREAM_UNSUPPORTED_CALLS
-    );
-    counter!("read_only_open_calls", SQLITE_READ_ONLY_OPEN_CALLS);
-    counter!("read_only_open_failures", SQLITE_READ_ONLY_OPEN_FAILURES);
-    counter!("writer_fallbacks", SQLITE_WRITER_FALLBACKS);
-    counter!("statements_executed", SQLITE_STATEMENTS_EXECUTED);
-    counter!(
-        "statement_elapsed_ns_total",
-        SQLITE_STATEMENT_ELAPSED_NS_TOTAL
-    );
-    counter!("statement_elapsed_ns_max", SQLITE_STATEMENT_ELAPSED_NS_MAX);
-    counter!("statement_elapsed_ge_1ms", SQLITE_STATEMENT_ELAPSED_GE_1MS);
-    counter!(
-        "statement_elapsed_ge_10ms",
-        SQLITE_STATEMENT_ELAPSED_GE_10MS
-    );
-    counter!(
-        "statement_elapsed_ge_100ms",
-        SQLITE_STATEMENT_ELAPSED_GE_100MS
-    );
-    counter!(
-        "statement_elapsed_ge_1000ms",
-        SQLITE_STATEMENT_ELAPSED_GE_1000MS
-    );
-    counter!(
-        "write_transactions_started",
-        SQLITE_WRITE_TRANSACTIONS_STARTED
-    );
-    counter!(
-        "write_transactions_committed",
-        SQLITE_WRITE_TRANSACTIONS_COMMITTED
-    );
-    counter!(
-        "write_transactions_failed",
-        SQLITE_WRITE_TRANSACTIONS_FAILED
-    );
-    counter!(
-        "writer_lock_acquire_calls",
-        SQLITE_WRITER_LOCK_ACQUIRE_CALLS
-    );
-    counter!(
-        "writer_lock_wait_ns_total",
-        SQLITE_WRITER_LOCK_WAIT_NS_TOTAL
-    );
-    counter!("writer_lock_wait_ns_max", SQLITE_WRITER_LOCK_WAIT_NS_MAX);
-    counter!("writer_lock_wait_ge_1ms", SQLITE_WRITER_LOCK_WAIT_GE_1MS);
-    counter!("writer_lock_wait_ge_10ms", SQLITE_WRITER_LOCK_WAIT_GE_10MS);
-    counter!(
-        "writer_lock_wait_ge_100ms",
-        SQLITE_WRITER_LOCK_WAIT_GE_100MS
-    );
-    counter!(
-        "writer_lock_wait_ge_1000ms",
-        SQLITE_WRITER_LOCK_WAIT_GE_1000MS
-    );
-    counter!(
-        "writer_lock_held_ns_total",
-        SQLITE_WRITER_LOCK_HELD_NS_TOTAL
-    );
-    counter!("writer_lock_held_ns_max", SQLITE_WRITER_LOCK_HELD_NS_MAX);
-    counter!("writer_lock_held_ge_1ms", SQLITE_WRITER_LOCK_HELD_GE_1MS);
-    counter!("writer_lock_held_ge_10ms", SQLITE_WRITER_LOCK_HELD_GE_10MS);
-    counter!(
-        "writer_lock_held_ge_100ms",
-        SQLITE_WRITER_LOCK_HELD_GE_100MS
-    );
-    counter!(
-        "writer_lock_held_ge_1000ms",
-        SQLITE_WRITER_LOCK_HELD_GE_1000MS
-    );
-    counter!(
-        "external_poll_data_version_reads",
-        SQLITE_EXTERNAL_POLL_DATA_VERSION_READS
-    );
-    counter!(
-        "external_poll_changed_table_reads",
-        SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READS
-    );
-    counter!(
-        "external_poll_connection_opens",
-        SQLITE_EXTERNAL_POLL_CONNECTION_OPENS
-    );
-    counter!(
-        "external_poll_connection_open_failures",
-        SQLITE_EXTERNAL_POLL_CONNECTION_OPEN_FAILURES
-    );
-    counter!("external_poll_wakeups", SQLITE_EXTERNAL_POLL_WAKEUPS);
-    counter!(
-        "external_poll_active_wakeups",
-        SQLITE_EXTERNAL_POLL_ACTIVE_WAKEUPS
-    );
-    counter!(
-        "external_poll_standby_wakeups",
-        SQLITE_EXTERNAL_POLL_STANDBY_WAKEUPS
-    );
-    counter!(
-        "external_poll_standby_entries",
-        SQLITE_EXTERNAL_POLL_STANDBY_ENTRIES
-    );
-    counter!(
-        "external_poll_active_resets",
-        SQLITE_EXTERNAL_POLL_ACTIVE_RESETS
-    );
-    counter!(
-        "external_poll_data_version_changes",
-        SQLITE_EXTERNAL_POLL_DATA_VERSION_CHANGES
-    );
-    counter!(
-        "external_poll_data_version_read_failures",
-        SQLITE_EXTERNAL_POLL_DATA_VERSION_READ_FAILURES
-    );
-    counter!(
-        "external_poll_changed_table_read_failures",
-        SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READ_FAILURES
-    );
-    counter!(
-        "external_poll_changed_table_rows",
-        SQLITE_EXTERNAL_POLL_CHANGED_TABLE_ROWS
-    );
-    counter!(
-        "external_poll_changed_table_notifications",
-        SQLITE_EXTERNAL_POLL_CHANGED_TABLE_NOTIFICATIONS
-    );
-    counter!(
-        "external_poll_local_hook_suppressed_notifications",
-        SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSED_NOTIFICATIONS
-    );
-    counter!(
-        "external_poll_drain_calls",
-        SQLITE_EXTERNAL_POLL_DRAIN_CALLS
-    );
-    counter!(
-        "external_poll_drain_batches",
-        SQLITE_EXTERNAL_POLL_DRAIN_BATCHES
-    );
-    counter!(
-        "external_poll_drain_empty_batches",
-        SQLITE_EXTERNAL_POLL_DRAIN_EMPTY_BATCHES
-    );
-    counter!(
-        "external_poll_drain_rows_visited",
-        SQLITE_EXTERNAL_POLL_DRAIN_ROWS_VISITED
-    );
-    counter!(
-        "external_poll_drain_rows_decoded",
-        SQLITE_EXTERNAL_POLL_DRAIN_ROWS_DECODED
-    );
-    counter!(
-        "external_poll_drain_rows_max",
-        SQLITE_EXTERNAL_POLL_DRAIN_ROWS_MAX
-    );
-    counter!(
-        "external_poll_drain_batches_max",
-        SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_MAX
-    );
-    counter!(
-        "external_poll_drain_budget_exhaustions",
-        SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS
-    );
-    counter!(
-        "external_poll_drain_failures",
-        SQLITE_EXTERNAL_POLL_DRAIN_FAILURES
-    );
-    out.insert(
-        "external_poll_wakeups_by_database".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_WAKEUPS_BY_DATABASE),
-    );
-    out.insert(
-        "external_poll_notifications_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_NOTIFICATIONS_BY_TABLE),
-    );
-    out.insert(
-        "external_poll_local_hook_suppressions_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSIONS_BY_TABLE),
-    );
-    out.insert(
-        "external_poll_drain_rows_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_ROWS_BY_TABLE),
-    );
-    out.insert(
-        "external_poll_drain_batches_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_BY_TABLE),
-    );
-    out.insert(
-        "external_poll_drain_budget_exhaustions_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS_BY_TABLE),
-    );
-    out.insert(
-        "external_poll_drain_failures_by_table".to_string(),
-        snapshot_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE),
-    );
-    Value::Object(out)
-}
-
-fn snapshot_counter_map(map: &OnceLock<StdMutex<HashMap<String, u64>>>) -> Value {
-    let Some(map) = map.get() else {
-        return Value::Object(Default::default());
-    };
-    let counters = map.lock().unwrap();
-    let sorted = counters
-        .iter()
-        .map(|(key, value)| (key.clone(), *value))
-        .collect::<BTreeMap<_, _>>();
-    serde_json::to_value(sorted).unwrap_or_else(|_| Value::Object(Default::default()))
-}
-
-fn snapshot_nested_counter_map(
-    map: &OnceLock<StdMutex<HashMap<String, HashMap<String, u64>>>>,
-) -> Value {
-    let Some(map) = map.get() else {
-        return Value::Object(Default::default());
-    };
-    let counters = map.lock().unwrap();
-    let sorted = counters
-        .iter()
-        .map(|(outer, inner)| {
-            let inner_sorted = inner
-                .iter()
-                .map(|(key, value)| (key.clone(), *value))
-                .collect::<BTreeMap<_, _>>();
-            (outer.clone(), inner_sorted)
-        })
-        .collect::<BTreeMap<_, _>>();
-    serde_json::to_value(sorted).unwrap_or_else(|_| Value::Object(Default::default()))
-}
-
-fn increment_counter_map(map: &OnceLock<StdMutex<HashMap<String, u64>>>, key: &str) {
-    let mut counters = map
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    let counter = counters.entry(key.to_string()).or_insert(0);
-    *counter = counter.saturating_add(1);
-}
-
-fn increment_counter_map_by(
-    map: &OnceLock<StdMutex<HashMap<String, u64>>>,
-    key: &str,
-    amount: u64,
-) {
-    if amount == 0 {
-        return;
-    }
-    let mut counters = map
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    let counter = counters.entry(key.to_string()).or_insert(0);
-    *counter = counter.saturating_add(amount);
-}
-
-fn increment_nested_counter_map(
-    map: &OnceLock<StdMutex<HashMap<String, HashMap<String, u64>>>>,
-    outer: &str,
-    inner: &str,
-) {
-    let mut counters = map
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    let inner_counters = counters.entry(outer.to_string()).or_default();
-    let counter = inner_counters.entry(inner.to_string()).or_insert(0);
-    *counter = counter.saturating_add(1);
-}
-
-fn increment_nested_counter_map_by(
-    map: &OnceLock<StdMutex<HashMap<String, HashMap<String, u64>>>>,
-    outer: &str,
-    inner: &str,
-    amount: u64,
-) {
-    if amount == 0 {
-        return;
-    }
-    let mut counters = map
-        .get_or_init(|| StdMutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    let inner_counters = counters.entry(outer.to_string()).or_default();
-    let counter = inner_counters.entry(inner.to_string()).or_insert(0);
-    *counter = counter.saturating_add(amount);
-}
-
-fn normalized_query_fallback_operators(operator_families: &[String]) -> Vec<String> {
-    if operator_families.is_empty() {
-        vec!["$none".to_string()]
-    } else {
-        operator_families.to_vec()
-    }
-}
-
-fn record_query_fallback_attribution(collection_name: &str, operator_families: &[String]) {
-    increment_counter_map(&SQLITE_QUERY_FALLBACK_BY_COLLECTION, collection_name);
-    for operator in normalized_query_fallback_operators(operator_families) {
-        increment_counter_map(&SQLITE_QUERY_FALLBACK_BY_OPERATOR, &operator);
-        increment_nested_counter_map(
-            &SQLITE_QUERY_FALLBACK_BY_COLLECTION_OPERATOR,
-            collection_name,
-            &operator,
-        );
-    }
-}
-
-fn record_query_fallback_rows(
-    collection_name: &str,
-    operator_families: &[String],
-    rows_visited: u64,
-    rows_decoded: u64,
-) {
-    SQLITE_QUERY_FALLBACK_ROWS_VISITED.fetch_add(rows_visited, Ordering::Relaxed);
-    SQLITE_QUERY_FALLBACK_ROWS_DECODED.fetch_add(rows_decoded, Ordering::Relaxed);
-    increment_counter_map_by(
-        &SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION,
-        collection_name,
-        rows_visited,
-    );
-    increment_counter_map_by(
-        &SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION,
-        collection_name,
-        rows_decoded,
-    );
-    for operator in normalized_query_fallback_operators(operator_families) {
-        increment_counter_map_by(
-            &SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_OPERATOR,
-            &operator,
-            rows_visited,
-        );
-        increment_counter_map_by(
-            &SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_OPERATOR,
-            &operator,
-            rows_decoded,
-        );
-        increment_nested_counter_map_by(
-            &SQLITE_QUERY_FALLBACK_ROWS_VISITED_BY_COLLECTION_OPERATOR,
-            collection_name,
-            &operator,
-            rows_visited,
-        );
-        increment_nested_counter_map_by(
-            &SQLITE_QUERY_FALLBACK_ROWS_DECODED_BY_COLLECTION_OPERATOR,
-            collection_name,
-            &operator,
-            rows_decoded,
-        );
-    }
-}
-
-pub(crate) fn record_sqlite_statement_executed(count: u64) {
-    SQLITE_STATEMENTS_EXECUTED.fetch_add(count, Ordering::Relaxed);
-}
-
-pub(crate) struct TimedSqliteStatement {
-    started: Instant,
-}
-
-impl Drop for TimedSqliteStatement {
-    fn drop(&mut self) {
-        record_sqlite_statement_elapsed(self.started.elapsed());
-    }
-}
-
-pub(crate) fn timed_sqlite_statement() -> TimedSqliteStatement {
-    record_sqlite_statement_executed(1);
-    TimedSqliteStatement {
-        started: Instant::now(),
-    }
-}
-
-pub(crate) fn record_sqlite_external_poll_data_version_read() {
-    SQLITE_EXTERNAL_POLL_DATA_VERSION_READS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_changed_table_read() {
-    SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_connection_open() {
-    SQLITE_EXTERNAL_POLL_CONNECTION_OPENS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_connection_open_failure() {
-    SQLITE_EXTERNAL_POLL_CONNECTION_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_wakeup(standby: bool, database_key: &str) {
-    SQLITE_EXTERNAL_POLL_WAKEUPS.fetch_add(1, Ordering::Relaxed);
-    increment_counter_map(&SQLITE_EXTERNAL_POLL_WAKEUPS_BY_DATABASE, database_key);
-    if standby {
-        SQLITE_EXTERNAL_POLL_STANDBY_WAKEUPS.fetch_add(1, Ordering::Relaxed);
-    } else {
-        SQLITE_EXTERNAL_POLL_ACTIVE_WAKEUPS.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-pub(crate) fn record_sqlite_external_poll_standby_entry() {
-    SQLITE_EXTERNAL_POLL_STANDBY_ENTRIES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_active_reset() {
-    SQLITE_EXTERNAL_POLL_ACTIVE_RESETS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_data_version_change() {
-    SQLITE_EXTERNAL_POLL_DATA_VERSION_CHANGES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_data_version_read_failure() {
-    SQLITE_EXTERNAL_POLL_DATA_VERSION_READ_FAILURES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_changed_table_read_failure() {
-    SQLITE_EXTERNAL_POLL_CHANGED_TABLE_READ_FAILURES.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_changed_table_rows(rows: usize) {
-    SQLITE_EXTERNAL_POLL_CHANGED_TABLE_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
-}
-
-pub(crate) fn record_sqlite_external_poll_changed_table_notification(table_name: &str) {
-    SQLITE_EXTERNAL_POLL_CHANGED_TABLE_NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
-    increment_counter_map(&SQLITE_EXTERNAL_POLL_NOTIFICATIONS_BY_TABLE, table_name);
-}
-
-pub(crate) fn record_sqlite_external_poll_local_hook_suppression(table_name: &str) {
-    SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSED_NOTIFICATIONS.fetch_add(1, Ordering::Relaxed);
-    increment_counter_map(
-        &SQLITE_EXTERNAL_POLL_LOCAL_HOOK_SUPPRESSIONS_BY_TABLE,
-        table_name,
-    );
-}
-
-fn record_sqlite_external_poll_drain(
-    table_name: &str,
-    batches: usize,
-    empty_batches: usize,
-    rows: usize,
-    drained_to_empty: bool,
-) {
-    SQLITE_EXTERNAL_POLL_DRAIN_CALLS.fetch_add(1, Ordering::Relaxed);
-    SQLITE_EXTERNAL_POLL_DRAIN_BATCHES.fetch_add(batches as u64, Ordering::Relaxed);
-    SQLITE_EXTERNAL_POLL_DRAIN_EMPTY_BATCHES.fetch_add(empty_batches as u64, Ordering::Relaxed);
-    SQLITE_EXTERNAL_POLL_DRAIN_ROWS_VISITED.fetch_add(rows as u64, Ordering::Relaxed);
-    SQLITE_EXTERNAL_POLL_DRAIN_ROWS_DECODED.fetch_add(rows as u64, Ordering::Relaxed);
-    update_atomic_max(&SQLITE_EXTERNAL_POLL_DRAIN_ROWS_MAX, rows as u64);
-    update_atomic_max(&SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_MAX, batches as u64);
-    increment_counter_map_by(
-        &SQLITE_EXTERNAL_POLL_DRAIN_ROWS_BY_TABLE,
-        table_name,
-        rows as u64,
-    );
-    increment_counter_map_by(
-        &SQLITE_EXTERNAL_POLL_DRAIN_BATCHES_BY_TABLE,
-        table_name,
-        batches as u64,
-    );
-    if !drained_to_empty {
-        SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS.fetch_add(1, Ordering::Relaxed);
-        increment_counter_map(
-            &SQLITE_EXTERNAL_POLL_DRAIN_BUDGET_EXHAUSTIONS_BY_TABLE,
-            table_name,
-        );
-    }
-}
-
-fn record_sqlite_external_poll_drain_failure(table_name: &str) {
-    SQLITE_EXTERNAL_POLL_DRAIN_FAILURES.fetch_add(1, Ordering::Relaxed);
-    increment_counter_map(&SQLITE_EXTERNAL_POLL_DRAIN_FAILURES_BY_TABLE, table_name);
-}
-
-fn record_sqlite_writer_lock_wait(elapsed: Duration) {
-    let elapsed_ns = duration_ns(elapsed);
-    SQLITE_WRITER_LOCK_WAIT_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
-    update_atomic_max(&SQLITE_WRITER_LOCK_WAIT_NS_MAX, elapsed_ns);
-    record_duration_buckets(
-        elapsed_ns,
-        &SQLITE_WRITER_LOCK_WAIT_GE_1MS,
-        &SQLITE_WRITER_LOCK_WAIT_GE_10MS,
-        &SQLITE_WRITER_LOCK_WAIT_GE_100MS,
-        &SQLITE_WRITER_LOCK_WAIT_GE_1000MS,
-    );
-}
-
-fn record_sqlite_writer_lock_held(elapsed: Duration) {
-    let elapsed_ns = duration_ns(elapsed);
-    SQLITE_WRITER_LOCK_HELD_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
-    update_atomic_max(&SQLITE_WRITER_LOCK_HELD_NS_MAX, elapsed_ns);
-    record_duration_buckets(
-        elapsed_ns,
-        &SQLITE_WRITER_LOCK_HELD_GE_1MS,
-        &SQLITE_WRITER_LOCK_HELD_GE_10MS,
-        &SQLITE_WRITER_LOCK_HELD_GE_100MS,
-        &SQLITE_WRITER_LOCK_HELD_GE_1000MS,
-    );
-}
-
-fn record_sqlite_statement_elapsed(elapsed: Duration) {
-    let elapsed_ns = duration_ns(elapsed);
-    SQLITE_STATEMENT_ELAPSED_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
-    update_atomic_max(&SQLITE_STATEMENT_ELAPSED_NS_MAX, elapsed_ns);
-    record_duration_buckets(
-        elapsed_ns,
-        &SQLITE_STATEMENT_ELAPSED_GE_1MS,
-        &SQLITE_STATEMENT_ELAPSED_GE_10MS,
-        &SQLITE_STATEMENT_ELAPSED_GE_100MS,
-        &SQLITE_STATEMENT_ELAPSED_GE_1000MS,
-    );
-}
-
-fn duration_ns(duration: Duration) -> u64 {
-    let elapsed_ns = duration.as_nanos().min(u128::from(u64::MAX)) as u64;
-    elapsed_ns.max(1)
-}
-
-fn record_duration_buckets(
-    elapsed_ns: u64,
-    ge_1ms: &AtomicU64,
-    ge_10ms: &AtomicU64,
-    ge_100ms: &AtomicU64,
-    ge_1000ms: &AtomicU64,
-) {
-    if elapsed_ns >= 1_000_000 {
-        ge_1ms.fetch_add(1, Ordering::Relaxed);
-    }
-    if elapsed_ns >= 10_000_000 {
-        ge_10ms.fetch_add(1, Ordering::Relaxed);
-    }
-    if elapsed_ns >= 100_000_000 {
-        ge_100ms.fetch_add(1, Ordering::Relaxed);
-    }
-    if elapsed_ns >= 1_000_000_000 {
-        ge_1000ms.fetch_add(1, Ordering::Relaxed);
-    }
-}
-
-fn update_atomic_max(value: &AtomicU64, candidate: u64) {
-    let mut current = value.load(Ordering::Relaxed);
-    while candidate > current {
-        match value.compare_exchange_weak(current, candidate, Ordering::Relaxed, Ordering::Relaxed)
-        {
-            Ok(_) => break,
-            Err(next_current) => current = next_current,
-        }
-    }
-}
-
+pub use super::metrics::sqlite_runtime_counters_snapshot;
+pub(crate) use super::metrics::timed_sqlite_statement;
 pub(crate) struct TimedSqliteWriterGuard<'a> {
     guard: parking_lot::MutexGuard<'a, rusqlite::Connection>,
     held_started: Instant,
@@ -896,7 +161,7 @@ impl Drop for TimedSqliteWriterGuard<'_> {
 pub(crate) fn lock_sqlite_writer(
     connection: &SharedSqliteConnection,
 ) -> TimedSqliteWriterGuard<'_> {
-    SQLITE_WRITER_LOCK_ACQUIRE_CALLS.fetch_add(1, Ordering::Relaxed);
+    record_sqlite_writer_lock_acquire();
     let lock_wait_started = Instant::now();
     let guard = connection.lock();
     record_sqlite_writer_lock_wait(lock_wait_started.elapsed());
@@ -1091,6 +356,18 @@ pub fn notify_database_change(database_key: &str) {
     }
 }
 
+enum ReadOperation {
+    FindDocumentsById,
+    Query,
+    Count,
+    ChangedDocumentsSince,
+}
+
+enum ReadConnection {
+    ReadOnly(SharedSqliteConnection),
+    WriterFallback(SharedSqliteConnection),
+}
+
 pub struct RxStorageInstanceSqlite {
     pub database_name: String,
     pub collection_name: String,
@@ -1183,6 +460,52 @@ impl RxStorageInstanceSqlite {
             ));
         }
         Ok(())
+    }
+
+    async fn with_read_connection<T, F>(&self, operation: ReadOperation, read: F) -> RxResult<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&rusqlite::Connection) -> RxResult<T> + Send + 'static,
+    {
+        let connection = match self.open_read_only_connection() {
+            Ok(connection) => ReadConnection::ReadOnly(connection),
+            Err(_) => {
+                SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
+                SQLITE_WRITER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
+                #[cfg(test)]
+                match operation {
+                    ReadOperation::FindDocumentsById => {
+                        FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                    }
+                    ReadOperation::Query => {
+                        QUERY_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                    }
+                    ReadOperation::ChangedDocumentsSince => {
+                        CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
+                    }
+                    ReadOperation::Count => {}
+                }
+                #[cfg(not(test))]
+                let _ = operation;
+
+                // In-memory databases cannot be reopened as independent read-only
+                // connections. Preserve the legacy shared-writer fallback there and
+                // for read-only connection open failures.
+                ReadConnection::WriterFallback(Arc::clone(&self.connection))
+            }
+        };
+        tokio::task::spawn_blocking(move || match connection {
+            ReadConnection::ReadOnly(connection) => {
+                let conn = connection.lock();
+                read(&conn)
+            }
+            ReadConnection::WriterFallback(connection) => {
+                let conn = lock_sqlite_writer(&connection);
+                read(&conn)
+            }
+        })
+        .await
+        .map_err(join_error)?
     }
 }
 
@@ -1297,6 +620,17 @@ fn collect_logical_operator_children(value: &Value, operators: &mut BTreeSet<Str
     }
 }
 
+fn parse_filled_query(prepared_query: &Value) -> RxResult<FilledMangoQuery> {
+    serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null)).map_err(
+        |err| {
+            new_rx_error(
+                "SQLITE_QUERY",
+                Some(json!({ "message": format!("invalid prepared query: {err}") })),
+            )
+        },
+    )
+}
+
 fn execute_query_documents(
     conn: &rusqlite::Connection,
     table_name: &str,
@@ -1333,11 +667,9 @@ fn execute_query_documents(
         SQLITE_QUERY_FALLBACK_INDEXED_CANDIDATE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
     let mut visited_rows = 0u64;
-    let mut decoded_rows = 0u64;
     let mut rows: Vec<Value> = Vec::new();
     let mut visit_document = |doc: Value| {
         visited_rows = visited_rows.saturating_add(1);
-        decoded_rows = decoded_rows.saturating_add(1);
         if visited_rows > SQLITE_QUERY_FALLBACK_SCAN_LIMIT {
             SQLITE_QUERY_FALLBACK_TOO_BROAD_CALLS.fetch_add(1, Ordering::Relaxed);
             return Err(new_rx_error(
@@ -1361,12 +693,7 @@ fn execute_query_documents(
     } else {
         for_each_document(conn, table_name, &mut visit_document)
     };
-    record_query_fallback_rows(
-        collection_name,
-        &fallback_operator_families,
-        visited_rows,
-        decoded_rows,
-    );
+    record_query_fallback_rows(collection_name, &fallback_operator_families, visited_rows);
     fallback_result?;
     rows.sort_by(|a, b| comparator(a, b));
     let start = skip.min(rows.len());
@@ -1432,7 +759,6 @@ fn start_external_write_poll(
             let poll_conn = Arc::clone(&connection);
             let poll_database_path = database_path.clone();
             let poll_table = table_name.clone();
-            let poll_primary = primary_path.clone();
             let poll_checkpoint = checkpoint.lock().clone();
             let poll_read_connection = Arc::clone(&read_connection);
             let result = tokio::task::spawn_blocking(move || {
@@ -1441,7 +767,6 @@ fn start_external_write_poll(
                     return drain_external_changed_documents_since(
                         &conn,
                         &poll_table,
-                        &poll_primary,
                         poll_checkpoint,
                     );
                 }
@@ -1450,12 +775,7 @@ fn start_external_write_poll(
                     &poll_read_connection,
                 )?;
                 let conn = conn.lock();
-                drain_external_changed_documents_since(
-                    &conn,
-                    &poll_table,
-                    &poll_primary,
-                    poll_checkpoint,
-                )
+                drain_external_changed_documents_since(&conn, &poll_table, poll_checkpoint)
             })
             .await;
             // A broken table or connection must remain observable without
@@ -1563,10 +883,6 @@ fn external_poll_failure_backoff(consecutive_failures: u32) -> Duration {
         .min(SQLITE_EXTERNAL_POLL_FAILURE_BACKOFF_MAX)
 }
 
-fn sqlite_path_is_in_memory(path: &Path) -> bool {
-    path.to_string_lossy() == ":memory:"
-}
-
 fn open_read_only_connection_for_path(path: &Path) -> RxResult<rusqlite::Connection> {
     use rusqlite::OpenFlags;
     SQLITE_READ_ONLY_OPEN_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -1582,12 +898,7 @@ fn open_read_only_connection_for_path(path: &Path) -> RxResult<rusqlite::Connect
 
 fn open_dedicated_read_only_connection_for_path(path: &Path) -> RxResult<rusqlite::Connection> {
     if sqlite_path_is_in_memory(path) {
-        return Err(new_rx_error(
-            "SQLITE_QUERY",
-            Some(json!({
-                "message": "in-memory SQLite does not support concurrent readers; use file-backed storage in production"
-            })),
-        ));
+        return Err(sqlite_concurrent_reader_error());
     }
     open_read_only_connection_for_path(path)
 }
@@ -1597,12 +908,7 @@ fn cached_read_only_connection_for_path(
     cache: &Arc<Mutex<Option<SharedSqliteConnection>>>,
 ) -> RxResult<SharedSqliteConnection> {
     if sqlite_path_is_in_memory(path) {
-        return Err(new_rx_error(
-            "SQLITE_QUERY",
-            Some(json!({
-                "message": "in-memory SQLite does not support concurrent readers; use file-backed storage in production"
-            })),
-        ));
+        return Err(sqlite_concurrent_reader_error());
     }
     let mut guard = cache.lock();
     if let Some(existing) = guard.as_ref() {
@@ -1622,7 +928,6 @@ struct ExternalPollDrain {
 fn drain_external_changed_documents_since(
     conn: &rusqlite::Connection,
     table_name: &str,
-    primary_path: &str,
     initial_checkpoint: Value,
 ) -> RxResult<ExternalPollDrain> {
     let poll_limit = if table_name.contains("desktop_file_chunks") {
@@ -1635,13 +940,7 @@ fn drain_external_changed_documents_since(
     let mut rows = 0usize;
     let mut empty_batches = 0usize;
     for _ in 0..SQLITE_EXTERNAL_POLL_MAX_BATCHES_PER_WAKE {
-        let result = changed_documents_since(
-            conn,
-            table_name,
-            primary_path,
-            poll_limit,
-            Some(&checkpoint),
-        )?;
+        let result = changed_documents_since(conn, table_name, poll_limit, Some(&checkpoint))?;
         checkpoint = result.checkpoint.clone();
         if result.documents.is_empty() {
             empty_batches += 1;
@@ -1697,7 +996,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn changed_documents_since(
     conn: &rusqlite::Connection,
     table_name: &str,
-    _primary_path: &str,
     limit: u64,
     checkpoint: Option<&Value>,
 ) -> Result<RxStorageChangedDocumentsSinceResult, RxError> {
@@ -1984,33 +1282,11 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
         SQLITE_FIND_DOCUMENTS_BY_ID_REQUESTED.fetch_add(ids.len() as u64, Ordering::Relaxed);
         let table_name = self.table_name.clone();
         let ids = ids.to_vec();
-        if let Ok(read_conn) = self.open_read_only_connection() {
-            let documents = tokio::task::spawn_blocking(move || -> RxResult<Vec<Value>> {
-                let conn = read_conn.lock();
-                documents_by_ids(&conn, &table_name, &ids, with_deleted)
+        let documents = self
+            .with_read_connection(ReadOperation::FindDocumentsById, move |conn| {
+                documents_by_ids(conn, &table_name, &ids, with_deleted)
             })
-            .await
-            .map_err(join_error)??;
-            SQLITE_FIND_DOCUMENTS_BY_ID_RESULTS
-                .fetch_add(documents.len() as u64, Ordering::Relaxed);
-            return Ok(documents);
-        }
-        SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
-        SQLITE_WRITER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-
-        #[cfg(test)]
-        FIND_DOCUMENTS_BY_ID_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
-
-        // In-memory test databases cannot be reopened as independent read-only
-        // connections. Keep that legacy fallback, but file-backed production
-        // storage must stay off the shared writer mutex for this read path.
-        let connection = Arc::clone(&self.connection);
-        let documents = tokio::task::spawn_blocking(move || -> RxResult<Vec<Value>> {
-            let conn = lock_sqlite_writer(&connection);
-            documents_by_ids(&conn, &table_name, &ids, with_deleted)
-        })
-        .await
-        .map_err(join_error)??;
+            .await?;
         SQLITE_FIND_DOCUMENTS_BY_ID_RESULTS.fetch_add(documents.len() as u64, Ordering::Relaxed);
         Ok(documents)
     }
@@ -2091,14 +1367,7 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
     async fn query(&self, prepared_query: &Value) -> Result<RxStorageQueryResult, RxError> {
         self.ensure_open("query")?;
         SQLITE_QUERY_CALLS.fetch_add(1, Ordering::Relaxed);
-        let query: FilledMangoQuery =
-            serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null))
-                .map_err(|err| {
-                    new_rx_error(
-                        "SQLITE_QUERY",
-                        Some(json!({ "message": format!("invalid prepared query: {err}") })),
-                    )
-                })?;
+        let query = parse_filled_query(prepared_query)?;
         let skip = query.skip.unwrap_or(0) as usize;
         let limit = query
             .limit
@@ -2128,13 +1397,10 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
 
         let table_name = self.table_name.clone();
         let collection_name = self.collection_name.clone();
-        if let Ok(read_conn) = self.open_read_only_connection() {
-            let collection_name = collection_name.clone();
-            let fallback_operator_families = fallback_operator_families.clone();
-            let documents = tokio::task::spawn_blocking(move || -> RxResult<Vec<Value>> {
-                let conn = read_conn.lock();
+        let documents = self
+            .with_read_connection(ReadOperation::Query, move |conn| {
                 execute_query_documents(
-                    &conn,
+                    conn,
                     &table_name,
                     &collection_name,
                     primary_ids,
@@ -2147,39 +1413,7 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
                     skip_plus_limit,
                 )
             })
-            .await
-            .map_err(join_error)??;
-            SQLITE_QUERY_RESULTS.fetch_add(documents.len() as u64, Ordering::Relaxed);
-            return Ok(RxStorageQueryResult { documents });
-        }
-        SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
-        SQLITE_WRITER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-
-        #[cfg(test)]
-        QUERY_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
-
-        // In-memory storage cannot be reopened as a separate read-only
-        // connection. File-backed storage should use the branch above, including
-        // complex Rust matcher fallbacks that cannot be compiled into SQL.
-        let connection = Arc::clone(&self.connection);
-        let documents = tokio::task::spawn_blocking(move || -> RxResult<Vec<Value>> {
-            let conn = lock_sqlite_writer(&connection);
-            execute_query_documents(
-                &conn,
-                &table_name,
-                &collection_name,
-                primary_ids,
-                compiled_sql,
-                fallback_candidate_sql,
-                fallback_operator_families,
-                matcher,
-                comparator,
-                skip,
-                skip_plus_limit,
-            )
-        })
-        .await
-        .map_err(join_error)??;
+            .await?;
         SQLITE_QUERY_RESULTS.fetch_add(documents.len() as u64, Ordering::Relaxed);
         Ok(RxStorageQueryResult { documents })
     }
@@ -2187,36 +1421,13 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
     async fn count(&self, prepared_query: &Value) -> Result<RxStorageCountResult, RxError> {
         self.ensure_open("count")?;
         SQLITE_COUNT_CALLS.fetch_add(1, Ordering::Relaxed);
-        let query: FilledMangoQuery =
-            serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null))
-                .map_err(|err| {
-                    new_rx_error(
-                        "SQLITE_QUERY",
-                        Some(json!({ "message": format!("invalid prepared query: {err}") })),
-                    )
-                })?;
+        let query = parse_filled_query(prepared_query)?;
         if let Some(compiled) = compile_count_sql(&self.table_name, &self.primary_path, &query) {
-            if let Ok(read_conn) = self.open_read_only_connection() {
-                let count = tokio::task::spawn_blocking(move || -> RxResult<u64> {
-                    let conn = read_conn.lock();
-                    count_with_compiled_sql(&conn, &compiled)
+            let count = self
+                .with_read_connection(ReadOperation::Count, move |conn| {
+                    count_with_compiled_sql(conn, &compiled)
                 })
-                .await
-                .map_err(join_error)??;
-                return Ok(RxStorageCountResult {
-                    count,
-                    mode: "fast".to_string(),
-                });
-            }
-            SQLITE_READ_ONLY_OPEN_FAILURES.fetch_add(1, Ordering::Relaxed);
-            SQLITE_WRITER_FALLBACKS.fetch_add(1, Ordering::Relaxed);
-            let connection = Arc::clone(&self.connection);
-            let count = tokio::task::spawn_blocking(move || -> RxResult<u64> {
-                let conn = lock_sqlite_writer(&connection);
-                count_with_compiled_sql(&conn, &compiled)
-            })
-            .await
-            .map_err(join_error)??;
+                .await?;
             return Ok(RxStorageCountResult {
                 count,
                 mode: "fast".to_string(),
@@ -2237,43 +1448,11 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
     ) -> Result<RxStorageChangedDocumentsSinceResult, RxError> {
         self.ensure_open("get_changed_documents_since")?;
         let table_name = self.table_name.clone();
-        let primary_path = self.primary_path.clone();
         let checkpoint = checkpoint.cloned();
-        if let Ok(read_conn) = self.open_read_only_connection() {
-            return tokio::task::spawn_blocking(
-                move || -> Result<RxStorageChangedDocumentsSinceResult, RxError> {
-                    let conn = read_conn.lock();
-                    changed_documents_since(
-                        &conn,
-                        &table_name,
-                        &primary_path,
-                        limit,
-                        checkpoint.as_ref(),
-                    )
-                },
-            )
-            .await
-            .map_err(join_error)?;
-        }
-
-        #[cfg(test)]
-        CHANGED_DOCUMENTS_SINCE_WRITER_FALLBACKS.fetch_add(1, Ordering::SeqCst);
-
-        let connection = Arc::clone(&self.connection);
-        tokio::task::spawn_blocking(
-            move || -> Result<RxStorageChangedDocumentsSinceResult, RxError> {
-                let conn = lock_sqlite_writer(&connection);
-                changed_documents_since(
-                    &conn,
-                    &table_name,
-                    &primary_path,
-                    limit,
-                    checkpoint.as_ref(),
-                )
-            },
-        )
+        self.with_read_connection(ReadOperation::ChangedDocumentsSince, move |conn| {
+            changed_documents_since(conn, &table_name, limit, checkpoint.as_ref())
+        })
         .await
-        .map_err(join_error)?
     }
 
     fn change_stream(&self) -> RxStream<EventBulk> {
@@ -2343,7 +1522,7 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
         _digest: &str,
     ) -> Result<String, RxError> {
         Err(new_rx_error(
-            "SQL1",
+            "SQLITE_ATTACHMENT",
             Some(json!({
                 "message": "sqlite storage does not inline attachment payloads"
             })),
@@ -2371,14 +1550,7 @@ fn query_stream_on_dedicated_connection<F>(
 where
     F: FnMut(Vec<Value>) -> RxResult<bool>,
 {
-    let query: FilledMangoQuery =
-        serde_json::from_value(prepared_query.get("query").cloned().unwrap_or(Value::Null))
-            .map_err(|err| {
-                new_rx_error(
-                    "SQLITE_QUERY",
-                    Some(json!({ "message": format!("invalid prepared query: {err}") })),
-                )
-            })?;
+    let query = parse_filled_query(prepared_query)?;
     // A stream deliberately does not borrow the cached point-read connection:
     // its cursor stays open across callbacks and must not serialize unrelated reads.
     let read_conn = match open_dedicated_read_only_connection_for_path(database_path) {
@@ -2462,20 +1634,10 @@ impl RxStorageInstanceSqlite {
         // it, so point reads retain the legacy writer fallback there. For
         // file-backed DBs, WAL mode gives us a real concurrent reader.
         if sqlite_path_is_in_memory(path) {
-            return Err(new_rx_error(
-                "SQLITE_QUERY",
-                Some(json!({
-                    "message": "in-memory SQLite does not support concurrent readers; use file-backed storage in production"
-                })),
-            ));
+            return Err(sqlite_concurrent_reader_error());
         }
         cached_read_only_connection_for_path(path, &self.read_connection)
     }
-}
-
-#[allow(dead_code)]
-fn _zero_use() {
-    let _ = random_token(Some(1));
 }
 
 #[cfg(test)]
