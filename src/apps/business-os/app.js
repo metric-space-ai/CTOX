@@ -1,4 +1,5 @@
 import { CtoxResizer } from './shared/resizer.js?v=20260723-resizer-pointer-capture-v1';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260717-knowledge-sync-v130';
 import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260721-pane-grammar-v2';
 import { createAppActions } from './shared/app-actions.js?v=20260715-runtime-v2';
 import {
@@ -6321,6 +6322,14 @@ function renderModulePermissionDeniedState(mod, error) {
   host.replaceChildren(locked);
 }
 
+function currentCollectionReadiness(collection) {
+  return collectionReadinessFromDiagnostics(
+    collection,
+    state.syncDiagnostics?.collections?.[collection],
+    { syncMode: state.syncDiagnostics?.mode },
+  );
+}
+
 function createLiveSyncFacade({ host = null } = {}) {
   const assertActive = () => {
     if (!host || host.isConnected) return;
@@ -6332,6 +6341,41 @@ function createLiveSyncFacade({ host = null } = {}) {
     get mode() { return state.sync?.mode; },
     get config() { return state.sync?.config; },
     get diagnostics() { return state.sync?.diagnostics; },
+    collectionReadiness: (collection) => currentCollectionReadiness(collection),
+    subscribeCollectionReadiness: (collection, listener) => {
+      assertActive();
+      if (typeof listener !== 'function') throw new TypeError('Collection readiness listener must be a function.');
+      let active = true;
+      let lastState = null;
+      const unsubscribe = () => {
+        if (!active) return;
+        active = false;
+        window.removeEventListener('ctox-business-os-sync-diagnostics', handleDiagnostics);
+      };
+      const handleDiagnostics = () => {
+        if (!active) return;
+        if (host && !host.isConnected) {
+          unsubscribe();
+          return;
+        }
+        const snapshot = currentCollectionReadiness(collection);
+        if (snapshot.state === lastState) return;
+        lastState = snapshot.state;
+        listener(snapshot);
+        if (host && !host.isConnected) unsubscribe();
+      };
+      window.addEventListener('ctox-business-os-sync-diagnostics', handleDiagnostics);
+      try {
+        const snapshot = currentCollectionReadiness(collection);
+        lastState = snapshot.state;
+        listener(snapshot);
+        if (host && !host.isConnected) unsubscribe();
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+      return unsubscribe;
+    },
     // Module code may request an eager bridge, but it must never promote that
     // bridge to a permanent shell pin. The shell-owned module lease is the
     // lifecycle authority and releases the last unpinned bridge on unmount.

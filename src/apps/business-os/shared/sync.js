@@ -21,6 +21,7 @@ import {
   batchSizeFor,
   collectionTopic,
   nativeRxdbPeerReady,
+  normalizeCollectionReadinessState,
 } from './sync-contract.js?v=20260717-knowledge-sync-v130';
 import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260714-chat-queue-v56';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
@@ -2067,6 +2068,8 @@ function sanitizeReplicationTransportStatus(status) {
     lastSendPriority: stringField('lastSendPriority', 'normal', 20),
     lastAckLagMs: numberField('lastAckLagMs'),
     lastBufferedAmount: numberField('lastBufferedAmount'),
+    collectionReadinessState: normalizeCollectionReadinessState(status.collectionReadinessState),
+    firstPullCompletedAtMs: numberField('firstPullCompletedAtMs'),
     pullInProgress: status.pullInProgress === true,
     pushInProgress: status.pushInProgress === true,
     demandLoading: sanitizeDemandLoadingStatus(status.demandLoading),

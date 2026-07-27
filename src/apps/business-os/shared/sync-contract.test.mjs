@@ -2,12 +2,93 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { batchSizeFor } from './sync-contract.js';
+import {
+  batchSizeFor,
+  COLLECTION_READINESS_STATES,
+  collectionReadinessFromDiagnostics,
+  normalizeCollectionReadinessState,
+} from './sync-contract.js';
 
 test('knowledge table replication pulls one byte-bounded document at a time', () => {
   assert.equal(batchSizeFor('knowledge_tables'), 1);
   assert.equal(batchSizeFor('desktop_file_chunks'), 6);
   assert.equal(batchSizeFor('research_runs'), 20);
+});
+
+test('collection readiness normalization accepts only canonical states', () => {
+  for (const readinessState of COLLECTION_READINESS_STATES) {
+    assert.equal(normalizeCollectionReadinessState(readinessState), readinessState);
+  }
+  for (const value of [null, undefined, '', 'complete', 'LIVE', 1]) {
+    assert.equal(normalizeCollectionReadinessState(value), null);
+  }
+});
+
+test('collection readiness follows the canonical diagnostics derivation table', () => {
+  const updatedAt = '2026-07-27T10:15:00.000Z';
+  const cases = [
+    {
+      name: 'non-WebRTC mode treats the local database as authoritative',
+      entry: null,
+      syncMode: 'local',
+      expected: { state: 'live', ready: true, syncing: false, updatedAt: null },
+    },
+    {
+      name: 'missing bridge report means catch-up is still starting',
+      entry: null,
+      syncMode: 'webrtc',
+      expected: { state: 'catching-up', ready: false, syncing: true, updatedAt: null },
+    },
+    ...COLLECTION_READINESS_STATES.map((readinessState) => ({
+      name: `frame transport state ${readinessState} is authoritative`,
+      entry: {
+        frameTransport: { collectionReadinessState: readinessState },
+        initialReplicationState: 'complete',
+        updatedAt,
+      },
+      syncMode: 'webrtc',
+      expected: {
+        state: readinessState,
+        ready: readinessState === 'live',
+        syncing: readinessState === 'catching-up' || readinessState === 'never-synced',
+        updatedAt,
+      },
+    })),
+    {
+      name: 'legacy complete replication falls back to live',
+      entry: { initialReplicationState: 'complete', updatedAt },
+      syncMode: 'webrtc',
+      expected: { state: 'live', ready: true, syncing: false, updatedAt },
+    },
+    {
+      name: 'legacy failed replication falls back to offline pending',
+      entry: { initialReplicationState: 'failed', updatedAt },
+      syncMode: 'webrtc',
+      expected: { state: 'offline-pending', ready: false, syncing: false, updatedAt },
+    },
+    {
+      name: 'legacy unsupported replication falls back to offline pending',
+      entry: { initialReplicationState: 'unsupported', updatedAt },
+      syncMode: 'webrtc',
+      expected: { state: 'offline-pending', ready: false, syncing: false, updatedAt },
+    },
+    {
+      name: 'unknown transport and legacy states fall back to catching up',
+      entry: {
+        frameTransport: { collectionReadinessState: 'unknown' },
+        initialReplicationState: 'pending',
+        updatedAt,
+      },
+      syncMode: 'webrtc',
+      expected: { state: 'catching-up', ready: false, syncing: true, updatedAt },
+    },
+  ];
+
+  for (const { name, entry, syncMode, expected } of cases) {
+    const snapshot = collectionReadinessFromDiagnostics('research_runs', entry, { syncMode });
+    assert.deepEqual(snapshot, { collection: 'research_runs', ...expected }, name);
+    assert.equal(Object.isFrozen(snapshot), true, `${name}: snapshot must be frozen`);
+  }
 });
 
 test('sync runtime version-binds its nested sync contract import', async () => {
@@ -17,6 +98,15 @@ test('sync runtime version-binds its nested sync contract import', async () => {
     /from '\.\/sync-contract\.js\?v=[^']+'/,
     'mutable nested sync contract imports must not use an unversioned CDN URL',
   );
+});
+
+test('sync transport diagnostics preserve canonical collection readiness', async () => {
+  const source = await readFile(new URL('./sync.js', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /collectionReadinessState:\s*normalizeCollectionReadinessState\(status\.collectionReadinessState\)/,
+  );
+  assert.match(source, /firstPullCompletedAtMs:\s*numberField\('firstPullCompletedAtMs'\)/);
 });
 
 test('slow collection startup remains pending instead of dereferencing an empty timeout result', async () => {

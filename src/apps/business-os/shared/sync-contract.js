@@ -5,6 +5,39 @@ export const RXDB_VERSION = '16.20.0';
 export const SYNC_TRANSPORT = 'webrtc';
 export const SYNC_TOPIC_PREFIX = 'ctox-business-os';
 export const RXDB_NATIVE_PEER_PENDING_REASON = 'CTOX native WebRTC peer is starting or unavailable';
+export const COLLECTION_READINESS_STATES = ['never-synced', 'catching-up', 'live', 'offline-pending'];
+
+export function normalizeCollectionReadinessState(value) {
+  return COLLECTION_READINESS_STATES.includes(value) ? value : null;
+}
+
+export function collectionReadinessFromDiagnostics(collection, entry, { syncMode } = {}) {
+  let readinessState;
+  if (syncMode !== undefined && syncMode !== null && syncMode !== '' && syncMode !== SYNC_TRANSPORT) {
+    readinessState = 'live';
+  } else if (!entry) {
+    readinessState = 'catching-up';
+  } else {
+    readinessState = normalizeCollectionReadinessState(entry.frameTransport?.collectionReadinessState);
+    if (!readinessState) {
+      if (entry.initialReplicationState === 'complete') {
+        readinessState = 'live';
+      } else if (entry.initialReplicationState === 'failed' || entry.initialReplicationState === 'unsupported') {
+        readinessState = 'offline-pending';
+      } else {
+        readinessState = 'catching-up';
+      }
+    }
+  }
+
+  return Object.freeze({
+    collection,
+    state: readinessState,
+    ready: readinessState === 'live',
+    syncing: readinessState === 'catching-up' || readinessState === 'never-synced',
+    updatedAt: entry?.updatedAt || null,
+  });
+}
 
 export function collectionTopic(syncRoom, collection) {
   if (!syncRoom) throw new Error('Business OS sync requires sync_room');
