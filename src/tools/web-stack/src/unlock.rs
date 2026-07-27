@@ -917,24 +917,6 @@ pub fn handle_unlock_command(root: &Path, args: &[String]) -> Result<()> {
             let limit = find_flag_u64(args, "--limit").unwrap_or(20);
             cmd_history(root, probe_filter.as_deref(), limit)
         }
-        "report" => {
-            let strict = args.iter().any(|arg| arg == "--strict");
-            let max_age_hours = find_flag_u64(args, "--max-age-hours").unwrap_or(168);
-            let report = crate::unlock_report::build_unlock_acceptance_report(
-                root,
-                crate::unlock_report::UnlockReportOptions {
-                    strict,
-                    max_age_hours,
-                },
-            )?;
-            println!("{}", serde_json::to_string_pretty(&report)?);
-            anyhow::ensure!(
-                !strict || report.ok,
-                "strict web unlock acceptance failed for {} active target(s)",
-                report.action_required
-            );
-            Ok(())
-        }
         "add-vector" => cmd_add_vector(root, args),
         "set-vector-status" => cmd_set_vector_status(root, args),
         "repair" => {
