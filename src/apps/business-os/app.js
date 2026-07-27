@@ -71,7 +71,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260727-knowledge-table-budget-v80';
+const APP_BUILD = '20260727-module-asset-revision-v81';
 
 ensureShellStylesheets();
 
@@ -6625,10 +6625,12 @@ function moduleRevisionQuery(moduleLike) {
     lifecycle.last_reviewed_at_ms,
     lifecycle.last_release_id,
   ];
-  const rev = candidates
+  const revisions = candidates
     .map((value) => String(value || '').trim())
-    .find(Boolean);
-  return rev ? `_${encodeURIComponent(rev).replace(/%/g, '')}` : '';
+    .filter(Boolean);
+  if (!revisions.length) return '';
+  const revision = [...new Set(revisions)].join('|');
+  return `_${encodeURIComponent(revision).replace(/%/g, '')}`;
 }
 
 function moduleVersionOriginLabel(origin) {
