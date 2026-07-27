@@ -3928,9 +3928,27 @@ async function runSelectedResearch() {
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
   const sourceTable = tableForKey(base, task.source_catalog_key || 'source_catalog');
-  const candidateRows = candidateTable ? await fetchTableRows(candidateTable.id) : [];
+  const [candidateRows, authoritativeSourceRows] = await Promise.all([
+    candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
+    sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
+  ]);
+  const declaredSourceRows = firstPositiveNumber(sourceTable, [
+    'row_count',
+    'rowCount',
+    'total_row_count',
+    'totalRows',
+    'projected_row_count',
+  ]);
+  if (sourceTable && declaredSourceRows && authoritativeSourceRows.length < declaredSourceRows) {
+    setStatus(`Der Quellenkatalog wird noch synchronisiert (${authoritativeSourceRows.length}/${declaredSourceRows}). Research wurde nicht gestartet.`);
+    renderRight();
+    return;
+  }
   const knowledgeTableRefs = compactKnowledgeTableReferences(base?.tables || []);
-  const rawVerifiedSourceModels = (state.sourceModels || [])
+  const launchSourceModels = sourceTable
+    ? buildSourceModels(task, authoritativeSourceRows, [], state.measurementRows || [])
+    : state.sourceModels || [];
+  const rawVerifiedSourceModels = launchSourceModels
     .filter((source) => source.evidenceEligible);
   const verifiedSourceModels = uniqueSourceModels(rawVerifiedSourceModels);
   const verifiedSourceCount = boundedVerifiedSourceCount(verifiedSourceModels, sourceTable);
@@ -3939,7 +3957,7 @@ async function runSelectedResearch() {
   ))];
   const excludedSourceUrls = [...new Set([
     ...sourceUrlsFromRows(candidateRows),
-    ...sourceUrlsFromRows((state.sourceModels || []).map((source) => source.row)),
+    ...sourceUrlsFromRows(launchSourceModels.map((source) => source.row)),
   ])];
   const targetVerifiedSources = effectiveTargetVerifiedSources(
     task?.payload?.target_verified_sources,

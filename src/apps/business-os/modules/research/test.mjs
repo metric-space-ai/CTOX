@@ -580,6 +580,39 @@ test('research launch deduplicates projected sources and repairs a legacy inflat
   assert.equal(hooks.effectiveTargetVerifiedSources(150, 276, 276, 138), 150);
 });
 
+test('research launch can rebuild verified models from the authoritative source table', () => {
+  const rows = Array.from({ length: 138 }, (_, index) => ({
+    source_id: `source-${index}`,
+    title: `Source ${index}`,
+    verification_status: 'verified',
+    transport_verified: true,
+    content_extracted: true,
+    actual_full_text_or_data: true,
+    evidence_eligible: true,
+    http_status: 200,
+    snapshot_hash: `sha256:${index.toString(16).padStart(64, '0')}`,
+    snapshot_id: `snapshot-${index}`,
+    snapshot_path: `/snapshots/source-${index}/source.pdf`,
+    evidence_id: `evidence-${index}`,
+    retrieved_at: '2026-07-27T00:00:00Z',
+    url_role: 'original_content',
+    content_scope: 'full_text',
+    canonical_url: `https://example.test/source-${index}`,
+    evidence_relevance_score: 9,
+    source_tier: 'primary',
+  }));
+  const models = hooks.buildSourceModels(
+    { payload: { scoring_dimensions: [{ id: 'relevance', label: 'Relevance' }] } },
+    rows,
+    [],
+    [],
+  );
+
+  assert.equal(models.length, 138);
+  assert.equal(models.filter((source) => source.evidenceEligible).length, 138);
+  assert.equal(hooks.effectiveTargetVerifiedSources(276, 138, 138, 138), 100);
+});
+
 test('research reports contain only live documents with explicit task or domain lineage', () => {
   const task = { id: 'task-1', knowledge_domain: 'drone_bearing_design' };
   const reports = hooks.researchReportsForTask(task, [
