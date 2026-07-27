@@ -17,6 +17,7 @@ const labels = {
     refresh: 'Aktualisieren',
     search: 'Threads suchen',
     noThreads: 'Keine relevanten Threads vorhanden.',
+    syncingThreads: 'Threads werden synchronisiert.',
     noSelection: 'Kein Thread ausgewählt.',
     commandFailed: 'Aktion konnte nicht abgeschlossen werden.',
   },
@@ -24,6 +25,7 @@ const labels = {
     refresh: 'Refresh',
     search: 'Search threads',
     noThreads: 'No relevant threads.',
+    syncingThreads: 'Syncing threads.',
     noSelection: 'No thread selected.',
     commandFailed: 'Action could not be completed.',
   },
@@ -54,6 +56,7 @@ export async function mount(ctx) {
   state.mobileView = 'list';
   state.requestedThreadId = String(ctx.args?.thread_id || ctx.args?.thread || '').trim();
   state.data = emptyData();
+  state.threadsReadiness = null;
   state.status = '';
 
   const messages = await loadModuleMessages(import.meta.url, ctx.locale || 'de', labels);
@@ -70,6 +73,7 @@ export async function mount(ctx) {
   restoreDraft();
   updateConnectivity();
   state.cleanup.push(wireRealtime());
+  state.cleanup.push(wireReadiness());
   ensureRoster().then(renderRosterSelects).catch(() => {});
   // Whose inbox is this? Anchor the identity in the pane header.
   const kicker = els.root?.querySelector('[data-label="hubKicker"]');
@@ -391,6 +395,26 @@ function wireRealtime() {
     refresh().catch((error) => console.warn('[threads] refresh failed', error));
   }, 10000);
   return () => window.clearInterval(timer);
+}
+
+// Sync readiness is a render hint only: while the user_threads collection
+// has not finished its initial replication (ready === false), an empty
+// unfiltered source list renders as a syncing shell instead of "no threads".
+function readThreadsReadiness() {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, 'user_threads') : null;
+}
+
+// Re-render on every readiness state transition; the snapshot arrives
+// immediately on subscribe and the list render preserves its scroll offset.
+function wireReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return null;
+  const unsubscribe = subscribe.call(state.ctx.sync, 'user_threads', (snapshot) => {
+    state.threadsReadiness = snapshot;
+    render();
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : null;
 }
 
 async function refresh(options = {}) {
@@ -793,7 +817,16 @@ function renderList(threads, { resetScroll = false } = {}) {
   // because the content set changed). The shell scroll guard backs this up.
   const scrollTop = resetScroll ? 0 : els.list.scrollTop;
   if (!threads.length) {
-    els.list.innerHTML = `<div class="ctox-empty">${escapeHtml(state.t('noThreads', 'Keine relevanten Threads vorhanden.'))}</div>`;
+    // Data-driven empty: only when the UNFILTERED source (user_threads) is
+    // empty. While that collection has not finished its initial replication
+    // (ready === false), this is a sync state, not "no threads". A filtered
+    // or searched-out list (source non-empty) stays a plain filter empty.
+    const readiness = state.threadsReadiness || readThreadsReadiness();
+    if (!state.data.threads.length && readiness?.ready === false) {
+      els.list.innerHTML = `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(state.t('syncingThreads', 'Threads werden synchronisiert.'))}</div>`;
+    } else {
+      els.list.innerHTML = `<div class="ctox-empty">${escapeHtml(state.t('noThreads', 'Keine relevanten Threads vorhanden.'))}</div>`;
+    }
     els.list.scrollTop = scrollTop;
     return;
   }

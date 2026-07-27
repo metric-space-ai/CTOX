@@ -2,6 +2,7 @@
   "refresh": "Refresh",
   "search": "Search threads",
   "noThreads": "No relevant threads.",
+  "syncingThreads": "Syncing threads.",
   "noSelection": "No thread selected.",
   "commandFailed": "Action could not be completed.",
   "filterApprovals": "Approvals",

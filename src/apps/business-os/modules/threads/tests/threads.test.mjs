@@ -112,4 +112,22 @@ assert.doesNotMatch(css, /\.threads-briefing/);
 // Kit tokens are owned by the kit (shared/base.css), never re-defined here.
 assert.doesNotMatch(css, /--kit-fill:\s|--kit-hover:\s|--kit-fill-strong:\s|--focus-ring:\s/);
 
+// Sync readiness gates the data-driven list empty: while user_threads has
+// not finished its initial replication (ready === false), an empty unfiltered
+// source renders the canonical ctox-syncing shell — never "no threads".
+// Selection/filter empties stay ungated ctox-empty.
+assert.match(js, /collectionReadiness/);
+assert.match(js, /subscribeCollectionReadiness/);
+assert.match(js, /subscribe\.call\(state\.ctx\.sync, 'user_threads'/);
+assert.match(js, /state\.cleanup\.push\(wireReadiness\(\)\)/);
+assert.match(js, /ctox-syncing" role="status" aria-live="polite"/);
+assert.match(js, /syncingThreads/);
+// The syncing shell only appears when the unfiltered source is empty AND the
+// collection is not ready; a filtered-out list keeps the plain empty state.
+assert.match(js, /!state\.data\.threads\.length && readiness\?\.ready === false/);
+for (const locale of ['de', 'en']) {
+  const messages = JSON.parse(await readFile(fileURLToPath(new URL(`../locales/${locale}.json`, import.meta.url)), 'utf8'));
+  assert.ok(messages.syncingThreads, `locales/${locale}.json carries syncingThreads`);
+}
+
 console.log('threads module smoke ok');
