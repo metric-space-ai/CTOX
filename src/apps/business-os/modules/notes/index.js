@@ -129,6 +129,7 @@ const labels = {
     newTagPrompt: 'Name für den neuen Tag:',
     defaultFolder: 'Notizen',
     noNotes: 'Keine Notizen vorhanden',
+    syncingNotes: 'Notizen werden synchronisiert.',
     readTime: 'Min. Lesezeit',
   },
   en: {
@@ -155,6 +156,7 @@ const labels = {
     newTagPrompt: 'Name for the new tag:',
     defaultFolder: 'Notes',
     noNotes: 'No notes available',
+    syncingNotes: 'Syncing notes.',
     readTime: 'min read',
   }
 };
@@ -180,6 +182,8 @@ const state = {
   activeNoteDecryptedContent: {}, // noteId -> decrypted plainText content (string)
   saveTimer: null,
   localSubscriptionCleanup: null,
+  notesReadiness: null,
+  readinessCleanup: null,
   renderTimer: null,
   t: (key, fallback) => fallback ?? key,
   dataDiagnostics: { kind: 'starting', message: '' },
@@ -359,6 +363,7 @@ export async function mount(ctx) {
   // Load notes and wire up database merge sync
   await loadNotesFromLocal();
   state.localSubscriptionCleanup = wireLocalRealtime();
+  state.readinessCleanup = wireReadiness();
   
   // Pre-select first note if available
   // Presence (advisory UX): show who else has the same note open, and
@@ -399,6 +404,10 @@ export async function mount(ctx) {
 
     state.localSubscriptionCleanup?.();
     state.localSubscriptionCleanup = null;
+
+    state.readinessCleanup?.();
+    state.readinessCleanup = null;
+    state.notesReadiness = null;
 
     state.ctx.host?.querySelector('.nn-action-toast')?.remove();
 
@@ -722,17 +731,36 @@ function syncNotebooksAndTags() {
 function wireLocalRealtime() {
   const collection = getCollection();
   if (!collection) return null;
-  
+
   const logPrefix = state.ctx.module?.id === 'notizen' ? '[notizen]' : '[notes]';
   const sub = collection.$.subscribe(() => {
     loadNotesFromLocal().catch(err => {
       console.warn(`${logPrefix} failed to refresh notes`, err);
     });
   });
-  
+
   return () => {
     sub?.unsubscribe();
   };
+}
+
+function readNotesReadiness() {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, 'notes') : null;
+}
+
+// Sync readiness is a render hint only: while the notes collection has not
+// finished its initial replication (ready === false), an empty source list is
+// rendered as a syncing shell instead of "no notes". Re-render on every
+// state transition; the snapshot arrives immediately on subscribe.
+function wireReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return null;
+  const unsubscribe = subscribe.call(state.ctx.sync, 'notes', (snapshot) => {
+    state.notesReadiness = snapshot;
+    scheduleRender();
+  });
+  return typeof unsubscribe === 'function' ? unsubscribe : null;
 }
 
 function scheduleRender() {
@@ -893,7 +921,7 @@ function getFilteredNotes({ includeSearch = true } = {}) {
   return list;
 }
 
-function buildNotesEmptyState({ totalNotes, scopedNotes, hasSearch, activeLabel, diagnostics, t }) {
+function buildNotesEmptyState({ totalNotes, scopedNotes, hasSearch, activeLabel, diagnostics, readiness, t }) {
   const translate = typeof t === 'function' ? t : (_key, fallback) => fallback;
   const diagnosticKind = diagnostics?.kind || 'ok';
   if (diagnosticKind === 'missing' || diagnosticKind === 'error') {
@@ -922,6 +950,16 @@ function buildNotesEmptyState({ totalNotes, scopedNotes, hasSearch, activeLabel,
       kind: diagnosticKind,
       title: translate('noNotes', 'No notes'),
       body: diagnostics?.message || ''
+    };
+  }
+  // Data-driven empty: the unfiltered source from the replicated notes
+  // collection is empty. Until that collection has finished its initial
+  // replication (ready === false), this is a sync state, not "no notes".
+  if (readiness?.ready === false) {
+    return {
+      kind: 'syncing',
+      title: translate('syncingNotes', 'Notizen werden synchronisiert.'),
+      body: ''
     };
   }
   return {
@@ -958,8 +996,18 @@ function renderNotesList() {
       hasSearch: !!state.searchQuery.trim(),
       activeLabel: getActiveListLabel(),
       diagnostics: state.dataDiagnostics,
+      readiness: state.notesReadiness || readNotesReadiness(),
       t: state.t
     });
+    if (emptyState.kind === 'syncing') {
+      els.notesList.innerHTML = `
+      <div class="ctox-syncing nn-empty-state-syncing" role="status" aria-live="polite">
+        <strong>${escapeHtml(emptyState.title)}</strong>
+        ${emptyState.body ? `<span>${escapeHtml(emptyState.body)}</span>` : ''}
+      </div>
+    `;
+      return;
+    }
     els.notesList.innerHTML = `
       <div class="ctox-empty nn-empty-state-${escapeHtml(emptyState.kind)}">
         <strong>${escapeHtml(emptyState.title)}</strong>

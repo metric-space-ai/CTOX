@@ -4,20 +4,30 @@ import { Buffer } from 'node:buffer';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 
-import { build } from 'esbuild';
+// Prefer the esbuild bundle (CI installs the dev dependency in
+// src/apps/business-os); fall back to a direct source import when esbuild is
+// not installed. The module graph (index.js + vendor/lexical.mjs + shared/*)
+// has no transitive imports and is Node-safe at top level — the same code the
+// bundle executes.
+let hooks;
+try {
+  const { build } = await import('esbuild');
+  const bundledModule = await build({
+    entryPoints: [fileURLToPath(new URL('./index.js', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'browser',
+    write: false,
+  });
 
-const bundledModule = await build({
-  entryPoints: [fileURLToPath(new URL('./index.js', import.meta.url))],
-  bundle: true,
-  format: 'esm',
-  platform: 'browser',
-  write: false,
-});
-
-const [{ text: bundledSource }] = bundledModule.outputFiles;
-const { __notesTestHooks: hooks } = await import(
-  `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
-);
+  const [{ text: bundledSource }] = bundledModule.outputFiles;
+  ({ __notesTestHooks: hooks } = await import(
+    `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
+  ));
+} catch (error) {
+  if (error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
+  ({ __notesTestHooks: hooks } = await import(new URL('./index.js', import.meta.url)));
+}
 
 const t = (_key, fallback) => fallback;
 
@@ -44,6 +54,46 @@ test('empty state distinguishes sync diagnostics from real empty lists', () => {
   });
 
   assert.equal(empty.kind, 'empty');
+});
+
+test('empty source list follows collection readiness (syncing vs empty)', () => {
+  const base = {
+    totalNotes: 0,
+    scopedNotes: 0,
+    hasSearch: false,
+    activeLabel: 'Alle Notizen',
+    diagnostics: { kind: 'ok-empty', message: '' },
+    t,
+  };
+
+  const syncing = hooks.buildNotesEmptyState({
+    ...base,
+    readiness: { collection: 'notes', state: 'catching-up', ready: false, syncing: true, updatedAt: 0 },
+  });
+  assert.equal(syncing.kind, 'syncing');
+
+  const offlinePending = hooks.buildNotesEmptyState({
+    ...base,
+    readiness: { collection: 'notes', state: 'offline-pending', ready: false, syncing: false, updatedAt: 0 },
+  });
+  assert.equal(offlinePending.kind, 'syncing');
+
+  const ready = hooks.buildNotesEmptyState({
+    ...base,
+    readiness: { collection: 'notes', state: 'live', ready: true, syncing: false, updatedAt: 1 },
+  });
+  assert.equal(ready.kind, 'empty');
+
+  // Readiness never overrides filter/search empties — data exists there.
+  const searchMiss = hooks.buildNotesEmptyState({
+    ...base,
+    totalNotes: 2,
+    scopedNotes: 2,
+    hasSearch: true,
+    diagnostics: { kind: 'ok', message: '' },
+    readiness: { collection: 'notes', state: 'catching-up', ready: false, syncing: true, updatedAt: 0 },
+  });
+  assert.equal(searchMiss.kind, 'no-results');
 });
 
 test('search misses are not rendered as missing notes', () => {
