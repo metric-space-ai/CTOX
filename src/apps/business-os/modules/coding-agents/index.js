@@ -64,6 +64,7 @@ const labels = {
     resultTitle: 'Letzter Turn',
     recentTitle: 'Letzte Turns',
     loadingApps: 'Apps werden geladen…',
+    syncingData: 'Daten werden synchronisiert.',
     emptyApps: 'Keine Apps verfügbar.',
     emptyAppsHint: 'Installiere eine Business-OS-App, um Coding-Turns zu delegieren.',
     selectAppHint: 'Wähle links eine App aus, um einen Turn zu delegieren.',
@@ -99,6 +100,7 @@ const labels = {
     resultTitle: 'Last turn',
     recentTitle: 'Recent turns',
     loadingApps: 'Loading apps…',
+    syncingData: 'Syncing data.',
     emptyApps: 'No apps available.',
     emptyAppsHint: 'Install a Business OS app to delegate coding turns.',
     selectAppHint: 'Select an app on the left to delegate a turn.',
@@ -156,6 +158,7 @@ export async function mount(ctx) {
   wireEvents();
   await initChatView();
   const projectionSubscriptions = subscribeProjectionUpdates();
+  const readinessUnsubscribers = subscribeReadinessUpdates();
 
   // Column resizing is owned by the shell (setupModuleResizers in app.js),
   // wired declaratively from the `.ctox-column-resizer[data-resizer-var]`
@@ -167,6 +170,9 @@ export async function mount(ctx) {
     clearProjectionTimers();
     projectionSubscriptions.forEach((subscription) => {
       try { subscription?.unsubscribe?.(); } catch (err) { console.warn('[coding-agents] projection unsubscribe failed', err); }
+    });
+    readinessUnsubscribers.forEach((unsubscribe) => {
+      try { unsubscribe?.(); } catch (err) { console.warn('[coding-agents] readiness unsubscribe failed', err); }
     });
     try { chatView?.destroy?.(); } catch (err) { console.warn('[coding-agents] chat-ui destroy failed', err); }
     chatView = null;
@@ -697,6 +703,38 @@ function renderResult(result) {
 
 /* Recent turns from the business_commands log */
 
+// Collection readiness (shell sync API): while a backing collection has not
+// finished its initial replication, an empty list is a sync state, never
+// "no data". A missing API (tests, degraded shell) never gates rendering.
+function collectionReadiness(name) {
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, name) : null;
+}
+
+// True only when the readiness API answers and at least one transcript source
+// (turn log, sessions, events) is still pre-live.
+function transcriptSourcesNotReady() {
+  const snapshots = [COMMAND_LOG_COLLECTION, SESSIONS_COLLECTION, EVENTS_COLLECTION]
+    .map((name) => collectionReadiness(name))
+    .filter(Boolean);
+  return snapshots.length > 0 && snapshots.some((snap) => snap.ready !== true);
+}
+
+function renderSyncingShell(box) {
+  box.innerHTML = `<div class="ctox-syncing" role="status" aria-live="polite">${escapeHtml(t('syncingData'))}</div>`;
+}
+
+// Readiness flips are rare (never-synced → catching-up → live); the listener
+// only re-fires on state changes. Each flip re-renders the center column so an
+// empty transcript/delegation view leaves the sync state once data is live.
+function subscribeReadinessUpdates() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return [];
+  return [COMMAND_LOG_COLLECTION, SESSIONS_COLLECTION, EVENTS_COLLECTION]
+    .map((name) => subscribe.call(state.ctx.sync, name, () => renderRecentTurns()))
+    .filter((unsubscribe) => typeof unsubscribe === 'function');
+}
+
 function subscribeProjectionUpdates() {
   const subscriptions = [];
   const commandLog = state.ctx?.db?.collection?.(COMMAND_LOG_COLLECTION);
@@ -842,6 +880,11 @@ function renderRecentTurns() {
   box.hidden = showTurns;
   if (showTurns) {
     renderTurnsList();
+  } else if (!events.length && !filtered && !running && transcriptSourcesNotReady()) {
+    // Unfiltered empty transcript while the backing collections are still
+    // pre-live: a sync state, never "no turns for this app". The chat view
+    // re-attaches its thread on the next update() once data arrives.
+    renderSyncingShell(box);
   } else if (chatView && state.chatViewMode === 'cards') {
     chatView.update({ events, running: running && !filtered, emptyText });
   } else {
@@ -898,6 +941,13 @@ function renderTurnsList() {
   const scrollTop = box.scrollTop;
   box.innerHTML = '';
   if (!state.recentTurns.length) {
+    // Empty turn log from a not-yet-replicated business_commands collection is
+    // a sync state, not "no delegations".
+    const readiness = collectionReadiness(COMMAND_LOG_COLLECTION);
+    if (readiness && readiness.ready !== true) {
+      renderSyncingShell(box);
+      return;
+    }
     box.innerHTML = `<div class="ctox-empty"><strong>Noch keine Delegationen.</strong></div>`;
     return;
   }

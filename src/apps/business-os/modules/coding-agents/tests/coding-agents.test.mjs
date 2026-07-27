@@ -227,6 +227,21 @@ test('module stays free of idle polling loops', () => {
   assert.equal(source.includes('setInterval('), false);
 });
 
+test('data-driven empty center views become sync states until collections are live', () => {
+  const js = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+  // Readiness comes from the canonical shell sync API and is re-rendered on
+  // state flips; the empty transcript and the empty delegation list render the
+  // kit .ctox-syncing shell instead of a "no data" claim while pre-live.
+  assert.match(js, /sync\?\.collectionReadiness/);
+  assert.match(js, /sync\?\.subscribeCollectionReadiness/);
+  assert.match(js, /<div class="ctox-syncing" role="status" aria-live="polite">/);
+  assert.match(js, /transcriptSourcesNotReady\(\)/);
+  assert.match(js, /readiness\.ready !== true/);
+  // Filter/selection empties stay untouched: only the unfiltered transcript
+  // branch is gated.
+  assert.match(js, /!events\.length && !filtered && !running && transcriptSourcesNotReady\(\)/);
+});
+
 test('escaped text is safe to inject into render fragments', () => {
   assert.equal(hooks.escapeHtml('<script>alert(1)</script>'), '&lt;script&gt;alert(1)&lt;/script&gt;');
 });
