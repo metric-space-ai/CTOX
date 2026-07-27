@@ -99,6 +99,30 @@ test('submissions: renders a shard list from a stub doc array with the context t
   assert.match(renderList([], { view: 'cards' }), /ctox-empty/);
 });
 
+test('submissions: empty source gates on collection readiness', () => {
+  // Source empty + not yet replicated → kit syncing shell (role=status).
+  const syncingHtml = renderList([], { view: 'cards', sourceEmpty: true, readiness: { ready: false, state: 'catching-up' } });
+  assert.match(syncingHtml, /ctox-syncing/);
+  assert.match(syncingHtml, /role="status"/);
+  assert.doesNotMatch(syncingHtml, /ctox-empty/);
+  // Source empty + live → the real empty state.
+  const emptyHtml = renderList([], { view: 'cards', sourceEmpty: true, readiness: { ready: true, state: 'live' } });
+  assert.match(emptyHtml, /ctox-empty/);
+  assert.doesNotMatch(emptyHtml, /ctox-syncing/);
+  // Filter-empty (source holds rows) never shows the syncing shell, even
+  // when the collection is still catching up.
+  const filterEmptyHtml = renderList([], { view: 'cards', sourceEmpty: false, readiness: { ready: false } });
+  assert.match(filterEmptyHtml, /ctox-empty/);
+  assert.doesNotMatch(filterEmptyHtml, /ctox-syncing/);
+  // Rows always win over readiness.
+  const rowsHtml = renderList(
+    [{ id: 's1', candidate_id: 'CAND-1', client_account_id: 'ACC-1', status: 'sent' }],
+    { view: 'cards', sourceEmpty: false, readiness: { ready: false } },
+  );
+  assert.match(rowsHtml, /CAND-1/);
+  assert.doesNotMatch(rowsHtml, /ctox-syncing/);
+});
+
 test('submissions: band counts and filtering derive from the status field', () => {
   const docs = [
     { id: 'a', candidate_id: 'ALPHA', client_account_id: 'ACC', status: 'sent' },

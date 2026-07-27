@@ -1,4 +1,6 @@
-const MOD_BUILD = '20260721-ia1';
+import { renderListOrState } from '../../shared/list-state.js';
+
+const MOD_BUILD = '20260727-readiness';
 const MODULE_ID = 'submissions';
 const PRIMARY = 'submissions';
 const PRESENT_COMMAND = 'ats.submission.present';
@@ -14,11 +16,13 @@ export const COPY = {
     candidate: 'Kandidat-ID', client: 'Kunden-Account-ID', more: 'Weitere Angaben', present: 'Vorstellen', entries: 'Einträge', empty: 'Noch keine Vorstellungen.', idCopied: 'ID kopiert', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', blocked: 'Blockiert.', idsRequired: 'Kandidat-ID und Kunden-Account-ID sind erforderlich.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', presented: 'Vorgestellt.', submission: 'Submission', vacancyLabel: 'Vakanz', contactLabel: 'Kontakt', consent: 'Consent', feedback: 'Feedback', sent: 'Gesendet', copyId: 'ID kopieren', unknown: 'unbekannt', conflict: 'Konflikt', status: 'Status',
     kicker: 'VORSTELLUNGEN', listTitle: 'Kandidaten', allStatus: 'Alle Status', viewAll: 'Alle', viewOpen: 'Offen', viewDone: 'Erledigt', composerKicker: 'NEUE VORSTELLUNG', composerTitle: 'Kandidat vorstellen', composerHint: 'Eintrag wählen oder neue Vorstellung anlegen.', recordKicker: 'VORSTELLUNG', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusSent: 'gesendet', statusHired: 'eingestellt', statusWithdrawn: 'zurückgezogen', statusRejected: 'abgelehnt',
+    syncing: 'Daten werden synchronisiert.',
   },
   en: {
     candidate: 'Candidate ID', client: 'Client account ID', more: 'More details', present: 'Present candidate', entries: 'records', empty: 'No submissions yet.', idCopied: 'ID copied', offlineService: 'Offline: command service unavailable.', blocked: 'Blocked.', idsRequired: 'Candidate ID and client account ID are required.', offlineSend: 'Offline: command could not be sent.', presented: 'Candidate presented.', submission: 'Submission', vacancyLabel: 'Vacancy', contactLabel: 'Contact', consent: 'Consent', feedback: 'Feedback', sent: 'Sent', copyId: 'Copy ID', unknown: 'unknown', conflict: 'Conflict', status: 'Status',
     kicker: 'SUBMISSIONS', listTitle: 'Candidates', allStatus: 'All statuses', viewAll: 'All', viewOpen: 'Open', viewDone: 'Closed', composerKicker: 'NEW SUBMISSION', composerTitle: 'Present candidate', composerHint: 'Select a record or start a new submission.', recordKicker: 'SUBMISSION', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusSent: 'sent', statusHired: 'hired', statusWithdrawn: 'withdrawn', statusRejected: 'rejected',
+    syncing: 'Syncing data.',
   },
 };
 let text = COPY.de;
@@ -52,6 +56,17 @@ export async function mount(ctx) {
   const state = { records: [], visible: [], selectedId: '', userCollapsed: false, grammar: readGrammarState(listPane) };
   const collection = () => { try { return ctx.db?.collection?.(PRIMARY) || null; } catch { return null; } };
 
+  // Shell-owned readiness for the primary collection; absent API (older
+  // shells, tests) reads as null → the previous empty-state behaviour.
+  function readSubmissionsReadiness() {
+    const read = ctx.sync?.collectionReadiness;
+    if (typeof read !== 'function') return null;
+    try { return read.call(ctx.sync, PRIMARY) || null; } catch { return null; }
+  }
+  // Collection readiness snapshot for the record list (shell-owned sync
+  // contract); null when the shell exposes no readiness API.
+  let submissionReadiness = readSubmissionsReadiness();
+
   // Gate feedback renders in the kit callout; kinds map onto its variants.
   const GATE_VARIANTS = { ok: 'is-success', block: 'is-danger', offline: 'is-warning' };
   function setGate(html, kind) {
@@ -68,7 +83,12 @@ export async function mount(ctx) {
   function renderListRegion() {
     const counts = bandCounts(state.records);
     state.visible = filterRecords(state.records, state.grammar);
-    if (listEl) listEl.innerHTML = renderList(state.visible, { view: state.grammar.view, selectedId: state.selectedId }, text);
+    if (listEl) listEl.innerHTML = renderList(state.visible, {
+      view: state.grammar.view,
+      selectedId: state.selectedId,
+      sourceEmpty: state.records.length === 0,
+      readiness: submissionReadiness,
+    }, text);
     writeCounts(listPane, counts);
     writeFooter(listPane, `${state.visible.length} ${text.entries} · ${bandLabel(state.grammar, text)}`);
   }
@@ -306,12 +326,26 @@ export async function mount(ctx) {
 
   // ---- Reactive backbone ----------------------------------------------------
   let sub = null;
+  let readinessUnsub = null;
   const col = collection();
   if (col?.find) { try { sub = col.find({ selector: {} }).$?.subscribe?.(() => { refresh().catch(() => {}); }); } catch {} }
+  // Re-render the record list when the primary collection flips its
+  // replication state so the empty list swaps between the syncing shell and
+  // the real empty state without waiting for data changes.
+  if (typeof ctx.sync?.subscribeCollectionReadiness === 'function') {
+    try {
+      const unsubscribe = ctx.sync.subscribeCollectionReadiness(PRIMARY, (snapshot) => {
+        submissionReadiness = snapshot || null;
+        renderListRegion();
+      });
+      if (typeof unsubscribe === 'function') readinessUnsub = unsubscribe;
+    } catch {}
+  }
   await refresh();
 
   return () => {
     try { sub?.unsubscribe?.(); } catch {}
+    try { readinessUnsub?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     listEl?.removeEventListener('click', onListClick);
     detailEl?.removeEventListener('click', onDetailClick);
@@ -383,11 +417,19 @@ export function normalizeSubmission(raw, opts = {}) {
   return record;
 }
 
+// Record-list body via the canonical list-state helper: rows always win; the
+// kit syncing shell shows only when the UNFILTERED source is empty and its
+// collection has not finished initial replication (ready === false).
+// Filter/search empties (source holds rows) and missing readiness APIs keep
+// the plain empty copy.
 export function renderList(records, opts = {}, t = text) {
-  if (!records || !records.length) return `<div class="ctox-empty">${esc(t.empty)}</div>`;
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selectedId = opts.selectedId || '';
-  return records.map((r) => (view === 'list' ? shardCompact(r, selectedId, t) : shardCard(r, selectedId, t))).join('');
+  return renderListOrState(records, opts.sourceEmpty ? (opts.readiness ?? null) : null, {
+    renderRows: (rows) => rows.map((r) => (view === 'list' ? shardCompact(r, selectedId, t) : shardCard(r, selectedId, t))).join(''),
+    empty: t.empty,
+    syncing: t.syncing,
+  });
 }
 
 function recordKey(r) { return (r && r.id) || ''; }
