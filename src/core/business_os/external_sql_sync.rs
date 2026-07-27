@@ -11,6 +11,7 @@
 use super::policy::BusinessOsPermission;
 use super::store::{self, BusinessCommand};
 use anyhow::{bail, Context};
+use ctox_postgres_adapter::{PostgresAdapter, PostgresConfig, PostgresSslMode};
 use ctox_sqlserver_adapter::{
     validate_read_statement, validate_write_statement, SqlParameter, SqlServerAdapter,
     SqlServerConfig,
@@ -26,6 +27,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 const SQLSERVER_KIND: &str = "sqlserver";
+const POSTGRES_KIND: &str = "postgres";
 const SYNC_COMMAND: &str = "external_sql.sync.refresh";
 const WRITE_COMMAND: &str = "external_sql.write";
 const BACKGROUND_POLL_SECONDS: u64 = 30;
@@ -64,8 +66,8 @@ struct ExternalSqlSourceConfig {
 #[serde(deny_unknown_fields)]
 struct ExternalSqlConnectionConfig {
     server: String,
-    #[serde(default = "default_sqlserver_port")]
-    port: u16,
+    #[serde(default)]
+    port: Option<u16>,
     database: String,
     user: String,
     password_secret: String,
@@ -73,12 +75,76 @@ struct ExternalSqlConnectionConfig {
     encrypt: bool,
     #[serde(default)]
     trust_server_certificate: bool,
+    #[serde(default = "default_postgres_sslmode")]
+    sslmode: String,
     #[serde(default = "default_request_timeout_ms")]
     request_timeout_ms: u64,
     #[serde(default = "default_connector_max_rows")]
     max_rows: usize,
     #[serde(default)]
     allow_writes: bool,
+}
+
+enum ExternalSqlAdapter {
+    SqlServer(SqlServerAdapter),
+    Postgres(PostgresAdapter),
+}
+
+impl ExternalSqlAdapter {
+    async fn query(
+        &mut self,
+        sql: &str,
+        parameters: &[SqlParameter],
+    ) -> anyhow::Result<Vec<Value>> {
+        match self {
+            Self::SqlServer(adapter) => adapter.query(sql, parameters).await,
+            Self::Postgres(adapter) => adapter.query(sql, parameters).await,
+        }
+    }
+
+    async fn execute(&mut self, sql: &str, parameters: &[SqlParameter]) -> anyhow::Result<u64> {
+        match self {
+            Self::SqlServer(adapter) => Ok(adapter
+                .execute(sql, parameters)
+                .await?
+                .rows_affected()
+                .iter()
+                .sum()),
+            Self::Postgres(adapter) => adapter.execute(sql, parameters).await,
+        }
+    }
+
+    async fn execute_returning(
+        &mut self,
+        sql: &str,
+        parameters: &[SqlParameter],
+    ) -> anyhow::Result<Vec<Value>> {
+        match self {
+            Self::SqlServer(adapter) => adapter.execute_returning(sql, parameters).await,
+            Self::Postgres(adapter) => adapter.execute_returning(sql, parameters).await,
+        }
+    }
+
+    async fn begin_transaction(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::SqlServer(adapter) => adapter.begin_transaction().await,
+            Self::Postgres(adapter) => adapter.begin_transaction().await,
+        }
+    }
+
+    async fn commit_transaction(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::SqlServer(adapter) => adapter.commit_transaction().await,
+            Self::Postgres(adapter) => adapter.commit_transaction().await,
+        }
+    }
+
+    async fn rollback_transaction(&mut self) -> anyhow::Result<()> {
+        match self {
+            Self::SqlServer(adapter) => adapter.rollback_transaction().await,
+            Self::Postgres(adapter) => adapter.rollback_transaction().await,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -446,7 +512,7 @@ async fn sync_source(
 
 async fn sync_projection(
     root: &Path,
-    adapter: &mut SqlServerAdapter,
+    adapter: &mut ExternalSqlAdapter,
     source: &ExternalSqlSourceConfig,
     projection: &ProjectionConfig,
 ) -> anyhow::Result<ProjectionStats> {
@@ -891,7 +957,7 @@ async fn apply_source_write(
     operation_id: &str,
     payload_hash: &str,
     payload: &Value,
-    adapter: &mut SqlServerAdapter,
+    adapter: &mut ExternalSqlAdapter,
 ) -> anyhow::Result<(u64, Vec<Value>, bool)> {
     if operation.transaction {
         adapter.begin_transaction().await?;
@@ -953,7 +1019,7 @@ async fn apply_source_write(
 }
 
 async fn execute_statement(
-    adapter: &mut SqlServerAdapter,
+    adapter: &mut ExternalSqlAdapter,
     statement: &StatementConfig,
     payload: &Value,
 ) -> anyhow::Result<(u64, Vec<Value>)> {
@@ -967,13 +1033,15 @@ async fn execute_statement(
                 .await?,
         ))
     } else {
-        let result = adapter.execute(&statement.sql, &parameters).await?;
-        Ok((result.rows_affected().iter().sum(), Vec::new()))
+        Ok((
+            adapter.execute(&statement.sql, &parameters).await?,
+            Vec::new(),
+        ))
     }
 }
 
 async fn lookup_source_receipt(
-    adapter: &mut SqlServerAdapter,
+    adapter: &mut ExternalSqlAdapter,
     config: &SourceReceiptConfig,
     payload: &Value,
     expected_payload_hash: &str,
@@ -1038,7 +1106,7 @@ fn write_conflict(message: impl Into<String>) -> anyhow::Error {
 }
 
 async fn verify_source_version(
-    adapter: &mut SqlServerAdapter,
+    adapter: &mut ExternalSqlAdapter,
     check: &VersionCheckConfig,
     payload: &Value,
 ) -> anyhow::Result<()> {
@@ -1063,8 +1131,8 @@ async fn verify_source_version(
 fn adapter_for_source(
     root: &Path,
     source: &ExternalSqlSourceConfig,
-) -> anyhow::Result<SqlServerAdapter> {
-    if source.kind != SQLSERVER_KIND {
+) -> anyhow::Result<ExternalSqlAdapter> {
+    if !matches!(source.kind.as_str(), SQLSERVER_KIND | POSTGRES_KIND) {
         bail!("unsupported external SQL source kind `{}`", source.kind);
     }
     let password = crate::secrets::get_credential(root, &source.connection.password_secret)
@@ -1074,20 +1142,47 @@ fn adapter_for_source(
                 source.connection.password_secret
             )
         })?;
-    SqlServerAdapter::new(SqlServerConfig {
-        server: source.connection.server.clone(),
-        port: source.connection.port,
-        database: source.connection.database.clone(),
-        user: source.connection.user.clone(),
-        password: Some(password),
-        password_file: None,
-        encrypt: source.connection.encrypt,
-        trust_server_certificate: source.connection.trust_server_certificate,
-        request_timeout_ms: source.connection.request_timeout_ms,
-        max_rows: source.connection.max_rows,
-        allow_writes: source.connection.allow_writes,
-        application_name: format!("ctox-external-sql-{}", source.id),
-    })
+    match source.kind.as_str() {
+        SQLSERVER_KIND => Ok(ExternalSqlAdapter::SqlServer(SqlServerAdapter::new(
+            SqlServerConfig {
+                server: source.connection.server.clone(),
+                port: source
+                    .connection
+                    .port
+                    .unwrap_or_else(default_sqlserver_port),
+                database: source.connection.database.clone(),
+                user: source.connection.user.clone(),
+                password: Some(password),
+                password_file: None,
+                encrypt: source.connection.encrypt,
+                trust_server_certificate: source.connection.trust_server_certificate,
+                request_timeout_ms: source.connection.request_timeout_ms,
+                max_rows: source.connection.max_rows,
+                allow_writes: source.connection.allow_writes,
+                application_name: format!("ctox-external-sql-{}", source.id),
+            },
+        )?)),
+        POSTGRES_KIND => {
+            // encrypt/trust_server_certificate are SQL Server-only. PostgreSQL uses
+            // explicit sslmode and defaults to disable, so loopback is not forced to TLS.
+            let sslmode = source.connection.sslmode.parse::<PostgresSslMode>()?;
+            Ok(ExternalSqlAdapter::Postgres(PostgresAdapter::new(
+                PostgresConfig {
+                    server: source.connection.server.clone(),
+                    port: source.connection.port.unwrap_or(5432),
+                    database: source.connection.database.clone(),
+                    user: source.connection.user.clone(),
+                    password: Some(password),
+                    sslmode,
+                    request_timeout_ms: source.connection.request_timeout_ms,
+                    max_rows: source.connection.max_rows,
+                    allow_writes: source.connection.allow_writes,
+                    application_name: format!("ctox-external-sql-{}", source.id),
+                },
+            )?))
+        }
+        _ => bail!("unsupported external SQL source kind `{}`", source.kind),
+    }
 }
 
 fn load_source_configs(root: &Path) -> anyhow::Result<Vec<ExternalSqlSourceConfig>> {
@@ -1115,6 +1210,13 @@ fn validate_source(source: &ExternalSqlSourceConfig) -> anyhow::Result<()> {
         if value.trim().is_empty() {
             bail!("external SQL {name} must not be empty");
         }
+    }
+    match source.kind.as_str() {
+        SQLSERVER_KIND => {}
+        POSTGRES_KIND => {
+            source.connection.sslmode.parse::<PostgresSslMode>()?;
+        }
+        _ => bail!("unsupported external SQL source kind `{}`", source.kind),
     }
     validate_identifier(&source.module_id, "module_id")?;
     validate_identifier(&source.id, "source id")?;
@@ -1989,6 +2091,9 @@ fn default_source_kind() -> String {
 fn default_sqlserver_port() -> u16 {
     1433
 }
+fn default_postgres_sslmode() -> String {
+    "disable".to_owned()
+}
 fn default_sync_interval_seconds() -> u64 {
     DEFAULT_SYNC_INTERVAL_SECONDS
 }
@@ -2060,6 +2165,25 @@ mod tests {
         validate_source(&source).expect("valid source");
         assert_eq!(source.module_id, "inventory");
         assert_eq!(source.projections[0].collection, "inventory_items");
+    }
+
+    #[test]
+    fn postgres_source_contract_uses_vendor_specific_defaults() {
+        let source: ExternalSqlSourceConfig = serde_json::from_value(json!({
+            "module_id":"eventus",
+            "id":"eventus-primary",
+            "kind":"postgres",
+            "connection":{"server":"127.0.0.1","database":"eventus","user":"sync","password_secret":"EVENTUS_POSTGRES_PASSWORD"},
+            "sync_interval_seconds":300,
+            "status_collection":"eventus_sync_status",
+            "projections":[{"id":"jobs","collection":"eventus_jobs","record_id_field":"id","query":"SELECT id,status FROM ctox_jobs ORDER BY id OFFSET @P1 LIMIT @P2"}]
+        }))
+        .expect("PostgreSQL source config");
+        validate_source(&source).expect("valid PostgreSQL source");
+        assert_eq!(source.kind, POSTGRES_KIND);
+        assert_eq!(source.connection.port, None);
+        assert_eq!(source.connection.sslmode, "disable");
+        assert!(source.connection.encrypt);
     }
 
     #[test]
