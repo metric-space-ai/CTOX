@@ -47,7 +47,8 @@ pub struct ScrapeBridgeResult {
     /// Typed records the scrape script emitted, mapped onto our vocab.
     pub fields: Vec<(FieldKey, FieldEvidence)>,
     /// `ctox scrape execute` classification:
-    /// `succeeded | temporary_unreachable | portal_drift | blocked | partial_output`,
+    /// `succeeded | temporary_unreachable | portal_drift | blocked |
+    /// partial_output | authorization_required`,
     /// or `target_not_registered` when the bridge skipped the call.
     pub classification: String,
     /// Compact reason string from the executor.
@@ -663,6 +664,52 @@ mod tests {
         assert!(result.repair_queued);
         assert!(result.fields.is_empty());
         assert_eq!(result.reason.as_deref(), Some("reachable_empty_output"));
+    }
+
+    #[test]
+    fn parse_envelope_marks_authorization_required_with_auth_assist_handoff() {
+        let envelope = json!({
+            "ok": true,
+            "run_id": "scrape_run-reauth",
+            "classification": {
+                "status": "authorization_required",
+                "reason": "session_expired_login_landing:app.dnbhoovers.com"
+            },
+            "records": [],
+            "reauthorization": {
+                "kind": "auth-assist-request",
+                "source_id": "dnbhoovers.com",
+                "login_url": "https://app.dnbhoovers.com/login",
+                "allowed_domains": ["dnbhoovers.com", "app.dnbhoovers.com", "plus.dnb.com"],
+                "credential_ref": "ctox-secret://credentials/DNB_HOOVERS_BROWSER_LOGIN",
+                "reason": "session_expired_or_invalid",
+                "secret_value_in_payload": false
+            },
+            "repair_queue_task": {
+                "kind": "auth-assist-request",
+                "command_id": "web_stack_auth_assist_dnbhoovers_com_fixture",
+                "source_id": "dnbhoovers.com",
+                "target_url": "https://app.dnbhoovers.com/login",
+                "secret_value_in_payload": false
+            }
+        });
+        let result = parse_scrape_envelope(
+            "dnbhoovers.com",
+            crate::sources::find("dnbhoovers.com").unwrap(),
+            "WITTENSTEIN SE",
+            &envelope,
+        );
+        assert_eq!(result.classification, "authorization_required");
+        assert!(result.repair_queued);
+        assert!(result.fields.is_empty());
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("session_expired_login_landing:app.dnbhoovers.com")
+        );
+        assert!(result
+            .evidence_rejections
+            .iter()
+            .any(|r| r == "classification_not_succeeded:authorization_required"));
     }
 
     #[test]

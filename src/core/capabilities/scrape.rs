@@ -383,6 +383,11 @@ pub(crate) enum ScrapeRunStatus {
     PortalDrift,
     Blocked,
     PartialOutput,
+    /// Session expired/invalid on a credential-protected source: the run
+    /// landed on the source's own login page during an authenticated
+    /// capture. Distinct from `PortalDrift` (genuine layout/domain drift)
+    /// and from `Blocked` (upstream challenge/verification).
+    AuthorizationRequired,
 }
 
 impl ScrapeRunStatus {
@@ -393,6 +398,7 @@ impl ScrapeRunStatus {
             Self::PortalDrift => "portal_drift",
             Self::Blocked => "blocked",
             Self::PartialOutput => "partial_output",
+            Self::AuthorizationRequired => "authorization_required",
         }
     }
 }
@@ -427,6 +433,10 @@ pub(crate) struct ScrapeExecutionOutcome {
     should_queue_repair: bool,
     repair_request_path: Option<String>,
     repair_queue_task: Option<Value>,
+    /// Typed reauthorization action persisted for `authorization_required`
+    /// runs (capability 10): source id, safe login URL, allowed domains and
+    /// the `ctox-secret://` credential reference — never secret values.
+    reauthorization: Option<Value>,
     template_event: Option<Value>,
     materialization: Option<Value>,
     run_manifest_path: PathBuf,
@@ -731,13 +741,28 @@ pub(crate) fn execute_scrape_with_outcome(
         .as_ref()
         .map(|items| items.len() as i64)
         .unwrap_or(0);
-    let classification = classify_outcome(
+    let mut classification = classify_outcome(
         &payload,
         &probe,
         &execution,
         records_found,
         expected_min_records,
     );
+    // Capability 10: an expired/invalid session on a credential-protected
+    // source lands on the source's own login page. That is not portal drift —
+    // upgrade the classification and persist the precise reauthorization
+    // action so the typed auth-assist handoff can fire below.
+    let reauthorization =
+        session_expiry_reauthorization(&target, &probe, &payload, &classification);
+    if reauthorization.is_some() && classification.status != ScrapeRunStatus::AuthorizationRequired
+    {
+        let host = url_host_lower(&probe.final_url).unwrap_or_default();
+        classification = Classification {
+            status: ScrapeRunStatus::AuthorizationRequired,
+            should_queue_repair: true,
+            reason: format!("session_expired_login_landing:{host}"),
+        };
+    }
     let run_finished_at = now_iso_string();
     let default_schema_key = target
         .view
@@ -787,10 +812,38 @@ pub(crate) fn execute_scrape_with_outcome(
             records_found,
             last_successful_run.as_ref(),
             materialization.as_ref(),
+            reauthorization.as_ref(),
         )?)
     } else {
         None
     };
+    // Typed auth-assist handoff for expired/invalid protected sessions. This
+    // fires whenever the classification is `authorization_required` — it is a
+    // request for human authorization, not an automated heal, so it is not
+    // gated on --allow-heal (the adapter scripts emit the same request
+    // ungated when they detect the auth wall themselves).
+    let auth_assist_handoff = if classification.status == ScrapeRunStatus::AuthorizationRequired {
+        reauthorization.as_ref().and_then(|action| {
+            emit_reauthorization_handoff(
+                root,
+                &run_id,
+                find_flag_value(args, "--thread-key"),
+                action,
+            )
+        })
+    } else {
+        None
+    };
+    let failure_mode = if classification.status == ScrapeRunStatus::AuthorizationRequired {
+        Some("authorization_required")
+    } else {
+        payload.get("failure_mode").and_then(Value::as_str)
+    };
+    let browser_assist_requested = payload
+        .get("browser_assist_requested")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || auth_assist_handoff.is_some();
     let mut artifacts = build_run_artifacts(
         &run_dir,
         &output_dir,
@@ -825,12 +878,17 @@ pub(crate) fn execute_scrape_with_outcome(
                 "reason": classification.reason,
                 "enrichment": enrichment.as_ref().map(|item| item.summary.clone()),
                 "repair_request_path": repair_request_path.as_ref().map(|path| path.to_string_lossy().to_string()),
+                "reauthorization": reauthorization.clone().unwrap_or(Value::Null),
                 "last_successful_run": last_successful_run,
             }),
             result: json!({
                 "records_found": records_found,
                 "enriched_records_found": materialized_records.map(|items| items.len() as i64),
                 "source_count": target_sources(&target.view).len(),
+                "failure_mode": failure_mode,
+                "detail": payload.get("detail").cloned().unwrap_or(Value::Null),
+                "browser_assist_requested": browser_assist_requested,
+                "reauthorization": reauthorization.clone().unwrap_or(Value::Null),
                 "stdout_excerpt": tail_excerpt(&execution.stdout_text, 4000),
                 "stderr_excerpt": tail_excerpt(&execution.stderr_text, 4000),
                 "timed_out": execution.timed_out,
@@ -849,7 +907,11 @@ pub(crate) fn execute_scrape_with_outcome(
         None
     };
 
-    let repair_queue_task = if allow_heal && classification.should_queue_repair {
+    let repair_queue_task = if classification.status == ScrapeRunStatus::AuthorizationRequired {
+        // The reauthorization handoff IS the queued action for an expired
+        // session; a generic script-repair task would be the wrong action.
+        auth_assist_handoff.clone()
+    } else if allow_heal && classification.should_queue_repair {
         let thread_key = find_flag_value(args, "--thread-key")
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| format!("scrape/{}", target.view.target_key));
@@ -863,7 +925,7 @@ pub(crate) fn execute_scrape_with_outcome(
             repair_request_path.as_ref(),
         );
         let suggested_skill = repair_skill_for_status(classification.status);
-        Some(channels::create_queue_task(
+        Some(serde_json::to_value(channels::create_queue_task(
             root,
             channels::QueueTaskCreateRequest {
                 title: format!("repair scrape target {}", target.view.target_key),
@@ -875,7 +937,7 @@ pub(crate) fn execute_scrape_with_outcome(
                 parent_message_key: None,
                 extra_metadata: None,
             },
-        )?)
+        )?)?)
     } else {
         None
     };
@@ -900,10 +962,8 @@ pub(crate) fn execute_scrape_with_outcome(
         repair_request_path: repair_request_path
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
-        repair_queue_task: repair_queue_task
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?,
+        repair_queue_task,
+        reauthorization,
         template_event,
         materialization: materialization.as_ref().map(|item| item.summary.clone()),
         run_manifest_path: run_dir.join("run.json"),
@@ -3049,6 +3109,13 @@ fn classify_outcome(
             reason: "explicit_failure_mode_auth_required".to_string(),
         };
     }
+    if explicit_failure == "authorization_required" {
+        return Classification {
+            status: ScrapeRunStatus::AuthorizationRequired,
+            should_queue_repair: true,
+            reason: "explicit_failure_mode_authorization_required".to_string(),
+        };
+    }
     if explicit_failure == "partial_output"
         || payload.get("partial_output") == Some(&Value::Bool(true))
     {
@@ -3140,6 +3207,272 @@ fn classify_outcome(
         status: ScrapeRunStatus::Succeeded,
         should_queue_repair: false,
         reason: "ok".to_string(),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session-expiry reauthorization (web-stack unlocking capability 10).
+//
+// A credential-protected source (Rust `browser_recipe()` and/or the adapter
+// script's PROTECTED_SOURCE_CONFIG entry) that lands on its own login page
+// during an authenticated capture has an expired/invalid session — not
+// portal drift. Such runs classify as `authorization_required` and emit a
+// typed `auth-assist-request` handoff (source id, safe login URL, allowed
+// domains, ctox-secret credential reference; never secret values).
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Default)]
+struct ProtectedCaptureConfig {
+    login_url: Option<String>,
+    allowed_domains: Vec<String>,
+    credential_ref: Option<String>,
+}
+
+fn js_object_string_field(body: &str, key: &str) -> Option<String> {
+    let marker = format!("{key}: \"");
+    let start = body.find(&marker)? + marker.len();
+    let end = body[start..].find('"')? + start;
+    Some(body[start..end].to_string())
+}
+
+fn js_object_string_list(body: &str, key: &str) -> Vec<String> {
+    let marker = format!("{key}: [");
+    let Some(start) = body.find(&marker).map(|i| i + marker.len()) else {
+        return Vec::new();
+    };
+    let Some(end) = body[start..].find(']').map(|i| i + start) else {
+        return Vec::new();
+    };
+    body[start..end]
+        .split(',')
+        .filter_map(|item| {
+            let item = item.trim().trim_matches('"');
+            (!item.is_empty()).then(|| item.to_string())
+        })
+        .collect()
+}
+
+/// Parse the `PROTECTED_SOURCE_CONFIG` entry for `source_id` out of the
+/// registered adapter script body — the same static contract the unlock
+/// acceptance report validates. Entry bodies contain arrays but no nested
+/// braces, so a brace-delimited slice is sufficient.
+fn protected_config_from_script(script: &str, source_id: &str) -> Option<ProtectedCaptureConfig> {
+    let marker = "const PROTECTED_SOURCE_CONFIG = Object.freeze({";
+    let start = script.find(marker)? + marker.len();
+    let rest = &script[start..];
+    let end = rest.find("\n});").unwrap_or(rest.len());
+    let section = &rest[..end];
+    let entry_marker = format!("\"{source_id}\": {{");
+    let entry_start = section.find(&entry_marker)? + entry_marker.len();
+    let entry_end = section[entry_start..].find('}')? + entry_start;
+    let body = &section[entry_start..entry_end];
+    let config = ProtectedCaptureConfig {
+        login_url: js_object_string_field(body, "login_url"),
+        allowed_domains: js_object_string_list(body, "allowed_domains"),
+        credential_ref: js_object_string_field(body, "credential_ref"),
+    };
+    (config.login_url.is_some() || !config.allowed_domains.is_empty()).then_some(config)
+}
+
+/// A credential reference is only ever `ctox-secret://<scope>/<NAME>` — never
+/// a raw value, never userinfo/query/fragment.
+fn valid_credential_reference(value: &str) -> bool {
+    let prefix = format!("ctox-secret://{}/", crate::secrets::credential_scope());
+    let Some(name) = value.strip_prefix(prefix.as_str()) else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn url_host_lower(url: &str) -> Option<String> {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|host| host.trim_start_matches("www.").to_ascii_lowercase())
+        })
+        .filter(|host| !host.is_empty())
+}
+
+fn host_within_domains(host: &str, domains: &[String]) -> bool {
+    domains
+        .iter()
+        .any(|domain| host == domain || host.ends_with(&format!(".{domain}")))
+}
+
+/// Resolve the protected-capture config for a target's `expected_provider`.
+/// The compiled-in Rust `browser_recipe()` is authoritative when the source
+/// module exists; the registered adapter script's PROTECTED_SOURCE_CONFIG
+/// entry fills the gaps (and is the only source for script-only adapters).
+/// The result is validated: https login URL inside the allow-list, and a
+/// secret-store credential reference — runner scripts are hot-revisable and
+/// therefore untrusted, so nothing is taken from the run payload.
+fn resolve_protected_capture_config(
+    target: &RegisteredTarget,
+) -> Option<(String, ProtectedCaptureConfig)> {
+    let provider = target
+        .view
+        .config
+        .get("expected_provider")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
+    if provider.is_empty() {
+        return None;
+    }
+    let recipe =
+        ctox_web_stack::sources::find(&provider).and_then(|module| module.browser_recipe());
+    let script_config = fs::read_to_string(&target.script.script_path)
+        .ok()
+        .and_then(|body| protected_config_from_script(&body, &provider));
+    if recipe.is_none() && script_config.is_none() {
+        return None;
+    }
+    let mut config = ProtectedCaptureConfig::default();
+    if let Some(script_config) = script_config {
+        config = script_config;
+    }
+    if let Some(recipe) = recipe {
+        // The compiled-in recipe wins on every field it carries.
+        config.login_url = Some(recipe.login_url.clone());
+        if !recipe.allowed_domains.is_empty() {
+            config.allowed_domains = recipe.allowed_domains.clone();
+        }
+        if let Some(secret_name) = recipe.required_secret_name {
+            config.credential_ref = Some(format!(
+                "ctox-secret://{}/{}",
+                crate::secrets::credential_scope(),
+                secret_name
+            ));
+        }
+    }
+    let login_url = config.login_url.clone()?;
+    if !login_url.starts_with("https://") {
+        return None;
+    }
+    if let Some(host) = url_host_lower(&login_url) {
+        if !config.allowed_domains.is_empty()
+            && !host_within_domains(&host, &config.allowed_domains)
+        {
+            return None;
+        }
+    }
+    if let Some(reference) = &config.credential_ref {
+        if !valid_credential_reference(reference) {
+            config.credential_ref = None;
+        }
+    }
+    Some((provider, config))
+}
+
+/// True when `final_url` is the source's own login page: same host as the
+/// configured login URL with a matching (or root) login path, or a URL on an
+/// allowed domain whose host/path is unambiguously a login endpoint
+/// (`login.<domain>`, `/login`, `/sign/in`, `/anmeldung`, ...).
+fn url_is_login_landing(final_url: &str, login_url: &str, allowed_domains: &[String]) -> bool {
+    let Some(host) = url_host_lower(final_url) else {
+        return false;
+    };
+    let path = url::Url::parse(final_url)
+        .map(|parsed| parsed.path().to_ascii_lowercase())
+        .unwrap_or_default();
+    let login_host = url_host_lower(login_url);
+    let login_path = url::Url::parse(login_url)
+        .map(|parsed| parsed.path().trim_end_matches('/').to_ascii_lowercase())
+        .unwrap_or_default();
+    if login_host.as_deref() == Some(host.as_str())
+        && (login_path.is_empty() || path.starts_with(login_path.as_str()))
+    {
+        return true;
+    }
+    host_within_domains(&host, allowed_domains)
+        && (host.starts_with("login.")
+            || path.contains("login")
+            || path.contains("sign/in")
+            || path.contains("sign-in")
+            || path.contains("anmeld"))
+}
+
+/// Build the typed reauthorization action for a run when the evidence shows
+/// an expired/invalid session on a credential-protected source: either the
+/// adapter script classified `authorization_required` explicitly, or the
+/// portal probe landed on the source's own login page while the run drifted
+/// (which is how an expired stored session presents — the login redirect is
+/// not layout drift). Returns the action payload to persist and to hand off.
+fn session_expiry_reauthorization(
+    target: &RegisteredTarget,
+    probe: &ProbeResult,
+    payload: &Value,
+    classification: &Classification,
+) -> Option<Value> {
+    let explicit =
+        payload.get("failure_mode").and_then(Value::as_str) == Some("authorization_required");
+    let login_landing_upgrade = classification.status == ScrapeRunStatus::PortalDrift
+        && probe.reachable
+        && !probe.human_verification;
+    if !explicit && !login_landing_upgrade {
+        return None;
+    }
+    let (provider, config) = resolve_protected_capture_config(target)?;
+    let login_url = config.login_url.clone()?;
+    if !explicit && !url_is_login_landing(&probe.final_url, &login_url, &config.allowed_domains) {
+        return None;
+    }
+    Some(json!({
+        "kind": "auth-assist-request",
+        "source_id": provider,
+        "login_url": login_url,
+        "allowed_domains": config.allowed_domains,
+        "credential_ref": config.credential_ref,
+        "reason": "session_expired_or_invalid",
+        "secret_value_in_payload": false,
+    }))
+}
+
+/// Emit the typed `auth-assist-request` handoff through the existing
+/// Business OS web-stack mechanism (the same enqueue the adapter scripts and
+/// the `ctox business-os web-stack auth-assist-request` CLI use). Lossy by
+/// design: a handoff failure is reported in the run error, never fatal.
+fn emit_reauthorization_handoff(
+    root: &Path,
+    run_id: &str,
+    thread_key: Option<&str>,
+    reauthorization: &Value,
+) -> Option<Value> {
+    let source_id = reauthorization.get("source_id")?.as_str()?.to_string();
+    let login_url = reauthorization.get("login_url")?.as_str()?.to_string();
+    let credential_ref = reauthorization
+        .get("credential_ref")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let task_id = thread_key.unwrap_or(run_id).to_string();
+    match crate::service::business_os::enqueue_web_stack_auth_assist_request(
+        root,
+        &source_id,
+        Some(&login_url),
+        credential_ref.as_deref(),
+        Some("stored session expired or invalid; reauthorization required"),
+        &task_id,
+        "scrape_executor",
+        "ctox scrape execute",
+        !task_id.trim().is_empty(),
+        true,
+    ) {
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                object.insert("kind".to_string(), json!("auth-assist-request"));
+                object.insert("run_id".to_string(), json!(run_id));
+            }
+            Some(value)
+        }
+        Err(err) => {
+            eprintln!("scrape execute: auth-assist handoff failed: {err:#}");
+            None
+        }
     }
 }
 
@@ -3813,6 +4146,7 @@ fn write_repair_request(
     records_found: i64,
     last_successful_run: Option<&Value>,
     materialization: Option<&MaterializationOutcome>,
+    reauthorization: Option<&Value>,
 ) -> Result<PathBuf> {
     let path = run_dir.join("repair_request.json");
     let latest_state_paths = latest_state_paths_for_target(&target.view);
@@ -3830,6 +4164,7 @@ fn write_repair_request(
             "reason": reason,
             "probe": probe_to_json(probe),
             "records_found": records_found,
+            "reauthorization": reauthorization.cloned().unwrap_or(Value::Null),
             "workspace_dir": target.view.workspace_dir,
             "manifest_path": resolve_workspace_dir(Path::new(""), &target.view.workspace_dir).join("manifest.json"),
             "current_script_path": target.script.script_path,
@@ -5711,6 +6046,265 @@ module.exports = async function extractSource(context) {
         assert!(classification.should_queue_repair);
         assert_eq!(classification.reason, "explicit_failure_mode_auth_required");
         assert_eq!(repair_skill_for_status(classification.status), "web-unlock");
+    }
+
+    #[test]
+    fn classify_explicit_authorization_required_as_typed_reauth() {
+        let payload = json!({"failure_mode": "authorization_required"});
+        let probe = ProbeResult {
+            reachable: true,
+            status_code: Some(200),
+            final_url: "https://app.example.com/login".to_string(),
+            human_verification: false,
+            error: None,
+        };
+        let execution = CommandExecution {
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_text: String::new(),
+            stderr_text: String::new(),
+        };
+        let classification = classify_outcome(&payload, &probe, &execution, 0, 1);
+        assert_eq!(
+            classification.status,
+            ScrapeRunStatus::AuthorizationRequired
+        );
+        assert!(classification.should_queue_repair);
+        assert_eq!(
+            classification.reason,
+            "explicit_failure_mode_authorization_required"
+        );
+        assert_eq!(classification.status.as_str(), "authorization_required");
+    }
+
+    #[test]
+    fn login_landing_detection_matches_source_login_pages() {
+        let dnb = vec![
+            "dnbhoovers.com".to_string(),
+            "app.dnbhoovers.com".to_string(),
+            "plus.dnb.com".to_string(),
+        ];
+        assert!(url_is_login_landing(
+            "https://app.dnbhoovers.com/login",
+            "https://app.dnbhoovers.com/login",
+            &dnb
+        ));
+        let leadfeeder = vec![
+            "leadfeeder.com".to_string(),
+            "app.leadfeeder.com".to_string(),
+        ];
+        assert!(url_is_login_landing(
+            "https://app.leadfeeder.com/f/sign/in",
+            "https://app.leadfeeder.com/login",
+            &leadfeeder
+        ));
+        let xing = vec!["xing.com".to_string()];
+        assert!(url_is_login_landing(
+            "https://login.xing.com/",
+            "https://login.xing.com/",
+            &xing
+        ));
+        let rocketreach = vec!["rocketreach.com".to_string(), "rocketreach.co".to_string()];
+        assert!(url_is_login_landing(
+            "https://rocketreach.co/login",
+            "https://rocketreach.co/login",
+            &rocketreach
+        ));
+        // Genuine drift on the same portal is NOT a login landing.
+        assert!(!url_is_login_landing(
+            "https://app.dnbhoovers.com/home",
+            "https://app.dnbhoovers.com/login",
+            &dnb
+        ));
+        // A foreign domain is never this source's login page.
+        assert!(!url_is_login_landing(
+            "https://evil.example/login",
+            "https://app.dnbhoovers.com/login",
+            &dnb
+        ));
+    }
+
+    #[test]
+    fn protected_config_parses_from_adapter_script() {
+        let script = r#"
+const PROTECTED_SOURCE_CONFIG = Object.freeze({
+  "rocketreach.com": {
+    login_url: "https://rocketreach.co/login",
+    allowed_domains: ["rocketreach.com", "rocketreach.co"],
+    credential_ref: "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN",
+    capture_supported: false,
+  },
+});
+"#;
+        let config =
+            protected_config_from_script(script, "rocketreach.com").expect("protected config");
+        assert_eq!(
+            config.login_url.as_deref(),
+            Some("https://rocketreach.co/login")
+        );
+        assert_eq!(
+            config.allowed_domains,
+            vec!["rocketreach.com".to_string(), "rocketreach.co".to_string()]
+        );
+        assert_eq!(
+            config.credential_ref.as_deref(),
+            Some("ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN")
+        );
+        assert!(protected_config_from_script(script, "missing.example").is_none());
+    }
+
+    #[test]
+    fn credential_reference_validation_rejects_raw_values() {
+        assert!(valid_credential_reference(
+            "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN"
+        ));
+        assert!(!valid_credential_reference("hunter2"));
+        assert!(!valid_credential_reference("ctox-secret://credentials/"));
+        assert!(!valid_credential_reference("https://user:pw@example.com"));
+        assert!(!valid_credential_reference(
+            "ctox-secret://other-scope/NAME"
+        ));
+    }
+
+    #[test]
+    fn session_expiry_reauthorization_detects_login_landing_for_protected_target() {
+        let root = temp_root("reauth");
+        let target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "reauth-fixture",
+                "display_name": "Reauth Fixture",
+                "start_url": "https://rocketreach.co/",
+                "target_kind": "prospect-research",
+                "config": {
+                    "expected_provider": "rocketreach.com",
+                    "record_key_fields": ["field", "source_url"]
+                }
+            }),
+        )
+        .unwrap();
+        let script_path = root.join("reauth-script.js");
+        fs::write(
+            &script_path,
+            r#"
+const PROTECTED_SOURCE_CONFIG = Object.freeze({
+  "rocketreach.com": {
+    login_url: "https://rocketreach.co/login",
+    allowed_domains: ["rocketreach.com", "rocketreach.co"],
+    credential_ref: "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN",
+    capture_supported: false,
+  },
+});
+"#,
+        )
+        .unwrap();
+        let registered = RegisteredTarget {
+            view: target,
+            script: ScrapeScriptRevisionRecord {
+                revision_no: 1,
+                script_path: script_path.to_string_lossy().to_string(),
+                language: "javascript".to_string(),
+                entry_command: vec!["node".to_string(), "{script_path}".to_string()],
+                script_sha256: "sha".to_string(),
+            },
+            workspace_root: root.clone(),
+        };
+        let probe = ProbeResult {
+            reachable: true,
+            status_code: Some(200),
+            final_url: "https://rocketreach.co/login".to_string(),
+            human_verification: false,
+            error: None,
+        };
+        let payload = json!({
+            "records": [],
+            "failure_mode": "portal_drift",
+            "detail": "unsupported or missing source_id"
+        });
+        let drift = Classification {
+            status: ScrapeRunStatus::PortalDrift,
+            should_queue_repair: true,
+            reason: "explicit_failure_mode_portal_drift".to_string(),
+        };
+        let action = session_expiry_reauthorization(&registered, &probe, &payload, &drift)
+            .expect("login landing on a protected source must yield a reauthorization action");
+        assert_eq!(action["kind"], "auth-assist-request");
+        assert_eq!(action["source_id"], "rocketreach.com");
+        assert_eq!(action["login_url"], "https://rocketreach.co/login");
+        assert_eq!(
+            action["credential_ref"],
+            "ctox-secret://credentials/ROCKETREACH_BROWSER_LOGIN"
+        );
+        assert_eq!(action["reason"], "session_expired_or_invalid");
+        assert_eq!(action["secret_value_in_payload"], false);
+        let serialized = action.to_string();
+        assert!(!serialized.contains("password"));
+        assert!(!serialized.contains("hunter"));
+
+        // Genuine drift away from the login page stays portal_drift.
+        let drifted_probe = ProbeResult {
+            final_url: "https://rocketreach.co/search".to_string(),
+            ..probe
+        };
+        assert!(
+            session_expiry_reauthorization(&registered, &drifted_probe, &payload, &drift).is_none()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn session_expiry_reauthorization_ignores_public_targets() {
+        let root = temp_root("reauth-public");
+        let target = upsert_target(
+            &root,
+            DEFAULT_RUNTIME_ROOT,
+            json!({
+                "target_key": "reauth-public-fixture",
+                "display_name": "Reauth Public Fixture",
+                "start_url": "https://www.zefix.ch/",
+                "target_kind": "prospect-research",
+                "config": {
+                    "expected_provider": "zefix.ch",
+                    "record_key_fields": ["field", "source_url"]
+                }
+            }),
+        )
+        .unwrap();
+        let script_path = root.join("reauth-public-script.js");
+        fs::write(&script_path, "process.stdout.write('{}');\n").unwrap();
+        let registered = RegisteredTarget {
+            view: target,
+            script: ScrapeScriptRevisionRecord {
+                revision_no: 1,
+                script_path: script_path.to_string_lossy().to_string(),
+                language: "javascript".to_string(),
+                entry_command: vec!["node".to_string(), "{script_path}".to_string()],
+                script_sha256: "sha".to_string(),
+            },
+            workspace_root: root.clone(),
+        };
+        let probe = ProbeResult {
+            reachable: true,
+            status_code: Some(200),
+            final_url: "https://www.zefix.ch/login".to_string(),
+            human_verification: false,
+            error: None,
+        };
+        // Even an explicit payload claim cannot turn a public source into an
+        // auth handoff: without a credential reference / protected config the
+        // executor must never emit a reauthorization action.
+        let payload = json!({"records": [], "failure_mode": "authorization_required"});
+        let classification = Classification {
+            status: ScrapeRunStatus::AuthorizationRequired,
+            should_queue_repair: true,
+            reason: "explicit_failure_mode_authorization_required".to_string(),
+        };
+        assert!(
+            session_expiry_reauthorization(&registered, &probe, &payload, &classification)
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

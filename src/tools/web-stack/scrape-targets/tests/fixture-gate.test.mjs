@@ -38,7 +38,7 @@ function resolvedScript(targetName) {
   return statSync(specialized, { throwIfNoEntry: false }) ? specialized : sharedScript;
 }
 
-function executeFixture(targetName, fixturePath, mode) {
+function executeFixture(targetName, fixturePath, mode, inputOverride) {
   const fixture = loadJson(fixturePath);
   const outputDir = mkdtempSync(path.join(tmpdir(), `ctox-scrape-${targetName}-`));
   const callLog = path.join(outputDir, "ctox-calls.jsonl");
@@ -53,16 +53,18 @@ function executeFixture(targetName, fixturePath, mode) {
         CTOX_SCRAPE_FIXTURE: fixturePath,
         CTOX_SCRAPE_FIXTURE_MODE: mode,
         CTOX_SCRAPE_CALL_LOG: callLog,
-        CTOX_SCRAPE_INPUT_JSON: JSON.stringify(fixture.input),
+        CTOX_SCRAPE_INPUT_JSON: JSON.stringify(inputOverride === undefined ? fixture.input : inputOverride),
         CTOX_SCRAPE_OUTPUT_DIR: outputDir,
       },
     });
     assert.equal(child.signal, null, `${targetName}/${mode} timed out`);
     assert.equal(child.status, 0, `${targetName}/${mode}: ${child.stderr || child.stdout}`);
     assert.doesNotThrow(() => JSON.parse(child.stdout), `${targetName}/${mode} returned invalid JSON`);
-    const calls = readFileSync(callLog, "utf8").trim().split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line).args);
+    const calls = statSync(callLog, { throwIfNoEntry: false })
+      ? readFileSync(callLog, "utf8").trim().split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line).args)
+      : [];
     return { result: JSON.parse(child.stdout), calls };
   } finally {
     rmSync(outputDir, { recursive: true, force: true });
@@ -146,8 +148,25 @@ test("protected research adapters use secret references and Browser-App handoff"
 
       const { result, calls } = executeFixture(targetName, fixturePath, "auth_required");
       assert.deepEqual(result.records, [], `${targetName} fabricated records without a login`);
-      assert.equal(result.failure_mode, "auth_required");
+      assert.equal(result.failure_mode, "authorization_required");
       assert.equal(result.browser_assist_requested, true);
+
+      const reauthorization = result.reauthorization;
+      assert.ok(reauthorization, `${targetName} did not persist a reauthorization action`);
+      assert.equal(reauthorization.kind, "auth-assist-request");
+      assert.equal(reauthorization.source_id, targetName);
+      assert.equal(reauthorization.login_url, fixture.login_url);
+      for (const domain of fixture.browser_allowed_domains) {
+        assert.ok(
+          reauthorization.allowed_domains.some((allowed) =>
+            domain === allowed || domain.endsWith(`.${allowed}`)),
+          `${targetName} reauthorization allow-list ${JSON.stringify(reauthorization.allowed_domains)} does not cover ${domain}`,
+        );
+      }
+      assert.equal(reauthorization.credential_ref, fixture.input.credential_ref);
+      assert.equal(reauthorization.reason, "session_expired_or_invalid");
+      assert.equal(reauthorization.secret_value_in_payload, false);
+      assert.equal(containsForbiddenSecretKey(result), false, `${targetName} result contains a credential value`);
 
       const handoff = calls.find((args) => args[0] === "business-os" && args.includes("auth-assist-request"));
       assert.ok(handoff, `${targetName} did not open a Browser-App authorization request`);
@@ -155,6 +174,40 @@ test("protected research adapters use secret references and Browser-App handoff"
       assert.equal(flagValue(handoff, "--target-url"), fixture.login_url);
       assert.equal(flagValue(handoff, "--task-id"), fixture.input.task_id);
       assert.ok(!calls.flat().some((arg) => /(?:password|passwd)=/i.test(String(arg))));
+    });
+  }
+});
+
+test("expired-session login landing stays distinguishable from genuine portal drift", async (t) => {
+  for (const targetName of PROTECTED_TARGETS) {
+    await t.test(targetName, () => {
+      const fixturePath = path.join(fixturesDir, `${targetName}.json`);
+      // Genuine drift/input failure: no usable input at all. The script must
+      // NOT cry reauthorization without evidence of a login landing; the
+      // native executor upgrades this to authorization_required only when the
+      // portal probe actually lands on the source's own login page.
+      const { result, calls } = executeFixture(targetName, fixturePath, "success", {});
+      assert.equal(result.failure_mode, "portal_drift");
+      assert.deepEqual(result.records, []);
+      assert.equal(result.reauthorization, undefined);
+      assert.equal(result.browser_assist_requested, undefined);
+      assert.ok(!calls.some((args) => args[0] === "business-os" && args.includes("auth-assist-request")),
+        `${targetName} emitted an auth handoff without a login landing`);
+    });
+  }
+});
+
+test("public sources without credentials never emit auth handoffs", async (t) => {
+  for (const targetName of ["zefix.ch", "experte.de", "bundesanzeiger.de"]) {
+    await t.test(targetName, () => {
+      const fixturePath = path.join(fixturesDir, `${targetName}.json`);
+      for (const mode of ["success", "blocked", "auth_required"]) {
+        const { result, calls } = executeFixture(targetName, fixturePath, mode);
+        assert.equal(result.reauthorization, undefined, `${targetName}/${mode} emitted a reauthorization action`);
+        assert.notEqual(result.failure_mode, "authorization_required", `${targetName}/${mode} claimed reauthorization`);
+        assert.ok(!calls.some((args) => args[0] === "business-os" && args.includes("auth-assist")),
+          `${targetName}/${mode} opened an auth-assist handoff without a protected config`);
+      }
     });
   }
 });

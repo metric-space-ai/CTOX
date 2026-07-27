@@ -25338,6 +25338,9 @@ fn outbound_apply_research_adapter_scrape_effect(
                     ("test_zero_records", "test_zero_records")
                 } else {
                     match test_outcome.status {
+                        scrape::ScrapeRunStatus::AuthorizationRequired => {
+                            ("test_auth_required", "test_auth_required")
+                        }
                         scrape::ScrapeRunStatus::Blocked => ("test_blocked", "test_blocked"),
                         scrape::ScrapeRunStatus::PortalDrift => {
                             ("test_portal_drift", "test_portal_drift")
