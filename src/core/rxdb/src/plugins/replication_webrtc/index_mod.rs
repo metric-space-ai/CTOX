@@ -67,6 +67,7 @@ use protocol_contract_generated::{
 const FORK_RESYNC_INTERVAL: Duration = Duration::from_secs(5);
 const PROTOCOL_ROOM_PAYLOAD_CACHE_TTL: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_MASTER_PULLS: usize = 4;
+const MAX_CONCURRENT_REQUEST_TASKS: usize = 32;
 const CTOX_RXDB_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-rxdb-native-v1",
     "ctox-file-chunks-v1",
@@ -197,6 +198,9 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     /// Per-collection master replication handler, keyed by collection name.
     pub master_replication_handlers: HashMap<String, Arc<dyn RxReplicationHandler>>,
     pub canceled: std::sync::atomic::AtomicBool,
+    /// Makes concurrent `cancel()` callers wait for the in-flight teardown
+    /// instead of returning merely because cancellation has started.
+    cancel_lifecycle: AsyncMutex<()>,
     pub error_subject: RxSubject<RxError>,
     pub query_fetch_registry: Arc<super::query_fetch_handler::QueryFetchRegistry>,
     pub file_fetch_registry: Arc<super::file_fetch_handler::FileFetchRegistry>,
@@ -217,11 +221,17 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     /// Historical pulls perform synchronous SQLite work below an async
     /// boundary. Bound them so command writes retain a runnable Tokio worker.
     master_pull_semaphore: Semaphore,
+    /// Bounds concurrently executing inbound request futures across protocol,
+    /// replication, query, and file-fetch methods.
+    request_semaphore: Arc<Semaphore>,
     /// Per-peer sub-tasks (the master-change relay tasks, one per collection).
     peer_states: Mutex<HashMap<H::Peer, PeerState>>,
     /// Fork replication states keyed by (collection, peer). One entry per
     /// collection per peer for which CTOX was elected fork.
     fork_states: Mutex<HashMap<(String, H::Peer), Arc<RxReplicationState>>>,
+    /// Serializes replacement/removal so displaced fork cancellation completes
+    /// before a successor becomes visible and before pool cancellation returns.
+    fork_state_lifecycle: AsyncMutex<()>,
     tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
@@ -288,6 +298,7 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             connection_handler,
             master_replication_handlers,
             canceled: std::sync::atomic::AtomicBool::new(false),
+            cancel_lifecycle: AsyncMutex::new(()),
             error_subject: RxSubject::new(),
             query_fetch_registry: registry,
             file_fetch_registry: file_registry,
@@ -295,8 +306,10 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             collections: collection_map,
             protocol_room_payload_cache: AsyncMutex::new(ProtocolRoomPayloadCache::default()),
             master_pull_semaphore: Semaphore::new(MAX_CONCURRENT_MASTER_PULLS),
+            request_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUEST_TASKS)),
             peer_states: Mutex::new(HashMap::new()),
             fork_states: Mutex::new(HashMap::new()),
+            fork_state_lifecycle: AsyncMutex::new(()),
             tasks: Mutex::new(Vec::new()),
         })
     }
@@ -343,6 +356,12 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
     /// collection for which CTOX is master to this peer). Fork states are
     /// tracked separately in [`Self::add_fork_state`].
     pub fn add_peer(&self, peer: H::Peer, sub_tasks: Vec<tokio::task::JoinHandle<()>>) {
+        if self.canceled.load(std::sync::atomic::Ordering::SeqCst) {
+            for task in sub_tasks {
+                task.abort();
+            }
+            return;
+        }
         let mut states = self.peer_states.lock();
         let entry = states.entry(peer).or_insert_with(|| PeerState {
             sub_tasks: Vec::new(),
@@ -350,36 +369,73 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
         entry.sub_tasks.extend(sub_tasks);
     }
 
+    /// Start a pool-owned task behind a registration gate. The future cannot do
+    /// work before its handle is visible to `cancel`, and a concurrent cancel
+    /// either rejects it before start or aborts and joins it from `self.tasks`.
+    fn spawn_tracked<F>(self: &Arc<Self>, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        let request_semaphore = Arc::clone(&self.request_semaphore);
+        let task = tokio::spawn(async move {
+            if start_rx.await.is_err() {
+                return;
+            }
+            let Ok(_permit) = request_semaphore.acquire_owned().await else {
+                return;
+            };
+            future.await;
+        });
+        let mut tasks = self.tasks.lock();
+        tasks.retain(|task| !task.is_finished());
+        if self.canceled.load(std::sync::atomic::Ordering::SeqCst) {
+            task.abort();
+            return;
+        }
+        tasks.push(task);
+        drop(tasks);
+        let _ = start_tx.send(());
+    }
+
     /// Record a per-(collection, peer) fork replication state so cancel
     /// propagates on `remove_peer` / `cancel`.
-    pub fn add_fork_state(
+    pub async fn add_fork_state(
         &self,
         collection: String,
         peer: H::Peer,
         fork_state: Arc<RxReplicationState>,
     ) {
-        let displaced = self
-            .fork_states
-            .lock()
-            .insert((collection, peer), fork_state);
+        let _lifecycle = self.fork_state_lifecycle.lock().await;
+        let key = (collection, peer);
+        let displaced = self.fork_states.lock().remove(&key);
         if let Some(old) = displaced {
-            // A re-handshake replaced this fork state (same peer id
-            // reconnect). The displaced state's replication machinery runs in
-            // detached tasks — without an explicit cancel it keeps pulling /
-            // pushing and races the new state on the shared checkpoint meta
-            // (both derive the same replication identifier).
-            tokio::spawn(async move {
-                old.cancel().await;
-            });
+            // A re-handshake replacement must not become active until the old
+            // state has stopped touching the shared checkpoint metadata.
+            old.cancel().await;
         }
+        if self.canceled.load(std::sync::atomic::Ordering::SeqCst) {
+            fork_state.cancel().await;
+            return;
+        }
+        self.fork_states.lock().insert(key, fork_state);
     }
 
-    pub fn remove_peer(&self, peer: &H::Peer) {
-        if let Some(state) = self.peer_states.lock().remove(peer) {
-            for h in state.sub_tasks.into_iter() {
-                h.abort();
-            }
+    pub async fn remove_peer(&self, peer: &H::Peer) {
+        let sub_tasks = self
+            .peer_states
+            .lock()
+            .remove(peer)
+            .map(|state| state.sub_tasks)
+            .unwrap_or_default();
+        for task in &sub_tasks {
+            task.abort();
         }
+        for task in sub_tasks {
+            let _ = task.await;
+        }
+
+        let _lifecycle = self.fork_state_lifecycle.lock().await;
         // Cancel and drop every fork state bound to this peer (all collections).
         let drained: Vec<Arc<RxReplicationState>> = {
             let mut forks = self.fork_states.lock();
@@ -387,36 +443,47 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
                 forks.keys().filter(|(_, p)| p == peer).cloned().collect();
             keys.into_iter().filter_map(|k| forks.remove(&k)).collect()
         };
-        for fork in drained.into_iter() {
-            tokio::spawn(async move {
-                fork.cancel().await;
-            });
+        for fork in drained {
+            fork.cancel().await;
         }
     }
 
     pub async fn cancel(&self) {
+        let _cancel_lifecycle = self.cancel_lifecycle.lock().await;
         if self
             .canceled
             .swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             return;
         }
+
+        // Stop request/loop tasks first and join their cancellation. Once this
+        // completes they can neither enter storage nor emit a late response.
+        let tasks = std::mem::take(&mut *self.tasks.lock());
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+
         // Cancel all peer sub-tasks + fork states.
         let peers: Vec<H::Peer> = self.peer_states.lock().keys().cloned().collect();
-        for p in peers.iter() {
-            self.remove_peer(p);
+        for peer in peers {
+            self.remove_peer(&peer).await;
         }
         // Cancel any fork states whose peer never had a peer_states entry.
-        let drained: Vec<Arc<RxReplicationState>> =
-            self.fork_states.lock().drain().map(|(_, v)| v).collect();
-        for fork in drained.into_iter() {
+        let _lifecycle = self.fork_state_lifecycle.lock().await;
+        let drained: Vec<Arc<RxReplicationState>> = self
+            .fork_states
+            .lock()
+            .drain()
+            .map(|(_, value)| value)
+            .collect();
+        for fork in drained {
             fork.cancel().await;
         }
-        // Cancel pool-level tasks.
-        let tasks = std::mem::take(&mut *self.tasks.lock());
-        for t in tasks.into_iter() {
-            t.abort();
-        }
+        drop(_lifecycle);
         let _ = self.connection_handler.close().await;
     }
 }
@@ -696,7 +763,7 @@ where
         let mut disc_stream = connection_handler.disconnect_stream();
         let t = tokio::spawn(async move {
             while let Some(peer) = disc_stream.next().await {
-                pool_clone.remove_peer(&peer);
+                pool_clone.remove_peer(&peer).await;
             }
         });
         pool.tasks.lock().push(t);
@@ -725,7 +792,7 @@ where
                     let peer = item.peer.clone();
                     let peer_identity = handler.peer_identity(&peer);
                     let message = item.message.clone();
-                    tokio::spawn(async move {
+                    pool_clone.spawn_tracked(async move {
                         let _ = super::query_fetch_handler::run_query_fetch(
                             registry,
                             handler_clone,
@@ -754,7 +821,7 @@ where
                     let peer = item.peer.clone();
                     let peer_identity = handler.peer_identity(&peer);
                     let message = item.message.clone();
-                    tokio::spawn(async move {
+                    pool_clone.spawn_tracked(async move {
                         let _ = super::file_fetch_handler::run_file_fetch(
                             registry,
                             handler_clone,
@@ -803,7 +870,13 @@ where
                 let representative_task = Arc::clone(&representative);
                 let storage_token = storage_token.clone();
                 let peer_session_id = peer_session_id.clone();
-                tokio::spawn(async move {
+                pool_clone.spawn_tracked(async move {
+                    if pool_task
+                        .canceled
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return;
+                    }
                     let frame_collection = item.message.collection.clone();
                     if item.message.method == "ctoxProtocol" {
                         if let Some(token) = item
@@ -907,6 +980,12 @@ where
                                         } else {
                                             None
                                         };
+                                        if pool_task
+                                            .canceled
+                                            .load(std::sync::atomic::Ordering::SeqCst)
+                                        {
+                                            return;
+                                        }
                                         let document_filter = if method == "masterChangesSince" {
                                             handler_task
                                                 .document_filter_for_peer(&item.peer, &target_name)
@@ -935,6 +1014,12 @@ where
                             }
                         }
                     };
+                    if pool_task
+                        .canceled
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return;
+                    }
                     // Echo the collection back on the answer so a multiplexing
                     // browser can correlate the response without relying solely
                     // on the request id map.
@@ -1293,11 +1378,13 @@ where
                                         }
                                     });
                                     pool_clone.add_peer(peer.clone(), vec![err_task]);
-                                    pool_clone.add_fork_state(
-                                        collection.name.clone(),
-                                        peer.clone(),
-                                        state,
-                                    );
+                                    pool_clone
+                                        .add_fork_state(
+                                            collection.name.clone(),
+                                            peer.clone(),
+                                            state,
+                                        )
+                                        .await;
                                 }
                                 Err(e) => {
                                     pool_clone.error_subject.next(e);
@@ -3372,5 +3459,133 @@ mod tests {
             "handshake failure must close the peer transport"
         );
         pool.cancel().await;
+    }
+
+    fn dormant_fork_state(
+        collection: StdArc<RxCollection>,
+        id: &str,
+    ) -> StdArc<RxReplicationState> {
+        RxReplicationState::new(ReplicationOptions {
+            replication_identifier: id.to_string(),
+            collection,
+            deleted_field: "_deleted".to_string(),
+            pull: None,
+            push: None,
+            live: true,
+            retry_time: 5_000,
+            auto_start: false,
+            wait_for_leadership: false,
+        })
+    }
+
+    /// Regression for A0.10 finding 4: replacement, peer removal, and pool
+    /// cancellation must not return before displaced fork cancellation finishes.
+    #[tokio::test]
+    async fn fork_state_replacement_and_removal_await_cancellation() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("fork-await").await;
+        let handler = MockHandler::new();
+        let pool = RxWebRTCReplicationPool::new(StdArc::clone(&collection), handler);
+        let peer = MockPeer("peer-fork".to_string());
+
+        let old = dormant_fork_state(StdArc::clone(&collection), "old");
+        let old_finished = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+        let old_finished_for_cancel = StdArc::clone(&old_finished);
+        old.on_cancel(Box::new(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            old_finished_for_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        pool.add_fork_state("fork-await".to_string(), peer.clone(), old)
+            .await;
+
+        let replacement = dormant_fork_state(StdArc::clone(&collection), "replacement");
+        let started_at = Instant::now();
+        pool.add_fork_state(
+            "fork-await".to_string(),
+            peer.clone(),
+            StdArc::clone(&replacement),
+        )
+        .await;
+        assert!(old_finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(started_at.elapsed() >= Duration::from_millis(40));
+        assert!(StdArc::ptr_eq(
+            pool.fork_states
+                .lock()
+                .get(&("fork-await".to_string(), peer.clone()))
+                .expect("replacement active"),
+            &replacement,
+        ));
+
+        let replacement_finished = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+        let replacement_finished_for_cancel = StdArc::clone(&replacement_finished);
+        replacement.on_cancel(Box::new(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            replacement_finished_for_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        pool.remove_peer(&peer).await;
+        assert!(replacement_finished.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(pool.fork_states.lock().is_empty());
+
+        let final_state = dormant_fork_state(StdArc::clone(&collection), "final");
+        let final_finished = StdArc::new(std::sync::atomic::AtomicBool::new(false));
+        let final_finished_for_cancel = StdArc::clone(&final_finished);
+        final_state.on_cancel(Box::new(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            final_finished_for_cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        }));
+        pool.add_fork_state("fork-await".to_string(), peer, final_state)
+            .await;
+        pool.cancel().await;
+        assert!(final_finished.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// Regression for A0.10 finding 5: request work is registered before it can
+    /// start, and `cancel()` aborts and joins it before any post-abort storage or
+    /// response side effect can run.
+    #[tokio::test]
+    async fn cancel_aborts_and_joins_tracked_request_tasks() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("tracked-request").await;
+        let handler = MockHandler::new();
+        let pool = RxWebRTCReplicationPool::new(collection, handler);
+        let started = StdArc::new(tokio::sync::Notify::new());
+        let started_count = StdArc::new(std::sync::atomic::AtomicU64::new(0));
+        let release = StdArc::new(tokio::sync::Notify::new());
+        let storage_touches = StdArc::new(std::sync::atomic::AtomicU64::new(0));
+        let responses = StdArc::new(std::sync::atomic::AtomicU64::new(0));
+
+        for _ in 0..=MAX_CONCURRENT_REQUEST_TASKS {
+            let started_for_task = StdArc::clone(&started);
+            let started_count_for_task = StdArc::clone(&started_count);
+            let release_for_task = StdArc::clone(&release);
+            let storage_for_task = StdArc::clone(&storage_touches);
+            let responses_for_task = StdArc::clone(&responses);
+            pool.spawn_tracked(async move {
+                started_count_for_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                started_for_task.notify_one();
+                release_for_task.notified().await;
+                storage_for_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                responses_for_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        while started_count.load(std::sync::atomic::Ordering::SeqCst)
+            < MAX_CONCURRENT_REQUEST_TASKS as u64
+        {
+            started.notified().await;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            started_count.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_CONCURRENT_REQUEST_TASKS as u64,
+            "one excess request must remain behind the pool semaphore"
+        );
+
+        pool.cancel().await;
+        release.notify_waiters();
+        tokio::task::yield_now().await;
+
+        assert_eq!(storage_touches.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(responses.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(pool.tasks.lock().is_empty());
     }
 }

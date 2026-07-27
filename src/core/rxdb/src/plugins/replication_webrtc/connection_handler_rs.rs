@@ -73,6 +73,13 @@ const MAX_PEER_SEND_QUEUE_BYTES: usize = 16 * 1024 * 1024;
 // realistic resume-after-complete window; 60s matches the browser.
 const COMPLETED_FRAME_ACK_TTL_MS: u64 = 60_000;
 const COMPLETED_FRAME_ACK_CAP: usize = 512;
+// Inbound transfer reservations are bounded independently by count and by the
+// memory they can consume. The byte estimate includes both the advertised
+// payload and the `Vec<Option<String>>` slots allocated at `start` time.
+const MAX_INCOMING_TRANSFERS_PER_PEER: usize = 8;
+const MAX_INCOMING_TRANSFERS_TOTAL: usize = 64;
+const MAX_INCOMING_ALLOCATED_BYTES_PER_PEER: usize = 32 * 1024 * 1024;
+const MAX_INCOMING_ALLOCATED_BYTES_TOTAL: usize = 128 * 1024 * 1024;
 const FAIR_SEND_SCHEDULE: [SendPriority; 7] = [
     SendPriority::High,
     SendPriority::High,
@@ -186,11 +193,42 @@ impl PeerBackpressure {
 /// the same outcome.
 type BuildOutcome = Result<Arc<dyn PeerConnection>, RxError>;
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TransferStateKey {
+    peer: PeerId,
+    transfer_id: String,
+}
+
+impl TransferStateKey {
+    fn new(peer: &PeerId, transfer_id: &str) -> Self {
+        Self {
+            peer: peer.clone(),
+            transfer_id: transfer_id.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct PendingFrameAckKey {
+    transfer: TransferStateKey,
+    ack_seq: usize,
+}
+
+impl PendingFrameAckKey {
+    fn new(peer: &PeerId, transfer_id: &str, ack_seq: usize) -> Self {
+        Self {
+            transfer: TransferStateKey::new(peer, transfer_id),
+            ack_seq,
+        }
+    }
+}
+
 struct IncomingFrame {
     peer: PeerId,
     attempt: u64,
     total_frames: usize,
     total_bytes: usize,
+    received_bytes: usize,
     next_ack_seq: usize,
     received: Vec<Option<String>>,
 }
@@ -342,6 +380,41 @@ impl Drop for DrainResetGuard {
     }
 }
 
+/// Drop-based accounting for one outbound chunked transfer. This guard is kept
+/// alive across every await in `send_framed_text`, so errors and task aborts both
+/// release the active-transfer count and any ACK waiter owned by the operation.
+struct FramedTransferGuard {
+    transport_status: Arc<Mutex<WebRtcFrameTransportStatus>>,
+    pending_frame_acks: Arc<Mutex<HashMap<PendingFrameAckKey, PendingFrameAck>>>,
+    transfer: TransferStateKey,
+}
+
+impl FramedTransferGuard {
+    fn new(handler: &WebRTCRsConnectionHandler, peer: &PeerId, transfer_id: &str) -> Self {
+        handler.record_status(|status| {
+            status.active_transfers = status.active_transfers.saturating_add(1);
+        });
+        Self {
+            transport_status: Arc::clone(&handler.transport_status),
+            pending_frame_acks: Arc::clone(&handler.pending_frame_acks),
+            transfer: TransferStateKey::new(peer, transfer_id),
+        }
+    }
+}
+
+impl Drop for FramedTransferGuard {
+    fn drop(&mut self) {
+        self.pending_frame_acks
+            .lock()
+            .retain(|key, _| key.transfer != self.transfer);
+        let pending_acks = self.pending_frame_acks.lock().len();
+        let mut status = self.transport_status.lock();
+        status.active_transfers = status.active_transfers.saturating_sub(1);
+        status.pending_acks = pending_acks;
+        status.updated_at_ms = now_ms();
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct WebRtcFrameTransportStatus {
     pub protocol: &'static str,
@@ -448,9 +521,9 @@ pub struct WebRTCRsConnectionHandler {
     ice_servers: Vec<RTCIceServer>,
     data_channel_label: String,
     udp_bind_addr: String,
-    incoming_frames: Arc<Mutex<HashMap<String, IncomingFrame>>>,
-    completed_frame_acks: Arc<Mutex<HashMap<String, CompletedFrameAck>>>,
-    pending_frame_acks: Arc<Mutex<HashMap<String, PendingFrameAck>>>,
+    incoming_frames: Arc<Mutex<HashMap<TransferStateKey, IncomingFrame>>>,
+    completed_frame_acks: Arc<Mutex<HashMap<TransferStateKey, CompletedFrameAck>>>,
+    pending_frame_acks: Arc<Mutex<HashMap<PendingFrameAckKey, PendingFrameAck>>>,
     send_queues: Arc<Mutex<HashMap<WebRTCRsPeer, PeerSendQueue>>>,
     /// Phase 2: per-peer "active collection" set. A browser sends
     /// `rxdb.activeCollections` (params: `[[collectionNames]]`) whenever its
@@ -469,6 +542,12 @@ pub struct WebRTCRsConnectionHandler {
     /// no task). See `schedule_presence_sweep` for why this is NOT a
     /// per-update generation counter.
     presence_sweep_armed: Arc<std::sync::atomic::AtomicBool>,
+    /// The pending presence sweep is owned explicitly so `close` can abort it
+    /// instead of leaving a sleeping task holding the handler alive.
+    presence_sweep_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Terminal lifecycle flag checked before arming, broadcasting, or re-arming
+    /// a presence sweep.
+    closed: Arc<std::sync::atomic::AtomicBool>,
     /// Set when a peer with visible presence was removed outside the normal
     /// broadcast paths (abrupt disconnect -> `remove_peer`); the next sweep
     /// broadcasts the corrected aggregate even when nothing expired.
@@ -535,6 +614,8 @@ impl WebRTCRsConnectionHandler {
             active_collections: Arc::new(Mutex::new(HashMap::new())),
             presence: Arc::new(Mutex::new(HashMap::new())),
             presence_sweep_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            presence_sweep_task: Mutex::new(None),
+            closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             presence_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             transport_status: Arc::new(Mutex::new(WebRtcFrameTransportStatus::default())),
             frame_counter: AtomicU64::new(0),
@@ -628,16 +709,15 @@ impl WebRTCRsConnectionHandler {
     }
 
     fn clear_peer_transfer_state(&self, peer: &WebRTCRsPeer) {
-        let ack_prefix = format!("{peer}|frame|");
         self.pending_frame_acks
             .lock()
-            .retain(|key, _| !key.starts_with(&ack_prefix));
+            .retain(|key, _| key.transfer.peer != *peer);
         self.incoming_frames
             .lock()
-            .retain(|_, incoming| incoming.peer != *peer);
+            .retain(|key, _| key.peer != *peer);
         self.completed_frame_acks
             .lock()
-            .retain(|_, completed| completed.peer != *peer);
+            .retain(|key, _| key.peer != *peer);
         self.refresh_dynamic_transport_status();
     }
 
@@ -646,8 +726,9 @@ impl WebRTCRsConnectionHandler {
     /// The freshly inserted entry is always retained: its age is 0 (< TTL) and
     /// cap-eviction only removes the oldest entries.
     fn record_completed_frame_ack(&self, transfer_id: String, ack: CompletedFrameAck) {
+        let key = TransferStateKey::new(&ack.peer, &transfer_id);
         let mut cache = self.completed_frame_acks.lock();
-        cache.insert(transfer_id, ack);
+        cache.insert(key, ack);
         Self::prune_completed_frame_acks(&mut cache, now_ms());
     }
 
@@ -658,11 +739,8 @@ impl WebRTCRsConnectionHandler {
     ) -> Option<(i64, usize)> {
         self.completed_frame_acks
             .lock()
-            .get(transfer_id)
-            .and_then(|completed| {
-                (completed.peer == *peer)
-                    .then_some((completed.ack_seq as i64, completed.received_frames))
-            })
+            .get(&TransferStateKey::new(peer, transfer_id))
+            .map(|completed| (completed.ack_seq as i64, completed.received_frames))
     }
 
     /// Evict completed-frame-ack entries older than `COMPLETED_FRAME_ACK_TTL_MS`
@@ -670,7 +748,10 @@ impl WebRTCRsConnectionHandler {
     /// A `resume` within the TTL window still finds its ack (docs §6.3); only
     /// entries past the window — which a legitimately-delayed resume no longer
     /// needs — are removed.
-    fn prune_completed_frame_acks(cache: &mut HashMap<String, CompletedFrameAck>, now_ms: u64) {
+    fn prune_completed_frame_acks(
+        cache: &mut HashMap<TransferStateKey, CompletedFrameAck>,
+        now_ms: u64,
+    ) {
         cache.retain(|_, ack| {
             now_ms.saturating_sub(ack.inserted_at_ms) < COMPLETED_FRAME_ACK_TTL_MS
         });
@@ -686,6 +767,132 @@ impl WebRTCRsConnectionHandler {
                 None => break,
             }
         }
+    }
+
+    fn take_pending_frame_acks(
+        &self,
+        peer: &WebRTCRsPeer,
+        transfer_id: &str,
+        ack_seq: Option<usize>,
+    ) -> Vec<PendingFrameAck> {
+        let transfer = TransferStateKey::new(peer, transfer_id);
+        let mut pending = self.pending_frame_acks.lock();
+        match ack_seq {
+            Some(ack_seq) => pending
+                .remove(&PendingFrameAckKey { transfer, ack_seq })
+                .into_iter()
+                .collect(),
+            None => {
+                let keys: Vec<PendingFrameAckKey> = pending
+                    .keys()
+                    .filter(|key| key.transfer == transfer)
+                    .cloned()
+                    .collect();
+                keys.into_iter()
+                    .filter_map(|key| pending.remove(&key))
+                    .collect()
+            }
+        }
+    }
+
+    fn register_incoming_transfer(
+        &self,
+        peer: &WebRTCRsPeer,
+        transfer_id: &str,
+        attempt: u64,
+        total_frames: usize,
+        total_bytes: usize,
+    ) -> RxResult<()> {
+        if total_frames == 0
+            || total_frames > 100_000
+            || total_bytes > MAX_TRANSFER_BYTES
+            || (total_frames > 1 && total_bytes == 0)
+        {
+            return Err(new_rx_error(
+                "RC_WEBRTC_PEER",
+                Some(serde_json::json!({
+                    "message": "invalid WebRTC transport frame allocation",
+                    "transferId": transfer_id,
+                    "totalFrames": total_frames,
+                    "totalBytes": total_bytes,
+                    "maxBytes": MAX_TRANSFER_BYTES,
+                    "peer": peer,
+                })),
+            ));
+        }
+
+        let key = TransferStateKey::new(peer, transfer_id);
+        let requested_bytes = incoming_frame_allocation_bytes(total_frames, total_bytes);
+        let mut incoming = self.incoming_frames.lock();
+        let replaced_bytes = incoming
+            .get(&key)
+            .map(|entry| incoming_frame_allocation_bytes(entry.total_frames, entry.total_bytes))
+            .unwrap_or_default();
+        let peer_count = incoming
+            .keys()
+            .filter(|existing| existing.peer == *peer && **existing != key)
+            .count();
+        let total_count = incoming
+            .len()
+            .saturating_sub(usize::from(incoming.contains_key(&key)));
+        let peer_bytes = incoming
+            .iter()
+            .filter(|(existing, _)| existing.peer == *peer && **existing != key)
+            .map(|(_, entry)| {
+                incoming_frame_allocation_bytes(entry.total_frames, entry.total_bytes)
+            })
+            .fold(0usize, usize::saturating_add);
+        let total_allocated_bytes = incoming
+            .values()
+            .map(|entry| incoming_frame_allocation_bytes(entry.total_frames, entry.total_bytes))
+            .fold(0usize, usize::saturating_add)
+            .saturating_sub(replaced_bytes);
+
+        let exceeds_budget = peer_count.saturating_add(1) > MAX_INCOMING_TRANSFERS_PER_PEER
+            || total_count.saturating_add(1) > MAX_INCOMING_TRANSFERS_TOTAL
+            || peer_bytes.saturating_add(requested_bytes) > MAX_INCOMING_ALLOCATED_BYTES_PER_PEER
+            || total_allocated_bytes.saturating_add(requested_bytes)
+                > MAX_INCOMING_ALLOCATED_BYTES_TOTAL;
+        if exceeds_budget {
+            drop(incoming);
+            self.record_status(|status| {
+                status.rejected_frames = status.rejected_frames.saturating_add(1);
+            });
+            return Err(new_rx_error(
+                "RC_WEBRTC_PEER",
+                Some(serde_json::json!({
+                    "message": "incoming WebRTC transfer budget exceeded",
+                    "transferId": transfer_id,
+                    "peer": peer,
+                    "peerTransfers": peer_count,
+                    "totalTransfers": total_count,
+                    "peerAllocatedBytes": peer_bytes,
+                    "totalAllocatedBytes": total_allocated_bytes,
+                    "requestedAllocatedBytes": requested_bytes,
+                    "maxPeerTransfers": MAX_INCOMING_TRANSFERS_PER_PEER,
+                    "maxTotalTransfers": MAX_INCOMING_TRANSFERS_TOTAL,
+                    "maxPeerAllocatedBytes": MAX_INCOMING_ALLOCATED_BYTES_PER_PEER,
+                    "maxTotalAllocatedBytes": MAX_INCOMING_ALLOCATED_BYTES_TOTAL,
+                })),
+            ));
+        }
+
+        incoming.insert(
+            key.clone(),
+            IncomingFrame {
+                peer: peer.clone(),
+                attempt,
+                total_frames,
+                total_bytes,
+                received_bytes: 0,
+                next_ack_seq: usize::min(FRAME_ACK_WINDOW - 1, total_frames - 1),
+                received: vec![None; total_frames],
+            },
+        );
+        drop(incoming);
+        self.completed_frame_acks.lock().remove(&key);
+        self.refresh_dynamic_transport_status();
+        Ok(())
     }
 
     fn start_signaling_tasks(self: &Arc<Self>) {
@@ -1118,6 +1325,15 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
     }
 
     async fn close(&self) -> Result<(), RxError> {
+        self.closed.store(true, Ordering::SeqCst);
+        self.presence_sweep_armed.store(false, Ordering::SeqCst);
+        let presence_task = self.presence_sweep_task.lock().take();
+        if let Some(task) = presence_task {
+            task.abort();
+            let _ = task.await;
+        }
+        self.presence.lock().clear();
+        self.presence_dirty.store(false, Ordering::SeqCst);
         let tasks = std::mem::take(&mut *self.tasks.lock());
         for task in tasks {
             task.abort();
@@ -1493,23 +1709,30 @@ impl WebRTCRsConnectionHandler {
     /// removal marked the aggregate dirty, and re-arms only while entries
     /// remain. An empty map arms nothing and clears nothing.
     fn schedule_presence_sweep(self: &Arc<Self>) {
-        if self.presence.lock().is_empty() {
+        let mut task_slot = self.presence_sweep_task.lock();
+        if self.closed.load(Ordering::SeqCst) || self.presence.lock().is_empty() {
             return;
         }
         if self.presence_sweep_armed.swap(true, Ordering::SeqCst) {
             return; // a sweep task is already pending
         }
         let handler = Arc::clone(self);
-        tokio::spawn(async move {
+        *task_slot = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(CTOX_PRESENCE_TTL_MS + 1_000)).await;
             handler.presence_sweep_armed.store(false, Ordering::SeqCst);
+            handler.presence_sweep_task.lock().take();
+            if handler.closed.load(Ordering::SeqCst) {
+                return;
+            }
             let pruned = handler.prune_expired_presence(now_ms());
             let dirty = handler.presence_dirty.swap(false, Ordering::SeqCst);
-            if pruned || dirty {
+            if (pruned || dirty) && !handler.closed.load(Ordering::SeqCst) {
                 handler.broadcast_presence().await;
             }
-            handler.schedule_presence_sweep();
-        });
+            if !handler.closed.load(Ordering::SeqCst) {
+                handler.schedule_presence_sweep();
+            }
+        }));
     }
 
     async fn send_queued_text(
@@ -1667,23 +1890,18 @@ impl WebRTCRsConnectionHandler {
             ));
         }
         let chunks = split_chunks_for_frame(&text, &transfer_id);
-        self.record_status(|status| {
-            status.active_transfers = status.active_transfers.saturating_add(1);
-        });
+        let _transfer_guard = FramedTransferGuard::new(self, peer, &transfer_id);
 
         let mut transfer_attempt = 0usize;
         let start = transport_start_frame(&transfer_id, transfer_attempt, chunks.len(), text.len());
         if let Err(error) = send_json_text(&data_channel, &start).await {
-            self.record_status(|status| {
-                status.active_transfers = status.active_transfers.saturating_sub(1);
-            });
             return Err(error);
         }
         self.record_sent_transport_frame(&start);
 
         for window_start in (0..chunks.len()).step_by(FRAME_ACK_WINDOW) {
             let window_end = usize::min(window_start + FRAME_ACK_WINDOW, chunks.len()) - 1;
-            let ack_key = transfer_ack_key(&transfer_id, window_end);
+            let ack_key = PendingFrameAckKey::new(peer, &transfer_id, window_end);
             let mut attempt = transfer_attempt;
             let mut restart_from_zero = false;
             loop {
@@ -1691,9 +1909,6 @@ impl WebRTCRsConnectionHandler {
                     let restart =
                         transport_start_frame(&transfer_id, attempt, chunks.len(), text.len());
                     if let Err(error) = send_json_text(&data_channel, &restart).await {
-                        self.record_status(|status| {
-                            status.active_transfers = status.active_transfers.saturating_sub(1);
-                        });
                         return Err(error);
                     }
                     self.record_sent_transport_frame(&restart);
@@ -1721,18 +1936,12 @@ impl WebRTCRsConnectionHandler {
                     if let Err(error) = self.wait_for_send_capacity(peer).await {
                         self.pending_frame_acks.lock().remove(&ack_key);
                         self.refresh_dynamic_transport_status();
-                        self.record_status(|status| {
-                            status.active_transfers = status.active_transfers.saturating_sub(1);
-                        });
                         return Err(error);
                     }
                     let chunk = transport_chunk_frame(&transfer_id, attempt, seq, data);
                     if let Err(error) = send_json_text(&data_channel, &chunk).await {
                         self.pending_frame_acks.lock().remove(&ack_key);
                         self.refresh_dynamic_transport_status();
-                        self.record_status(|status| {
-                            status.active_transfers = status.active_transfers.saturating_sub(1);
-                        });
                         return Err(error);
                     }
                     self.record_sent_transport_frame(&chunk);
@@ -1744,9 +1953,6 @@ impl WebRTCRsConnectionHandler {
                     Ok(Err(_)) => {
                         self.pending_frame_acks.lock().remove(&ack_key);
                         self.refresh_dynamic_transport_status();
-                        self.record_status(|status| {
-                            status.active_transfers = status.active_transfers.saturating_sub(1);
-                        });
                         return Err(new_rx_error(
                             "RC_WEBRTC_PEER",
                             Some(serde_json::json!({
@@ -1773,9 +1979,6 @@ impl WebRTCRsConnectionHandler {
                             break;
                         }
                         if attempt >= MAX_FRAME_RETRIES {
-                            self.record_status(|status| {
-                                status.active_transfers = status.active_transfers.saturating_sub(1);
-                            });
                             return Err(new_rx_error(
                                 "RC_WEBRTC_PEER",
                                 Some(serde_json::json!({
@@ -1801,9 +2004,6 @@ impl WebRTCRsConnectionHandler {
                 }
             }
         }
-        self.record_status(|status| {
-            status.active_transfers = status.active_transfers.saturating_sub(1);
-        });
         Ok(())
     }
 
@@ -1815,7 +2015,7 @@ impl WebRTCRsConnectionHandler {
         ack_seq: usize,
         attempt: usize,
     ) -> Result<bool, RxError> {
-        let ack_key = transfer_ack_key(transfer_id, ack_seq);
+        let ack_key = PendingFrameAckKey::new(peer, transfer_id, ack_seq);
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         self.pending_frame_acks.lock().insert(
             ack_key.clone(),
@@ -1871,35 +2071,23 @@ impl WebRTCRsConnectionHandler {
         if kind == "ack" {
             let ack_seq_i64 = frame.get("ackSeq").and_then(Value::as_i64);
             let ack_seq = ack_seq_i64.and_then(|v| usize::try_from(v).ok());
-            let key = ack_seq
-                .map(|seq| transfer_ack_key(&transfer_id, seq))
-                .unwrap_or_else(|| transfer_id.clone());
-            if let Some(pending) = self.pending_frame_acks.lock().remove(&key) {
+            let pending_acks = match (ack_seq, ack_seq_i64.is_none()) {
+                (Some(seq), _) => self.take_pending_frame_acks(peer, &transfer_id, Some(seq)),
+                (None, true) => self.take_pending_frame_acks(peer, &transfer_id, None),
+                (None, false) => Vec::new(),
+            };
+            let is_resume = frame
+                .get("resume")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            for pending in pending_acks {
                 self.record_ack_lag(pending.sent_at_ms);
-                if frame
-                    .get("resume")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
+                if is_resume {
                     self.record_status(|status| {
                         status.resume_ack_count = status.resume_ack_count.saturating_add(1);
                     });
                 }
                 let _ = pending.sender.send(());
-            } else if ack_seq_i64.is_none() {
-                let keys: Vec<String> = self
-                    .pending_frame_acks
-                    .lock()
-                    .keys()
-                    .filter(|key| key.starts_with(&format!("{transfer_id}|")))
-                    .cloned()
-                    .collect();
-                for key in keys {
-                    if let Some(pending) = self.pending_frame_acks.lock().remove(&key) {
-                        self.record_ack_lag(pending.sent_at_ms);
-                        let _ = pending.sender.send(());
-                    }
-                }
             }
             self.refresh_dynamic_transport_status();
             return Ok(None);
@@ -1922,32 +2110,13 @@ impl WebRTCRsConnectionHandler {
                 .and_then(Value::as_u64)
                 .unwrap_or(0) as usize;
             let total_bytes = frame.get("totalBytes").and_then(Value::as_u64).unwrap_or(0) as usize;
-            if total_frames == 0 || total_frames > 100_000 || total_bytes > MAX_TRANSFER_BYTES {
-                return Err(new_rx_error(
-                    "RC_WEBRTC_PEER",
-                    Some(serde_json::json!({
-                        "message": "invalid WebRTC transport frame count",
-                        "transferId": transfer_id,
-                        "totalFrames": total_frames,
-                        "totalBytes": total_bytes,
-                        "maxBytes": MAX_TRANSFER_BYTES,
-                        "peer": peer,
-                    })),
-                ));
-            }
-            self.incoming_frames.lock().insert(
-                transfer_id.clone(),
-                IncomingFrame {
-                    peer: peer.clone(),
-                    attempt: frame.get("attempt").and_then(Value::as_u64).unwrap_or(0),
-                    total_frames,
-                    total_bytes,
-                    next_ack_seq: usize::min(FRAME_ACK_WINDOW - 1, total_frames - 1),
-                    received: vec![None; total_frames],
-                },
-            );
-            self.completed_frame_acks.lock().remove(&transfer_id);
-            self.refresh_dynamic_transport_status();
+            self.register_incoming_transfer(
+                peer,
+                &transfer_id,
+                frame.get("attempt").and_then(Value::as_u64).unwrap_or(0),
+                total_frames,
+                total_bytes,
+            )?;
             return Ok(None);
         }
 
@@ -1971,21 +2140,23 @@ impl WebRTCRsConnectionHandler {
 
             let resume_ack = {
                 let incoming = self.incoming_frames.lock();
-                incoming.get(&transfer_id).and_then(|entry| {
-                    if entry.peer != *peer {
-                        return None;
-                    }
-                    Some((
-                        highest_contiguous_seq(&entry.received)
-                            .map(|seq| seq as i64)
-                            .unwrap_or(-1),
-                        entry
-                            .received
-                            .iter()
-                            .filter(|chunk| chunk.is_some())
-                            .count(),
-                    ))
-                })
+                incoming
+                    .get(&TransferStateKey::new(peer, &transfer_id))
+                    .and_then(|entry| {
+                        if entry.peer != *peer {
+                            return None;
+                        }
+                        Some((
+                            highest_contiguous_seq(&entry.received)
+                                .map(|seq| seq as i64)
+                                .unwrap_or(-1),
+                            entry
+                                .received
+                                .iter()
+                                .filter(|chunk| chunk.is_some())
+                                .count(),
+                        ))
+                    })
             };
             if let Some((ack_seq, received_frames)) = resume_ack {
                 send_transport_ack(
@@ -2050,8 +2221,9 @@ impl WebRTCRsConnectionHandler {
         }
 
         let frame_status = {
+            let transfer_key = TransferStateKey::new(peer, &transfer_id);
             let mut incoming = self.incoming_frames.lock();
-            let entry = incoming.get_mut(&transfer_id).ok_or_else(|| {
+            let entry = incoming.get_mut(&transfer_key).ok_or_else(|| {
                 new_rx_error(
                     "RC_WEBRTC_PEER",
                     Some(serde_json::json!({
@@ -2085,6 +2257,27 @@ impl WebRTCRsConnectionHandler {
                     })),
                 ));
             }
+            let replaced_bytes = entry.received[seq]
+                .as_ref()
+                .map(|chunk| chunk.len())
+                .unwrap_or_default();
+            let received_bytes = entry
+                .received_bytes
+                .saturating_sub(replaced_bytes)
+                .saturating_add(data.len());
+            if received_bytes > entry.total_bytes {
+                return Err(new_rx_error(
+                    "RC_WEBRTC_PEER",
+                    Some(serde_json::json!({
+                        "message": "WebRTC transport chunks exceed advertised bytes",
+                        "transferId": transfer_id,
+                        "advertisedBytes": entry.total_bytes,
+                        "receivedBytes": received_bytes,
+                        "peer": peer,
+                    })),
+                ));
+            }
+            entry.received_bytes = received_bytes;
             entry.received[seq] = Some(data);
             if entry.received.iter().any(Option::is_none) {
                 let contiguous_seq = highest_contiguous_seq(&entry.received);
@@ -2100,12 +2293,12 @@ impl WebRTCRsConnectionHandler {
                     FrameReceiveStatus::Pending
                 }
             } else {
-                let entry = incoming.remove(&transfer_id).expect("entry exists");
+                let entry = incoming.remove(&transfer_key).expect("entry exists");
                 let mut text = String::new();
                 for chunk in entry.received {
                     text.push_str(&chunk.unwrap_or_default());
                 }
-                if entry.total_bytes != 0 && text.len() != entry.total_bytes {
+                if text.len() != entry.total_bytes {
                     return Err(new_rx_error(
                         "RC_WEBRTC_PEER",
                         Some(serde_json::json!({
@@ -2811,8 +3004,8 @@ fn is_ctox_transport_frame(value: &Value) -> bool {
     value.get("ctoxFrame").and_then(Value::as_str) == Some(CTOX_FRAME_PROTOCOL)
 }
 
-fn transfer_ack_key(transfer_id: &str, ack_seq: usize) -> String {
-    format!("{transfer_id}|{ack_seq}")
+fn incoming_frame_allocation_bytes(total_frames: usize, total_bytes: usize) -> usize {
+    total_bytes.saturating_add(total_frames.saturating_mul(std::mem::size_of::<Option<String>>()))
 }
 
 fn highest_contiguous_seq(received: &[Option<String>]) -> Option<usize> {
@@ -3369,7 +3562,7 @@ mod tests {
         }));
         let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
         handler.pending_frame_acks.lock().insert(
-            transfer_ack_key("t1", 0),
+            PendingFrameAckKey::new(&"peer-1".to_string(), "t1", 0),
             PendingFrameAck {
                 sender: ack_tx,
                 sent_at_ms: now_ms(),
@@ -3890,25 +4083,26 @@ mod tests {
         handler.peer_backpressure(&peer).set_high();
         let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
         handler.pending_frame_acks.lock().insert(
-            transfer_ack_key("peer-stalled|frame|1", 0),
+            PendingFrameAckKey::new(&peer, "peer-stalled|frame|1", 0),
             PendingFrameAck {
                 sender: ack_tx,
                 sent_at_ms: now_ms(),
             },
         );
         handler.incoming_frames.lock().insert(
-            "incoming-1".to_string(),
+            TransferStateKey::new(&peer, "incoming-1"),
             IncomingFrame {
                 peer: peer.clone(),
                 attempt: 0,
                 total_frames: 1,
                 total_bytes: 1,
+                received_bytes: 0,
                 next_ack_seq: 0,
                 received: vec![None],
             },
         );
         handler.completed_frame_acks.lock().insert(
-            "completed-1".to_string(),
+            TransferStateKey::new(&peer, "completed-1"),
             CompletedFrameAck {
                 peer: peer.clone(),
                 ack_seq: 0,
@@ -3964,7 +4158,7 @@ mod tests {
         // A stale entry, past the TTL, and a fresh entry still inside the
         // resume-after-complete window.
         handler.completed_frame_acks.lock().insert(
-            "aged".to_string(),
+            TransferStateKey::new(&peer, "aged"),
             CompletedFrameAck {
                 peer: peer.clone(),
                 ack_seq: 3,
@@ -3973,7 +4167,7 @@ mod tests {
             },
         );
         handler.completed_frame_acks.lock().insert(
-            "fresh".to_string(),
+            TransferStateKey::new(&peer, "fresh"),
             CompletedFrameAck {
                 peer: peer.clone(),
                 ack_seq: 7,
@@ -3996,16 +4190,18 @@ mod tests {
         let cache = handler.completed_frame_acks.lock();
         // Aged entry is gone; a delayed resume for it correctly gets no ack.
         assert!(
-            !cache.contains_key("aged"),
+            !cache.contains_key(&TransferStateKey::new(&peer, "aged")),
             "aged entry must be evicted past TTL"
         );
         // The fresh entry survives, so a resume within the window still finds
         // its final ack (docs §6.3).
-        let fresh = cache.get("fresh").expect("fresh entry must survive prune");
+        let fresh = cache
+            .get(&TransferStateKey::new(&peer, "fresh"))
+            .expect("fresh entry must survive prune");
         assert_eq!(fresh.ack_seq, 7);
         assert_eq!(fresh.received_frames, 8);
         assert_eq!(fresh.peer, peer);
-        assert!(cache.contains_key("newest"));
+        assert!(cache.contains_key(&TransferStateKey::new(&peer, "newest")));
     }
 
     #[test]
@@ -4035,12 +4231,12 @@ mod tests {
     #[test]
     fn completed_frame_ack_cache_caps_size_dropping_oldest_first() {
         let now = now_ms();
-        let mut cache: HashMap<String, CompletedFrameAck> = HashMap::new();
+        let mut cache: HashMap<TransferStateKey, CompletedFrameAck> = HashMap::new();
         // One over the cap; each entry gets a distinct (recent) timestamp so the
         // oldest is unambiguous and none are TTL-evicted.
         for i in 0..=COMPLETED_FRAME_ACK_CAP {
             cache.insert(
-                format!("t{i}"),
+                TransferStateKey::new(&"peer".to_string(), &format!("t{i}")),
                 CompletedFrameAck {
                     peer: "peer".to_string(),
                     ack_seq: i,
@@ -4057,9 +4253,208 @@ mod tests {
         assert_eq!(cache.len(), COMPLETED_FRAME_ACK_CAP);
         // The oldest entry is the one dropped to honor the cap.
         assert!(
-            !cache.contains_key("t0"),
+            !cache.contains_key(&TransferStateKey::new(&"peer".to_string(), "t0")),
             "oldest entry must be evicted first"
         );
-        assert!(cache.contains_key(&format!("t{COMPLETED_FRAME_ACK_CAP}")));
+        assert!(cache.contains_key(&TransferStateKey::new(
+            &"peer".to_string(),
+            &format!("t{COMPLETED_FRAME_ACK_CAP}"),
+        )));
+    }
+
+    /// Regression for A0.4 finding 1: an ACK from one peer must never release
+    /// another peer's waiter, even when both use the same caller-controlled
+    /// transfer id and sequence.
+    #[tokio::test]
+    async fn frame_ack_waiters_are_scoped_by_peer() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer_a = "peer-a".to_string();
+        let peer_b = "peer-b".to_string();
+        let (ack_a_tx, ack_a_rx) = tokio::sync::oneshot::channel();
+        let (ack_b_tx, mut ack_b_rx) = tokio::sync::oneshot::channel();
+        handler.pending_frame_acks.lock().insert(
+            PendingFrameAckKey::new(&peer_a, "shared-transfer", 3),
+            PendingFrameAck {
+                sender: ack_a_tx,
+                sent_at_ms: now_ms(),
+            },
+        );
+        handler.pending_frame_acks.lock().insert(
+            PendingFrameAckKey::new(&peer_b, "shared-transfer", 3),
+            PendingFrameAck {
+                sender: ack_b_tx,
+                sent_at_ms: now_ms(),
+            },
+        );
+
+        let released = handler.take_pending_frame_acks(&peer_a, "shared-transfer", Some(3));
+        assert_eq!(released.len(), 1);
+        for pending in released {
+            let _ = pending.sender.send(());
+        }
+        ack_a_rx.await.expect("peer A waiter released");
+        assert!(matches!(
+            futures::poll!(&mut ack_b_rx),
+            std::task::Poll::Pending
+        ));
+        assert!(handler
+            .pending_frame_acks
+            .lock()
+            .contains_key(&PendingFrameAckKey::new(&peer_b, "shared-transfer", 3)));
+    }
+
+    /// Regression for A0.4 finding 2: starts reserve peer-scoped state and are
+    /// rejected observably when zero-byte or count/byte budgets are exceeded.
+    #[test]
+    fn incoming_transfer_allocation_enforces_peer_and_global_budgets() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer_a = "peer-a".to_string();
+        let peer_b = "peer-b".to_string();
+
+        let zero_error = handler
+            .register_incoming_transfer(&peer_a, "zero", 0, 2, 0)
+            .expect_err("multi-frame zero-byte transfer must be rejected");
+        assert!(zero_error.to_string().contains("allocation"));
+
+        handler
+            .register_incoming_transfer(&peer_a, "shared", 1, 1, 1)
+            .expect("peer A reservation");
+        handler
+            .register_incoming_transfer(&peer_b, "shared", 2, 1, 1)
+            .expect("peer B may use the same transfer id");
+        assert_eq!(handler.incoming_frames.lock().len(), 2);
+        assert_eq!(
+            handler
+                .incoming_frames
+                .lock()
+                .get(&TransferStateKey::new(&peer_a, "shared"))
+                .map(|entry| entry.attempt),
+            Some(1)
+        );
+
+        let count_handler = WebRTCRsConnectionHandler::new();
+        for index in 0..MAX_INCOMING_TRANSFERS_PER_PEER {
+            count_handler
+                .register_incoming_transfer(&peer_a, &format!("count-{index}"), 0, 1, 1)
+                .expect("within per-peer count budget");
+        }
+        let per_peer_count_error = count_handler
+            .register_incoming_transfer(&peer_a, "count-over", 0, 1, 1)
+            .expect_err("per-peer transfer count must be bounded");
+        assert!(per_peer_count_error.to_string().contains("budget exceeded"));
+
+        let global_count_handler = WebRTCRsConnectionHandler::new();
+        for index in 0..MAX_INCOMING_TRANSFERS_TOTAL {
+            global_count_handler
+                .register_incoming_transfer(
+                    &format!("global-peer-{index}"),
+                    &format!("global-{index}"),
+                    0,
+                    1,
+                    1,
+                )
+                .expect("within global count budget");
+        }
+        global_count_handler
+            .register_incoming_transfer(&"global-over".to_string(), "global-over", 0, 1, 1)
+            .expect_err("global transfer count must be bounded");
+
+        let per_peer_bytes_handler = WebRTCRsConnectionHandler::new();
+        for index in 0..3 {
+            per_peer_bytes_handler.incoming_frames.lock().insert(
+                TransferStateKey::new(&peer_a, &format!("bytes-{index}")),
+                IncomingFrame {
+                    peer: peer_a.clone(),
+                    attempt: 0,
+                    total_frames: 1,
+                    total_bytes: MAX_TRANSFER_BYTES,
+                    received_bytes: 0,
+                    next_ack_seq: 0,
+                    received: Vec::new(),
+                },
+            );
+        }
+        per_peer_bytes_handler
+            .register_incoming_transfer(&peer_a, "bytes-over", 0, 1, MAX_TRANSFER_BYTES)
+            .expect_err("per-peer allocated-byte budget must be bounded");
+
+        let global_bytes_handler = WebRTCRsConnectionHandler::new();
+        for index in 0..15 {
+            let peer = format!("byte-peer-{index}");
+            global_bytes_handler.incoming_frames.lock().insert(
+                TransferStateKey::new(&peer, &format!("byte-transfer-{index}")),
+                IncomingFrame {
+                    peer,
+                    attempt: 0,
+                    total_frames: 1,
+                    total_bytes: MAX_TRANSFER_BYTES,
+                    received_bytes: 0,
+                    next_ack_seq: 0,
+                    received: Vec::new(),
+                },
+            );
+        }
+        global_bytes_handler
+            .register_incoming_transfer(
+                &"byte-peer-over".to_string(),
+                "byte-transfer-over",
+                0,
+                1,
+                MAX_TRANSFER_BYTES,
+            )
+            .expect_err("aggregate allocated-byte budget must be bounded");
+        assert!(
+            global_bytes_handler
+                .frame_transport_status()
+                .rejected_frames
+                > 0
+        );
+    }
+
+    /// Regression for A0.4 finding 3: dropping the operation future (task abort)
+    /// must restore accounting without relying on a manual return-path decrement.
+    #[test]
+    fn framed_transfer_guard_cleans_accounting_and_ack_waiters_on_drop() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer = "peer-guard".to_string();
+        let transfer_id = "guard-transfer";
+        let guard = FramedTransferGuard::new(&handler, &peer, transfer_id);
+        let (ack_tx, _ack_rx) = tokio::sync::oneshot::channel();
+        handler.pending_frame_acks.lock().insert(
+            PendingFrameAckKey::new(&peer, transfer_id, 0),
+            PendingFrameAck {
+                sender: ack_tx,
+                sent_at_ms: now_ms(),
+            },
+        );
+        assert_eq!(handler.frame_transport_status().active_transfers, 1);
+
+        drop(guard);
+
+        assert_eq!(handler.frame_transport_status().active_transfers, 0);
+        assert!(handler.pending_frame_acks.lock().is_empty());
+    }
+
+    /// Regression for A0.4 finding 6: closing a handler aborts the sleeping
+    /// presence sweep and makes re-arming terminally impossible.
+    #[tokio::test]
+    async fn close_aborts_presence_sweep_and_prevents_rearm() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer = "peer-presence".to_string();
+        assert!(handler.apply_presence(
+            &peer,
+            &presence_report(serde_json::json!([{ "recordId": "r1" }]))
+        ));
+        handler.schedule_presence_sweep();
+        assert!(handler.presence_sweep_armed.load(Ordering::SeqCst));
+        assert!(handler.presence_sweep_task.lock().is_some());
+
+        handler.close().await.expect("close handler");
+        handler.schedule_presence_sweep();
+
+        assert!(handler.closed.load(Ordering::SeqCst));
+        assert!(!handler.presence_sweep_armed.load(Ordering::SeqCst));
+        assert!(handler.presence_sweep_task.lock().is_none());
+        assert!(handler.presence.lock().is_empty());
     }
 }
