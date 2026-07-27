@@ -556,6 +556,23 @@ test('targeted graph research carries only currently eligible source ids', () =>
   );
 });
 
+test('research launch deduplicates projected sources and repairs a legacy inflated target', () => {
+  const source = {
+    id: 'source-1',
+    evidenceEligible: true,
+    row: { source_id: 'source-1', canonical_url: 'https://example.test/source-1' },
+  };
+  const duplicateProjection = {
+    ...source,
+    row: { ...source.row },
+  };
+  const unique = hooks.uniqueSourceModels([source, duplicateProjection]);
+
+  assert.equal(unique.length, 1);
+  assert.equal(hooks.effectiveTargetVerifiedSources(276, 276, 138), 100);
+  assert.equal(hooks.effectiveTargetVerifiedSources(150, 276, 138), 150);
+});
+
 test('research reports contain only live documents with explicit task or domain lineage', () => {
   const task = { id: 'task-1', knowledge_domain: 'drone_bearing_design' };
   const reports = hooks.researchReportsForTask(task, [

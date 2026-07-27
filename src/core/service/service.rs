@@ -6189,6 +6189,8 @@ fn start_prompt_worker(
             };
             let execution_prompt = materialize_systematic_research_skill(&root, &job).and_then(
                 |systematic_research_skill_dir| {
+                    let staged_research_inputs =
+                        materialize_systematic_research_seed_inputs(&root, &job)?;
                     attach_typed_business_command_context(
                         &root,
                         &job,
@@ -6228,6 +6230,26 @@ fn start_prompt_worker(
                                 evidence_manifest.display(),
                                 dashboard_builder.display(),
                             ));
+                            if !staged_research_inputs.is_empty() {
+                                prompt.push_str(
+                                    "\n\nManaged research seed inputs (read-only workspace copies):",
+                                );
+                                for input in &staged_research_inputs {
+                                    prompt.push_str(&format!(
+                                        "\n- {} -> {} (sha256:{}, {} bytes)",
+                                        input.original_path,
+                                        input.staged_path,
+                                        input.sha256,
+                                        input.byte_size,
+                                    ));
+                                }
+                                prompt.push_str(
+                                    "\nUse the staged workspace paths above, never the host paths. Ignore prior seed-missing or duplicated-target failure memory when these inputs exist; the current execution contract is authoritative.",
+                                );
+                            }
+                            prompt.push_str(
+                                "\n\nThe native CTOX service owns Business OS validation and writeback. The `ctox` CLI is intentionally unavailable inside the harness sandbox; do not treat that as a blocker and do not attempt direct database writes. Emit the reviewed workspace artifacts at the exact contract paths.",
+                            );
                             if job.prompt.contains(
                                 "evidence receipt artifacts were not emitted by typed ctox_web_read calls",
                             ) {
@@ -11360,6 +11382,133 @@ fn materialize_systematic_research_skill(
         crate::skill_store::export_system_skill(root, "systematic-research", &export_root)
             .context("materialize systematic-research skill inside task workspace")?;
     Ok(Some(skill_dir))
+}
+
+#[derive(Debug, Serialize)]
+struct StagedResearchInput {
+    original_path: String,
+    staged_path: String,
+    byte_size: u64,
+    sha256: String,
+}
+
+fn materialize_systematic_research_seed_inputs(
+    root: &Path,
+    job: &QueuedPrompt,
+) -> Result<Vec<StagedResearchInput>> {
+    if !is_systematic_research_job(job) {
+        return Ok(Vec::new());
+    }
+    let workspace = job
+        .workspace_root
+        .as_deref()
+        .map(Path::new)
+        .context("systematic research requires a typed workspace root")?;
+    let approved_roots = [
+        root.join("imports"),
+        env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(".local/share/ctox/imports"),
+    ]
+    .into_iter()
+    .filter_map(|path| std::fs::canonicalize(path).ok())
+    .collect::<Vec<_>>();
+    if approved_roots.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let allowed_suffixes = [
+        ".tar.gz", ".tgz", ".zip", ".json", ".jsonl", ".csv", ".parquet", ".pdf",
+    ];
+    let mut candidates = Vec::new();
+    for token in job.prompt.split_whitespace() {
+        let candidate = token.trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+            )
+        });
+        if !candidate.starts_with('/') {
+            continue;
+        }
+        let lowercase = candidate.to_ascii_lowercase();
+        if !allowed_suffixes
+            .iter()
+            .any(|suffix| lowercase.ends_with(suffix))
+        {
+            continue;
+        }
+        let Ok(canonical) = std::fs::canonicalize(candidate) else {
+            continue;
+        };
+        if canonical.is_file()
+            && approved_roots
+                .iter()
+                .any(|approved_root| canonical.starts_with(approved_root))
+            && !candidates.contains(&canonical)
+        {
+            candidates.push(canonical);
+        }
+    }
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let destination_root = workspace.join("inputs/managed-seeds");
+    std::fs::create_dir_all(&destination_root).with_context(|| {
+        format!(
+            "create systematic research seed directory {}",
+            destination_root.display()
+        )
+    })?;
+    let mut staged = Vec::new();
+    for source in candidates {
+        let filename = source
+            .file_name()
+            .context("managed research seed has no filename")?;
+        let destination = destination_root.join(filename);
+        std::fs::copy(&source, &destination).with_context(|| {
+            format!(
+                "stage managed research seed {} at {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+        let mut file = std::fs::File::open(&destination)?;
+        let mut hasher = {
+            use sha2::Digest;
+            sha2::Sha256::new()
+        };
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            let read = file.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            use sha2::Digest;
+            hasher.update(&buffer[..read]);
+        }
+        use sha2::Digest;
+        let sha256 = format!("{:x}", hasher.finalize());
+        let metadata = std::fs::metadata(&destination)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o444))?;
+        }
+        staged.push(StagedResearchInput {
+            original_path: source.to_string_lossy().into_owned(),
+            staged_path: destination.to_string_lossy().into_owned(),
+            byte_size: metadata.len(),
+            sha256,
+        });
+    }
+    std::fs::write(
+        destination_root.join("manifest.json"),
+        serde_json::to_vec_pretty(&staged)?,
+    )?;
+    Ok(staged)
 }
 
 fn business_os_app_validation_may_own_completion(job: &QueuedPrompt) -> bool {
@@ -25866,6 +26015,42 @@ mod tests {
                 && line.contains("status=pass")
                 && line.contains("manifests=1")
         ));
+    }
+
+    #[test]
+    fn systematic_research_stages_only_managed_seed_inputs() {
+        let root = temp_root("research-managed-seeds");
+        let imports = root.join("imports");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(&imports).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let approved = imports.join("baseline.tar.gz");
+        let rejected = root.join("outside.zip");
+        std::fs::write(&approved, b"approved research seed").unwrap();
+        std::fs::write(&rejected, b"must not be exposed").unwrap();
+        let mut job = systematic_research_test_job(&workspace);
+        job.prompt.push_str(&format!(
+            "\nManaged seed: {}\nUntrusted seed: {}",
+            approved.display(),
+            rejected.display()
+        ));
+
+        let staged = materialize_systematic_research_seed_inputs(&root, &job).unwrap();
+
+        assert_eq!(staged.len(), 1);
+        assert_eq!(
+            PathBuf::from(&staged[0].original_path),
+            std::fs::canonicalize(&approved).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&staged[0].staged_path).unwrap(),
+            b"approved research seed"
+        );
+        let manifest = workspace.join("inputs/managed-seeds/manifest.json");
+        let manifest_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(manifest_json.as_array().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

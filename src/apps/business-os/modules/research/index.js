@@ -3929,8 +3929,9 @@ async function runSelectedResearch() {
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
   const candidateRows = candidateTable ? await fetchTableRows(candidateTable.id) : [];
   const knowledgeTableRefs = compactKnowledgeTableReferences(base?.tables || []);
-  const verifiedSourceModels = (state.sourceModels || [])
+  const rawVerifiedSourceModels = (state.sourceModels || [])
     .filter((source) => source.evidenceEligible);
+  const verifiedSourceModels = uniqueSourceModels(rawVerifiedSourceModels);
   const verifiedSourceUrls = [...new Set(sourceUrlsFromRows(
     verifiedSourceModels.map((source) => source.row),
   ))];
@@ -3938,9 +3939,10 @@ async function runSelectedResearch() {
     ...sourceUrlsFromRows(candidateRows),
     ...sourceUrlsFromRows((state.sourceModels || []).map((source) => source.row)),
   ])];
-  const targetVerifiedSources = Math.max(
-    100,
-    Number(task?.payload?.target_verified_sources || 0),
+  const targetVerifiedSources = effectiveTargetVerifiedSources(
+    task?.payload?.target_verified_sources,
+    rawVerifiedSourceModels.length,
+    verifiedSourceModels.length,
   );
   const minimumCandidateSources = Math.max(
     targetVerifiedSources * 2,
@@ -4106,6 +4108,34 @@ function sourceUrlsFromRows(rows = []) {
     ])
     .map((url) => String(url || '').trim())
     .filter((url) => /^https?:\/\//i.test(url));
+}
+
+function sourceModelIdentity(source) {
+  const row = source?.row || {};
+  const id = String(source?.id || sourceId(row) || '').trim();
+  if (id) return `id:${id}`;
+  const canonicalUrl = firstString(row, ['canonical_url', 'source_url', 'url', 'direct_url', 'doi'])
+    .trim()
+    .replace(/\/+$/, '')
+    .toLowerCase();
+  return canonicalUrl ? `url:${canonicalUrl}` : '';
+}
+
+function uniqueSourceModels(sourceModels = []) {
+  const seen = new Set();
+  return (sourceModels || []).filter((source, index) => {
+    const identity = sourceModelIdentity(source) || `anonymous:${index}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+}
+
+function effectiveTargetVerifiedSources(configuredTarget, rawVerifiedCount, uniqueVerifiedCount) {
+  const configured = Number(configuredTarget || 0);
+  const duplicatedProjectionTarget = rawVerifiedCount > uniqueVerifiedCount
+    && configured === rawVerifiedCount;
+  return Math.max(100, duplicatedProjectionTarget ? 0 : configured);
 }
 
 function researchScoringContract(scoringDimensions) {
@@ -5735,9 +5765,11 @@ export const __researchTestHooks = {
   renderNoTaskCenter,
   researchDomainFromFormValue,
   metricPropellerLength,
+  effectiveTargetVerifiedSources,
   shouldRetryEmptyKnowledgeTables,
   tangentialEquivalentForce,
   toJson,
+  uniqueSourceModels,
   validateChunkSequence,
   validateResearchTaskInput,
   validateSelectedResearchTask,
