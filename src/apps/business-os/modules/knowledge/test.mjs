@@ -27,6 +27,7 @@ const {
   isKnowledgeActionFormReady,
   isKnowledgeTabDisabled,
   knowledgeItemsFromTables,
+  mergeKnowledgeTableChunks,
   knowledgeGroupMatchesDomain,
   knowledgeListStateHtml,
   runCoalescedRefresh,
@@ -107,6 +108,47 @@ test('projects knowledge table records into visible dataframe entries', () => {
   assert.equal(groups[0].entries[0].id, 'table:load-points');
   assert.equal(groups[0].entries[0].has_table, true);
   assert.deepEqual(groups[0].tableIds, ['table:load-points']);
+});
+
+test('merges physical table chunks into one logical dataframe before grouping', () => {
+  const [table] = mergeKnowledgeTableChunks([
+    {
+      id: 'table:load-points:chunk:1',
+      payload: {
+        id: 'table:load-points:chunk:1',
+        logical_table_id: 'table:load-points',
+        domain: 'drone_bearing_design_verified',
+        chunk_index: 1,
+        chunk_count: 2,
+        rows_complete: true,
+        rows: [{ measurement_id: 'MLP-002' }],
+      },
+    },
+    {
+      id: 'table:load-points:chunk:0',
+      payload: {
+        id: 'table:load-points:chunk:0',
+        logical_table_id: 'table:load-points',
+        domain: 'drone_bearing_design_verified',
+        chunk_index: 0,
+        chunk_count: 2,
+        rows_complete: true,
+        rows: [{ measurement_id: 'MLP-001' }],
+      },
+    },
+  ]);
+
+  assert.equal(table.id, 'table:load-points');
+  assert.equal(table.payload.logical_table_id, 'table:load-points');
+  assert.equal(table.payload.source_chunk_count, 2);
+  assert.equal(table.payload.chunk_count, 1);
+  assert.equal(table.payload.rows_complete, true);
+  assert.deepEqual(table.payload.rows.map((row) => row.measurement_id), ['MLP-001', 'MLP-002']);
+
+  const groups = buildKnowledgeBundles([], [], [table]);
+  const hub = groups.find((group) => group.id === 'research/drone-design/drone-bearing-loads');
+  assert.ok(hub);
+  assert.deepEqual(hub.tableIds, ['table:load-points']);
 });
 
 test('matches a Research handoff to a Knowledge group by entry domain', () => {

@@ -1210,13 +1210,18 @@
   display: flex;
   gap: 2px;
   padding: 3px;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   border-radius: var(--knowledge-control-radius);
   background: var(--kit-fill);
+  scrollbar-width: thin;
 }
 .knowledge-module .table-switcher .ctox-chip,
 .knowledge-module .knowledge-secondary-switcher .ctox-chip {
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: 150px;
+  max-width: 280px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

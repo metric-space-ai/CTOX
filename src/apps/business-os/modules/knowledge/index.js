@@ -380,7 +380,9 @@ function cancelInitialKnowledgeRetry() {
 function applyKnowledgeRecords({ items = [], runbooks = [], tables = [] }) {
   const normalizedItems = Array.isArray(items) ? items.map(normalizeStoredKnowledgeRecord).filter(isActiveKnowledgeRecord) : [];
   const normalizedRunbooks = Array.isArray(runbooks) ? runbooks.map(normalizeStoredKnowledgeRecord).filter(isActiveKnowledgeRecord) : [];
-  const normalizedTables = Array.isArray(tables) ? tables.map(normalizeStoredKnowledgeRecord).filter(isActiveKnowledgeRecord) : [];
+  const normalizedTables = mergeKnowledgeTableChunks(
+    Array.isArray(tables) ? tables.map(normalizeStoredKnowledgeRecord).filter(isActiveKnowledgeRecord) : [],
+  );
   state.tables = normalizedTables;
   state.items = uniqueById([
     ...normalizedItems,
@@ -814,6 +816,69 @@ function knowledgeItemsFromTables(tables = [], existingItems = []) {
     .filter((item) => item?.id && !existingIds.has(item.id));
 }
 
+function mergeKnowledgeTableChunks(tables = []) {
+  const groups = new Map();
+  for (const rawTable of Array.isArray(tables) ? tables : []) {
+    if (!rawTable || typeof rawTable !== 'object') continue;
+    const source = rawTable.payload && typeof rawTable.payload === 'object' && !Array.isArray(rawTable.payload)
+      ? rawTable.payload
+      : rawTable;
+    const logicalId = String(
+      source.logical_table_id
+      || rawTable.logical_table_id
+      || source.id
+      || rawTable.id
+      || '',
+    ).trim();
+    if (!logicalId) continue;
+    if (!groups.has(logicalId)) groups.set(logicalId, []);
+    groups.get(logicalId).push({ rawTable, source });
+  }
+
+  return [...groups.entries()].map(([logicalId, parts]) => {
+    parts.sort((left, right) => (
+      Number(left.source.chunk_index ?? left.rawTable.chunk_index ?? 0)
+      - Number(right.source.chunk_index ?? right.rawTable.chunk_index ?? 0)
+    ));
+    const first = parts[0];
+    const rows = parts.flatMap(({ rawTable, source }) => firstArray(
+      source.rows,
+      source.records,
+      source.data,
+      rawTable.rows,
+      rawTable.records,
+      rawTable.data,
+    ));
+    const expectedChunks = Math.max(...parts.map(({ rawTable, source }) => (
+      Number(source.chunk_count ?? rawTable.chunk_count ?? 1)
+    )).filter(Number.isFinite), 1);
+    const rowsComplete = parts.length === expectedChunks && parts.every(({ rawTable, source }) => (
+      (source.rows_complete ?? rawTable.rows_complete ?? true) !== false
+    ));
+    const payload = {
+      ...first.source,
+      id: logicalId,
+      logical_table_id: logicalId,
+      chunk_index: 0,
+      chunk_count: 1,
+      source_chunk_count: expectedChunks,
+      chunk_row_offset: 0,
+      row_offset: 0,
+      chunk_row_count: rows.length,
+      row_count: rows.length,
+      projected_row_count: rows.length,
+      rows_total: rows.length,
+      rows_complete: rowsComplete,
+      rows,
+    };
+    return {
+      ...first.rawTable,
+      ...payload,
+      payload,
+    };
+  });
+}
+
 function knowledgeItemFromTable(table) {
   if (!table || typeof table !== 'object') return null;
   const payload = table.payload && typeof table.payload === 'object' && !Array.isArray(table.payload)
@@ -988,10 +1053,10 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
     ? group.entries
     : group.entries.filter((entry) => entry.id === skillbookEntry.id || relatedToSkillbook(skillbookEntry, entry));
   const entries = scopedEntries.length ? scopedEntries : group.entries;
-  const skill = skillbookEntry
-    || entries.find((entry) => entry.kind === 'skill')
+  const skill = entries.find((entry) => entry.kind === 'skill')
     || group.entries.find((entry) => entry.kind === 'skill')
-    || group.entries.find((entry) => ['skillbook', 'skill'].includes(entry.kind))
+    || skillbookEntry
+    || group.entries.find((entry) => entry.kind === 'skillbook')
     || group.entries[0]
     || null;
   const runbookItems = entries.filter((entry) => entry.kind === 'runbook');
@@ -1006,8 +1071,10 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
     if (!groupRunbookIds.has(id)) return false;
     return !skillbookEntry || allSkillbooks.length <= 1 || relatedToSkillbook(skillbookEntry, runbook);
   });
-  const tables = entries.filter((entry) => entry.has_table);
-  const resources = entries.filter((entry) => entry.kind === 'resource');
+  // Sources and tables are domain assets. They must not disappear merely
+  // because a user selected one of several explanatory Knowledge Books.
+  const tables = uniqueById(group.entries.filter((entry) => entry.has_table));
+  const resources = uniqueById(group.entries.filter((entry) => entry.kind === 'resource'));
   return { skillbook: skillbookEntry || null, entries, skill, runbookItems, runbooks, resources, tables };
 }
 
@@ -1445,8 +1512,9 @@ function renderSelectionHeader() {
   const group = activeGroup();
   const context = skillbookContext(group, state.selectedSkillbookId);
   const item = state.items.find((entry) => entry.id === state.selectedId) || context.skill;
-  els.selectedKind.textContent = 'Skill';
-  els.selectedTitle.textContent = context.skillbook?.title || item?.title || group?.title || 'Knowledge';
+  const isProceduralSkill = context.skill?.kind === 'skill';
+  els.selectedKind.textContent = isProceduralSkill ? 'Skill' : 'Knowledge Book';
+  els.selectedTitle.textContent = context.skill?.title || context.skillbook?.title || item?.title || group?.title || 'Knowledge';
   syncMarkdownEditControls();
 }
 
@@ -1630,8 +1698,13 @@ async function renderTable() {
       : { returned: 0, rows: [] };
     els.tableTitle.textContent = schema.title || tableSource.title || 'DataFrame';
     const totalRows = Number.isFinite(Number(schema.row_count)) ? Number(schema.row_count) : localRows.length;
-    const total = `${totalRows.toLocaleString('de-DE')} Zeilen`;
-    els.tableMeta.textContent = `${schema.columns?.length || 0} Spalten · ${total}`;
+    const firstVisible = totalRows ? state.tableOffset + 1 : 0;
+    const lastVisible = Math.min(totalRows, state.tableOffset + rows.returned);
+    els.tableMeta.textContent = `${schema.columns?.length || 0} Spalten · Zeilen ${firstVisible.toLocaleString('de-DE')}-${lastVisible.toLocaleString('de-DE')} von ${totalRows.toLocaleString('de-DE')}`;
+    const previous = state.ctx.host.querySelector('[data-action="prev-rows"]');
+    const next = state.ctx.host.querySelector('[data-action="next-rows"]');
+    if (previous) previous.disabled = state.tableOffset <= 0;
+    if (next) next.disabled = lastVisible >= totalRows;
     renderDataFrameTable(schema.columns || [], rows.rows || []);
   } catch (error) {
     els.tableHost.innerHTML = `<div class="ctox-empty knowledge-error"><strong>DataFrame konnte nicht geladen werden</strong><span>${escapeHtml(error.message || String(error))}</span></div>`;
@@ -3141,6 +3214,7 @@ export const __knowledgeTestHooks = {
   isKnowledgeActionFormReady,
   isKnowledgeTabDisabled,
   knowledgeItemsFromTables,
+  mergeKnowledgeTableChunks,
   knowledgeGroupMatchesDomain,
   knowledgeEmptyStateMessage,
   knowledgeListStateHtml,
