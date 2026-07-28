@@ -87,3 +87,6 @@ tmp_intersolar_*.js
 !/docs/harness-operating-model.md
 !/docs/ctox-office-port-plan.md
 src/apps/business-os-desktop/resources/ctox/
+
+# Browser-Profile aus lokalen QA-Harnessen (Cache, Cookies, IndexedDB)
+tmp/*/profile/

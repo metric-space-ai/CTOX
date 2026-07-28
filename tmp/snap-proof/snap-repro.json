@@ -1,0 +1,612 @@
+{
+  "startedAt": "2026-07-28T07:39:00.829Z",
+  "cases": [
+    {
+      "name": "left-slow",
+      "target": {
+        "x": 4,
+        "y": 420
+      },
+      "steps": 12,
+      "snapZone": "left",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 52,
+        "w": 800,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": false
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224344270,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "left"
+        }
+      ]
+    },
+    {
+      "name": "left-fast",
+      "target": {
+        "x": 4,
+        "y": 420
+      },
+      "steps": 1,
+      "snapZone": "left",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 52,
+        "w": 800,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224344753,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "left"
+        }
+      ]
+    },
+    {
+      "name": "right-slow",
+      "target": {
+        "x": 1596,
+        "y": 420
+      },
+      "steps": 12,
+      "snapZone": "right",
+      "snapped": true,
+      "rect": {
+        "x": 800,
+        "y": 52,
+        "w": 800,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": false
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224345306,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "right"
+        }
+      ]
+    },
+    {
+      "name": "right-fast",
+      "target": {
+        "x": 1596,
+        "y": 420
+      },
+      "steps": 1,
+      "snapZone": "right",
+      "snapped": true,
+      "rect": {
+        "x": 800,
+        "y": 52,
+        "w": 800,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": true
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224345831,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "right"
+        }
+      ]
+    },
+    {
+      "name": "top-slow",
+      "target": {
+        "x": 800,
+        "y": 40
+      },
+      "steps": 12,
+      "snapZone": "top",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 52,
+        "w": 1600,
+        "h": 480
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "top",
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "top",
+          "visible": true
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224346438,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "top"
+        }
+      ]
+    },
+    {
+      "name": "bottom-slow",
+      "target": {
+        "x": 800,
+        "y": 995
+      },
+      "steps": 12,
+      "snapZone": "bottom",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 512,
+        "w": 1600,
+        "h": 480
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "bottom",
+          "visible": false
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224347021,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "bottom"
+        }
+      ]
+    },
+    {
+      "name": "right-inset-dock",
+      "target": {
+        "x": 1596,
+        "y": 420
+      },
+      "steps": 8,
+      "snapZone": "right",
+      "snapped": true,
+      "rect": {
+        "x": 580,
+        "y": 52,
+        "w": 640,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "right",
+          "visible": true
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224347694,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "right"
+        }
+      ]
+    },
+    {
+      "name": "left-with-right-inset",
+      "target": {
+        "x": 4,
+        "y": 420
+      },
+      "steps": 8,
+      "snapZone": "left",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 52,
+        "w": 640,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": false
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224348246,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "left"
+        }
+      ]
+    },
+    {
+      "name": "left-from-maximized",
+      "target": {
+        "x": 4,
+        "y": 420
+      },
+      "steps": 8,
+      "snapZone": "left",
+      "snapped": true,
+      "rect": {
+        "x": 0,
+        "y": 52,
+        "w": 800,
+        "h": 940
+      },
+      "previewSamples": [
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": true,
+          "zone": null,
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": false
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        },
+        {
+          "hidden": false,
+          "zone": "left",
+          "visible": true
+        }
+      ],
+      "snapEvents": [
+        {
+          "t": 1785224349097,
+          "id": "desk_win_1xd8dl41jp6xhc",
+          "ownerId": "desktop-app:ctox",
+          "zone": "left"
+        }
+      ]
+    }
+  ],
+  "console": [],
+  "ok": true,
+  "endedAt": "2026-07-28T07:39:09.595Z"
+}
