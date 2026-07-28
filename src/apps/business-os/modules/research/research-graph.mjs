@@ -32,11 +32,14 @@ export function createResearchGraph(host, options = {}) {
   let hoveredId = '';
   let autoRotateEnabled = options.autoRotate !== false;
   let settledFitPending = true;
+  let layoutLocked = false;
+  let layoutLockTimer = 0;
   let topologyKey = projectionTopologyKey(projection);
   let focusFrame = 0;
   let disposed = false;
   let persistentLabelIds = selectPersistentLabelIds(projection);
   host.dataset.graphReheatCount = '0';
+  host.dataset.graphLayoutLocked = 'false';
   let projectionFingerprint = graphProjectionFingerprint(projection);
 
   const graph = ForceGraph3D({
@@ -73,6 +76,10 @@ export function createResearchGraph(host, options = {}) {
     .linkDirectionalParticleColor((link) => link.color || MUTED)
     .linkOpacity(0.5)
     .onNodeHover((node) => {
+      // ForceGraph may keep a warm simulation alive while the pointer is over
+      // the canvas. Freeze the current coordinates before applying hover
+      // styling so pointer movement can never restart or reshape the layout.
+      if (!layoutLocked) settleLayout();
       hoveredId = node?.id || '';
       if (focusFrame) window.cancelAnimationFrame(focusFrame);
       focusFrame = window.requestAnimationFrame(() => {
@@ -91,13 +98,7 @@ export function createResearchGraph(host, options = {}) {
       options.onBackgroundClick?.();
     })
     .onEngineStop(() => {
-      // The initial force pass can expand far beyond the camera bounds after
-      // the eager first fit. Re-fit once the layout has actually settled so a
-      // freshly replicated graph never opens as an apparently empty canvas.
-      if (settledFitPending) {
-        settledFitPending = false;
-        fit(900);
-      }
+      settleLayout();
       options.onSettled?.();
     });
 
@@ -128,6 +129,7 @@ export function createResearchGraph(host, options = {}) {
   const api = {
     setData(nextProjection) {
       if (disposed) return;
+      const wasLayoutLocked = layoutLocked;
       const positionedNodes = new Map(
         (graph.graphData?.().nodes || []).map((node) => [node.id, node]),
       );
@@ -154,35 +156,52 @@ export function createResearchGraph(host, options = {}) {
           vx: positioned.vx,
           vy: positioned.vy,
           vz: positioned.vz,
+          ...(wasLayoutLocked && !topologyChanged ? {
+            fx: positioned.x,
+            fy: positioned.y,
+            fz: dimensions === 2 ? 0 : positioned.z,
+          } : {}),
         };
       });
       // Detail/layer slices preserve the existing camera and node positions.
       // Only the initial mount needs the settled-layout camera correction.
-      settledFitPending = false;
+      settledFitPending = topologyChanged;
       for (const timer of cameraFitTimers) window.clearTimeout(timer);
       cameraFitTimers.clear();
+      if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
+      layoutLockTimer = 0;
       rebuildAdjacency();
       if (topologyChanged || semanticChanged) {
+        if (topologyChanged) unlockLayout();
         graph.graphData(cloneProjection(projection));
+        if (wasLayoutLocked && !topologyChanged) {
+          layoutLocked = true;
+          host.dataset.graphLayoutLocked = 'true';
+        }
         disposeStaleNodeObjects(new Set(projection.nodes.map((node) => node.id)));
       }
       applyVisibilityState();
       configureForces();
       if (topologyChanged || semanticChanged) {
         host.dataset.graphReheatCount = String(Number(host.dataset.graphReheatCount || 0) + 1);
-        if (topologyChanged) graph.d3ReheatSimulation?.();
+        if (topologyChanged) {
+          graph.d3ReheatSimulation?.();
+          scheduleLayoutLock();
+        }
         if (selectedId || hoveredId) applyFocusState();
       }
       return true;
     },
     setDimensions(nextDimensions) {
       if (disposed) return;
+      unlockLayout();
       dimensions = nextDimensions === 2 ? 2 : 3;
       settledFitPending = true;
       graph.numDimensions(dimensions);
       configureForces();
       host.dataset.graphReheatCount = String(Number(host.dataset.graphReheatCount || 0) + 1);
       graph.d3ReheatSimulation?.();
+      scheduleLayoutLock();
       setAutoRotate(autoRotateEnabled);
       if (dimensions === 2) graph.cameraPosition({ x: 0, y: 0, z: 520 }, { x: 0, y: 0, z: 0 }, 700);
       window.setTimeout(() => fit(560), 180);
@@ -224,6 +243,7 @@ export function createResearchGraph(host, options = {}) {
       document.removeEventListener('visibilitychange', visibilityHandler);
       graph.pauseAnimation?.();
       if (focusFrame) window.cancelAnimationFrame(focusFrame);
+      if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
       for (const timer of cameraFitTimers) window.clearTimeout(timer);
       cameraFitTimers.clear();
       disposeNodeObjects();
@@ -441,7 +461,6 @@ export function createResearchGraph(host, options = {}) {
   }
 
   function fit(duration = 700) {
-    graph.resumeAnimation?.();
     graph.zoomToFit?.(
       duration,
       dimensions === 2 ? 96 : 78,
@@ -453,6 +472,44 @@ export function createResearchGraph(host, options = {}) {
     // The settled fit handles the final force layout. This early checkpoint
     // makes initial content visible without repeatedly moving the camera.
     scheduleCameraFit(520, 560);
+    scheduleLayoutLock();
+  }
+
+  function scheduleLayoutLock() {
+    if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
+    layoutLockTimer = window.setTimeout(() => {
+      layoutLockTimer = 0;
+      if (!disposed) settleLayout();
+    }, projection.nodes.length > 120 ? 2800 : 4400);
+  }
+
+  function settleLayout() {
+    if (!layoutLocked) lockLayout();
+    if (settledFitPending) {
+      settledFitPending = false;
+      fit(900);
+    }
+  }
+
+  function lockLayout() {
+    for (const node of graph.graphData?.().nodes || []) {
+      if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) continue;
+      node.fx = node.x;
+      node.fy = node.y;
+      node.fz = dimensions === 2 ? 0 : (Number.isFinite(node.z) ? node.z : 0);
+    }
+    layoutLocked = true;
+    host.dataset.graphLayoutLocked = 'true';
+  }
+
+  function unlockLayout() {
+    for (const node of graph.graphData?.().nodes || []) {
+      node.fx = undefined;
+      node.fy = undefined;
+      node.fz = undefined;
+    }
+    layoutLocked = false;
+    host.dataset.graphLayoutLocked = 'false';
   }
 
   function scheduleCameraFit(delay, duration) {

@@ -867,6 +867,10 @@ test('discovery graph prefers persisted citation paths over inferred tag cluster
 
 test('research graph releases its WebGL context when the surface is remounted', () => {
   assert.match(researchGraphSource, /zoomToFit\?\.\([\s\S]*?projection\.visibleNodeIds\.has\(node\.id\)/);
+  assert.match(researchGraphSource, /onNodeHover\(\(node\) => \{[\s\S]*?if \(!layoutLocked\) settleLayout\(\)/);
+  assert.match(researchGraphSource, /function lockLayout\(\)[\s\S]*?node\.fx = node\.x[\s\S]*?node\.fy = node\.y[\s\S]*?graphLayoutLocked = 'true'/);
+  assert.match(researchGraphSource, /function unlockLayout\(\)[\s\S]*?node\.fx = undefined[\s\S]*?graphLayoutLocked = 'false'/);
+  assert.doesNotMatch(researchGraphSource, /function fit\(duration = 700\) \{\s*graph\.resumeAnimation/);
   assert.match(researchGraphSource, /graph\.pauseAnimation\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.forceContextLoss\?\.\(\)/);
