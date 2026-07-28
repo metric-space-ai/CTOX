@@ -7,7 +7,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v89';
+const BUILD = '20260728-research-knowledge-usability-v90';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -3735,6 +3735,14 @@ function renderRight() {
 function renderRunPanel(runInfo) {
   const task = selectedTask();
   const canRun = canRunResearchTask(task);
+  const isCancelledHistory = runInfo.statusKind === 'cancelled';
+  const visibleStatusKind = isCancelledHistory ? 'idle' : runInfo.statusKind;
+  const visibleStatusLabel = isCancelledHistory
+    ? state.t('lastRunCancelled', 'Letzter Lauf abgebrochen')
+    : runInfo.statusLabel;
+  const visibleRunTitle = isCancelledHistory
+    ? state.t('readyForContinuation', 'Bereit für eine Fortsetzung')
+    : (runInfo.title || runInfo.commandType || 'Systematic Research');
   return `
     <section class="research-run-panel">
       <div class="research-section-head flush">
@@ -3742,18 +3750,13 @@ function renderRunPanel(runInfo) {
         <span>${escapeHtml(runInfo.updatedLabel || state.t('noActiveRun', 'kein Lauf'))}</span>
       </div>
       ${runInfo.run || runInfo.command || runInfo.queueTask ? `
-        <div class="research-run-state research-run-${escapeHtml(runInfo.statusKind)}">
+        <div class="research-run-state research-run-${escapeHtml(visibleStatusKind)}">
           <span></span>
           <div>
-            <strong>${escapeHtml(runInfo.statusLabel)}</strong>
-            <small>${escapeHtml(runInfo.title || runInfo.commandType || 'Systematic Research')}</small>
+            <strong>${escapeHtml(visibleStatusLabel)}</strong>
+            <small>${escapeHtml(visibleRunTitle)}</small>
           </div>
         </div>
-        <dl class="ctox-fields">
-          <dt>${escapeHtml(state.t('command', 'Command'))}</dt><dd>${escapeHtml(shortId(runInfo.commandId))}</dd>
-          <dt>${escapeHtml(state.t('queue', 'Queue'))}</dt><dd>${escapeHtml(shortId(runInfo.taskQueueId))}</dd>
-          <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
-        </dl>
         <div class="research-run-actions">
           <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
