@@ -287,8 +287,11 @@ enum NativePeerExit {
     LockHeldElsewhere,
 }
 /// Phase 3: single-session signaling/replication bring-up timeout. One room is
-/// joined once for the whole sync room; if it cannot come up in this window we
-/// log and continue (collections stay locally queryable).
+/// joined once for the whole sync room; if it cannot come up in this window the
+/// attempt is aborted and the error goes to the supervisor for a backed-off
+/// respawn. Bring-up failure is fatal for the run, never log-and-continue —
+/// that produced the canonical zombie (heartbeat "running", zero replication,
+/// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
 const CTOX_RXDB_PROTOCOL: &str = "ctox-rxdb-protocol-v1";
 const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
