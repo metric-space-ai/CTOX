@@ -17,15 +17,12 @@ pub fn plugin_missing(plugin_key: &str) -> std::io::Error {
         plugin_name.push_str(&ucfirst(part));
     }
     plugin_name.push_str("Plugin");
-    std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!(
-            "You are using a function which must be overwritten by a plugin.\n\
+    std::io::Error::other(format!(
+        "You are using a function which must be overwritten by a plugin.\n\
              You should either prevent the usage of this function or add the plugin via:\n    \
                  import {{ {plugin_name} }} from 'rxdb/plugins/{plugin_key}';\n    \
                  addRxPlugin({plugin_name});\n        "
-        ),
-    )
+    ))
 }
 
 // ref: rxdb/src/plugins/utils/utils-error.ts:35-53

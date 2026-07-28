@@ -18,8 +18,9 @@
 //!   6. Keep `cargo test --manifest-path src/core/rxdb/Cargo.toml` AND
 //!      `node src/apps/business-os/rxdb/tests/run-all.mjs` green. Never
 //!      delete or weaken a failing test to make a change pass.
+//!
 //! ============================================================================
-
+//!
 //! Port of `src/plugins/replication-webrtc/` — phase-4 WebRTC transport.
 //!
 //! The user-facing `replicateWebRTC()` entry point is available through the

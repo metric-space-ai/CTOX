@@ -293,8 +293,7 @@ pub fn is_selector_satisfied_by_index(
 
     // If the index contains a non-relevant field between the relevant fields,
     // then the index is not satisfying.
-    let mut i = 0usize;
-    for field_name in index.iter() {
+    for (i, field_name) in index.iter().enumerate() {
         for set in [
             &mut lower_operator_field_names,
             &mut upper_operator_field_names,
@@ -312,7 +311,6 @@ pub fn is_selector_satisfied_by_index(
         {
             return false;
         }
-        i += 1;
     }
     true
 }

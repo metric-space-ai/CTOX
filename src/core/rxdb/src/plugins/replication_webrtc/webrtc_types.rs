@@ -198,10 +198,16 @@ pub trait WebRTCConnectionHandler: Send + Sync {
         &self,
         _peer: &Self::Peer,
         _collection: &str,
-    ) -> Option<Arc<dyn Fn(&Value) -> bool + Send + Sync>> {
+    ) -> Option<WebRTCDocumentFilter> {
         None
     }
 }
+
+/// Peer admission predicate shared by WebRTC replication options.
+pub type WebRTCPeerValidator<P> = Arc<dyn Fn(&P) -> bool + Send + Sync>;
+
+/// Per-peer document visibility predicate shared by replication and query fetch.
+pub type WebRTCDocumentFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 
 /// Soft threshold above which the V1.5 dispatcher yields and waits before
 /// sending the next chunk. Matches typical WebRTC SCTP send-queue depth.

@@ -1,7 +1,7 @@
 //! Port of `src/rx-query-mingo.ts`.
 //!
 //! Upstream lazily initialises a global mingo operator registry (`useOperators`
-//! + `mingoInitDone` flag) on first `getMingoQuery` call. The Rust port (see
+//! and `mingoInitDone` flag) on first `getMingoQuery` call. The Rust port (see
 //! [`crate::util::mango`]) replaces the global mutable registry with a
 //! per-`Query` `Context` that is populated by `util::mango::get_mingo_query`
 //! itself, so this module is just a re-export.

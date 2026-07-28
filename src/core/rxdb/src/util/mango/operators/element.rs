@@ -21,9 +21,9 @@ pub fn op_exists(selector: &str, value: &Value, _options: &Options) -> QueryPred
     let selector_owned = selector.to_string();
 
     // top-level keys and array elements (selector ends with `.<digits>`)
-    let trailing_index = selector.rsplit_once('.').map_or(false, |(_, last)| {
-        !last.is_empty() && last.chars().all(|c| c.is_ascii_digit())
-    });
+    let trailing_index = selector
+        .rsplit_once('.')
+        .is_some_and(|(_, last)| !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()));
 
     if !nested || trailing_index {
         return Arc::new(move |o: &Value| (resolve(o, &selector_owned, false).is_some()) == b);

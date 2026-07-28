@@ -269,7 +269,7 @@ async fn main() {
     );
 
     // Signal ready so the JS driver can start sending.
-    writeln!(out.lock(), "{}", json!({"kind":"ready"}).to_string()).ok();
+    writeln!(out.lock(), "{}", json!({"kind":"ready"})).ok();
     out.lock().flush().ok();
 
     let stdin = std::io::stdin();

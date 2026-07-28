@@ -260,13 +260,13 @@ pub fn ref_human_data(best_friend: Option<&str>) -> Value {
 }
 
 pub fn ref_human_nested_data(best_friend: Option<&str>) -> Value {
-    let mut foo = Map::new();
+    let mut nested = Map::new();
     if let Some(best_friend) = best_friend {
-        foo.insert("bestFriend".to_string(), json!(best_friend));
+        nested.insert("bestFriend".to_string(), json!(best_friend));
     }
     json!({
         "name": random_string(8, 12),
-        "foo": foo
+        "foo": nested
     })
 }
 

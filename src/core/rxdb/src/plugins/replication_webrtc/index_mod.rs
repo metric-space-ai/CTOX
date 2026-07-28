@@ -46,7 +46,8 @@ use crate::plugins::replication_webrtc::webrtc_helper::{
     is_master_in_webrtc_replication, send_message_and_await_answer,
 };
 use crate::plugins::replication_webrtc::webrtc_types::{
-    WebRTCConnectionHandler, WebRTCMessage, WebRTCResponse, WebRTCWireFrame,
+    WebRTCConnectionHandler, WebRTCDocumentFilter, WebRTCMessage, WebRTCPeerValidator,
+    WebRTCResponse, WebRTCWireFrame,
 };
 use crate::plugins::utils::utils_string::random_token;
 use crate::replication_protocol::index_mod::rx_storage_instance_to_replication_handler;
@@ -98,13 +99,14 @@ pub fn remote_supports_query_fetch(remote_protocol: &Value) -> bool {
 }
 
 pub type RxWebRTCReplicationState<H> = RxWebRTCReplicationPool<H>;
+type ForkStateMap<P> = HashMap<(String, P), Arc<RxReplicationState>>;
 
 #[derive(Clone)]
 pub struct SyncOptionsWebRTC<H: WebRTCConnectionHandler> {
     pub collection: Arc<RxCollection>,
     pub connection_handler: Arc<H>,
     pub topic: Option<String>,
-    pub is_peer_valid: Option<Arc<dyn Fn(&H::Peer) -> bool + Send + Sync>>,
+    pub is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
     pub pull_batch_size: u64,
     pub push_batch_size: u64,
     pub retry_time: u64,
@@ -130,7 +132,7 @@ pub struct SyncOptionsWebRTCRs {
     pub topic: String,
     pub peer_session_id: String,
     pub ice_servers: Vec<RTCIceServer>,
-    pub is_peer_valid: Option<Arc<dyn Fn(&WebRTCRsPeer) -> bool + Send + Sync>>,
+    pub is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     pub pull_batch_size: u64,
     pub push_batch_size: u64,
     pub retry_time: u64,
@@ -232,7 +234,7 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     peer_states: Mutex<HashMap<H::Peer, PeerState>>,
     /// Fork replication states keyed by (collection, peer). One entry per
     /// collection per peer for which CTOX was elected fork.
-    fork_states: Mutex<HashMap<(String, H::Peer), Arc<RxReplicationState>>>,
+    fork_states: Mutex<ForkStateMap<H::Peer>>,
     /// Serializes replacement/removal so displaced fork cancellation completes
     /// before a successor becomes visible and before pool cancellation returns.
     fork_state_lifecycle: AsyncMutex<()>,
@@ -535,7 +537,7 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
 pub async fn replicate_web_rtc<H>(
     collection: Arc<RxCollection>,
     connection_handler: Arc<H>,
-    is_peer_valid: Option<Arc<dyn Fn(&H::Peer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
 ) -> Result<Arc<RxWebRTCReplicationPool<H>>, RxError>
 where
     H: WebRTCConnectionHandler + 'static,
@@ -555,7 +557,7 @@ where
 pub async fn replicate_web_rtc_multi<H>(
     collections: Vec<Arc<RxCollection>>,
     connection_handler: Arc<H>,
-    is_peer_valid: Option<Arc<dyn Fn(&H::Peer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
     tuning_topic: Option<String>,
     peer_session_id: Option<Arc<str>>,
 ) -> Result<Arc<RxWebRTCReplicationPool<H>>, RxError>
@@ -627,13 +629,19 @@ pub async fn replicate_web_rtc_rs(
 /// registers every supplied collection's master handler + fork state behind
 /// it. This is the native counterpart to the browser's single
 /// `CtoxWebRtcNativePeer` per sync room.
+// Known finding, deliberately NOT fixed here: this and the two URL-provider
+// variants below forward the same collection/auth/tuning/transport fields, and
+// the options-object direction should eventually own the multiplex config too.
+// That is an API change, out of scope for the clippy pass (SYNC-A-E2) — it is
+// recorded for the final re-review instead of being rushed.
+#[allow(clippy::too_many_arguments)]
 pub async fn replicate_web_rtc_rs_multi(
     collections: Vec<Arc<RxCollection>>,
     signaling_url: String,
     topic: String,
     peer_session_id: String,
     ice_servers: Vec<RTCIceServer>,
-    is_peer_valid: Option<Arc<dyn Fn(&WebRTCRsPeer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     pull_batch_size: u64,
     push_batch_size: u64,
     retry_time: u64,
@@ -668,7 +676,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_provider(
     topic: String,
     peer_session_id: String,
     ice_servers: Vec<RTCIceServer>,
-    is_peer_valid: Option<Arc<dyn Fn(&WebRTCRsPeer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
@@ -710,7 +718,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
     topic: String,
     peer_session_id: String,
     ice_servers: Vec<RTCIceServer>,
-    is_peer_valid: Option<Arc<dyn Fn(&WebRTCRsPeer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<WebRTCRsPeer>>,
     collection_authz: Option<CollectionAuthzHook>,
     collection_write_authz: Option<CollectionAuthzHook>,
     document_read_authz: Option<DocumentReadAuthzHook>,
@@ -749,7 +757,7 @@ pub async fn replicate_web_rtc_rs_multi_with_url_list_provider(
 async fn replicate_web_rtc_inner<H>(
     collections: Vec<Arc<RxCollection>>,
     connection_handler: Arc<H>,
-    is_peer_valid: Option<Arc<dyn Fn(&H::Peer) -> bool + Send + Sync>>,
+    is_peer_valid: Option<WebRTCPeerValidator<H::Peer>>,
     tuning: WebRTCReplicationTuning,
 ) -> Result<Arc<RxWebRTCReplicationPool<H>>, RxError>
 where
@@ -2113,7 +2121,7 @@ async fn call_master_method(
     handler: &dyn RxReplicationHandler,
     method: &str,
     params: Vec<Value>,
-    document_filter: Option<Arc<dyn Fn(&Value) -> bool + Send + Sync>>,
+    document_filter: Option<WebRTCDocumentFilter>,
 ) -> Value {
     match method {
         "masterChangesSince" => {

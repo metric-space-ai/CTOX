@@ -496,6 +496,20 @@ fn read_changed_table_versions(conn: &Connection) -> rusqlite::Result<HashMap<St
     result
 }
 
+pub fn sqlite_error(err: rusqlite::Error) -> crate::rx_error::RxError {
+    new_rx_error(
+        "SQLITE",
+        Some(serde_json::json!({ "message": err.to_string() })),
+    )
+}
+
+pub fn sqlite_io_error(err: std::io::Error) -> crate::rx_error::RxError {
+    new_rx_error(
+        "SQLITE",
+        Some(serde_json::json!({ "message": err.to_string() })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,18 +693,4 @@ mod tests {
             &database_path
         ));
     }
-}
-
-pub fn sqlite_error(err: rusqlite::Error) -> crate::rx_error::RxError {
-    new_rx_error(
-        "SQLITE",
-        Some(serde_json::json!({ "message": err.to_string() })),
-    )
-}
-
-pub fn sqlite_io_error(err: std::io::Error) -> crate::rx_error::RxError {
-    new_rx_error(
-        "SQLITE",
-        Some(serde_json::json!({ "message": err.to_string() })),
-    )
 }

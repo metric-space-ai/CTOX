@@ -151,10 +151,8 @@ pub fn has_deep_property(obj: &Value, property: &str) -> bool {
                 return true;
             }
             for v in map.values() {
-                if v.is_object() || v.is_array() {
-                    if has_deep_property(v, property) {
-                        return true;
-                    }
+                if (v.is_object() || v.is_array()) && has_deep_property(v, property) {
+                    return true;
                 }
             }
             false

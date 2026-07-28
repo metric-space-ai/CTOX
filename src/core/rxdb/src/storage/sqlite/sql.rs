@@ -459,8 +459,7 @@ fn compile_selector_sql(primary_path: &str, selector: &Value) -> Option<(String,
                             clauses.push("0 = 1".to_string());
                             continue;
                         }
-                        let placeholders = std::iter::repeat("?")
-                            .take(values.len())
+                        let placeholders = std::iter::repeat_n("?", values.len())
                             .collect::<Vec<_>>()
                             .join(", ");
                         clauses.push(format!("{expression} IN ({placeholders})"));
@@ -685,8 +684,7 @@ pub fn documents_by_ids(
     let mut by_id: HashMap<String, Value> = HashMap::with_capacity(ids.len());
     let quoted_table = quote_identifier(table);
     for chunk in ids.chunks(DOCUMENTS_BY_ID_BATCH_SIZE) {
-        let placeholders = std::iter::repeat("?")
-            .take(chunk.len())
+        let placeholders = std::iter::repeat_n("?", chunk.len())
             .collect::<Vec<_>>()
             .join(", ");
         let sql = if with_deleted {

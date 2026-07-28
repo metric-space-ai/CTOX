@@ -6,12 +6,9 @@ use std::hash::Hash;
 use crate::rx_error::{RxError, RxResult};
 
 // ref: rxdb/src/plugins/utils/utils-map.ts:1-7
-pub fn get_from_map_or_throw<'a, K: Eq + Hash, V>(
-    map: &'a HashMap<K, V>,
-    key: &K,
-) -> RxResult<&'a V>
+pub fn get_from_map_or_throw<'a, K, V>(map: &'a HashMap<K, V>, key: &K) -> RxResult<&'a V>
 where
-    K: std::fmt::Debug,
+    K: Eq + Hash + std::fmt::Debug,
 {
     map.get(key)
         .ok_or_else(|| {

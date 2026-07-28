@@ -185,8 +185,7 @@ pub async fn replicate_rx_storage_instance(
         .fork_instance
         .schema()
         .extra
-        .get("attachments")
-        .is_some();
+        .contains_key("attachments");
     let checkpoint_key = get_checkpoint_key(&input).await;
     let downstream_bulk_write_flag = format!("replication-downstream-{checkpoint_key}");
 
@@ -253,7 +252,7 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         ) {
             return Box::pin(futures::stream::empty());
         }
-        let has_attachments = self.instance.schema().extra.get("attachments").is_some();
+        let has_attachments = self.instance.schema().extra.contains_key("attachments");
         let keep_meta = self.keep_meta;
         let stream = self.instance.change_stream();
         Box::pin(stream.map(move |event_bulk| {
@@ -289,7 +288,7 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         use crate::replication_protocol::helper::write_doc_to_doc_state;
         use crate::rx_schema_helper::get_primary_field_of_primary_key;
 
-        let has_attachments = self.instance.schema().extra.get("attachments").is_some();
+        let has_attachments = self.instance.schema().extra.contains_key("attachments");
         let is_file_chunks = self.instance.collection_name() == "desktop_file_chunks";
         let is_knowledge_tables = self.instance.collection_name() == "knowledge_tables";
         let result = self
@@ -346,7 +345,7 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         use crate::types::BulkWriteRow;
 
         let primary_path = get_primary_field_of_primary_key(&self.instance.schema().primary_key);
-        let has_attachments = self.instance.schema().extra.get("attachments").is_some();
+        let has_attachments = self.instance.schema().extra.contains_key("attachments");
 
         // Index input rows by doc id.
         let mut row_by_id: std::collections::HashMap<

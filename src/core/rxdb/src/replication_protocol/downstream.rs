@@ -1137,10 +1137,11 @@ mod tests {
         .await
         .unwrap();
 
-        let stats = state.stats.down.lock();
-        assert_eq!(stats.master_change_stream_emit, 2);
-        assert_eq!(stats.persist_from_master, 1);
-        drop(stats);
+        {
+            let stats = state.stats.down.lock();
+            assert_eq!(stats.master_change_stream_emit, 2);
+            assert_eq!(stats.persist_from_master, 1);
+        }
         let checkpoint = get_last_checkpoint_doc(&state, RxStorageReplicationDirection::Down)
             .await
             .unwrap()

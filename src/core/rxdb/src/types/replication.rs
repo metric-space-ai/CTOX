@@ -155,18 +155,10 @@ impl Default for ActiveSubjects {
 }
 
 // ref: rxdb/src/types/replication-protocol.d.ts ReplicationProcessedSubjects
+#[derive(Default)]
 pub struct ProcessedSubjects {
     pub down: RxSubject<Value>,
     pub up: RxSubject<Value>,
-}
-
-impl Default for ProcessedSubjects {
-    fn default() -> Self {
-        Self {
-            down: RxSubject::new(),
-            up: RxSubject::new(),
-        }
-    }
 }
 
 // ref: rxdb/src/types/replication-protocol.d.ts ReplicationEvents
@@ -357,18 +349,10 @@ impl Drop for ReplicationQueueGuard<'_> {
     }
 }
 
+#[derive(Default)]
 pub struct StreamQueue {
     pub down: ReplicationQueue,
     pub up: ReplicationQueue,
-}
-
-impl Default for StreamQueue {
-    fn default() -> Self {
-        Self {
-            down: ReplicationQueue::new(),
-            up: ReplicationQueue::new(),
-        }
-    }
 }
 
 // ref: rxdb/src/types/replication-protocol.d.ts RxReplicationWriteToMasterRow<RxDocType>

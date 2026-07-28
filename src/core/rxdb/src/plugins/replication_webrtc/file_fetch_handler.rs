@@ -23,7 +23,7 @@ use super::protocol_contract_generated::{
 };
 use super::query_fetch_handler::{
     send_fetch_accepted, send_fetch_error_frame, send_fetch_message, send_fetch_response,
-    FetchInflight,
+    FetchErrorFrame, FetchInflight,
 };
 #[cfg(test)]
 use super::webrtc_types::WebRTCWireFrame;
@@ -455,11 +455,13 @@ async fn send_file_error<H: WebRTCConnectionHandler>(
         handler,
         peer,
         ack_id,
-        request_id,
-        CTOX_FILE_RPC_ERROR,
-        code,
-        message,
-        retryable,
+        FetchErrorFrame {
+            request_id,
+            error_method: CTOX_FILE_RPC_ERROR,
+            code,
+            message,
+            retryable,
+        },
     )
     .await;
 }

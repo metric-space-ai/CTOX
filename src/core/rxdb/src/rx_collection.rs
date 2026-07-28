@@ -576,7 +576,7 @@ impl RxCollection {
         let write_result = self.bulk_insert(vec![json.clone()]).await?;
         throw_if_is_storage_write_error(
             &self.name,
-            json.get(&self.primary_path().unwrap_or_else(|| String::from("id")))
+            json.get(self.primary_path().unwrap_or_else(|| String::from("id")))
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
             &json,
@@ -1126,9 +1126,9 @@ pub(crate) mod test_support {
             .await
             .unwrap();
         let database = RxDatabase::new(
-            &format!("db-{name}"),
-            &format!("db-token-{name}"),
-            &format!("storage-token-{name}"),
+            format!("db-{name}"),
+            format!("db-token-{name}"),
+            format!("storage-token-{name}"),
             false,
             hash_function,
             storage,

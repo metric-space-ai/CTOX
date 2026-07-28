@@ -1,3 +1,8 @@
+// Same rationale as the crate-level allow in src/lib.rs: RxError mirrors the
+// upstream RxDB error shape, and boxing it would break every signature in the
+// fork. Test targets do not inherit the lib's inner attribute (SYNC-A-E2).
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

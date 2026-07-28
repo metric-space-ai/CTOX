@@ -24,8 +24,7 @@ use rxdb::plugins::replication_webrtc::query_fetch_handler::{
     decode_chunk_documents, run_query_fetch, QueryFetchChunk, QueryFetchRegistry,
 };
 use rxdb::plugins::replication_webrtc::webrtc_types::{
-    PeerWithMessage, PeerWithResponse, WebRTCConnectionHandler, WebRTCMessage, WebRTCResponse,
-    WebRTCWireFrame,
+    PeerWithMessage, PeerWithResponse, WebRTCConnectionHandler, WebRTCMessage, WebRTCWireFrame,
 };
 use rxdb::replication_protocol::default_conflict_handler::DefaultConflictHandler;
 use rxdb::rx_collection::RxCollection;
@@ -209,7 +208,7 @@ fn schema() -> RxJsonSchema {
 fn doc(i: usize) -> Value {
     json!({
         "id": format!("rec-{i:08}"),
-        "status": if i % 3 == 0 { "open" } else if i % 3 == 1 { "done" } else { "stalled" },
+        "status": if i.is_multiple_of(3) { "open" } else if i % 3 == 1 { "done" } else { "stalled" },
         "owner": format!("user-{:02}", i % 25),
         "subject": format!("Synthetic record {} for V1.5 scale wire test", i),
         "n": i as i64,

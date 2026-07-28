@@ -1927,9 +1927,7 @@ impl WebRTCRsConnectionHandler {
 
         let mut transfer_attempt = 0usize;
         let start = transport_start_frame(&transfer_id, transfer_attempt, chunks.len(), text.len());
-        if let Err(error) = send_json_text(&data_channel, &start).await {
-            return Err(error);
-        }
+        send_json_text(&data_channel, &start).await?;
         self.record_sent_transport_frame(&start);
 
         for window_start in (0..chunks.len()).step_by(FRAME_ACK_WINDOW) {
@@ -1941,9 +1939,7 @@ impl WebRTCRsConnectionHandler {
                 if restart_from_zero {
                     let restart =
                         transport_start_frame(&transfer_id, attempt, chunks.len(), text.len());
-                    if let Err(error) = send_json_text(&data_channel, &restart).await {
-                        return Err(error);
-                    }
+                    send_json_text(&data_channel, &restart).await?;
                     self.record_sent_transport_frame(&restart);
                 }
                 let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
@@ -3233,30 +3229,6 @@ fn split_chunks_for_frame(text: &str, transfer_id: &str) -> Vec<String> {
     chunks
 }
 
-fn split_utf8_chunks(text: &str, max_bytes: usize) -> Vec<String> {
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < text.len() {
-        let mut end = usize::min(start + max_bytes, text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        if end == start {
-            end = text[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(offset, _)| start + offset)
-                .unwrap_or(text.len());
-        }
-        chunks.push(text[start..end].to_string());
-        start = end;
-    }
-    chunks
-}
-
 #[cfg(test)]
 mod tests {
     // `WebRTCMessage` / `WebRTCResponse` are now imported at module scope
@@ -3496,10 +3468,15 @@ mod tests {
 
     #[test]
     fn splits_transport_chunks_on_utf8_boundaries() {
-        let chunks = split_utf8_chunks("aaäbb🙂cc", 4);
+        // The raw-byte splitter this once covered is gone; `split_chunks_for_frame`
+        // superseded it and bounds the *serialized* size instead. The invariant
+        // worth keeping is that multi-byte text still reassembles exactly — a
+        // splitter that cut mid-codepoint would corrupt every non-ASCII payload.
+        let text = "aaäbb🙂cc".repeat(4096);
+        let chunks = split_chunks_for_frame(&text, "ctox-core-peer-abcdef0123456789|frame|4242");
 
-        assert_eq!(chunks.concat(), "aaäbb🙂cc");
-        assert!(chunks.iter().all(|chunk| chunk.len() <= 4));
+        assert!(chunks.len() > 1, "input must be large enough to split");
+        assert_eq!(chunks.concat(), text);
     }
 
     #[test]

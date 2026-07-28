@@ -371,11 +371,12 @@ impl RxDocument {
     ) -> RxResult<Arc<Self>> {
         let collection = self.collection_ref()?;
         let queue = collection.incremental_write_queue()?;
+        // Bind the snapshot before the await: as a temporary inside the call
+        // expression the guard would live until the end of the statement, so the
+        // document lock would be held across the queued write.
+        let current = self.data.lock().clone();
         let result = queue
-            .add_write(
-                self.data.lock().clone(),
-                modifier_from_public_to_internal(mutation_function),
-            )
+            .add_write(current, modifier_from_public_to_internal(mutation_function))
             .await?;
         self.replace_data(result.clone());
         collection.doc_cache()?.get_cached_rx_document(&result)

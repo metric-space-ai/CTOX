@@ -41,6 +41,9 @@ pub type ValidatorFunction = Arc<dyn Fn(&Value) -> Vec<Value> + Send + Sync>;
 /// User-supplied factory: builds a [`ValidatorFunction`] from a schema.
 pub type ValidatorBuilder = Arc<dyn Fn(&RxJsonSchema) -> ValidatorFunction + Send + Sync>;
 
+type ValidatorsBySchema = HashMap<String, ValidatorFunction>;
+type ValidatorCache = Arc<Mutex<HashMap<String, ValidatorsBySchema>>>;
+
 /// User-supplied per-doc modifier closure for [`wrap_rx_storage_instance`].
 pub type DocModifier = Arc<
     dyn Fn(Value) -> Pin<Box<dyn Future<Output = Result<Value, RxError>> + Send>> + Send + Sync,
@@ -269,11 +272,9 @@ impl WrappedRxStorageInstance {
 /// nested-map cache (one outer entry per validation library, then keyed by
 /// serialized schema). `Arc<Mutex<...>>` so multiple `RxStorage` wrappers
 /// share the cache.
-static VALIDATOR_CACHE: std::sync::OnceLock<
-    Arc<Mutex<HashMap<String, HashMap<String, ValidatorFunction>>>>,
-> = std::sync::OnceLock::new();
+static VALIDATOR_CACHE: std::sync::OnceLock<ValidatorCache> = std::sync::OnceLock::new();
 
-fn validator_cache() -> Arc<Mutex<HashMap<String, HashMap<String, ValidatorFunction>>>> {
+fn validator_cache() -> ValidatorCache {
     VALIDATOR_CACHE
         .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
         .clone()
@@ -343,9 +344,7 @@ impl RxStorage for ValidationStorage {
         let cache = validator_cache();
         let validator = {
             let mut outer = cache.lock();
-            let inner_cache = outer
-                .entry(self.validator_key.clone())
-                .or_insert_with(HashMap::new);
+            let inner_cache = outer.entry(self.validator_key.clone()).or_default();
             inner_cache
                 .entry(schema_json)
                 .or_insert_with(|| (self.validator_builder)(&params.schema))
@@ -418,7 +417,7 @@ impl RxStorageInstance for ValidatingInstance {
         } else {
             self.inner.bulk_write(continue_writes, context).await?
         };
-        write_result.error.extend(errors.into_iter());
+        write_result.error.extend(errors);
         Ok(write_result)
     }
 

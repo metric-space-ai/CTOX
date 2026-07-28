@@ -46,10 +46,7 @@ pub fn fill_object_data_before_insert(schema: &RxSchema, mut data: Value) -> RxR
     // ref: rxdb/src/rx-schema-helper.ts:344-353 fillObjectWithDefaults
     if let Some(obj) = data.as_object_mut() {
         for (key, default) in schema.default_values().iter() {
-            let needs_default = match obj.get(key) {
-                None | Some(Value::Null) => true,
-                _ => false,
-            };
+            let needs_default = matches!(obj.get(key), None | Some(Value::Null));
             if needs_default {
                 obj.insert(key.clone(), default.clone());
             }

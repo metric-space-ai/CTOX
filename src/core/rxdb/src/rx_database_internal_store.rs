@@ -375,7 +375,7 @@ pub async fn add_connected_storage_to_collection(
         {
             Ok(_) => return Ok(()),
             Err(e) => {
-                let err_value = serde_json::to_value(&e.parameters()).unwrap_or(Value::Null);
+                let err_value = serde_json::to_value(e.parameters()).unwrap_or(Value::Null);
                 if is_bulk_write_conflict_error(&err_value).is_some() {
                     continue;
                 }
@@ -460,7 +460,7 @@ pub async fn remove_connected_storage_from_collection(
         {
             Ok(_) => return Ok(()),
             Err(e) => {
-                let err_value = serde_json::to_value(&e.parameters()).unwrap_or(Value::Null);
+                let err_value = serde_json::to_value(e.parameters()).unwrap_or(Value::Null);
                 if is_bulk_write_conflict_error(&err_value).is_some() {
                     continue;
                 }

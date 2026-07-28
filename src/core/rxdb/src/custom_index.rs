@@ -15,6 +15,9 @@ use crate::rx_error::{new_rx_error, RxResult};
 use crate::rx_schema_helper::get_schema_by_object_path;
 use crate::types::{JsonSchema, RxJsonSchema};
 
+/// Precomputed document-to-index-string projection.
+pub type IndexableStringFunction = Box<dyn Fn(&Value) -> String + Send + Sync>;
+
 // ref: rxdb/src/custom-index.ts:38-47
 pub struct IndexMetaField {
     pub field_name: String,
@@ -106,7 +109,7 @@ pub fn get_index_meta(schema: &RxJsonSchema, index: &[String]) -> RxResult<Vec<I
 pub fn get_indexable_string_monad(
     schema: &RxJsonSchema,
     index: &[String],
-) -> RxResult<Box<dyn Fn(&Value) -> String + Send + Sync>> {
+) -> RxResult<IndexableStringFunction> {
     let meta = get_index_meta(schema, index)?;
     Ok(Box::new(move |doc| {
         let mut s = String::new();

@@ -415,17 +415,17 @@ impl RxStorageInstanceSqlite {
         // checkpoint read and the database-wide data_version watcher baseline.
         notifier.signal();
 
-        start_external_write_poll(
-            Arc::clone(&connection),
-            database_path.clone(),
-            table_name.clone(),
-            primary_path.clone(),
-            changes.clone(),
-            Arc::clone(&closed),
-            Arc::clone(&external_checkpoint),
-            Arc::clone(&notifier),
-            Arc::clone(&read_connection),
-        );
+        start_external_write_poll(ExternalWritePoll {
+            connection: Arc::clone(&connection),
+            database_path: database_path.clone(),
+            table_name: table_name.clone(),
+            primary_path: primary_path.clone(),
+            changes: changes.clone(),
+            closed: Arc::clone(&closed),
+            checkpoint: Arc::clone(&external_checkpoint),
+            notifier: Arc::clone(&notifier),
+            read_connection: Arc::clone(&read_connection),
+        });
         let external_notifier = notifier;
         Self {
             database_name: params.database_name,
@@ -631,10 +631,9 @@ fn parse_filled_query(prepared_query: &Value) -> RxResult<FilledMangoQuery> {
     )
 }
 
-fn execute_query_documents(
-    conn: &rusqlite::Connection,
-    table_name: &str,
-    collection_name: &str,
+struct QueryDocumentsRequest {
+    table_name: String,
+    collection_name: String,
     primary_ids: Option<Vec<String>>,
     compiled_sql: Option<CompiledSqliteQuery>,
     fallback_candidate_sql: Option<CompiledSqliteQuery>,
@@ -643,7 +642,26 @@ fn execute_query_documents(
     comparator: DeterministicSortComparator,
     skip: usize,
     skip_plus_limit: usize,
+}
+
+fn execute_query_documents(
+    conn: &rusqlite::Connection,
+    request: QueryDocumentsRequest,
 ) -> RxResult<Vec<Value>> {
+    let QueryDocumentsRequest {
+        table_name,
+        collection_name,
+        primary_ids,
+        compiled_sql,
+        fallback_candidate_sql,
+        fallback_operator_families,
+        matcher,
+        comparator,
+        skip,
+        skip_plus_limit,
+    } = request;
+    let table_name = table_name.as_str();
+    let collection_name = collection_name.as_str();
     if let Some(ids) = primary_ids {
         let mut rows = Vec::new();
         for doc in documents_by_ids(conn, table_name, &ids, true)? {
@@ -701,7 +719,7 @@ fn execute_query_documents(
     Ok(rows[start..end].to_vec())
 }
 
-fn start_external_write_poll(
+struct ExternalWritePoll {
     connection: SharedSqliteConnection,
     database_path: std::path::PathBuf,
     table_name: String,
@@ -711,7 +729,20 @@ fn start_external_write_poll(
     checkpoint: Arc<Mutex<Value>>,
     notifier: Arc<TableNotifier>,
     read_connection: Arc<Mutex<Option<SharedSqliteConnection>>>,
-) {
+}
+
+fn start_external_write_poll(poll: ExternalWritePoll) {
+    let ExternalWritePoll {
+        connection,
+        database_path,
+        table_name,
+        primary_path,
+        changes,
+        closed,
+        checkpoint,
+        notifier,
+        read_connection,
+    } = poll;
     let Ok(_) = tokio::runtime::Handle::try_current() else {
         return;
     };
@@ -1361,7 +1392,7 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
         chunk_size: usize,
         on_batch: &mut (dyn FnMut(Vec<Value>) -> Result<bool, RxError> + Send),
     ) -> Option<Result<(), RxError>> {
-        Some(self.query_stream(prepared_query, chunk_size, |batch| on_batch(batch)))
+        Some(self.query_stream(prepared_query, chunk_size, on_batch))
     }
 
     async fn query(&self, prepared_query: &Value) -> Result<RxStorageQueryResult, RxError> {
@@ -1401,16 +1432,18 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
             .with_read_connection(ReadOperation::Query, move |conn| {
                 execute_query_documents(
                     conn,
-                    &table_name,
-                    &collection_name,
-                    primary_ids,
-                    compiled_sql,
-                    fallback_candidate_sql,
-                    fallback_operator_families,
-                    matcher,
-                    comparator,
-                    skip,
-                    skip_plus_limit,
+                    QueryDocumentsRequest {
+                        table_name,
+                        collection_name,
+                        primary_ids,
+                        compiled_sql,
+                        fallback_candidate_sql,
+                        fallback_operator_families,
+                        matcher,
+                        comparator,
+                        skip,
+                        skip_plus_limit,
+                    },
                 )
             })
             .await?;
@@ -1640,6 +1673,11 @@ impl RxStorageInstanceSqlite {
     }
 }
 
+// clippy::int_plus_one is allowed here on purpose: these counter assertions read
+// "at least N more than before" and sit next to siblings with `+ 3` / `+ SCAN_LIMIT + 1`.
+// Rewriting the `+ 1` cases to `>` would make one member of each group inconsistent
+// with the others and obscure the intent, for no semantic gain.
+#[allow(clippy::int_plus_one)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2446,6 +2484,10 @@ mod tests {
         );
     }
 
+    // clippy::await_holding_lock is allowed here deliberately: holding the writer
+    // mutex across the await IS the subject of this test — it proves the read path
+    // proceeds while a writer holds the lock. Releasing it would delete the premise.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn compiled_query_and_count_do_not_wait_for_writer_mutex() {
         let dir = tempfile::tempdir().unwrap();
@@ -2516,6 +2558,10 @@ mod tests {
         assert_eq!(count_result.count, 2);
     }
 
+    // clippy::await_holding_lock is allowed here deliberately: holding the writer
+    // mutex across the await IS the subject of this test — it proves the read path
+    // proceeds while a writer holds the lock. Releasing it would delete the premise.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn query_fallback_does_not_wait_for_writer_mutex() {
         let dir = tempfile::tempdir().unwrap();
@@ -2640,24 +2686,24 @@ mod tests {
         )
         .expect("query plan should produce an age-bounded candidate query");
         let conn = storage.connection().unwrap();
-        let conn = conn.lock();
-        let mut statement = conn
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", candidate.sql))
-            .unwrap();
-        let plan = statement
-            .query_map(rusqlite::params_from_iter(candidate.params.iter()), |row| {
-                row.get::<_, String>(3)
-            })
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap()
-            .join("\n");
-        assert!(
-            plan.contains("_json_age_idx"),
-            "expected query-plan candidate fallback to use the age index, got plan:\n{plan}"
-        );
-        drop(statement);
-        drop(conn);
+        {
+            let conn = conn.lock();
+            let mut statement = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", candidate.sql))
+                .unwrap();
+            let plan = statement
+                .query_map(rusqlite::params_from_iter(candidate.params.iter()), |row| {
+                    row.get::<_, String>(3)
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .join("\n");
+            assert!(
+                plan.contains("_json_age_idx"),
+                "expected query-plan candidate fallback to use the age index, got plan:\n{plan}"
+            );
+        }
 
         let fallback_calls_before = runtime_counter("query_fallback_calls");
         let candidate_calls_before = runtime_counter("query_fallback_indexed_candidate_calls");
@@ -3450,6 +3496,10 @@ mod tests {
         assert_eq!(second.checkpoint, first.checkpoint);
     }
 
+    // clippy::await_holding_lock is allowed here deliberately: holding the writer
+    // mutex across the await IS the subject of this test — it proves the read path
+    // proceeds while a writer holds the lock. Releasing it would delete the premise.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn changed_documents_since_file_backed_uses_read_only_connection() {
         let dir = tempfile::tempdir().unwrap();
@@ -3914,6 +3964,10 @@ mod tests {
         assert_eq!(bulk.events[0].operation, "UPDATE");
     }
 
+    // clippy::await_holding_lock is allowed here deliberately: holding the writer
+    // mutex across the await IS the subject of this test — it proves the read path
+    // proceeds while a writer holds the lock. Releasing it would delete the premise.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn external_write_poll_uses_read_only_connection_while_writer_mutex_is_held() {
         use tokio::time::timeout;

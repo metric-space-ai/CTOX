@@ -92,7 +92,6 @@ pub fn add_rx_storage_multi_instance_support(
 ) {
     if !instance_creation_params.multi_instance {
         // Single-process: nothing to do. This is the only path CTOX exercises.
-        return;
     }
     // multi-instance is not supported in this build.
     // A future port would build a broadcast-channel and wrap the instance's

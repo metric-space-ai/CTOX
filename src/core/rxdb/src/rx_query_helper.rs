@@ -38,6 +38,9 @@ pub type DeterministicSortComparator = Arc<dyn Fn(&Value, &Value) -> Ordering + 
 /// Closure type for query matchers (`QueryMatcher` upstream).
 pub type QueryMatcher = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 
+type SortValueGetter = Box<dyn Fn(&Value) -> Value + Send + Sync>;
+type SortPart = (String, String, SortValueGetter);
+
 // ref: rxdb/src/rx-query-helper.ts:35-176
 /// Normalize the query to ensure all fields are set and equivalent logical
 /// queries compare equal by cache key.
@@ -164,7 +167,7 @@ pub fn get_sort_comparator(
     _schema: &RxJsonSchema,
     query: &FilledMangoQuery,
 ) -> DeterministicSortComparator {
-    let mut parts: Vec<(String, String, Box<dyn Fn(&Value) -> Value + Send + Sync>)> = Vec::new();
+    let mut parts: Vec<SortPart> = Vec::new();
     for sort_block in query.sort.iter() {
         if let Some((k, dir)) = sort_block.iter().next() {
             let getter = object_path_monad(k);

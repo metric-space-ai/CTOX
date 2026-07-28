@@ -162,7 +162,7 @@ pub(crate) fn flatten(xs: &[Value], depth: i32) -> Vec<Value> {
     fn rec(ys: &[Value], n: i32, out: &mut Vec<Value>) {
         for item in ys {
             if let Value::Array(a) = item {
-                if n > 0 || n < 0 {
+                if n != 0 {
                     rec(a, std::cmp::max(-1, n - 1), out);
                     continue;
                 }

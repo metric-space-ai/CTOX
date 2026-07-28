@@ -788,7 +788,9 @@ pub fn categorize_bulk_write_rows_with_hooks(
             }
         } else {
             // Update path.
-            let in_db = document_in_db.unwrap();
+            let Some(in_db) = document_in_db else {
+                unreachable!("update branch requires an existing document")
+            };
             let rev_in_db = in_db.get("_rev").and_then(|v| v.as_str()).unwrap_or("");
             let conflict = match previous {
                 None => true,

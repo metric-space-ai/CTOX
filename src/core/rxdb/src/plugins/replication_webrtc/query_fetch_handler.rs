@@ -234,16 +234,27 @@ pub(super) async fn send_fetch_message<H: WebRTCConnectionHandler>(
     let _ = handler.send(peer, WebRTCWireFrame::Message(frame)).await;
 }
 
+pub(super) struct FetchErrorFrame<'a> {
+    pub request_id: &'a str,
+    pub error_method: &'a str,
+    pub code: &'a str,
+    pub message: &'a str,
+    pub retryable: bool,
+}
+
 pub(super) async fn send_fetch_error_frame<H: WebRTCConnectionHandler>(
     handler: &H,
     peer: &H::Peer,
     ack_id: &str,
-    request_id: &str,
-    error_method: &str,
-    code: &str,
-    message: &str,
-    retryable: bool,
+    error: FetchErrorFrame<'_>,
 ) {
+    let FetchErrorFrame {
+        request_id,
+        error_method,
+        code,
+        message,
+        retryable,
+    } = error;
     if !ack_id.is_empty() {
         send_fetch_response(
             handler,
@@ -751,19 +762,19 @@ async fn stream_chunks<H: WebRTCConnectionHandler + 'static>(
     let producer_cancel_seen = Arc::clone(&cancel_seen);
     let producer_timeout_seen = Arc::clone(&timeout_seen);
     let producer_task = tokio::task::spawn_blocking(move || -> RxResult<()> {
-        produce_query_fetch_frames(
-            producer_collection,
+        produce_query_fetch_frames(QueryFetchProducer {
+            collection: producer_collection,
             prepared,
             max_doc_chunk,
             max_byte_chunk,
             runtime_deadline,
             projection,
             document_filter,
-            producer_cancel_flag,
-            producer_cancel_seen,
-            producer_timeout_seen,
+            cancel_flag: producer_cancel_flag,
+            cancel_seen: producer_cancel_seen,
+            timeout_seen: producer_timeout_seen,
             frame_tx,
-        )
+        })
     });
 
     let producer_result = producer_task.await.map_err(|err| {
@@ -822,7 +833,7 @@ struct QueryFetchFrame {
     cancelled: bool,
 }
 
-fn produce_query_fetch_frames(
+struct QueryFetchProducer {
     collection: Arc<RxCollection>,
     prepared: Value,
     max_doc_chunk: usize,
@@ -834,7 +845,22 @@ fn produce_query_fetch_frames(
     cancel_seen: Arc<AtomicBool>,
     timeout_seen: Arc<AtomicBool>,
     frame_tx: mpsc::Sender<QueryFetchFrame>,
-) -> RxResult<()> {
+}
+
+fn produce_query_fetch_frames(producer: QueryFetchProducer) -> RxResult<()> {
+    let QueryFetchProducer {
+        collection,
+        prepared,
+        max_doc_chunk,
+        max_byte_chunk,
+        runtime_deadline,
+        projection,
+        document_filter,
+        cancel_flag,
+        cancel_seen,
+        timeout_seen,
+        frame_tx,
+    } = producer;
     let mut sequence: u32 = 0;
     let mut pending: VecDeque<SerializedQueryDocument> = VecDeque::new();
     let mut any_emitted = false;
@@ -1006,11 +1032,13 @@ async fn send_query_fetch_frame<H: WebRTCConnectionHandler>(
             handler,
             peer,
             request,
-            frame.sequence,
-            Vec::new(),
-            true,
             revision,
-            true,
+            QueryFetchFrame {
+                sequence: frame.sequence,
+                documents: Vec::new(),
+                complete: true,
+                cancelled: true,
+            },
         )
         .await;
         return true;
@@ -1022,11 +1050,13 @@ async fn send_query_fetch_frame<H: WebRTCConnectionHandler>(
                 handler,
                 peer,
                 request,
-                frame.sequence,
-                Vec::new(),
-                true,
                 revision,
-                true,
+                QueryFetchFrame {
+                    sequence: frame.sequence,
+                    documents: Vec::new(),
+                    complete: true,
+                    cancelled: true,
+                },
             )
             .await;
             return true;
@@ -1047,18 +1077,9 @@ async fn send_query_fetch_frame<H: WebRTCConnectionHandler>(
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = (backoff_ms * 2).min(64);
     }
-    send_chunk(
-        handler,
-        peer,
-        request,
-        frame.sequence,
-        frame.documents,
-        frame.complete,
-        revision,
-        frame.cancelled,
-    )
-    .await;
-    frame.complete
+    let complete = frame.complete;
+    send_chunk(handler, peer, request, revision, frame).await;
+    complete
 }
 
 fn apply_request_window_to_mango(window: &Value, mango: &mut MangoQuery) -> Result<(), String> {
@@ -1101,24 +1122,21 @@ async fn send_chunk<H: WebRTCConnectionHandler>(
     handler: &H,
     peer: &H::Peer,
     request: &QueryFetchRequest,
-    sequence: u32,
-    documents: Vec<SerializedQueryDocument>,
-    complete: bool,
     revision: &str,
-    cancelled: bool,
+    frame: QueryFetchFrame,
 ) {
     let chunk = build_chunk_from_serialized(
         request.request_id.clone(),
-        sequence,
-        documents,
-        complete,
+        frame.sequence,
+        frame.documents,
+        frame.complete,
         Some(revision.to_string()),
-        cancelled,
+        frame.cancelled,
     );
     send_fetch_message(
         handler,
         peer,
-        format!("{}-c{}", request.request_id, sequence),
+        format!("{}-c{}", request.request_id, frame.sequence),
         CTOX_QUERY_RPC_CHUNK,
         serde_json::to_value(chunk).unwrap_or(Value::Null),
         Some(request.collection_name.clone()),
@@ -1222,7 +1240,7 @@ fn build_chunk_from_serialized(
             if let Ok(compressed) = encoder.finish() {
                 // Only switch to compressed form if it actually saves bytes
                 // after base64 encoding (compressed * 4 / 3).
-                let b64_len_estimate = (compressed.len() + 2) / 3 * 4;
+                let b64_len_estimate = compressed.len().div_ceil(3) * 4;
                 if b64_len_estimate < payload.len() {
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&compressed);
                     chunk.compressed = Some("deflate".to_string());
@@ -1271,11 +1289,13 @@ async fn send_error<H: WebRTCConnectionHandler>(
         handler,
         peer,
         ack_id,
-        request_id,
-        CTOX_QUERY_RPC_ERROR,
-        code,
-        message,
-        retryable,
+        FetchErrorFrame {
+            request_id,
+            error_method: CTOX_QUERY_RPC_ERROR,
+            code,
+            message,
+            retryable,
+        },
     )
     .await;
 }

@@ -122,6 +122,11 @@ impl RxDatabase {
         )
     }
 
+    // Deliberate: this is the explicit constructor that `new` delegates to, so the
+    // parameters are the database's identity and storage wiring rather than an
+    // accreted argument list. Collapsing them into an options struct would only
+    // move the same fields one indirection away.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_query_options(
         name: impl Into<String>,
         token: impl Into<String>,
@@ -257,7 +262,6 @@ impl RxDatabase {
             .collections
             .lock()
             .values()
-            .cloned()
             .map(|collection| {
                 let collection_name = collection.name.clone();
                 Box::pin(collection.event_bulks().map(move |bulk| RxChangeEventBulk {
@@ -894,6 +898,11 @@ async fn repair_collection_meta_schema_hash(
     Ok(())
 }
 
+// clippy::int_plus_one is allowed here on purpose: these counter assertions read
+// "at least N more than before" and sit next to siblings with `+ 3` / `+ SCAN_LIMIT + 1`.
+// Rewriting the `+ 1` cases to `>` would make one member of each group inconsistent
+// with the others and obscure the intent, for no semantic gain.
+#[allow(clippy::int_plus_one)]
 #[cfg(test)]
 mod tests {
     use super::*;

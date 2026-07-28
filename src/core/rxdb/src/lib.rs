@@ -14,6 +14,10 @@
 
 #![forbid(unsafe_code)]
 #![warn(unused_must_use)]
+// This hard fork intentionally mirrors upstream RxDB's RxError shape. Boxing it
+// would break result signatures crate-wide and make upstream port comparison
+// permanently harder, so SYNC-A-E2 consciously keeps the large Err variant.
+#![allow(clippy::result_large_err)]
 
 pub mod change_event_buffer;
 pub mod custom_index;
