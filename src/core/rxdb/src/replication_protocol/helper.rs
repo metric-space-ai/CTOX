@@ -1,5 +1,7 @@
 //! Port of `src/replication-protocol/helper.ts`.
 
+use std::sync::atomic::{AtomicI64, Ordering};
+
 use futures::StreamExt;
 use serde_json::{json, Value};
 
@@ -7,6 +9,48 @@ use crate::plugins::utils::utils_revision::{create_revision, get_height_of_revis
 use crate::plugins::utils::utils_time::now;
 use crate::rx_storage_helper::strip_attachments_data_from_document;
 use crate::types::{BulkWriteRow, RxStorageInstanceReplicationState};
+
+/// Monotonic event sequencing and the current replication-phase cutoff.
+///
+/// Callers define the direction-specific meaning of `phase_start`; keeping both
+/// atomics together ensures every task in one replication direction observes
+/// the same virtual clock.
+pub(crate) struct ReplicationClock {
+    timer: AtomicI64,
+    phase_start: AtomicI64,
+}
+
+impl ReplicationClock {
+    pub(crate) const fn new(timer: i64, phase_start: i64) -> Self {
+        Self {
+            timer: AtomicI64::new(timer),
+            phase_start: AtomicI64::new(phase_start),
+        }
+    }
+
+    pub(crate) fn next_time(&self) -> i64 {
+        self.timer.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub(crate) fn phase_start(&self) -> i64 {
+        self.phase_start.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_phase_start(&self, value: i64) {
+        self.phase_start.store(value, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn time(&self) -> i64 {
+        self.timer.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for ReplicationClock {
+    fn default() -> Self {
+        Self::new(0, -1)
+    }
+}
 
 // ref: rxdb/src/replication-protocol/helper.ts:19-49
 pub fn doc_state_to_write_doc(

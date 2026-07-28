@@ -17,7 +17,6 @@
 //! - `masterChangeStream$` `"RESYNC"` trigger, via the typed
 //!   `RxReplicationMasterChange` enum.
 
-use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use futures::FutureExt;
@@ -31,7 +30,7 @@ use crate::replication_protocol::checkpoint::{
 use crate::replication_protocol::conflicts::resolve_conflict_error;
 use crate::replication_protocol::helper::{
     remote_revision_height_marker_matches, strip_attachments_data_from_meta_write_rows,
-    wait_for_cancel,
+    wait_for_cancel, ReplicationClock,
 };
 use crate::rx_storage_helper::{get_written_documents_from_bulk_write_response, stack_checkpoints};
 use crate::types::{
@@ -64,31 +63,18 @@ pub async fn start_replication_upstream(state: Arc<RxStorageInstanceReplicationS
 
     // 2. Spawn ongoing fork.changeStream subscription EARLY so events that
     //    arrive during the initial sync don't get lost.
-    let timer = Arc::new(AtomicI64::new(0));
-    let initial_sync_start_time = Arc::new(AtomicI64::new(-1));
-    let ongoing = spawn_ongoing_upstream_with_timing(
-        Arc::clone(&state),
-        Arc::clone(&timer),
-        Arc::clone(&initial_sync_start_time),
-    );
-    let resync_listener = spawn_upstream_resync_listener_with_timing(
-        Arc::clone(&state),
-        Arc::clone(&timer),
-        Arc::clone(&initial_sync_start_time),
-    );
+    // Upstream uses `phase_start` as `initial_sync_start_time`: ongoing events
+    // sequenced before the latest initial-sync fetch must be ignored.
+    let clock = Arc::new(ReplicationClock::default());
+    let ongoing = spawn_ongoing_upstream(Arc::clone(&state), Arc::clone(&clock));
+    let resync_listener = spawn_upstream_resync_listener(Arc::clone(&state), Arc::clone(&clock));
 
     // 3. Initial sync (per-batch lock). A failed first pass must stay pending:
     // consumers use first_sync_done as the readiness invariant, so publishing
     // success before a retry would leave the replication permanently stale.
     let mut initial_sync_retry_delay = std::time::Duration::from_millis(50);
     while !state.events.canceled.get_value() {
-        match upstream_initial_sync_until_no_conflicts_with_timing(
-            &state,
-            &timer,
-            &initial_sync_start_time,
-        )
-        .await
-        {
+        match upstream_initial_sync_until_no_conflicts(&state, &clock).await {
             Ok(()) => {
                 if !state.first_sync_done.up.get_value() && !state.events.canceled.get_value() {
                     state.first_sync_done.up.next(true);
@@ -123,23 +109,12 @@ pub async fn start_replication_upstream(state: Arc<RxStorageInstanceReplicationS
     resync_listener.abort();
 }
 
-#[cfg(test)]
 async fn upstream_initial_sync_until_no_conflicts(
     state: &Arc<RxStorageInstanceReplicationState>,
-) -> Result<(), crate::rx_error::RxError> {
-    let timer = AtomicI64::new(0);
-    let initial_sync_start_time = AtomicI64::new(-1);
-    upstream_initial_sync_until_no_conflicts_with_timing(state, &timer, &initial_sync_start_time)
-        .await
-}
-
-async fn upstream_initial_sync_until_no_conflicts_with_timing(
-    state: &Arc<RxStorageInstanceReplicationState>,
-    timer: &AtomicI64,
-    initial_sync_start_time: &AtomicI64,
+    clock: &ReplicationClock,
 ) -> Result<(), crate::rx_error::RxError> {
     loop {
-        if !upstream_initial_sync_with_timing(state, timer, initial_sync_start_time).await? {
+        if !upstream_initial_sync(state, clock).await? {
             return Ok(());
         }
     }
@@ -148,10 +123,9 @@ async fn upstream_initial_sync_until_no_conflicts_with_timing(
 /// Run the initial paginated push of fork→master.
 /// Acquires `state.stream_queue.up` once per batch so ongoing events can
 /// interleave between batches.
-async fn upstream_initial_sync_with_timing(
+async fn upstream_initial_sync(
     state: &Arc<RxStorageInstanceReplicationState>,
-    timer: &AtomicI64,
-    initial_sync_start_time: &AtomicI64,
+    clock: &ReplicationClock,
 ) -> Result<bool, crate::rx_error::RxError> {
     {
         let mut stats = state.stats.up.lock();
@@ -168,8 +142,8 @@ async fn upstream_initial_sync_with_timing(
 
     while !state.events.canceled.get_value() {
         let _g = state.stream_queue.up.lock().await;
-        let fetch_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
-        initial_sync_start_time.store(fetch_time, AtomicOrdering::SeqCst);
+        let fetch_time = clock.next_time();
+        clock.set_phase_start(fetch_time);
         let up_result = state
             .input
             .fork_instance
@@ -207,19 +181,9 @@ async fn upstream_initial_sync_with_timing(
 
 /// Spawn the long-lived task that consumes `fork.change_stream()` and pushes
 /// each event-bulk to master.
-#[cfg(test)]
-fn spawn_ongoing_upstream(state: Arc<RxStorageInstanceReplicationState>) -> JoinHandle<()> {
-    spawn_ongoing_upstream_with_timing(
-        state,
-        Arc::new(AtomicI64::new(0)),
-        Arc::new(AtomicI64::new(-1)),
-    )
-}
-
-fn spawn_ongoing_upstream_with_timing(
+fn spawn_ongoing_upstream(
     state: Arc<RxStorageInstanceReplicationState>,
-    timer: Arc<AtomicI64>,
-    initial_sync_start_time: Arc<AtomicI64>,
+    clock: Arc<ReplicationClock>,
 ) -> JoinHandle<()> {
     let downstream_flag = state.downstream_bulk_write_flag.clone();
     tokio::spawn(async move {
@@ -231,7 +195,7 @@ fn spawn_ongoing_upstream_with_timing(
             if state.events.paused.get_value() {
                 continue;
             }
-            let task_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
+            let task_time = clock.next_time();
             if let Some(wait_before_persist) = state.input.wait_before_persist.as_ref() {
                 wait_before_persist().await;
             }
@@ -248,18 +212,12 @@ fn spawn_ongoing_upstream_with_timing(
                     lagged_resync = true;
                     continue;
                 }
-                let task_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
+                let task_time = clock.next_time();
                 tasks.push((task_time, next_event_bulk));
             }
             if lagged_resync {
                 state.events.active.up.next(true);
-                if let Err(e) = upstream_initial_sync_until_no_conflicts_with_timing(
-                    &state,
-                    &timer,
-                    &initial_sync_start_time,
-                )
-                .await
-                {
+                if let Err(e) = upstream_initial_sync_until_no_conflicts(&state, &clock).await {
                     tracing::error!(
                         target: "ctox_rxdb::replication_protocol::upstream",
                         "lagged fork change stream RESYNC upstreamInitialSync failed: {e}",
@@ -268,13 +226,8 @@ fn spawn_ongoing_upstream_with_timing(
                 state.events.active.up.next(false);
                 continue;
             }
-            if let Err(e) = process_upstream_event_tasks(
-                &state,
-                &downstream_flag,
-                &initial_sync_start_time,
-                tasks,
-            )
-            .await
+            if let Err(e) =
+                process_upstream_event_tasks(&state, &downstream_flag, &clock, tasks).await
             {
                 tracing::error!(
                     target: "ctox_rxdb::replication_protocol::upstream",
@@ -288,10 +241,10 @@ fn spawn_ongoing_upstream_with_timing(
 async fn process_upstream_event_tasks(
     state: &Arc<RxStorageInstanceReplicationState>,
     downstream_flag: &str,
-    initial_sync_start_time: &AtomicI64,
+    clock: &ReplicationClock,
     tasks: Vec<(i64, EventBulk)>,
 ) -> Result<(), crate::rx_error::RxError> {
-    let cutoff = initial_sync_start_time.load(AtomicOrdering::SeqCst);
+    let cutoff = clock.phase_start();
     let mut docs: Vec<Value> = Vec::new();
     let mut checkpoints = Vec::new();
     let mut emit_count = 0;
@@ -331,10 +284,9 @@ async fn process_upstream_event_tasks(
     result.map(|_| ())
 }
 
-fn spawn_upstream_resync_listener_with_timing(
+fn spawn_upstream_resync_listener(
     state: Arc<RxStorageInstanceReplicationState>,
-    timer: Arc<AtomicI64>,
-    initial_sync_start_time: Arc<AtomicI64>,
+    clock: Arc<ReplicationClock>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut master_stream = state.input.replication_handler.master_change_stream();
@@ -345,18 +297,12 @@ fn spawn_upstream_resync_listener_with_timing(
             let RxReplicationMasterChange::Resync = master_change else {
                 continue;
             };
-            let task_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
-            if task_time < initial_sync_start_time.load(AtomicOrdering::SeqCst) {
+            let task_time = clock.next_time();
+            if task_time < clock.phase_start() {
                 continue;
             }
             state.events.active.up.next(true);
-            if let Err(e) = upstream_initial_sync_until_no_conflicts_with_timing(
-                &state,
-                &timer,
-                &initial_sync_start_time,
-            )
-            .await
-            {
+            if let Err(e) = upstream_initial_sync_until_no_conflicts(&state, &clock).await {
                 tracing::error!(
                     target: "ctox_rxdb::replication_protocol::upstream",
                     "RESYNC upstreamInitialSync failed: {e}",
@@ -1092,7 +1038,8 @@ mod tests {
             has_attachments: false,
         });
 
-        upstream_initial_sync_until_no_conflicts(&state)
+        let clock = ReplicationClock::default();
+        upstream_initial_sync_until_no_conflicts(&state, &clock)
             .await
             .unwrap();
 
@@ -1396,7 +1343,10 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let ongoing = spawn_ongoing_upstream(std::sync::Arc::clone(&state));
+        let ongoing = spawn_ongoing_upstream(
+            std::sync::Arc::clone(&state),
+            std::sync::Arc::new(ReplicationClock::default()),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         fork_instance
@@ -1498,13 +1448,9 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let timer = std::sync::Arc::new(AtomicI64::new(0));
-        let initial_sync_start_time = std::sync::Arc::new(AtomicI64::new(1));
-        let ongoing = spawn_ongoing_upstream_with_timing(
-            std::sync::Arc::clone(&state),
-            std::sync::Arc::clone(&timer),
-            initial_sync_start_time,
-        );
+        let clock = std::sync::Arc::new(ReplicationClock::new(0, 1));
+        let ongoing =
+            spawn_ongoing_upstream(std::sync::Arc::clone(&state), std::sync::Arc::clone(&clock));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         fork_instance
@@ -1519,7 +1465,7 @@ mod tests {
             .unwrap();
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while timer.load(AtomicOrdering::SeqCst) == 0 {
+            while clock.time() == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
@@ -1706,7 +1652,10 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let ongoing = spawn_ongoing_upstream(std::sync::Arc::clone(&state));
+        let ongoing = spawn_ongoing_upstream(
+            std::sync::Arc::clone(&state),
+            std::sync::Arc::new(ReplicationClock::default()),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         fork_instance
@@ -1820,7 +1769,10 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let ongoing = spawn_ongoing_upstream(std::sync::Arc::clone(&state));
+        let ongoing = spawn_ongoing_upstream(
+            std::sync::Arc::clone(&state),
+            std::sync::Arc::new(ReplicationClock::default()),
+        );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         fork_instance
@@ -1945,10 +1897,9 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let resync_listener = spawn_upstream_resync_listener_with_timing(
+        let resync_listener = spawn_upstream_resync_listener(
             std::sync::Arc::clone(&state),
-            std::sync::Arc::new(AtomicI64::new(0)),
-            std::sync::Arc::new(AtomicI64::new(-1)),
+            std::sync::Arc::new(ReplicationClock::default()),
         );
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 

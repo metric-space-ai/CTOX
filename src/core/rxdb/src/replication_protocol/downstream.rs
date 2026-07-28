@@ -17,7 +17,6 @@
 //!   a serialized, ownership-safe Rust path.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 
 use futures::{FutureExt, StreamExt};
@@ -29,6 +28,7 @@ use crate::replication_protocol::checkpoint::{
 use crate::replication_protocol::helper::{
     doc_state_to_write_doc, remote_revision_height_marker_matches,
     strip_attachments_data_from_meta_write_rows, wait_for_cancel, write_doc_to_doc_state,
+    ReplicationClock,
 };
 use crate::replication_protocol::meta_instance::{get_assumed_master_state, get_meta_write_row};
 use crate::rx_storage_helper::stack_checkpoints;
@@ -60,26 +60,17 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
     }
 
     // 2. Spawn ongoing master.change_stream subscription early.
-    let timer = Arc::new(AtomicI64::new(0));
-    let last_time_master_changes_requested = Arc::new(AtomicI64::new(-1));
-    let ongoing = spawn_ongoing_downstream_with_timing(
-        Arc::clone(&state),
-        Arc::clone(&timer),
-        Arc::clone(&last_time_master_changes_requested),
-    );
+    // Downstream uses `phase_start` as `last_time_master_changes_requested`:
+    // master-stream events sequenced before the latest resync request are stale.
+    let clock = Arc::new(ReplicationClock::default());
+    let ongoing = spawn_ongoing_downstream(Arc::clone(&state), Arc::clone(&clock));
 
     // 3. Initial resync. A failed first pass must stay pending: consumers use
     // first_sync_done as the readiness invariant, so only a successful retry may
     // release waiters.
     let mut initial_sync_retry_delay = std::time::Duration::from_millis(50);
     while !state.events.canceled.get_value() {
-        match downstream_resync_once_with_timing(
-            &state,
-            &timer,
-            &last_time_master_changes_requested,
-        )
-        .await
-        {
+        match downstream_resync_once(&state, &clock).await {
             Ok(()) => {
                 if !state.first_sync_done.down.get_value() && !state.events.canceled.get_value() {
                     state.first_sync_done.down.next(true);
@@ -115,21 +106,9 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
 
 /// Spawn the long-lived task that consumes `replication_handler.master_change_stream()`
 /// and writes each batch to the fork via `persist_from_master`.
-#[cfg(test)]
 fn spawn_ongoing_downstream(
     state: Arc<RxStorageInstanceReplicationState>,
-) -> tokio::task::JoinHandle<()> {
-    spawn_ongoing_downstream_with_timing(
-        state,
-        Arc::new(AtomicI64::new(0)),
-        Arc::new(AtomicI64::new(-1)),
-    )
-}
-
-fn spawn_ongoing_downstream_with_timing(
-    state: Arc<RxStorageInstanceReplicationState>,
-    timer: Arc<AtomicI64>,
-    last_time_master_changes_requested: Arc<AtomicI64>,
+    clock: Arc<ReplicationClock>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut stream = state.input.replication_handler.master_change_stream();
@@ -137,19 +116,14 @@ fn spawn_ongoing_downstream_with_timing(
             if state.events.canceled.get_value() {
                 break;
             }
-            let task_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
+            let task_time = clock.next_time();
             wait_until_upstream_inactive(&state).await;
-            if task_time < last_time_master_changes_requested.load(AtomicOrdering::SeqCst) {
+            if task_time < clock.phase_start() {
                 continue;
             }
             match master_change {
                 RxReplicationMasterChange::Resync => {
-                    run_downstream_resync_from_stream(
-                        &state,
-                        &timer,
-                        &last_time_master_changes_requested,
-                    )
-                    .await;
+                    run_downstream_resync_from_stream(&state, &clock).await;
                 }
                 RxReplicationMasterChange::Documents(docs_with_cp) => {
                     let mut tasks = vec![(task_time, docs_with_cp)];
@@ -158,7 +132,7 @@ fn spawn_ongoing_downstream_with_timing(
                         if state.events.canceled.get_value() {
                             break;
                         }
-                        let next_task_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
+                        let next_task_time = clock.next_time();
                         match next_master_change {
                             RxReplicationMasterChange::Documents(next_docs_with_cp) => {
                                 tasks.push((next_task_time, next_docs_with_cp));
@@ -169,12 +143,8 @@ fn spawn_ongoing_downstream_with_timing(
                             }
                         }
                     }
-                    if let Err(e) = process_downstream_master_change_tasks(
-                        &state,
-                        &last_time_master_changes_requested,
-                        tasks,
-                    )
-                    .await
+                    if let Err(e) =
+                        process_downstream_master_change_tasks(&state, &clock, tasks).await
                     {
                         tracing::error!(
                             target: "ctox_rxdb::replication_protocol::downstream",
@@ -182,12 +152,7 @@ fn spawn_ongoing_downstream_with_timing(
                         );
                     }
                     if run_resync_after_batch {
-                        run_downstream_resync_from_stream(
-                            &state,
-                            &timer,
-                            &last_time_master_changes_requested,
-                        )
-                        .await;
+                        run_downstream_resync_from_stream(&state, &clock).await;
                     }
                 }
             }
@@ -197,10 +162,10 @@ fn spawn_ongoing_downstream_with_timing(
 
 async fn process_downstream_master_change_tasks(
     state: &Arc<RxStorageInstanceReplicationState>,
-    last_time_master_changes_requested: &AtomicI64,
+    clock: &ReplicationClock,
     tasks: Vec<(i64, crate::types::DocumentsWithCheckpoint)>,
 ) -> Result<(), crate::rx_error::RxError> {
-    let cutoff = last_time_master_changes_requested.load(AtomicOrdering::SeqCst);
+    let cutoff = clock.phase_start();
     let mut docs = Vec::new();
     let mut checkpoints = Vec::new();
     let mut emit_count = 0;
@@ -235,13 +200,10 @@ async fn process_downstream_master_change_tasks(
 
 async fn run_downstream_resync_from_stream(
     state: &Arc<RxStorageInstanceReplicationState>,
-    timer: &AtomicI64,
-    last_time_master_changes_requested: &AtomicI64,
+    clock: &ReplicationClock,
 ) {
     state.events.active.down.next(true);
-    if let Err(e) =
-        downstream_resync_once_with_timing(state, timer, last_time_master_changes_requested).await
-    {
+    if let Err(e) = downstream_resync_once(state, clock).await {
         tracing::error!(
             target: "ctox_rxdb::replication_protocol::downstream",
             "RESYNC downstreamResyncOnce failed: {e}",
@@ -263,10 +225,9 @@ async fn wait_until_upstream_inactive(state: &RxStorageInstanceReplicationState)
 }
 
 // ref: rxdb/src/replication-protocol/downstream.ts:175-217
-async fn downstream_resync_once_with_timing(
+async fn downstream_resync_once(
     state: &Arc<RxStorageInstanceReplicationState>,
-    timer: &AtomicI64,
-    last_time_master_changes_requested: &AtomicI64,
+    clock: &ReplicationClock,
 ) -> Result<(), crate::rx_error::RxError> {
     {
         let mut stats = state.stats.down.lock();
@@ -283,8 +244,8 @@ async fn downstream_resync_once_with_timing(
     while !state.events.canceled.get_value() {
         // Acquire stream_queue.down per batch so ongoing events can interleave.
         let _g = state.stream_queue.down.lock().await;
-        let request_time = timer.fetch_add(1, AtomicOrdering::SeqCst);
-        last_time_master_changes_requested.store(request_time, AtomicOrdering::SeqCst);
+        let request_time = clock.next_time();
+        clock.set_phase_start(request_time);
         let down_result = state
             .input
             .replication_handler
@@ -1273,7 +1234,8 @@ mod tests {
             has_attachments: false,
         });
         state.events.active.up.next(true);
-        let ongoing = spawn_ongoing_downstream(Arc::clone(&state));
+        let ongoing =
+            spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         master_stream.next(RxReplicationMasterChange::Documents(
@@ -1381,7 +1343,8 @@ mod tests {
             has_attachments: false,
         });
         state.events.active.up.next(true);
-        let ongoing = spawn_ongoing_downstream(Arc::clone(&state));
+        let ongoing =
+            spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         master_stream.next(RxReplicationMasterChange::Documents(
@@ -1507,13 +1470,8 @@ mod tests {
             checkpoint_queue: tokio::sync::Mutex::new(()),
             has_attachments: false,
         });
-        let timer = Arc::new(AtomicI64::new(0));
-        let last_time_master_changes_requested = Arc::new(AtomicI64::new(1));
-        let ongoing = spawn_ongoing_downstream_with_timing(
-            Arc::clone(&state),
-            Arc::clone(&timer),
-            last_time_master_changes_requested,
-        );
+        let clock = Arc::new(ReplicationClock::new(0, 1));
+        let ongoing = spawn_ongoing_downstream(Arc::clone(&state), Arc::clone(&clock));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         master_stream.next(RxReplicationMasterChange::Documents(
@@ -1528,7 +1486,7 @@ mod tests {
         ));
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while timer.load(AtomicOrdering::SeqCst) == 0 {
+            while clock.time() == 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
         })
@@ -1620,7 +1578,8 @@ mod tests {
             has_attachments: false,
         });
         state.events.active.up.next(false);
-        let ongoing = spawn_ongoing_downstream(Arc::clone(&state));
+        let ongoing =
+            spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         master_stream.next(RxReplicationMasterChange::Resync);
