@@ -29,13 +29,13 @@ const launchableModuleIds = systemAppIds.filter((id) => id !== 'desktop');
 
 const desktopAppIds = [...appSource.matchAll(/id:\s*'([^']+)'/g)]
   .map((match) => match[1])
-  .filter((id) => ['explorer', 'code-editor', 'file-viewer', 'creator'].includes(id))
+  .filter((id) => ['explorer', 'code-editor', 'file-viewer'].includes(id))
   .filter((id) => id !== 'file-viewer' && !moduleIds.includes(id));
 
 const launchIds = [...launchableModuleIds, ...desktopAppIds];
 assert.equal(new Set(launchIds).size, launchIds.length, 'launch target ids must be unique');
 
-for (const requiredId of ['explorer', 'code-editor', 'ctox', 'tickets', 'threads', 'knowledge', 'browser', 'credentials', 'app-store', 'creator', 'reports']) {
+for (const requiredId of ['explorer', 'code-editor', 'ctox', 'tickets', 'threads', 'knowledge', 'browser', 'credentials', 'app-store', 'importer', 'reports', 'coding-agents']) {
   assert.ok(launchIds.includes(requiredId), `launch targets must include ${requiredId}`);
 }
 
@@ -43,11 +43,7 @@ for (const storeOnlyId of ['conversations', 'outbound', 'research']) {
   assert.ok(!launchIds.includes(storeOnlyId), `uninstalled store app must not be a launch target: ${storeOnlyId}`);
 }
 
-assert.equal(
-  launchIds.filter((id) => id === 'creator').length,
-  1,
-  'App Creator must have exactly one launch target'
-);
+assert.ok(!launchIds.includes('creator'), 'backend-only App Creator must not have a launcher target');
 
 for (const requiredId of ['explorer', 'code-editor']) {
   assert.ok(

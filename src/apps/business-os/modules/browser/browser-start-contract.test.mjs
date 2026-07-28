@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 
 const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
 
-assert.match(source, /commandBus\.dispatch\([\s\S]*\{ until: 'accepted' \}\)/);
+assert.match(source, /commandBus\.dispatch\([\s\S]*until:\s*waitsForRuntime\s*\?\s*'terminal'\s*:\s*'accepted'/);
+assert.match(source, /waitsForRuntime\s*\?\s*\{\s*timeoutMs:\s*150_000\s*\}\s*:\s*\{\}/);
 assert.match(source, /startNewBrowserSession[\s\S]*?new_session:\s*true[\s\S]*?refs\.start[\s\S]*?startNewBrowserSession/);
 assert.match(source, /opensNewSession[\s\S]*?`browser_tab_\$\{now\}`/);
 assert.match(source, /result\?\.opensNewSession[\s\S]*?selectedSessionId\s*=\s*result\.sessionId/);
