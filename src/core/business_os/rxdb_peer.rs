@@ -1758,6 +1758,74 @@ fn shutdown_native_peer_runtime(runtime: tokio::runtime::Runtime, max_wait: Dura
     runtime.shutdown_timeout(max_wait);
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TemporaryDatabaseLockScope {
+    TemporaryOnly,
+    EntireOperation,
+}
+
+fn with_business_os_database<T, F, Fut>(
+    root: &Path,
+    runtime_context: &'static str,
+    create_runtime_dir: bool,
+    lock_scope: TemporaryDatabaseLockScope,
+    operation: F,
+) -> anyhow::Result<T>
+where
+    F: FnOnce(Option<Arc<NativePeer>>, Arc<RxDatabase>) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let database_path = store::rxdb_store_path(root);
+    if create_runtime_dir {
+        if let Some(parent) = database_path.parent() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create RxDB runtime dir {}", parent.display())
+            })?;
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context(runtime_context)?;
+    let _database_guard = match lock_scope {
+        TemporaryDatabaseLockScope::TemporaryOnly => {
+            if let Some(peer) = current_peer() {
+                return runtime.block_on(operation(
+                    Some(Arc::clone(&peer)),
+                    Arc::clone(&peer.database),
+                ));
+            }
+            TEMPORARY_RXDB_DATABASE_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+        TemporaryDatabaseLockScope::EntireOperation => TEMPORARY_RXDB_DATABASE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    };
+    if lock_scope == TemporaryDatabaseLockScope::EntireOperation {
+        if let Some(peer) = current_peer() {
+            return runtime.block_on(operation(
+                Some(Arc::clone(&peer)),
+                Arc::clone(&peer.database),
+            ));
+        }
+    }
+    runtime.block_on(async move {
+        let database = open_database(database_path).await?;
+        database
+            .add_collections(collection_creators())
+            .await
+            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
+        let output = operation(None, Arc::clone(&database)).await?;
+        database
+            .close()
+            .await
+            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
+        Ok(output)
+    })
+}
+
 pub fn sync_desktop_file_from_path(root: &Path, path: &Path) -> anyhow::Result<()> {
     sync_desktop_file_from_path_with_policy(root, path, None)
 }
@@ -1787,35 +1855,19 @@ fn sync_desktop_file_from_path_with_policy(
             DesktopFileContentPolicy::Lazy
         }
     });
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS desktop file sync runtime")?;
-    if let Some(peer) = current_peer() {
-        return runtime
-            .block_on(async move { peer.upsert_desktop_file_from_path(path, policy).await });
-    }
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        upsert_desktop_file_with_policy(root, &database, path, policy).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(())
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS desktop file sync runtime",
+        true,
+        TemporaryDatabaseLockScope::TemporaryOnly,
+        |peer, database| async move {
+            if let Some(peer) = peer {
+                peer.upsert_desktop_file_from_path(path, policy).await
+            } else {
+                upsert_desktop_file_with_policy(root, &database, path, policy).await
+            }
+        },
+    )
 }
 
 pub fn sync_desktop_files_from_workspace_root(
@@ -1839,72 +1891,32 @@ pub fn sync_desktop_files_from_workspace_root(
         path: workspace_root,
         label,
     }];
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS workspace file sync runtime")?;
-    if let Some(peer) = current_peer() {
-        return runtime.block_on(async move {
-            peer.sync_desktop_files_from_scan_roots_unbounded(scan_roots)
-                .await
-        });
-    }
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let indexed =
-            sync_desktop_file_scan_roots_with_database_unbounded(root, &database, scan_roots)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(indexed)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS workspace file sync runtime",
+        true,
+        TemporaryDatabaseLockScope::TemporaryOnly,
+        |peer, database| async move {
+            if let Some(peer) = peer {
+                peer.sync_desktop_files_from_scan_roots_unbounded(scan_roots)
+                    .await
+            } else {
+                sync_desktop_file_scan_roots_with_database_unbounded(root, &database, scan_roots)
+                    .await
+            }
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_desktop_file_index(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS desktop file index runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_desktop_file_index_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let indexed = sync_desktop_file_index_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(indexed)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS desktop file index runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_desktop_file_index_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -1912,78 +1924,27 @@ fn sync_desktop_file_index_if_changed(
     root: &Path,
     last_projection_stamp: &mut Option<DesktopFileIndexProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS desktop file index runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_desktop_file_index_with_database_if_changed(
-                root,
-                &peer.database,
-                last_projection_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let indexed = sync_desktop_file_index_with_database_if_changed(
-            root,
-            &database,
-            last_projection_stamp,
-        )
-        .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(indexed)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS desktop file index runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
+            sync_desktop_file_index_with_database_if_changed(root, &database, last_projection_stamp)
+                .await
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_channel_state(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS channel state sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_channel_state_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_channel_state_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS channel state sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_channel_state_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -1991,75 +1952,27 @@ fn sync_channel_state_if_changed(
     root: &Path,
     last_projection_stamp: &mut Option<ChannelStateProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS channel state sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_channel_state_with_database_if_changed(
-                root,
-                &peer.database,
-                last_projection_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
+    with_business_os_database(
+        root,
+        "failed to create Business OS channel state sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
             sync_channel_state_with_database_if_changed(root, &database, last_projection_stamp)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+                .await
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_business_users(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS users sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_business_users_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_business_users_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS users sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_business_users_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -2067,75 +1980,27 @@ fn sync_business_users_if_changed(
     root: &Path,
     last_projection_stamp: &mut Option<store::BusinessUsersProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS users sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_business_users_with_database_if_changed(
-                root,
-                &peer.database,
-                last_projection_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
+    with_business_os_database(
+        root,
+        "failed to create Business OS users sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
             sync_business_users_with_database_if_changed(root, &database, last_projection_stamp)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+                .await
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_runtime_settings(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS runtime settings sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_runtime_settings_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_runtime_settings_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS runtime settings sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_runtime_settings_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -2143,75 +2008,27 @@ fn sync_runtime_settings_if_changed(
     root: &Path,
     last_projection_stamp: &mut Option<store::RuntimeSettingsProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS runtime settings sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_runtime_settings_with_database_if_changed(
-                root,
-                &peer.database,
-                last_projection_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
+    with_business_os_database(
+        root,
+        "failed to create Business OS runtime settings sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
             sync_runtime_settings_with_database_if_changed(root, &database, last_projection_stamp)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+                .await
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_module_catalog(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS module catalog sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_module_catalog_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_module_catalog_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS module catalog sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_module_catalog_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -2219,75 +2036,27 @@ fn sync_module_catalog_if_changed(
     root: &Path,
     last_projection_stamp: &mut Option<store::ModuleCatalogProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS module catalog sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_module_catalog_with_database_if_changed(
-                root,
-                &peer.database,
-                last_projection_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
+    with_business_os_database(
+        root,
+        "failed to create Business OS module catalog sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
             sync_module_catalog_with_database_if_changed(root, &database, last_projection_stamp)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+                .await
+        },
+    )
 }
 
 #[cfg(test)]
 fn sync_ticket_state(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS ticket state sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_ticket_state_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_ticket_state_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS ticket state sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_ticket_state_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -2295,73 +2064,25 @@ fn sync_ticket_state_if_changed(
     root: &Path,
     last_source_stamp: &mut Option<tickets::TicketStoreChangeStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS ticket state sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_ticket_state_with_database_if_changed(
-                root,
-                &peer.database,
-                last_source_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
-            sync_ticket_state_with_database_if_changed(root, &database, last_source_stamp).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS ticket state sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
+            sync_ticket_state_with_database_if_changed(root, &database, last_source_stamp).await
+        },
+    )
 }
 
 pub(crate) fn sync_knowledge_tables(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS knowledge tables sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_knowledge_tables_with_database(root, &peer.database).await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_knowledge_tables_with_database(root, &database).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS knowledge tables sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move { sync_knowledge_tables_with_database(root, &database).await },
+    )
 }
 
 #[cfg(test)]
@@ -2369,93 +2090,37 @@ fn sync_knowledge_tables_if_changed(
     root: &Path,
     last_source_stamp: &mut Option<crate::knowledge::KnowledgeTablesProjectionSourceStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS knowledge tables sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        if let Some(peer) = current_peer() {
-            return sync_knowledge_tables_with_database_if_changed(
-                root,
-                &peer.database,
-                last_source_stamp,
-            )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced =
-            sync_knowledge_tables_with_database_if_changed(root, &database, last_source_stamp)
-                .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS knowledge tables sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
+            sync_knowledge_tables_with_database_if_changed(root, &database, last_source_stamp).await
+        },
+    )
 }
 
 pub(crate) fn sync_business_record_projections(root: &Path) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS business record projection sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database_write_lock = Arc::new(AsyncMutex::new(()));
-        if let Some(peer) = current_peer() {
+    with_business_os_database(
+        root,
+        "failed to create Business OS business record projection sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
+            let database_write_lock = Arc::new(AsyncMutex::new(()));
             let mut since_by_collection = HashMap::new();
             let mut queue_chat_repair_stamp = None;
-            return sync_business_record_projections_with_database(
+            sync_business_record_projections_with_database(
                 root,
-                &peer.database,
+                &database,
                 &database_write_lock,
                 &mut since_by_collection,
                 &mut queue_chat_repair_stamp,
             )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
             .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let mut since_by_collection = HashMap::new();
-        let mut queue_chat_repair_stamp = None;
-        let synced = sync_business_record_projections_with_database(
-            root,
-            &database,
-            &database_write_lock,
-            &mut since_by_collection,
-            &mut queue_chat_repair_stamp,
-        )
-        .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -2465,85 +2130,36 @@ fn sync_business_record_projections_if_changed(
     queue_chat_repair_stamp: &mut Option<QueueChatRepairProjectionStamp>,
     last_source_stamp: &mut Option<BusinessRecordProjectionSourceStamp>,
 ) -> anyhow::Result<usize> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS business record projection sync runtime")?;
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database_write_lock = Arc::new(AsyncMutex::new(()));
-        if let Some(peer) = current_peer() {
-            return sync_business_record_projections_with_database_if_changed(
+    with_business_os_database(
+        root,
+        "failed to create Business OS business record projection sync runtime",
+        true,
+        TemporaryDatabaseLockScope::EntireOperation,
+        |_peer, database| async move {
+            let database_write_lock = Arc::new(AsyncMutex::new(()));
+            sync_business_record_projections_with_database_if_changed(
                 root,
-                &peer.database,
+                &database,
                 &database_write_lock,
                 since_by_collection,
                 queue_chat_repair_stamp,
                 last_source_stamp,
             )
-            .await;
-        }
-
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
             .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let synced = sync_business_record_projections_with_database_if_changed(
-            root,
-            &database,
-            &database_write_lock,
-            since_by_collection,
-            queue_chat_repair_stamp,
-            last_source_stamp,
-        )
-        .await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(synced)
-    })
+        },
+    )
 }
 
 pub fn enqueue_business_command_document(root: &Path, document: Value) -> anyhow::Result<Value> {
-    let database_path = store::rxdb_store_path(root);
-    if let Some(parent) = database_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create RxDB runtime dir {}", parent.display()))?;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS command enqueue runtime")?;
-    if let Some(peer) = current_peer() {
-        return runtime.block_on(async move {
-            enqueue_business_command_document_with_database(&peer.database, document).await
-        });
-    }
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let stored = enqueue_business_command_document_with_database(&database, document).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(stored)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS command enqueue runtime",
+        true,
+        TemporaryDatabaseLockScope::TemporaryOnly,
+        |_peer, database| async move {
+            enqueue_business_command_document_with_database(&database, document).await
+        },
+    )
 }
 
 pub fn browser_session_status(root: &Path, session_id: &str) -> anyhow::Result<Value> {
@@ -2551,32 +2167,15 @@ pub fn browser_session_status(root: &Path, session_id: &str) -> anyhow::Result<V
     if session_id.is_empty() {
         anyhow::bail!("session_id is required");
     }
-    let database_path = store::rxdb_store_path(root);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS browser session status runtime")?;
-    if let Some(peer) = current_peer() {
-        return runtime.block_on(async move {
-            browser_session_status_with_database(&peer.database, &session_id).await
-        });
-    }
-    let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    runtime.block_on(async move {
-        let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-        let status = browser_session_status_with_database(&database, &session_id).await?;
-        database
-            .close()
-            .await
-            .map_err(|err| anyhow::anyhow!("close temporary Business OS RxDB database: {err}"))?;
-        Ok(status)
-    })
+    with_business_os_database(
+        root,
+        "failed to create Business OS browser session status runtime",
+        false,
+        TemporaryDatabaseLockScope::TemporaryOnly,
+        |_peer, database| async move {
+            browser_session_status_with_database(&database, &session_id).await
+        },
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -2595,32 +2194,15 @@ pub fn browser_context_capture(
     if session_id.is_empty() {
         anyhow::bail!("session_id is required");
     }
-    let database_path = store::rxdb_store_path(root);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("failed to create Business OS browser context capture runtime")?;
-    let mut outcome = if let Some(peer) = current_peer() {
-        runtime.block_on(async move {
-            browser_context_snapshot_with_database(&peer.database, &session_id).await
-        })?
-    } else {
-        let _database_guard = TEMPORARY_RXDB_DATABASE_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        runtime.block_on(async move {
-            let database = open_database(database_path).await?;
-            database
-                .add_collections(collection_creators())
-                .await
-                .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
-            let capture = browser_context_snapshot_with_database(&database, &session_id).await?;
-            database.close().await.map_err(|err| {
-                anyhow::anyhow!("close temporary Business OS RxDB database: {err}")
-            })?;
-            Ok::<Value, anyhow::Error>(capture)
-        })?
-    };
+    let mut outcome = with_business_os_database(
+        root,
+        "failed to create Business OS browser context capture runtime",
+        false,
+        TemporaryDatabaseLockScope::TemporaryOnly,
+        |_peer, database| async move {
+            browser_context_snapshot_with_database(&database, &session_id).await
+        },
+    )?;
     if request.enqueue_handoff {
         let now = now_ms() as u64;
         let command_id = format!("browser_context_handoff_{now}");
@@ -5987,15 +5569,6 @@ async fn accept_pending_business_command(
             }
         }
     }
-    if is_browser_runtime_command(&command_type) {
-        if let Err(err) = apply_browser_runtime_command(&root, database, &document, &accepted).await
-        {
-            eprintln!("[business-os] browser runtime command failed: {err:#}");
-            mark_browser_runtime_command_failed(database, &command_id, &command_payload, &err)
-                .await?;
-        }
-    }
-
     Ok(())
 }
 
@@ -15538,7 +15111,7 @@ fn repair_rxdb_collection_schema_version_drift_with_connection(
             conn.execute(
                 &format!(
                     "DROP TRIGGER IF EXISTS {}",
-                    quote_sqlite_identifier(&trigger.name)
+                    sqlite_quote_identifier(&trigger.name)
                 ),
                 [],
             )
@@ -15548,7 +15121,7 @@ fn repair_rxdb_collection_schema_version_drift_with_connection(
             conn.execute(
                 &format!(
                     "DROP TABLE IF EXISTS {}",
-                    quote_sqlite_identifier(&table.name)
+                    sqlite_quote_identifier(&table.name)
                 ),
                 [],
             )
@@ -15645,7 +15218,7 @@ fn active_rxdb_collection_version(
                AND COALESCE(json_extract(data, '$._deleted'), 0) = 0
              ORDER BY CAST(json_extract(data, '$.data.version') AS INTEGER) DESC
              LIMIT 1",
-            quote_sqlite_identifier(&internal_table)
+            sqlite_quote_identifier(&internal_table)
         ),
         params![collection],
         |row| row.get::<_, i64>(0),
@@ -15820,7 +15393,7 @@ fn sqlite_trigger_exists(conn: &Connection, trigger: &str) -> anyhow::Result<boo
 
 fn sqlite_table_row_count(conn: &Connection, table: &str) -> anyhow::Result<i64> {
     conn.query_row(
-        &format!("SELECT COUNT(*) FROM {}", quote_sqlite_identifier(table)),
+        &format!("SELECT COUNT(*) FROM {}", sqlite_quote_identifier(table)),
         [],
         |row| row.get::<_, i64>(0),
     )
@@ -15834,16 +15407,12 @@ fn sqlite_table_latest_updated_at_ms(
     conn.query_row(
         &format!(
             "SELECT MAX(CAST(json_extract(data, '$.updated_at_ms') AS INTEGER)) FROM {}",
-            quote_sqlite_identifier(table)
+            sqlite_quote_identifier(table)
         ),
         [],
         |row| row.get::<_, Option<i64>>(0),
     )
     .with_context(|| format!("read latest updated_at_ms in {table}"))
-}
-
-fn quote_sqlite_identifier(identifier: &str) -> String {
-    format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -17687,7 +17256,7 @@ mod tests {
               AND json_extract(data, '$.status') = ?
             LIMIT 10
             "#,
-                quote_sqlite_identifier(&business_commands_table)
+                sqlite_quote_identifier(&business_commands_table)
             ),
             &[&"pending_sync"],
             &format!("{business_commands_table}_json__deleted__status"),
@@ -17701,7 +17270,7 @@ mod tests {
               AND json_extract(data, '$.command_id') = ?
             LIMIT 1
             "#,
-                quote_sqlite_identifier(&business_commands_table)
+                sqlite_quote_identifier(&business_commands_table)
             ),
             &[&"cmd_1"],
             &format!("{business_commands_table}_json__deleted__command_id"),
@@ -17715,7 +17284,7 @@ mod tests {
               AND json_extract(data, '$.status') = ?
             LIMIT 10
             "#,
-                quote_sqlite_identifier(&ctox_queue_tasks_table)
+                sqlite_quote_identifier(&ctox_queue_tasks_table)
             ),
             &[&"queued"],
             &format!("{ctox_queue_tasks_table}_json__deleted__status"),
@@ -17729,7 +17298,7 @@ mod tests {
               AND json_extract(data, '$.command_id') = ?
             LIMIT 1
             "#,
-                quote_sqlite_identifier(&ctox_queue_tasks_table)
+                sqlite_quote_identifier(&ctox_queue_tasks_table)
             ),
             &[&"cmd_1"],
             &format!("{ctox_queue_tasks_table}_json__deleted__command_id"),
@@ -17746,7 +17315,7 @@ mod tests {
               AND json_extract(data, '$.idx') < ?
             ORDER BY json_extract(data, '$.idx') ASC
             "#,
-                quote_sqlite_identifier(&desktop_file_chunks_table)
+                sqlite_quote_identifier(&desktop_file_chunks_table)
             ),
             &[&"file_1", &"gen_1", &0_i64, &100_i64],
             &format!(
@@ -17765,7 +17334,7 @@ mod tests {
             ORDER BY id
             LIMIT ?3
             "#,
-                quote_sqlite_identifier(&document_blob_chunks_table)
+                sqlite_quote_identifier(&document_blob_chunks_table)
             ),
             &[
                 &document_lower as &dyn rusqlite::ToSql,
@@ -17785,7 +17354,7 @@ mod tests {
             ORDER BY id
             LIMIT ?3
             "#,
-                quote_sqlite_identifier(&spreadsheet_blob_chunks_table)
+                sqlite_quote_identifier(&spreadsheet_blob_chunks_table)
             ),
             &[
                 &spreadsheet_lower as &dyn rusqlite::ToSql,
@@ -17802,7 +17371,7 @@ mod tests {
               AND json_extract(data, '$.expires_at_ms') < ?
             LIMIT 256
             "#,
-                quote_sqlite_identifier(&browser_frames_table)
+                sqlite_quote_identifier(&browser_frames_table)
             ),
             &[&1_i64],
             &format!("{browser_frames_table}_json__deleted__expires_at_ms"),
@@ -17818,7 +17387,7 @@ mod tests {
             ORDER BY json_extract(data, '$.seq') ASC
             LIMIT 64
             "#,
-                quote_sqlite_identifier(&browser_input_events_table)
+                sqlite_quote_identifier(&browser_input_events_table)
             ),
             &[&"session_1", &"pending"],
             &format!("{browser_input_events_table}_json__deleted__session_id__status__seq"),
@@ -17915,7 +17484,7 @@ mod tests {
             .query_row(
                 &format!(
                     "SELECT deleted, json_extract(data, '$.data'), CAST(json_extract(data, '$.size_bytes') AS INTEGER), json_extract(data, '$.encoding') FROM {} WHERE id = ?1",
-                    quote_sqlite_identifier(&frame_table)
+                    sqlite_quote_identifier(&frame_table)
                 ),
                 params!["expired_frame"],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
@@ -17928,7 +17497,7 @@ mod tests {
             conn.query_row(
                 &format!(
                     "SELECT deleted FROM {} WHERE id = ?1",
-                    quote_sqlite_identifier(&input_table)
+                    sqlite_quote_identifier(&input_table)
                 ),
                 params![id],
                 |row| row.get(0),
@@ -18232,7 +17801,7 @@ mod tests {
             conn.query_row(
                 &format!(
                     "SELECT json_extract(data, '$.status') FROM {} WHERE id = ?1",
-                    quote_sqlite_identifier(&session_table)
+                    sqlite_quote_identifier(&session_table)
                 ),
                 params![id],
                 |row| row.get(0),
@@ -18254,10 +17823,6 @@ mod tests {
             |row| row.get::<_, String>(0),
         )
         .expect("RxDB collection table exists")
-    }
-
-    fn quote_sqlite_identifier(identifier: &str) -> String {
-        format!("\"{}\"", identifier.replace('"', "\"\""))
     }
 
     fn assert_plan_uses_index(
@@ -19482,7 +19047,7 @@ mod tests {
         conn.execute_batch("ANALYZE")
             .expect("analyze desktop chunk db");
 
-        let table = quote_sqlite_identifier("ctox_business_os__desktop_file_chunks__v0");
+        let table = sqlite_quote_identifier("ctox_business_os__desktop_file_chunks__v0");
         let (chunk_id_lower, chunk_id_upper) = desktop_file_chunk_id_bounds(&file_id);
         let limit = DESKTOP_FILE_CHUNK_CLEANUP_SCAN_LIMIT as i64;
         let sql = format!(
@@ -21275,7 +20840,7 @@ mod tests {
             let mut rxdb_conn =
                 Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
             let queue_table = rxdb_test_table_name(&rxdb_conn, "ctox_queue_tasks", 0);
-            let queue_table_sql = quote_sqlite_identifier(&queue_table);
+            let queue_table_sql = sqlite_quote_identifier(&queue_table);
             let insert_sql = format!(
                 "INSERT INTO {queue_table_sql} (id, revision, deleted, lastWriteTime, data)
                  VALUES (?1, ?2, 0, ?3, ?4)"
@@ -21825,7 +21390,7 @@ mod tests {
             let mut rxdb_conn =
                 Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
             let chat_table = rxdb_test_table_name(&rxdb_conn, "business_chats", 0);
-            let chat_table_sql = quote_sqlite_identifier(&chat_table);
+            let chat_table_sql = sqlite_quote_identifier(&chat_table);
             let insert_sql = format!(
                 "INSERT INTO {chat_table_sql} (id, revision, deleted, lastWriteTime, data)
                  VALUES (?1, ?2, 0, ?3, ?4)"
