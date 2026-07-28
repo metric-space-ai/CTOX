@@ -10627,6 +10627,8 @@ fn chat_turn_session_options_for_queue_job(
     if is_systematic_research_job(job) {
         return turn_loop::ChatTurnSessionOptions {
             disable_mcp_servers: false,
+            enable_business_os_mcp: false,
+            business_os_mcp_command_session: None,
             force_isolated_session: true,
             base_instructions: None,
             plain_prompt: false,
@@ -10645,6 +10647,8 @@ fn chat_turn_session_options_for_queue_job(
     if business_os_app_module_target_from_prompt(&job.prompt).is_some() {
         return turn_loop::ChatTurnSessionOptions {
             disable_mcp_servers: true,
+            enable_business_os_mcp: false,
+            business_os_mcp_command_session: None,
             force_isolated_session: false,
             base_instructions: Some(BUSINESS_OS_APP_AUTHORING_BASE_INSTRUCTIONS.to_string()),
             plain_prompt: true,
