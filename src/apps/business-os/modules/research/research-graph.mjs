@@ -166,12 +166,12 @@ export function createResearchGraph(host, options = {}) {
       // Detail/layer slices preserve the existing camera and node positions.
       // Only the initial mount needs the settled-layout camera correction.
       settledFitPending = topologyChanged;
-      for (const timer of cameraFitTimers) window.clearTimeout(timer);
-      cameraFitTimers.clear();
-      if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
-      layoutLockTimer = 0;
       rebuildAdjacency();
       if (topologyChanged || semanticChanged) {
+        for (const timer of cameraFitTimers) window.clearTimeout(timer);
+        cameraFitTimers.clear();
+        if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
+        layoutLockTimer = 0;
         if (topologyChanged) unlockLayout();
         graph.graphData(cloneProjection(projection));
         if (wasLayoutLocked && !topologyChanged) {
@@ -186,8 +186,8 @@ export function createResearchGraph(host, options = {}) {
         host.dataset.graphReheatCount = String(Number(host.dataset.graphReheatCount || 0) + 1);
         if (topologyChanged) {
           graph.d3ReheatSimulation?.();
-          scheduleLayoutLock();
         }
+        if (!layoutLocked) scheduleLayoutLock();
         if (selectedId || hoveredId) applyFocusState();
       }
       return true;
