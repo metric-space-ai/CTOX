@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v90';
+const APP_BUILD = '20260728-research-knowledge-usability-v91';
 
 ensureShellStylesheets();
 
@@ -8589,6 +8589,7 @@ async function refreshMaintenanceStatus(options = {}) {
 }
 
 function applyMaintenanceState(next) {
+  const wasActive = Boolean(state.maintenance?.active);
   state.maintenance = next;
   document.body.dataset.maintenanceActive = next.active ? 'true' : 'false';
   document.body.dataset.maintenanceStatus = next.status || 'idle';
@@ -8614,6 +8615,16 @@ function applyMaintenanceState(next) {
   } else {
     stopMaintenanceEmptyStateGuard();
     state.maintenanceAckLeaseId = '';
+    if (wasActive && state.initialModuleOpened && state.activeModule?.id) {
+      const moduleId = state.activeModule.id;
+      queueMicrotask(() => {
+        if (state.maintenance?.active || state.activeModule?.id !== moduleId) return;
+        openModule(moduleId, { force: true, isNavHistory: true }).catch((error) => {
+          console.error(`[business-os] failed to remount ${moduleId} after maintenance`, error);
+          setStatus(`${moduleDisplayTitle(state.activeModule)}: ${error?.message || error}`);
+        });
+      });
+    }
   }
 }
 
