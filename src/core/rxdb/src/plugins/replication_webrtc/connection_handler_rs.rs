@@ -500,6 +500,31 @@ impl Default for WebRtcFrameTransportStatus {
     }
 }
 
+/// Publish a failed best-effort server push through the existing WebRTC error
+/// relay without turning normal peer teardown into error-stream noise.
+///
+/// These two exact errors are produced when the peer was already removed or a
+/// queued sender was released by `remove_peer_inner`. At the server-push sites
+/// the peer had previously been open, so they mean the recipient disappeared;
+/// every serialization, queue-budget, backpressure, and data-channel failure is
+/// still published.
+/// Marker on send errors that mean "the peer went away", set at the two sites
+/// that can only fire during teardown. Best-effort senders suppress those and
+/// publish everything else. It is a structured field rather than a message
+/// match so the policy cannot silently break when an error text is reworded.
+pub(crate) const EXPECTED_PEER_TEARDOWN_PARAM: &str = "expectedPeerTeardown";
+
+pub(crate) fn publish_best_effort_send_error(error_subject: &RxSubject<RxError>, error: RxError) {
+    let expected_peer_close = error
+        .parameters()
+        .get(EXPECTED_PEER_TEARDOWN_PARAM)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !expected_peer_close {
+        error_subject.next(error);
+    }
+}
+
 /// WebRTC connection-handler implementation backed by `webrtc-rs`.
 pub struct WebRTCRsConnectionHandler {
     connect_subject: RxSubject<WebRTCRsPeer>,
@@ -1305,6 +1330,7 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
                     Some(serde_json::json!({
                         "message": "unknown or unopened peer",
                         "peer": peer,
+                        EXPECTED_PEER_TEARDOWN_PARAM: true,
                     })),
                 )
             })?;
@@ -1667,9 +1693,12 @@ impl WebRTCRsConnectionHandler {
             error: None,
             collection: None,
         };
-        let _ = self
+        if let Err(error) = self
             .send(recipient, WebRTCWireFrame::Response(response))
-            .await;
+            .await
+        {
+            publish_best_effort_send_error(&self.error_subject, error);
+        }
     }
 
     /// Push the current presence aggregate to every open peer as a
@@ -1693,9 +1722,12 @@ impl WebRTCRsConnectionHandler {
                 error: None,
                 collection: None,
             };
-            let _ = self
+            if let Err(error) = self
                 .send(&recipient, WebRTCWireFrame::Response(response))
-                .await;
+                .await
+            {
+                publish_best_effort_send_error(&self.error_subject, error);
+            }
         }
     }
 
@@ -1804,6 +1836,7 @@ impl WebRTCRsConnectionHandler {
                 Some(serde_json::json!({
                     "message": "WebRTC send queue result dropped",
                     "peer": peer,
+                    EXPECTED_PEER_TEARDOWN_PARAM: true,
                 })),
             )
         })?
@@ -2754,12 +2787,18 @@ fn install_data_channel(
                                                     error: None,
                                                     collection: Some(collection),
                                                 };
-                                                let _ = handler_resync
+                                                if let Err(error) = handler_resync
                                                     .send(
                                                         &peer_resync,
                                                         WebRTCWireFrame::Response(resp),
                                                     )
-                                                    .await;
+                                                    .await
+                                                {
+                                                    publish_best_effort_send_error(
+                                                        &handler_resync.error_subject,
+                                                        error,
+                                                    );
+                                                }
                                             }
                                         });
                                     }
@@ -3224,6 +3263,54 @@ mod tests {
     // (used by `apply_active_collections` + the send path) and reach the tests
     // through this glob.
     use super::*;
+
+    #[tokio::test]
+    async fn best_effort_send_error_policy_suppresses_close_and_publishes_transport_failure() {
+        let subject = RxSubject::new();
+        let mut errors = subject.subscribe();
+        publish_best_effort_send_error(
+            &subject,
+            new_rx_error(
+                "RC_WEBRTC_PEER",
+                Some(serde_json::json!({
+                    "message": "unknown or unopened peer",
+                    EXPECTED_PEER_TEARDOWN_PARAM: true,
+                })),
+            ),
+        );
+        publish_best_effort_send_error(
+            &subject,
+            new_rx_error(
+                "RC_WEBRTC_PEER",
+                Some(serde_json::json!({
+                    "message": "WebRTC send queue result dropped",
+                    EXPECTED_PEER_TEARDOWN_PARAM: true,
+                })),
+            ),
+        );
+        publish_best_effort_send_error(
+            &subject,
+            new_rx_error(
+                "RC_WEBRTC_PEER",
+                Some(serde_json::json!({
+                    "message": "send data channel frame: transport failed"
+                })),
+            ),
+        );
+
+        let published = tokio::time::timeout(Duration::from_secs(1), errors.next())
+            .await
+            .expect("genuine transport failure must be published")
+            .expect("error subject must remain open");
+        assert_eq!(
+            published
+                .parameters()
+                .get("message")
+                .and_then(Value::as_str),
+            Some("send data channel frame: transport failed"),
+            "the expected peer-close error must not precede the transport failure"
+        );
+    }
 
     /// #12c: per-collection authz is fail-open until a hook is installed, then
     /// enforces using the peer's captured capability token.

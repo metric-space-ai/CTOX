@@ -38,8 +38,8 @@ use crate::plugins::replication::{
     RxReplicationState, StreamFactory,
 };
 use crate::plugins::replication_webrtc::connection_handler_rs::{
-    CollectionAuthzHook, DocumentReadAuthzHook, DocumentWriteAuthzHook, WebRTCRsConfig,
-    WebRTCRsConnectionHandler, WebRTCRsPeer,
+    publish_best_effort_send_error, CollectionAuthzHook, DocumentReadAuthzHook,
+    DocumentWriteAuthzHook, WebRTCRsConfig, WebRTCRsConnectionHandler, WebRTCRsPeer,
 };
 use crate::plugins::replication_webrtc::signaling_client::SignalingClient;
 use crate::plugins::replication_webrtc::webrtc_helper::{
@@ -214,10 +214,14 @@ pub struct RxWebRTCReplicationPool<H: WebRTCConnectionHandler> {
     /// A fresh Business OS browser can send multiple `ctoxProtocol` requests
     /// while the native peer also starts its own handshake. Building
     /// collectionSchemas/collectionCheckpoints for the whole multiplexed room
-    /// per task fans out into hundreds of SQLite checkpoint snapshots. Share
-    /// one in-flight build and reuse it briefly; individual target collection
-    /// payloads are still resolved per response.
-    protocol_room_payload_cache: AsyncMutex<ProtocolRoomPayloadCache>,
+    /// per task fans out into hundreds of SQLite checkpoint snapshots. Cache
+    /// inspection stays synchronous and independent from the build gate so a
+    /// valid hit never waits behind storage work.
+    protocol_room_payload_cache: Mutex<ProtocolRoomPayloadCache>,
+    /// Coalesces cache misses without holding the cache mutex across schema or
+    /// checkpoint awaits. Waiters re-check the cache after acquiring this gate
+    /// and consume the winner's payload instead of starting another build.
+    protocol_room_payload_build: AsyncMutex<()>,
     /// Historical pulls perform synchronous SQLite work below an async
     /// boundary. Bound them so command writes retain a runnable Tokio worker.
     master_pull_semaphore: Semaphore,
@@ -304,7 +308,8 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
             file_fetch_registry: file_registry,
             missing_collection_schemas_warning_count: std::sync::atomic::AtomicU64::new(0),
             collections: collection_map,
-            protocol_room_payload_cache: AsyncMutex::new(ProtocolRoomPayloadCache::default()),
+            protocol_room_payload_cache: Mutex::new(ProtocolRoomPayloadCache::default()),
+            protocol_room_payload_build: AsyncMutex::new(()),
             master_pull_semaphore: Semaphore::new(MAX_CONCURRENT_MASTER_PULLS),
             request_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_REQUEST_TASKS)),
             peer_states: Mutex::new(HashMap::new()),
@@ -333,23 +338,54 @@ impl<H: WebRTCConnectionHandler + 'static> RxWebRTCReplicationPool<H> {
         self.master_replication_handlers.get(name).cloned()
     }
 
-    async fn protocol_room_payload(&self) -> ProtocolRoomPayload {
-        let now = Instant::now();
-        let mut cache = self.protocol_room_payload_cache.lock().await;
-        if let (Some(payload), Some(built_at)) = (&cache.payload, cache.built_at) {
-            if now.duration_since(built_at) <= PROTOCOL_ROOM_PAYLOAD_CACHE_TTL {
-                return payload.clone();
+    fn cached_protocol_room_payload(&self, now: Instant) -> Option<ProtocolRoomPayload> {
+        let cache = self.protocol_room_payload_cache.lock();
+        match (&cache.payload, cache.built_at) {
+            (Some(payload), Some(built_at))
+                if now.duration_since(built_at) <= PROTOCOL_ROOM_PAYLOAD_CACHE_TTL =>
+            {
+                Some(payload.clone())
             }
+            _ => None,
+        }
+    }
+
+    async fn protocol_room_payload_with<F, Fut>(&self, build: F) -> ProtocolRoomPayload
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = ProtocolRoomPayload>,
+    {
+        // Fast path deliberately does not touch the async build gate. A valid
+        // cached handshake therefore remains available even while another task
+        // owns the in-flight-build slot.
+        if let Some(payload) = self.cached_protocol_room_payload(Instant::now()) {
+            return payload;
         }
 
-        let collections = self.collections();
-        let payload = ProtocolRoomPayload {
-            collection_schemas: collection_schemas_payload(&collections).await,
-            collection_checkpoints: collection_checkpoints_payload(&collections).await,
-        };
+        let _build_guard = self.protocol_room_payload_build.lock().await;
+        // Every waiter re-checks after the winner completes. This preserves
+        // exactly-one-build coalescing without retaining the cache mutex across
+        // schema hashing or storage checkpoint awaits.
+        if let Some(payload) = self.cached_protocol_room_payload(Instant::now()) {
+            return payload;
+        }
+
+        let payload = build().await;
+        let mut cache = self.protocol_room_payload_cache.lock();
         cache.built_at = Some(Instant::now());
         cache.payload = Some(payload.clone());
         payload
+    }
+
+    async fn protocol_room_payload(&self) -> ProtocolRoomPayload {
+        let collections = self.collections();
+        self.protocol_room_payload_with(|| async move {
+            ProtocolRoomPayload {
+                collection_schemas: collection_schemas_payload(&collections).await,
+                collection_checkpoints: collection_checkpoints_payload(&collections).await,
+            }
+        })
+        .await
     }
 
     /// Register the per-peer relay sub-tasks (one master-change relay per
@@ -1292,6 +1328,7 @@ where
                             };
                             let handler_for_stream = Arc::clone(&handler);
                             let peer_for_stream = peer.clone();
+                            let error_subject = pool_clone.error_subject.clone();
                             let stream_task = tokio::spawn(async move {
                                 let mut master_stream = master.master_change_stream();
                                 while let Some(ev) = master_stream.next().await {
@@ -1329,9 +1366,12 @@ where
                                         error: None,
                                         collection: Some(collection_name.clone()),
                                     };
-                                    let _ = handler_for_stream
+                                    if let Err(error) = handler_for_stream
                                         .send(&peer_for_stream, WebRTCWireFrame::Response(resp))
-                                        .await;
+                                        .await
+                                    {
+                                        publish_best_effort_send_error(&error_subject, error);
+                                    }
                                 }
                             });
                             peer_sub_tasks.push(stream_task);
@@ -3098,6 +3138,98 @@ mod tests {
         async fn close_peer(&self, peer: &MockPeer) {
             self.closed_peers.lock().push(peer.0.clone());
         }
+    }
+
+    #[tokio::test]
+    async fn protocol_room_payload_cache_hit_bypasses_in_flight_build_gate() {
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("protocol_cache_hit").await;
+        let pool = RxWebRTCReplicationPool::new(collection, MockHandler::new());
+        let cached_payload = ProtocolRoomPayload {
+            collection_schemas: Some(serde_json::json!({ "source": "cache" })),
+            collection_checkpoints: Some(serde_json::json!({ "checkpoint": 1 })),
+        };
+        {
+            let mut cache = pool.protocol_room_payload_cache.lock();
+            cache.payload = Some(cached_payload.clone());
+            cache.built_at = Some(Instant::now());
+        }
+
+        // Holding this gate simulates a slow storage-backed build. The cache
+        // lookup must not acquire it when the TTL entry is still valid.
+        let build_guard = pool.protocol_room_payload_build.lock().await;
+        let build_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let build_calls_for_closure = StdArc::clone(&build_calls);
+        let hit = tokio::time::timeout(
+            Duration::from_millis(100),
+            pool.protocol_room_payload_with(move || async move {
+                build_calls_for_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                ProtocolRoomPayload::default()
+            }),
+        )
+        .await
+        .expect("valid cache hit must not wait behind the in-flight build gate");
+
+        assert_eq!(hit.collection_schemas, cached_payload.collection_schemas);
+        assert_eq!(
+            build_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a valid hit must not invoke the payload builder"
+        );
+        drop(build_guard);
+        pool.cancel().await;
+    }
+
+    #[tokio::test]
+    async fn protocol_room_payload_concurrent_misses_coalesce_one_build() {
+        const CALLERS: usize = 12;
+        let collection =
+            crate::rx_collection::test_support::test_collection_named("protocol_cache_miss").await;
+        let pool = RxWebRTCReplicationPool::new(collection, MockHandler::new());
+        let start = StdArc::new(tokio::sync::Barrier::new(CALLERS + 1));
+        let build_calls = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut callers = Vec::with_capacity(CALLERS);
+
+        for _ in 0..CALLERS {
+            let pool = StdArc::clone(&pool);
+            let start = StdArc::clone(&start);
+            let build_calls = StdArc::clone(&build_calls);
+            callers.push(tokio::spawn(async move {
+                start.wait().await;
+                pool.protocol_room_payload_with(move || async move {
+                    let build_number =
+                        build_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    ProtocolRoomPayload {
+                        collection_schemas: Some(serde_json::json!({
+                            "build": build_number
+                        })),
+                        collection_checkpoints: None,
+                    }
+                })
+                .await
+            }));
+        }
+
+        start.wait().await;
+        for caller in callers {
+            let payload = caller.await.expect("cache caller task");
+            assert_eq!(
+                payload
+                    .collection_schemas
+                    .as_ref()
+                    .and_then(|value| value.get("build"))
+                    .and_then(Value::as_u64),
+                Some(1),
+                "all waiters must consume the winner's payload"
+            );
+        }
+        assert_eq!(
+            build_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "concurrent cache misses must invoke exactly one builder"
+        );
+        pool.cancel().await;
     }
 
     fn master_changes_since_frame(id: &str, collection: &str) -> WebRTCMessage {
