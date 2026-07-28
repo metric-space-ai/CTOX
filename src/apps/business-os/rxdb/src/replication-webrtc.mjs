@@ -127,6 +127,7 @@ const SHARED_ROOM_PEERS = new Map(); // key -> SharedRoomPeer
 const SHARED_HANDSHAKE_TIMEOUT_MS = 60000;
 const SHARED_TOKEN_TIMEOUT_MS = 30000;
 const SHARED_PEER_OPEN_WAIT_MS = 60000;
+const SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS = 250;
 const SHARED_PROTOCOL_COLLECTION_CONCURRENCY = 8;
 const VOLATILE_SIGNALING_QUERY_PARAMS = new Set([
   'client',
@@ -225,6 +226,8 @@ class SharedRoomPeer {
     // whole room.
     this.schemaMismatchCollections = new Set();
     this.collectionCatchUps = new Map();
+    this.collectionCatchUpGenerations = new Map();
+    this.collectionCatchUpQueueSliceMs = SHARED_COLLECTION_CATCH_UP_QUEUE_SLICE_MS;
     this.negotiationCatchUp = null;
     // Phase 2: subscription-driven active-collection priority. The shared peer
     // forwards the RxDB layer's active set (derived from real reactive
@@ -274,34 +277,90 @@ class SharedRoomPeer {
 
   scheduleCollectionCatchUp(collection, registration) {
     if (!collection || this.collectionCatchUps.has(collection)) return;
-    const run = this.peerOpenQueue
-      .then(() => this.catchUpRegisteredCollection(collection, registration))
-      .catch((error) => registration.state?.emitError?.(error))
-      .finally(() => this.collectionCatchUps.delete(collection));
-    // A shared peer reconnect re-drives every registered collection at once.
-    // Keep the complete initial pull/push for each collection on one room-wide
-    // chain; merely pacing collection registration does not protect a peer
-    // that reconnects after all collections are already registered.
-    this.peerOpenQueue = run.catch(() => {});
+    const generation = Number(this.collectionCatchUpGenerations.get(collection) || 0) + 1;
+    this.collectionCatchUpGenerations.set(collection, generation);
+    const invalidated = createDeferred();
+    const queueStart = this.peerOpenQueue.catch(() => {});
+    let run = null;
+    const isCurrent = () => (
+      run?.cancelled !== true
+      && this.collectionCatchUpGenerations.get(collection) === generation
+      && (!this.collections.has(collection) || this.collections.get(collection) === registration)
+      && this.collectionCatchUps.get(collection) === run
+    );
+    run = queueStart
+      .then(() => {
+        if (!isCurrent()) return;
+        return this.catchUpRegisteredCollection(collection, registration, isCurrent);
+      })
+      .catch((error) => {
+        if (isCurrent()) registration.state?.emitError?.(error);
+      })
+      .finally(() => {
+        // A stale generation may finish after unregister + re-register. It must
+        // never remove the fresh generation's deduplication entry.
+        if (this.collectionCatchUps.get(collection) === run) {
+          this.collectionCatchUps.delete(collection);
+        }
+      });
+    run.cancelled = false;
+    run.generation = generation;
+    run.isCurrent = isCurrent;
+    run.invalidate = () => {
+      if (run.cancelled) return;
+      run.cancelled = true;
+      invalidated.resolve(true);
+    };
     this.collectionCatchUps.set(collection, run);
+
+    // Keep room-level catch-ups paced, but do not let one hanging collection
+    // monopolize the queue. Invalidation releases the slot immediately so a
+    // re-register starts a new generation without inheriting the stale run.
+    const queueRelease = createDeferred();
+    let queueReleased = false;
+    let queueSliceTimer = null;
+    const releaseQueue = () => {
+      if (queueReleased) return;
+      queueReleased = true;
+      if (queueSliceTimer) clearTimeout(queueSliceTimer);
+      queueRelease.resolve(true);
+    };
+    run.then(releaseQueue, releaseQueue);
+    invalidated.promise.then(releaseQueue);
+    this.peerOpenQueue = queueStart
+      .then(() => {
+        if (!queueReleased) {
+          const sliceMs = Math.max(0, Number(this.collectionCatchUpQueueSliceMs) || 0);
+          queueSliceTimer = setTimeout(releaseQueue, sliceMs);
+          queueSliceTimer.unref?.();
+        }
+        return queueRelease.promise;
+      })
+      .catch(() => {});
   }
 
-  async catchUpRegisteredCollection(collection, registration) {
+  async catchUpRegisteredCollection(collection, registration, isCurrent = () => (
+    this.collections.get(collection) === registration
+  )) {
+    if (!isCurrent()) return;
     const negotiated = await this.ensureNegotiatedPeer();
-    if (!negotiated || !this.isPeerOpen(negotiated.peerId)) return;
+    if (!isCurrent() || !negotiated || !this.isPeerOpen(negotiated.peerId)) return;
     const { peerId, queryFetchCapable } = negotiated;
     const existingPeerStates = registration.state?.peerStates$?.getValue?.();
     if (existingPeerStates?.has?.(peerId) && registration.state?.isPeerOpen?.(peerId)) return;
     if (this.schemaMismatchCollections.has(collection)) return;
     const remoteProtocol = this.remoteProtocolForCollection(negotiated.remoteProtocol, collection);
     const localSchemas = await this.collectCollectionSchemas();
+    if (!isCurrent()) return;
     const only = { [collection]: localSchemas[collection] };
     const mismatches = assertCollectionSchemasCompatible(only, remoteProtocol);
     if (mismatches.has(collection)) {
+      if (!isCurrent()) return;
       this.schemaMismatchCollections.add(collection);
       registration.state?.emitError?.(mismatches.get(collection));
       return;
     }
+    if (!isCurrent()) return;
     await registration.state?.onPeerReady?.(peerId, remoteProtocol, queryFetchCapable);
   }
 
@@ -326,6 +385,18 @@ class SharedRoomPeer {
 
   unregister(collection) {
     this.collections.delete(collection);
+    // Invalidate before a later register can schedule the same name. The stale
+    // Promise remains observable to existing awaiters, but loses authority to
+    // activate/persist and cannot delete the next generation's map entry.
+    const catchUp = this.collectionCatchUps.get(collection);
+    this.collectionCatchUpGenerations.set(
+      collection,
+      Number(this.collectionCatchUpGenerations.get(collection) || 0) + 1,
+    );
+    catchUp?.invalidate?.();
+    if (this.collectionCatchUps.get(collection) === catchUp) {
+      this.collectionCatchUps.delete(collection);
+    }
     this.refCount = Math.max(0, this.refCount - 1);
     if (this.refCount === 0) {
       SHARED_ROOM_PEERS.delete(this.key);
