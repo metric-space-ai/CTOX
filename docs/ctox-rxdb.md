@@ -133,6 +133,34 @@ All descriptions verified against the file headers.
 | `observable.mjs` | Minimal subject/behaviour-subject. |
 | `event-target.mjs` | Tiny `EventTarget`-backed emitter. |
 
+### 3.1a Collection readiness — "unsynced" is not "empty" (SYNC-A wave F)
+
+A collection that has never completed a pull looks exactly like an empty one if
+you only count documents. Modules rendered "no data yet" during catch-up because
+the readiness signal existed in diagnostics but never reached the render path.
+
+The engine persists `firstPullCompletedAtMs` in the retained checkpoint record
+(`replication-webrtc.mjs`), so readiness survives reloads and participates in the
+existing validity-key invalidation — a permission or generation change resets it
+correctly. From it, `collectionReadinessState` derives four states, exposed on
+the transport status:
+
+| State | Meaning |
+|---|---|
+| `never-synced` | No marker and no pull running. |
+| `catching-up` | First pull is in flight. |
+| `live` | Marker present — including at zero documents. |
+| `offline-pending` | No marker, circuit open or no peer. |
+
+The shell exposes exactly one selector, `ctx.sync.collectionReadiness(name)`
+plus a subscription, fed from the existing diagnostics pipeline. The kit ships
+`.ctox-syncing` as a sibling of `.ctox-empty`, and the rule for modules is:
+**not ready ⇒ loading shell; ready and empty ⇒ `.ctox-empty`**. Rows that
+already exist always render regardless of readiness.
+
+Explicit non-goal: readiness is a **render hint, never a mount blocker**. The OS
+stays snappy; a module must not wait for sync to appear.
+
 ### 3.2 Shell integration
 
 **`shared/db.js` — `createBusinessDb({ name })`.** Imports the bundle from
@@ -480,6 +508,27 @@ asynchronously and correlated by `requestId`
 `demand-loading-transport.mjs`). Capability gate:
 `ctox-rxdb-query-fetch-v1`.
 
+**Error codes are a contract, and `retryable` is part of it** (SYNC-A-B2).
+The JS side keys its retry/fallback behaviour on these codes, so a wrong code
+is a behaviour bug, not a cosmetic one. Both handlers classify centrally —
+`query_fetch_error_code_for_rx_error` and its file-side counterpart — rather
+than mapping errors ad hoc at each `map_err`:
+
+| Code | retryable | Meaning |
+|---|---|---|
+| `FILE_NOT_FOUND` | no | The file genuinely does not exist. |
+| `FILE_SOURCE_ERROR` | **yes** | Transient source failure (I/O, DB, lock). Previously collapsed into `FILE_NOT_FOUND`, which made disk blips indistinguishable from a missing file and therefore never retried. |
+| `UNAUTHORIZED` | no | Peer is not authorized for the collection/file. |
+| `STREAM_LIMIT_EXCEEDED` | yes | Too many in-flight streams. |
+| `RATE_LIMITED` | yes | Server-side throttle. |
+| `REMOTE_TIMEOUT` | yes | Deadline hit. |
+| `QUERY_NOT_SUPPORTED`, `SCHEMA_MISMATCH`, `FEATURE_DISABLED` | no | Terminal until config/schema changes. |
+
+Adding a code is safe on this path: `routeFileError`
+(`demand-loading-transport.mjs`) carries `code` and `retryable` through without
+an allowlist, so an unknown code retries according to the server's flag rather
+than being misclassified as fatal.
+
 ### 6.5 Presence (ctox-presence-v1)
 
 Ephemeral "who is viewing/editing what" hints between browser peers, relayed
@@ -602,6 +651,37 @@ by `checkpoint-contract-smoke.mjs`, which drives the real
 | Browser-side repair | Error classification (§3.2) decides between recording a reconnect hint (blips, lifecycle events) and scheduling the unhealthy-collection sweep / full restart; an `active$` drop schedules a 750 ms restart. | `sync.js` |
 | Native peer death | Supervised respawn with capped backoff; config re-read per attempt (room-password rotation applies); bring-up failure or stale heartbeat ⇒ fatal exit ⇒ respawn — never a zombie. | `rxdb_peer.rs` (§4.2) |
 | SQLite contention while accepting durable background controls | Commands with durable identities and idempotent effects are returned to `pending_sync` with their payload and authorization receipt intact. The allowlist covers external-SQL sync/write, person research, and outbound source adapter generation/test/auth assistance; non-idempotent controls still fail closed. Accepted or non-terminal failed allowlisted rows remain restart-recoverable. | `store.rs::is_recoverable_background_control_command_type`, `rxdb_peer.rs::transient_business_command_retry_document` |
+
+### 8.0 Waiting for quiescence (SYNC-A-C9b)
+
+There is exactly **one** answer to "is the replication quiet?":
+`replication_protocol::index_mod::await_rx_storage_replication_idle`, with
+`await_rx_storage_replication_direction_idle` for callers that only care about
+one direction. Before SYNC-A this existed four ways — a real subscription on
+`active.up`, an acquire-and-immediately-drop of `stream_queue.up`, a fixed
+double lock-drain in the protocol, and a second `for _ in 0..2` drain stacked on
+top at the plugin layer. Two layers of the same approximation.
+
+The primitive waits on retained signals, not on lock acquisition: activity is
+published *before* throttling or queue acquisition and released by RAII when the
+work actually ends, overlapping work is counted so no premature `false` escapes,
+and the stream queues carry a retained idle flag that also covers waiting lock
+acquisitions. Because the signals are retained, an already-idle state returns
+immediately and a transition that happened before subscription is not missed.
+
+Two properties are load-bearing — breaking either turns a wait into a hang:
+
+- The primitive holds **no** stream or checkpoint lock while awaiting a signal.
+  It takes the checkpoint lock only to drain and releases it before the final
+  directional recheck; otherwise directional work could block on
+  `set_checkpoint()` while the primitive waits on exactly that work.
+- Lock ordering stays one-way. The `QueueOnly` path may wait for Up while
+  holding Down; there is no inverse Up-to-Down wait in the protocol.
+
+One caller keeps different semantics on purpose: the resolved-conflict path in
+`persist_from_master` uses `QueueOnly`, because upstream RxDB awaits only the
+current `streamQueue.up` head there. It must not wait for initial or unrelated
+future upstream activity — full quiescence would be wrong, not merely slower.
 
 ### 8.1 Hard invariants (2026-06-10 soak campaign)
 
@@ -937,9 +1017,24 @@ or `src/core/rxdb/src/plugins/replication_webrtc/` (and `rxdb_peer.rs`):
 
 ```sh
 node src/apps/business-os/rxdb/tests/run-all.mjs
-cargo test --manifest-path src/core/rxdb/Cargo.toml
+cargo test --manifest-path src/core/rxdb/Cargo.toml -- --test-threads=1
+cargo clippy --manifest-path src/core/rxdb/Cargo.toml --all-targets
 cargo fmt --check --manifest-path src/core/rxdb/Cargo.toml
 ```
+
+`cargo clippy` is part of the gate, not optional: the crate is clippy-clean
+(zero warnings) as of SYNC-A-E2, so any warning you see is yours. Two lints are
+allowed crate-wide with the reason written at the attribute in `lib.rs` —
+`result_large_err` (boxing `RxError` would change every signature in a fork
+whose error shape deliberately mirrors upstream) and, where it applies,
+`type_complexity`. Every other `allow` in the crate is individually justified in
+place; adding one without a written reason is a review finding.
+
+`--test-threads=1` matters on a loaded machine: two SQLite tests
+(`change_stream_emits_other_connection_sqlite_writes`,
+`query_fallback_does_not_wait_for_writer_mutex`) time out under heavy parallel
+load and pass in isolation. Check the load average before diagnosing them as a
+regression.
 
 If `src/` of the browser runtime changed: rebuild dist + bump the three
 cache-busters first (§9), since most smokes import from `dist/`.
