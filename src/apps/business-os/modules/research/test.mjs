@@ -38,6 +38,7 @@ test('measurement semantics never fall back to legacy radial load and retain zer
   assert.equal(hooks.tangentialEquivalentForce({ radial_load_N: 4 }), '');
   assert.equal(hooks.tangentialEquivalentForce({ radial_load_N: 4, tangential_equivalent_force_N: 0 }), 0);
   assert.equal(hooks.metricPropellerLength({ prop_diameter_mm: 0, prop_diameter_in: 9 }, 'prop_diameter'), 0);
+  assert.equal(hooks.metricPropellerLength({ input_D_m: 0.2159 }, 'prop_diameter'), 215.9);
 
   const measurements = hooks.aggregateMeasurements([
     { source_id: 'source-1', evidence_id: 'evidence-1', snapshot_id: 'snap-1', snapshot_path: 'runtime/snapshots/source-1.html', retrieved_at: '2026-07-17T00:00:00Z', url_role: 'original_content', content_scope: 'full_text', snapshot_hash: `sha256:${'1'.repeat(64)}`, canonical_url: 'https://example.test/source-1', radial_load_N: 4, rpm: 0 },
@@ -45,6 +46,29 @@ test('measurement semantics never fall back to legacy radial load and retain zer
   ]);
   assert.equal(measurements.get('source-1').maxTangentialEquivalent, 0);
   assert.equal(measurements.get('source-1').maxRpm, 0);
+});
+
+test('derived propeller rows inherit geometry without overwriting derived values', () => {
+  const [row] = hooks.derivedMeasurementDisplayRows(
+    [{
+      measurement_id: 'MEAS-1',
+      source_id: 'SRC-1',
+      input_rpm: 2489,
+      derived_thrust_N: 0.479,
+      derived_torque_Nm: 0.0089,
+    }],
+    [{
+      measurement_id: 'MEAS-1',
+      propeller_size_original: '8.5x6',
+      prop_diameter_in: 8.5,
+      prop_pitch_in: 6,
+      rpm: 2500,
+    }],
+  );
+  assert.equal(row.propeller_size_original, '8.5x6');
+  assert.equal(row.prop_pitch_in, 6);
+  assert.equal(row.input_rpm, 2489);
+  assert.equal(row.derived_thrust_N, 0.479);
 });
 
 test('research tasks keep evidence and direct measurements in separate tables', () => {
@@ -866,6 +890,10 @@ test('discovery graph prefers persisted citation paths over inferred tag cluster
 });
 
 test('research graph releases its WebGL context when the surface is remounted', () => {
+  assert.match(researchSource, /const preservedGraphHost = state\.showDiagram[\s\S]*?state\.graphTaskId === task\.id/);
+  assert.match(researchSource, /replacementHost\?\.replaceWith\(preservedGraphHost\)[\s\S]*?state\.graphSurface\.setData\(projection\)/);
+  assert.match(researchSource, /state\.graphTaskId = task\.id/);
+  assert.match(researchSource, /state\.graphTaskId = ''/);
   assert.match(researchGraphSource, /zoomToFit\?\.\([\s\S]*?projection\.visibleNodeIds\.has\(node\.id\)/);
   assert.match(researchGraphSource, /onNodeHover\(\(node\) => \{[\s\S]*?if \(!layoutLocked\) settleLayout\(\)/);
   assert.match(researchGraphSource, /function lockLayout\(\)[\s\S]*?node\.fx = node\.x[\s\S]*?node\.fy = node\.y[\s\S]*?graphLayoutLocked = 'true'/);

@@ -11236,6 +11236,8 @@ function showStartMenu(panel) {
     setTimeout(() => searchInput.focus(), 20);
   }
   filterStartMenu(panel, '');
+  const menuBody = panel.querySelector('.start-menu-body');
+  if (menuBody) menuBody.scrollTop = 0;
 
   // Close when clicking outside
   const outsideClickListener = (evt) => {

@@ -215,6 +215,85 @@ const RESEARCH_TABLE_CONTRACT = Object.freeze({
   },
 });
 
+const BEARING_MEASUREMENT_TABLE_CONTRACT = Object.freeze({
+  measured_load_points: {
+    title: 'Direct Measurement Points',
+    columns: [
+      'measurement_id',
+      'source_id',
+      'dataset_id',
+      'source_file',
+      'source_row_ref',
+      'propeller_size_original',
+      'prop_diameter_in',
+      'prop_pitch_in',
+      'rpm',
+      'thrust_N',
+      'torque_Nm',
+      'shaft_power_W',
+      'radial_load_N_direct',
+      'axial_load_N_direct',
+      'thrust_coefficient_CT',
+      'power_coefficient_CP',
+      'measurement_kind',
+      'uncertainty',
+      'confidence',
+      'canonical_url',
+      'snapshot_sha256',
+      'is_derived',
+    ],
+  },
+  derived_propeller_load_points: {
+    title: 'Derived Propeller Load Points',
+    columns: [
+      'derivation_id',
+      'source_id',
+      'dataset_id',
+      'source_file',
+      'source_row_ref',
+      'propeller_size_original',
+      'prop_diameter_in',
+      'prop_pitch_in',
+      'diameter_m_input',
+      'rpm_input',
+      'air_density_kg_m3_input',
+      'thrust_coefficient_CT_input',
+      'power_coefficient_CP_input',
+      'thrust_N_derived',
+      'shaft_power_W_derived',
+      'torque_Nm_derived',
+      'formula_thrust',
+      'formula_power',
+      'formula_torque',
+      'assumptions',
+      'uncertainty',
+      'confidence',
+      'derivation_method',
+      'is_derived',
+      'canonical_url',
+      'snapshot_sha256',
+    ],
+  },
+  derived_bearing_loads: {
+    title: 'Derived Bearing Reactions',
+    columns: [
+      'derivation_id',
+      'source_id',
+      'source_row_ref',
+      'bearing_radial_load_N',
+      'axial_load_N',
+      'moment_Nm',
+      'derivation_method',
+      'assumption_text',
+      'uncertainty',
+      'claim_id',
+      'evidence_id',
+      'canonical_url',
+      'snapshot_hash',
+    ],
+  },
+});
+
 const DRONE_SOURCES_METADATA = Object.freeze({
   'nasa-mtb2': {
     group: 'nasa',
@@ -390,6 +469,7 @@ const state = {
   candidateModels: [],
   sourceRows: [],
   curatedRows: [],
+  evidenceRows: [],
   measurementRows: [],
   derivedMeasurementRows: [],
   graphNodeRows: [],
@@ -400,6 +480,7 @@ const state = {
   graphContractErrors: [],
   graphProjectionCache: new Map(),
   graphSurface: null,
+  graphTaskId: '',
   graphMountToken: 0,
   knowledgeRefreshInFlight: false,
   selectedGraphNodeId: '',
@@ -1263,6 +1344,7 @@ async function loadDashboardData() {
   state.candidateModels = [];
   state.sourceRows = [];
   state.curatedRows = [];
+  state.evidenceRows = [];
   state.measurementRows = [];
   state.derivedMeasurementRows = [];
   state.graphNodeRows = [];
@@ -1281,14 +1363,17 @@ async function loadDashboardData() {
     task.source_catalog_key || tableKey(base, ['source_catalog', 'sources', 'curated_sources']),
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
+  const evidenceTable = tableForKey(base, 'evidence_points');
   const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
-  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
+  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
+    || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
-  const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
+  const [candidateRows, sourceRows, curatedRows, evidenceRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
     candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
     sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
     curatedTable && curatedTable.id !== sourceTable?.id ? fetchTableRows(curatedTable.id) : Promise.resolve([]),
+    evidenceTable ? fetchTableRows(evidenceTable.id) : Promise.resolve([]),
     measurementTable && measurementTable.id !== sourceTable?.id && measurementTable.id !== curatedTable?.id ? fetchTableRows(measurementTable.id) : Promise.resolve([]),
     derivedMeasurementTable ? fetchTableRows(derivedMeasurementTable.id) : Promise.resolve([]),
     graphNodeTable ? fetchTableRows(graphNodeTable.id) : Promise.resolve([]),
@@ -1297,12 +1382,13 @@ async function loadDashboardData() {
   state.candidateRows = candidateRows;
   state.sourceRows = sourceRows;
   state.curatedRows = curatedRows;
+  state.evidenceRows = evidenceRows;
   state.measurementRows = measurementRows;
   state.derivedMeasurementRows = derivedMeasurementRows;
   state.graphNodeRows = graphNodeRows;
   state.graphEdgeRows = graphEdgeRows;
   state.candidateModels = buildSourceModels(task, candidateRows, [], []);
-  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows);
+  state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows);
   const evidenceMeasurementRows = filterMeasurementRowsForEvidence(measurementRows, state.sourceModels);
   const evidenceGraphRows = filterGraphRowsForEvidence(graphNodeRows, graphEdgeRows, evidenceSourceIds(state.sourceModels));
   state.graphContractStatus = evidenceGraphRows.status || '';
@@ -1500,11 +1586,19 @@ function finitePositive(value) {
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
-function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
+function buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows = []) {
   const curatedBySource = new Map();
   for (const row of curatedRows) {
     const id = sourceId(row);
     if (id) curatedBySource.set(id, row);
+  }
+  const evidenceBySource = new Map();
+  for (const row of evidenceRows) {
+    const id = sourceId(row);
+    if (!id) continue;
+    const sourceEvidence = evidenceBySource.get(id) || [];
+    if (sourceEvidence.length < 12) sourceEvidence.push(row);
+    evidenceBySource.set(id, sourceEvidence);
   }
   const raw = (sourceRows.length ? sourceRows : curatedRows).filter((row) => sourceModelId(row));
   const initialModels = raw.map((row) => {
@@ -1537,6 +1631,7 @@ function buildSourceModels(task, sourceRows, curatedRows, measurementRows) {
       note,
       row,
       curated,
+      evidenceRows: evidenceBySource.get(id) || [],
       measurements: agg,
       evidenceEligible: gate.eligible,
       evidenceStatus: gate.status,
@@ -1843,13 +1938,22 @@ function aggregateMeasurements(rows, sourceModels = null) {
       count: 0,
       maxAxial: 0,
       maxTangentialEquivalent: 0,
+      minRpm: Number.POSITIVE_INFINITY,
       maxRpm: 0,
+      hasCt: false,
+      hasCp: false,
       files: new Set(),
     };
     current.count += 1;
     current.maxAxial = Math.max(current.maxAxial, numberValue(row.force_N ?? row.axial_load_N ?? row.thrust_N));
     current.maxTangentialEquivalent = Math.max(current.maxTangentialEquivalent, numberValue(tangentialEquivalentForce(row)));
-    current.maxRpm = Math.max(current.maxRpm, numberValue(row.rpm));
+    const rpm = optionalNumberValue(row.rpm);
+    if (rpm !== null) {
+      current.minRpm = Math.min(current.minRpm, rpm);
+      current.maxRpm = Math.max(current.maxRpm, rpm);
+    }
+    current.hasCt ||= optionalNumberValue(row.thrust_coefficient_CT) !== null;
+    current.hasCp ||= optionalNumberValue(row.power_coefficient_CP) !== null;
     if (row.source_file) current.files.add(String(row.source_file));
     bySource.set(id, current);
   }
@@ -2078,6 +2182,12 @@ function renderCenter() {
   }
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
+  const preservedGraphHost = state.showDiagram
+    && state.graphSurface
+    && state.graphTaskId === task.id
+    ? root.querySelector('[data-research-graph-host]')
+    : null;
+  preservedGraphHost?.remove();
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2137,8 +2247,16 @@ function renderCenter() {
       </section>
     </div>
   `;
-  if (state.showDiagram) scheduleResearchGraphMount(task, projection);
-  else disposeResearchGraph();
+  if (state.showDiagram && preservedGraphHost) {
+    const replacementHost = root.querySelector('[data-research-graph-host]');
+    replacementHost?.replaceWith(preservedGraphHost);
+    root.querySelector('[data-research-graph-loading]')?.remove();
+    state.graphSurface.setData(projection);
+  } else if (state.showDiagram) {
+    scheduleResearchGraphMount(task, projection);
+  } else {
+    disposeResearchGraph();
+  }
   restorePaneScroll(root, scrollState);
 }
 
@@ -2394,6 +2512,7 @@ async function scheduleResearchGraphMount(task, projection) {
         loading?.remove();
       },
     });
+    state.graphTaskId = task.id;
     state.graph.status = 'ready';
     loading?.remove();
   } catch (error) {
@@ -2416,6 +2535,7 @@ function disposeResearchGraph() {
   state.graphMountToken += 1;
   state.graphSurface?.dispose?.();
   state.graphSurface = null;
+  state.graphTaskId = '';
 }
 
 function selectGraphNode(node) {
@@ -3455,6 +3575,24 @@ function sourceDataSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['data_fields', 'fields', 'measurement_fields', 'summary', 'abstract']);
   if (direct) return direct;
+  const measurements = source?.measurements;
+  if (measurements?.count) {
+    const channels = [
+      measurements.hasCt ? 'CT' : '',
+      measurements.hasCp ? 'CP' : '',
+      measurements.maxAxial > 0 ? 'Schub (N)' : '',
+      measurements.maxTangentialEquivalent > 0 ? 'Tangentialkraft (N)' : '',
+    ].filter(Boolean);
+    const rpmRange = Number.isFinite(measurements.minRpm) && measurements.maxRpm > 0
+      ? `; ${formatMeasurementNumber(measurements.minRpm, 0)}–${formatMeasurementNumber(measurements.maxRpm, 0)} RPM`
+      : '';
+    return `${Number(measurements.count).toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US')} Messzeilen${channels.length ? `; ${channels.join(', ')}` : ''}${rpmRange}`;
+  }
+  const evidence = source?.evidenceRows?.find((item) => (
+    firstString(item, ['exact_quote_or_value', 'fact_value', 'quote'])
+  ));
+  const excerpt = compactSourceExcerpt(firstString(evidence, ['exact_quote_or_value', 'fact_value', 'quote']));
+  if (excerpt) return excerpt;
   const bibliographic = [
     firstString(row, ['authors_or_institution', 'authors', 'institution', 'publisher']),
     firstString(row, ['publication_year', 'year']),
@@ -3469,7 +3607,14 @@ function sourceDataSummary(source) {
 function sourceContributionSummary(source) {
   const row = source?.row || {};
   const direct = firstString(row, ['contribution_note', 'contribution', 'use', 'verification_notes', 'evidence_note']);
-  if (direct) return direct;
+  if (direct && !/original content read|snapshot retained|sha-256 verified/i.test(direct)) return direct;
+  const evidence = source?.evidenceRows?.find((item) => firstString(item, ['claim_id']))
+    || source?.evidenceRows?.[0];
+  const evidenceValue = compactSourceExcerpt(firstString(evidence, ['fact_value', 'exact_quote_or_value', 'quote']));
+  if (evidenceValue) {
+    const label = firstString(evidence, ['fact_label', 'statement_type', 'criterion_id']);
+    return `${label && label !== 'source_relevance' ? `${label}: ` : ''}${evidenceValue}`;
+  }
   const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
   return relevance
     ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
@@ -3484,7 +3629,18 @@ function sourceLimitationsSummary(source) {
     'limitations',
     'uncertainty',
     'independence_note',
+  ]) || firstString(source?.evidenceRows?.find((item) => firstString(item, ['limitations'])), [
+    'limitations',
   ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
+}
+
+function compactSourceExcerpt(value, maxLength = 260) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  const cut = text.slice(0, maxLength);
+  const boundary = Math.max(cut.lastIndexOf('. '), cut.lastIndexOf('; '), cut.lastIndexOf(' '));
+  return `${cut.slice(0, Math.max(boundary, Math.floor(maxLength * 0.7))).trim()}…`;
 }
 
 function sourceTags(source) {
@@ -3530,7 +3686,10 @@ function formatDimensionScore(value) {
 
 function renderMeasurementsTable() {
   const directRows = filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels);
-  const derivedRows = filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels);
+  const derivedRows = derivedMeasurementDisplayRows(
+    filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels),
+    directRows,
+  );
   const mode = state.measurementMode === 'direct' ? 'direct' : 'derived';
   const rows = mode === 'direct' ? directRows : derivedRows;
   return `
@@ -3539,7 +3698,7 @@ function renderMeasurementsTable() {
         Direkte Messwerte <span>${directRows.length}</span>
       </button>
       <button type="button" class="ctox-pane-tab${mode === 'derived' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="derived" role="tab" aria-selected="${mode === 'derived'}">
-        Abgeleitete Kräfte &amp; Momente <span>${derivedRows.length}</span>
+        Abgeleitete Propellerlasten <span>${derivedRows.length}</span>
       </button>
     </div>
     <p class="research-measurement-note">${mode === 'direct'
@@ -3547,6 +3706,16 @@ function renderMeasurementsTable() {
       : 'Aus CT/CP mit dokumentierter Luftdichte und Propellergeometrie abgeleitet. Diese Werte sind keine direkt gemessenen Lagerkräfte.'}</p>
     ${mode === 'direct' ? renderDirectMeasurements(rows) : renderDerivedMeasurements(rows)}
   `;
+}
+
+function derivedMeasurementDisplayRows(derivedRows, directRows) {
+  const directRowsById = new Map((directRows || [])
+    .map((row) => [String(row.measurement_id || '').trim(), row])
+    .filter(([id]) => id));
+  return (derivedRows || []).map((row) => ({
+    ...(directRowsById.get(String(row.measurement_id || '').trim()) || {}),
+    ...row,
+  }));
 }
 
 function renderDirectMeasurements(rows) {
@@ -3613,11 +3782,11 @@ function renderDerivedMeasurements(rows) {
             <td>${escapeHtml(firstString(row, ['propeller_size_original', 'propeller_size']))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_diameter'))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_pitch'))}</td>
-            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.rpm, 0)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.thrust_N)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.torque_Nm)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.shaft_power_W)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.air_density_kg_m3)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.input_rpm ?? row.rpm, 0)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.derived_thrust_N ?? row.thrust_N)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.derived_torque_Nm ?? row.torque_Nm)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.derived_shaft_power_W ?? row.shaft_power_W)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.input_rho_kg_m3 ?? row.air_density_kg_m3)}</td>
           </tr>
         `).join('') || `<tr><td colspan="9">Keine verifizierten abgeleiteten Kraft-/Momentzeilen vorhanden.</td></tr>`}
       </tbody>
@@ -3645,7 +3814,12 @@ function metricPropellerLength(row, stem) {
   const metric = optionalNumberValue(row[`${stem}_mm`]);
   if (metric !== null) return metric;
   const inches = optionalNumberValue(row[`${stem}_in`]);
-  return inches === null ? '' : inches * 25.4;
+  if (inches !== null) return inches * 25.4;
+  if (stem === 'prop_diameter') {
+    const meters = optionalNumberValue(row.diameter_m_input ?? row.input_D_m);
+    if (meters !== null) return meters * 1000;
+  }
+  return '';
 }
 
 function tangentialEquivalentForce(row) {
@@ -4107,12 +4281,19 @@ async function runSelectedResearch() {
   const commandId = `cmd_${crypto.randomUUID()}`;
   const researchRunId = `research_run_${crypto.randomUUID()}`;
   const scoringDimensions = scoringDimensionsForTask(task).filter((axis) => axis.id !== 'portfolio_priority');
-  const tableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
+  const baseTableContract = task.payload?.table_contract || RESEARCH_TABLE_CONTRACT;
+  const tableContract = inferResearchKind(task) === 'bearing'
+    ? { ...BEARING_MEASUREMENT_TABLE_CONTRACT, ...baseTableContract }
+    : baseTableContract;
   const existingTables = new Set((base?.tables || []).map((table) => table.table_key));
   const missingTables = Object.keys(tableContract).filter((key) => !existingTables.has(key));
-  const requireMeasuredLoadPoints = task.measurements_table_key === 'measured_load_points'
+  const requireMeasuredLoadPoints = inferResearchKind(task) === 'bearing'
+    || task.measurements_table_key === 'measured_load_points'
     || existingTables.has('measured_load_points')
     || Object.hasOwn(tableContract, 'measured_load_points');
+  const requireDerivedPropellerLoads = inferResearchKind(task) === 'bearing'
+    || existingTables.has('derived_propeller_load_points')
+    || Object.hasOwn(tableContract, 'derived_propeller_load_points');
   const requireDerivedBearingLoads = existingTables.has('derived_bearing_loads')
     || Object.hasOwn(tableContract, 'derived_bearing_loads');
   const candidateTable = tableForKey(base, task.candidate_catalog_key || 'source_candidates');
@@ -4244,6 +4425,7 @@ async function runSelectedResearch() {
         semantic_graph_nodes: 'semantic_graph_nodes',
         semantic_graph_edges: 'semantic_graph_edges',
         ...(requireMeasuredLoadPoints ? { measured_load_points: 'measured_load_points' } : {}),
+        ...(requireDerivedPropellerLoads ? { derived_propeller_load_points: 'derived_propeller_load_points' } : {}),
         ...(requireDerivedBearingLoads ? { derived_bearing_loads: 'derived_bearing_loads' } : {}),
       },
     },
@@ -6053,6 +6235,7 @@ export const __researchTestHooks = {
   disabledTabButton,
   evidenceGate,
   defaultMeasurementsTableKey,
+  derivedMeasurementDisplayRows,
   eligibleGraphFocusSourceIds,
   filterGraphRowsForEvidence,
   filterMeasurementRowsForEvidence,

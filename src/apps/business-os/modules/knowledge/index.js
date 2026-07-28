@@ -1076,9 +1076,9 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
     ? group.entries
     : group.entries.filter((entry) => entry.id === skillbookEntry.id || relatedToSkillbook(skillbookEntry, entry));
   const entries = scopedEntries.length ? scopedEntries : group.entries;
-  const skill = entries.find((entry) => entry.kind === 'skill')
+  const skill = skillbookEntry
+    || entries.find((entry) => entry.kind === 'skill')
     || group.entries.find((entry) => entry.kind === 'skill')
-    || skillbookEntry
     || group.entries.find((entry) => entry.kind === 'skillbook')
     || group.entries[0]
     || null;
@@ -3334,6 +3334,7 @@ function isKnowledgeActionFormReady(values, requiredFields = []) {
 
 export const __knowledgeTestHooks = {
   buildKnowledgeBundles,
+  skillbookContext,
   isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,

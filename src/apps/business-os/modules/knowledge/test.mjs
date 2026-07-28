@@ -22,6 +22,7 @@ const { __knowledgeTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   buildKnowledgeBundles,
+  skillbookContext,
   isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,
@@ -203,6 +204,30 @@ test('groups linked SKF skillbooks, runbooks, resources, and tables into one dom
   ]));
   assert.ok(hub.runbookIds.includes('runbook:verification'));
   assert.equal(groups.some((group) => group.id === 'bundle/drone-bearing-design-verified-v1'), false);
+});
+
+test('selected skillbook remains the visible Skill document instead of an arbitrary bundle skill', () => {
+  const skillbook = {
+    id: 'skillbook:drone-bearing-design-verified-v2',
+    kind: 'skillbook',
+    title: 'UAV bearing design',
+    linked_runbook_ids: ['runbook:drone-bearing-validation'],
+  };
+  const importedSkill = {
+    id: 'skill:recent-validation-fragment',
+    kind: 'skill',
+    title: 'Prüfstand und Validierung planen',
+  };
+  const group = {
+    id: 'research/drone-design/drone-bearing-loads',
+    entries: [importedSkill, skillbook],
+    runbookIds: [],
+    tableIds: [],
+  };
+
+  const context = skillbookContext(group, skillbook);
+
+  assert.equal(context.skill?.id, skillbook.id);
 });
 
 test('normalizes RxDB payload records without dropping table rows or schema', () => {
