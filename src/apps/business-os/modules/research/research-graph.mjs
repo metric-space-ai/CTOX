@@ -168,11 +168,12 @@ export function createResearchGraph(host, options = {}) {
       settledFitPending = topologyChanged;
       rebuildAdjacency();
       if (topologyChanged || semanticChanged) {
-        for (const timer of cameraFitTimers) window.clearTimeout(timer);
-        cameraFitTimers.clear();
-        if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
-        layoutLockTimer = 0;
-        if (topologyChanged) unlockLayout();
+        if (topologyChanged) {
+          for (const timer of cameraFitTimers) window.clearTimeout(timer);
+          cameraFitTimers.clear();
+          cancelLayoutLock();
+          unlockLayout();
+        }
         graph.graphData(cloneProjection(projection));
         if (wasLayoutLocked && !topologyChanged) {
           layoutLocked = true;
@@ -194,6 +195,7 @@ export function createResearchGraph(host, options = {}) {
     },
     setDimensions(nextDimensions) {
       if (disposed) return;
+      cancelLayoutLock();
       unlockLayout();
       dimensions = nextDimensions === 2 ? 2 : 3;
       settledFitPending = true;
@@ -476,11 +478,17 @@ export function createResearchGraph(host, options = {}) {
   }
 
   function scheduleLayoutLock() {
-    if (layoutLockTimer) window.clearTimeout(layoutLockTimer);
+    if (layoutLockTimer || layoutLocked) return;
     layoutLockTimer = window.setTimeout(() => {
       layoutLockTimer = 0;
       if (!disposed) settleLayout();
     }, projection.nodes.length > 120 ? 2800 : 4400);
+  }
+
+  function cancelLayoutLock() {
+    if (!layoutLockTimer) return;
+    window.clearTimeout(layoutLockTimer);
+    layoutLockTimer = 0;
   }
 
   function settleLayout() {

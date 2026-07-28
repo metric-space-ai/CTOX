@@ -870,6 +870,8 @@ test('research graph releases its WebGL context when the surface is remounted', 
   assert.match(researchGraphSource, /onNodeHover\(\(node\) => \{[\s\S]*?if \(!layoutLocked\) settleLayout\(\)/);
   assert.match(researchGraphSource, /function lockLayout\(\)[\s\S]*?node\.fx = node\.x[\s\S]*?node\.fy = node\.y[\s\S]*?graphLayoutLocked = 'true'/);
   assert.match(researchGraphSource, /function unlockLayout\(\)[\s\S]*?node\.fx = undefined[\s\S]*?graphLayoutLocked = 'false'/);
+  assert.match(researchGraphSource, /if \(topologyChanged\) \{[\s\S]*?cancelLayoutLock\(\);[\s\S]*?unlockLayout\(\)/);
+  assert.match(researchGraphSource, /function scheduleLayoutLock\(\) \{\s*if \(layoutLockTimer \|\| layoutLocked\) return;/);
   assert.doesNotMatch(researchGraphSource, /function fit\(duration = 700\) \{\s*graph\.resumeAnimation/);
   assert.match(researchGraphSource, /graph\.pauseAnimation\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
