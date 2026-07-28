@@ -1659,13 +1659,44 @@
 }
 
 .research-table-host .ctox-table {
-  min-width: 920px;
+  min-width: 1060px;
 }
 
 .research-table-host .ctox-table th,
 .research-table-host .ctox-table td {
-  overflow-wrap: anywhere;
+  overflow-wrap: break-word;
   vertical-align: top;
+}
+
+.research-source-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.research-source-col-title {
+  width: 390px;
+}
+
+.research-source-col-class {
+  width: 190px;
+}
+
+.research-source-col-score {
+  width: 130px;
+}
+
+.research-source-col-axis {
+  width: 105px;
+}
+
+.research-source-col-action {
+  width: 90px;
+}
+
+.research-source-class {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .research-measurement-mode {

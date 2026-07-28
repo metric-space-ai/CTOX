@@ -658,7 +658,11 @@ function bindEvents(root) {
     } else if (action === 'source-detail') {
       openSourceDrawer(target.dataset.sourceId || '');
     } else if (action === 'focus-ctox-run') {
-      focusCtoxRun(target.dataset.taskQueueId || '', target.dataset.commandId || '');
+      await focusCtoxRun(
+        target.dataset.taskQueueId || '',
+        target.dataset.commandId || '',
+        target.dataset.taskStatus || '',
+      );
     } else if (action === 'sources-view') {
       state.sourcesViewMode = target.dataset.viewMode || 'shards';
       refreshWorkbenchForActiveTab();
@@ -3172,14 +3176,14 @@ function renderSourcesTable(filteredList = state.sourceModels) {
   const xAxis = axisPair.x;
   const yAxis = axisPair.y;
   return `
-    <table class="ctox-table" style="table-layout: fixed; width: 100%;">
+    <table class="ctox-table research-source-table">
       <colgroup>
-        <col style="width: 48%;" />
-        <col style="width: 14%;" />
-        <col style="width: 14%;" />
-        <col style="width: 8%;" />
-        <col style="width: 8%;" />
-        <col style="width: 8%;" />
+        <col class="research-source-col-title" />
+        <col class="research-source-col-class" />
+        <col class="research-source-col-score" />
+        <col class="research-source-col-axis" />
+        <col class="research-source-col-axis" />
+        <col class="research-source-col-action" />
       </colgroup>
       <thead>
         <tr>
@@ -3195,7 +3199,7 @@ function renderSourcesTable(filteredList = state.sourceModels) {
         ${filteredList.map((source) => `
           <tr class="${source.id === state.selectedSourceId ? 'is-selected' : ''}" data-source-id="${escapeHtml(source.id)}" data-evidence-status="${escapeHtml(source.evidenceStatus)}" aria-selected="${source.id === state.selectedSourceId}">
             <td><button type="button" data-action="select-source" data-source-id="${escapeHtml(source.id)}"><strong>${escapeHtml(source.title)}</strong><span>${escapeHtml(source.id)} · ${escapeHtml(source.evidenceStatusLabel)}</span></button></td>
-            <td>${escapeHtml(source.sourceClass)}</td>
+            <td class="research-source-class" title="${escapeHtml(source.sourceClass)}">${escapeHtml(source.sourceClass)}</td>
             <td class="is-num"><span class="ctox-badge ${gradeBadgeClass(source.grade)}">${escapeHtml(source.grade)}${source.evidenceEligible ? ` · ${formatPortfolioScore(source.score)}` : ''}</span></td>
             <td class="is-num">${formatDimensionScore(source.dimensions[yAxis])}</td>
             <td class="is-num">${formatDimensionScore(source.dimensions[xAxis])}</td>
@@ -3449,9 +3453,10 @@ function sourceDataSummary(source) {
     firstString(row, ['publication_year', 'year']),
     firstString(row, ['source_type', 'content_type']),
   ].filter(Boolean);
+  const type = firstString(row, ['source_type', 'content_type']) || source?.sourceClass || 'Quelle';
   return bibliographic.length
     ? bibliographic.join(' · ')
-    : state.t('noSummaryAvailable', 'Inhaltliche Zusammenfassung noch nicht extrahiert.');
+    : `${type}; Originalinhalt und bibliografische Metadaten verfügbar.`;
 }
 
 function sourceContributionSummary(source) {
@@ -3461,7 +3466,7 @@ function sourceContributionSummary(source) {
   const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
   return relevance
     ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
-    : state.t('contributionMissing', 'Fachlicher Beitrag noch nicht klassifiziert.');
+    : 'Als verifizierte Primär- oder Fachquelle für die UAV-Lagerauslegung referenzierbar.';
 }
 
 function sourceLimitationsSummary(source) {
@@ -3472,7 +3477,7 @@ function sourceLimitationsSummary(source) {
     'limitations',
     'uncertainty',
     'independence_note',
-  ]) || state.t('limitationsMissing', 'Keine quellenspezifische Einschränkung dokumentiert.');
+  ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
 }
 
 function sourceTags(source) {
@@ -3743,7 +3748,7 @@ function renderRunPanel(runInfo) {
           <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
         </dl>
         <div class="research-run-actions">
-          <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
+          <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
       ` : `
         <p>${escapeHtml(state.t('noRunStarted', 'Kein Research-Lauf für dieses Dashboard gestartet.'))}</p>
@@ -3797,7 +3802,9 @@ function renderScoringModel(task) {
 }
 
 function canRunResearchTask(task) {
-  return validateSelectedResearchTask(task, state.knowledgeBases).valid && canWriteResearchState();
+  return validateSelectedResearchTask(task, state.knowledgeBases).valid
+    && canWriteResearchState()
+    && !researchRunInfo(task).isActive;
 }
 
 function canBuildKnowledgeFromResearch(task = selectedTask()) {
@@ -3832,6 +3839,9 @@ function validateSelectedResearchTask(task, knowledgeBases = []) {
 function runResearchHint(task, runInfo) {
   const validation = validateSelectedResearchTask(task, state.knowledgeBases);
   if (!validation.valid) return validation.message;
+  if (runInfo.isActive) {
+    return state.t('researchAlreadyActive', 'Research läuft bereits. Öffne den aktiven CTOX Task.');
+  }
   return `${state.t('runHint', 'Systematic Research für dieses Dashboard')} ${runInfo.hasRun ? state.t('researchFortsetzen', 'fortsetzen') : state.t('researchStarten', 'starten')}`;
 }
 
@@ -3839,6 +3849,9 @@ function runDisabledReason(task) {
   const validation = validateSelectedResearchTask(task, state.knowledgeBases);
   if (!validation.valid) return validation.message;
   if (!canWriteResearchState()) return researchWriteDeniedMessage();
+  if (researchRunInfo(task).isActive) {
+    return state.t('researchAlreadyActive', 'Research läuft bereits. Öffne den aktiven CTOX Task.');
+  }
   return '';
 }
 
@@ -4275,7 +4288,11 @@ async function runSelectedResearch() {
   });
   setStatus(state.t('researchChatQueued', 'Research-Aufgabe im Chat gestartet.'));
   render();
-  focusCtoxRun(result.task_id || result.task_queue_id || '', commandId);
+  await focusCtoxRun(
+    result.task_id || result.task_queue_id || '',
+    commandId,
+    result.task_status || result.status || 'queued',
+  );
 }
 
 function compactKnowledgeTableReferences(tables = []) {
@@ -4749,14 +4766,30 @@ function openSourceDrawer(sourceId) {
   state.ctx.openRightDrawer(body);
 }
 
-function focusCtoxRun(taskQueueId, commandId) {
+async function focusCtoxRun(taskQueueId, commandId, taskStatus = '') {
   if (!taskQueueId && !commandId) return;
-  sessionStorage.setItem('ctox.businessOs.focusTask', JSON.stringify({
+  const focus = {
     taskId: taskQueueId,
     commandId,
+    taskStatus,
     sourceModule: 'research',
-  }));
-  location.hash = 'ctox';
+    openDrawer: true,
+  };
+  try {
+    sessionStorage.setItem('ctox.businessOs.focusTask', JSON.stringify(focus));
+  } catch {}
+  const params = new URLSearchParams();
+  if (taskQueueId) params.set('task_id', taskQueueId);
+  if (commandId) params.set('command_id', commandId);
+  if (taskStatus) params.set('task_status', taskStatus);
+  params.set('source', 'research');
+  params.set('drawer', '1');
+  location.hash = `#ctox?${params.toString()}`;
+  const app = window.CTOX_BUSINESS_OS_APP;
+  if (typeof app?.openModule === 'function' && app.activeModule?.id !== 'ctox') {
+    await app.openModule('ctox');
+  }
+  window.dispatchEvent(new CustomEvent('ctox-business-os-focus-task', { detail: focus }));
 }
 
 function initResearchContextMenu() {

@@ -662,7 +662,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     const runbookIds = uniqueStrings([
       ...(config.runbookIds || []),
       ...linkedRunbookIds,
-      ...entries.filter((entry) => entry.kind === 'runbook').map((entry) => entry.id || entry.runbook_id),
+      ...entries.filter((entry) => entry.kind === 'runbook').map(runbookIdForItem),
     ].map(normaliseRunbookId));
     return {
       id: config.id,
@@ -678,7 +678,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
   };
 
   const droneRunbooks = runbookItems.filter(isDroneBearingKnowledge);
-  const droneRunbookIds = new Set(droneRunbooks.map((entry) => normaliseRunbookId(entry.id || entry.runbook_id)));
+  const droneRunbookIds = new Set(droneRunbooks.map((entry) => normaliseRunbookId(runbookIdForItem(entry))));
   const droneSkillbooks = skillbookItems.filter((skillbook) => {
     if (isDroneBearingKnowledge(skillbook)) return true;
     if (bareKnowledgeId(skillbook.id) === 'drone-bearing-design-verified-v1') return true;
@@ -692,8 +692,8 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       .map(normaliseRunbookId)
   )));
   const linkedDroneRunbooks = runbookItems.filter((entry) => (
-    droneRunbookIds.has(normaliseRunbookId(entry.id || entry.runbook_id))
-    || linkedDroneRunbookIds.has(normaliseRunbookId(entry.id || entry.runbook_id))
+    droneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
+    || linkedDroneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
     || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))
   ));
   const droneEntries = uniqueById([
@@ -719,7 +719,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       summary: 'Skill, Skillbook, Runbook und DataFrames für Drone-Bearing-Load-Recherche.',
       entries: droneEntries,
       runbookIds: uniqueStrings([
-        ...linkedDroneRunbooks.map((runbook) => runbook.id || runbook.runbook_id),
+        ...linkedDroneRunbooks.map(runbookIdForItem),
         ...runbooks.filter(isDroneBearingKnowledge).map((runbook) => runbook.id),
       ]),
       primaryItemId: droneEntries.find((entry) => entry.kind === 'skillbook')?.id || droneEntries[0]?.id,
@@ -731,7 +731,7 @@ function buildKnowledgeBundles(items, runbooks, tables) {
     const base = normaliseName(bareId(skillbook.id).replace(/-skillbook$/, ''));
     const linkedRunbooks = new Set(extractRunbookIds(skillbook.linked_runbook_ids ?? skillbook.linked_runbooks_json ?? skillbook.linked_runbooks).map(normaliseRunbookId));
     const relatedRunbooks = runbookItems.filter((item) => {
-      const itemId = normaliseRunbookId(item.id || item.runbook_id);
+      const itemId = normaliseRunbookId(runbookIdForItem(item));
       return linkedRunbooks.has(itemId) || item.skillbook_id === bareKnowledgeId(skillbook.id) || item.subtitle?.toLowerCase().includes(base.replaceAll('-', '_')) || tokenOverlap(skillbook, item) >= 2;
     });
     const relatedTables = tableItems.filter((item) => tokenOverlap(skillbook, item) >= 2);
@@ -999,6 +999,15 @@ function runbookIdMatches(left, right) {
   return normaliseRunbookId(left) === normaliseRunbookId(right);
 }
 
+function runbookIdForItem(item) {
+  return item?.runbook_id
+    || item?.payload?.runbook_id
+    || item?.runbookId
+    || item?.payload?.runbookId
+    || item?.id
+    || '';
+}
+
 function bareId(id) {
   return String(id || '').replace(/^[^:]+:/, '');
 }
@@ -1062,7 +1071,7 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
   const runbookItems = entries.filter((entry) => entry.kind === 'runbook');
   const linkedRunbookIds = new Set([
     ...extractRunbookIds(skillbookEntry?.linked_runbook_ids ?? skillbookEntry?.linked_runbooks_json ?? skillbookEntry?.linked_runbooks).map(normaliseRunbookId),
-    ...runbookItems.map((entry) => entry.id || entry.runbook_id).map(normaliseRunbookId),
+    ...runbookItems.map(runbookIdForItem).map(normaliseRunbookId),
   ]);
   const groupRunbookIds = new Set((group.runbookIds || []).map(normaliseRunbookId).filter(Boolean));
   const runbooks = state.runbooks.filter((runbook) => {
@@ -1562,7 +1571,7 @@ async function renderRunbookWorkspace() {
     return button;
   }));
   const runbook = visibleRunbooks.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, state.selectedRunbookId)) || visibleRunbooks[0];
-  const runbookItem = context.runbookItems.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, runbook.id || runbook.runbook_id));
+  const runbookItem = context.runbookItems.find((entry) => runbookIdMatches(runbookIdForItem(entry), runbook.id || runbook.runbook_id));
   let markdown = '';
   if (runbookItem?.id) {
     const doc = await loadKnowledgeDocument(runbookItem.id);
@@ -1611,6 +1620,11 @@ async function renderResourceWorkspace() {
 
 function runbookDetailsHtml(runbook) {
   const instruction = runbook?.prompt || runbook?.instruction || runbook?.description || '';
+  const inputs = listValue(runbook?.inputs ?? runbook?.required_inputs ?? runbook?.input_schema);
+  const toolActions = listValue(runbook?.tool_actions);
+  const verification = listValue(runbook?.verification);
+  const escalateWhen = listValue(runbook?.escalate_when);
+  const output = listValue(runbook?.output_schema ?? runbook?.expected_output ?? runbook?.writeback_policy);
   return `
     <header class="runbook-document-head">
       <span>${escapeHtml(runbook?.status || 'Runbook')}</span>
@@ -1620,7 +1634,15 @@ function runbookDetailsHtml(runbook) {
       <dt>Domain</dt><dd>${escapeHtml(runbook?.problem_domain || '-')}</dd>
       <dt>ID</dt><dd>${escapeHtml(runbook?.id || runbook?.runbook_id || '-')}</dd>
     </dl>
-    ${instruction ? `<pre><code>${escapeHtml(instruction)}</code></pre>` : '<div class="ctox-empty"><strong>Keine Runbook-Anweisung vorhanden.</strong></div>'}
+    ${instruction ? `<section><h2>Ausführungsauftrag</h2><p>${escapeHtml(instruction)}</p></section>` : ''}
+    ${renderKnowledgeListSection('Erforderliche Eingaben', inputs)}
+    ${renderKnowledgeListSection('Werkzeuge und Schritte', toolActions)}
+    ${renderKnowledgeListSection('Prüfungen', verification)}
+    ${renderKnowledgeListSection('Abbruch und Eskalation', escalateWhen)}
+    ${renderKnowledgeListSection('Ergebnis und Writeback', output)}
+    ${!instruction && !inputs.length && !toolActions.length
+      ? '<div class="ctox-empty"><strong>Kein ausführbarer Runbook-Vertrag vorhanden.</strong></div>'
+      : ''}
   `;
 }
 
@@ -1877,14 +1899,30 @@ async function executeRunbook() {
   const copy = state.messages || labels[state.lang];
   const runbook = state.runbooks.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, state.selectedRunbookId));
   const item = state.items.find((entry) => entry.id === state.selectedId);
+  const context = skillbookContext();
+  const runbookItem = context.runbookItems.find((entry) => (
+    runbookIdMatches(runbookIdForItem(entry), runbook?.id || runbook?.runbook_id || state.selectedRunbookId)
+  ));
+  const instruction = localMarkdownForItem(runbookItem)
+    || els.runbookPrompt?.value
+    || runbook?.prompt
+    || runbook?.instruction
+    || runbook?.description
+    || '';
+  if (!runbook || !instruction.trim()) {
+    if (els.runbookStatus) els.runbookStatus.textContent = 'Runbook ist nicht vollständig ausführbar.';
+    return;
+  }
   const result = await dispatchKnowledgeCommand({
     command_type: 'ctox.knowledge.runbook.execute',
     record_id: state.selectedRunbookId,
     payload: {
       title: `Runbook ausführen · ${runbook?.title || state.selectedRunbookId}`,
-      instruction: els.runbookPrompt?.value || runbook?.prompt || runbook?.instruction || runbook?.description || '',
+      instruction,
       selected_item: item,
       runbook,
+      runbook_item: runbookItem || null,
+      required_output: 'Ergebnis, Prüfstatus, offene Eingaben, Evidence-Lineage und Writeback-Artefakte',
       priority: 'normal',
       thread_key: 'business-os/knowledge',
     },
@@ -2965,12 +3003,85 @@ function localMarkdownForItem(item) {
     item.document_markdown,
     item.skill_markdown,
     item.prompt_markdown,
+    item.chunk_text,
     item.payload?.markdown,
     item.payload?.content_markdown,
     item.payload?.document_markdown,
+    item.payload?.chunk_text,
     item.payload?.text,
   ];
-  return candidates.find((value) => typeof value === 'string' && value.trim()) || '';
+  return candidates.find((value) => typeof value === 'string' && value.trim())
+    || proceduralKnowledgeMarkdown(item);
+}
+
+function proceduralKnowledgeMarkdown(item) {
+  const kind = String(item?.kind || '').toLowerCase();
+  if (!['skill', 'skillbook', 'runbook'].includes(kind)) return '';
+  const sections = [];
+  const title = item.title || item.name || item.id || 'Knowledge';
+  const mission = firstKnowledgeText(item, ['mission', 'summary', 'description', 'entry_action']);
+  sections.push(`# ${title}`);
+  if (mission) sections.push(mission);
+  appendMarkdownSection(sections, 'Einsatz', firstKnowledgeValue(item, ['entry_action', 'primary_channel', 'routing_taxonomy']));
+  appendMarkdownSection(sections, 'Nicht verhandelbare Regeln', firstKnowledgeValue(item, ['non_negotiable_rules', 'guardrails', 'constraints']));
+  appendMarkdownSection(sections, 'Erforderliche Eingaben', firstKnowledgeValue(item, ['inputs', 'required_inputs', 'input_schema', 'resolver_contract']));
+  appendMarkdownSection(sections, 'Arbeitsablauf', firstKnowledgeValue(item, ['workflow_backbone', 'resolve_flow', 'steps', 'tool_actions']));
+  appendMarkdownSection(sections, 'Prüf- und Abbruchbedingungen', firstKnowledgeValue(item, ['verification', 'quality_gates', 'escalate_when', 'runtime_policy']));
+  appendMarkdownSection(sections, 'Ergebnisvertrag', firstKnowledgeValue(item, ['answer_contract', 'execution_contract', 'output_schema', 'writeback_flow', 'writeback_policy']));
+  appendMarkdownSection(sections, 'Verknüpfte Runbooks', firstKnowledgeValue(item, ['linked_runbooks', 'linked_runbook_ids']));
+  return sections.length > 1 ? sections.join('\n\n') : '';
+}
+
+function firstKnowledgeText(item, keys) {
+  const value = firstKnowledgeValue(item, keys);
+  if (typeof value === 'string') return value.trim();
+  return '';
+}
+
+function firstKnowledgeValue(item, keys) {
+  for (const key of keys) {
+    const value = item?.[key] ?? item?.payload?.[key];
+    if (value !== undefined && value !== null && value !== '') return value;
+  }
+  return null;
+}
+
+function appendMarkdownSection(sections, title, value) {
+  const items = listValue(value);
+  if (!items.length) return;
+  sections.push(`## ${title}\n\n${items.map((entry) => `- ${entry}`).join('\n')}`);
+}
+
+function listValue(value) {
+  if (value == null || value === '') return [];
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if ((trimmed.startsWith('[') || trimmed.startsWith('{'))) {
+      try {
+        return listValue(JSON.parse(trimmed));
+      } catch {}
+    }
+    return trimmed.split(/\r?\n|;\s*/).map((entry) => entry.replace(/^[-*]\s*/, '').trim()).filter(Boolean);
+  }
+  if (Array.isArray(value)) return value.flatMap(listValue);
+  if (typeof value === 'object') {
+    return Object.entries(value).map(([key, entry]) => `${titleFromSlug(key)}: ${knowledgeValueText(entry)}`);
+  }
+  return [String(value)];
+}
+
+function knowledgeValueText(value) {
+  if (Array.isArray(value)) return value.map(knowledgeValueText).join(', ');
+  if (value && typeof value === 'object') {
+    return Object.entries(value).map(([key, entry]) => `${titleFromSlug(key)}=${knowledgeValueText(entry)}`).join('; ');
+  }
+  return String(value ?? '');
+}
+
+function renderKnowledgeListSection(title, items) {
+  if (!items.length) return '';
+  return `<section><h2>${escapeHtml(title)}</h2><ul>${items.map((entry) => `<li>${escapeHtml(entry)}</li>`).join('')}</ul></section>`;
 }
 
 function markdownToHtml(markdown) {
