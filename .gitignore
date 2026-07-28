@@ -5,6 +5,8 @@ target.nosync
 archive/
 /runtime
 /runtime/
+/bin/ctox
+/bin/ctox-real
 .venv/
 node_modules/
 .codex-paramiko-venv/
