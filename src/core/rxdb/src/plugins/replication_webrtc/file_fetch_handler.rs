@@ -71,7 +71,7 @@ pub struct FileFetchChunk {
 pub const FILE_FETCH_ERROR_NOT_FOUND: &str = "FILE_NOT_FOUND";
 pub const FILE_FETCH_ERROR_SOURCE: &str = "FILE_SOURCE_ERROR";
 pub const FILE_FETCH_ERROR_UNAUTHORIZED: &str = "UNAUTHORIZED";
-pub const FILE_FETCH_ERROR_RATE_LIMITED: &str = "RATE_LIMITED";
+pub const FILE_FETCH_ERROR_STREAM_LIMIT: &str = "STREAM_LIMIT_EXCEEDED";
 pub const FILE_FETCH_ERROR_FEATURE_DISABLED: &str = "FEATURE_DISABLED";
 pub const FILE_FETCH_ERROR_REMOTE_TIMEOUT: &str = "REMOTE_TIMEOUT";
 
@@ -269,7 +269,7 @@ pub async fn run_file_fetch<H: WebRTCConnectionHandler>(
                 &peer,
                 &message.id,
                 &request.request_id,
-                FILE_FETCH_ERROR_RATE_LIMITED,
+                FILE_FETCH_ERROR_STREAM_LIMIT,
                 "max in-flight file streams reached",
                 true,
             )

@@ -373,9 +373,23 @@ async fn persist_from_master(
                     .and_then(Value::as_str)
                     == fork.get("_rev").and_then(Value::as_str)
                 {
-                    // This is deliberately queue-head semantics: upstream RxDB
-                    // awaits `streamQueue.up` here so the resolved write is sent,
-                    // without waiting for unrelated future upstream activity.
+                    // Deliberately queue-head semantics: upstream RxDB awaits
+                    // `streamQueue.up` here so the resolved write is sent, without
+                    // waiting for unrelated future upstream activity. Pinned by
+                    // `downstream_waits_for_upstream_queue_when_fork_is_resolved_conflict`.
+                    //
+                    // OPEN (E4 adjudication, SYNC-A-R9): upstream enqueues its task
+                    // synchronously on event arrival, while this port publishes
+                    // activity *before* queue entry — so there may be a window
+                    // (activity set, queue still empty) that the original does not
+                    // have, letting an upstream push with a stale assumedMasterState
+                    // overtake this fork update. Self-healing via the next conflict
+                    // round, hence low severity. Switching to `ActivityAndQueue`
+                    // makes the test above time out, so the window must be
+                    // demonstrated before the semantics change: park an upstream
+                    // task between activity-track and queue acquisition via the
+                    // `wait_before_persist` hook while a resolved-conflict batch
+                    // runs. Do not flip the requirement without that evidence.
                     crate::replication_protocol::index_mod::await_rx_storage_replication_direction_idle(
                         state,
                         RxStorageReplicationDirection::Up,
