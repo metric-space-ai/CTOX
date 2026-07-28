@@ -63,12 +63,8 @@ export function createCommandBus({ db, sync = null, session = null } = {}) {
       };
       const receipt = await submitRxdbCommand({ db, sync, session, command: cancellation });
       if (until === 'local') return receipt;
-      return waitForCommandState({
-        db,
-        sync,
-        commandId: receipt.command_id,
+      return receipt.resumeTracking({
         until: until === 'accepted' ? 'accepted' : 'terminal',
-        options: {},
       });
     },
     async dispatch(command, options = {}) {
@@ -79,13 +75,7 @@ export function createCommandBus({ db, sync = null, session = null } = {}) {
       const until = options.until || command?.until || 'accepted';
       if (until === 'local') return receipt;
       if (until === 'terminal') {
-        return waitForCommandState({
-          db,
-          sync,
-          commandId: receipt.command_id,
-          until,
-          options: { ...command, ...options },
-        });
+        return receipt.tracking.waitForTerminal({ ...command, ...options });
       }
       if (until !== 'accepted') {
         throw commandError(receipt.command_id, `Unknown command wait target: ${until}`, {
@@ -93,13 +83,7 @@ export function createCommandBus({ db, sync = null, session = null } = {}) {
           retryable: false,
         });
       }
-      const accepted = await waitForCommandState({
-        db,
-        sync,
-        commandId: receipt.command_id,
-        until,
-        options: { ...command, ...options },
-      });
+      const accepted = await receipt.tracking.waitForAccepted({ ...command, ...options });
       emitCommandLifecycle(receipt.command_id, command.command_type || command.type, 'accepted');
       return accepted;
     },
@@ -249,18 +233,93 @@ async function submitRxdbCommand({ db, sync, session, command }) {
     await insertOrPatchCommandDocument(collection, commandId, doc);
     emitCommandLifecycle(commandId, command.command_type || command.type, 'local_inserted', submitStartedAt);
     recordCommandMetric(sync, 'local_submit', commandId, Date.now() - localWriteStartedAt);
-    await flushSyncBridges(syncPlan.submitBridges, [doc]);
-    emitCommandLifecycle(commandId, command.command_type || command.type, 'push_confirmed', submitStartedAt);
+
+    let pushConfirmed = false;
+    try {
+      const confirmations = await flushSyncBridges(syncPlan.submitBridges, [doc]);
+      pushConfirmed = confirmations.length > 0 && confirmations.every(Boolean);
+    } catch (error) {
+      // The local insert is the submit atomicity boundary. A transient push
+      // failure after this point is a delivery state, not evidence that the
+      // command was lost; periodic replication keeps retrying the same doc.
+      if (!pushConfirmationRemainsPending(error, syncPlan.submitBridges)) {
+        rememberActiveCommandId(commandId);
+        error.command_id ||= commandId;
+        error.receipt ||= localCommandReceipt({ db, sync, commandId, pushConfirmed: false });
+        throw error;
+      }
+    }
+
+    if (pushConfirmed) {
+      emitCommandLifecycle(commandId, command.command_type || command.type, 'push_confirmed', submitStartedAt);
+    } else {
+      rememberActiveCommandId(commandId);
+      emitCommandLifecycle(commandId, command.command_type || command.type, 'push_unconfirmed', submitStartedAt);
+    }
     recordCommandMetric(sync, 'submit_receipt', commandId, Date.now() - submitStartedAt);
-    return {
-      ok: true,
-      command_id: commandId,
-      status: 'local',
-      transport: 'rxdb-command-bus',
-    };
+    return localCommandReceipt({ db, sync, commandId, pushConfirmed });
   } finally {
     await releaseSyncPlan(syncPlan);
   }
+}
+
+function localCommandReceipt({ db, sync, commandId, pushConfirmed }) {
+  const tracking = commandTrackingHandle({ db, sync, commandId });
+  return {
+    ok: true,
+    command_id: commandId,
+    status: 'local',
+    code: pushConfirmed ? 'push_confirmed' : 'push_unconfirmed',
+    transient: !pushConfirmed,
+    retryable: false,
+    pushConfirmed: Boolean(pushConfirmed),
+    transport: 'rxdb-command-bus',
+    tracking,
+    resumeTracking: tracking.resumeTracking,
+  };
+}
+
+function commandTrackingHandle({ db, sync, commandId }) {
+  return {
+    command_id: commandId,
+    waitForAccepted(options = {}) {
+      return waitForCommandState({ db, sync, commandId, until: 'accepted', options });
+    },
+    waitForTerminal(options = {}) {
+      return waitForCommandState({ db, sync, commandId, until: 'terminal', options });
+    },
+    resumeTracking(options = {}) {
+      return waitForCommandState({
+        db,
+        sync,
+        commandId,
+        until: options.until || 'terminal',
+        options,
+      });
+    },
+    subscribe(observer) {
+      return subscribeToCommand({ db, sync, commandId, observer });
+    },
+    async getStatus() {
+      const currentDb = await resolveCommandDb(db);
+      return findDoc(currentDb?.raw?.business_commands, commandId, { swallowErrors: false });
+    },
+  };
+}
+
+function pushConfirmationRemainsPending(error, bridges) {
+  // Multi-tab follower failover has its own contract and deadline (G4); keep
+  // its existing typed failure until that coordinator can acknowledge the
+  // specific command id rather than only the leader flush attempt.
+  if ((bridges || []).some((bridge) => syncBridgeFromHandle(bridge)?.mode === 'follower')) return false;
+  const code = cleanContextText(error?.code);
+  return ![
+    'ctox_rxdb_schema_hash_mismatch',
+    'idempotency_conflict',
+    'invalid_command_contract',
+    'command_payload_too_large',
+    'auth_required',
+  ].includes(code);
 }
 
 export function assertCommandDocumentTransportBudget(doc, commandId = '') {
@@ -1165,7 +1224,7 @@ function syncBridgeStatusSummary(status) {
 }
 
 async function flushSyncBridges(bridges, documents = []) {
-  await Promise.all((bridges || []).map((bridge) => flushSyncBridge(bridge, documents)));
+  return Promise.all((bridges || []).map((bridge) => flushSyncBridge(bridge, documents)));
 }
 
 async function flushSyncBridge(bridge, documents = []) {
@@ -1185,16 +1244,23 @@ async function flushSyncBridge(bridge, documents = []) {
         message: 'CTOX Sync Engine could not complete multi-tab command failover before the deadline.',
       },
     );
-    return;
+    return true;
   }
   const state = resolvedBridge?.state;
-  if (!state) return;
+  if (!state) return false;
+  let pushesCurrentDocuments = false;
   await withTimeout(
     () => {
       if (documents.length && typeof state.pushDocumentsToRemotePeers === 'function') {
+        pushesCurrentDocuments = true;
         return state.pushDocumentsToRemotePeers(documents);
       }
-      if (typeof state.pushToRemotePeers === 'function') return state.pushToRemotePeers();
+      if (typeof state.pushToRemotePeers === 'function') {
+        pushesCurrentDocuments = true;
+        return state.pushToRemotePeers();
+      }
+      // awaitInSync is only a collection-wide readiness signal. It does not
+      // confirm that this command document reached the master.
       return state.awaitInSync?.();
     },
     COMMAND_SYNC_FLUSH_TIMEOUT_MS,
@@ -1203,6 +1269,7 @@ async function flushSyncBridge(bridge, documents = []) {
       message: 'CTOX Sync Engine could not push command dependencies before the deadline.',
     },
   );
+  return pushesCurrentDocuments;
 }
 
 function followerSyncFlushTimeoutMs(bridge) {
