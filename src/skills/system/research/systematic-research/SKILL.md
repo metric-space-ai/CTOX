@@ -39,9 +39,12 @@ Search snippets, metadata records, abstracts, DOI resolver pages, and
 
 ## Web Stack Commands
 
-In a managed Harness run, call the equivalent typed tools directly. Do not run
-these CLI commands through a shell because only typed calls can emit
-server-owned evidence receipts. In an operator shell, use the commands exactly
+In a managed Harness run, prefer the equivalent typed tools directly. Running
+these CLI commands through the worker shell is also receipt-verifiable —
+completion validation recognizes a plain `ctox web …` invocation recorded in
+the durable rollout exactly like the typed call (the typed handler spawns the
+same CLI). Chained commands, pipes, or redirects around the CLI are **not**
+recognized and fail completion. In an operator shell, use the commands exactly
 as shown.
 
 ### 1. Inspect available source adapters

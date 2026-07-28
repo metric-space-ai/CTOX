@@ -375,7 +375,15 @@ The service also verifies the parent worker's durable rollout before accepting
 systematic research. It requires a successful typed `ctox_deep_research` call
 from the same durable research run and command, at the depth declared by the
 server-bound task, and a persisted research workspace inside the task
-workspace. Immutable Web Stack and deep-research receipts may span bounded
+workspace. The typed `CtoxWebHandler` itself spawns the `ctox web …` CLI, so
+an equivalent `ctox web search|scholarly search|deep-research|read`
+invocation recorded in the durable rollout as `exec_command` satisfies the
+same discovery, coverage, and typed-read receipt checks with the same
+run/command/workspace binding. Recognition is fail-closed: only one plain
+`ctox web …` command per exec call counts; shell operators, pipelines,
+redirects, or command substitutions make the invocation unrecognizable so
+fabricated envelope text cannot be chained around real CLI output. Immutable
+Web Stack and deep-research receipts may span bounded
 rework attempts of that same run, command, and workspace; the evidence manifest
 and completion result remain bound to the current attempt. Shallower calls and
 `no_workspace` discovery runs cannot satisfy completion. The complete Web Stack

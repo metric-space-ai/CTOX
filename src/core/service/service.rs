@@ -11757,6 +11757,225 @@ const SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS: [&str; 3] = [
     "ctox_scholarly_search",
 ];
 
+/// Shell/exec tool surfaces whose command payload may carry an equivalent
+/// typed CTOX Web CLI invocation. The typed `CtoxWebHandler` itself spawns
+/// the same `ctox web …` CLI (see
+/// `src/core/harness/core/src/tools/handlers/ctox_web.rs`), so a durable
+/// `exec_command` invocation of `ctox web <subcommand>` runs the identical
+/// server-owned pipeline and persists the identical receipts; only the
+/// rollout surface differs. Completion validation therefore recognizes both
+/// surfaces with the same run/command/workspace binding (F-010 layer 2).
+const SYSTEMATIC_RESEARCH_EXEC_TOOLS: [&str; 2] = ["exec_command", "shell"];
+
+/// An equivalent typed CTOX Web invocation recovered from an exec/shell
+/// command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SystematicResearchCliCall {
+    /// Logical typed-tool name (`ctox_web_search`, `ctox_web_read`,
+    /// `ctox_scholarly_search`, or `ctox_deep_research`).
+    tool: &'static str,
+    depth: SystematicResearchDepth,
+    no_workspace: bool,
+}
+
+/// Tokenize a shell command line honoring single/double quotes and
+/// backslash escapes. Returns `None` on unterminated quotes.
+fn tokenize_systematic_research_cli(cmd: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut has_content = false;
+    let mut quote: Option<char> = None;
+    let mut chars = cmd.chars();
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(active) => {
+                if ch == active {
+                    quote = None;
+                } else {
+                    current.push(ch);
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    quote = Some(ch);
+                    has_content = true;
+                }
+                '\\' => {
+                    let next = chars.next()?;
+                    current.push(next);
+                    has_content = true;
+                }
+                // Shell control characters are token boundaries even when
+                // written without surrounding whitespace (`'…'; ctox …`).
+                ';' | '|' | '&' | '<' | '>' => {
+                    if has_content {
+                        tokens.push(std::mem::take(&mut current));
+                        has_content = false;
+                    }
+                    tokens.push(ch.to_string());
+                }
+                ch if ch.is_whitespace() => {
+                    if has_content {
+                        tokens.push(std::mem::take(&mut current));
+                        has_content = false;
+                    }
+                }
+                ch => {
+                    current.push(ch);
+                    has_content = true;
+                }
+            },
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if has_content {
+        tokens.push(current);
+    }
+    Some(tokens)
+}
+
+/// Parse an exec/shell tool payload into an equivalent typed CTOX Web CLI
+/// invocation. Fail-closed: only one plain
+/// `[ENV=…] ctox web <subcommand> [flags]` invocation is recognized; shell
+/// operators, substitutions, pipelines, redirects, or chained commands make
+/// the call unrecognizable so a model cannot smuggle fabricated envelope
+/// text around the real CLI output.
+fn parse_systematic_research_cli_call(arguments: &str) -> Option<SystematicResearchCliCall> {
+    let payload = serde_json::from_str::<Value>(arguments).ok()?;
+    let cmd = payload
+        .get("cmd")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            // Legacy shell surface: direct argv, or a `bash -c/-lc "<cmd>"`
+            // wrapper whose command string is re-validated below.
+            let argv = payload.get("command").and_then(Value::as_array)?;
+            let argv: Vec<&str> = argv.iter().filter_map(Value::as_str).collect();
+            let first = argv.first()?;
+            let first_base = first.rsplit('/').next().unwrap_or(first);
+            if matches!(first_base, "bash" | "sh" | "zsh" | "dash")
+                && argv.len() >= 3
+                && argv[1].starts_with('-')
+                && argv[1].contains('c')
+            {
+                return Some(argv[2].to_string());
+            }
+            Some(argv.join(" "))
+        })?;
+    let cmd = cmd.trim();
+    if cmd.is_empty()
+        || cmd.contains(['\n', '\r', '`'])
+        || cmd.contains("$(")
+        || cmd.contains("${")
+    {
+        return None;
+    }
+    let tokens = tokenize_systematic_research_cli(cmd)?;
+    const OPERATORS: [&str; 11] = [
+        "&&", "||", ";", "|", ">", ">>", "<", "<<", "&", "2>", "2>>",
+    ];
+    if tokens
+        .iter()
+        .any(|token| OPERATORS.contains(&token.as_str()))
+    {
+        return None;
+    }
+    let mut tokens = tokens.into_iter().peekable();
+    while tokens.peek().is_some_and(|token| {
+        let mut split = token.splitn(2, '=');
+        let name = split.next().unwrap_or_default();
+        split.next().is_some()
+            && !name.is_empty()
+            && name.chars().enumerate().all(|(index, ch)| {
+                ch == '_' || ch.is_ascii_alphabetic() || (index > 0 && ch.is_ascii_digit())
+            })
+    }) {
+        tokens.next();
+    }
+    let binary = tokens.next()?;
+    if binary.rsplit('/').next().unwrap_or(binary.as_str()) != "ctox" {
+        return None;
+    }
+    if tokens.next().as_deref() != Some("web") {
+        return None;
+    }
+    let subcommand = tokens.next()?;
+    let (tool, flags): (&'static str, Vec<String>) = match subcommand.as_str() {
+        "search" => ("ctox_web_search", tokens.collect()),
+        "read" => ("ctox_web_read", tokens.collect()),
+        "deep-research" => ("ctox_deep_research", tokens.collect()),
+        "scholarly" => {
+            if tokens.next().as_deref() != Some("search") {
+                return None;
+            }
+            ("ctox_scholarly_search", tokens.collect())
+        }
+        _ => return None,
+    };
+    let mut depth = SystematicResearchDepth::Standard;
+    let mut no_workspace = false;
+    let mut index = 0;
+    while index < flags.len() {
+        match flags[index].as_str() {
+            "--depth" => {
+                depth = SystematicResearchDepth::parse(flags.get(index + 1)?)?;
+                index += 2;
+            }
+            "--no-workspace" => {
+                no_workspace = true;
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+    Some(SystematicResearchCliCall {
+        tool,
+        depth,
+        no_workspace,
+    })
+}
+
+/// Extract the CTOX Web JSON envelope from a tool output string. Typed web
+/// tools return the CLI stdout verbatim; exec outputs prepend
+/// `Command:`/`Wall time:`/`Output:` sections and may truncate, so this
+/// scans for the first embedded JSON document carrying the envelope shape.
+fn extract_ctox_web_envelope(output: &str) -> Option<Value> {
+    fn is_envelope(value: &Value) -> bool {
+        value.is_object()
+            && (value.get("ok").is_some()
+                || value.get("workspace_evidence").is_some()
+                || value.get("research_workspace").is_some()
+                || value.get("results").is_some())
+    }
+    let trimmed = output.trim();
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if is_envelope(&value) {
+            return Some(value);
+        }
+        for key in ["output", "content"] {
+            if let Some(inner) = value.get(key).and_then(Value::as_str) {
+                if let Some(found) = extract_ctox_web_envelope(inner) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    for (index, ch) in output.char_indices() {
+        if ch != '{' {
+            continue;
+        }
+        let mut stream = serde_json::Deserializer::from_str(&output[index..]).into_iter::<Value>();
+        if let Some(Ok(value)) = stream.next() {
+            if is_envelope(&value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 fn validate_systematic_research_discovery_receipt(
     job: &QueuedPrompt,
     workspace: &Path,
@@ -11827,7 +12046,8 @@ fn validate_systematic_research_discovery_receipt_from_conn(
         }
         let file = std::fs::File::open(&rollout_path)
             .with_context(|| format!("open harness rollout {}", rollout_path.display()))?;
-        let mut calls = BTreeMap::<String, (&'static str, SystematicResearchDepth, u64)>::new();
+        let mut calls =
+            BTreeMap::<String, (&'static str, SystematicResearchDepth, u64, &'static str)>::new();
         let mut run_bound = false;
         let mut command_bound = false;
         let mut workspace_bound = false;
@@ -11869,61 +12089,76 @@ fn validate_systematic_research_discovery_receipt_from_conn(
             }
             match payload.get("type").and_then(Value::as_str) {
                 Some("function_call") => {
-                    let Some(tool) = payload
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .filter(|name| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(name))
-                    else {
+                    let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let Some(arguments) = payload.get("arguments").and_then(Value::as_str) else {
                         continue;
                     };
-                    let tool: &'static str = SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
-                        .into_iter()
-                        .find(|candidate| *candidate == tool)
-                        .expect("discovery tool membership checked above");
+                    let (tool, depth, no_workspace, via): (
+                        &'static str,
+                        SystematicResearchDepth,
+                        bool,
+                        &'static str,
+                    ) = if SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&name) {
+                        let tool: &'static str = SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
+                            .into_iter()
+                            .find(|candidate| *candidate == name)
+                            .expect("discovery tool membership checked above");
+                        let Ok(arguments_value) = serde_json::from_str::<Value>(arguments)
+                        else {
+                            continue;
+                        };
+                        let depth = arguments_value
+                            .get("depth")
+                            .and_then(Value::as_str)
+                            .and_then(SystematicResearchDepth::parse)
+                            .unwrap_or(SystematicResearchDepth::Standard);
+                        let no_workspace = tool == "ctox_deep_research"
+                            && arguments_value.get("no_workspace").and_then(Value::as_bool)
+                                == Some(true);
+                        (tool, depth, no_workspace, "")
+                    } else if SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name) {
+                        let Some(call) = parse_systematic_research_cli_call(arguments) else {
+                            continue;
+                        };
+                        if !SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&call.tool) {
+                            continue;
+                        }
+                        (call.tool, call.depth, call.no_workspace, " via exec_command")
+                    } else {
+                        continue;
+                    };
                     if !run_bound || !command_bound || !workspace_bound {
                         continue;
                     }
                     let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
                         continue;
                     };
-                    let Some(arguments) = payload.get("arguments").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Ok(arguments_value) = serde_json::from_str::<Value>(arguments) else {
-                        continue;
-                    };
-                    let depth = arguments_value
-                        .get("depth")
-                        .and_then(Value::as_str)
-                        .and_then(SystematicResearchDepth::parse)
-                        .unwrap_or(SystematicResearchDepth::Standard);
-                    if tool == "ctox_deep_research"
-                        && arguments_value.get("no_workspace").and_then(Value::as_bool)
-                            == Some(true)
-                    {
-                        observed_calls
-                            .push(format!("{tool} at depth {} (no_workspace)", depth.as_str()));
+                    if tool == "ctox_deep_research" && no_workspace {
+                        observed_calls.push(format!(
+                            "{tool} at depth {} (no_workspace){via}",
+                            depth.as_str()
+                        ));
                         continue;
                     }
-                    calls.insert(call_id.to_string(), (tool, depth, timestamp));
+                    calls.insert(call_id.to_string(), (tool, depth, timestamp, via));
                 }
                 Some("function_call_output") => {
                     let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
                         continue;
                     };
-                    let Some((tool, depth, called_at)) = calls.get(call_id) else {
+                    let Some((tool, depth, called_at, via)) = calls.get(call_id) else {
                         continue;
                     };
-                    let (tool, depth, called_at) = (*tool, *depth, *called_at);
+                    let (tool, depth, called_at, via) = (*tool, *depth, *called_at, *via);
                     let Some(output) = payload.get("output").and_then(Value::as_str) else {
                         continue;
                     };
-                    let Ok(output) = serde_json::from_str::<Value>(output) else {
-                        observed_calls.push(format!("{tool} (invalid output)"));
+                    let Some(output) = extract_ctox_web_envelope(output) else {
+                        observed_calls.push(format!("{tool}{via} (invalid output)"));
                         continue;
                     };
                     if output.get("ok").and_then(Value::as_bool) != Some(true) {
-                        observed_calls.push(format!("{tool} (failed)"));
+                        observed_calls.push(format!("{tool}{via} (failed)"));
                         continue;
                     }
                     // Search and scholarly envelopes carry ok/provider/results
@@ -11931,12 +12166,13 @@ fn validate_systematic_research_discovery_receipt_from_conn(
                     // research sweep must additionally prove its research
                     // workspace inside the task workspace.
                     if tool != "ctox_deep_research" {
-                        observed_calls.push(tool.to_string());
+                        observed_calls.push(format!("{tool}{via}"));
                         if required_depth == SystematicResearchDepth::Exhaustive {
                             continue;
                         }
                         return Ok(serde_json::json!({
                             "tool": tool,
+                            "transport": if via.is_empty() { "typed_tool" } else { "exec_cli" },
                             "provider": output.get("provider").cloned(),
                             "thread_id": thread_id,
                             "call_id": call_id,
@@ -11973,22 +12209,23 @@ fn validate_systematic_research_discovery_receipt_from_conn(
                         });
                     if !persisted_workspace || !persisted_receipt_artifacts {
                         observed_calls.push(format!(
-                            "{tool} at depth {} (not persisted)",
+                            "{tool} at depth {} (not persisted){via}",
                             depth.as_str()
                         ));
                         continue;
                     }
                     if depth < required_depth {
                         observed_calls.push(format!(
-                            "{tool} at depth {} (shallower than requested {})",
+                            "{tool} at depth {} (shallower than requested {}){via}",
                             depth.as_str(),
                             required_depth.as_str()
                         ));
                         continue;
                     }
-                    observed_calls.push(format!("{tool} at depth {}", depth.as_str()));
+                    observed_calls.push(format!("{tool} at depth {}{via}", depth.as_str()));
                     return Ok(serde_json::json!({
                         "tool": tool,
+                        "transport": if via.is_empty() { "typed_tool" } else { "exec_cli" },
                         "depth": depth.as_str(),
                         "thread_id": thread_id,
                         "call_id": call_id,
@@ -12005,7 +12242,7 @@ fn validate_systematic_research_discovery_receipt_from_conn(
     }
 
     anyhow::bail!(
-        "systematic research requires at least one successful typed discovery call ({}) in the current durable research run{}; observed discovery calls: {}",
+        "systematic research requires at least one successful typed discovery call ({}) or an equivalent `ctox web …` CLI invocation in the current durable research run{}; observed discovery calls: {}",
         SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.join(", "),
         if required_depth == SystematicResearchDepth::Exhaustive {
             " and an exhaustive persisted ctox_deep_research sweep"
@@ -12087,11 +12324,24 @@ fn validate_systematic_research_discovery_coverage(
         }
         match payload.get("type").and_then(Value::as_str) {
             Some("function_call") if run_bound && command_bound && workspace_bound => {
-                let Some(tool) = payload
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(name))
-                else {
+                let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
+                let tool: Option<&'static str> = if SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
+                    .contains(&name)
+                {
+                    SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
+                        .into_iter()
+                        .find(|candidate| *candidate == name)
+                } else if SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name) {
+                    payload
+                        .get("arguments")
+                        .and_then(Value::as_str)
+                        .and_then(parse_systematic_research_cli_call)
+                        .filter(|call| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&call.tool))
+                        .map(|call| call.tool)
+                } else {
+                    None
+                };
+                let Some(tool) = tool else {
                     continue;
                 };
                 let Some(call_id) = payload.get("call_id").and_then(Value::as_str) else {
@@ -12109,7 +12359,7 @@ fn validate_systematic_research_discovery_coverage(
                 let output_ok = payload
                     .get("output")
                     .and_then(Value::as_str)
-                    .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                    .and_then(extract_ctox_web_envelope)
                     .and_then(|output| output.get("ok").and_then(Value::as_bool))
                     == Some(true);
                 if output_ok && completed_call_ids.insert(call_id.to_string()) {
@@ -12332,10 +12582,16 @@ fn validate_systematic_research_typed_web_read_receipts_from_conn(
                     .is_some_and(|cwd| cwd == workspace);
             }
             match payload.get("type").and_then(Value::as_str) {
-                Some("function_call")
-                    if payload.get("name").and_then(Value::as_str) == Some("ctox_web_read") =>
-                {
-                    if run_bound && command_bound && workspace_bound {
+                Some("function_call") => {
+                    let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let is_web_read = name == "ctox_web_read"
+                        || (SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name)
+                            && payload
+                                .get("arguments")
+                                .and_then(Value::as_str)
+                                .and_then(parse_systematic_research_cli_call)
+                                .is_some_and(|call| call.tool == "ctox_web_read"));
+                    if is_web_read && run_bound && command_bound && workspace_bound {
                         if let Some(call_id) = payload.get("call_id").and_then(Value::as_str) {
                             calls.insert(call_id.to_string());
                         }
@@ -12348,10 +12604,11 @@ fn validate_systematic_research_typed_web_read_receipts_from_conn(
                     if !calls.contains(call_id) {
                         continue;
                     }
-                    let Some(output) = payload.get("output").and_then(Value::as_str) else {
-                        continue;
-                    };
-                    let Ok(output) = serde_json::from_str::<Value>(output) else {
+                    let Some(output) = payload
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .and_then(extract_ctox_web_envelope)
+                    else {
                         continue;
                     };
                     if output.get("ok").and_then(Value::as_bool) != Some(true)
@@ -12410,7 +12667,7 @@ fn validate_systematic_research_typed_web_read_receipts_from_conn(
     missing.sort();
     anyhow::ensure!(
         missing.is_empty(),
-        "evidence receipt artifacts were not emitted by typed ctox_web_read calls in the current durable research run: {}",
+        "evidence receipt artifacts were not emitted by typed ctox_web_read calls or equivalent `ctox web read` CLI invocations in the current durable research run: {}",
         missing.join(", ")
     );
     Ok(())
@@ -26686,6 +26943,425 @@ mod tests {
         assert!(error
             .to_string()
             .contains("were not emitted by typed ctox_web_read calls"));
+    }
+
+    #[test]
+    fn systematic_research_accepts_exec_command_cli_discovery() {
+        let workspace = temp_root("research-exec-cli-workspace");
+        let research_workspace = workspace.join("research/deep-research/cli-1");
+        std::fs::create_dir_all(&research_workspace).unwrap();
+        std::fs::write(research_workspace.join("manifest.json"), "{}").unwrap();
+        std::fs::write(research_workspace.join("evidence_bundle.json"), "{}").unwrap();
+        let codex_home = temp_root("research-exec-cli-codex-home");
+        let rollout = codex_home.join("sessions/rollout-parent.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                subagent_parent_thread_id TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, subagent_parent_thread_id)
+             VALUES ('parent-thread', ?1, ?2, NULL)",
+            params![rollout.to_string_lossy(), codex_home.to_string_lossy()],
+        )
+        .unwrap();
+        let timestamp = now_iso_string();
+        let research_started_at = current_epoch_secs().saturating_sub(1);
+        let envelope = serde_json::json!({
+            "ok": true,
+            "depth": "exhaustive",
+            "research_workspace": {
+                "path": research_workspace,
+                "manifest": research_workspace.join("manifest.json"),
+                "evidence_bundle": research_workspace.join("evidence_bundle.json"),
+            },
+        });
+        let write_rollout = |cmd: &str| {
+            let exec_output = format!(
+                "Chunk ID: 9f\nWall time: 1.2340 seconds\nProcess exited with code 0\nOutput:\n{envelope}"
+            );
+            let rows = [
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-1"},
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Research Run ID: run-1\nResearch Command ID: command-1",
+                        }],
+                    },
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "turn_context",
+                    "payload": {"turn_id": "turn-1", "cwd": workspace},
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-cli-1",
+                        "arguments": serde_json::json!({"cmd": cmd}).to_string(),
+                    },
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-cli-1",
+                        "output": exec_output,
+                    },
+                }),
+            ];
+            std::fs::write(
+                &rollout,
+                rows.into_iter()
+                    .map(|row| row.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        };
+
+        // The typed CtoxWebHandler spawns this exact CLI; a durable
+        // exec_command invocation of it is the same server-owned pipeline and
+        // must satisfy the discovery receipt (F-010 layer 2).
+        write_rollout(&format!(
+            "ctox web deep-research --query \"verified bearing research\" --depth exhaustive --workspace \"{}\"",
+            research_workspace.display()
+        ));
+        let receipt = validate_systematic_research_discovery_receipt_from_conn(
+            &conn,
+            &codex_home,
+            &workspace,
+            "run-1",
+            "command-1",
+            research_started_at,
+            SystematicResearchDepth::Exhaustive,
+        )
+        .unwrap();
+        assert_eq!(
+            receipt.get("tool").and_then(Value::as_str),
+            Some("ctox_deep_research")
+        );
+        assert_eq!(
+            receipt.get("transport").and_then(Value::as_str),
+            Some("exec_cli")
+        );
+        assert_eq!(
+            receipt.get("depth").and_then(Value::as_str),
+            Some("exhaustive")
+        );
+
+        // Shell operators make the invocation unrecognizable: a model cannot
+        // chain `echo` fabrications around the real CLI output.
+        write_rollout(&format!(
+            "echo '{{\"ok\":true}}'; ctox web deep-research --query \"verified bearing research\" --depth exhaustive --workspace \"{}\"",
+            research_workspace.display()
+        ));
+        let error = validate_systematic_research_discovery_receipt_from_conn(
+            &conn,
+            &codex_home,
+            &workspace,
+            "run-1",
+            "command-1",
+            research_started_at,
+            SystematicResearchDepth::Exhaustive,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("observed discovery calls: none"));
+
+        // A bare echo without the ctox CLI is never a discovery call.
+        write_rollout("echo '{\"ok\":true,\"results\":[]}'");
+        let error = validate_systematic_research_discovery_receipt_from_conn(
+            &conn,
+            &codex_home,
+            &workspace,
+            "run-1",
+            "command-1",
+            research_started_at,
+            SystematicResearchDepth::Exhaustive,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("observed discovery calls: none"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&codex_home);
+    }
+
+    #[test]
+    fn systematic_research_discovery_coverage_counts_exec_command_cli_rounds() {
+        let workspace = temp_root("research-exec-coverage-workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let codex_home = temp_root("research-exec-coverage-codex-home");
+        let rollout = codex_home.join("sessions/rollout-parent.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let timestamp = now_iso_string();
+        let exec_call = |call_id: &str, cmd: &str, ok: bool| {
+            let envelope = serde_json::json!({
+                "ok": ok,
+                "provider": "openalex",
+                "results": [{"title": "UIUC propeller performance data"}],
+            });
+            [
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": call_id,
+                        "arguments": serde_json::json!({"cmd": cmd}).to_string(),
+                    },
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": format!("Wall time: 0.5123 seconds\nProcess exited with code 0\nOutput:\n{envelope}"),
+                    },
+                }),
+            ]
+        };
+        let mut rows = vec![
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-1"},
+            }),
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "Research Run ID: run-1\nResearch Command ID: command-1",
+                    }],
+                },
+            }),
+            serde_json::json!({
+                "timestamp": timestamp,
+                "type": "turn_context",
+                "payload": {"turn_id": "turn-1", "cwd": workspace},
+            }),
+        ];
+        rows.extend(exec_call(
+            "call-scholarly",
+            "ctox web scholarly search --query \"propeller aerodynamics\" --provider openalex",
+            true,
+        ));
+        rows.extend(exec_call(
+            "call-search",
+            "ctox web search --query \"UIUC propeller database\" --context-size high",
+            true,
+        ));
+        // Failed rounds never count toward coverage.
+        rows.extend(exec_call(
+            "call-failed",
+            "ctox web search --query \"unreachable portal\"",
+            false,
+        ));
+        std::fs::write(
+            &rollout,
+            rows.into_iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let mut job = systematic_research_test_job(&workspace);
+        job.prompt
+            .push_str("\nMinimum Discovery Rounds: 2\nMinimum Scholarly Rounds: 1");
+        let receipt = serde_json::json!({"rollout_path": rollout});
+        let coverage = validate_systematic_research_discovery_coverage(
+            &job,
+            &receipt,
+            current_epoch_secs().saturating_sub(1),
+        )
+        .unwrap();
+        assert_eq!(
+            coverage.get("successful_rounds").and_then(Value::as_u64),
+            Some(2)
+        );
+        assert_eq!(
+            coverage.get("scholarly_rounds").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            coverage
+                .get("tool_types")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(2)
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&codex_home);
+    }
+
+    #[test]
+    fn systematic_research_accepts_exec_command_web_read_receipts() {
+        let workspace = temp_root("research-exec-read-workspace");
+        let receipt = workspace.join(".ctox/web-read/cli-1/receipt.json");
+        std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+        std::fs::write(&receipt, "{}").unwrap();
+        let codex_home = temp_root("research-exec-read-codex-home");
+        let rollout = codex_home.join("sessions/rollout-parent.jsonl");
+        std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                rollout_path TEXT NOT NULL,
+                cwd TEXT NOT NULL,
+                subagent_parent_thread_id TEXT
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO threads (id, rollout_path, cwd, subagent_parent_thread_id)
+             VALUES ('parent-thread', ?1, ?2, NULL)",
+            params![rollout.to_string_lossy(), codex_home.to_string_lossy()],
+        )
+        .unwrap();
+        let receipt_hash = "b".repeat(64);
+        let timestamp = now_iso_string();
+        let envelope = serde_json::json!({
+            "ok": true,
+            "evidence_eligible": true,
+            "evidence_relevance_score": 9,
+            "workspace_evidence": {
+                "persisted": true,
+                "receipt_path": receipt,
+                "receipt_sha256": receipt_hash,
+            },
+        });
+        let write_rollout = |cmd: &str| {
+            let rows = [
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-1"},
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{
+                            "type": "input_text",
+                            "text": "Research Run ID: run-1\nResearch Command ID: command-1",
+                        }],
+                    },
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "turn_context",
+                    "payload": {"turn_id": "turn-1", "cwd": workspace},
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "call_id": "call-read-1",
+                        "arguments": serde_json::json!({"cmd": cmd}).to_string(),
+                    },
+                }),
+                serde_json::json!({
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "function_call_output",
+                        "call_id": "call-read-1",
+                        "output": format!("Chunk ID: 7a\nWall time: 2.1000 seconds\nProcess exited with code 0\nOutput:\n{envelope}"),
+                    },
+                }),
+            ];
+            std::fs::write(
+                &rollout,
+                rows.into_iter()
+                    .map(|row| row.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+        };
+        let manifest = serde_json::json!({
+            "evidence": [{
+                "evidence_id": "evidence-1",
+                "relevance_score": 9,
+                "retrieval_receipt": {
+                    "tool": "ctox_web_read",
+                    "receipt_artifact": {
+                        "path": ".ctox/web-read/cli-1/receipt.json",
+                        "sha256": "b".repeat(64),
+                    },
+                },
+            }],
+        });
+        let started_at = current_epoch_secs().saturating_sub(1);
+
+        write_rollout(
+            "ctox web read --url \"https://example.edu/paper\" --query \"measured thrust\" --workspace \"$PWD/research/read-1\"",
+        );
+        validate_systematic_research_typed_web_read_receipts_from_conn(
+            &conn,
+            &codex_home,
+            &workspace,
+            "run-1",
+            "command-1",
+            &manifest,
+            started_at,
+        )
+        .unwrap();
+
+        // Redirects/pipes make the invocation unrecognizable; the receipt is
+        // then correctly reported as not emitted by a verifiable call.
+        write_rollout(
+            "ctox web read --url \"https://example.edu/paper\" --workspace \"$PWD/research/read-1\" > out.json",
+        );
+        let error = validate_systematic_research_typed_web_read_receipts_from_conn(
+            &conn,
+            &codex_home,
+            &workspace,
+            "run-1",
+            "command-1",
+            &manifest,
+            started_at,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("were not emitted by typed ctox_web_read calls"));
+
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&codex_home);
     }
 
     #[test]
