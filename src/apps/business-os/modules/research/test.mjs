@@ -801,24 +801,44 @@ test('RxDB documents are detached before chunk cache eviction mutates live value
   assert.deepEqual(snapshot.payload.rows, [{ candidate_id: 'candidate-1' }]);
 });
 
-test('empty knowledge read retries only when knowledge_tables sync is live', () => {
-  const previousWindow = globalThis.window;
-  try {
-    globalThis.window = { ctoxBusinessOsSyncDiagnostics: { collections: {} } };
-    assert.equal(hooks.shouldRetryEmptyKnowledgeTables(), true);
+test('empty knowledge read retries follow canonical knowledge_tables readiness', () => {
+  const snapshot = (state, ready, syncing) => ({ collection: 'knowledge_tables', state, ready, syncing, updatedAt: ready ? 1 : null });
 
-    globalThis.window.ctoxBusinessOsSyncDiagnostics.collections.knowledge_tables = { status: 'connected' };
-    assert.equal(hooks.shouldRetryEmptyKnowledgeTables(), true);
+  // Without a readiness API the optimistic legacy default stays.
+  assert.equal(hooks.shouldRetryEmptyKnowledgeTables(), true);
+  // Live channels may still receive demand-loaded chunks; catching-up
+  // channels may still deliver the initial replication.
+  assert.equal(hooks.shouldRetryEmptyKnowledgeTables(snapshot('live', true, false)), true);
+  assert.equal(hooks.shouldRetryEmptyKnowledgeTables(snapshot('catching-up', false, true)), true);
+  // Known offline/failed or never-synced channels make retries pointless.
+  assert.equal(hooks.shouldRetryEmptyKnowledgeTables(snapshot('offline-pending', false, false)), false);
+  assert.equal(hooks.shouldRetryEmptyKnowledgeTables(snapshot('never-synced', false, true)), false);
+});
 
-    globalThis.window.ctoxBusinessOsSyncDiagnostics.collections.knowledge_tables = { initialReplicationState: 'complete' };
-    assert.equal(hooks.shouldRetryEmptyKnowledgeTables(), true);
-  } finally {
-    if (previousWindow === undefined) {
-      delete globalThis.window;
-    } else {
-      globalThis.window = previousWindow;
-    }
-  }
+test('data-driven empties follow collection readiness (syncing vs empty)', () => {
+  assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: false }), true);
+  assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: true }), false);
+  assert.equal(hooks.dataEmptyShowsSyncing(false, { ready: false }), false);
+  assert.equal(hooks.dataEmptyShowsSyncing(true, undefined), false);
+  assert.match(researchSource, /renderListOrState\(tables, collectionReadiness\('knowledge_tables'\)/);
+
+  const live = (collection) => ({ collection, state: 'live', ready: true, syncing: false, updatedAt: 1 });
+
+  // Empty + unready: the syncing shell replaces the empty copy.
+  hooks.setCollectionReadinessForTest('research_tasks', { collection: 'research_tasks', state: 'catching-up', ready: false, syncing: true, updatedAt: null });
+  assert.equal(hooks.emptyStateForNoTask().kind, 'syncing');
+  assert.match(hooks.renderNoTasksEmpty(), /class="ctox-syncing research-empty-card" role="status" aria-live="polite"/);
+  assert.match(hooks.renderNoTaskCenter(), /class="ctox-syncing research-empty-state-panel" role="status" aria-live="polite"/);
+
+  // Empty + ready: the regular empty state renders.
+  hooks.setCollectionReadinessForTest('research_tasks', live('research_tasks'));
+  hooks.setCollectionReadinessForTest('knowledge_tables', live('knowledge_tables'));
+  assert.equal(hooks.emptyStateForNoTask().kind, 'empty');
+  assert.match(hooks.renderNoTasksEmpty(), /class="ctox-empty research-empty research-empty-card"/);
+  assert.match(hooks.renderNoTaskCenter(), /class="ctox-empty research-empty-state-panel"/);
+
+  hooks.setCollectionReadinessForTest('research_tasks', null);
+  hooks.setCollectionReadinessForTest('knowledge_tables', null);
 });
 
 test('empty dashboard keeps standard header and disabled workbench controls', () => {
@@ -836,7 +856,9 @@ test('empty dashboard keeps standard header and disabled workbench controls', ()
 test('initial research loading cannot masquerade as an empty knowledge base', () => {
   assert.match(researchSource, /initialDataReady: false/);
   assert.match(researchSource, /await waitForReplicationBridge\(bridge, collection\)/);
-  assert.match(researchSource, /if \(!state\.initialDataReady\)[\s\S]*?Research-Daten werden mit dieser Instanz synchronisiert/);
+  assert.match(researchSource, /subscribeCollectionReadiness/);
+  assert.match(researchSource, /dataEmptyShowsSyncing\(true, tasksReadiness\)/);
+  assert.match(researchSource, /Research-Daten werden mit dieser Instanz synchronisiert/);
   assert.match(researchSource, /await refreshAll\(\{ seed: true, mountToken \}\)[\s\S]*?state\.initialDataReady = true/);
 });
 

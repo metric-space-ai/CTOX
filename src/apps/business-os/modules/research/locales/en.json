@@ -11,6 +11,8 @@
   "noSourcesLoaded": "No sources loaded yet.",
   "rows": "rows",
   "loadingKnowledge": "Loading knowledge...",
+  "syncingResearchData": "Research data is being synchronized with this instance.",
+  "syncingKnowledgeTables": "Knowledge tables are being synchronized.",
   "noResearchTask": "No Research Task",
   "createTaskBase": "Create a task based on a Knowledge Base.",
   "discoveryGraph": "Discovery Graph",

@@ -1,4 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { renderListOrState } from '../../shared/list-state.js';
 import {
   buildResearchGraphProjection,
   GRAPH_DETAIL_LEVELS,
@@ -429,6 +430,7 @@ const state = {
     postSyncRefreshes: 0,
   },
   initialDataReady: false,
+  readiness: {},
   refreshInFlight: null,
   refreshDirty: false,
   researchRefreshTimer: null,
@@ -483,9 +485,10 @@ export async function mount(ctx) {
   // re-renders, then start the WebRTC bridges in the BACKGROUND. Awaiting the
   // 6-collection bridge handshake here used to freeze the Research open for
   // 1-2s before anything appeared; the sync toast covers "still loading" and
-  // `schedulePostSyncRefresh` + `wireRealtime` refresh once data lands.
+  // `wireReadiness` + `schedulePostSyncRefresh` + `wireRealtime` refresh once
+  // data lands.
   wireRealtime();
-  wireSyncDiagnosticsRefresh();
+  wireReadiness();
   startResearchCollections(mountToken)
     .then(async () => {
       if (state.mountToken !== mountToken) return;
@@ -807,20 +810,39 @@ function wireRealtime() {
   }
 }
 
-function wireSyncDiagnosticsRefresh() {
-  const listener = (event) => {
-    const collections = event?.detail?.collections
-      || event?.detail?.snapshot?.collections
-      || window.ctoxBusinessOsSyncDiagnostics?.collections
-      || {};
-    const hasResearchCollection = RESEARCH_COLLECTIONS.some((name) => {
-      const info = collections[name];
-      return info?.initialReplicationState === 'complete' || info?.status === 'connected' || info?.status === 'reused';
+function collectionReadiness(name) {
+  if (state.readiness[name]) return state.readiness[name];
+  const read = state.ctx?.sync?.collectionReadiness;
+  return typeof read === 'function' ? read.call(state.ctx.sync, name) : null;
+}
+
+// Shared gate for data-driven empties: only an empty, unfiltered replicated
+// source may downgrade to the syncing shell, and only while its backing
+// collection reports ready === false. Selection-, filter-, permission- and
+// error-empties never call this.
+function dataEmptyShowsSyncing(isEmpty, readiness) {
+  return Boolean(isEmpty) && readiness?.ready === false;
+}
+
+// Canonical readiness subscription (replaces the former private
+// 'ctox-business-os-sync-diagnostics' window-event probe): stores one
+// snapshot per required collection as a render hint and refreshes the local
+// knowledge projection once a collection finishes its initial replication.
+function wireReadiness() {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return;
+  for (const name of RESEARCH_REQUIRED_COLLECTIONS) {
+    let wasReady = null;
+    const unsubscribe = subscribe.call(state.ctx.sync, name, (snapshot) => {
+      if (!snapshot) return;
+      const becameReady = wasReady === false && snapshot.ready === true;
+      wasReady = snapshot.ready === true;
+      state.readiness[name] = snapshot;
+      if (becameReady) scheduleKnowledgeRefresh(250);
+      render();
     });
-    if (hasResearchCollection) schedulePostSyncRefresh(250);
-  };
-  window.addEventListener('ctox-business-os-sync-diagnostics', listener);
-  state.cleanup.push(() => window.removeEventListener('ctox-business-os-sync-diagnostics', listener));
+    if (typeof unsubscribe === 'function') state.cleanup.push(unsubscribe);
+  }
 }
 
 function schedulePostSyncRefresh(delay = 250) {
@@ -1175,14 +1197,14 @@ async function findOneDocument(collection, id, collectionName = '') {
   }
 }
 
-function shouldRetryEmptyKnowledgeTables() {
-  const info = window.ctoxBusinessOsSyncDiagnostics?.collections?.knowledge_tables;
-  if (!info) return true;
-  return info.status === 'connected'
-    || info.status === 'reused'
-    || info.connectionStatus === 'connected'
-    || info.initialReplicationState === 'complete'
-    || info.active === true;
+function shouldRetryEmptyKnowledgeTables(readiness = collectionReadiness('knowledge_tables')) {
+  // Canonical readiness replaces the private sync-diagnostics probe: retry an
+  // empty knowledge_tables read while initial replication may still deliver
+  // rows (catching-up) or when the channel is live (demand-loaded chunks can
+  // land later). offline-pending / never-synced channels make retries
+  // pointless. Without a readiness API keep the optimistic legacy default.
+  if (!readiness) return true;
+  return readiness.ready === true || readiness.state === 'catching-up';
 }
 
 function isResearchKnowledgeBase(base) {
@@ -2012,8 +2034,16 @@ function renderRankingRow(source) {
 
 function renderNoTasksEmpty() {
   const empty = emptyStateForNoTask();
+  if (empty.kind === 'syncing') {
+    return `
+      <div class="ctox-syncing research-empty-card" role="status" aria-live="polite">
+        <strong>${escapeHtml(empty.title)}</strong>
+        <span>${escapeHtml(empty.body)}</span>
+      </div>
+    `;
+  }
   return `
-    <div class="research-empty research-empty-card">
+    <div class="ctox-empty research-empty research-empty-card">
       <strong>${escapeHtml(empty.title)}</strong>
       <span>${escapeHtml(empty.body)}</span>
     </div>
@@ -2034,8 +2064,24 @@ function renderNoSourcesEmpty(task) {
 }
 
 function emptyStateForNoTask() {
-  if (!state.initialDataReady) {
+  // Sync readiness is the second input of this data-driven empty: while a
+  // backing collection has not finished its initial replication
+  // (ready === false), an empty local result means "syncing", never
+  // "no data".
+  const tasksReadiness = collectionReadiness('research_tasks');
+  const knowledgeReadiness = collectionReadiness('knowledge_tables');
+  if (dataEmptyShowsSyncing(true, tasksReadiness) || dataEmptyShowsSyncing(true, knowledgeReadiness)) {
     return {
+      kind: 'syncing',
+      title: state.t('loadingKnowledge', 'Knowledge wird geladen...'),
+      body: state.t('syncingResearchData', 'Research-Daten werden mit dieser Instanz synchronisiert.'),
+    };
+  }
+  if (!tasksReadiness && !knowledgeReadiness && !state.initialDataReady) {
+    // No readiness API available (standalone/test harness): keep the legacy
+    // loading placeholder until the first local refresh finished.
+    return {
+      kind: 'loading',
       title: state.t('loadingKnowledge', 'Knowledge wird geladen...'),
       body: state.t('syncingResearchData', 'Research-Daten werden mit dieser Instanz synchronisiert.'),
     };
@@ -2043,17 +2089,20 @@ function emptyStateForNoTask() {
   const failure = diagnosticFailures()[0];
   if (failure) {
     return {
+      kind: 'empty',
       title: state.t('researchUnavailableTitle', 'Research ist gerade nicht verfügbar'),
       body: state.t('researchUnavailableBody', 'Dashboards erscheinen automatisch, sobald die Knowledge Base verfügbar ist.'),
     };
   }
   if (!state.knowledgeBases.length) {
     return {
+      kind: 'empty',
       title: state.t('noKnowledgeDomains', 'Noch keine Knowledge Base verfügbar'),
       body: state.t('noKnowledgeDomainsBody', 'Lege eine Knowledge Base an oder lade Inhalte, um ein Research-Dashboard zu starten.'),
     };
   }
   return {
+    kind: 'empty',
     title: state.t('noResearchTask', 'Keine Research-Aufgabe'),
     body: state.t('createTaskBase', 'Lege eine Aufgabe auf Basis einer Knowledge Base an.'),
   };
@@ -2743,7 +2792,7 @@ function renderNoTaskCenter() {
       </div>
     </header>
     <div class="research-center-empty-body">
-      <section class="ctox-empty research-empty-state-panel">
+      <section class="${empty.kind === 'syncing' ? 'ctox-syncing' : 'ctox-empty'} research-empty-state-panel"${empty.kind === 'syncing' ? ' role="status" aria-live="polite"' : ''}>
         <strong>${escapeHtml(empty.title)}</strong>
         <span>${escapeHtml(empty.body)}</span>
       </section>
@@ -3648,15 +3697,20 @@ function tangentialEquivalentForce(row) {
 
 function renderKnowledgeTables(task) {
   const base = knowledgeBaseForTask(task);
+  const tables = base?.tables || [];
   return `
     <div class="research-knowledge-list">
       ${renderDataQualityNotices()}
-      ${(base?.tables || []).map((table) => `
+      ${renderListOrState(tables, collectionReadiness('knowledge_tables'), {
+        renderRows: (rows) => rows.map((table) => `
         <button type="button" data-action="open-knowledge" data-table-id="${escapeHtml(table.id)}">
           <strong>${escapeHtml(table.title || table.table_key)}</strong>
           <span>${escapeHtml(table.table_key)} · ${Number(table.row_count || 0).toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US')} ${escapeHtml(state.t('rows', 'rows'))}</span>
         </button>
-      `).join('') || `<div class="research-empty">${escapeHtml(state.t('noKnowledgeConnected', 'Keine Knowledge-Tabellen verknüpft.'))}</div>`}
+      `).join(''),
+        empty: state.t('noKnowledgeConnected', 'Keine Knowledge-Tabellen verknüpft.'),
+        syncing: state.t('syncingKnowledgeTables', 'Knowledge-Tabellen werden synchronisiert.'),
+      })}
     </div>
   `;
 }
@@ -6029,12 +6083,19 @@ function documentLinksToResearch(document, task) {
   });
 }
 
+function setCollectionReadinessForTest(name, snapshot) {
+  if (snapshot == null) delete state.readiness[name];
+  else state.readiness[name] = snapshot;
+}
+
 export const __researchTestHooks = {
   buildSourceModels,
   collapseResearchTaskLineages,
   collectionDiagnosticRows,
+  dataEmptyShowsSyncing,
   diagnosticRows,
   disabledTabButton,
+  emptyStateForNoTask,
   evidenceGate,
   defaultMeasurementsTableKey,
   eligibleGraphFocusSourceIds,
@@ -6057,7 +6118,9 @@ export const __researchTestHooks = {
   renderSourcesTable,
   normalizeKnowledgeTableRows,
   renderNoTaskCenter,
+  renderNoTasksEmpty,
   researchDomainFromFormValue,
+  setCollectionReadinessForTest,
   sourceTierGrade,
   metricPropellerLength,
   boundedVerifiedSourceCount,
