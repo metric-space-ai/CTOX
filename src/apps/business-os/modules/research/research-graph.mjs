@@ -441,7 +441,11 @@ export function createResearchGraph(host, options = {}) {
 
   function fit(duration = 700) {
     graph.resumeAnimation?.();
-    graph.zoomToFit?.(duration, 36);
+    graph.zoomToFit?.(
+      duration,
+      36,
+      (node) => projection.visibleNodeIds.has(node.id),
+    );
   }
 
   function scheduleInitialCameraFits() {
