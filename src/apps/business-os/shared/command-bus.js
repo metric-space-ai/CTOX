@@ -10,7 +10,12 @@ const COMMAND_SYNC_FLUSH_TIMEOUT_MS = 15000;
 // normal leader-side push, so it needs a separate deadline.
 const COMMAND_FOLLOWER_SYNC_FLUSH_TIMEOUT_MS = 45000;
 const COMMAND_CAPABILITY_TIMEOUT_MS = 5000;
-const COMMAND_CAPABILITY_NEGATIVE_CACHE_MS = 10000;
+const COMMAND_CAPABILITY_TERMINAL_NEGATIVE_CACHE_MS = 10000;
+// Transient failures only need enough suppression to avoid an immediate request
+// storm. The submit retry waits slightly longer, so it always performs a fresh
+// acquisition instead of re-reading this short-lived failure.
+const COMMAND_CAPABILITY_TRANSIENT_ANTI_STORM_MS = 100;
+const COMMAND_CAPABILITY_REFRESH_RETRY_BACKOFF_MS = 125;
 const MAX_COMMAND_DOCUMENT_BYTES = 6 * 1024 * 1024;
 const MAX_SIMULTANEOUS_COMMAND_WATCHERS = 128;
 let activeCommandWatcherCount = 0;
@@ -99,20 +104,38 @@ let capabilityTokenCache = {
   expiresAtMs: 0,
   failureUntilMs: 0,
   failureCode: '',
+  failureTransient: false,
 };
 
 export async function getBusinessOsCapabilityToken({
   timeoutMs = COMMAND_CAPABILITY_TIMEOUT_MS,
 } = {}) {
+  const result = await acquireBusinessOsCapabilityToken({ timeoutMs });
+  return result.token;
+}
+
+async function acquireBusinessOsCapabilityToken({
+  timeoutMs = COMMAND_CAPABILITY_TIMEOUT_MS,
+} = {}) {
   const now = Date.now();
   if (capabilityTokenCache.token && now < capabilityTokenCache.expiresAtMs - 60_000) {
-    return capabilityTokenCache.token;
+    return capabilityAcquisitionResult({ token: capabilityTokenCache.token });
   }
-  if (now < capabilityTokenCache.failureUntilMs) return null;
+  if (now < capabilityTokenCache.failureUntilMs) {
+    return capabilityAcquisitionResult({
+      code: capabilityTokenCache.failureCode,
+      transient: capabilityTokenCache.failureTransient,
+    });
+  }
   const injected = injectedBusinessOsCapabilityToken(now);
   if (injected?.token) {
-    capabilityTokenCache = injected;
-    return capabilityTokenCache.token;
+    capabilityTokenCache = {
+      ...injected,
+      failureUntilMs: 0,
+      failureCode: '',
+      failureTransient: false,
+    };
+    return capabilityAcquisitionResult({ token: capabilityTokenCache.token });
   }
   const abortController = typeof AbortController === 'function' ? new AbortController() : null;
   try {
@@ -132,26 +155,35 @@ export async function getBusinessOsCapabilityToken({
       },
     );
     if (!res.ok) {
-      rememberCapabilityFailure(now, `capability_http_${res.status}`);
-      return null;
+      const status = Number(res.status || 0);
+      const transient = !isTerminalCapabilityHttpStatus(status);
+      const code = `capability_http_${status || 'unknown'}`;
+      rememberCapabilityFailure(code, { transient });
+      return capabilityAcquisitionResult({ code, transient });
     }
     const data = await res.json();
     if (data && data.capability_token) {
       capabilityTokenCache = {
         token: data.capability_token,
-        expiresAtMs: Number(data.expires_at_ms) || now + 11 * 60 * 60 * 1000,
+        expiresAtMs: Number(data.expires_at_ms) || Date.now() + 11 * 60 * 60 * 1000,
         failureUntilMs: 0,
         failureCode: '',
+        failureTransient: false,
       };
-      return capabilityTokenCache.token;
+      return capabilityAcquisitionResult({ token: capabilityTokenCache.token });
     }
-    rememberCapabilityFailure(now, 'capability_missing');
+    // A successful HTTP response without a token is not an authorization
+    // rejection signal. Stay fail-closed, but classify the malformed control-
+    // plane response as transient rather than pinning all submits for 10 s.
+    rememberCapabilityFailure('capability_missing', { transient: true });
+    return capabilityAcquisitionResult({ code: 'capability_missing', transient: true });
   } catch (error) {
-    // Control plane unreachable. Remember the failure briefly; command
-    // submission remains fail-closed and never falls back to a direct write.
-    rememberCapabilityFailure(now, String(error?.code || 'capability_unavailable'));
+    // fetch rejects for timeout/abort and network failures. HTTP authorization
+    // rejection is handled above from its concrete 4xx status.
+    const code = String(error?.code || error?.name || 'capability_unavailable');
+    rememberCapabilityFailure(code, { transient: true });
+    return capabilityAcquisitionResult({ code, transient: true });
   }
-  return null;
 }
 
 export function resetBusinessOsCapabilityTokenCacheForTests() {
@@ -160,15 +192,32 @@ export function resetBusinessOsCapabilityTokenCacheForTests() {
     expiresAtMs: 0,
     failureUntilMs: 0,
     failureCode: '',
+    failureTransient: false,
   };
 }
 
-function rememberCapabilityFailure(now, code) {
+function capabilityAcquisitionResult({ token = null, code = '', transient = false } = {}) {
+  return {
+    token: token || null,
+    code: String(code || ''),
+    transient: Boolean(transient),
+  };
+}
+
+function isTerminalCapabilityHttpStatus(status) {
+  return status >= 400 && status < 500;
+}
+
+function rememberCapabilityFailure(code, { transient }) {
+  const cacheMs = transient
+    ? COMMAND_CAPABILITY_TRANSIENT_ANTI_STORM_MS
+    : COMMAND_CAPABILITY_TERMINAL_NEGATIVE_CACHE_MS;
   capabilityTokenCache = {
     token: null,
     expiresAtMs: 0,
-    failureUntilMs: now + COMMAND_CAPABILITY_NEGATIVE_CACHE_MS,
-    failureCode: code,
+    failureUntilMs: Date.now() + cacheMs,
+    failureCode: String(code || 'capability_unavailable'),
+    failureTransient: Boolean(transient),
   };
 }
 
@@ -193,10 +242,19 @@ function injectedBusinessOsCapabilityToken(now = Date.now()) {
   return null;
 }
 
+async function acquireCapabilityTokenForSubmit() {
+  let result = await acquireBusinessOsCapabilityToken();
+  if (result.token || !result.transient) return result;
+  await delay(COMMAND_CAPABILITY_REFRESH_RETRY_BACKOFF_MS);
+  result = await acquireBusinessOsCapabilityToken();
+  return result;
+}
+
 async function submitRxdbCommand({ db, sync, session, command }) {
   const submitStartedAt = Date.now();
   const commandId = command.id || `cmd_${crypto.randomUUID()}`;
-  const capabilityToken = await getBusinessOsCapabilityToken();
+  const capability = await acquireCapabilityTokenForSubmit();
+  const capabilityToken = capability.token;
   emitCommandLifecycle(commandId, command.command_type || command.type, 'capability_resolved', submitStartedAt);
   // Every Business OS command mutates native/domain state. Offline reads stay
   // local-first, but mutation intent without a current server-issued actor
@@ -210,6 +268,7 @@ async function submitRxdbCommand({ db, sync, session, command }) {
   ) {
     throw commandError(commandId, 'Business OS authorization is currently unavailable.', {
       code: 'auth_required',
+      transient: capability.transient,
       retryable: true,
     });
   }
