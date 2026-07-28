@@ -123,18 +123,120 @@ policy, or a wall of scoring internals by default.
 
 ## Current Repair Work Log
 
-| Area | Failure | Required Result | Status |
-| --- | --- | --- | --- |
-| Knowledge projection | Summary only was replicated | Full Skill, Skillbook, and Runbook Markdown | Implemented; 22/22 module tests pass |
-| Knowledge selection | Generic registry Skill replaced selected Skillbook | Explicit Skillbook switcher and selected Skillbook content | Implemented; 22/22 module tests pass |
-| Knowledge sources | Verified receipts were not visible in Knowledge | Counted source tab with receipt, canonical URL, and snapshot hash | Implemented; 138-resource import prepared |
-| Research lineage | Two cards for one domain | One current lineage with historical task IDs | Implemented; 42/42 module tests pass |
-| Ranking | Computed score overrode audited tier | Audited grade-first ranking | Implemented; 42/42 module tests pass |
-| Graph motion | Continuous directional particle animation | Stationary graph after fit | Implemented; browser QA passes |
-| Graph layout | Controls and insights overlapped | Reserved, responsive overlay regions | Implemented; desktop, compact, and touch QA pass |
-| Right pane | Internal prompt text wall | Concise context and actions | Implemented; browser QA passes |
-| Reports | Current report not linked across lineage | Explicit task/domain lineage and current verified report | Verified report live; two inadmissible legacy reports quarantined |
-| Knowledge depth | Several native records appeared shallow | Substantive verified Skills, Runbooks, resources, and tables | Nine full Books and thirteen Runbooks verified; resource promotion pending deployment |
+The statuses below are deliberately split into code, deployment, and live acceptance. A
+unit test or source-code change is not evidence that the production UI works.
+
+| Area | Failure | Required Result | Code | Live acceptance |
+| --- | --- | --- | --- | --- |
+| Knowledge projection | Summary only was replicated | Full Skill, Skillbook, and Runbook Markdown | Implemented; module tests pass | Pending managed upgrade and browser verification |
+| Knowledge selection | Generic registry Skill replaced selected Skillbook | Explicit Skillbook switcher and selected Skillbook content | Implemented | Pending |
+| Knowledge sources | Verified receipts were not visible in Knowledge | Counted source tab with receipt, canonical URL, and snapshot hash | Implemented | Pending |
+| Research lineage | Two cards for one domain | One current lineage with historical task IDs | Implemented; module tests pass | Pending |
+| Ranking | Computed score overrode audited tier | Audited grade-first ranking | Implemented; module tests pass | Pending |
+| Graph motion | Graph restarted or animated on hover | Stationary graph that preserves simulation state | Implemented | Pending pointer and resize tests |
+| Graph layout | Controls, insights, labels, and search overlapped | Reserved responsive regions with no clipping | Implemented | Pending viewport matrix |
+| Right pane | Internal prompt text wall | Concise context, facts, status, and actions | Implemented | Pending |
+| Reports | Current report not linked across lineage | Explicit task/domain lineage and current verified report | Implemented | Pending open/export test |
+| Knowledge depth | Native records appeared shallow | Substantive verified Skill and executable Runbooks | Six typed engineering Runbooks imported | Pending full-content and execution test |
+
+## Complete Defect And Acceptance Matrix
+
+### Web Research layout and interaction
+
+- [ ] The application remains a windowed module and never renders an empty body.
+- [ ] Header, module tabs, pane titles, counts, filters, and actions are not clipped at
+  1920, 1440, 1280, 1024, 768, and mobile widths.
+- [ ] The three-pane layout collapses only when the available module width requires it;
+  it does not switch prematurely because of the outer browser width.
+- [ ] Source cards do not clip titles, grades, metadata, or actions.
+- [ ] Source-table columns have stable widths and never overlap.
+- [ ] Source and measurement tables scroll horizontally when required.
+- [ ] Independent pane scroll positions survive selection, refresh, tab changes, and
+  background replication updates.
+- [ ] Selecting a ranked source on the left selects and reveals the same source in the
+  center and renders it in the right pane.
+- [ ] Selecting a source in the center updates the left ranking and right details.
+- [ ] Tag filters produce a visibly filtered result set and can be reset with `Alle`.
+- [ ] Source cards contain a factual summary, concrete contribution, limitations, and
+  provenance; generic audit boilerplate is not accepted as content.
+
+### Graph
+
+- [ ] The graph initializes once, fits once, and does not restart on hover.
+- [ ] Pointer movement, node hover, selection, resize, detail changes, and pane
+  navigation preserve the graph instance unless the graph data changes.
+- [ ] The graph becomes stationary after bounded layout stabilization.
+- [ ] Search, layers, fit, detail, 2D/3D, zoom, insights, and legend never overlap.
+- [ ] Overview, standard, and deep modes produce meaningful, bounded graph changes.
+- [ ] Node labels, topics, and relations are domain concepts derived from evidence.
+- [ ] Invalid graph provenance fails closed instead of rendering invented relations.
+
+### Research data and evidence
+
+- [ ] The current lineage shows 1,643 candidates, 138 admitted sources, 4,177 direct
+  measurements, 3,925 separate derivations, 8 Knowledge entries, and 1 current report,
+  unless a newer audited run intentionally changes those counts.
+- [ ] Direct measurements expose the original reported quantities and source row.
+- [ ] UIUC coefficient rows expose `CT` and `CP` as direct, dimensionless measurements.
+- [ ] Derived thrust, torque, and power use a separate view and state the assumed air
+  density and formula.
+- [ ] Propeller diameter and pitch are separate metric columns with explanatory headers.
+- [ ] Numerical exports remain machine-readable; German display formatting does not
+  corrupt stored numeric values.
+- [ ] Every admitted source opens a valid canonical original or captured primary
+  artifact and exposes receipt and SHA-256 provenance.
+- [ ] Rejected or quarantined candidates never appear as verified evidence.
+- [ ] Ranking is audited-grade first and score second; A/B evidence is visible before
+  lower tiers.
+
+### Task and Harness flow
+
+- [ ] `Research fortsetzen` creates exactly one continuation task.
+- [ ] The task immediately becomes visible in Chat/CTOX and receives focus.
+- [ ] Repeated clicks cannot create duplicate active runs.
+- [ ] The Harness leases, runs, reviews, and completes the task with MiniMax M3.
+- [ ] The Responses proxy streams long-running work without truncation.
+- [ ] No red, blocked, orphaned, or stale task remains after completion.
+- [ ] Research progress and upgrade/synchronization states cannot look like empty data.
+
+### Knowledge
+
+- [ ] The active domain displays a substantive UAV motor-bearing design Skill, not a
+  source-registry sentence.
+- [ ] The Skill defines purpose, required inputs, engineering method, assumptions,
+  evidence policy, decision gates, outputs, limitations, and citations.
+- [ ] Every Runbook is an executable specialization with required inputs, ordered
+  actions, validation gates, artifacts, failure conditions, and an execution command.
+- [ ] Runbook execution creates a visible CTOX task and a traceable output.
+- [ ] The six required procedures cover load points, bearing reactions, life spectrum,
+  clearance/preload, lubrication/sealing, and validation.
+- [ ] Skill, Runbook, Sources, and Tables switchers are labelled, horizontally
+  scrollable where needed, and keyboard accessible.
+- [ ] Physical replication chunks are merged into logical tables; users do not see
+  hundreds of cryptic one-letter chunk tabs.
+- [ ] Incomplete chunk sets show recovery/retry status and do not silently masquerade
+  as complete Knowledge.
+- [ ] Table headers expose units and concise hover explanations.
+
+### Documents, reports, files, and spreadsheets
+
+- [ ] The current verified report is visible and opens from Research.
+- [ ] Document creation automatically recommends or explicitly accepts the UAV-bearing
+  Skill and a relevant Runbook.
+- [ ] Generated documents retain evidence citations through edit and export.
+- [ ] Generated CSV and document files appear in Files with direct open and download.
+- [ ] CSV opens in the actual Spreadsheets application; documents open in Documents.
+- [ ] Upload, download, drag-in, and drag-out work in browser and desktop hosts where
+  the platform permits them.
+
+### Account and session acceptance
+
+- [ ] A fresh Michael session logs in, reloads, uses all required modules, and logs out.
+- [ ] A fresh Ingo session does the same with the Owner role.
+- [ ] Exactly those two active users exist.
+- [ ] Settings render completely for both authorized roles.
+- [ ] No anonymous `Local CTOX` identity or local-runtime fallback appears on the
+  managed tenant.
 
 ## Release Gate
 

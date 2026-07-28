@@ -610,7 +610,7 @@ impl PersistentSession {
     /// persistent harness thread.
     pub(crate) fn start_isolated(root: &Path, settings: &BTreeMap<String, String>) -> Result<Self> {
         Self::start_with_instructions_and_tool_mode(
-            root, settings, None, false, false, false, false, false,
+            root, settings, None, false, false, false, None, false, false,
         )
     }
 

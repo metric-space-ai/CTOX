@@ -377,8 +377,8 @@ export function createResearchGraph(host, options = {}) {
         else child.material.opacity = active ? 0.96 : 0.14;
       });
     }
-    graph.linkColor(linkColor);
-    graph.linkWidth(linkWidth);
+    // Updating ForceGraph link accessors can restart renderer/layout work.
+    // Hover only changes existing node materials; topology and camera stay put.
   }
 
   function applyVisibilityState() {

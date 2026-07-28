@@ -7,7 +7,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260721-command-reference-context-v2';
+const BUILD = '20260728-research-knowledge-usability-v88';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -384,12 +384,14 @@ const state = {
   showDiagram: true,
   sourceSearchTerm: '',
   sourceActiveTag: 'all',
+  measurementMode: 'derived',
   mapMode: 'discovery',
   candidateRows: [],
   candidateModels: [],
   sourceRows: [],
   curatedRows: [],
   measurementRows: [],
+  derivedMeasurementRows: [],
   graphNodeRows: [],
   graphEdgeRows: [],
   sourceModels: [],
@@ -607,11 +609,10 @@ function bindEvents(root) {
       await loadDashboardData();
       render();
     } else if (action === 'select-source') {
-      state.selectedSourceId = target.dataset.sourceId || '';
-      render();
+      selectSourceFromUi(target.dataset.sourceId || '');
     } else if (action === 'tab') {
       state.activeTab = target.dataset.tab || 'sources';
-      renderCenter();
+      refreshWorkbenchForActiveTab();
     } else if (action === 'map-mode') {
       state.mapMode = target.dataset.mapMode || 'portfolio';
       // Zoom & Pan state is persistent, do not reset view!
@@ -657,10 +658,14 @@ function bindEvents(root) {
     } else if (action === 'source-detail') {
       openSourceDrawer(target.dataset.sourceId || '');
     } else if (action === 'focus-ctox-run') {
-      focusCtoxRun(target.dataset.taskQueueId || '', target.dataset.commandId || '');
+      await focusCtoxRun(
+        target.dataset.taskQueueId || '',
+        target.dataset.commandId || '',
+        target.dataset.taskStatus || '',
+      );
     } else if (action === 'sources-view') {
       state.sourcesViewMode = target.dataset.viewMode || 'shards';
-      renderCenter();
+      refreshWorkbenchForActiveTab();
     } else if (action === 'toggle-diagram') {
       state.showDiagram = !state.showDiagram;
       const centerBody = root.querySelector('.research-center-body');
@@ -674,7 +679,10 @@ function bindEvents(root) {
       renderCenter();
     } else if (action === 'source-tag-filter') {
       state.sourceActiveTag = target.dataset.tagId || 'all';
-      renderCenter();
+      refreshSourcesWorkbenchInPlace();
+    } else if (action === 'measurement-mode') {
+      state.measurementMode = target.dataset.measurementMode === 'direct' ? 'direct' : 'derived';
+      refreshMeasurementWorkbenchInPlace();
     }
   });
   root.addEventListener('change', (event) => {
@@ -696,7 +704,7 @@ function bindEvents(root) {
       const selectionStart = searchInput.selectionStart;
       const selectionEnd = searchInput.selectionEnd;
       state.sourceSearchTerm = searchInput.value;
-      renderCenter();
+      refreshSourcesWorkbenchInPlace();
       const restoredInput = document.getElementById('research-source-search-input');
       if (restoredInput) {
         restoredInput.focus();
@@ -1249,6 +1257,7 @@ async function loadDashboardData() {
   state.sourceRows = [];
   state.curatedRows = [];
   state.measurementRows = [];
+  state.derivedMeasurementRows = [];
   state.graphNodeRows = [];
   state.graphEdgeRows = [];
   state.sourceModels = [];
@@ -1266,13 +1275,15 @@ async function loadDashboardData() {
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
   const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
+  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
-  const [candidateRows, sourceRows, curatedRows, measurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
+  const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
     candidateTable ? fetchTableRows(candidateTable.id) : Promise.resolve([]),
     sourceTable ? fetchTableRows(sourceTable.id) : Promise.resolve([]),
     curatedTable && curatedTable.id !== sourceTable?.id ? fetchTableRows(curatedTable.id) : Promise.resolve([]),
     measurementTable && measurementTable.id !== sourceTable?.id && measurementTable.id !== curatedTable?.id ? fetchTableRows(measurementTable.id) : Promise.resolve([]),
+    derivedMeasurementTable ? fetchTableRows(derivedMeasurementTable.id) : Promise.resolve([]),
     graphNodeTable ? fetchTableRows(graphNodeTable.id) : Promise.resolve([]),
     graphEdgeTable ? fetchTableRows(graphEdgeTable.id) : Promise.resolve([]),
   ]);
@@ -1280,6 +1291,7 @@ async function loadDashboardData() {
   state.sourceRows = sourceRows;
   state.curatedRows = curatedRows;
   state.measurementRows = measurementRows;
+  state.derivedMeasurementRows = derivedMeasurementRows;
   state.graphNodeRows = graphNodeRows;
   state.graphEdgeRows = graphEdgeRows;
   state.candidateModels = buildSourceModels(task, candidateRows, [], []);
@@ -1934,6 +1946,7 @@ function render() {
 function renderLeft() {
   const root = pane('left');
   if (!root) return;
+  const scrollState = capturePaneScroll(root);
   const task = selectedTask();
   const rankedSources = evidenceRankedSources();
   root.innerHTML = `
@@ -1970,6 +1983,7 @@ function renderLeft() {
       </section>
     </div>
   `;
+  restorePaneScroll(root, scrollState);
 }
 
 function renderTaskButton(task) {
@@ -2048,6 +2062,7 @@ function emptyStateForNoTask() {
 function renderCenter() {
   const root = pane('center');
   if (!root) return;
+  const scrollState = capturePaneScroll(root);
   const task = selectedTask();
   if (!task) {
     disposeResearchGraph();
@@ -2117,6 +2132,7 @@ function renderCenter() {
   `;
   if (state.showDiagram) scheduleResearchGraphMount(task, projection);
   else disposeResearchGraph();
+  restorePaneScroll(root, scrollState);
 }
 
 function renderSemanticGraph(task, projection) {
@@ -3160,14 +3176,14 @@ function renderSourcesTable(filteredList = state.sourceModels) {
   const xAxis = axisPair.x;
   const yAxis = axisPair.y;
   return `
-    <table class="ctox-table" style="table-layout: fixed; width: 100%;">
+    <table class="ctox-table research-source-table">
       <colgroup>
-        <col style="width: 48%;" />
-        <col style="width: 14%;" />
-        <col style="width: 14%;" />
-        <col style="width: 8%;" />
-        <col style="width: 8%;" />
-        <col style="width: 8%;" />
+        <col class="research-source-col-title" />
+        <col class="research-source-col-class" />
+        <col class="research-source-col-score" />
+        <col class="research-source-col-axis" />
+        <col class="research-source-col-axis" />
+        <col class="research-source-col-action" />
       </colgroup>
       <thead>
         <tr>
@@ -3181,9 +3197,9 @@ function renderSourcesTable(filteredList = state.sourceModels) {
       </thead>
       <tbody>
         ${filteredList.map((source) => `
-          <tr class="${source.id === state.selectedSourceId ? 'is-selected' : ''}" data-evidence-status="${escapeHtml(source.evidenceStatus)}">
+          <tr class="${source.id === state.selectedSourceId ? 'is-selected' : ''}" data-source-id="${escapeHtml(source.id)}" data-evidence-status="${escapeHtml(source.evidenceStatus)}" aria-selected="${source.id === state.selectedSourceId}">
             <td><button type="button" data-action="select-source" data-source-id="${escapeHtml(source.id)}"><strong>${escapeHtml(source.title)}</strong><span>${escapeHtml(source.id)} · ${escapeHtml(source.evidenceStatusLabel)}</span></button></td>
-            <td>${escapeHtml(source.sourceClass)}</td>
+            <td class="research-source-class" title="${escapeHtml(source.sourceClass)}">${escapeHtml(source.sourceClass)}</td>
             <td class="is-num"><span class="ctox-badge ${gradeBadgeClass(source.grade)}">${escapeHtml(source.grade)}${source.evidenceEligible ? ` · ${formatPortfolioScore(source.score)}` : ''}</span></td>
             <td class="is-num">${formatDimensionScore(source.dimensions[yAxis])}</td>
             <td class="is-num">${formatDimensionScore(source.dimensions[xAxis])}</td>
@@ -3218,7 +3234,8 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
             <button type="button"
                     class="ctox-chip${activeTag === theme.id ? ' is-active' : ''}"
                     data-action="source-tag-filter"
-                    data-tag-id="${theme.id}">
+                    data-tag-id="${theme.id}"
+                    aria-pressed="${activeTag === theme.id}">
               ${escapeHtml(theme.label)}
             </button>
           `).join('')}
@@ -3245,8 +3262,7 @@ function filteredSources(sourceModels = state.sourceModels) {
 
   return sourceModels.filter((source) => {
     if (activeTag !== 'all') {
-      const tags = sourceTags(source);
-      if (!tags.includes(activeTag)) return false;
+      if (getSearchCluster(source) !== activeTag) return false;
     }
     if (searchTerm) {
       const titleMatch = (source.title || '').toLowerCase().includes(searchTerm);
@@ -3267,13 +3283,123 @@ function filteredSources(sourceModels = state.sourceModels) {
   });
 }
 
+function refreshSourcesWorkbenchInPlace() {
+  const center = pane('center');
+  if (!center || !['sources', 'candidates'].includes(state.activeTab)) return;
+  center.querySelectorAll('[data-action="source-tag-filter"]').forEach((button) => {
+    const active = button.dataset.tagId === (state.sourceActiveTag || 'all');
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  const host = center.querySelector('.research-table-host');
+  if (!host) return;
+  const scrollTop = host.scrollTop;
+  const scrollLeft = host.scrollLeft;
+  host.innerHTML = renderActiveTable(selectedTask());
+  host.scrollTop = scrollTop;
+  host.scrollLeft = scrollLeft;
+}
+
+function refreshWorkbenchForActiveTab() {
+  const center = pane('center');
+  const host = center?.querySelector('.research-table-host');
+  const tabs = center?.querySelector('.research-tabs-container');
+  if (!host || !tabs) {
+    renderCenter();
+    return;
+  }
+  center.querySelectorAll('[data-action="tab"]').forEach((button) => {
+    const active = button.dataset.tab === state.activeTab;
+    button.classList.toggle('is-active', active);
+    button.setAttribute('aria-selected', String(active));
+  });
+  const previousToggle = tabs.querySelector('.research-view-toggle');
+  if (state.activeTab === 'sources') {
+    const toggle = document.createElement('div');
+    toggle.className = 'ctox-pane-tabs research-view-toggle';
+    toggle.innerHTML = `
+      <button type="button" class="ctox-pane-tab${state.sourcesViewMode === 'table' ? ' is-active' : ''}" data-action="sources-view" data-view-mode="table" aria-label="${escapeHtml(state.t('tableView', 'Tabelle'))}" title="${escapeHtml(state.t('tableView', 'Tabelle'))}">${iconSvg('table')}</button>
+      <button type="button" class="ctox-pane-tab${state.sourcesViewMode === 'shards' ? ' is-active' : ''}" data-action="sources-view" data-view-mode="shards" aria-label="${escapeHtml(state.t('shardsView', 'Karten'))}" title="${escapeHtml(state.t('shardsView', 'Karten'))}">${iconSvg('grid')}</button>
+    `;
+    previousToggle?.replaceWith(toggle);
+    if (!previousToggle) tabs.append(toggle);
+  } else {
+    previousToggle?.remove();
+  }
+  const scrollTop = host.scrollTop;
+  const scrollLeft = host.scrollLeft;
+  host.innerHTML = renderActiveTable(selectedTask());
+  host.scrollTop = scrollTop;
+  host.scrollLeft = scrollLeft;
+}
+
+function refreshMeasurementWorkbenchInPlace() {
+  const host = pane('center')?.querySelector('.research-table-host');
+  if (!host || state.activeTab !== 'measurements') return;
+  const scrollTop = host.scrollTop;
+  const scrollLeft = host.scrollLeft;
+  host.innerHTML = renderMeasurementsTable();
+  host.scrollTop = scrollTop;
+  host.scrollLeft = scrollLeft;
+}
+
+function selectSourceFromUi(sourceId) {
+  const nextId = String(sourceId || '');
+  if (!nextId) return;
+  state.selectedSourceId = nextId;
+
+  for (const root of [pane('left'), pane('center')]) {
+    root?.querySelectorAll('[data-source-id]').forEach((node) => {
+      const selected = node.dataset.sourceId === nextId;
+      node.classList.toggle('is-selected', selected);
+      node.setAttribute('aria-selected', String(selected));
+    });
+  }
+
+  const centerMatch = [...(pane('center')?.querySelectorAll('[data-source-id]') || [])]
+    .find((node) => node.dataset.sourceId === nextId && node.closest('.research-table-host'));
+  centerMatch?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+
+  renderRight();
+  pane('right')?.querySelector('[data-selected-source-section]')?.scrollIntoView?.({
+    block: 'start',
+    inline: 'nearest',
+  });
+}
+
+function capturePaneScroll(root) {
+  if (!root) return [];
+  const selectors = [
+    '.research-left-scroll',
+    '.research-right-scroll',
+    '.research-center-body',
+    '.research-table-host',
+    '.research-sources-shards-scroll',
+  ];
+  return selectors.flatMap((selector) => [...root.querySelectorAll(selector)].map((node, index) => ({
+    selector,
+    index,
+    top: node.scrollTop,
+    left: node.scrollLeft,
+  })));
+}
+
+function restorePaneScroll(root, entries = []) {
+  for (const entry of entries) {
+    const node = root?.querySelectorAll(entry.selector)?.[entry.index];
+    if (!node) continue;
+    node.scrollTop = entry.top;
+    node.scrollLeft = entry.left;
+  }
+}
+
 function renderSourceCard(source) {
   const isSelected = source.id === state.selectedSourceId;
   const kind = source.sourceClass || 'Quelle';
   const tags = sourceTags(source);
-  const fields = firstString(source.row, ['data_fields', 'fields', 'measurement_fields', 'summary']) || state.t('noSummaryAvailable', 'Keine Zusammenfassung.');
-  const use = firstString(source.row, ['contribution_note', 'contribution', 'use']) || state.t('contributionMissing', 'Beitrag nicht dokumentiert.');
-  const missing = firstString(source.row, ['evidence_gap', 'gap', 'limitations']) || state.t('limitationsMissing', 'Grenzen nicht dokumentiert.');
+  const fields = sourceDataSummary(source);
+  const use = sourceContributionSummary(source);
+  const missing = sourceLimitationsSummary(source);
   const canonicalUrl = firstString(source.row, ['canonical_url']);
 
   return `
@@ -3318,6 +3444,42 @@ function renderSourceCard(source) {
   `;
 }
 
+function sourceDataSummary(source) {
+  const row = source?.row || {};
+  const direct = firstString(row, ['data_fields', 'fields', 'measurement_fields', 'summary', 'abstract']);
+  if (direct) return direct;
+  const bibliographic = [
+    firstString(row, ['authors_or_institution', 'authors', 'institution', 'publisher']),
+    firstString(row, ['publication_year', 'year']),
+    firstString(row, ['source_type', 'content_type']),
+  ].filter(Boolean);
+  const type = firstString(row, ['source_type', 'content_type']) || source?.sourceClass || 'Quelle';
+  return bibliographic.length
+    ? bibliographic.join(' · ')
+    : `${type}; Originalinhalt und bibliografische Metadaten verfügbar.`;
+}
+
+function sourceContributionSummary(source) {
+  const row = source?.row || {};
+  const direct = firstString(row, ['contribution_note', 'contribution', 'use', 'verification_notes', 'evidence_note']);
+  if (direct) return direct;
+  const relevance = firstString(row, ['evidence_relevance_score', 'relevance_score']);
+  return relevance
+    ? `Evidence-Relevanz ${relevance}/100; Originalinhalt und Snapshot verifiziert.`
+    : 'Als verifizierte Primär- oder Fachquelle für die UAV-Lagerauslegung referenzierbar.';
+}
+
+function sourceLimitationsSummary(source) {
+  const row = source?.row || {};
+  return firstString(row, [
+    'evidence_gap',
+    'gap',
+    'limitations',
+    'uncertainty',
+    'independence_note',
+  ]) || 'Geltungsbereich und Übertragbarkeit müssen für den konkreten Betriebspunkt geprüft werden.';
+}
+
 function sourceTags(source) {
   const raw = source?.row?.tags ?? source?.row?.source_tags ?? source?.sourceClass ?? '';
   const values = Array.isArray(raw)
@@ -3360,19 +3522,33 @@ function formatDimensionScore(value) {
 }
 
 function renderMeasurementsTable() {
-  const rows = filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels);
+  const directRows = filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels);
+  const derivedRows = filterMeasurementRowsForEvidence(state.derivedMeasurementRows, state.sourceModels);
+  const mode = state.measurementMode === 'direct' ? 'direct' : 'derived';
+  const rows = mode === 'direct' ? directRows : derivedRows;
+  return `
+    <div class="research-measurement-mode ctox-pane-tabs" role="tablist" aria-label="Messdatenart">
+      <button type="button" class="ctox-pane-tab${mode === 'direct' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="direct" role="tab" aria-selected="${mode === 'direct'}">
+        Direkte Messwerte <span>${directRows.length}</span>
+      </button>
+      <button type="button" class="ctox-pane-tab${mode === 'derived' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="derived" role="tab" aria-selected="${mode === 'derived'}">
+        Abgeleitete Kräfte &amp; Momente <span>${derivedRows.length}</span>
+      </button>
+    </div>
+    <p class="research-measurement-note">${mode === 'direct'
+      ? 'Direkt publizierte dimensionslose UIUC-Koeffizienten. Kraft und Moment werden hier bewusst nicht als direkt gemessen ausgegeben.'
+      : 'Aus CT/CP mit dokumentierter Luftdichte und Propellergeometrie abgeleitet. Diese Werte sind keine direkt gemessenen Lagerkräfte.'}</p>
+    ${mode === 'direct' ? renderDirectMeasurements(rows) : renderDerivedMeasurements(rows)}
+  `;
+}
+
+function renderDirectMeasurements(rows) {
   return `
     <table class="ctox-table" style="table-layout: fixed; width: 100%;">
       <colgroup>
-        <col style="width: 15%;" />
-        <col style="width: 11%;" />
-        <col style="width: 11%;" />
-        <col style="width: 10%;" />
-        <col style="width: 10%;" />
-        <col style="width: 11%;" />
-        <col style="width: 11%;" />
-        <col style="width: 11%;" />
-        <col style="width: 10%;" />
+        <col style="width: 17%;" /><col style="width: 12%;" /><col style="width: 12%;" />
+        <col style="width: 12%;" /><col style="width: 10%;" /><col style="width: 10%;" />
+        <col style="width: 10%;" /><col style="width: 17%;" />
       </colgroup>
       <thead>
         <tr>
@@ -3381,9 +3557,8 @@ function renderMeasurementsTable() {
           ${measurementHeader('Durchmesser (mm)', 'Propeller-Durchmesser metrisch in Millimetern, aus Angaben wie 9x5 separat extrahiert.', true)}
           ${measurementHeader('Steigung (mm)', 'Propeller-Steigung metrisch in Millimetern, aus Angaben wie 9x5 separat extrahiert.', true)}
           ${measurementHeader('RPM', 'Drehzahl in Umdrehungen pro Minute, ohne Tausendertrennzeichen formatiert.', true)}
-          ${measurementHeader('Force (N)', 'Axiale Kraft in Newton. Bei Propellerdaten ist dies in der Regel der gemessene Schub.', true)}
-          ${measurementHeader('Tangentiale Ersatzkraft (N)', 'Aus Drehmoment und Radius abgeleitete tangentiale Ersatzkraft. Das ist keine gemessene Lager-Radiallast.', true)}
-          ${measurementHeader('Moment/Torque (N m)', 'Drehmoment beziehungsweise Moment in Newtonmeter aus dem Messdatensatz.', true)}
+          ${measurementHeader('CT', 'Direkt publizierter dimensionsloser Schubbeiwert.', true)}
+          ${measurementHeader('CP', 'Direkt publizierter dimensionsloser Leistungsbeiwert.', true)}
           ${measurementHeader('Methode', 'Konfidenz oder Ableitungsverfahren der Messzeile.')}
         </tr>
       </thead>
@@ -3395,12 +3570,49 @@ function renderMeasurementsTable() {
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_diameter'))}</td>
             <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_pitch'))}</td>
             <td class="is-num">${formatMeasurementNumber(row.rpm, 0)}</td>
-            <td class="is-num">${formatMeasurementNumber(row.force_N ?? row.axial_load_N ?? row.thrust_N)}</td>
-            <td class="is-num">${formatMeasurementNumber(tangentialEquivalentForce(row))}</td>
-            <td class="is-num">${formatMeasurementNumber(row.torque_Nm)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.thrust_coefficient_CT)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.power_coefficient_CP)}</td>
             <td>${escapeHtml(firstString(row, ['confidence', 'derivation_method']).slice(0, 90))}</td>
           </tr>
-        `).join('') || `<tr><td colspan="9">${escapeHtml(state.t('noMeasurements', 'Keine verifizierten Messpunkte vorhanden.'))}</td></tr>`}
+        `).join('') || `<tr><td colspan="8">${escapeHtml(state.t('noMeasurements', 'Keine verifizierten Messpunkte vorhanden.'))}</td></tr>`}
+      </tbody>
+    </table>
+  `;
+}
+
+function renderDerivedMeasurements(rows) {
+  return `
+    <table class="ctox-table research-derived-measurements" style="table-layout: fixed; width: 100%;">
+      <colgroup>
+        <col style="width: 15%;" /><col style="width: 11%;" /><col style="width: 11%;" />
+        <col style="width: 11%;" /><col style="width: 10%;" /><col style="width: 12%;" />
+        <col style="width: 12%;" /><col style="width: 10%;" /><col style="width: 8%;" />
+      </colgroup>
+      <thead><tr>
+        ${measurementHeader('Quelle', 'Quell-ID der zugrunde liegenden Messreihe.')}
+        ${measurementHeader('Propeller', 'Originale Propellerangabe Durchmesser x Steigung.')}
+        ${measurementHeader('Durchmesser (mm)', 'Metrischer Propellerdurchmesser.', true)}
+        ${measurementHeader('Steigung (mm)', 'Metrische Propellersteigung.', true)}
+        ${measurementHeader('RPM', 'Eingangs-Drehzahl.', true)}
+        ${measurementHeader('Schub/Force (N)', 'Aus CT, Luftdichte, Drehzahl und Durchmesser abgeleiteter Schub.', true)}
+        ${measurementHeader('Moment/Torque (N m)', 'Aus CP und Wellenleistung abgeleitetes Drehmoment.', true)}
+        ${measurementHeader('Leistung (W)', 'Aus CP abgeleitete Wellenleistung.', true)}
+        ${measurementHeader('ρ (kg/m³)', 'Für die Ableitung verwendete Luftdichte.', true)}
+      </tr></thead>
+      <tbody>
+        ${rows.slice(0, 120).map((row) => `
+          <tr>
+            <td>${escapeHtml(row.source_id || '')}</td>
+            <td>${escapeHtml(firstString(row, ['propeller_size_original', 'propeller_size']))}</td>
+            <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_diameter'))}</td>
+            <td class="is-num">${formatMeasurementNumber(metricPropellerLength(row, 'prop_pitch'))}</td>
+            <td class="is-num">${formatMeasurementNumber(row.rpm_input ?? row.rpm, 0)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.thrust_N_derived ?? row.thrust_N)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.torque_Nm_derived ?? row.torque_Nm)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.shaft_power_W_derived ?? row.shaft_power_W)}</td>
+            <td class="is-num">${formatMeasurementNumber(row.air_density_kg_m3_input ?? row.air_density_kg_m3)}</td>
+          </tr>
+        `).join('') || `<tr><td colspan="9">Keine verifizierten abgeleiteten Kraft-/Momentzeilen vorhanden.</td></tr>`}
       </tbody>
     </table>
   `;
@@ -3415,7 +3627,7 @@ function measurementHeader(label, help, numeric = false) {
 }
 
 function propellerSize(row) {
-  const explicit = firstString(row, ['propeller_size', 'prop_size', 'prop']);
+  const explicit = firstString(row, ['propeller_size_original', 'propeller_size', 'prop_size', 'prop']);
   if (explicit) return explicit.replace(/\s*[xX×]\s*/g, ' x ');
   const diameter = formatMeasurementNumber(row.prop_diameter_in);
   const pitch = formatMeasurementNumber(row.prop_pitch_in);
@@ -3461,6 +3673,7 @@ function renderDataQualityNotices() {
 function renderRight() {
   const root = pane('right');
   if (!root) return;
+  const scrollState = capturePaneScroll(root);
   const task = selectedTask();
   const source = selectedSource();
   const runInfo = researchRunInfo(task);
@@ -3491,7 +3704,7 @@ function renderRight() {
         <div><strong>${researchReportsForTask(task).length}</strong><span>${escapeHtml(state.t('reports', 'Fachberichte'))}</span></div>
       </section>
       ${renderRunPanel(runInfo)}
-      <section class="research-context-block">
+      <section class="research-context-block" data-selected-source-section>
         <span class="ctox-pane-kicker">${escapeHtml(state.t('selectedSource', 'Selected Source'))}</span>
         ${source ? `
           <strong>${escapeHtml(source.title)}</strong>
@@ -3509,6 +3722,7 @@ function renderRight() {
       </section>
     </div>
   `;
+  restorePaneScroll(root, scrollState);
 }
 
 function renderRunPanel(runInfo) {
@@ -3534,7 +3748,7 @@ function renderRunPanel(runInfo) {
           <dt>${escapeHtml(state.t('thread', 'Thread'))}</dt><dd title="${escapeHtml(runInfo.threadKey || '-')}">${escapeHtml(runInfo.threadKey || '-')}</dd>
         </dl>
         <div class="research-run-actions">
-          <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
+          <button type="button" class="ctox-button" data-action="focus-ctox-run" data-command-id="${escapeHtml(runInfo.commandId)}" data-task-queue-id="${escapeHtml(runInfo.taskQueueId)}" data-task-status="${escapeHtml(runInfo.status)}" ${runInfo.taskQueueId || runInfo.commandId ? '' : 'disabled'}>${escapeHtml(state.t('viewInCtox', 'In CTOX ansehen'))}</button>
         </div>
       ` : `
         <p>${escapeHtml(state.t('noRunStarted', 'Kein Research-Lauf für dieses Dashboard gestartet.'))}</p>
@@ -3588,7 +3802,9 @@ function renderScoringModel(task) {
 }
 
 function canRunResearchTask(task) {
-  return validateSelectedResearchTask(task, state.knowledgeBases).valid && canWriteResearchState();
+  return validateSelectedResearchTask(task, state.knowledgeBases).valid
+    && canWriteResearchState()
+    && !researchRunInfo(task).isActive;
 }
 
 function canBuildKnowledgeFromResearch(task = selectedTask()) {
@@ -3623,6 +3839,9 @@ function validateSelectedResearchTask(task, knowledgeBases = []) {
 function runResearchHint(task, runInfo) {
   const validation = validateSelectedResearchTask(task, state.knowledgeBases);
   if (!validation.valid) return validation.message;
+  if (runInfo.isActive) {
+    return state.t('researchAlreadyActive', 'Research läuft bereits. Öffne den aktiven CTOX Task.');
+  }
   return `${state.t('runHint', 'Systematic Research für dieses Dashboard')} ${runInfo.hasRun ? state.t('researchFortsetzen', 'fortsetzen') : state.t('researchStarten', 'starten')}`;
 }
 
@@ -3630,6 +3849,9 @@ function runDisabledReason(task) {
   const validation = validateSelectedResearchTask(task, state.knowledgeBases);
   if (!validation.valid) return validation.message;
   if (!canWriteResearchState()) return researchWriteDeniedMessage();
+  if (researchRunInfo(task).isActive) {
+    return state.t('researchAlreadyActive', 'Research läuft bereits. Öffne den aktiven CTOX Task.');
+  }
   return '';
 }
 
@@ -4066,6 +4288,11 @@ async function runSelectedResearch() {
   });
   setStatus(state.t('researchChatQueued', 'Research-Aufgabe im Chat gestartet.'));
   render();
+  await focusCtoxRun(
+    result.task_id || result.task_queue_id || '',
+    commandId,
+    result.task_status || result.status || 'queued',
+  );
 }
 
 function compactKnowledgeTableReferences(tables = []) {
@@ -4539,14 +4766,30 @@ function openSourceDrawer(sourceId) {
   state.ctx.openRightDrawer(body);
 }
 
-function focusCtoxRun(taskQueueId, commandId) {
+async function focusCtoxRun(taskQueueId, commandId, taskStatus = '') {
   if (!taskQueueId && !commandId) return;
-  sessionStorage.setItem('ctox.businessOs.focusTask', JSON.stringify({
+  const focus = {
     taskId: taskQueueId,
     commandId,
+    taskStatus,
     sourceModule: 'research',
-  }));
-  location.hash = 'ctox';
+    openDrawer: true,
+  };
+  try {
+    sessionStorage.setItem('ctox.businessOs.focusTask', JSON.stringify(focus));
+  } catch {}
+  const params = new URLSearchParams();
+  if (taskQueueId) params.set('task_id', taskQueueId);
+  if (commandId) params.set('command_id', commandId);
+  if (taskStatus) params.set('task_status', taskStatus);
+  params.set('source', 'research');
+  params.set('drawer', '1');
+  location.hash = `#ctox?${params.toString()}`;
+  const app = window.CTOX_BUSINESS_OS_APP;
+  if (typeof app?.openModule === 'function' && app.activeModule?.id !== 'ctox') {
+    await app.openModule('ctox');
+  }
+  window.dispatchEvent(new CustomEvent('ctox-business-os-focus-task', { detail: focus }));
 }
 
 function initResearchContextMenu() {

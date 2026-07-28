@@ -3669,9 +3669,11 @@ fn emit_reauthorization_handoff(
         Some(&login_url),
         credential_ref.as_deref(),
         Some("stored session expired or invalid; reauthorization required"),
+        Some(reauthorization),
         &task_id,
         "scrape_executor",
         "ctox scrape execute",
+        None,
         !task_id.trim().is_empty(),
         true,
     ) {
