@@ -1848,6 +1848,7 @@ fn sync_desktop_file_from_path_with_policy(
     if !metadata.is_file() {
         anyhow::bail!("desktop file path is not a file: {}", path.display());
     }
+    let force_chunk_verification = forced_policy == Some(DesktopFileContentPolicy::Eager);
     let policy = forced_policy.unwrap_or_else(|| {
         if should_eager_sync_file(&path, &metadata) {
             DesktopFileContentPolicy::Eager
@@ -1862,9 +1863,17 @@ fn sync_desktop_file_from_path_with_policy(
         TemporaryDatabaseLockScope::TemporaryOnly,
         |peer, database| async move {
             if let Some(peer) = peer {
-                peer.upsert_desktop_file_from_path(path, policy).await
+                peer.upsert_desktop_file_from_path(path, policy, force_chunk_verification)
+                    .await
             } else {
-                upsert_desktop_file_with_policy(root, &database, path, policy).await
+                upsert_desktop_file_with_policy(
+                    root,
+                    &database,
+                    path,
+                    policy,
+                    force_chunk_verification,
+                )
+                .await
             }
         },
     )
@@ -3383,8 +3392,16 @@ impl NativePeer {
         &self,
         path: PathBuf,
         policy: DesktopFileContentPolicy,
+        force_chunk_verification: bool,
     ) -> anyhow::Result<()> {
-        upsert_desktop_file_with_policy(&self.root, &self.database, path, policy).await
+        upsert_desktop_file_with_policy(
+            &self.root,
+            &self.database,
+            path,
+            policy,
+            force_chunk_verification,
+        )
+        .await
     }
 
     async fn sync_desktop_files_from_scan_roots(
@@ -4473,7 +4490,13 @@ async fn deliver_business_command_outbox_background_loop(root: PathBuf) {
         match result {
             Ok(0) => {
                 idle_rounds = idle_rounds.saturating_add(1);
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(projection_sleep_secs(
+                    BUSINESS_COMMAND_ACTIVE_POLL_SECS,
+                    BUSINESS_COMMAND_IDLE_POLL_SECS,
+                    BUSINESS_COMMAND_IDLE_BACKOFF_AFTER_TICKS,
+                    idle_rounds,
+                )))
+                .await;
             }
             Ok(_) => {
                 idle_rounds = 0;
@@ -5490,6 +5513,7 @@ async fn accept_pending_business_command(
                 database,
                 PathBuf::from(materialized_path),
                 DesktopFileContentPolicy::Eager,
+                true,
             )
             .await
             .with_context(|| {
@@ -10803,6 +10827,7 @@ async fn upsert_desktop_file_with_policy(
     database: &Arc<RxDatabase>,
     path: PathBuf,
     policy: DesktopFileContentPolicy,
+    force_chunk_verification: bool,
 ) -> anyhow::Result<()> {
     let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
     upsert_desktop_file_with_parent(
@@ -10810,6 +10835,7 @@ async fn upsert_desktop_file_with_policy(
         database,
         path,
         policy,
+        force_chunk_verification,
         CTOX_DESKTOP_FOLDER_ID.to_string(),
         None,
     )
@@ -10948,6 +10974,7 @@ async fn upsert_desktop_file_with_parent(
     database: &Arc<RxDatabase>,
     path: PathBuf,
     policy: DesktopFileContentPolicy,
+    force_chunk_verification: bool,
     parent_id: String,
     virtual_path: Option<String>,
 ) -> anyhow::Result<()> {
@@ -11044,7 +11071,12 @@ async fn upsert_desktop_file_with_parent(
                         .get("content_generation_id")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    if desktop_file_generation_verified_by_metadata(doc, generation, metadata.len())
+                    if !force_chunk_verification
+                        && desktop_file_generation_verified_by_metadata(
+                            doc,
+                            generation,
+                            metadata.len(),
+                        )
                     {
                         true
                     } else if desktop_file_chunk_generation_is_complete(
@@ -11099,9 +11131,10 @@ async fn upsert_desktop_file_with_parent(
         // fall through to a full rewrite (self-healing repair).
         let mut reused_generation_id = reused_generation_id;
         if let Some(generation) = reused_generation_id.as_deref() {
-            let metadata_verified = existing_file_doc.as_ref().is_some_and(|doc| {
-                desktop_file_generation_verified_by_metadata(doc, generation, metadata.len())
-            });
+            let metadata_verified = !force_chunk_verification
+                && existing_file_doc.as_ref().is_some_and(|doc| {
+                    desktop_file_generation_verified_by_metadata(doc, generation, metadata.len())
+                });
             if !metadata_verified
                 && !desktop_file_chunk_generation_is_complete(
                     database,
@@ -12139,43 +12172,47 @@ fn desktop_file_chunk_rows_by_row_id_from_sqlite(
     index_window: (u64, u64),
     stats: &mut DemandFileFetchRequestStats,
 ) -> rxdb::rx_error::RxResult<Vec<Value>> {
-    let mut rows = Vec::with_capacity(
-        usize::try_from(index_window.1.saturating_sub(index_window.0)).unwrap_or(0),
-    );
-    let canonical_prefix = format!("{file_id}_{generation_id}_");
-    let canonical_upper = format!("{canonical_prefix}`");
-    let legacy_prefix = format!("{file_id}_");
-    let legacy_upper = format!("{legacy_prefix}\u{10ffff}");
-    for (lower, upper) in [
-        (canonical_prefix.as_str(), canonical_upper.as_str()),
-        (legacy_prefix.as_str(), legacy_upper.as_str()),
-    ] {
+    const ROW_ID_BATCH_SIZE: u64 = 256;
+
+    let start_idx = index_window.0.min(expected_total);
+    let end_idx = index_window.1.min(expected_total);
+    let mut rows =
+        Vec::with_capacity(usize::try_from(end_idx.saturating_sub(start_idx)).unwrap_or_default());
+    let mut batch_start = start_idx;
+    while batch_start < end_idx {
+        let batch_end = batch_start.saturating_add(ROW_ID_BATCH_SIZE).min(end_idx);
+        let ids = (batch_start..batch_end)
+            .map(|idx| SqlValue::Text(format!("{file_id}_{generation_id}_{idx}")))
+            .collect::<Vec<_>>();
+        let placeholders = vec!["?"; ids.len()].join(", ");
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT data FROM ctox_business_os__desktop_file_chunks__v0 \
-                 WHERE id >= ?1 AND id < ?2 AND COALESCE(deleted, 0) = 0 \
-                 ORDER BY id ASC",
-            )
+                 WHERE COALESCE(deleted, 0) = 0 AND id IN ({placeholders})"
+            ))
             .map_err(|err| {
-                demand_file_source_error(format!("prepare chunk row-id lookup: {err}"))
+                demand_file_source_error(format!("prepare exact chunk row-id lookup: {err}"))
             })?;
         let query_rows = stmt
-            .query_map(params![lower, upper], |row| row.get::<_, String>(0))
+            .query_map(params_from_iter(ids), |row| row.get::<_, String>(0))
             .map_err(|err| {
-                demand_file_source_error(format!("query desktop file chunks by row id: {err}"))
+                demand_file_source_error(format!(
+                    "query desktop file chunks by exact row id: {err}"
+                ))
             })?;
         for row in query_rows {
             let raw = row.map_err(|err| {
-                demand_file_source_error(format!("load desktop file chunk by row id: {err}"))
+                demand_file_source_error(format!("load desktop file chunk by exact row id: {err}"))
             })?;
             stats.rows_loaded = stats.rows_loaded.saturating_add(1);
             let value = serde_json::from_str::<Value>(&raw).map_err(|err| {
                 demand_file_source_error(format!(
-                    "decode desktop file chunk by row id for {file_id}: {err}"
+                    "decode desktop file chunk by exact row id for {file_id}: {err}"
                 ))
             })?;
             rows.push(value);
         }
+        batch_start = batch_end;
     }
     rows.retain(|chunk| {
         chunk.get("file_id").and_then(Value::as_str) == Some(file_id)
@@ -12619,6 +12656,7 @@ async fn sync_desktop_file_scan_with_database(
             database,
             path.clone(),
             policy,
+            false,
             parent_id,
             Some(virtual_path),
         )
@@ -15548,6 +15586,7 @@ mod tests {
         let source = include_str!("rxdb_peer.rs");
         const IDLE_MARKERS: &[&str] = &[
             "projection_sleep_secs(",
+            "business_record_projection_loop_sleep_secs(",
             "sleep_interval(",
             "wait_for_event(",
             "wait_for_table_change",
@@ -16198,14 +16237,18 @@ mod tests {
         Ok(())
     }
 
-    // SYNC-32: without any module declarations the source list is EXACTLY the
-    // built-in 4 — declarations only ever add.
+    // SYNC-32: without any module declarations the source list is exactly the
+    // built-in registry — declarations only ever add.
     #[test]
     fn demand_file_source_configs_default_to_builtins() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let configs = demand_file_source_configs(temp.path());
-        assert_eq!(configs.len(), 4);
-        assert_eq!(DEMAND_FILE_CHUNK_COLLECTIONS.len(), 4);
+        assert_eq!(configs.len(), DEMAND_FILE_CHUNK_COLLECTIONS.len());
+        for (config, builtin) in configs.iter().zip(DEMAND_FILE_CHUNK_COLLECTIONS) {
+            assert_eq!(config.request_collection, builtin.request_collection);
+            assert_eq!(config.storage_collection, builtin.storage_collection);
+            assert_eq!(config.key_field, builtin.key_field);
+        }
         assert!(runtime_module_demand_chunk_sources(temp.path()).is_empty());
         Ok(())
     }
@@ -16327,7 +16370,10 @@ mod tests {
         )?;
         assert!(!collection_creators_for_root(temp.path()).contains_key("camscan_blob_chunks"));
         assert!(runtime_module_demand_chunk_sources(temp.path()).is_empty());
-        assert_eq!(demand_file_source_configs(temp.path()).len(), 4);
+        assert_eq!(
+            demand_file_source_configs(temp.path()).len(),
+            DEMAND_FILE_CHUNK_COLLECTIONS.len()
+        );
         Ok(())
     }
 
@@ -17238,14 +17284,13 @@ mod tests {
         let conn = Connection::open(&database_path).expect("open sqlite");
         conn.execute_batch("ANALYZE")
             .expect("analyze hot index test db");
-        let business_commands_table = rxdb_test_table_name(&conn, "business_commands", 1);
-        let ctox_queue_tasks_table = rxdb_test_table_name(&conn, "ctox_queue_tasks", 0);
-        let desktop_file_chunks_table = rxdb_test_table_name(&conn, "desktop_file_chunks", 0);
-        let document_blob_chunks_table = rxdb_test_table_name(&conn, "document_blob_chunks", 0);
-        let spreadsheet_blob_chunks_table =
-            rxdb_test_table_name(&conn, "spreadsheet_blob_chunks", 0);
-        let browser_frames_table = rxdb_test_table_name(&conn, "browser_frames", 0);
-        let browser_input_events_table = rxdb_test_table_name(&conn, "browser_input_events", 0);
+        let business_commands_table = rxdb_test_table_name(&conn, "business_commands");
+        let ctox_queue_tasks_table = rxdb_test_table_name(&conn, "ctox_queue_tasks");
+        let desktop_file_chunks_table = rxdb_test_table_name(&conn, "desktop_file_chunks");
+        let document_blob_chunks_table = rxdb_test_table_name(&conn, "document_blob_chunks");
+        let spreadsheet_blob_chunks_table = rxdb_test_table_name(&conn, "spreadsheet_blob_chunks");
+        let browser_frames_table = rxdb_test_table_name(&conn, "browser_frames");
+        let browser_input_events_table = rxdb_test_table_name(&conn, "browser_input_events");
 
         assert_plan_uses_index(
             &conn,
@@ -17479,7 +17524,7 @@ mod tests {
         );
 
         let conn = Connection::open(&database_path).expect("open sqlite");
-        let frame_table = rxdb_test_table_name(&conn, "browser_frames", 0);
+        let frame_table = rxdb_test_table_name(&conn, "browser_frames");
         let frame: (i64, String, i64, String) = conn
             .query_row(
                 &format!(
@@ -17492,7 +17537,7 @@ mod tests {
             .expect("expired frame row");
         assert_eq!(frame, (1, String::new(), 0, "redacted".to_string()));
 
-        let input_table = rxdb_test_table_name(&conn, "browser_input_events", 0);
+        let input_table = rxdb_test_table_name(&conn, "browser_input_events");
         let deleted_state = |id: &str| -> i64 {
             conn.query_row(
                 &format!(
@@ -17796,7 +17841,7 @@ mod tests {
         );
 
         let conn = Connection::open(&database_path).expect("open sqlite");
-        let session_table = rxdb_test_table_name(&conn, "browser_sessions", 0);
+        let session_table = rxdb_test_table_name(&conn, "browser_sessions");
         let status_for = |id: &str| -> String {
             conn.query_row(
                 &format!(
@@ -17816,13 +17861,20 @@ mod tests {
         assert_eq!(status_for("synthetic"), "synthetic");
     }
 
-    fn rxdb_test_table_name(conn: &Connection, collection: &str, version: i64) -> String {
+    fn rxdb_test_table_name(conn: &Connection, collection: &str) -> String {
+        let version = business_os_schema_contract()
+            .get(collection)
+            .and_then(|schema| schema.get("version"))
+            .and_then(Value::as_u64)
+            .unwrap_or_else(|| panic!("Business OS schema version exists for {collection}"));
         conn.query_row(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE ?1 ORDER BY name",
             params![format!("%__{collection}__v{version}")],
             |row| row.get::<_, String>(0),
         )
-        .expect("RxDB collection table exists")
+        .unwrap_or_else(|err| {
+            panic!("active RxDB collection table exists for {collection} v{version}: {err}")
+        })
     }
 
     fn assert_plan_uses_index(
@@ -20839,7 +20891,7 @@ mod tests {
                 .expect("ctox_queue_tasks collection");
             let mut rxdb_conn =
                 Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
-            let queue_table = rxdb_test_table_name(&rxdb_conn, "ctox_queue_tasks", 0);
+            let queue_table = rxdb_test_table_name(&rxdb_conn, "ctox_queue_tasks");
             let queue_table_sql = sqlite_quote_identifier(&queue_table);
             let insert_sql = format!(
                 "INSERT INTO {queue_table_sql} (id, revision, deleted, lastWriteTime, data)
@@ -21389,7 +21441,7 @@ mod tests {
                 .expect("business_chats collection");
             let mut rxdb_conn =
                 Connection::open(store::rxdb_store_path(root.path())).expect("open rxdb sqlite");
-            let chat_table = rxdb_test_table_name(&rxdb_conn, "business_chats", 0);
+            let chat_table = rxdb_test_table_name(&rxdb_conn, "business_chats");
             let chat_table_sql = sqlite_quote_identifier(&chat_table);
             let insert_sql = format!(
                 "INSERT INTO {chat_table_sql} (id, revision, deleted, lastWriteTime, data)
@@ -21921,19 +21973,23 @@ mod tests {
     fn desktop_file_background_sleep_uses_slow_fallback_after_successful_scan() {
         let first_scan_at = UNIX_EPOCH + Duration::from_secs(1_000);
         let now = first_scan_at + Duration::from_secs(DESKTOP_FILE_SCAN_INTERVAL_SECS);
-        assert_eq!(
-            desktop_file_index_sleep_interval(true, first_scan_at, Some(first_scan_at), now),
-            Duration::from_secs(
-                DESKTOP_FILE_SCAN_FALLBACK_INTERVAL_SECS - DESKTOP_FILE_SCAN_INTERVAL_SECS
-            ),
-            "without a watcher, stable roots should still use the slow fallback after a full scan"
+        let maintenance_due = Duration::from_secs(
+            DESKTOP_FILE_INDEX_MAINTENANCE_INTERVAL_SECS - DESKTOP_FILE_SCAN_INTERVAL_SECS,
         );
         assert_eq!(
             desktop_file_index_sleep_interval(true, first_scan_at, Some(first_scan_at), now),
-            Duration::from_secs(
-                DESKTOP_FILE_SCAN_FALLBACK_INTERVAL_SECS - DESKTOP_FILE_SCAN_INTERVAL_SECS
-            ),
-            "with a watcher, unchanged roots should sleep until the slow fallback scan"
+            maintenance_due,
+            "stable roots should wake for bounded maintenance before the slower fallback scan"
+        );
+        assert_eq!(
+            desktop_file_index_sleep_interval(false, first_scan_at, Some(first_scan_at), now),
+            maintenance_due,
+            "root discovery should remain idle until maintenance or the slow fallback is due"
+        );
+        assert_eq!(
+            desktop_file_index_sleep_interval(true, now, Some(first_scan_at), now),
+            Duration::from_secs(DESKTOP_FILE_INDEX_MAINTENANCE_INTERVAL_SECS),
+            "after maintenance, the next wake is still bounded by the maintenance cadence"
         );
         assert_eq!(
             desktop_file_index_sleep_interval(
@@ -21944,13 +22000,6 @@ mod tests {
             ),
             Duration::ZERO,
             "the fallback scan is due immediately at the fallback boundary"
-        );
-        assert_eq!(
-            desktop_file_index_sleep_interval(false, first_scan_at, Some(first_scan_at), now),
-            Duration::from_secs(
-                DESKTOP_FILE_SCAN_FALLBACK_INTERVAL_SECS - DESKTOP_FILE_SCAN_INTERVAL_SECS
-            ),
-            "with no scan roots, the background loop must not poll every desktop scan interval"
         );
     }
 
@@ -23163,8 +23212,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bounded_workspace_scan_does_not_tombstone_when_limit_is_reached() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_workspace_scan_does_not_tombstone_when_limit_is_reached() {
         let root = tempfile::tempdir().expect("temp root");
         let workspace = root.path().join("large-workspace");
         fs::create_dir_all(&workspace).expect("create workspace");
@@ -23172,15 +23221,36 @@ mod tests {
             fs::write(workspace.join(format!("file-{idx:03}.md")), b"visible")
                 .expect("write workspace file");
         }
+        let workspace = workspace.canonicalize().expect("canonical workspace");
+        let scan_root = DesktopFileScanRoot {
+            label: desktop_file_scan_root_label(&workspace),
+            path: workspace.clone(),
+        };
+        let database_path = store::rxdb_store_path(root.path());
+        fs::create_dir_all(database_path.parent().expect("rxdb parent")).expect("runtime dir");
+        let database = open_test_database(database_path.clone())
+            .await
+            .expect("open rxdb sqlite");
+        database
+            .add_collections(collection_creators())
+            .await
+            .expect("register collections");
 
-        let indexed = sync_desktop_files_from_workspace_root(root.path(), &workspace)
-            .expect("sync large workspace root");
+        let indexed = sync_desktop_file_scan_roots_with_database(
+            root.path(),
+            &database,
+            vec![scan_root.clone()],
+        )
+        .await
+        .expect("sync bounded workspace root");
         assert_eq!(indexed, DESKTOP_FILE_SCAN_MAX_FILES);
 
-        let conn = Connection::open(store::rxdb_store_path(root.path())).expect("open sqlite");
+        let conn = Connection::open(&database_path).expect("open sqlite");
+        let desktop_files_table = rxdb_test_table_name(&conn, "desktop_files");
+        let desktop_files_table_sql = sqlite_quote_identifier(&desktop_files_table);
         let (removed_id, removed_path) = {
             let mut rows = conn
-                .prepare("SELECT id, data FROM ctox_business_os__desktop_files__v0")
+                .prepare(&format!("SELECT id, data FROM {desktop_files_table_sql}"))
                 .expect("workspace file rows query");
             let mut found = None;
             for row in rows
@@ -23209,14 +23279,20 @@ mod tests {
         drop(conn);
         fs::remove_file(&removed_path).expect("remove indexed file");
 
-        let indexed_after_remove = sync_desktop_files_from_workspace_root(root.path(), &workspace)
-            .expect("sync large workspace root after remove");
+        let indexed_after_remove =
+            sync_desktop_file_scan_roots_with_database(root.path(), &database, vec![scan_root])
+                .await
+                .expect("sync bounded workspace root after remove");
         assert_eq!(indexed_after_remove, DESKTOP_FILE_SCAN_MAX_FILES);
 
-        let conn = Connection::open(store::rxdb_store_path(root.path())).expect("open sqlite");
+        let conn = Connection::open(&database_path).expect("open sqlite");
+        let desktop_files_table = rxdb_test_table_name(&conn, "desktop_files");
         let row_json: String = conn
             .query_row(
-                "SELECT data FROM ctox_business_os__desktop_files__v0 WHERE id = ?1",
+                &format!(
+                    "SELECT data FROM {} WHERE id = ?1",
+                    sqlite_quote_identifier(&desktop_files_table)
+                ),
                 [removed_id.as_str()],
                 |row| row.get(0),
             )
@@ -23380,7 +23456,7 @@ mod tests {
                 "command_id": "cmd_native_consumer",
                 "contract_version": 2,
                 "idempotency_key": "cmd_native_consumer",
-                "payload_hash": "sha256:native-consumer-fixture",
+                "payload_hash": "sha256:2a4d41fe85c3e8921c4e9427d07ed19ee636c0212ba9814349f19db8210f6cbc",
                 "module": "ctox",
                 "command_type": "business_os.test",
                 "record_id": "",
@@ -23437,7 +23513,7 @@ mod tests {
             );
             assert_eq!(
                 accepted.get("payload_hash").and_then(Value::as_str),
-                Some("sha256:native-consumer-fixture")
+                Some("sha256:2a4d41fe85c3e8921c4e9427d07ed19ee636c0212ba9814349f19db8210f6cbc")
             );
             let task_id = accepted
                 .get("task_id")
@@ -23484,7 +23560,7 @@ mod tests {
             );
             assert_eq!(
                 duplicate.get("payload_hash").and_then(Value::as_str),
-                Some("sha256:native-consumer-fixture")
+                Some("sha256:2a4d41fe85c3e8921c4e9427d07ed19ee636c0212ba9814349f19db8210f6cbc")
             );
 
             let after_duplicate = queue
@@ -24821,7 +24897,7 @@ mod tests {
         std::fs::write(&validator, "process.exit(0);\n").expect("write validator stub");
         std::fs::write(
             module_root.join("module.json"),
-            r#"{"id":"gov-demo","title":"Governance Demo v1"}"#,
+            r#"{"id":"gov-demo","title":"Governance Demo v1","version":"1.0.0"}"#,
         )
         .expect("write module manifest");
         let template_source = root
@@ -24830,7 +24906,7 @@ mod tests {
         std::fs::create_dir_all(&template_source).expect("create template source");
         std::fs::write(
             template_source.join("module.json"),
-            r#"{"id":"template-source","title":"Template Source","entry":"modules/template-source/index.html","collections":["business_commands"]}"#,
+            r#"{"id":"template-source","title":"Template Source","version":"1.0.0","entry":"modules/template-source/index.html","collections":["business_commands"]}"#,
         )
         .expect("write template source manifest");
         std::fs::write(template_source.join("index.html"), "<div></div>")
@@ -25343,7 +25419,7 @@ mod tests {
                 if command_id.ends_with("_v2") {
                     std::fs::write(
                         module_root.join("module.json"),
-                        r#"{"id":"gov-demo","title":"Governance Demo v2"}"#,
+                        r#"{"id":"gov-demo","title":"Governance Demo v2","version":"2.0.0"}"#,
                     )
                     .expect("write updated manifest");
                 }
