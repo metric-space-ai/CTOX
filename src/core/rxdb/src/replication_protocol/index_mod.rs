@@ -19,6 +19,10 @@ use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 use crate::plugins::utils::utils_object_deep_equal::deep_equal;
+#[cfg(test)]
+#[path = "test_utils.rs"]
+pub(crate) mod test_utils;
+
 use crate::types::{
     FirstSyncDone, ReplicationEvents, ReplicationStats, RxStorageInstanceReplicationInput,
     RxStorageInstanceReplicationState, StreamQueue,
@@ -532,52 +536,20 @@ mod tests {
 
     use crate::plugins::storage_memory::get_rx_storage_memory;
     use crate::replication_protocol::default_conflict_handler::DefaultConflictHandler;
-    use crate::rx_schema_helper::fill_with_default_settings;
+    use crate::replication_protocol::index_mod::test_utils::{
+        test_schema_variant, TestHashFunction, TestSchemaVariant,
+    };
     use crate::rxjs_compat::DEFAULT_SUBJECT_BUFFER;
     use crate::types::{
-        BulkWriteRow, FirstSyncDone, HashFunction, HashOutput, JsonSchema, PrimaryKey,
-        ReplicationEvents, ReplicationStats, RxJsonSchema, RxReplicationMasterChange,
-        RxStorageInstance, RxStorageInstanceCreationParams, RxStorageInstanceReplicationInput,
-        RxStorageInstanceReplicationState, RxStorageReplicationDirection, StreamQueue,
+        BulkWriteRow, FirstSyncDone, ReplicationEvents, ReplicationStats,
+        RxReplicationMasterChange, RxStorageInstance, RxStorageInstanceCreationParams,
+        RxStorageInstanceReplicationInput, RxStorageInstanceReplicationState,
+        RxStorageReplicationDirection, StreamQueue,
     };
-
-    struct TestHashFunction;
-
-    impl HashFunction for TestHashFunction {
-        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
-            Box::pin(async move { format!("hash:{input}") })
-        }
-    }
-
-    fn test_schema() -> RxJsonSchema {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "id".to_string(),
-            JsonSchema {
-                schema_type: Some("string".to_string()),
-                max_length: Some(100),
-                ..Default::default()
-            },
-        );
-        fill_with_default_settings(RxJsonSchema {
-            version: 0,
-            primary_key: PrimaryKey::Simple("id".to_string()),
-            schema_type: "object".to_string(),
-            properties,
-            required: vec!["id".to_string()],
-            indexes: Vec::new(),
-            encrypted: Vec::new(),
-            internal_indexes: Vec::new(),
-            key_compression: false,
-            attachments: None,
-            additional_properties: true,
-            extra: HashMap::new(),
-        })
-    }
 
     async fn idle_test_state(database_name: &str) -> Arc<RxStorageInstanceReplicationState> {
         let storage = get_rx_storage_memory(());
-        let schema = test_schema();
+        let schema = test_schema_variant(TestSchemaVariant::ProtocolIndex);
         let fork_instance: Arc<dyn RxStorageInstance> = storage
             .create_storage_instance(
                 RxStorageInstanceCreationParams {
@@ -791,7 +763,7 @@ mod tests {
     #[tokio::test]
     async fn storage_master_change_stream_lag_maps_to_resync() {
         let storage = get_rx_storage_memory(());
-        let schema = test_schema();
+        let schema = test_schema_variant(TestSchemaVariant::ProtocolIndex);
         let instance: Arc<dyn RxStorageInstance> = storage
             .create_storage_instance(
                 RxStorageInstanceCreationParams {
@@ -838,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn slow_master_change_stream_peer_recovers_all_docs_after_resync() {
         let storage = get_rx_storage_memory(());
-        let schema = test_schema();
+        let schema = test_schema_variant(TestSchemaVariant::ProtocolIndex);
         let instance: Arc<dyn RxStorageInstance> = storage
             .create_storage_instance(
                 RxStorageInstanceCreationParams {

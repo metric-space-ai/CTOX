@@ -574,27 +574,17 @@ mod tests {
     use serde_json::json;
 
     use crate::plugins::storage_memory::get_rx_storage_memory;
-    use crate::replication_protocol::default_conflict_handler::DefaultConflictHandler;
+    use crate::replication_protocol::index_mod::test_utils::{
+        test_schema, ReplicationStateBuilder,
+    };
     use crate::replication_protocol::meta_instance::{
         get_meta_write_row, get_rx_replication_meta_instance_schema,
     };
-    use crate::rx_schema_helper::fill_with_default_settings;
     use crate::rxjs_compat::{RxStream, RxSubject};
     use crate::types::{
-        DocumentsWithCheckpoint, FirstSyncDone, HashFunction, HashOutput, JsonSchema, PrimaryKey,
-        ReplicationEvents, ReplicationStats, RxJsonSchema, RxJsonSchemaAttachments,
-        RxReplicationHandler, RxReplicationMasterChange, RxStorageInstance,
-        RxStorageInstanceCreationParams, RxStorageInstanceReplicationInput,
-        RxStorageInstanceReplicationState, StreamQueue,
+        DocumentsWithCheckpoint, RxJsonSchemaAttachments, RxReplicationHandler,
+        RxReplicationMasterChange, RxStorageInstance, RxStorageInstanceCreationParams,
     };
-
-    struct TestHashFunction;
-
-    impl HashFunction for TestHashFunction {
-        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
-            Box::pin(async move { format!("hash:{input}") })
-        }
-    }
 
     struct ConflictOnceHandler;
 
@@ -805,39 +795,6 @@ mod tests {
         }
     }
 
-    fn test_schema() -> RxJsonSchema {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "id".to_string(),
-            JsonSchema {
-                schema_type: Some("string".to_string()),
-                max_length: Some(100),
-                ..Default::default()
-            },
-        );
-        properties.insert(
-            "age".to_string(),
-            JsonSchema {
-                schema_type: Some("number".to_string()),
-                ..Default::default()
-            },
-        );
-        fill_with_default_settings(RxJsonSchema {
-            version: 0,
-            primary_key: PrimaryKey::Simple("id".to_string()),
-            schema_type: "object".to_string(),
-            properties,
-            required: vec!["id".to_string()],
-            indexes: vec![vec!["age".to_string()]],
-            encrypted: Vec::new(),
-            internal_indexes: Vec::new(),
-            key_compression: false,
-            attachments: None,
-            additional_properties: true,
-            extra: HashMap::new(),
-        })
-    }
-
     fn fork_doc(age: i64) -> Value {
         fork_doc_with_id("a", age, 100.0)
     }
@@ -918,33 +875,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
+        let state = ReplicationStateBuilder::from_instances(
+            std::sync::Arc::clone(&fork_instance),
             meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(ConflictOnceHandler),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+            std::sync::Arc::new(ConflictOnceHandler),
+        )
+        .build()
+        .await
+        .state;
 
         persist_to_master(&state, vec![fork_doc(1)], json!({ "sequence": 1 }))
             .await
@@ -1008,36 +946,17 @@ mod tests {
             .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let seen_ages = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
+        let state = ReplicationStateBuilder::from_instances(
+            std::sync::Arc::clone(&fork_instance),
             meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(ConflictThenAcceptHandler {
+            std::sync::Arc::new(ConflictThenAcceptHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
                 seen_ages: std::sync::Arc::clone(&seen_ages),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await
+        .state;
 
         let clock = ReplicationClock::default();
         upstream_initial_sync_until_no_conflicts(&state, &clock)
@@ -1103,36 +1022,17 @@ mod tests {
             .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let allow_second_attempt = std::sync::Arc::new(tokio::sync::Notify::new());
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
+        let state = ReplicationStateBuilder::from_instances(
             fork_instance,
             meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(InitialSyncRetryHandler {
+            std::sync::Arc::new(InitialSyncRetryHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
                 allow_second_attempt: std::sync::Arc::clone(&allow_second_attempt),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await
+        .state;
         let mut errors = state.events.error.subscribe();
         let state_for_task = std::sync::Arc::clone(&state);
         let replication_task =
@@ -1171,71 +1071,17 @@ mod tests {
 
     #[tokio::test]
     async fn persist_to_master_skips_revision_height_marked_as_replicated() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-rev-height-skip".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-rev-height-skip".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance,
-            meta_instance: meta_instance.clone(),
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(CountingHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-rev-height-skip",
+            std::sync::Arc::new(CountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let meta_instance = built.meta_instance;
         let assumed_master = json!({
             "id": "a",
             "age": 1,
@@ -1279,71 +1125,17 @@ mod tests {
 
     #[tokio::test]
     async fn downstream_originated_events_advance_upstream_checkpoint_without_push() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-checkpoint".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-checkpoint".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
-            meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(CountingHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-downstream-checkpoint",
+            std::sync::Arc::new(CountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         let ongoing = spawn_ongoing_upstream(
             std::sync::Arc::clone(&state),
             std::sync::Arc::new(ReplicationClock::default()),
@@ -1384,71 +1176,17 @@ mod tests {
 
     #[tokio::test]
     async fn ongoing_upstream_skips_events_covered_by_initial_sync_cutoff() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-upstream-cutoff".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-upstream-cutoff".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
-            meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(CountingHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-upstream-cutoff",
+            std::sync::Arc::new(CountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         let clock = std::sync::Arc::new(ReplicationClock::new(0, 1));
         let ongoing =
             spawn_ongoing_upstream(std::sync::Arc::clone(&state), std::sync::Arc::clone(&clock));
@@ -1486,72 +1224,20 @@ mod tests {
 
     #[tokio::test]
     async fn persist_to_master_strips_attachment_data_from_meta_rows() {
-        let storage = get_rx_storage_memory(());
         let mut schema = test_schema();
         schema.attachments = Some(RxJsonSchemaAttachments::default());
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-attachment-meta".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-attachment-meta".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance,
-            meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(CountingHandler {
+        let state = ReplicationStateBuilder::new(
+            "db-attachment-meta",
+            std::sync::Arc::new(CountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: true,
-        });
+        )
+        .schema(schema)
+        .has_attachments(true)
+        .build()
+        .await
+        .state;
 
         persist_to_master(
             &state,
@@ -1577,82 +1263,29 @@ mod tests {
 
     #[tokio::test]
     async fn ongoing_upstream_waits_before_persisting_change_events() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-wait-before-persist".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-wait-before-persist".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let wait_started = std::sync::Arc::new(AtomicUsize::new(0));
         let wait_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let wait_started_for_closure = std::sync::Arc::clone(&wait_started);
         let wait_notify_for_closure = std::sync::Arc::clone(&wait_notify);
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
-            meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(CountingHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-wait-before-persist",
+            std::sync::Arc::new(CountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: Some(std::sync::Arc::new(move || {
-                let wait_started = std::sync::Arc::clone(&wait_started_for_closure);
-                let wait_notify = std::sync::Arc::clone(&wait_notify_for_closure);
-                Box::pin(async move {
-                    wait_started.fetch_add(1, Ordering::SeqCst);
-                    wait_notify.notified().await;
-                })
-            })),
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .wait_before_persist(std::sync::Arc::new(move || {
+            let wait_started = std::sync::Arc::clone(&wait_started_for_closure);
+            let wait_notify = std::sync::Arc::clone(&wait_notify_for_closure);
+            Box::pin(async move {
+                wait_started.fetch_add(1, Ordering::SeqCst);
+                wait_notify.notified().await;
+            })
+        }))
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         let ongoing = spawn_ongoing_upstream(
             std::sync::Arc::clone(&state),
             std::sync::Arc::new(ReplicationClock::default()),
@@ -1692,84 +1325,31 @@ mod tests {
 
     #[tokio::test]
     async fn ongoing_upstream_batches_buffered_change_events() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-upstream-batching".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: std::sync::Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-upstream-batching".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let wait_started = std::sync::Arc::new(AtomicUsize::new(0));
         let wait_notify = std::sync::Arc::new(tokio::sync::Notify::new());
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
         let batch_sizes = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
         let wait_started_for_closure = std::sync::Arc::clone(&wait_started);
         let wait_notify_for_closure = std::sync::Arc::clone(&wait_notify);
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
-            meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(BatchCountingHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-upstream-batching",
+            std::sync::Arc::new(BatchCountingHandler {
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
                 batch_sizes: std::sync::Arc::clone(&batch_sizes),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: Some(std::sync::Arc::new(move || {
-                let wait_started = std::sync::Arc::clone(&wait_started_for_closure);
-                let wait_notify = std::sync::Arc::clone(&wait_notify_for_closure);
-                Box::pin(async move {
-                    wait_started.fetch_add(1, Ordering::SeqCst);
-                    wait_notify.notified().await;
-                })
-            })),
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .wait_before_persist(std::sync::Arc::new(move || {
+            let wait_started = std::sync::Arc::clone(&wait_started_for_closure);
+            let wait_notify = std::sync::Arc::clone(&wait_notify_for_closure);
+            Box::pin(async move {
+                wait_started.fetch_add(1, Ordering::SeqCst);
+                wait_notify.notified().await;
+            })
+        }))
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         let ongoing = spawn_ongoing_upstream(
             std::sync::Arc::clone(&state),
             std::sync::Arc::new(ReplicationClock::default()),
@@ -1868,36 +1448,17 @@ mod tests {
 
         let master_stream = RxSubject::new();
         let master_write_calls = std::sync::Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: fork_instance.clone(),
+        let state = ReplicationStateBuilder::from_instances(
+            fork_instance,
             meta_instance,
-            hash_function: std::sync::Arc::new(TestHashFunction),
-            conflict_handler: std::sync::Arc::new(DefaultConflictHandler),
-            replication_handler: std::sync::Arc::new(ResyncCountingHandler {
+            std::sync::Arc::new(ResyncCountingHandler {
                 stream: master_stream.clone(),
                 master_write_calls: std::sync::Arc::clone(&master_write_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = std::sync::Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: std::sync::Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await
+        .state;
         let resync_listener = spawn_upstream_resync_listener(
             std::sync::Arc::clone(&state),
             std::sync::Arc::new(ReplicationClock::default()),

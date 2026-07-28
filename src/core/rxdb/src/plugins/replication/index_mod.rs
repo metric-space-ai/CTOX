@@ -791,17 +791,12 @@ mod tests {
     use serde_json::json;
 
     use crate::plugins::storage_memory::get_rx_storage_memory;
+    use crate::replication_protocol::index_mod::test_utils::{
+        test_schema_variant, TestHashFunction, TestSchemaVariant,
+    };
     use crate::rx_database::{create_rx_database, RxCollectionCreator, RxDatabaseCreator};
     use crate::rx_database_internal_store::get_all_collection_documents;
-    use crate::types::{HashFunction, HashOutput, JsonSchema, PrimaryKey, RxJsonSchema, RxStorage};
-
-    struct TestHashFunction;
-
-    impl HashFunction for TestHashFunction {
-        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
-            Box::pin(async move { format!("hash:{input}") })
-        }
-    }
+    use crate::types::{HashFunction, HashOutput, RxStorage};
 
     struct BlockingHashFunction {
         block_replication_hash: AtomicBool,
@@ -832,32 +827,6 @@ mod tests {
                 }
                 format!("hash:{input}")
             })
-        }
-    }
-
-    fn test_schema() -> RxJsonSchema {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "id".to_string(),
-            JsonSchema {
-                schema_type: Some("string".to_string()),
-                max_length: Some(100),
-                ..Default::default()
-            },
-        );
-        RxJsonSchema {
-            version: 0,
-            primary_key: PrimaryKey::Simple("id".to_string()),
-            schema_type: "object".to_string(),
-            properties,
-            required: vec!["id".to_string()],
-            indexes: Vec::new(),
-            encrypted: Vec::new(),
-            internal_indexes: Vec::new(),
-            key_compression: false,
-            attachments: None,
-            additional_properties: false,
-            extra: HashMap::new(),
         }
     }
 
@@ -899,7 +868,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -972,7 +941,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -1080,7 +1049,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -1152,7 +1121,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -1221,7 +1190,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -1261,7 +1230,7 @@ mod tests {
             .add_collections(HashMap::from([(
                 "humans".to_string(),
                 RxCollectionCreator {
-                    schema: test_schema(),
+                    schema: test_schema_variant(TestSchemaVariant::Collection),
                     conflict_handler: None,
                     options: HashMap::new(),
                 },
@@ -1313,7 +1282,7 @@ mod tests {
             stream_factory: None,
             pull_modifier,
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1351,7 +1320,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1393,7 +1362,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1442,7 +1411,7 @@ mod tests {
             stream_factory: Some(stream_factory),
             pull_modifier,
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1475,7 +1444,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1520,7 +1489,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier,
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1573,7 +1542,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),
@@ -1623,7 +1592,7 @@ mod tests {
             stream_factory: None,
             pull_modifier: default_document_modifier(),
             push_modifier: default_document_modifier(),
-            collection_schema: test_schema(),
+            collection_schema: test_schema_variant(TestSchemaVariant::Collection),
             deleted_field: "_deleted".to_string(),
             retry_time: 0,
             canceled: RxBehaviorSubject::new(false),

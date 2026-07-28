@@ -219,32 +219,17 @@ mod tests {
 
     use std::sync::Arc;
 
+    use crate::replication_protocol::index_mod::test_utils::{
+        test_schema_variant, TestHashFunction, TestSchemaVariant,
+    };
     use crate::rx_error::{new_rx_error, RxError};
     use crate::rxjs_compat::RxStream;
     use crate::types::RxStorageInstance;
     use crate::types::{
-        EventBulk, HashFunction, HashOutput, RxConflictHandler, RxConflictHandlerInput,
-        RxJsonSchema, RxReplicationHandler, RxStorageBulkWriteResponse,
-        RxStorageChangedDocumentsSinceResult, RxStorageCountResult,
+        EventBulk, RxConflictHandler, RxConflictHandlerInput, RxJsonSchema, RxReplicationHandler,
+        RxStorageBulkWriteResponse, RxStorageChangedDocumentsSinceResult, RxStorageCountResult,
         RxStorageInstanceReplicationInput, RxStorageQueryResult,
     };
-
-    fn test_schema() -> RxJsonSchema {
-        RxJsonSchema {
-            version: 0,
-            primary_key: crate::types::PrimaryKey::Simple("id".to_string()),
-            schema_type: "object".to_string(),
-            properties: HashMap::new(),
-            required: Vec::new(),
-            indexes: Vec::new(),
-            encrypted: Vec::new(),
-            internal_indexes: Vec::new(),
-            key_compression: false,
-            attachments: None,
-            additional_properties: true,
-            extra: HashMap::new(),
-        }
-    }
 
     struct NoopStorageInstance {
         collection_name: String,
@@ -256,7 +241,7 @@ mod tests {
         fn new(collection_name: &str, underlying: Option<Arc<dyn RxStorageInstance>>) -> Arc<Self> {
             Arc::new(Self {
                 collection_name: collection_name.to_string(),
-                schema: test_schema(),
+                schema: test_schema_variant(TestSchemaVariant::Helper),
                 underlying,
             })
         }
@@ -368,14 +353,6 @@ mod tests {
             _rows: Vec<crate::types::RxReplicationWriteToMasterRow>,
         ) -> Result<Vec<Value>, RxError> {
             Ok(Vec::new())
-        }
-    }
-
-    struct TestHashFunction;
-
-    impl HashFunction for TestHashFunction {
-        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
-            Box::pin(async move { format!("hash:{input}") })
         }
     }
 

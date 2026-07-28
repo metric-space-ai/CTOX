@@ -500,25 +500,15 @@ mod tests {
     use serde_json::json;
 
     use crate::plugins::storage_memory::get_rx_storage_memory;
-    use crate::replication_protocol::default_conflict_handler::DefaultConflictHandler;
+    use crate::replication_protocol::index_mod::test_utils::{
+        test_schema, ReplicationStateBuilder,
+    };
     use crate::replication_protocol::meta_instance::get_rx_replication_meta_instance_schema;
-    use crate::rx_schema_helper::fill_with_default_settings;
     use crate::rxjs_compat::{RxStream, RxSubject};
     use crate::types::{
-        DocumentsWithCheckpoint, FirstSyncDone, HashFunction, HashOutput, JsonSchema, PrimaryKey,
-        ReplicationEvents, ReplicationStats, RxJsonSchema, RxReplicationHandler,
-        RxReplicationMasterChange, RxStorageInstance, RxStorageInstanceCreationParams,
-        RxStorageInstanceReplicationInput, RxStorageInstanceReplicationState,
-        RxStorageReplicationDirection, StreamQueue,
+        DocumentsWithCheckpoint, RxReplicationHandler, RxReplicationMasterChange,
+        RxStorageInstance, RxStorageInstanceCreationParams, RxStorageReplicationDirection,
     };
-
-    struct TestHashFunction;
-
-    impl HashFunction for TestHashFunction {
-        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
-            Box::pin(async move { format!("hash:{input}") })
-        }
-    }
 
     struct NoopReplicationHandler;
 
@@ -661,39 +651,6 @@ mod tests {
         }
     }
 
-    fn test_schema() -> RxJsonSchema {
-        let mut properties = HashMap::new();
-        properties.insert(
-            "id".to_string(),
-            JsonSchema {
-                schema_type: Some("string".to_string()),
-                max_length: Some(100),
-                ..Default::default()
-            },
-        );
-        properties.insert(
-            "age".to_string(),
-            JsonSchema {
-                schema_type: Some("number".to_string()),
-                ..Default::default()
-            },
-        );
-        fill_with_default_settings(RxJsonSchema {
-            version: 0,
-            primary_key: PrimaryKey::Simple("id".to_string()),
-            schema_type: "object".to_string(),
-            properties,
-            required: vec!["id".to_string()],
-            indexes: vec![vec!["age".to_string()]],
-            encrypted: Vec::new(),
-            internal_indexes: Vec::new(),
-            key_compression: false,
-            attachments: None,
-            additional_properties: true,
-            extra: HashMap::new(),
-        })
-    }
-
     fn fork_doc(age: i64, rev: &str) -> Value {
         json!({
             "id": "a",
@@ -707,73 +664,18 @@ mod tests {
 
     #[tokio::test]
     async fn initial_downstream_sync_error_stays_pending_relays_error_and_retries() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-initial-error-retry".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-initial-error-retry".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_changes_since_calls = Arc::new(AtomicUsize::new(0));
         let allow_second_attempt = Arc::new(tokio::sync::Notify::new());
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance,
-            meta_instance,
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(InitialSyncRetryHandler {
+        let state = ReplicationStateBuilder::new(
+            "db-downstream-initial-error-retry",
+            Arc::new(InitialSyncRetryHandler {
                 master_changes_since_calls: Arc::clone(&master_changes_since_calls),
                 allow_second_attempt: Arc::clone(&allow_second_attempt),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await
+        .state;
         let mut errors = state.events.error.subscribe();
         let state_for_task = Arc::clone(&state);
         let replication_task =
@@ -857,33 +759,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance: Arc::clone(&meta_instance),
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(NoopReplicationHandler),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        let state = ReplicationStateBuilder::from_instances(
+            Arc::clone(&fork_instance),
+            Arc::clone(&meta_instance),
+            Arc::new(NoopReplicationHandler),
+        )
+        .build()
+        .await
+        .state;
         let assumed_master = json!({
             "id": "a",
             "age": 1,
@@ -982,33 +865,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance: Arc::clone(&meta_instance),
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(NoopReplicationHandler),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        let state = ReplicationStateBuilder::from_instances(
+            Arc::clone(&fork_instance),
+            Arc::clone(&meta_instance),
+            Arc::new(NoopReplicationHandler),
+        )
+        .build()
+        .await
+        .state;
         let assumed_master = json!({
             "id": "a",
             "age": 1,
@@ -1094,33 +958,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance: Arc::clone(&meta_instance),
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(NoopReplicationHandler),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        let state = ReplicationStateBuilder::from_instances(
+            Arc::clone(&fork_instance),
+            Arc::clone(&meta_instance),
+            Arc::new(NoopReplicationHandler),
+        )
+        .build()
+        .await
+        .state;
         let assumed_master = json!({
             "id": "a",
             "age": 1,
@@ -1177,71 +1022,17 @@ mod tests {
 
     #[tokio::test]
     async fn downstream_master_stream_waits_until_upstream_inactive() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-active-up".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-active-up".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_stream = RxSubject::new();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance,
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(StreamReplicationHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-downstream-active-up",
+            Arc::new(StreamReplicationHandler {
                 stream: master_stream.clone(),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         state.events.active.up.next(true);
         let ongoing =
             spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
@@ -1286,71 +1077,17 @@ mod tests {
 
     #[tokio::test]
     async fn ongoing_downstream_batches_buffered_master_events() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-buffered-batch".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-buffered-batch".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_stream = RxSubject::new();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance,
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(StreamReplicationHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-downstream-buffered-batch",
+            Arc::new(StreamReplicationHandler {
                 stream: master_stream.clone(),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         state.events.active.up.next(true);
         let ongoing =
             spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
@@ -1414,71 +1151,17 @@ mod tests {
 
     #[tokio::test]
     async fn downstream_master_stream_skips_events_covered_by_resync_cutoff() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-cutoff".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-cutoff".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_stream = RxSubject::new();
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance,
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(StreamReplicationHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-downstream-cutoff",
+            Arc::new(StreamReplicationHandler {
                 stream: master_stream.clone(),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         let clock = Arc::new(ReplicationClock::new(0, 1));
         let ongoing = spawn_ongoing_downstream(Arc::clone(&state), Arc::clone(&clock));
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1519,73 +1202,19 @@ mod tests {
 
     #[tokio::test]
     async fn master_change_stream_resync_triggers_downstream_resync() {
-        let storage = get_rx_storage_memory(());
-        let schema = test_schema();
-        let fork_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-resync".to_string(),
-                    collection_name: "docs".to_string(),
-                    schema: schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
-        let meta_schema = get_rx_replication_meta_instance_schema(&schema, false).unwrap();
-        let meta_instance: Arc<dyn RxStorageInstance> = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: "db-token".to_string(),
-                    database_name: "db-downstream-resync".to_string(),
-                    collection_name: "meta".to_string(),
-                    schema: meta_schema,
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let master_stream = RxSubject::new();
         let master_changes_since_calls = Arc::new(AtomicUsize::new(0));
-        let input = RxStorageInstanceReplicationInput {
-            identifier: "replication-test".to_string(),
-            fork_instance: Arc::clone(&fork_instance),
-            meta_instance,
-            hash_function: Arc::new(TestHashFunction),
-            conflict_handler: Arc::new(DefaultConflictHandler),
-            replication_handler: Arc::new(ResyncPullReplicationHandler {
+        let built = ReplicationStateBuilder::new(
+            "db-downstream-resync",
+            Arc::new(ResyncPullReplicationHandler {
                 stream: master_stream.clone(),
                 master_changes_since_calls: Arc::clone(&master_changes_since_calls),
             }),
-            push_batch_size: 100,
-            pull_batch_size: 100,
-            bulk_size: 100,
-            keep_meta: false,
-            initial_checkpoint: None,
-            wait_before_persist: None,
-        };
-        let state = Arc::new(RxStorageInstanceReplicationState {
-            primary_path: "id".to_string(),
-            input: Arc::new(input),
-            checkpoint_key: "checkpoint".to_string(),
-            downstream_bulk_write_flag: "downstream".to_string(),
-            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
-            events: ReplicationEvents::new(),
-            stats: ReplicationStats::new(),
-            first_sync_done: FirstSyncDone::default(),
-            stream_queue: StreamQueue::default(),
-            checkpoint_queue: tokio::sync::Mutex::new(()),
-            has_attachments: false,
-        });
+        )
+        .build()
+        .await;
+        let state = built.state;
+        let fork_instance = built.fork_instance;
         state.events.active.up.next(false);
         let ongoing =
             spawn_ongoing_downstream(Arc::clone(&state), Arc::new(ReplicationClock::default()));
