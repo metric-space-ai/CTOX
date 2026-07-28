@@ -17,7 +17,8 @@
 // Connection lifecycle invariants pinned by tests: token freshness re-stamp
 // per connect, yourPeerId-only identity adoption, joined-based backoff reset
 // (signaling-freshness-smoke), byte-budgeted frame chunking mirroring the
-// Rust splitter (frame-chunking-smoke), multiplex admission + the
+// Rust splitter (frame-chunking-smoke), immediate RTC connection creation
+// without admission/eviction (rtc-admission-removal-smoke), and the
 // SHELL_CRITICAL_COLLECTIONS pin (rtc-critical-pool-smoke).
 import { CtoxEventEmitter } from './event-target.mjs';
 import { buildProtocolPayload, CTOX_RXDB_PROTOCOL } from './schema.mjs';
@@ -56,17 +57,7 @@ const MAX_INCOMING_FRAME_TRANSFERS = 8;
 const MAX_INCOMING_FRAME_BUFFERED_BYTES = MAX_TRANSFER_BYTES * 4;
 const FRAME_RESUME_TIMEOUT_MS = 1_000;
 const COMPLETED_FRAME_ACK_TTL_MS = 60_000;
-// TODO(rxdb-webrtc-multiplexing): the real fix is to multiplex every
-// collection over a single RTCPeerConnection instead of opening one
-// PeerConnection per collection. There are ~80 Business OS collections (see
-// CTOX_BUSINESS_OS_SCHEMA_HASHES in schema.mjs), so a per-collection model
-// always risks slot starvation when several modules are open at once. Raising
-// the cap to 64 buys headroom for that workload until the multiplexing
-// redesign lands; it is not the end state.
-const MAX_GLOBAL_RTC_PEER_CONNECTIONS = 64;
-const RTC_CONNECTION_QUEUE_TIMEOUT_MS = 45_000;
 const RTC_HANDSHAKE_TIMEOUT_MS = 60_000;
-const GLOBAL_RTC_CONNECTION_POOL_KEY = Symbol.for('ctox.rxdb.webrtc-rtc-pool.v1');
 const RECENT_RTC_EVENT_LIMIT = 40;
 const TERMINAL_SIGNALING_REJECTION_CODES = new Set([
   'protocol_missing',
@@ -114,9 +105,8 @@ const ICE_SERVERS_REFRESH_MIN_INTERVAL_MS = 60_000;
 const TRANSPORT_STATUS_EMIT_MIN_INTERVAL_MS = 250;
 // Single source of truth for the shell-critical collection set. app.js derives
 // its CRITICAL_SYNC_COLLECTIONS from this exported list so the two lists cannot
-// silently drift. Browser_* members only register when the Browser module is
-// active; the grant logic below gates only on criticals actually requested this
-// session (see criticalRequested / criticalRtcPeerConnectionsReady).
+// silently drift. This is shell-priority data only; RTC connections are never
+// admitted, queued, or evicted based on collection membership.
 export const SHELL_CRITICAL_COLLECTIONS = new Set([
   'ctox_runtime_settings',
   'business_module_catalog',
@@ -240,7 +230,6 @@ export class CtoxWebRtcNativePeer {
     this.recentMessages = [];
     this.transportStatusEmitTimer = null;
     this.lastTransportStatusEmitAtMs = 0;
-    this.connectionRequests = new Map();
     this.forceInitiatorPeers = new Set();
     this.closed = false;
     this.signalingReconnectTimer = null;
@@ -300,8 +289,6 @@ export class CtoxWebRtcNativePeer {
     }
     for (const timer of this.disconnectedGraceTimers.values()) clearTimeout(timer);
     this.disconnectedGraceTimers.clear();
-    cancelRtcPeerConnectionRequestsForOwner(this, 'peer-close');
-    this.connectionRequests.clear();
     for (const peerId of [...this.connections.keys()]) {
       this.removeConnection(peerId, 'peer-close');
     }
@@ -876,58 +863,16 @@ export class CtoxWebRtcNativePeer {
       this.deferConnectForIceRefresh(remotePeerId);
       return undefined;
     }
-    const slot = tryAcquireRtcPeerConnectionSlot(this, remotePeerId);
-    if (!slot) {
-      this.queueConnection(remotePeerId).catch((error) => {
-        this.events.emit('error', normalizePeerSignalError(error, remotePeerId));
-      });
-      return undefined;
-    }
-    return this.createConnection(remotePeerId, slot);
+    return this.createConnection(remotePeerId);
   }
 
-  queueConnection(remotePeerId) {
-    if (this.closed || !this.shouldConnectToRemotePeer(remotePeerId)) {
-      return Promise.resolve(undefined);
-    }
-    const existing = this.connections.get(remotePeerId);
-    if (existing) return Promise.resolve(existing);
-    const pending = this.connectionRequests.get(remotePeerId);
-    if (pending) return pending;
-    const request = acquireRtcPeerConnectionSlot(this, remotePeerId)
-      .then((slot) => {
-        if (this.closed || !this.shouldConnectToRemotePeer(remotePeerId)) {
-          releaseRtcPeerConnectionSlot(slot, 'queued-peer-abandoned');
-          return undefined;
-        }
-        const current = this.connections.get(remotePeerId);
-        if (current) {
-          releaseRtcPeerConnectionSlot(slot, 'queued-peer-existing');
-          return current;
-        }
-        return this.createConnection(remotePeerId, slot);
-      })
-      .finally(() => {
-        this.connectionRequests.delete(remotePeerId);
-      });
-    this.connectionRequests.set(remotePeerId, request);
-    return request;
-  }
-
-  createConnection(remotePeerId, rtcPoolSlot = null) {
-    let peer;
-    try {
-      peer = new RTCPeerConnection({ iceServers: this.options.iceServers });
-    } catch (error) {
-      releaseRtcPeerConnectionSlot(rtcPoolSlot, 'rtc-constructor-failed');
-      throw error;
-    }
+  createConnection(remotePeerId) {
+    const peer = new RTCPeerConnection({ iceServers: this.options.iceServers });
     const connection = {
       peer,
       channel: null,
       remotePeerId,
       pendingCandidates: [],
-      rtcPoolSlot,
       createdAtMs: Date.now(),
       lastStateChangeAtMs: Date.now(),
       lastError: null,
@@ -1146,9 +1091,7 @@ export class CtoxWebRtcNativePeer {
         clearTimeout(connection.handshakeTimer);
         connection.handshakeTimer = null;
       }
-      markCriticalRtcPeerConnectionOpened(connection.rtcPoolSlot);
       this.forceInitiatorPeers.delete(connection.remotePeerId);
-      drainRtcPeerConnectionQueue('critical-peer-opened');
       this.recordConnectionEvent(connection, 'datachannel-open', { readyState: channel.readyState || 'open' });
       this.events.emit('peer-open', { peerId: connection.remotePeerId });
     };
@@ -1635,7 +1578,6 @@ export class CtoxWebRtcNativePeer {
     const connection = this.connections.get(peerId);
     if (!connection) return;
     this.connections.delete(peerId);
-    this.connectionRequests.delete(peerId);
     connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
     connection.inboundFrameChain = null;
     if (connection.channel) connection.channel.onmessage = null;
@@ -1645,7 +1587,6 @@ export class CtoxWebRtcNativePeer {
     }
     try { connection.channel?.close?.(); } catch {}
     try { connection.peer?.close?.(); } catch {}
-    releaseRtcPeerConnectionSlot(connection.rtcPoolSlot, reason);
     this.rejectPendingForPeer(peerId, pendingError || createPeerClosedError(peerId, reason));
     this.events.emit('peer-close', { peerId, reason });
     if (reconnect && reason !== 'peer-close') {
@@ -1833,15 +1774,13 @@ export class CtoxWebRtcNativePeer {
       incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
       connectionCount: this.connections.size,
-      rtcConnectionPool: rtcPeerConnectionPoolCounters(),
     };
     if (!includeDiagnostics) return base;
     return {
       ...base,
       pendingRequestMethods: [...this.pending.values()].map((pending) => pending.method || '').filter(Boolean).slice(-20),
       observedRequestMethods: [...this.observedRequests.keys()].map((key) => String(key).split('|').slice(1).join('|')).slice(-20),
-      rtcConnectionPool: rtcPeerConnectionPoolSnapshot(),
-      rtcConnections: [...this.connections.values()].map((connection) => peerConnectionSnapshot(connection)),
+      rtcConnections: [...this.connections.values()].map((connection) => peerConnectionSnapshot(connection, this.options.room)),
       recentRtcEvents: this.recentConnectionEvents.slice(-RECENT_RTC_EVENT_LIMIT),
       connectionStates: [...this.connections.values()].map((connection) => ({
         peerId: connection.remotePeerId,
@@ -2160,292 +2099,6 @@ function serializeFrameError(error, method = '') {
     message: String(error || 'Unknown WebRTC request failure'),
     retryable: false,
     lifecycle: false,
-  };
-}
-
-function tryAcquireRtcPeerConnectionSlot(owner, remotePeerId) {
-  const pool = getRtcPeerConnectionPool();
-  noteCriticalRequested(pool, owner);
-  const key = rtcPeerConnectionOwnerKey(owner, remotePeerId);
-  const existing = pool.active.get(key);
-  if (existing) return existing;
-  const priority = rtcPeerConnectionPriority(owner);
-  if (priority > 0 && isBrowserRuntime() && isBusinessOsRoom(owner?.options?.room) && !criticalRtcPeerConnectionsReady(pool)) {
-    return null;
-  }
-  if (priority === 0) preemptOptionalRtcPeerConnectionSlot(pool);
-  if (pool.active.size >= pool.maxActive) return null;
-  const slot = createRtcPeerConnectionSlot(owner, remotePeerId, key);
-  pool.active.set(key, slot);
-  return slot;
-}
-
-function acquireRtcPeerConnectionSlot(owner, remotePeerId) {
-  const immediate = tryAcquireRtcPeerConnectionSlot(owner, remotePeerId);
-  if (immediate) return Promise.resolve(immediate);
-  const pool = getRtcPeerConnectionPool();
-  const key = rtcPeerConnectionOwnerKey(owner, remotePeerId);
-  const existingQueued = pool.queue.find((entry) => entry.key === key);
-  if (existingQueued) {
-    scheduleRtcPeerConnectionQueueDrain('existing-slot-request');
-    return existingQueued.promise;
-  }
-  noteCriticalRequested(pool, owner);
-  let resolve;
-  let reject;
-  const promise = new Promise((promiseResolve, promiseReject) => {
-    resolve = promiseResolve;
-    reject = promiseReject;
-  });
-  const entry = {
-    key,
-    owner,
-    remotePeerId,
-    priority: rtcPeerConnectionPriority(owner),
-    enqueuedAt: Date.now(),
-    resolve,
-    reject,
-    promise,
-    timer: null,
-  };
-  entry.timer = setTimeout(() => {
-    removeQueuedRtcPeerConnection(entry);
-    reject(new Error(`Timed out waiting for browser WebRTC connection budget for ${remotePeerId}`));
-  }, RTC_CONNECTION_QUEUE_TIMEOUT_MS);
-  pool.queue.push(entry);
-  sortRtcPeerConnectionQueue(pool);
-  owner?.events?.emit?.('peer-state', { peerId: remotePeerId, state: 'queued' });
-  scheduleRtcPeerConnectionQueueDrain('slot-request-queued');
-  return promise;
-}
-
-function releaseRtcPeerConnectionSlot(slot, reason = 'closed') {
-  if (!slot?.key) return;
-  const pool = getRtcPeerConnectionPool();
-  pool.active.delete(slot.key);
-  drainRtcPeerConnectionQueue(reason);
-}
-
-function drainRtcPeerConnectionQueue(reason = 'slot-released') {
-  const pool = getRtcPeerConnectionPool();
-  sortRtcPeerConnectionQueue(pool);
-  while (pool.active.size < pool.maxActive && pool.queue.length) {
-    const entryIndex = nextGrantableRtcPeerConnectionQueueIndex(pool);
-    if (entryIndex < 0) break;
-    const [entry] = pool.queue.splice(entryIndex, 1);
-    if (entry.timer) clearTimeout(entry.timer);
-    if (entry.owner?.closed) continue;
-    if (pool.active.has(entry.key)) {
-      entry.resolve(pool.active.get(entry.key));
-      continue;
-    }
-    const slot = createRtcPeerConnectionSlot(entry.owner, entry.remotePeerId, entry.key);
-    pool.active.set(entry.key, slot);
-    entry.owner?.events?.emit?.('peer-state', { peerId: entry.remotePeerId, state: 'slot-granted', reason });
-    entry.resolve(slot);
-  }
-}
-
-function scheduleRtcPeerConnectionQueueDrain(reason = 'slot-drain-scheduled') {
-  const pool = getRtcPeerConnectionPool();
-  if (pool.drainScheduled) return;
-  pool.drainScheduled = true;
-  const schedule = typeof queueMicrotask === 'function'
-    ? queueMicrotask
-    : (callback) => Promise.resolve().then(callback);
-  schedule(() => {
-    pool.drainScheduled = false;
-    drainRtcPeerConnectionQueue(reason);
-  });
-}
-
-function removeQueuedRtcPeerConnection(entry) {
-  const pool = getRtcPeerConnectionPool();
-  const index = pool.queue.indexOf(entry);
-  if (index >= 0) pool.queue.splice(index, 1);
-  if (entry?.timer) clearTimeout(entry.timer);
-}
-
-function cancelRtcPeerConnectionRequestsForOwner(owner, reason = 'owner-closed') {
-  const pool = getRtcPeerConnectionPool();
-  const queued = pool.queue.filter((entry) => entry.owner === owner);
-  for (const entry of queued) {
-    removeQueuedRtcPeerConnection(entry);
-    entry.reject(new Error(`Cancelled browser WebRTC connection budget request: ${reason}`));
-  }
-}
-
-function sortRtcPeerConnectionQueue(pool) {
-  pool.queue.sort((left, right) => {
-    if (left.priority !== right.priority) return left.priority - right.priority;
-    return left.enqueuedAt - right.enqueuedAt;
-  });
-}
-
-function createRtcPeerConnectionSlot(owner, remotePeerId, key = rtcPeerConnectionOwnerKey(owner, remotePeerId)) {
-  return {
-    key,
-    owner,
-    remotePeerId: String(remotePeerId || ''),
-    room: String(owner?.options?.room || ''),
-    priority: rtcPeerConnectionPriority(owner),
-    acquiredAtMs: Date.now(),
-  };
-}
-
-function getRtcPeerConnectionPool() {
-  const root = globalThis || {};
-  if (!root[GLOBAL_RTC_CONNECTION_POOL_KEY]) {
-    root[GLOBAL_RTC_CONNECTION_POOL_KEY] = {
-      maxActive: MAX_GLOBAL_RTC_PEER_CONNECTIONS,
-      active: new Map(),
-      queue: [],
-      criticalOpened: new Set(),
-      criticalRequested: new Set(),
-      drainScheduled: false,
-    };
-  } else if (root[GLOBAL_RTC_CONNECTION_POOL_KEY].maxActive < MAX_GLOBAL_RTC_PEER_CONNECTIONS) {
-    root[GLOBAL_RTC_CONNECTION_POOL_KEY].maxActive = MAX_GLOBAL_RTC_PEER_CONNECTIONS;
-  }
-  return root[GLOBAL_RTC_CONNECTION_POOL_KEY];
-}
-
-function rtcPeerConnectionPoolSnapshot() {
-  const pool = getRtcPeerConnectionPool();
-  return {
-    maxActive: pool.maxActive,
-    active: pool.active.size,
-    queued: pool.queue.length,
-    activeCritical: activeCriticalRtcPeerConnectionCount(pool),
-    queuedCritical: queuedCriticalRtcPeerConnectionNames(pool).length,
-    criticalOpened: [...pool.criticalOpened].sort(),
-    criticalReady: criticalRtcPeerConnectionsReady(pool),
-    activeConnections: [...pool.active.values()].map((slot) => rtcPeerConnectionSlotSnapshot(slot)),
-    queuedConnections: pool.queue.map((entry) => ({
-      collection: collectionNameFromTopic(entry.owner?.options?.room || ''),
-      priority: entry.priority,
-      queuedForMs: Date.now() - entry.enqueuedAt,
-    })),
-  };
-}
-
-function rtcPeerConnectionPoolCounters() {
-  const pool = getRtcPeerConnectionPool();
-  const active = pool.active.size;
-  const queued = pool.queue.length;
-  const activeCritical = activeCriticalRtcPeerConnectionCount(pool);
-  const queuedCritical = queuedCriticalRtcPeerConnectionNames(pool).length;
-  return {
-    maxActive: pool.maxActive,
-    active,
-    queued,
-    activeCritical,
-    queuedCritical,
-    maxConnections: pool.maxActive,
-    activeConnections: active,
-    queuedConnections: queued,
-    criticalActiveConnections: activeCritical,
-    criticalQueuedConnections: queuedCritical,
-  };
-}
-
-function rtcPeerConnectionOwnerKey(owner, remotePeerId) {
-  return `${String(owner?.options?.room || '')}|${String(owner?.options?.clientId || '')}|${String(remotePeerId || '')}`;
-}
-
-function rtcPeerConnectionPriority(owner) {
-  // Phase 3 (single multiplexed stream): there is now exactly ONE
-  // RTCPeerConnection per (browser, sync room) carrying every collection, so
-  // the per-collection admission gate is obsolete. The single connection is
-  // always critical/always-allowed. The SHELL_CRITICAL_COLLECTIONS set and the
-  // pool machinery are kept for back-compat but no longer gate anything in the
-  // multiplexed path.
-  void owner;
-  return 0;
-}
-
-function noteCriticalRequested(pool, owner) {
-  if (!pool || !owner) return;
-  const room = owner?.options?.room || '';
-  if (!isBusinessOsRoom(room)) return;
-  const collection = collectionNameFromTopic(room);
-  if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) return;
-  if (!pool.criticalRequested) pool.criticalRequested = new Set();
-  pool.criticalRequested.add(collection);
-}
-
-function criticalRtcPeerConnectionsReady(pool) {
-  // Gate optional connections only on the shell-critical collections actually
-  // requested this session, not on the full SHELL_CRITICAL_COLLECTIONS set.
-  // The 4 browser_* collections only register when the Browser module is
-  // active, so a Documents-only session must not wait on them forever. If no
-  // critical collection has been requested yet, optional connections may
-  // proceed; otherwise every requested critical must have an open DataChannel.
-  const requested = pool?.criticalRequested;
-  if (!requested || requested.size === 0) return true;
-  for (const collection of requested) {
-    if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) continue;
-    if (!pool.criticalOpened?.has(collection)) return false;
-  }
-  return true;
-}
-
-function queuedCriticalRtcPeerConnectionNames(pool) {
-  const queuedCriticalRooms = new Set();
-  for (const entry of pool.queue) {
-    const collection = collectionNameFromTopic(entry?.owner?.options?.room || '');
-    if (SHELL_CRITICAL_COLLECTIONS.has(collection)) queuedCriticalRooms.add(collection);
-  }
-  return [...queuedCriticalRooms].sort();
-}
-
-function activeCriticalRtcPeerConnectionCount(pool) {
-  let count = 0;
-  for (const slot of pool.active.values()) {
-    if (SHELL_CRITICAL_COLLECTIONS.has(collectionNameFromTopic(slot.room))) count += 1;
-  }
-  return count;
-}
-
-function preemptOptionalRtcPeerConnectionSlot(pool) {
-  if (pool.active.size < pool.maxActive) return false;
-  for (const slot of pool.active.values()) {
-    const collection = collectionNameFromTopic(slot.room);
-    if (SHELL_CRITICAL_COLLECTIONS.has(collection)) continue;
-    try {
-      slot.owner?.removeConnection?.(slot.remotePeerId, 'rtc-preempted-for-shell-critical');
-    } catch {}
-    return true;
-  }
-  return false;
-}
-
-function nextGrantableRtcPeerConnectionQueueIndex(pool) {
-  for (let index = 0; index < pool.queue.length; index += 1) {
-    const entry = pool.queue[index];
-    if (!entry) continue;
-    if (entry.priority === 0 || !isBrowserRuntime() || !isBusinessOsRoom(entry.owner?.options?.room)) {
-      return index;
-    }
-    if (criticalRtcPeerConnectionsReady(pool)) {
-      return index;
-    }
-  }
-  return -1;
-}
-
-function markCriticalRtcPeerConnectionOpened(slot) {
-  if (!slot || slot.priority !== 0 || !isBusinessOsRoom(slot.room)) return;
-  const collection = collectionNameFromTopic(slot.room);
-  if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) return;
-  getRtcPeerConnectionPool().criticalOpened.add(collection);
-}
-
-function rtcPeerConnectionSlotSnapshot(slot) {
-  return {
-    collection: collectionNameFromTopic(slot.room),
-    priority: slot.priority,
-    activeForMs: Date.now() - slot.acquiredAtMs,
   };
 }
 

@@ -1,6 +1,6 @@
 // CTOX Sync Engine app-local bundle. Generated from src/apps/business-os/rxdb/src/index.mjs.
 
-// src/apps/business-os/rxdb/src/protocol-contract.generated.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/protocol-contract.generated.mjs
 var CTOX_RXDB_PROTOCOL = "ctox-rxdb-protocol-v1";
 var CTOX_PROTOCOL_PHASE = "rxdb-protocol-handshake";
 var CTOX_REQUIRED_PROTOCOL_CAPABILITIES = Object.freeze([
@@ -52,7 +52,7 @@ var CTOX_COMMAND_LIFECYCLE_CAPABILITY = "ctox-command-lifecycle-v2";
 var CTOX_CHECKPOINT_GENERATION_CAPABILITY = "ctox-checkpoint-generation-v2";
 var CTOX_APP_RUNTIME_CAPABILITY = "ctox-app-runtime-v1";
 
-// src/apps/business-os/rxdb/src/schema.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/schema.mjs
 var CTOX_SCHEMA_HASH_CAPABILITY = "ctox-schema-hash-v1";
 var CTOX_PEER_SESSION_CAPABILITY = "ctox-peer-session-v1";
 var CTOX_CHECKPOINT_EPOCH_CAPABILITY = "ctox-checkpoint-epoch-v1";
@@ -582,7 +582,7 @@ function structuredCloneSafe(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-// src/apps/business-os/rxdb/src/event-target.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/event-target.mjs
 var CtoxEventEmitter = class {
   constructor() {
     this.target = new EventTarget();
@@ -615,7 +615,7 @@ function waitForEvent(emitter, type, timeoutMs = 1e4) {
   });
 }
 
-// src/apps/business-os/rxdb/src/conflict-merge.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/conflict-merge.mjs
 var SYSTEM_FIELD_PREFIX = "_";
 function deepEqualJson(a, b) {
   if (a === b) return true;
@@ -701,7 +701,7 @@ function normalizeDeleteStrategy(value) {
   return value === "final" ? "final" : "default";
 }
 
-// src/apps/business-os/rxdb/src/hybrid-logical-clock.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/hybrid-logical-clock.mjs
 var HLC_NODE_STORAGE_KEY = "ctox.businessOs.hlcNodeId.v1";
 var cachedNodeId = null;
 var nativeClockOffsetMs = 0;
@@ -782,7 +782,7 @@ function sanitizeNodeId(value) {
   return String(value || "unknown").toLowerCase().replace(/[^0-9a-z_-]/g, "").slice(0, 48) || "unknown";
 }
 
-// src/apps/business-os/rxdb/src/recovery-crypto.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/recovery-crypto.mjs
 var RECOVERY_EXPORT_SCHEMA = "ctox.browser-recovery.v2";
 var RECOVERY_CRYPTO_SCHEMA = "ctox.browser-recovery.crypto.v1";
 var PBKDF2_ITERATIONS = 6e5;
@@ -889,7 +889,7 @@ var recoveryCryptoTestInternals = Object.freeze({
   canonicalJson: canonicalJson2
 });
 
-// src/apps/business-os/rxdb/src/recovery-journal.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/recovery-journal.mjs
 var JOURNAL_VERSION = 3;
 var BATCH_STORE = "batches";
 var BATCH_STATE_COLLECTION_INDEX = "stateCollection";
@@ -1472,7 +1472,7 @@ var recoveryJournalTestInternals = Object.freeze({
   sweepExpiredPreviews
 });
 
-// src/apps/business-os/rxdb/src/query-meta-backend-memory.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/query-meta-backend-memory.mjs
 function createMemoryMetaBackend() {
   const queryWindows = /* @__PURE__ */ new Map();
   const queryWindowRefsByDocument = /* @__PURE__ */ new Map();
@@ -1577,7 +1577,7 @@ function normalizeDocumentIds(ids) {
   return Array.from(new Set(ids.map((id) => String(id || "")).filter(Boolean)));
 }
 
-// src/apps/business-os/rxdb/src/query-meta-storage.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/query-meta-storage.mjs
 var SIDECAR_DATABASE_NAME = "ctox_business_os_v1_5_meta";
 var SIDECAR_PIN_RECENT_READ_TTL_MS = 6e4;
 var PIN_RECENT_READ = "recently-read";
@@ -2140,7 +2140,7 @@ function stringKey2(key) {
   throw new TypeError("query window key must be array or string");
 }
 
-// src/apps/business-os/rxdb/src/storage-indexeddb.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/storage-indexeddb.mjs
 var DB_VERSION = 3;
 var DOCUMENT_STORE = "documents";
 var SCHEMA_INDEX_ENTRIES = "schemaIndexEntries";
@@ -3887,7 +3887,7 @@ var ctoxIndexedDbStorageTestInternals = {
   storedRecordForWrite
 };
 
-// src/apps/business-os/rxdb/src/frame-contract.generated.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/frame-contract.generated.mjs
 var CTOX_FRAME_PROTOCOL = "ctox-rxdb-frame-v1";
 var MAX_INLINE_FRAME_BYTES = 14336;
 var MAX_CHUNK_CHARS = 10240;
@@ -3895,7 +3895,7 @@ var MAX_TRANSFER_BYTES = 8388608;
 var FRAME_ACK_WINDOW = 4;
 var MAX_FRAME_RETRIES = 2;
 
-// src/apps/business-os/rxdb/src/webrtc-native.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/webrtc-native.mjs
 var SEND_BUFFER_HIGH_WATER = 512 * 1024;
 var SEND_BUFFER_LOW_WATER = 128 * 1024;
 var SEND_BUFFER_STALL_TIMEOUT_MS = 3e4;
@@ -3909,10 +3909,7 @@ var MAX_INCOMING_FRAME_TRANSFERS = 8;
 var MAX_INCOMING_FRAME_BUFFERED_BYTES = MAX_TRANSFER_BYTES * 4;
 var FRAME_RESUME_TIMEOUT_MS = 1e3;
 var COMPLETED_FRAME_ACK_TTL_MS = 6e4;
-var MAX_GLOBAL_RTC_PEER_CONNECTIONS = 64;
-var RTC_CONNECTION_QUEUE_TIMEOUT_MS = 45e3;
 var RTC_HANDSHAKE_TIMEOUT_MS = 6e4;
-var GLOBAL_RTC_CONNECTION_POOL_KEY = /* @__PURE__ */ Symbol.for("ctox.rxdb.webrtc-rtc-pool.v1");
 var RECENT_RTC_EVENT_LIMIT = 40;
 var TERMINAL_SIGNALING_REJECTION_CODES = /* @__PURE__ */ new Set([
   "protocol_missing",
@@ -4052,7 +4049,6 @@ var CtoxWebRtcNativePeer = class {
     this.recentMessages = [];
     this.transportStatusEmitTimer = null;
     this.lastTransportStatusEmitAtMs = 0;
-    this.connectionRequests = /* @__PURE__ */ new Map();
     this.forceInitiatorPeers = /* @__PURE__ */ new Set();
     this.closed = false;
     this.signalingReconnectTimer = null;
@@ -4102,8 +4098,6 @@ var CtoxWebRtcNativePeer = class {
     }
     for (const timer of this.disconnectedGraceTimers.values()) clearTimeout(timer);
     this.disconnectedGraceTimers.clear();
-    cancelRtcPeerConnectionRequestsForOwner(this, "peer-close");
-    this.connectionRequests.clear();
     for (const peerId of [...this.connections.keys()]) {
       this.removeConnection(peerId, "peer-close");
     }
@@ -4625,54 +4619,15 @@ var CtoxWebRtcNativePeer = class {
       this.deferConnectForIceRefresh(remotePeerId);
       return void 0;
     }
-    const slot = tryAcquireRtcPeerConnectionSlot(this, remotePeerId);
-    if (!slot) {
-      this.queueConnection(remotePeerId).catch((error) => {
-        this.events.emit("error", normalizePeerSignalError(error, remotePeerId));
-      });
-      return void 0;
-    }
-    return this.createConnection(remotePeerId, slot);
+    return this.createConnection(remotePeerId);
   }
-  queueConnection(remotePeerId) {
-    if (this.closed || !this.shouldConnectToRemotePeer(remotePeerId)) {
-      return Promise.resolve(void 0);
-    }
-    const existing = this.connections.get(remotePeerId);
-    if (existing) return Promise.resolve(existing);
-    const pending = this.connectionRequests.get(remotePeerId);
-    if (pending) return pending;
-    const request = acquireRtcPeerConnectionSlot(this, remotePeerId).then((slot) => {
-      if (this.closed || !this.shouldConnectToRemotePeer(remotePeerId)) {
-        releaseRtcPeerConnectionSlot(slot, "queued-peer-abandoned");
-        return void 0;
-      }
-      const current = this.connections.get(remotePeerId);
-      if (current) {
-        releaseRtcPeerConnectionSlot(slot, "queued-peer-existing");
-        return current;
-      }
-      return this.createConnection(remotePeerId, slot);
-    }).finally(() => {
-      this.connectionRequests.delete(remotePeerId);
-    });
-    this.connectionRequests.set(remotePeerId, request);
-    return request;
-  }
-  createConnection(remotePeerId, rtcPoolSlot = null) {
-    let peer;
-    try {
-      peer = new RTCPeerConnection({ iceServers: this.options.iceServers });
-    } catch (error) {
-      releaseRtcPeerConnectionSlot(rtcPoolSlot, "rtc-constructor-failed");
-      throw error;
-    }
+  createConnection(remotePeerId) {
+    const peer = new RTCPeerConnection({ iceServers: this.options.iceServers });
     const connection = {
       peer,
       channel: null,
       remotePeerId,
       pendingCandidates: [],
-      rtcPoolSlot,
       createdAtMs: Date.now(),
       lastStateChangeAtMs: Date.now(),
       lastError: null,
@@ -4878,9 +4833,7 @@ var CtoxWebRtcNativePeer = class {
         clearTimeout(connection.handshakeTimer);
         connection.handshakeTimer = null;
       }
-      markCriticalRtcPeerConnectionOpened(connection.rtcPoolSlot);
       this.forceInitiatorPeers.delete(connection.remotePeerId);
-      drainRtcPeerConnectionQueue("critical-peer-opened");
       this.recordConnectionEvent(connection, "datachannel-open", { readyState: channel.readyState || "open" });
       this.events.emit("peer-open", { peerId: connection.remotePeerId });
     };
@@ -5306,7 +5259,6 @@ var CtoxWebRtcNativePeer = class {
     const connection = this.connections.get(peerId);
     if (!connection) return;
     this.connections.delete(peerId);
-    this.connectionRequests.delete(peerId);
     connection.inboundFrameGeneration = Number(connection.inboundFrameGeneration || 0) + 1;
     connection.inboundFrameChain = null;
     if (connection.channel) connection.channel.onmessage = null;
@@ -5322,7 +5274,6 @@ var CtoxWebRtcNativePeer = class {
       connection.peer?.close?.();
     } catch {
     }
-    releaseRtcPeerConnectionSlot(connection.rtcPoolSlot, reason);
     this.rejectPendingForPeer(peerId, pendingError || createPeerClosedError(peerId, reason));
     this.events.emit("peer-close", { peerId, reason });
     if (reconnect && reason !== "peer-close") {
@@ -5493,16 +5444,14 @@ var CtoxWebRtcNativePeer = class {
       incomingFrameBufferedBytes: this.incomingFrameBufferedBytes(),
       incomingFrameReservedBytes: this.incomingFrameReservedBytes(),
       completedAckCacheSize: this.completedFrameAcks.size,
-      connectionCount: this.connections.size,
-      rtcConnectionPool: rtcPeerConnectionPoolCounters()
+      connectionCount: this.connections.size
     };
     if (!includeDiagnostics) return base;
     return {
       ...base,
       pendingRequestMethods: [...this.pending.values()].map((pending) => pending.method || "").filter(Boolean).slice(-20),
       observedRequestMethods: [...this.observedRequests.keys()].map((key) => String(key).split("|").slice(1).join("|")).slice(-20),
-      rtcConnectionPool: rtcPeerConnectionPoolSnapshot(),
-      rtcConnections: [...this.connections.values()].map((connection) => peerConnectionSnapshot(connection)),
+      rtcConnections: [...this.connections.values()].map((connection) => peerConnectionSnapshot(connection, this.options.room)),
       recentRtcEvents: this.recentConnectionEvents.slice(-RECENT_RTC_EVENT_LIMIT),
       connectionStates: [...this.connections.values()].map((connection) => ({
         peerId: connection.remotePeerId,
@@ -5780,257 +5729,6 @@ function serializeFrameError(error, method = "") {
     lifecycle: false
   };
 }
-function tryAcquireRtcPeerConnectionSlot(owner, remotePeerId) {
-  const pool = getRtcPeerConnectionPool();
-  noteCriticalRequested(pool, owner);
-  const key = rtcPeerConnectionOwnerKey(owner, remotePeerId);
-  const existing = pool.active.get(key);
-  if (existing) return existing;
-  const priority = rtcPeerConnectionPriority(owner);
-  if (priority > 0 && isBrowserRuntime() && isBusinessOsRoom(owner?.options?.room) && !criticalRtcPeerConnectionsReady(pool)) {
-    return null;
-  }
-  if (priority === 0) preemptOptionalRtcPeerConnectionSlot(pool);
-  if (pool.active.size >= pool.maxActive) return null;
-  const slot = createRtcPeerConnectionSlot(owner, remotePeerId, key);
-  pool.active.set(key, slot);
-  return slot;
-}
-function acquireRtcPeerConnectionSlot(owner, remotePeerId) {
-  const immediate = tryAcquireRtcPeerConnectionSlot(owner, remotePeerId);
-  if (immediate) return Promise.resolve(immediate);
-  const pool = getRtcPeerConnectionPool();
-  const key = rtcPeerConnectionOwnerKey(owner, remotePeerId);
-  const existingQueued = pool.queue.find((entry2) => entry2.key === key);
-  if (existingQueued) {
-    scheduleRtcPeerConnectionQueueDrain("existing-slot-request");
-    return existingQueued.promise;
-  }
-  noteCriticalRequested(pool, owner);
-  let resolve;
-  let reject;
-  const promise = new Promise((promiseResolve, promiseReject) => {
-    resolve = promiseResolve;
-    reject = promiseReject;
-  });
-  const entry = {
-    key,
-    owner,
-    remotePeerId,
-    priority: rtcPeerConnectionPriority(owner),
-    enqueuedAt: Date.now(),
-    resolve,
-    reject,
-    promise,
-    timer: null
-  };
-  entry.timer = setTimeout(() => {
-    removeQueuedRtcPeerConnection(entry);
-    reject(new Error(`Timed out waiting for browser WebRTC connection budget for ${remotePeerId}`));
-  }, RTC_CONNECTION_QUEUE_TIMEOUT_MS);
-  pool.queue.push(entry);
-  sortRtcPeerConnectionQueue(pool);
-  owner?.events?.emit?.("peer-state", { peerId: remotePeerId, state: "queued" });
-  scheduleRtcPeerConnectionQueueDrain("slot-request-queued");
-  return promise;
-}
-function releaseRtcPeerConnectionSlot(slot, reason = "closed") {
-  if (!slot?.key) return;
-  const pool = getRtcPeerConnectionPool();
-  pool.active.delete(slot.key);
-  drainRtcPeerConnectionQueue(reason);
-}
-function drainRtcPeerConnectionQueue(reason = "slot-released") {
-  const pool = getRtcPeerConnectionPool();
-  sortRtcPeerConnectionQueue(pool);
-  while (pool.active.size < pool.maxActive && pool.queue.length) {
-    const entryIndex = nextGrantableRtcPeerConnectionQueueIndex(pool);
-    if (entryIndex < 0) break;
-    const [entry] = pool.queue.splice(entryIndex, 1);
-    if (entry.timer) clearTimeout(entry.timer);
-    if (entry.owner?.closed) continue;
-    if (pool.active.has(entry.key)) {
-      entry.resolve(pool.active.get(entry.key));
-      continue;
-    }
-    const slot = createRtcPeerConnectionSlot(entry.owner, entry.remotePeerId, entry.key);
-    pool.active.set(entry.key, slot);
-    entry.owner?.events?.emit?.("peer-state", { peerId: entry.remotePeerId, state: "slot-granted", reason });
-    entry.resolve(slot);
-  }
-}
-function scheduleRtcPeerConnectionQueueDrain(reason = "slot-drain-scheduled") {
-  const pool = getRtcPeerConnectionPool();
-  if (pool.drainScheduled) return;
-  pool.drainScheduled = true;
-  const schedule = typeof queueMicrotask === "function" ? queueMicrotask : (callback) => Promise.resolve().then(callback);
-  schedule(() => {
-    pool.drainScheduled = false;
-    drainRtcPeerConnectionQueue(reason);
-  });
-}
-function removeQueuedRtcPeerConnection(entry) {
-  const pool = getRtcPeerConnectionPool();
-  const index = pool.queue.indexOf(entry);
-  if (index >= 0) pool.queue.splice(index, 1);
-  if (entry?.timer) clearTimeout(entry.timer);
-}
-function cancelRtcPeerConnectionRequestsForOwner(owner, reason = "owner-closed") {
-  const pool = getRtcPeerConnectionPool();
-  const queued = pool.queue.filter((entry) => entry.owner === owner);
-  for (const entry of queued) {
-    removeQueuedRtcPeerConnection(entry);
-    entry.reject(new Error(`Cancelled browser WebRTC connection budget request: ${reason}`));
-  }
-}
-function sortRtcPeerConnectionQueue(pool) {
-  pool.queue.sort((left, right) => {
-    if (left.priority !== right.priority) return left.priority - right.priority;
-    return left.enqueuedAt - right.enqueuedAt;
-  });
-}
-function createRtcPeerConnectionSlot(owner, remotePeerId, key = rtcPeerConnectionOwnerKey(owner, remotePeerId)) {
-  return {
-    key,
-    owner,
-    remotePeerId: String(remotePeerId || ""),
-    room: String(owner?.options?.room || ""),
-    priority: rtcPeerConnectionPriority(owner),
-    acquiredAtMs: Date.now()
-  };
-}
-function getRtcPeerConnectionPool() {
-  const root = globalThis || {};
-  if (!root[GLOBAL_RTC_CONNECTION_POOL_KEY]) {
-    root[GLOBAL_RTC_CONNECTION_POOL_KEY] = {
-      maxActive: MAX_GLOBAL_RTC_PEER_CONNECTIONS,
-      active: /* @__PURE__ */ new Map(),
-      queue: [],
-      criticalOpened: /* @__PURE__ */ new Set(),
-      criticalRequested: /* @__PURE__ */ new Set(),
-      drainScheduled: false
-    };
-  } else if (root[GLOBAL_RTC_CONNECTION_POOL_KEY].maxActive < MAX_GLOBAL_RTC_PEER_CONNECTIONS) {
-    root[GLOBAL_RTC_CONNECTION_POOL_KEY].maxActive = MAX_GLOBAL_RTC_PEER_CONNECTIONS;
-  }
-  return root[GLOBAL_RTC_CONNECTION_POOL_KEY];
-}
-function rtcPeerConnectionPoolSnapshot() {
-  const pool = getRtcPeerConnectionPool();
-  return {
-    maxActive: pool.maxActive,
-    active: pool.active.size,
-    queued: pool.queue.length,
-    activeCritical: activeCriticalRtcPeerConnectionCount(pool),
-    queuedCritical: queuedCriticalRtcPeerConnectionNames(pool).length,
-    criticalOpened: [...pool.criticalOpened].sort(),
-    criticalReady: criticalRtcPeerConnectionsReady(pool),
-    activeConnections: [...pool.active.values()].map((slot) => rtcPeerConnectionSlotSnapshot(slot)),
-    queuedConnections: pool.queue.map((entry) => ({
-      collection: collectionNameFromTopic(entry.owner?.options?.room || ""),
-      priority: entry.priority,
-      queuedForMs: Date.now() - entry.enqueuedAt
-    }))
-  };
-}
-function rtcPeerConnectionPoolCounters() {
-  const pool = getRtcPeerConnectionPool();
-  const active = pool.active.size;
-  const queued = pool.queue.length;
-  const activeCritical = activeCriticalRtcPeerConnectionCount(pool);
-  const queuedCritical = queuedCriticalRtcPeerConnectionNames(pool).length;
-  return {
-    maxActive: pool.maxActive,
-    active,
-    queued,
-    activeCritical,
-    queuedCritical,
-    maxConnections: pool.maxActive,
-    activeConnections: active,
-    queuedConnections: queued,
-    criticalActiveConnections: activeCritical,
-    criticalQueuedConnections: queuedCritical
-  };
-}
-function rtcPeerConnectionOwnerKey(owner, remotePeerId) {
-  return `${String(owner?.options?.room || "")}|${String(owner?.options?.clientId || "")}|${String(remotePeerId || "")}`;
-}
-function rtcPeerConnectionPriority(owner) {
-  void owner;
-  return 0;
-}
-function noteCriticalRequested(pool, owner) {
-  if (!pool || !owner) return;
-  const room = owner?.options?.room || "";
-  if (!isBusinessOsRoom(room)) return;
-  const collection = collectionNameFromTopic(room);
-  if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) return;
-  if (!pool.criticalRequested) pool.criticalRequested = /* @__PURE__ */ new Set();
-  pool.criticalRequested.add(collection);
-}
-function criticalRtcPeerConnectionsReady(pool) {
-  const requested = pool?.criticalRequested;
-  if (!requested || requested.size === 0) return true;
-  for (const collection of requested) {
-    if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) continue;
-    if (!pool.criticalOpened?.has(collection)) return false;
-  }
-  return true;
-}
-function queuedCriticalRtcPeerConnectionNames(pool) {
-  const queuedCriticalRooms = /* @__PURE__ */ new Set();
-  for (const entry of pool.queue) {
-    const collection = collectionNameFromTopic(entry?.owner?.options?.room || "");
-    if (SHELL_CRITICAL_COLLECTIONS.has(collection)) queuedCriticalRooms.add(collection);
-  }
-  return [...queuedCriticalRooms].sort();
-}
-function activeCriticalRtcPeerConnectionCount(pool) {
-  let count = 0;
-  for (const slot of pool.active.values()) {
-    if (SHELL_CRITICAL_COLLECTIONS.has(collectionNameFromTopic(slot.room))) count += 1;
-  }
-  return count;
-}
-function preemptOptionalRtcPeerConnectionSlot(pool) {
-  if (pool.active.size < pool.maxActive) return false;
-  for (const slot of pool.active.values()) {
-    const collection = collectionNameFromTopic(slot.room);
-    if (SHELL_CRITICAL_COLLECTIONS.has(collection)) continue;
-    try {
-      slot.owner?.removeConnection?.(slot.remotePeerId, "rtc-preempted-for-shell-critical");
-    } catch {
-    }
-    return true;
-  }
-  return false;
-}
-function nextGrantableRtcPeerConnectionQueueIndex(pool) {
-  for (let index = 0; index < pool.queue.length; index += 1) {
-    const entry = pool.queue[index];
-    if (!entry) continue;
-    if (entry.priority === 0 || !isBrowserRuntime() || !isBusinessOsRoom(entry.owner?.options?.room)) {
-      return index;
-    }
-    if (criticalRtcPeerConnectionsReady(pool)) {
-      return index;
-    }
-  }
-  return -1;
-}
-function markCriticalRtcPeerConnectionOpened(slot) {
-  if (!slot || slot.priority !== 0 || !isBusinessOsRoom(slot.room)) return;
-  const collection = collectionNameFromTopic(slot.room);
-  if (!SHELL_CRITICAL_COLLECTIONS.has(collection)) return;
-  getRtcPeerConnectionPool().criticalOpened.add(collection);
-}
-function rtcPeerConnectionSlotSnapshot(slot) {
-  return {
-    collection: collectionNameFromTopic(slot.room),
-    priority: slot.priority,
-    activeForMs: Date.now() - slot.acquiredAtMs
-  };
-}
 function signalingPeerDescriptors(message = {}) {
   const descriptors = [];
   const append = (entry) => {
@@ -6146,12 +5844,6 @@ function recordCandidateType(target, candidateLine) {
 function candidateTypeFromLine(candidateLine) {
   const match = String(candidateLine || "").match(/\styp\s+([a-z0-9-]+)/i);
   return match?.[1] ? match[1].toLowerCase() : "";
-}
-function isBusinessOsRoom(room) {
-  return String(room || "").startsWith("ctox-business-os:");
-}
-function isBrowserRuntime() {
-  return typeof window === "object" && typeof document === "object";
 }
 function collectionNameFromTopic(topic) {
   const parts = String(topic || "").split(":").filter(Boolean);
@@ -6359,7 +6051,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// src/apps/business-os/rxdb/src/observable.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/observable.mjs
 var CtoxSubject = class {
   constructor(initialValue) {
     this.value = initialValue;
@@ -6385,7 +6077,7 @@ var CtoxSubject = class {
   }
 };
 
-// src/apps/business-os/rxdb/src/chunk-decoder.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/chunk-decoder.mjs
 async function decodeChunk(chunk) {
   if (!chunk || typeof chunk !== "object") {
     throw new TypeError("chunk must be an object");
@@ -6422,7 +6114,7 @@ async function deflateInflate(bytes) {
   throw new Error('DecompressionStream("deflate-raw") is required for compressed CTOX Sync Engine chunks');
 }
 
-// src/apps/business-os/rxdb/src/demand-loading-transport.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/demand-loading-transport.mjs
 var ACK_RESPONSE = Object.freeze({ ack: true });
 var SERVER_QUERY_STREAM_LIMIT = Math.max(1, Number(CTOX_QUERY_RPC.maxInFlightStreams) || 4);
 var CLIENT_QUERY_STREAM_LIMIT = Math.max(1, Math.min(6, SERVER_QUERY_STREAM_LIMIT - 1 || 1));
@@ -7085,7 +6777,7 @@ function getGlobalQueryStreamState() {
   return globalThis[GLOBAL_QUERY_STREAM_STATE_KEY];
 }
 
-// src/apps/business-os/rxdb/src/query-fingerprint.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/query-fingerprint.mjs
 var PROTOCOL_VERSION = "1.5";
 function canonicalizeQueryInput(input) {
   if (!input || typeof input !== "object") {
@@ -7197,7 +6889,7 @@ function canonicalizeWindow(window2) {
   };
 }
 
-// src/apps/business-os/rxdb/src/query-demand-loader.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/query-demand-loader.mjs
 var DEFAULT_WINDOW_LIMIT = 200;
 var CONTROL_PLANE_QUERY_REVALIDATE_MS = 1e3;
 var EMPTY_QUERY_WINDOW_REVALIDATE_MS = 5e3;
@@ -7642,7 +7334,7 @@ function applyQueryToDocs(docs, query, window2) {
   return filtered;
 }
 
-// src/apps/business-os/rxdb/src/file-demand-loader.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/file-demand-loader.mjs
 var FILE_CHUNK_PRESENCE_KEY = (collection, fileId) => `${collection}|${fileId}`;
 var DEFAULT_FILE_RETURN_BUDGET_BYTES = 32 * 1024 * 1024;
 function createFileDemandLoader({
@@ -7921,7 +7613,7 @@ function dedupeSorted(values) {
   return out;
 }
 
-// src/apps/business-os/rxdb/src/query-meta-backend-indexeddb.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/query-meta-backend-indexeddb.mjs
 var SIDECAR_DB_VERSION = 2;
 var STORE_QUERY_WINDOWS = "queryWindows";
 var STORE_QUERY_WINDOW_REFS = "queryWindowRefs";
@@ -8269,7 +7961,7 @@ function runTransaction(tx, schedule) {
   });
 }
 
-// src/apps/business-os/rxdb/src/active-collections.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/active-collections.mjs
 var RECENT_EXEC_ACTIVE_MS = 15e3;
 var ACTIVE_NOTIFY_DEBOUNCE_MS = 100;
 var ActiveCollectionRegistry = class {
@@ -8390,7 +8082,7 @@ function createActiveCollectionRegistry(options = {}) {
   return new ActiveCollectionRegistry(options);
 }
 
-// src/apps/business-os/rxdb/src/presence.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/presence.mjs
 var PRESENCE_NOTIFY_DEBOUNCE_MS = 100;
 var PresenceRegistry = class {
   constructor({
@@ -8522,7 +8214,7 @@ function createPresenceRegistry(options = {}) {
   return new PresenceRegistry(options);
 }
 
-// src/apps/business-os/rxdb/src/v1_5_status.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/v1_5_status.mjs
 var V1_5_QUERY_FETCH_CAPABILITY = CTOX_QUERY_FETCH_CAPABILITY;
 var V1_5_QUERY_RPC = CTOX_QUERY_RPC;
 var V1_5_STATUS_FIELDS = Object.freeze([
@@ -8620,7 +8312,7 @@ function snapshotV1_5Status(state) {
   return snapshot;
 }
 
-// src/apps/business-os/rxdb/src/multi-tab-broker.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/multi-tab-broker.mjs
 var CHANNEL_PREFIX = "ctox-rxdb-v1_5-broker-";
 var CLAIM_TTL_MS = 3e4;
 var CLAIM_ELECTION_MS = 25;
@@ -8785,7 +8477,7 @@ function randomTabId() {
   return `tab-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-// src/apps/business-os/rxdb/src/replication-webrtc.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/replication-webrtc.mjs
 var ACTIVE_COLLECTIONS_METHOD = "rxdb.activeCollections";
 var GLOBAL_QUERY_META_BUDGET_BYTES = 512 * 1024 * 1024;
 var DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
@@ -10893,7 +10585,7 @@ function normalizeRemoteCollectionCheckpoints(map) {
   return Object.keys(out).length > 0 ? out : null;
 }
 
-// src/apps/business-os/rxdb/src/multi-tab-sync-coordinator.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/multi-tab-sync-coordinator.mjs
 var COORDINATORS = /* @__PURE__ */ Symbol.for("ctox.rxdb.multi-tab-sync-coordinators.v1");
 var CHANNEL_PREFIX2 = "ctox-rxdb-sync-leader-";
 var HEARTBEAT_MS = 5e3;
@@ -11192,7 +10884,7 @@ var multiTabSyncCoordinatorTestInternals = Object.freeze({
   stableHash
 });
 
-// src/apps/business-os/rxdb/src/sync-profile-registry.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/sync-profile-registry.mjs
 var REGISTRY_KEY = "__ctoxCollectionSyncProfiles";
 var VALID_PROFILES = /* @__PURE__ */ new Set(["demand-only", "demand-chunks"]);
 function registryMap() {
@@ -11223,7 +10915,7 @@ function clearCollectionSyncProfiles() {
   registryMap().clear();
 }
 
-// src/apps/business-os/rxdb/src/rx-database.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/rx-database.mjs
 function getCtoxIndexedDbStorage() {
   return { name: "ctox-indexeddb-native" };
 }
@@ -12177,7 +11869,7 @@ var ctoxRxdbTestInternals = {
   sortDocuments
 };
 
-// src/apps/business-os/rxdb/src/advanced-status-bridge.mjs
+// ../../../../private/tmp/claude-501/-Users-michaelwelsch-Documents-ctox/06aa10fa-42d2-4fde-9743-7f8c7a4dab0b/scratchpad/b4tree/src/apps/business-os/rxdb/src/advanced-status-bridge.mjs
 function buildBusinessOsAdvancedStatus({
   v15Status,
   peerSessions = [],

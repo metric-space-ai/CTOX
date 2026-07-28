@@ -10,8 +10,9 @@
 //
 //   1. SHELL_CRITICAL_COLLECTIONS is the single source of truth app.js
 //      derives from; its membership changing silently is a drift bug.
-//   2. Multiplexed admission: connections are granted immediately (no
-//      per-collection queueing), with the documented pool headroom.
+//   2. No admission machinery at all (SYNC-A-B4): every room's connection is
+//      created immediately — no pool, no queue, no cap, and a new incoming
+//      connection NEVER closes an existing one.
 //
 // If you (the agent reading this) change either contract, change it in
 // src/webrtc-native.mjs FIRST, on purpose, and update this pin in the same
@@ -19,8 +20,11 @@
 
 globalThis.window = {};
 globalThis.document = {};
+let fakeConnectionsCreated = 0;
+let fakeConnectionsClosed = 0;
 globalThis.RTCPeerConnection = class FakeRTCPeerConnection {
   constructor() {
+    fakeConnectionsCreated += 1;
     this.connectionState = 'new';
     this.iceConnectionState = 'new';
     this.iceGatheringState = 'new';
@@ -49,6 +53,7 @@ globalThis.RTCPeerConnection = class FakeRTCPeerConnection {
   }
 
   close() {
+    if (this.connectionState !== 'closed') fakeConnectionsClosed += 1;
     this.connectionState = 'closed';
     this.signalingState = 'closed';
   }
@@ -75,24 +80,39 @@ assertEqual(
   'SHELL_CRITICAL_COLLECTIONS membership changed — update this pin (and app.js consumers) deliberately',
 );
 
-// --- 2. multiplexed admission: all rooms get RTC slots immediately -----------
+// --- 2. no admission machinery: immediate creation, never eviction -----------
+// 70 rooms deliberately exceeds the retired 64-connection pool cap: with the
+// admission machinery gone, every room connects immediately and no incoming
+// connection may close an existing one (SYNC-A-B4 eviction regression).
 const joined = JSON.stringify({
   type: 'joined',
   peers: [{ peerId: 'ctox-core-test', role: 'ctox_instance' }],
 });
 
-const ROOM_COUNT = 18;
+const ROOM_COUNT = 70;
 const peers = Array.from({ length: ROOM_COUNT }, (_, index) => createPeer(`room-${index}`, `browser-${index}`));
 for (const peer of peers) peer.handleSignalingMessage(joined);
 await delay(10);
 
-const snapshot = peers[0].getTransportStatus().rtcConnectionPool;
-assertEqual(snapshot.maxActive, 64, 'browser RTC pool headroom (documented cap)');
-assertEqual(snapshot.active, ROOM_COUNT, 'multiplexed rooms must all be granted RTC slots immediately');
-assertEqual(snapshot.queued, 0, 'the retired per-collection admission gate must not queue connections');
+assertEqual(
+  fakeConnectionsCreated >= ROOM_COUNT,
+  true,
+  `all ${ROOM_COUNT} rooms must create their RTCPeerConnection immediately (created: ${fakeConnectionsCreated})`,
+);
+assertEqual(fakeConnectionsClosed, 0, 'no incoming connection may evict/close an existing RTCPeerConnection');
+assertEqual(
+  peers[0].getTransportStatus().rtcConnectionPool,
+  undefined,
+  'transport status must no longer report admission-pool counters',
+);
 
 for (const peer of peers) peer.close();
-console.log('ctox-rxdb-js rtc critical pool smoke OK (multiplex contract)');
+assertEqual(
+  fakeConnectionsClosed >= ROOM_COUNT,
+  true,
+  'explicit peer.close() must still close the underlying RTCPeerConnection',
+);
+console.log('ctox-rxdb-js rtc critical pool smoke OK (post-admission contract)');
 
 function createPeer(room, clientId) {
   return createCtoxWebRtcNativePeer({
