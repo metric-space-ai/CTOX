@@ -1367,21 +1367,39 @@
   white-space: normal;
 }
 
-@container business-app-window (max-width: 1100px) {
-  .research-module {
+@container business-app-window (max-width: 1350px) {
+  .ctox-workspace.research-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(220px, 34vh) minmax(420px, 1fr) minmax(260px, 38vh);
-    height: auto;
-    min-height: 100%;
+    grid-template-rows: minmax(640px, auto) minmax(260px, auto) minmax(260px, auto);
+    grid-template-areas:
+      "research-center"
+      "research-left"
+      "research-right";
+    height: 100%;
+    min-height: 0;
     overflow-y: auto;
     gap: 8px;
     padding: 8px;
   }
+
+  .research-left {
+    grid-area: research-left;
+  }
+
+  .research-center {
+    grid-area: research-center;
+  }
+
+  .research-right {
+    grid-area: research-right;
+  }
+
   .research-left,
   .research-center,
   .research-right {
     display: grid !important;
     min-height: 220px;
+    height: auto;
   }
   .research-module > .ctox-column-resizer {
     display: none !important;
@@ -1394,8 +1412,8 @@
 }
 
 @container business-app-window (max-width: 760px) {
-  .research-module {
-    grid-template-rows: minmax(200px, 34vh) minmax(690px, auto) minmax(240px, 40vh);
+  .ctox-workspace.research-module {
+    grid-template-rows: minmax(690px, auto) minmax(220px, auto) minmax(240px, auto);
   }
 
   .research-module > .ctox-column-resizer {
@@ -1575,6 +1593,37 @@
 
 .research-counted-tab.is-active .research-tab-count {
   color: currentColor;
+}
+
+@container business-app-window (max-width: 1350px) {
+  .research-tabs-container {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .research-tabs-container > .ctox-pane-tabs:first-child {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow: visible;
+  }
+
+  .research-view-toggle {
+    justify-self: end;
+  }
+
+  .research-counted-tab {
+    font-size: 10px;
+  }
+
+  .research-tab-label {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
+}
+
+@container business-app-window (max-width: 520px) {
+  .research-tabs-container > .ctox-pane-tabs:first-child {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 /* Icon-only view-switch tabs can be narrower than text tabs. */

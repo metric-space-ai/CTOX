@@ -1053,6 +1053,7 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
     }))
     .filter((group) => {
       if (!group.entries.length) return false;
+      if (state.sourceScope === 'all' && isInternalSkillOnlyGroup(group)) return false;
       if (!term) return true;
       return `${group.title} ${group.summary || ''} ${group.domain || ''} ${group.entries.map((entry) => `${entry.title} ${entry.subtitle || ''} ${entry.summary || ''}`).join(' ')}`.toLowerCase().includes(term);
     });
@@ -1105,6 +1106,13 @@ function renderKnowledgeList({ resetScroll = false } = {}) {
     const node = els.leftPane?.querySelector('[data-pg-footer]');
     if (node) node.textContent = footerText;
   }
+}
+
+function isInternalSkillOnlyGroup(group) {
+  if (!group?.entries?.length || groupSize(group) > 0) return false;
+  return group.entries.every((entry) => (
+    entry.kind === 'skill' && sourceScopeFor(entry) === 'system'
+  ));
 }
 
 function knowledgeEmptyStateMessage(copy, term = '') {
@@ -3128,6 +3136,7 @@ function isKnowledgeActionFormReady(values, requiredFields = []) {
 
 export const __knowledgeTestHooks = {
   buildKnowledgeBundles,
+  isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,
   isKnowledgeTabDisabled,

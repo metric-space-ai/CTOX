@@ -2055,6 +2055,7 @@ function renderCenter() {
     return;
   }
   const projection = currentGraphProjection(task);
+  const visibleStatus = visibleResearchStatus();
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2075,7 +2076,7 @@ function renderCenter() {
         </div>
       </div>
     </header>
-    ${state.status ? `<div class="research-status-line" role="status" aria-live="polite">${escapeHtml(state.status)}</div>` : ''}
+    ${visibleStatus ? `<div class="research-status-line" role="status" aria-live="polite">${escapeHtml(visibleStatus)}</div>` : ''}
     <div class="research-center-body${state.showDiagram ? '' : ' has-hidden-map'}">
       ${renderSemanticGraph(task, projection)}
       <section class="research-workbench">
@@ -5116,6 +5117,12 @@ function reloadStatusText() {
   const sourceCount = state.sourceModels.length;
   if (!domainCount) return state.t('noKnowledgeDomains', 'Noch keine Knowledge Base verfügbar');
   return state.t('researchReadySummary', '{0} Aufgaben, {1} Knowledge Bases, {2} Quellen verfügbar.', taskCount, domainCount, sourceCount);
+}
+
+function visibleResearchStatus() {
+  if (diagnosticFailures().length) return reloadStatusText();
+  if (state.initialDataReady && state.tasks.length) return '';
+  return state.status;
 }
 
 async function upsertDoc(collection, doc) {

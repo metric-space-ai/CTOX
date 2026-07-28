@@ -22,6 +22,7 @@ const { __knowledgeTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   buildKnowledgeBundles,
+  isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,
   isKnowledgeTabDisabled,
@@ -65,6 +66,28 @@ test('groups unknown knowledge records instead of rendering a false empty state'
   assert.equal(groups.length, 1);
   assert.equal(groups[0].id, 'knowledge/operations');
   assert.equal(groups[0].entries[0].id, 'note:ops-runner');
+});
+
+test('hides internal skill-only groups from the default customer knowledge view', () => {
+  assert.equal(isInternalSkillOnlyGroup({
+    entries: [{
+      id: 'skill:system/review',
+      kind: 'skill',
+      source_path: 'embedded:skills/system/review/SKILL.md',
+    }],
+    runbookIds: [],
+    tableIds: [],
+  }), true);
+
+  assert.equal(isInternalSkillOnlyGroup({
+    entries: [{
+      id: 'skillbook:drone-bearing-design',
+      kind: 'skillbook',
+      source_path: '/home/ctox/knowledge/drone-bearing-design.md',
+    }],
+    runbookIds: [],
+    tableIds: [],
+  }), false);
 });
 
 test('projects knowledge table records into visible dataframe entries', () => {

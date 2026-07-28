@@ -11,7 +11,7 @@ const require = createRequire(import.meta.url);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '../..');
 const outputDir = scriptDir;
-const targetUrl = process.env.BUSINESS_OS_INTERACTIVE_URL || 'http://127.0.0.1:8765/?rxdbSmoke=1';
+const targetUrl = process.env.BUSINESS_OS_INTERACTIVE_URL || 'http://127.0.0.1:8901/?rxdbSmoke=1';
 
 const { chromium } = require(path.join(repoRoot, 'runtime/browser/interactive-reference/node_modules/patchright'));
 const executablePath = path.join(
@@ -21,21 +21,18 @@ const executablePath = path.join(
 
 const report = { startedAt: new Date().toISOString(), cases: [], console: [] };
 
-const browser = await chromium.launch({
+// Persistentes Profil: teurer Cold-Boot (RxDB-Seed/Repair) nur beim ersten Lauf.
+const userDataDir = path.join(scriptDir, 'profile');
+const context = await chromium.launchPersistentContext(userDataDir, {
   headless: false,
   executablePath,
+  viewport: { width: 1600, height: 1000 },
+  deviceScaleFactor: 1,
   args: ['--disable-features=LocalNetworkAccessChecks,LocalNetworkAccessForNavigations'],
 });
+const browser = context;
 
-try {
-  const context = await browser.newContext({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
-  const page = await context.newPage();
-  page.on('pageerror', (error) => report.console.push({ type: 'pageerror', text: String(error) }));
-  page.on('console', (m) => {
-    if (m.type() === 'error') report.console.push({ type: 'error', text: m.text() });
-  });
-
-  await page.goto(targetUrl, { waitUntil: 'commit', timeout: 240000 });
+async function waitForSmokeShell(page, timeoutMs) {
   await page.waitForFunction(() => {
     const state = globalThis.ctoxBusinessOsSmoke?.state || globalThis.CTOX_BUSINESS_OS_APP;
     return document.body?.dataset?.authState !== 'locked'
@@ -43,7 +40,25 @@ try {
       && Array.isArray(state?.modules)
       && state.modules.length >= 30
       && !document.body.dataset.moduleLoading;
-  }, null, { timeout: 300000, polling: 1000 });
+  }, null, { timeout: timeoutMs, polling: 1000 });
+}
+
+try {
+  const page = context.pages()[0] || await context.newPage();
+  page.on('pageerror', (error) => report.console.push({ type: 'pageerror', text: String(error) }));
+  page.on('console', (m) => {
+    if (m.type() === 'error') report.console.push({ type: 'error', text: m.text() });
+  });
+
+  // Phase 1: Cold-Boot kann die rxdbSmoke-Query per Repair-Reload verlieren.
+  await page.goto(targetUrl, { waitUntil: 'commit', timeout: 240000 });
+  try {
+    await waitForSmokeShell(page, 200000);
+  } catch {
+    // Phase 2: warmer Reload mit intakter Query.
+    await page.goto(targetUrl, { waitUntil: 'commit', timeout: 120000 });
+    await waitForSmokeShell(page, 120000);
+  }
   await page.evaluate(() => globalThis.ctoxBusinessOsSmoke?.state?.windowManager?.destroyAll?.());
   await page.waitForTimeout(300);
 

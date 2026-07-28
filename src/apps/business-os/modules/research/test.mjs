@@ -866,6 +866,7 @@ test('discovery graph prefers persisted citation paths over inferred tag cluster
 });
 
 test('research graph releases its WebGL context when the surface is remounted', () => {
+  assert.match(researchGraphSource, /zoomToFit\?\.\([\s\S]*?projection\.visibleNodeIds\.has\(node\.id\)/);
   assert.match(researchGraphSource, /graph\.pauseAnimation\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.forceContextLoss\?\.\(\)/);
@@ -912,6 +913,8 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
   assert.doesNotMatch(source, /linear-gradient|radial-gradient/);
   assert.match(css, /grid-template-columns: var\(--research-left-width\) 6px minmax\(0, 1fr\) 6px var\(--research-right-width\)/);
+  assert.match(css, /@container business-app-window \(max-width: 1350px\)[\s\S]*?\.ctox-workspace\.research-module\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(css, /grid-template-areas:\s*"research-center"\s*"research-left"\s*"research-right"/);
   assert.match(css, /\.research-ai-prompt-pre/);
   assert.match(css, /@keyframes research-spin/);
 });

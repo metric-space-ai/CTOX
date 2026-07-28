@@ -845,7 +845,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       if (messagesContainer) {
         const expectedHtml = (renderChatAgentScopeHtml(chat.contextMeta)
           + (chat.messages.length
-            ? chat.messages.map(messageMarkup).join('')
+            ? chatMessagesMarkup(chat.messages)
             : '<div class="ctox-chat-empty">CTOX Aufgabe eingeben.</div>')).trim();
         if (messagesContainer.innerHTML.trim() !== expectedHtml) {
           messagesContainer.innerHTML = expectedHtml;
@@ -1827,7 +1827,7 @@ function chatWindow(chat, activeId, relation = 'center') {
       ${schedulerBarHtml}
       <div class="ctox-chat-messages">
         ${agentScopeHtml}
-        ${chat.messages.length ? chat.messages.map(messageMarkup).join('') : '<div class="ctox-chat-empty">CTOX Aufgabe eingeben.</div>'}
+        ${chat.messages.length ? chatMessagesMarkup(chat.messages) : '<div class="ctox-chat-empty">CTOX Aufgabe eingeben.</div>'}
       </div>
       ${bottomHtml}
     </section>
