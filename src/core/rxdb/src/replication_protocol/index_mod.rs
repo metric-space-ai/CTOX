@@ -59,25 +59,91 @@ pub async fn await_rx_storage_replication_in_sync(state: Arc<RxStorageInstanceRe
     let _cp = state.checkpoint_queue.lock().await;
 }
 
-// ref: rxdb/src/replication-protocol/index.ts:145-167
-/// Awaits replication to be idle: first in-sync, then all queues drained.
+#[derive(Clone, Copy)]
+pub enum ReplicationIdleRequirement {
+    /// Wait for the direction's retained activity signal and tracked queue.
+    ActivityAndQueue,
+    /// Wait only for the current queue head. Used where upstream RxDB explicitly
+    /// awaits `streamQueue.up`, not direction inactivity.
+    QueueOnly,
+}
+
+/// Waits for the requested quiescence level of one replication direction.
 ///
-/// Upstream checks `down === state.streamQueue.down && up === state.streamQueue.up`
-/// after awaiting, to detect whether new tasks were enqueued during the wait.
-/// With `tokio::sync::Mutex` the analogous check is "did anyone try to acquire
-/// the lock while we held it?". We model this by acquiring all three locks
-/// twice — if no new task came in, the second acquire is immediate.
+/// Activity is published before queue acquisition, and both the activity subject
+/// and tracked queue retain their current state for late subscribers. The final
+/// recheck closes the race where new work starts between the two awaits.
+pub async fn await_rx_storage_replication_direction_idle(
+    state: &RxStorageInstanceReplicationState,
+    direction: crate::types::RxStorageReplicationDirection,
+    requirement: ReplicationIdleRequirement,
+) {
+    let (active, queue) = match direction {
+        crate::types::RxStorageReplicationDirection::Down => {
+            (&state.events.active.down, &state.stream_queue.down)
+        }
+        crate::types::RxStorageReplicationDirection::Up => {
+            (&state.events.active.up, &state.stream_queue.up)
+        }
+    };
+
+    loop {
+        if matches!(requirement, ReplicationIdleRequirement::ActivityAndQueue) && active.get_value()
+        {
+            let mut activity = active.subscribe();
+            while let Some(is_active) = activity.next().await {
+                if !is_active {
+                    break;
+                }
+            }
+        }
+        queue.wait_until_idle().await;
+        if queue.is_idle()
+            && (matches!(requirement, ReplicationIdleRequirement::QueueOnly) || !active.get_value())
+        {
+            return;
+        }
+    }
+}
+
+// ref: rxdb/src/replication-protocol/index.ts:145-167
+/// Canonical replication-quiescence primitive.
+///
+/// Initial sync must be complete, both activity subjects must report inactive,
+/// both tracked stream queues must have no waiter or holder, and the checkpoint
+/// queue must drain. The checkpoint lock is released before direction state is
+/// rechecked, so this never waits for direction work while holding a lock that
+/// direction work needs for `set_checkpoint()`.
 pub async fn await_rx_storage_replication_idle(state: Arc<RxStorageInstanceReplicationState>) {
     await_rx_storage_replication_first_in_sync(Arc::clone(&state)).await;
-    // First drain.
-    {
-        let _down = state.stream_queue.down.lock().await;
-        let _up = state.stream_queue.up.lock().await;
-    }
-    // Second drain to confirm idle.
-    {
-        let _down = state.stream_queue.down.lock().await;
-        let _up = state.stream_queue.up.lock().await;
+    loop {
+        await_rx_storage_replication_direction_idle(
+            &state,
+            crate::types::RxStorageReplicationDirection::Down,
+            ReplicationIdleRequirement::ActivityAndQueue,
+        )
+        .await;
+        await_rx_storage_replication_direction_idle(
+            &state,
+            crate::types::RxStorageReplicationDirection::Up,
+            ReplicationIdleRequirement::ActivityAndQueue,
+        )
+        .await;
+
+        {
+            let _checkpoint = state.checkpoint_queue.lock().await;
+        }
+
+        // Work can enter a direction while checkpoint draining is blocked. Its
+        // retained activity/queue state makes that visible without a fixed
+        // second drain; loop only when the post-checkpoint snapshot changed.
+        if !state.events.active.down.get_value()
+            && !state.events.active.up.get_value()
+            && state.stream_queue.down.is_idle()
+            && state.stream_queue.up.is_idle()
+        {
+            return;
+        }
     }
 }
 
@@ -469,9 +535,19 @@ mod tests {
     use crate::rx_schema_helper::fill_with_default_settings;
     use crate::rxjs_compat::DEFAULT_SUBJECT_BUFFER;
     use crate::types::{
-        BulkWriteRow, JsonSchema, PrimaryKey, RxJsonSchema, RxReplicationMasterChange,
-        RxStorageInstance, RxStorageInstanceCreationParams,
+        BulkWriteRow, FirstSyncDone, HashFunction, HashOutput, JsonSchema, PrimaryKey,
+        ReplicationEvents, ReplicationStats, RxJsonSchema, RxReplicationMasterChange,
+        RxStorageInstance, RxStorageInstanceCreationParams, RxStorageInstanceReplicationInput,
+        RxStorageInstanceReplicationState, RxStorageReplicationDirection, StreamQueue,
     };
+
+    struct TestHashFunction;
+
+    impl HashFunction for TestHashFunction {
+        fn hash<'a>(&'a self, input: String) -> HashOutput<'a> {
+            Box::pin(async move { format!("hash:{input}") })
+        }
+    }
 
     fn test_schema() -> RxJsonSchema {
         let mut properties = HashMap::new();
@@ -497,6 +573,118 @@ mod tests {
             additional_properties: true,
             extra: HashMap::new(),
         })
+    }
+
+    async fn idle_test_state(database_name: &str) -> Arc<RxStorageInstanceReplicationState> {
+        let storage = get_rx_storage_memory(());
+        let schema = test_schema();
+        let fork_instance: Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: database_name.to_string(),
+                    collection_name: "fork".to_string(),
+                    schema: schema.clone(),
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        let meta_instance: Arc<dyn RxStorageInstance> = storage
+            .create_storage_instance(
+                RxStorageInstanceCreationParams {
+                    database_instance_token: "db-token".to_string(),
+                    database_name: database_name.to_string(),
+                    collection_name: "meta".to_string(),
+                    schema,
+                    options: HashMap::new(),
+                    multi_instance: false,
+                    dev_mode: false,
+                    password: None,
+                },
+                (),
+            )
+            .await
+            .unwrap();
+        let conflict_handler = Arc::new(DefaultConflictHandler);
+        let replication_handler = rx_storage_instance_to_replication_handler(
+            Arc::clone(&fork_instance),
+            conflict_handler.clone(),
+            "db-token".to_string(),
+            false,
+        );
+        let state = Arc::new(RxStorageInstanceReplicationState {
+            primary_path: "id".to_string(),
+            input: Arc::new(RxStorageInstanceReplicationInput {
+                identifier: "idle-test".to_string(),
+                fork_instance,
+                meta_instance,
+                hash_function: Arc::new(TestHashFunction),
+                conflict_handler,
+                replication_handler,
+                push_batch_size: 10,
+                pull_batch_size: 10,
+                bulk_size: 10,
+                keep_meta: false,
+                initial_checkpoint: None,
+                wait_before_persist: None,
+            }),
+            checkpoint_key: "checkpoint".to_string(),
+            downstream_bulk_write_flag: "downstream".to_string(),
+            last_checkpoint_doc: parking_lot::Mutex::new(HashMap::new()),
+            events: ReplicationEvents::new(),
+            stats: ReplicationStats::new(),
+            first_sync_done: FirstSyncDone::default(),
+            stream_queue: StreamQueue::default(),
+            checkpoint_queue: tokio::sync::Mutex::new(()),
+            has_attachments: false,
+        });
+        state.first_sync_done.down.next(true);
+        state.first_sync_done.up.next(true);
+        state
+            .events
+            .active
+            .finish_initial(RxStorageReplicationDirection::Down);
+        state
+            .events
+            .active
+            .finish_initial(RxStorageReplicationDirection::Up);
+        state
+    }
+
+    #[tokio::test]
+    async fn replication_idle_returns_immediately_when_already_idle() {
+        let state = idle_test_state("replication-idle-already-idle").await;
+
+        timeout(
+            Duration::from_millis(100),
+            await_rx_storage_replication_idle(state),
+        )
+        .await
+        .expect("already-idle replication must not wait for a future activity edge");
+    }
+
+    #[tokio::test]
+    async fn replication_idle_waits_for_running_work_then_returns() {
+        let state = idle_test_state("replication-idle-running-work").await;
+        let activity = state.events.active.track(RxStorageReplicationDirection::Up);
+        let state_for_wait = Arc::clone(&state);
+        let idle = tokio::spawn(async move {
+            await_rx_storage_replication_idle(state_for_wait).await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!idle.is_finished(), "idle resolved while work was active");
+
+        drop(activity);
+        timeout(Duration::from_secs(1), idle)
+            .await
+            .expect("idle must resolve after activity ends")
+            .unwrap();
     }
 
     #[test]

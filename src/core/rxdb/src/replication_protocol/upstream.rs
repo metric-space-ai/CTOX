@@ -79,6 +79,10 @@ pub async fn start_replication_upstream(state: Arc<RxStorageInstanceReplicationS
                 if !state.first_sync_done.up.get_value() && !state.events.canceled.get_value() {
                     state.first_sync_done.up.next(true);
                 }
+                state
+                    .events
+                    .active
+                    .finish_initial(RxStorageReplicationDirection::Up);
                 break;
             }
             Err(e) => {
@@ -195,6 +199,9 @@ fn spawn_ongoing_upstream(
             if state.events.paused.get_value() {
                 continue;
             }
+            // Publish pending activity before throttling or queue acquisition so
+            // quiescence cannot pass while this event is waiting to run.
+            let _activity = state.events.active.track(RxStorageReplicationDirection::Up);
             let task_time = clock.next_time();
             if let Some(wait_before_persist) = state.input.wait_before_persist.as_ref() {
                 wait_before_persist().await;
@@ -216,14 +223,12 @@ fn spawn_ongoing_upstream(
                 tasks.push((task_time, next_event_bulk));
             }
             if lagged_resync {
-                state.events.active.up.next(true);
                 if let Err(e) = upstream_initial_sync_until_no_conflicts(&state, &clock).await {
                     tracing::error!(
                         target: "ctox_rxdb::replication_protocol::upstream",
                         "lagged fork change stream RESYNC upstreamInitialSync failed: {e}",
                     );
                 }
-                state.events.active.up.next(false);
                 continue;
             }
             if let Err(e) =
@@ -278,10 +283,7 @@ async fn process_upstream_event_tasks(
         stats.fork_change_stream_emit += emit_count;
     }
     let _g = state.stream_queue.up.lock().await;
-    state.events.active.up.next(true);
-    let result = persist_to_master(state, docs, checkpoint).await;
-    state.events.active.up.next(false);
-    result.map(|_| ())
+    persist_to_master(state, docs, checkpoint).await.map(|_| ())
 }
 
 fn spawn_upstream_resync_listener(
@@ -301,14 +303,13 @@ fn spawn_upstream_resync_listener(
             if task_time < clock.phase_start() {
                 continue;
             }
-            state.events.active.up.next(true);
+            let _activity = state.events.active.track(RxStorageReplicationDirection::Up);
             if let Err(e) = upstream_initial_sync_until_no_conflicts(&state, &clock).await {
                 tracing::error!(
                     target: "ctox_rxdb::replication_protocol::upstream",
                     "RESYNC upstreamInitialSync failed: {e}",
                 );
             }
-            state.events.active.up.next(false);
         }
     })
 }

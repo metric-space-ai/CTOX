@@ -490,13 +490,8 @@ impl RxReplicationState {
                 Some(serde_json::json!({ "replicationIdentifier": self.replication_identifier })),
             )
         })?;
-        for _ in 0..2 {
-            self.collection.database.request_idle_promise().await;
-            crate::replication_protocol::index_mod::await_rx_storage_replication_in_sync(
-                Arc::clone(&state),
-            )
-            .await;
-        }
+        self.collection.database.request_idle_promise().await;
+        crate::replication_protocol::index_mod::await_rx_storage_replication_idle(state).await;
         Ok(true)
     }
 

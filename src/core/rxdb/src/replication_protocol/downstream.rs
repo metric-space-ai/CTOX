@@ -75,6 +75,10 @@ pub async fn start_replication_downstream(state: Arc<RxStorageInstanceReplicatio
                 if !state.first_sync_done.down.get_value() && !state.events.canceled.get_value() {
                     state.first_sync_done.down.next(true);
                 }
+                state
+                    .events
+                    .active
+                    .finish_initial(RxStorageReplicationDirection::Down);
                 break;
             }
             Err(e) => {
@@ -116,6 +120,12 @@ fn spawn_ongoing_downstream(
             if state.events.canceled.get_value() {
                 break;
             }
+            // Mark the event pending before it waits on upstream. Otherwise a
+            // whole-replication idle waiter could miss this hand-off window.
+            let _activity = state
+                .events
+                .active
+                .track(RxStorageReplicationDirection::Down);
             let task_time = clock.next_time();
             wait_until_upstream_inactive(&state).await;
             if task_time < clock.phase_start() {
@@ -192,36 +202,28 @@ async fn process_downstream_master_change_tasks(
         stats.master_change_stream_emit += emit_count;
     }
     let _g = state.stream_queue.down.lock().await;
-    state.events.active.down.next(true);
-    let result = persist_from_master(state, docs, checkpoint).await;
-    state.events.active.down.next(false);
-    result
+    persist_from_master(state, docs, checkpoint).await
 }
 
 async fn run_downstream_resync_from_stream(
     state: &Arc<RxStorageInstanceReplicationState>,
     clock: &ReplicationClock,
 ) {
-    state.events.active.down.next(true);
     if let Err(e) = downstream_resync_once(state, clock).await {
         tracing::error!(
             target: "ctox_rxdb::replication_protocol::downstream",
             "RESYNC downstreamResyncOnce failed: {e}",
         );
     }
-    state.events.active.down.next(false);
 }
 
 async fn wait_until_upstream_inactive(state: &RxStorageInstanceReplicationState) {
-    if !state.events.active.up.get_value() {
-        return;
-    }
-    let mut upstream_active = state.events.active.up.subscribe();
-    while let Some(is_active) = upstream_active.next().await {
-        if !is_active {
-            return;
-        }
-    }
+    crate::replication_protocol::index_mod::await_rx_storage_replication_direction_idle(
+        state,
+        RxStorageReplicationDirection::Up,
+        crate::replication_protocol::index_mod::ReplicationIdleRequirement::ActivityAndQueue,
+    )
+    .await;
 }
 
 // ref: rxdb/src/replication-protocol/downstream.ts:175-217
@@ -371,8 +373,15 @@ async fn persist_from_master(
                     .and_then(Value::as_str)
                     == fork.get("_rev").and_then(Value::as_str)
                 {
-                    let _up_queue_guard = state.stream_queue.up.lock().await;
-                    drop(_up_queue_guard);
+                    // This is deliberately queue-head semantics: upstream RxDB
+                    // awaits `streamQueue.up` here so the resolved write is sent,
+                    // without waiting for unrelated future upstream activity.
+                    crate::replication_protocol::index_mod::await_rx_storage_replication_direction_idle(
+                        state,
+                        RxStorageReplicationDirection::Up,
+                        crate::replication_protocol::index_mod::ReplicationIdleRequirement::QueueOnly,
+                    )
+                    .await;
                 }
                 let fork_clean = write_doc_to_doc_state(&fork, has_attachments, keep_meta);
                 let master_clean =

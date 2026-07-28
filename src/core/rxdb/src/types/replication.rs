@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, MutexGuard as TokioMutexGuard};
 
 use crate::rx_error::RxError;
 use crate::rxjs_compat::{RxBehaviorSubject, RxStream, RxSubject};
@@ -83,6 +83,64 @@ pub struct RxStorageReplicationMeta {
 pub struct ActiveSubjects {
     pub down: RxBehaviorSubject<bool>,
     pub up: RxBehaviorSubject<bool>,
+    down_count: Mutex<usize>,
+    up_count: Mutex<usize>,
+}
+
+impl ActiveSubjects {
+    /// Marks work as pending before it can wait for a stream-queue lock.
+    /// The returned guard publishes inactivity only after all such work ended.
+    pub fn track(&self, direction: RxStorageReplicationDirection) -> ReplicationActivityGuard<'_> {
+        let (subject, count) = self.parts(direction);
+        let mut count = count.lock();
+        if *count == 0 {
+            subject.next(true);
+        }
+        *count += 1;
+        drop(count);
+        ReplicationActivityGuard {
+            active: self,
+            direction,
+        }
+    }
+
+    /// Ends the initial activity represented by the subjects' initial `true` value.
+    pub fn finish_initial(&self, direction: RxStorageReplicationDirection) {
+        self.finish(direction);
+    }
+
+    fn finish(&self, direction: RxStorageReplicationDirection) {
+        let (subject, count) = self.parts(direction);
+        let mut count = count.lock();
+        if *count == 0 {
+            return;
+        }
+        *count -= 1;
+        if *count == 0 {
+            subject.next(false);
+        }
+    }
+
+    fn parts(
+        &self,
+        direction: RxStorageReplicationDirection,
+    ) -> (&RxBehaviorSubject<bool>, &Mutex<usize>) {
+        match direction {
+            RxStorageReplicationDirection::Down => (&self.down, &self.down_count),
+            RxStorageReplicationDirection::Up => (&self.up, &self.up_count),
+        }
+    }
+}
+
+pub struct ReplicationActivityGuard<'a> {
+    active: &'a ActiveSubjects,
+    direction: RxStorageReplicationDirection,
+}
+
+impl Drop for ReplicationActivityGuard<'_> {
+    fn drop(&mut self) {
+        self.active.finish(self.direction);
+    }
 }
 
 impl Default for ActiveSubjects {
@@ -90,6 +148,8 @@ impl Default for ActiveSubjects {
         Self {
             down: RxBehaviorSubject::new(true),
             up: RxBehaviorSubject::new(true),
+            down_count: Mutex::new(1),
+            up_count: Mutex::new(1),
         }
     }
 }
@@ -201,17 +261,112 @@ impl Default for FirstSyncDone {
 //
 // Upstream serializes stream-processing tasks per-direction via Promise chains
 // (`state.streamQueue.up = state.streamQueue.up.then(...)`). Rust mirrors that
-// with one `tokio::sync::Mutex` per direction.
+// with one tracked `tokio::sync::Mutex` per direction. Tracking starts before
+// lock acquisition, so idle waiters can observe both queued and running work.
+pub struct ReplicationQueue {
+    mutex: TokioMutex<()>,
+    pending: Mutex<usize>,
+    idle: RxBehaviorSubject<bool>,
+}
+
+impl ReplicationQueue {
+    pub fn new() -> Self {
+        Self {
+            mutex: TokioMutex::new(()),
+            pending: Mutex::new(0),
+            idle: RxBehaviorSubject::new(true),
+        }
+    }
+
+    pub async fn lock(&self) -> ReplicationQueueGuard<'_> {
+        let entry = ReplicationQueueEntry::new(self);
+        let guard = self.mutex.lock().await;
+        ReplicationQueueGuard {
+            guard: Some(guard),
+            entry: Some(entry),
+        }
+    }
+
+    pub fn is_idle(&self) -> bool {
+        *self.pending.lock() == 0
+    }
+
+    pub async fn wait_until_idle(&self) {
+        if self.is_idle() {
+            return;
+        }
+        let mut idle = self.idle.subscribe();
+        while let Some(is_idle) = tokio_stream::StreamExt::next(&mut idle).await {
+            if is_idle && self.is_idle() {
+                return;
+            }
+        }
+    }
+
+    fn enter(&self) {
+        let mut pending = self.pending.lock();
+        if *pending == 0 {
+            self.idle.next(false);
+        }
+        *pending += 1;
+    }
+
+    fn leave(&self) {
+        let mut pending = self.pending.lock();
+        debug_assert!(*pending > 0);
+        *pending = pending.saturating_sub(1);
+        if *pending == 0 {
+            self.idle.next(true);
+        }
+    }
+}
+
+impl Default for ReplicationQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+struct ReplicationQueueEntry<'a> {
+    queue: &'a ReplicationQueue,
+}
+
+impl<'a> ReplicationQueueEntry<'a> {
+    fn new(queue: &'a ReplicationQueue) -> Self {
+        queue.enter();
+        Self { queue }
+    }
+}
+
+impl Drop for ReplicationQueueEntry<'_> {
+    fn drop(&mut self) {
+        self.queue.leave();
+    }
+}
+
+pub struct ReplicationQueueGuard<'a> {
+    guard: Option<TokioMutexGuard<'a, ()>>,
+    entry: Option<ReplicationQueueEntry<'a>>,
+}
+
+impl Drop for ReplicationQueueGuard<'_> {
+    fn drop(&mut self) {
+        // Publish queue-idle only after releasing the serialization lock.
+        self.guard.take();
+        self.entry.take();
+    }
+}
+
 pub struct StreamQueue {
-    pub down: TokioMutex<()>,
-    pub up: TokioMutex<()>,
+    pub down: ReplicationQueue,
+    pub up: ReplicationQueue,
 }
 
 impl Default for StreamQueue {
     fn default() -> Self {
         Self {
-            down: TokioMutex::new(()),
-            up: TokioMutex::new(()),
+            down: ReplicationQueue::new(),
+            up: ReplicationQueue::new(),
         }
     }
 }
