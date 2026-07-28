@@ -1,5 +1,5 @@
 import { CtoxResizer } from './shared/resizer.js?v=20260723-resizer-pointer-capture-v1';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260717-knowledge-sync-v130';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260728-sync-readiness-v131';
 import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260721-pane-grammar-v2';
 import { createAppActions } from './shared/app-actions.js?v=20260715-runtime-v2';
 import {
@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v89';
+const APP_BUILD = '20260728-research-knowledge-usability-v90';
 
 ensureShellStylesheets();
 
