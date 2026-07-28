@@ -535,11 +535,20 @@ function wireLocalRealtime() {
   const subscriptions = collections
     .map((collectionName) => knowledgeCollection(collectionName)?.$?.subscribe?.(schedule) || null)
     .filter(Boolean);
+  const subscribeChanges = state.ctx?.sync?.subscribeCollectionChanges;
+  const storageUnsubscribes = typeof subscribeChanges === 'function'
+    ? collections.map((collectionName) => (
+      subscribeChanges.call(state.ctx.sync, collectionName, schedule)
+    )).filter((unsubscribe) => typeof unsubscribe === 'function')
+    : [];
   return () => {
     if (timer) window.clearTimeout(timer);
     timer = null;
     for (const sub of subscriptions) {
       try { sub.unsubscribe?.(); } catch {}
+    }
+    for (const unsubscribe of storageUnsubscribes) {
+      try { unsubscribe(); } catch {}
     }
   };
 }
@@ -564,6 +573,11 @@ function wireCollectionReadiness() {
       renderRunbooks();
       if (state.activeTab === 'runbooks') {
         renderRunbookWorkspace().catch((error) => console.warn('[knowledge] readiness re-render failed', error));
+      }
+      if (snapshot?.state === 'ready') {
+        loadKnowledgeFromLocal().catch((error) => {
+          console.warn('[knowledge] readiness reload failed', error);
+        });
       }
     });
     return typeof unsubscribe === 'function' ? unsubscribe : () => {};

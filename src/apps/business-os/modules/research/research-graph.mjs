@@ -35,6 +35,7 @@ export function createResearchGraph(host, options = {}) {
   let topologyKey = projectionTopologyKey(projection);
   let focusFrame = 0;
   let disposed = false;
+  let persistentLabelIds = selectPersistentLabelIds(projection);
   host.dataset.graphReheatCount = '0';
   let projectionFingerprint = graphProjectionFingerprint(projection);
 
@@ -139,6 +140,7 @@ export function createResearchGraph(host, options = {}) {
         || !sameIdSet(next.visibleLinkIds, projection.visibleLinkIds);
       if (!topologyChanged && !semanticChanged && !visibilityChanged) return false;
       projection = next;
+      persistentLabelIds = selectPersistentLabelIds(projection);
       projectionFingerprint = nextFingerprint;
       topologyKey = nextTopologyKey;
       projection.nodes = projection.nodes.map((node) => {
@@ -285,9 +287,8 @@ export function createResearchGraph(host, options = {}) {
     // A graph with a label sprite for every node becomes unreadable long
     // before it reaches the 120-node default. Keep persistent labels to the
     // most important concepts; all remaining nodes retain the hover tooltip.
-    const labelRankLimit = projection.nodes.length > 90 ? 10 : projection.nodes.length > 50 ? 14 : 20;
-    if (node.primary || Number(node.rank || 0) <= labelRankLimit) {
-      const label = new SpriteText(node.label || node.id);
+    if (persistentLabelIds.has(node.id)) {
+      const label = new SpriteText(truncateGraphLabel(node.label || node.id));
       label.color = node.color || '#d6eaf3';
       label.textHeight = Math.min(9, Math.max(3.2, node.labelSize || 4.5));
       label.fontFace = 'Inter, ui-sans-serif, system-ui, sans-serif';
@@ -443,7 +444,7 @@ export function createResearchGraph(host, options = {}) {
     graph.resumeAnimation?.();
     graph.zoomToFit?.(
       duration,
-      36,
+      dimensions === 2 ? 96 : 78,
       (node) => projection.visibleNodeIds.has(node.id),
     );
   }
@@ -525,6 +526,33 @@ function normalizeProjection(value) {
     visibleNodeIds: new Set(Array.isArray(value?.visibleNodeIds) ? value.visibleNodeIds : nodes.map((node) => node.id)),
     visibleLinkIds: new Set(Array.isArray(value?.visibleLinkIds) ? value.visibleLinkIds : links.map((link) => link.id)),
   };
+}
+
+function selectPersistentLabelIds(projection) {
+  const limit = projection.nodes.length > 50 ? 1 : 3;
+  const seenLabels = new Set();
+  return new Set(
+    [...projection.nodes]
+      .sort((left, right) => (
+        Number(Boolean(right.primary)) - Number(Boolean(left.primary))
+        || Number(right.importance || 0) - Number(left.importance || 0)
+        || Number(left.rank || Number.MAX_SAFE_INTEGER) - Number(right.rank || Number.MAX_SAFE_INTEGER)
+      ))
+      .filter((node) => {
+        const key = String(node.label || node.id || '').trim().toLocaleLowerCase();
+        if (!key || seenLabels.has(key)) return false;
+        seenLabels.add(key);
+        return true;
+      })
+      .slice(0, limit)
+      .map((node) => node.id),
+  );
+}
+
+function truncateGraphLabel(value, maxLength = 30) {
+  const label = String(value || '').trim();
+  if (label.length <= maxLength) return label;
+  return `${label.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
 function projectionTopologyKey(value) {

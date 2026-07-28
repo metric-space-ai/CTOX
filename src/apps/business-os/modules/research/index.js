@@ -7,7 +7,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v88';
+const BUILD = '20260728-research-knowledge-usability-v89';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -804,6 +804,13 @@ function wireRealtime() {
       if (knowledgeLifecycleCollections.has(name)) scheduleKnowledgeRefresh(250);
     });
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
+  }
+  const subscribeChanges = state.ctx?.sync?.subscribeCollectionChanges;
+  if (typeof subscribeChanges === 'function') {
+    const unsubscribe = subscribeChanges.call(state.ctx.sync, 'knowledge_tables', () => {
+      scheduleKnowledgeRefresh(120);
+    });
+    if (typeof unsubscribe === 'function') state.cleanup.push(unsubscribe);
   }
 }
 
@@ -5364,6 +5371,12 @@ function reloadStatusText() {
 
 function visibleResearchStatus() {
   if (diagnosticFailures().length) return reloadStatusText();
+  const passiveStatuses = new Set([
+    '',
+    state.t('loadingKnowledge', 'Knowledge wird geladen...'),
+    reloadStatusText(),
+  ]);
+  if (!passiveStatuses.has(String(state.status || ''))) return state.status;
   if (state.initialDataReady && state.tasks.length) return '';
   return state.status;
 }

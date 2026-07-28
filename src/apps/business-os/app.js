@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v91';
+const APP_BUILD = '20260728-research-knowledge-usability-v92';
 
 ensureShellStylesheets();
 
@@ -6374,6 +6374,38 @@ function createLiveSyncFacade({ host = null } = {}) {
         unsubscribe();
         throw error;
       }
+      return unsubscribe;
+    },
+    subscribeCollectionChanges: (collection, listener) => {
+      assertActive();
+      if (typeof listener !== 'function') throw new TypeError('Collection change listener must be a function.');
+      const normalizedCollection = String(collection || '').trim();
+      if (!normalizedCollection) throw new TypeError('Collection name is required.');
+      let active = true;
+      const unsubscribe = () => {
+        if (!active) return;
+        active = false;
+        window.removeEventListener('ctox-rxdb-storage-change', handleStorageChange);
+      };
+      const handleStorageChange = (event) => {
+        if (!active) return;
+        if (host && !host.isConnected) {
+          unsubscribe();
+          return;
+        }
+        const detail = event?.detail || {};
+        const databaseName = state.db?.name || state.db?.raw?.name || '';
+        if (detail.databaseName && databaseName && detail.databaseName !== databaseName) return;
+        if (String(detail.collection || '') !== normalizedCollection) return;
+        listener({
+          collection: normalizedCollection,
+          ids: Array.isArray(detail.ids) ? [...detail.ids] : [],
+          replicationOriginRole: String(detail.replicationOriginRole || ''),
+          atMs: Number(detail.atMs || Date.now()),
+        });
+        if (host && !host.isConnected) unsubscribe();
+      };
+      window.addEventListener('ctox-rxdb-storage-change', handleStorageChange);
       return unsubscribe;
     },
     // Module code may request an eager bridge, but it must never promote that

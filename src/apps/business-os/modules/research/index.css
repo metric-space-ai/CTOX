@@ -96,6 +96,14 @@
   font-size: 12px;
 }
 
+.research-status-line {
+  min-width: 0;
+  border-bottom: 1px solid var(--research-line);
+  padding: 7px 12px;
+  background: color-mix(in srgb, var(--research-accent) 5%, var(--research-surface));
+  overflow-wrap: anywhere;
+}
+
 .research-task-list,
 .research-ranking-list,
 .research-note-stack,
@@ -190,7 +198,9 @@
   padding: 12px;
 }
 
-.research-center-header .ctox-pane-title {
+.research-left .ctox-pane-title,
+.research-center .ctox-pane-title,
+.research-right .ctox-pane-title {
   display: -webkit-box;
   overflow: hidden;
   white-space: normal;
@@ -1367,14 +1377,13 @@
   white-space: normal;
 }
 
-@container business-app-window (max-width: 980px) {
+@container business-app-window (max-width: 1120px) {
   .ctox-workspace.research-module {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(640px, auto) minmax(260px, auto) minmax(260px, auto);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-rows: minmax(560px, auto) minmax(260px, auto);
     grid-template-areas:
-      "research-center"
-      "research-left"
-      "research-right";
+      "research-center research-center"
+      "research-left research-right";
     height: 100%;
     min-height: 0;
     overflow-y: auto;
@@ -1413,7 +1422,12 @@
 
 @container business-app-window (max-width: 680px) {
   .ctox-workspace.research-module {
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(690px, auto) minmax(220px, auto) minmax(240px, auto);
+    grid-template-areas:
+      "research-center"
+      "research-left"
+      "research-right";
   }
 
   .research-module > .ctox-column-resizer {
@@ -1596,7 +1610,7 @@
   color: currentColor;
 }
 
-@container business-app-window (max-width: 980px) {
+@container business-app-window (max-width: 1120px) {
   .research-tabs-container {
     grid-template-columns: minmax(0, 1fr);
   }
