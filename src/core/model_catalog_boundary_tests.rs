@@ -62,6 +62,10 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
             production_source(include_str!("capabilities/scrape/execute.rs")),
         ),
         (
+            "capabilities/scrape/semantic_enrichment.rs",
+            production_source(include_str!("capabilities/scrape/semantic_enrichment.rs")),
+        ),
+        (
             "ui/tui/mod.rs",
             production_source(include_str!("ui/tui/mod.rs")),
         ),
