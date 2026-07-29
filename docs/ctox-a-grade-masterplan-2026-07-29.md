@@ -163,11 +163,15 @@ Passwort-Hashing (d3ba4a5ab), SMTP-250-Ok-Mailverlust (50111e9d5),
 scrape-Transient-Klassifikation (in Arbeit).
 
 ### COMM-Welle (communication, D+ → A) — größte Einzelbaustelle
-1. **COMM-CUT** (move-only, 3 Commits): JS aus meeting_native als echte
-   `runner/*.js`-Dateien via include_str!; chat_native →
-   providers/{slack,discord,telegram,matrix,mattermost,zulip,google_chat} +
-   realtime + error + platform-Tabelle; email_native →
-   http/imap/smtp/ews/activesync/graph/mime.
+1. **COMM-CUT** (Teil 1 gelandet: d8369f33f — Runner-JS als echte
+   .mjs-Datei via include_str!, node --check erstmals grün).
+   Befund 29.07. nacht: chat_native ist NICHT move-only teilbar — nur 31
+   von 179 Top-Level-Fns sind provider-präfixiert, die Plattformlogik
+   steckt in Match-Armen gemeinsamer Funktionen. chat_native-Schnitt
+   daher MIT COMM-ERR zusammen als semantische Welle (providers/* +
+   platform-Tabelle entstehen aus den Match-Armen). email_native-Schnitt
+   (imap/smtp/ews/activesync/graph/mime) separat prüfen — vermutlich
+   ähnlich verwoben.
 2. **COMM-ERR**: getypter `ProviderError { status, retry_after, code }` —
    ersetzt den retry_after-Format-Parse-Roundtrip (chat_native.rs:4266→4110)
    und die 50-Substring-Klassifikation (3878-3980).
