@@ -132,7 +132,9 @@ pub fn browser_session_automation(
         .enable_all()
         .build()
         .context("failed to create Business OS browser automation runtime")?;
-    if let Some(peer) = current_peer() {
+    // Reuse the live peer only when it serves this root — the lifecycle
+    // static is process-global (see NativePeer::serves_root).
+    if let Some(peer) = current_peer().filter(|peer| peer.serves_root(&root)) {
         return runtime.block_on(async move {
             browser_session_automation_with_database(root, &peer.database, request).await
         });

@@ -1184,6 +1184,16 @@ pub(super) struct NativePeer {
 }
 
 impl NativePeer {
+    /// Whether this peer serves the given store root. Helpers that receive an
+    /// explicit `root` (temporary-database paths, browser automation) must
+    /// only reuse the live peer when the roots match — the lifecycle static is
+    /// process-global, so under `cargo test` a peer started by one test would
+    /// otherwise silently hijack every other test's tempdir operation onto the
+    /// wrong database (order-dependent failures that vanish in isolation).
+    pub(super) fn serves_root(&self, root: &Path) -> bool {
+        self.root == root
+    }
+
     fn task_liveness(&self) -> [(&'static str, bool); 14] {
         [
             ("business_commands", !self._command_consumer.is_finished()),
@@ -1935,7 +1945,7 @@ where
         .context(runtime_context)?;
     let _database_guard = match lock_scope {
         TemporaryDatabaseLockScope::TemporaryOnly => {
-            if let Some(peer) = current_peer() {
+            if let Some(peer) = current_peer().filter(|peer| peer.serves_root(root)) {
                 return runtime.block_on(operation(
                     Some(Arc::clone(&peer)),
                     Arc::clone(&peer.database),
@@ -1950,7 +1960,7 @@ where
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
     };
     if lock_scope == TemporaryDatabaseLockScope::EntireOperation {
-        if let Some(peer) = current_peer() {
+        if let Some(peer) = current_peer().filter(|peer| peer.serves_root(root)) {
             return runtime.block_on(operation(
                 Some(Arc::clone(&peer)),
                 Arc::clone(&peer.database),
