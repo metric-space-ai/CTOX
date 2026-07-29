@@ -176,7 +176,8 @@ impl PlanWaitCondition {
         anyhow::ensure!(!entity_type.is_empty(), "--wait-for entity type is empty");
         anyhow::ensure!(!entity_id.is_empty(), "--wait-for entity id is empty");
         let expected_state = match entity_type {
-            "approval" | "approval-gate" | "ticket-self-work" => "closed",
+            "approval" | "approval-gate" => "closed",
+            legacy if legacy == super::tickets::LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE => "closed",
             _ => anyhow::bail!(
                 "unsupported --wait-for entity type '{entity_type}'; supported: approval-gate"
             ),
@@ -1685,23 +1686,25 @@ pub(crate) fn reconcile_satisfied_waits(root: &Path) -> Result<usize> {
 
 fn reconcile_satisfied_waits_with_conn(root: &Path, conn: &Connection) -> Result<usize> {
     let ticket_table_exists: i64 = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ticket_self_work_items')",
-        [],
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        params![super::tickets::LEGACY_WORK_ITEM_TABLE],
         |row| row.get(0),
     )?;
     if ticket_table_exists == 0 {
         return Ok(0);
     }
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         r#"
         SELECT DISTINCT w.entity_id, i.state
         FROM planned_goal_waits w
-        JOIN ticket_self_work_items i ON i.work_id = w.entity_id
+        JOIN {legacy_table} i ON i.work_id = w.entity_id
         WHERE w.status = 'pending'
-          AND w.entity_type IN ('approval', 'approval-gate', 'ticket-self-work')
+          AND w.entity_type IN ('approval', 'approval-gate', '{legacy_wait}')
           AND i.state = w.expected_state
         "#,
-    )?;
+        legacy_table = super::tickets::LEGACY_WORK_ITEM_TABLE,
+        legacy_wait = super::tickets::LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE,
+    ))?;
     let ready = statement
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1729,35 +1732,39 @@ fn satisfy_wait_for_work_item_tx(
     state: &str,
 ) -> Result<usize> {
     let now = now_iso_string();
-    let mut statement = tx.prepare(
+    let mut statement = tx.prepare(&format!(
         r#"
         SELECT DISTINCT goal_id
         FROM planned_goal_waits
-        WHERE entity_type IN ('approval', 'approval-gate', 'ticket-self-work')
+        WHERE entity_type IN ('approval', 'approval-gate', '{legacy_wait}')
           AND entity_id = ?1
           AND expected_state = ?2
           AND status = 'pending'
         "#,
-    )?;
+        legacy_wait = super::tickets::LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE,
+    ))?;
     let goal_ids = statement
         .query_map(params![work_id, state], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     let updated = tx.execute(
-        r#"
+        &format!(
+            r#"
         UPDATE planned_goal_waits
         SET status = 'satisfied',
             evidence_ref = ?3,
             satisfied_at = ?4
-        WHERE entity_type IN ('approval', 'approval-gate', 'ticket-self-work')
+        WHERE entity_type IN ('approval', 'approval-gate', '{legacy_wait}')
           AND entity_id = ?1
           AND expected_state = ?2
           AND status = 'pending'
         "#,
+            legacy_wait = super::tickets::LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE,
+        ),
         params![
             work_id,
             state,
-            format!("ticket-self-work:{work_id}:{state}"),
+            super::tickets::legacy_work_item_wait_evidence_ref(work_id, state),
             now
         ],
     )?;

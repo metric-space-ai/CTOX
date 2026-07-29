@@ -854,6 +854,17 @@ pub(crate) struct AdapterTicketUpsertResult {
     pub changed: bool,
 }
 
+// The internal-work terminology firewall keeps legacy self-work strings out
+// of plan/review/autonomy (see `internal_work_terminology_firewall_keeps_
+// self_work_legacy_only`). They are persisted DB values — table name,
+// wait entity_type, evidence prefix — that only this module may spell out;
+// callers reference the neutral constants below instead.
+pub(crate) const LEGACY_WORK_ITEM_TABLE: &str = "ticket_self_work_items";
+pub(crate) const LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE: &str = "ticket-self-work";
+pub(crate) fn legacy_work_item_wait_evidence_ref(work_id: &str, state: &str) -> String {
+    format!("{LEGACY_WORK_ITEM_WAIT_ENTITY_TYPE}:{work_id}:{state}")
+}
+
 pub fn handle_ticket_command(root: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");
     match command {
@@ -13108,7 +13119,8 @@ mod tests {
             "src/core/service/core_state_machine.rs",
             "src/core/service/harness_flow.rs",
             "src/core/service/process_mining.rs",
-            "src/core/mission/channels.rs",
+            "src/core/mission/channels/mod.rs",
+            "src/core/mission/channels/tests.rs",
             "src/core/mission/ticket_zammad_native.rs",
         ] {
             scan_internal_work_firewall_file(
