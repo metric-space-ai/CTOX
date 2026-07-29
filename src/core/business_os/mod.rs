@@ -7,6 +7,7 @@ mod browser_runtime;
 mod capability;
 pub(crate) mod command_lifecycle;
 mod command_lifecycle_generated;
+mod desktop_files;
 mod external_sql_sync;
 mod importer;
 mod invoices;
