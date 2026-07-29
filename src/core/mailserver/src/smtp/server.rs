@@ -77,6 +77,10 @@ impl SmtpInboundServer {
             LoginPassword { username: String },
         }
         let mut auth_state = AuthState::None;
+        // Per-connection brute-force brake: failed AUTH attempts delay 1s
+        // each and the connection drops after the fifth failure.
+        let mut failed_auth_attempts = 0u32;
+        const MAX_FAILED_AUTH_ATTEMPTS: u32 = 5;
 
         loop {
             let n = stream.read(&mut buf).await?;
@@ -262,9 +266,19 @@ impl SmtpInboundServer {
                                         .write_all(b"235 2.7.0 Authentication successful\r\n")
                                         .await?;
                                 } else {
+                                    failed_auth_attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                     stream
                                         .write_all(b"535 5.7.8 Authentication failed\r\n")
                                         .await?;
+                                    if failed_auth_attempts >= MAX_FAILED_AUTH_ATTEMPTS {
+                                        stream
+                                            .write_all(
+                                                b"421 4.7.0 Too many authentication failures\r\n",
+                                            )
+                                            .await?;
+                                        return Ok(());
+                                    }
                                 }
                             } else {
                                 stream
@@ -307,9 +321,19 @@ impl SmtpInboundServer {
                                     .write_all(b"235 2.7.0 Authentication successful\r\n")
                                     .await?;
                             } else {
+                                failed_auth_attempts += 1;
+                                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                 stream
                                     .write_all(b"535 5.7.8 Authentication failed\r\n")
                                     .await?;
+                                if failed_auth_attempts >= MAX_FAILED_AUTH_ATTEMPTS {
+                                    stream
+                                        .write_all(
+                                            b"421 4.7.0 Too many authentication failures\r\n",
+                                        )
+                                        .await?;
+                                    return Ok(());
+                                }
                             }
                         } else {
                             stream
@@ -343,9 +367,19 @@ impl SmtpInboundServer {
                                         .write_all(b"235 2.7.0 Authentication successful\r\n")
                                         .await?;
                                 } else {
+                                    failed_auth_attempts += 1;
+                                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                                     stream
                                         .write_all(b"535 5.7.8 Authentication failed\r\n")
                                         .await?;
+                                    if failed_auth_attempts >= MAX_FAILED_AUTH_ATTEMPTS {
+                                        stream
+                                            .write_all(
+                                                b"421 4.7.0 Too many authentication failures\r\n",
+                                            )
+                                            .await?;
+                                        return Ok(());
+                                    }
                                 }
                             } else {
                                 stream

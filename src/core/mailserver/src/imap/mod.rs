@@ -62,6 +62,8 @@ impl ImapServer {
             .await?;
 
         let mut state = ImapState::NotAuthenticated;
+        let mut failed_auth_attempts = 0u32;
+        const MAX_FAILED_AUTH_ATTEMPTS: u32 = 5;
         let mut line_buffer = String::new();
 
         loop {
@@ -137,12 +139,21 @@ impl ImapServer {
                                 .write_all(format!("{} OK LOGIN completed\r\n", tag).as_bytes())
                                 .await?;
                         } else {
+                            // Per-connection brute-force brake, mirroring SMTP.
+                            failed_auth_attempts += 1;
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                             stream
                                 .write_all(
                                     format!("{} NO LOGIN failed: bad credentials\r\n", tag)
                                         .as_bytes(),
                                 )
                                 .await?;
+                            if failed_auth_attempts >= MAX_FAILED_AUTH_ATTEMPTS {
+                                stream
+                                    .write_all(b"* BYE Too many authentication failures\r\n")
+                                    .await?;
+                                return Ok(());
+                            }
                         }
                     }
                     "LIST" => {
