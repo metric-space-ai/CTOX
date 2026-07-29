@@ -484,6 +484,13 @@ fn next_task_state_after_emit(
         if run_status == "started" {
             return Ok((None, false));
         }
+        // Retry a failed join once a minute, but give up 15 minutes past the
+        // scheduled start — an unbounded minutely retry (broken URL, missing
+        // bot) stormed scheduled_task_runs forever.
+        let scheduled = parse_rfc3339_utc(scheduled_for)?;
+        if now - scheduled >= Duration::minutes(15) {
+            return Ok((None, false));
+        }
         return Ok((Some((now + Duration::minutes(1)).to_rfc3339()), true));
     }
     Ok((
@@ -1302,6 +1309,41 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn one_shot_meeting_join_retry_gives_up_after_fifteen_minutes() -> Result<()> {
+        let scheduled = "2026-07-29T10:00:00+00:00";
+        // Five minutes in: still retrying, one minute out.
+        let now = parse_rfc3339_utc("2026-07-29T10:05:00+00:00")?;
+        let (next, enabled) = next_task_state_after_emit(true, "failed", "", scheduled, now)?;
+        assert!(enabled);
+        assert_eq!(next.as_deref(), Some("2026-07-29T10:06:00+00:00"));
+
+        // Fifteen minutes past the scheduled start: the join is dead — no
+        // further retries, task disabled.
+        let now = parse_rfc3339_utc("2026-07-29T10:15:00+00:00")?;
+        let (next, enabled) = next_task_state_after_emit(true, "failed", "", scheduled, now)?;
+        assert!(!enabled);
+        assert!(next.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn cron_day_fields_combine_with_posix_or_semantics() -> Result<()> {
+        // "at 09:00 on the 1st AND on every Monday".
+        let expr = CronExpr::parse("0 9 1 * 1")?;
+        // 2026-08-01 is a Saturday: matches via day-of-month.
+        assert!(expr.matches(&parse_rfc3339_utc("2026-08-01T09:00:00+00:00")?));
+        // 2026-08-03 is a Monday (not the 1st): matches via day-of-week.
+        assert!(expr.matches(&parse_rfc3339_utc("2026-08-03T09:00:00+00:00")?));
+        // 2026-08-04 is a Tuesday, not the 1st: no match.
+        assert!(!expr.matches(&parse_rfc3339_utc("2026-08-04T09:00:00+00:00")?));
+        // With a wildcard day-of-month the fields still AND: only Mondays.
+        let weekly = CronExpr::parse("0 9 * * 1")?;
+        assert!(weekly.matches(&parse_rfc3339_utc("2026-08-03T09:00:00+00:00")?));
+        assert!(!weekly.matches(&parse_rfc3339_utc("2026-08-01T09:00:00+00:00")?));
+        Ok(())
+    }
 }
 
 fn parse_rfc3339_utc(value: &str) -> Result<DateTime<Utc>> {
@@ -1364,13 +1406,22 @@ impl CronExpr {
     }
 
     fn matches(&self, dt: &DateTime<Utc>) -> bool {
+        // POSIX cron: when BOTH day fields are restricted, the day matches if
+        // EITHER does ("0 9 1 * 1" fires on the 1st AND on Mondays). ANDing
+        // them silently mis-scheduled exactly those operator-style entries.
+        let dom = self.day_of_month.matches(dt.day());
+        let dow = self
+            .day_of_week
+            .matches(dt.weekday().num_days_from_sunday());
+        let day_matches = if !self.day_of_month.any && !self.day_of_week.any {
+            dom || dow
+        } else {
+            dom && dow
+        };
         self.minute.matches(dt.minute())
             && self.hour.matches(dt.hour())
-            && self.day_of_month.matches(dt.day())
+            && day_matches
             && self.month.matches(dt.month())
-            && self
-                .day_of_week
-                .matches(dt.weekday().num_days_from_sunday())
     }
 }
 
