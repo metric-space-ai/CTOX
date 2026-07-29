@@ -915,6 +915,7 @@
 .research-workbench {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
+  container: research-workbench / inline-size;
 }
 
 /* Table cell content inside the kit table (source title button, sub id). */
@@ -1580,6 +1581,21 @@
   min-width: 0;
 }
 
+/* The view-switch sits in the same row as the tabs. Once the tabs need the
+   whole row, that switch eats the last tab labels ("Knowledge" clipped to
+   "Kn", "Fachberichte" hidden behind the buttons). Below that width the
+   switch moves to its own row so every tab keeps its full label. */
+@container research-workbench (max-width: 720px) {
+  .research-tabs-container {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: 6px;
+  }
+
+  .research-tabs-container .research-view-toggle {
+    justify-self: end;
+  }
+}
+
 .research-tabs-container > .ctox-pane-tabs:first-child {
   display: flex;
   width: 100%;
@@ -2215,21 +2231,5 @@
   .research-graph-action {
     min-width: 34px;
     justify-content: center;
-  }
-}
-
-@container research-graph-stage (max-width: 600px) {
-  .research-graph-insights {
-    inset: auto 8px 54px;
-    height: 170px;
-    width: auto;
-    max-height: none;
-  }
-
-  .research-graph-stage.has-insights .research-graph-canvas {
-    right: 0;
-    bottom: 232px;
-    width: 100% !important;
-    height: auto !important;
   }
 }
