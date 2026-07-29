@@ -70,6 +70,10 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
             production_source(include_str!("capabilities/scrape/outputs.rs")),
         ),
         (
+            "capabilities/scrape/reauth.rs",
+            production_source(include_str!("capabilities/scrape/reauth.rs")),
+        ),
+        (
             "ui/tui/mod.rs",
             production_source(include_str!("ui/tui/mod.rs")),
         ),
