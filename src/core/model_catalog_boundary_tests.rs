@@ -42,8 +42,12 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
     let files = [
         ("main.rs", production_source(include_str!("main.rs"))),
         (
-            "capabilities/scrape.rs",
-            production_source(include_str!("capabilities/scrape.rs")),
+            "capabilities/scrape/mod.rs",
+            production_source(include_str!("capabilities/scrape/mod.rs")),
+        ),
+        (
+            "capabilities/scrape/classify.rs",
+            production_source(include_str!("capabilities/scrape/classify.rs")),
         ),
         (
             "ui/tui/mod.rs",
