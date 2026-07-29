@@ -10,6 +10,7 @@ mod command_lifecycle_generated;
 mod external_sql_sync;
 mod importer;
 mod invoices;
+mod iot_supervision;
 pub mod mcp_channel;
 pub mod office_engine;
 mod person_research_command;
