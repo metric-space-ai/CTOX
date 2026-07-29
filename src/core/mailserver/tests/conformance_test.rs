@@ -50,10 +50,21 @@ END:VCARD"#;
 
 #[test]
 fn test_dkim_signing() {
-    let signer = DkimSigner::new("selector", "ctox.local", "dGVzdA==").unwrap();
+    // A real PKCS8 RSA key signs; the header and body survive intact.
+    let pem = include_str!("fixtures-dkim-test-key.pem");
+    let signer = DkimSigner::new("selector", "ctox.local", pem).unwrap();
     let signed = signer.sign("sender@ctox.local", "Hello World").unwrap();
     assert!(signed.contains("DKIM-Signature:"));
     assert!(signed.contains("Hello World"));
+    assert!(
+        !signed.contains("MOCK_SIGNATURE_FAIL"),
+        "no fabricated signatures"
+    );
+
+    // An unusable key must fail signing instead of emitting a fabricated
+    // signature that every DKIM verifier would reject.
+    let bad_signer = DkimSigner::new("selector", "ctox.local", "dGVzdA==").unwrap();
+    assert!(bad_signer.sign("sender@ctox.local", "Hello World").is_err());
 }
 
 #[test]

@@ -41,32 +41,28 @@ impl DkimSigner {
         // Let's sign the header signature string.
         let header_to_sign = format!("from: {}\r\n{}", from, dkim_header_tmpl);
 
-        // Sign using ring
-        let signature_b64 =
-            if let Ok(key_pair) = signature::RsaKeyPair::from_pkcs8(&self.private_key_der) {
-                let key_pair: signature::RsaKeyPair = key_pair;
-                let mut sig_buf = vec![0u8; key_pair.public_key().modulus_len()];
-                let rng = ring::rand::SystemRandom::new();
-                if key_pair
-                    .sign(
-                        &signature::RSA_PKCS1_SHA256,
-                        &rng,
-                        header_to_sign.as_bytes(),
-                        &mut sig_buf,
-                    )
-                    .is_ok()
-                {
-                    BASE64_STANDARD.encode(&sig_buf)
-                } else {
-                    "MOCK_SIGNATURE_FAIL".to_string()
-                }
-            } else {
-                // Fallback for non-PKCS8 keys or stubs
-                let mut hasher = Sha256::new();
-                hasher.update(header_to_sign.as_bytes());
-                let fallback_sig = hasher.finalize();
-                BASE64_STANDARD.encode(fallback_sig)
-            };
+        // Sign using ring. A key we cannot sign with is an error — emitting a
+        // fabricated signature would advertise DKIM and then fail every
+        // verifier; the caller decides whether to send unsigned instead.
+        let key_pair = signature::RsaKeyPair::from_pkcs8(&self.private_key_der).map_err(|err| {
+            StalwartError::General(format!(
+                "DKIM private key for {} is not a usable PKCS8 RSA key: {err}",
+                self.domain
+            ))
+        })?;
+        let mut sig_buf = vec![0u8; key_pair.public_key().modulus_len()];
+        let rng = ring::rand::SystemRandom::new();
+        key_pair
+            .sign(
+                &signature::RSA_PKCS1_SHA256,
+                &rng,
+                header_to_sign.as_bytes(),
+                &mut sig_buf,
+            )
+            .map_err(|err| {
+                StalwartError::General(format!("DKIM signing failed for {}: {err}", self.domain))
+            })?;
+        let signature_b64 = BASE64_STANDARD.encode(&sig_buf);
 
         let full_dkim_header = format!("{}{}", dkim_header_tmpl, signature_b64);
         Ok(format!("{}\r\n{}", full_dkim_header, body))

@@ -51,11 +51,18 @@ impl SmtpOutboundClient {
         self.send_command("DATA\r\n").await?;
         self.read_response(354).await?;
 
-        // Apply DKIM signing if present
-        let signed_body = if let Some(signer) = dkim {
-            signer.sign(from, body)?
-        } else {
-            body.to_string()
+        // Apply DKIM signing if present. A signing failure degrades to an
+        // unsigned send (same as having no signer) — an unsigned mail can
+        // still pass SPF, while a fabricated signature fails every verifier.
+        let signed_body = match dkim {
+            Some(signer) => match signer.sign(from, body) {
+                Ok(signed) => signed,
+                Err(err) => {
+                    tracing::warn!("sending unsigned, DKIM signing failed: {err}");
+                    body.to_string()
+                }
+            },
+            None => body.to_string(),
         };
 
         self.send_command(&format!(
