@@ -1408,3 +1408,19 @@ fn continuity_refresh_prompt_pins_the_conversation_id() {
         );
     }
 }
+
+#[test]
+fn closure_claim_count_distinguishes_bare_from_regressed_schema() -> Result<()> {
+    // Bare connection (LCM never initialized): zero blockers, no error.
+    let bare = Connection::open_in_memory()?;
+    assert_eq!(count_open_closure_blocking_claims(&bare, 1)?, 0);
+
+    // Initialized LCM base schema but mission_claims missing: schema
+    // regression — the gate must refuse instead of reporting zero.
+    let regressed = Connection::open_in_memory()?;
+    regressed.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY);")?;
+    let err = count_open_closure_blocking_claims(&regressed, 1)
+        .expect_err("regressed schema must not open the closure gate");
+    assert!(err.to_string().contains("mission_claims"));
+    Ok(())
+}

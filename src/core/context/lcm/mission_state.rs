@@ -705,6 +705,21 @@ pub fn count_open_closure_blocking_claims(conn: &Connection, conversation_id: i6
         Err(rusqlite::Error::SqliteFailure(_, Some(message)))
             if message.contains("no such table") =>
         {
+            // A bare connection (LCM schema never initialized) legitimately
+            // has zero blockers. A database that HAS the LCM base tables but
+            // lost mission_claims is a schema regression — the closure gate
+            // must fail loudly instead of silently swinging open.
+            let lcm_initialized: i64 = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
+                [],
+                |row| row.get(0),
+            )?;
+            if lcm_initialized != 0 {
+                bail!(
+                    "mission_claims table is missing from an initialized LCM database — \
+                     refusing to report zero closure-blocking claims"
+                );
+            }
             Ok(0)
         }
         Err(err) => Err(err.into()),
