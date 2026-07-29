@@ -27,13 +27,26 @@ impl SmtpInboundServer {
             "SMTP Inbound Server running on {}",
             self.config.bind_address
         );
+        let connection_slots = Arc::new(tokio::sync::Semaphore::new(
+            self.config.max_connections.max(1),
+        ));
 
         loop {
             match listener.accept().await {
-                Ok((stream, addr)) => {
+                Ok((mut stream, addr)) => {
+                    let Ok(permit) = Arc::clone(&connection_slots).try_acquire_owned() else {
+                        // Config promises a connection ceiling — enforce it
+                        // instead of carrying it as dead weight.
+                        warn!("SMTP connection limit reached, rejecting {}", addr);
+                        let _ = stream
+                            .write_all(b"421 4.3.2 Too many connections, try again later\r\n")
+                            .await;
+                        continue;
+                    };
                     info!("Inbound SMTP connection from {}", addr);
                     let self_clone = Arc::clone(&self);
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) = self_clone.handle_connection(stream).await {
                             error!("SMTP Connection Error: {:?}", e);
                         }

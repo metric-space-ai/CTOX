@@ -51,12 +51,25 @@ impl SmtpOutboundQueue {
             return Ok(());
         }
 
-        let pending = self.store.get_pending_emails()?;
+        let mut pending = self.store.get_pending_emails()?;
         if pending.is_empty() {
             self.mark_idle_poll()?;
             return Ok(());
         }
         self.clear_idle_poll();
+
+        // outbound_throttle_per_min caps how many mails one queue pass (the
+        // poller runs at most once a minute) hands to the wire; the rest stay
+        // pending for the next pass.
+        let throttle = self.config.outbound_throttle_per_min.max(1);
+        if pending.len() > throttle {
+            info!(
+                "outbound throttle: sending {} of {} pending emails this pass",
+                throttle,
+                pending.len()
+            );
+            pending.truncate(throttle);
+        }
 
         info!("Found {} pending outbound emails in queue", pending.len());
 
