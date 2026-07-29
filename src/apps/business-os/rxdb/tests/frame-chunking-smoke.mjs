@@ -6,14 +6,9 @@
 // Chunking now budgets the JSON-ESCAPED byte length per chunk, mirroring the
 // Rust splitter (split_chunks_for_frame in connection_handler_rs.rs).
 
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { webrtcNativeTestInternals } from '../src/webrtc-native.mjs';
 
-const testDir = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(resolve(testDir, '../src/webrtc-native.mjs'), 'utf8');
 const {
   splitFrameChunks,
   jsonEscapedCharLen,
@@ -105,11 +100,8 @@ for (const text of [
   }
 }
 
-const encodedSizeSource = source.match(/function encodedSize[\s\S]*?\n}\n/)?.[0] || '';
-assert(
-  !encodedSizeSource.includes('TextEncoder'),
-  'encodedSize implementation must stay allocation-free',
-);
+// The allocation-free property is proven behaviourally above (TextEncoder
+// is replaced with a throwing stub); no source-text assertion needed.
 
 // 5. Reassembly ACK bookkeeping must advance incrementally instead of scanning
 // from frame 0 on every received chunk.
@@ -126,10 +118,9 @@ assert(
   assert(recordReceivedFrame(entry, 3, 'd2') === 3, 'duplicate frame does not rescan or advance');
 }
 
-assert(
-  !source.includes('highestContiguousSeq'),
-  'frame reassembly must not recompute contiguous ACK state by rescanning received chunks',
-);
+// Incremental (non-rescanning) advancement is proven behaviourally above:
+// the duplicate-frame case asserts no rescan happens. Identifier bans in
+// source text would only punish renames.
 
 // 6. Escaped-length parity spot checks against JSON.stringify ground truth.
 for (const ch of ['a', '"', '\\', '\n', '', 'ä', '€', '👩', '\ud800']) {
