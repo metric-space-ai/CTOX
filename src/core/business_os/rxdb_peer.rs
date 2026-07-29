@@ -12721,13 +12721,13 @@ fn prepare_unsafe_desktop_file_tombstone(document: &mut Value, revision: &str, n
     }
 }
 
+/// Maintenance writes mint revisions through the rxdb crate's canonical
+/// helper so a change to revision semantics there cannot silently diverge
+/// from what these raw-SQL maintenance paths persist (SYNC-A-C8). The token
+/// doubles as a provenance marker for maintenance-authored rows.
 fn maintenance_revision(previous: Option<&str>) -> String {
-    let height = previous
-        .and_then(|revision| revision.split_once('-').map(|(height, _)| height))
-        .and_then(|height| height.parse::<u64>().ok())
-        .unwrap_or(0)
-        .saturating_add(1);
-    format!("{height}-ctox-maintenance")
+    rxdb::plugins::utils::utils_revision::create_revision("ctox-maintenance", previous)
+        .unwrap_or_else(|_| "1-ctox-maintenance".to_string())
 }
 
 fn collect_desktop_file_index_candidates(
@@ -14672,6 +14672,28 @@ mod tests {
         assert_running_projections_agree(&lifecycle, false, false);
         lifecycle.supervisor_stopped().expect("stop supervisor");
         assert_running_projections_agree(&lifecycle, false, false);
+    }
+
+    #[test]
+    fn maintenance_revision_stays_single_sourced_with_the_crate() {
+        // SYNC-A-C8 drift guard: the maintenance path must mint exactly what
+        // the rxdb crate's canonical create_revision produces, for fresh,
+        // malformed, and normal previous revisions alike.
+        for previous in [
+            None,
+            Some("garbage"),
+            Some("2-ctox-maintenance"),
+            Some("7-abc"),
+        ] {
+            let expected =
+                rxdb::plugins::utils::utils_revision::create_revision("ctox-maintenance", previous)
+                    .expect("crate revision");
+            assert_eq!(
+                super::maintenance_revision(previous),
+                expected,
+                "previous={previous:?}"
+            );
+        }
     }
 
     #[test]
