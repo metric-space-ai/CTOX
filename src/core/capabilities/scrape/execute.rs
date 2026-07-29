@@ -369,8 +369,15 @@ pub(crate) fn execute_scrape_with_outcome(
 
     let fields_extracted = extracted_record_fields(records.as_deref());
     let error = scrape_error_diagnostic(&classification, &payload, &probe, &execution);
+    // `ok` reflects the classification: a blocked/drifted/unreachable run
+    // must not report success next to a populated `error` field. Partial
+    // output still delivered records, so it counts as ok-with-reason.
+    let run_ok = matches!(
+        classification.status,
+        ScrapeRunStatus::Succeeded | ScrapeRunStatus::PartialOutput
+    );
     Ok(ScrapeExecutionOutcome {
-        ok: true,
+        ok: run_ok,
         target_key: target.view.target_key,
         run_id,
         status: classification.status,

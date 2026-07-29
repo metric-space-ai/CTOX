@@ -2020,7 +2020,7 @@ fn execute_with_blocked_failure_queues_web_unlock_task() {
     )
     .unwrap();
 
-    execute_scrape(
+    let outcome = execute_scrape_with_outcome(
         &root,
         &[
             "execute".to_string(),
@@ -2032,6 +2032,11 @@ fn execute_with_blocked_failure_queues_web_unlock_task() {
         ],
     )
     .unwrap();
+    assert!(
+        !outcome.ok,
+        "a blocked run must not report ok next to a populated error field"
+    );
+    assert_eq!(outcome.status, ScrapeRunStatus::Blocked);
 
     let tasks = crate::channels::list_queue_tasks(&root, &["pending".to_string()], 10).unwrap();
     assert_eq!(tasks.len(), 1);
