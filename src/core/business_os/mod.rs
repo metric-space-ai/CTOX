@@ -3,6 +3,7 @@
 
 mod app_runtime;
 mod ats_gates;
+mod browser_control;
 mod browser_runtime;
 mod capability;
 pub(crate) mod command_lifecycle;
@@ -23,10 +24,11 @@ mod support;
 mod threads;
 
 pub(crate) use app_runtime::inspect_module as inspect_app_runtime_module;
+pub use browser_control::browser_context_capture;
+pub(crate) use browser_control::browser_session_automation as run_browser_session_automation;
+pub use browser_control::browser_session_status;
+pub use browser_control::BrowserContextCaptureRequest;
 pub(crate) use browser_runtime::BrowserSessionAutomationRequest;
-pub use rxdb_peer::browser_context_capture;
-pub(crate) use rxdb_peer::browser_session_automation as run_browser_session_automation;
-pub use rxdb_peer::browser_session_status;
 pub use rxdb_peer::enqueue_business_command_document;
 pub use rxdb_peer::native_peer_status;
 pub use rxdb_peer::repair_optional_rxdb_collection_schema_drift;
@@ -35,7 +37,6 @@ pub(crate) use rxdb_peer::sync_business_record_projections;
 pub use rxdb_peer::sync_desktop_file_from_path;
 pub use rxdb_peer::sync_desktop_files_from_workspace_root;
 pub(crate) use rxdb_peer::sync_knowledge_tables;
-pub use rxdb_peer::BrowserContextCaptureRequest;
 pub use rxdb_peer::{ensure_native_peer, native_peer_maintenance_health, restart_native_peer};
 pub use server::serve_business_os;
 pub use server::BusinessOsServeOptions;
