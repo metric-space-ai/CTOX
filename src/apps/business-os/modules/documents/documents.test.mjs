@@ -988,3 +988,35 @@ test('document blob chunks are persisted with one bulk write', async () => {
   assert.equal(bulkWrites.length, 1, 'blob chunks are written through one bulkUpsert call');
   assert.ok(bulkWrites[0].length > 1, 'test payload spans multiple chunk documents');
 });
+
+test('empty document list shows the syncing shell only while the backing collection replicates', () => {
+  // Gate: only an empty unfiltered source AND ready === false may downgrade
+  // to the syncing shell; rows, readiness snapshots and missing APIs always
+  // keep the previous empty-state behaviour.
+  assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: false }), true);
+  assert.equal(hooks.dataEmptyShowsSyncing(true, { ready: true }), false);
+  assert.equal(hooks.dataEmptyShowsSyncing(true, null), false);
+  assert.equal(hooks.dataEmptyShowsSyncing(true, undefined), false);
+  assert.equal(hooks.dataEmptyShowsSyncing(false, { ready: false }), false);
+});
+
+test('collection readiness falls back to ready when the shell exposes no sync api', () => {
+  assert.equal(hooks.collectionSyncReadiness({ ctx: {} }, 'documents'), null);
+  assert.equal(hooks.collectionSyncReadiness({ ctx: { sync: {} } }, 'documents'), null);
+  assert.equal(
+    hooks.collectionSyncReadiness({
+      ctx: { sync: { collectionReadiness: () => { throw new Error('boom'); } } },
+    }, 'documents'),
+    null,
+  );
+  const state = {
+    ctx: {
+      sync: {
+        collectionReadiness: (name) => ({ collection: name, state: 'catching-up', ready: false }),
+      },
+    },
+  };
+  const readiness = hooks.collectionSyncReadiness(state, 'documents');
+  assert.equal(readiness.collection, 'documents');
+  assert.equal(readiness.ready, false);
+});
