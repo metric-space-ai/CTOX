@@ -163,17 +163,23 @@ impl SmtpInboundServer {
                             }
                         }
 
-                        // Also check for bounce processing
-                        if let Some(dsn) = parse_dsn_report(&mail_body) {
-                            warn!(
-                                "Parsed bounce report: Recipient = {}, Status = {}, Hard = {}",
-                                dsn.recipient, dsn.status_code, dsn.is_hard_bounce
-                            );
-                            let _ = self.store.queue_email(
-                                "bounce-handler@localhost",
-                                "admin@localhost",
-                                &format!("Subject: Bounce report for {}\r\n\r\nRecipient {} bounced with status {}. Hard bounce: {}", dsn.recipient, dsn.recipient, dsn.status_code, dsn.is_hard_bounce)
-                            );
+                        // Bounce processing only for actual bounces: DSNs
+                        // arrive with a null envelope sender (MAIL FROM:<>).
+                        // Running the parser over every inbound mail turned
+                        // ordinary messages mentioning an address into
+                        // phantom bounce reports.
+                        if clean_from.is_empty() {
+                            if let Some(dsn) = parse_dsn_report(&mail_body) {
+                                warn!(
+                                    "Parsed bounce report: Recipient = {}, Status = {}, Hard = {}",
+                                    dsn.recipient, dsn.status_code, dsn.is_hard_bounce
+                                );
+                                let _ = self.store.queue_email(
+                                    "bounce-handler@localhost",
+                                    "admin@localhost",
+                                    &format!("Subject: Bounce report for {}\r\n\r\nRecipient {} bounced with status {}. Hard bounce: {}", dsn.recipient, dsn.recipient, dsn.status_code, dsn.is_hard_bounce)
+                                );
+                            }
                         }
 
                         if handled_recipients > 0 && failed_recipients.is_empty() {

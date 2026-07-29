@@ -85,17 +85,30 @@ impl SmtpOutboundQueue {
                 continue;
             }
 
-            // Determine if domain is local or remote
+            // Determine if domain is local or remote. A store error must not
+            // flip a local domain to "remote" (fail-open into an internet
+            // send) — skip the batch this round and let the retry schedule
+            // pick it up once the store answers again.
+            let local_lookup = || -> StalwartResult<bool> {
+                if self.store.get_domain_dkim(&domain)?.is_some() {
+                    return Ok(true);
+                }
+                for (_, _, to, _, _) in &emails {
+                    if self.store.user_exists(to)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            };
             let is_local_domain = domain == "localhost"
                 || domain == "ctox.local"
-                || self
-                    .store
-                    .get_domain_dkim(&domain)
-                    .map(|opt| opt.is_some())
-                    .unwrap_or(false)
-                || emails
-                    .iter()
-                    .any(|(_, _, to, _, _)| self.store.user_exists(to).unwrap_or(false));
+                || match local_lookup() {
+                    Ok(local) => local,
+                    Err(err) => {
+                        warn!("skipping outbound batch for {domain}: store lookup failed: {err}");
+                        continue;
+                    }
+                };
 
             let mut target_addr = self.config.bind_address;
             if !is_local_domain {
