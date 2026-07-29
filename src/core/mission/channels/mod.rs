@@ -50,6 +50,7 @@ pub use outbound_review::{
 
 mod command_saga;
 use command_saga::transition_business_command_for_task_in_transaction;
+mod route_status;
 pub(crate) use command_saga::{
     business_command_core_diagnostics, business_command_projection,
     business_command_retention_maintenance, business_command_saga_pending_compensation_steps,
@@ -66,6 +67,7 @@ pub(crate) use command_saga::{
     runtime_business_command_action_snapshot, start_business_command_saga,
     start_runtime_business_command_saga, transition_business_command_for_task,
 };
+pub(crate) use route_status::QueueRouteStatus;
 
 mod business_os_projection;
 pub(crate) use business_os_projection::communication_intake_source_stamp;
@@ -1038,12 +1040,13 @@ pub fn reclassify_historical_auto_submitted_inbounds(root: &Path) -> Result<usiz
             "boot-reclassifier",
             &reason,
         )?;
+        let route_status = QueueRouteStatus::Handled;
         let previous_route_status = current_queue_route_status(&conn, &candidate.message_key)?;
         enforce_queue_route_status_transition(
             &conn,
             &candidate.message_key,
             &previous_route_status,
-            "handled",
+            route_status.as_str(),
             "ctox-boot-reclassifier",
             "mark_historical_auto_submitted_inbound_handled",
         )?;
@@ -1052,16 +1055,16 @@ pub fn reclassify_historical_auto_submitted_inbounds(root: &Path) -> Result<usiz
             INSERT INTO communication_routing_state (
                 message_key, route_status, lease_owner, leased_at, acked_at, last_error, updated_at
             )
-            VALUES (?1, 'handled', NULL, NULL, ?2, NULL, ?2)
+            VALUES (?1, ?2, NULL, NULL, ?3, NULL, ?3)
             ON CONFLICT(message_key) DO UPDATE SET
-                route_status='handled',
+                route_status=excluded.route_status,
                 lease_owner=NULL,
                 leased_at=NULL,
-                acked_at=?2,
+                acked_at=?3,
                 last_error=NULL,
-                updated_at=?2
+                updated_at=?3
             "#,
-            params![candidate.message_key, now],
+            params![candidate.message_key, route_status.as_str(), now],
         )?;
         reclassified += 1;
     }
@@ -1152,10 +1155,7 @@ fn body_is_only_teams_meeting_link(body_text: &str) -> bool {
 /// non-terminal state. New work for the same thread must arrive via a
 /// fresh inbound message (with its own message_key).
 pub fn route_status_is_terminal(route_status: &str) -> bool {
-    matches!(
-        route_status,
-        "handled" | "cancelled" | "failed" | "completed"
-    )
+    QueueRouteStatus::parse(route_status).is_some_and(QueueRouteStatus::is_terminal)
 }
 
 pub fn classify_email_sender(
@@ -1696,7 +1696,9 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
         }
         "ack" => {
             let db_path = resolve_db_path(root, find_flag_value(args, "--db"));
-            let status = find_flag_value(args, "--status").unwrap_or("handled");
+            let status = canonical_queue_route_status(
+                find_flag_value(args, "--status").unwrap_or("handled"),
+            )?;
             let failure_reason = find_flag_value(args, "--reason");
             let message_keys = positional_after_flags(&args[1..]);
             if message_keys.is_empty() {
@@ -1705,17 +1707,23 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 );
             }
             let mut conn = open_channel_db(&db_path)?;
-            let (failure_note, ack_reason) = if status == "failed" {
+            let (failure_note, ack_reason) = if status == QueueRouteStatus::Failed {
                 (failure_reason, None)
             } else {
                 (None, failure_reason)
             };
-            let updated = ack_messages(&mut conn, &message_keys, status, failure_note, ack_reason)?;
+            let updated = ack_messages(
+                &mut conn,
+                &message_keys,
+                status.as_str(),
+                failure_note,
+                ack_reason,
+            )?;
             print_json(&json!({
                 "ok": true,
                 "db_path": db_path,
                 "updated": updated,
-                "status": status,
+                "status": status.as_str(),
                 "message_keys": message_keys,
             }))
         }
@@ -2224,10 +2232,11 @@ pub fn has_runnable_inbound_message(root: &Path) -> Result<bool> {
 }
 
 pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
-    guard_founder_handled_ack(root, &conn, message_keys, status)?;
-    ack_messages(&mut conn, message_keys, status, None, None)
+    guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
+    ack_messages(&mut conn, message_keys, status.as_str(), None, None)
 }
 
 /// Ack with an explicit routing reason. The reason feeds the core-transition
@@ -2240,10 +2249,11 @@ pub fn ack_leased_messages_with_reason(
     status: &str,
     reason: &str,
 ) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
-    guard_founder_handled_ack(root, &conn, message_keys, status)?;
-    ack_messages(&mut conn, message_keys, status, None, Some(reason))
+    guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
+    ack_messages(&mut conn, message_keys, status.as_str(), None, Some(reason))
 }
 
 pub fn ack_leased_messages_with_failure_reason(
@@ -2252,14 +2262,21 @@ pub fn ack_leased_messages_with_failure_reason(
     status: &str,
     failure_reason: &str,
 ) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
     anyhow::ensure!(
-        status == "failed",
+        status == QueueRouteStatus::Failed,
         "ack_leased_messages_with_failure_reason only accepts status='failed'"
     );
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
-    guard_founder_handled_ack(root, &conn, message_keys, status)?;
-    ack_messages(&mut conn, message_keys, status, Some(failure_reason), None)
+    guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
+    ack_messages(
+        &mut conn,
+        message_keys,
+        status.as_str(),
+        Some(failure_reason),
+        None,
+    )
 }
 
 /// Persist a typed completion hold without allowing an unbounded
@@ -2281,10 +2298,11 @@ pub fn hold_leased_messages(
     for message_key in message_keys {
         match reason {
             HoldReason::WaitingExternal(wait_ref) => {
+                let route_status = QueueRouteStatus::Blocked;
                 let command_transitioned = transition_business_command_for_task_in_transaction(
                     &tx,
                     message_key,
-                    "blocked",
+                    route_status.as_str(),
                     None,
                     None,
                     Some(summary.trim()),
@@ -2294,7 +2312,7 @@ pub fn hold_leased_messages(
                     updated += ack_messages_in_transaction(
                         &tx,
                         std::slice::from_ref(message_key),
-                        "blocked",
+                        route_status.as_str(),
                         None,
                         Some("waiting_external"),
                     )?;
@@ -2302,7 +2320,7 @@ pub fn hold_leased_messages(
                     updated += 1;
                 }
                 anyhow::ensure!(
-                    current_queue_route_status(&tx, message_key)? == "blocked",
+                    current_queue_route_status(&tx, message_key)? == route_status.as_str(),
                     "waiting-external hold did not persist the linked queue route"
                 );
                 tx.execute(
@@ -2347,7 +2365,11 @@ pub fn hold_leased_messages(
                     HoldReason::MissingArtifact => "missing_artifact".to_string(),
                     HoldReason::WaitingExternal(_) => unreachable!(),
                 };
-                let next_status = if exhausted { "failed" } else { "pending" };
+                let next_status = if exhausted {
+                    QueueRouteStatus::Failed
+                } else {
+                    QueueRouteStatus::Pending
+                };
                 let retry_not_before = (!exhausted).then(|| {
                     let exponent = u32::try_from(attempts.saturating_sub(1))
                         .unwrap_or(16)
@@ -2360,7 +2382,7 @@ pub fn hold_leased_messages(
                 let command_transitioned = transition_business_command_for_task_in_transaction(
                     &tx,
                     message_key,
-                    next_status,
+                    next_status.as_str(),
                     None,
                     None,
                     Some(summary.trim()),
@@ -2370,7 +2392,7 @@ pub fn hold_leased_messages(
                     updated += ack_messages_in_transaction(
                         &tx,
                         std::slice::from_ref(message_key),
-                        next_status,
+                        next_status.as_str(),
                         exhausted.then_some(summary.trim()),
                         (!exhausted).then_some("budgeted_completion_hold"),
                     )?;
@@ -2378,7 +2400,7 @@ pub fn hold_leased_messages(
                     updated += 1;
                 }
                 anyhow::ensure!(
-                    current_queue_route_status(&tx, message_key)? == next_status,
+                    current_queue_route_status(&tx, message_key)? == next_status.as_str(),
                     "budgeted completion hold did not persist the linked queue route"
                 );
                 tx.execute(
@@ -2430,21 +2452,23 @@ pub fn wake_messages_waiting_for(root: &Path, entity_type: &str, entity_id: &str
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows
     };
+    let from_route_status = QueueRouteStatus::Blocked;
+    let to_route_status = QueueRouteStatus::Pending;
     let mut updated = 0usize;
     for message_key in message_keys {
         let changed = tx.execute(
             r#"UPDATE communication_routing_state
-               SET route_status='pending', hold_reason=NULL, wait_entity_type=NULL,
-                   wait_entity_id=NULL, retry_not_before=NULL, first_pending_at=?2, updated_at=?2
+               SET route_status=?2, hold_reason=NULL, wait_entity_type=NULL,
+                   wait_entity_id=NULL, retry_not_before=NULL, first_pending_at=?3, updated_at=?3
                WHERE message_key=?1 AND route_status='blocked' AND hold_reason='waiting_external'"#,
-            params![message_key, now],
+            params![message_key, to_route_status.as_str(), now],
         )?;
         if changed != 0 {
             enforce_queue_route_status_transition(
                 &tx,
                 &message_key,
-                "blocked",
-                "pending",
+                from_route_status.as_str(),
+                to_route_status.as_str(),
                 "ctox-wait-wakeup",
                 "wake_messages_waiting_for",
             )?;
@@ -2465,11 +2489,12 @@ pub fn set_queue_task_route_status(
     if load_queue_message_from_conn(&conn, message_key)?.is_none() {
         return Ok(false);
     }
+    let route_status = canonical_queue_route_status(route_status)?;
     update_queue_task(
         root,
         QueueTaskUpdateRequest {
             message_key: message_key.to_string(),
-            route_status: Some(route_status.to_string()),
+            route_status: Some(route_status.as_str().to_string()),
             ..Default::default()
         },
     )?;
@@ -2892,11 +2917,12 @@ pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result
     ensure_queue_account(&mut conn)?;
     let current = load_queue_message_from_conn(&conn, &request.message_key)?
         .context("queue task not found")?;
-    if request
+    let requested_route_status = request
         .route_status
         .as_deref()
-        .is_some_and(|status| status.eq_ignore_ascii_case("pending"))
-    {
+        .map(canonical_queue_route_status)
+        .transpose()?;
+    if requested_route_status.is_some_and(QueueRouteStatus::is_pending) {
         let command_state = conn
             .query_row(
                 "SELECT aggregate.execution_phase, aggregate.terminal_status
@@ -2997,10 +3023,7 @@ pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result
     } else if request.clear_note {
         metadata.remove("status_note");
     }
-    let releases_deferred_work = request
-        .route_status
-        .as_deref()
-        .is_some_and(|status| status.eq_ignore_ascii_case("pending"));
+    let releases_deferred_work = requested_route_status.is_some_and(QueueRouteStatus::is_pending);
     if releases_deferred_work {
         metadata.remove("not_before");
         metadata.remove("defer_reason");
@@ -3035,29 +3058,28 @@ pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result
             metadata_json: &serde_json::to_string(&metadata)?,
         },
     )?;
-    if let Some(route_status) = request.route_status.as_deref() {
+    if let Some(route_status) = requested_route_status {
         let status_note = request
             .status_note
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
-        let command_transitioned = matches!(
-            route_status.trim().to_ascii_lowercase().as_str(),
-            "pending" | "cancelled"
-        ) && transition_business_command_for_task_in_transaction(
-            &tx,
-            &current.message_key,
-            route_status,
-            None,
-            None,
-            status_note,
-            status_note.unwrap_or("queue task released for retry"),
-        )?;
+        let command_transitioned = (route_status.is_pending()
+            || route_status == QueueRouteStatus::Cancelled)
+            && transition_business_command_for_task_in_transaction(
+                &tx,
+                &current.message_key,
+                route_status.as_str(),
+                None,
+                None,
+                status_note,
+                status_note.unwrap_or("queue task released for retry"),
+            )?;
         if !command_transitioned {
             set_routing_status(
                 &tx,
                 &current.message_key,
-                route_status,
+                route_status.as_str(),
                 &now,
                 "ctox-queue-update",
                 "update_queue_task",
@@ -3158,10 +3180,16 @@ pub fn lease_queue_task(
         // the row, so a losing racer never writes a phantom proof.
         let updated = tx.execute(
             r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at)
-               VALUES (?1, 'leased', ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
-               ON CONFLICT(message_key) DO UPDATE SET route_status='leased', lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
+               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
+               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
                WHERE communication_routing_state.route_status = 'pending'"#,
-            params![message_key, normalized_owner, now, lease_expires_at],
+            params![
+                message_key,
+                normalized_owner,
+                now,
+                lease_expires_at,
+                QueueRouteStatus::Leased.as_str()
+            ],
         )?;
         if updated != 0 {
             enforce_queue_route_status_transition(
@@ -3332,34 +3360,37 @@ pub fn release_stale_queue_task_leases(
                 tx.commit()?;
                 return Ok(true);
             }
+            let from_route_status = QueueRouteStatus::Leased;
+            let to_route_status = QueueRouteStatus::Pending;
             enforce_queue_route_status_transition(
                 &tx,
                 &candidate.message_key,
-                "leased",
-                "pending",
+                from_route_status.as_str(),
+                to_route_status.as_str(),
                 "ctox-communication-lease-repair",
                 "release_stale_queue_task_leases",
             )?;
             let updated = tx.execute(
                 r#"
             UPDATE communication_routing_state
-            SET route_status='pending',
+            SET route_status=?2,
                 lease_owner=NULL,
                 leased_at=NULL,
                 lease_expires_at=NULL,
                 lease_worker_id=NULL,
                 acked_at=NULL,
                 last_error=NULL,
-                updated_at=?2
+                updated_at=?3
             WHERE message_key = ?1
               AND route_status = 'leased'
-              AND lease_owner IS ?3
-              AND leased_at IS ?4
-              AND lease_expires_at IS ?5
-              AND lease_worker_id IS ?6
+              AND lease_owner IS ?4
+              AND leased_at IS ?5
+              AND lease_expires_at IS ?6
+              AND lease_worker_id IS ?7
             "#,
                 params![
                     candidate.message_key,
+                    to_route_status.as_str(),
                     now,
                     candidate.lease_owner,
                     candidate.leased_at,
@@ -4577,13 +4608,14 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     })?;
     let missing = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for (message_key, route_status, acked_at, updated_at) in missing {
+    for (message_key, raw_route_status, acked_at, updated_at) in missing {
+        let route_status = canonical_queue_route_status(&raw_route_status)?;
         let previous_route_status = current_queue_route_status(conn, &message_key)?;
         enforce_queue_route_status_transition(
             conn,
             &message_key,
             &previous_route_status,
-            &route_status,
+            route_status.as_str(),
             "ctox-routing-backfill",
             "ensure_routing_rows_for_inbound",
         )?;
@@ -4595,7 +4627,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
             VALUES (?1, ?2, NULL, NULL, ?3, NULL, ?4)
             ON CONFLICT(message_key) DO NOTHING
             "#,
-            params![message_key, route_status, acked_at, updated_at],
+            params![message_key, route_status.as_str(), acked_at, updated_at],
         )?;
     }
     let mut statement = conn.prepare(
@@ -4613,12 +4645,13 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     })?;
     let probe_updates = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
+    let route_status = QueueRouteStatus::Handled;
     for (message_key, previous_route_status) in probe_updates {
         enforce_queue_route_status_transition(
             conn,
             &message_key,
             &previous_route_status,
-            "handled",
+            route_status.as_str(),
             "ctox-routing-backfill",
             "normalize_system_probe_messages",
         )?;
@@ -4626,7 +4659,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     conn.execute(
         r#"
         UPDATE communication_routing_state
-        SET route_status = 'handled',
+        SET route_status = ?1,
             lease_owner = NULL,
             leased_at = NULL,
             acked_at = COALESCE(acked_at, (
@@ -4648,7 +4681,7 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
         )
           AND route_status <> 'handled'
         "#,
-        [],
+        params![route_status.as_str()],
     )
     .context("failed to normalize routing for system probe messages")?;
     Ok(())
@@ -5023,10 +5056,16 @@ fn take_messages(
     for mut item in rows {
         let updated = tx.execute(
             r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at)
-               VALUES (?1, 'leased', ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
-               ON CONFLICT(message_key) DO UPDATE SET route_status='leased', lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
+               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
+               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
                WHERE communication_routing_state.route_status = 'pending'"#,
-            params![item.message_key, lease_owner, leased_at, lease_expires_at],
+            params![
+                item.message_key,
+                lease_owner,
+                leased_at,
+                lease_expires_at,
+                QueueRouteStatus::Leased.as_str()
+            ],
         )?;
         if updated != 0 {
             enforce_queue_route_status_transition(
@@ -5044,7 +5083,7 @@ fn take_messages(
             // never return a message we did not actually lease.
             continue;
         }
-        item.routing.route_status = "leased".to_string();
+        item.routing.route_status = QueueRouteStatus::Leased.as_str().to_string();
         item.routing.lease_owner = Some(lease_owner.to_string());
         item.routing.leased_at = Some(leased_at.clone());
         item.routing.updated_at = leased_at.clone();
@@ -5113,13 +5152,17 @@ fn ack_messages_in_transaction(
     failure_note: Option<&str>,
     ack_reason: Option<&str>,
 ) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
     let now = now_iso_string();
-    let acked_at = if matches!(status, "handled" | "cancelled") {
+    let acked_at = if matches!(
+        status,
+        QueueRouteStatus::Handled | QueueRouteStatus::Cancelled
+    ) {
         Some(now.as_str())
     } else {
         None
     };
-    let failure_note = if status == "failed" {
+    let failure_note = if status == QueueRouteStatus::Failed {
         Some(
             failure_note
                 .map(str::trim)
@@ -5136,7 +5179,7 @@ fn ack_messages_in_transaction(
             &tx,
             message_key,
             &previous_route_status,
-            status,
+            status.as_str(),
             "ctox-queue-ack",
             ack_reason.or(failure_note).unwrap_or("ack_messages"),
         )?;
@@ -5157,7 +5200,7 @@ fn ack_messages_in_transaction(
                 last_error=excluded.last_error,
                 updated_at=excluded.updated_at
             "#,
-            params![message_key, status, acked_at, failure_note, now],
+            params![message_key, status.as_str(), acked_at, failure_note, now],
         )?;
         if routing_updates == 0 {
             continue;
@@ -5898,7 +5941,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
         .unwrap_or_else(|| message.external_created_at.clone());
     let prompt = message.body_text;
     let workspace_root = workspace_root_from_queue_metadata_or_prompt(&message.metadata, &prompt);
-    let route_status = message.routing.route_status.clone();
+    let route_status = canonical_queue_route_status(&message.routing.route_status)?;
     let metadata_status_note = || {
         message
             .metadata
@@ -5906,7 +5949,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
             .and_then(Value::as_str)
             .map(ToOwned::to_owned)
     };
-    let status_note = if route_status == "failed" {
+    let status_note = if route_status == QueueRouteStatus::Failed {
         message
             .routing
             .last_error
@@ -5937,7 +5980,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
             .get("parent_message_key")
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
-        route_status,
+        route_status: route_status.as_str().to_string(),
         status_note,
         lease_owner: message.routing.lease_owner,
         leased_at: message.routing.leased_at,
@@ -5969,7 +6012,7 @@ fn set_routing_status(
     status_note: Option<&str>,
 ) -> Result<()> {
     let route_status = canonical_queue_route_status(route_status)?;
-    let failure_note = if route_status == "failed" {
+    let failure_note = if route_status == QueueRouteStatus::Failed {
         let note = status_note
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -5979,7 +6022,7 @@ fn set_routing_status(
         None
     };
     let previous_route_status = current_queue_route_status(conn, message_key)?;
-    let transition_reason = if route_status == "failed" {
+    let transition_reason = if route_status == QueueRouteStatus::Failed {
         failure_note.unwrap_or(reason)
     } else {
         status_note
@@ -5991,11 +6034,14 @@ fn set_routing_status(
         conn,
         message_key,
         &previous_route_status,
-        &route_status,
+        route_status.as_str(),
         actor,
         transition_reason,
     )?;
-    let acked_at = if matches!(route_status.as_str(), "handled" | "cancelled") {
+    let acked_at = if matches!(
+        route_status,
+        QueueRouteStatus::Handled | QueueRouteStatus::Cancelled
+    ) {
         Some(now)
     } else {
         None
@@ -6020,32 +6066,31 @@ fn set_routing_status(
             last_error=excluded.last_error,
             updated_at=excluded.updated_at
         "#,
-        params![message_key, route_status, acked_at, failure_note, now],
+        params![
+            message_key,
+            route_status.as_str(),
+            acked_at,
+            failure_note,
+            now
+        ],
     )?;
     Ok(())
 }
 
 pub(crate) fn current_queue_route_status(conn: &Connection, message_key: &str) -> Result<String> {
-    conn.query_row(
-        "SELECT route_status FROM communication_routing_state WHERE message_key = ?1 LIMIT 1",
-        params![message_key],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .map(|value| value.unwrap_or_else(|| "pending".to_string()))
-    .map_err(anyhow::Error::from)
-}
-
-/// Legacy routing statuses that older builds wrote directly into
-/// `communication_routing_state`. They stay readable as transition SOURCES
-/// so normalization/healing can move such rows to canonical statuses, but
-/// they are not writable targets. `Blocked` is the non-terminal state with
-/// healing edges to Pending, Completed, Failed, and Superseded.
-fn legacy_queue_route_status_core_state(route_status: &str) -> Option<CoreState> {
-    match route_status.trim().to_ascii_lowercase().as_str() {
-        "duplicate" | "blocked_sender" | "meeting_scheduled" => Some(CoreState::Blocked),
-        _ => None,
-    }
+    let raw = conn
+        .query_row(
+            "SELECT route_status FROM communication_routing_state WHERE message_key = ?1 LIMIT 1",
+            params![message_key],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let route_status = match raw {
+        Some(raw) => canonical_queue_route_status(&raw)
+            .with_context(|| format!("unknown queue route status for message `{message_key}`"))?,
+        None => QueueRouteStatus::Pending,
+    };
+    Ok(route_status.as_str().to_string())
 }
 
 pub(crate) fn enforce_queue_route_status_transition(
@@ -6056,11 +6101,10 @@ pub(crate) fn enforce_queue_route_status_transition(
     actor: &str,
     reason: &str,
 ) -> Result<()> {
-    let from_state = match queue_route_status_core_state(from_route_status) {
-        Ok(state) => state,
-        Err(err) => legacy_queue_route_status_core_state(from_route_status).ok_or(err)?,
-    };
-    let to_state = queue_route_status_core_state(to_route_status)?;
+    let from_route_status = canonical_queue_route_status(from_route_status)?;
+    let to_route_status = canonical_queue_route_status(to_route_status)?;
+    let from_state = queue_route_status_core_state(from_route_status);
+    let to_state = queue_route_status_core_state(to_route_status);
     if from_state == to_state {
         return Ok(());
     }
@@ -6075,9 +6119,12 @@ pub(crate) fn enforce_queue_route_status_transition(
     let mut metadata = BTreeMap::new();
     metadata.insert(
         "from_route_status".to_string(),
-        from_route_status.to_string(),
+        from_route_status.as_str().to_string(),
     );
-    metadata.insert("to_route_status".to_string(), to_route_status.to_string());
+    metadata.insert(
+        "to_route_status".to_string(),
+        to_route_status.as_str().to_string(),
+    );
     metadata.insert("reason".to_string(), reason.to_string());
     if to_state == CoreState::Failed {
         metadata.insert("failure_reason".to_string(), reason.to_string());
@@ -6201,30 +6248,29 @@ fn queue_terminal_policy_proof(actor: &str, reason: &str) -> Option<String> {
     }
 }
 
-fn queue_route_status_core_state(route_status: &str) -> Result<CoreState> {
-    match route_status.trim().to_ascii_lowercase().as_str() {
-        "" | "pending" => Ok(CoreState::Pending),
-        "leased" => Ok(CoreState::Leased),
-        "running" => Ok(CoreState::Running),
-        "blocked" | "approval-nag-handled" => Ok(CoreState::Blocked),
-        "review_rework" => Ok(CoreState::ReworkRequired),
-        "failed" => Ok(CoreState::Failed),
-        "handled" | "completed" => Ok(CoreState::Completed),
-        "cancelled" | "superseded" => Ok(CoreState::Superseded),
-        other => anyhow::bail!("queue route status is not mapped to core state machine: {other}"),
+fn queue_route_status_core_state(route_status: QueueRouteStatus) -> CoreState {
+    match route_status {
+        QueueRouteStatus::Pending => CoreState::Pending,
+        QueueRouteStatus::Leased => CoreState::Leased,
+        QueueRouteStatus::Running => CoreState::Running,
+        QueueRouteStatus::Blocked => CoreState::Blocked,
+        QueueRouteStatus::ReviewRework => CoreState::ReworkRequired,
+        QueueRouteStatus::Failed => CoreState::Failed,
+        QueueRouteStatus::Handled => CoreState::Completed,
+        QueueRouteStatus::Cancelled => CoreState::Superseded,
     }
 }
 
-fn queue_route_status_core_event(route_status: &str) -> CoreEvent {
-    match route_status.trim().to_ascii_lowercase().as_str() {
-        "leased" => CoreEvent::Lease,
-        "pending" => CoreEvent::Release,
-        "blocked" | "approval-nag-handled" => CoreEvent::Block,
-        "review_rework" => CoreEvent::RequireRework,
-        "failed" => CoreEvent::Fail,
-        "cancelled" | "superseded" => CoreEvent::Supersede,
-        "handled" | "completed" => CoreEvent::Complete,
-        _ => CoreEvent::Retry,
+fn queue_route_status_core_event(route_status: QueueRouteStatus) -> CoreEvent {
+    match route_status {
+        QueueRouteStatus::Leased => CoreEvent::Lease,
+        QueueRouteStatus::Pending => CoreEvent::Release,
+        QueueRouteStatus::Blocked => CoreEvent::Block,
+        QueueRouteStatus::ReviewRework => CoreEvent::RequireRework,
+        QueueRouteStatus::Failed => CoreEvent::Fail,
+        QueueRouteStatus::Cancelled => CoreEvent::Supersede,
+        QueueRouteStatus::Handled => CoreEvent::Complete,
+        QueueRouteStatus::Running => CoreEvent::Retry,
     }
 }
 
@@ -6236,17 +6282,12 @@ fn canonical_queue_priority(raw: &str) -> Result<String> {
     }
 }
 
-fn canonical_queue_route_status(raw: &str) -> Result<String> {
-    let normalized = raw.trim().to_lowercase();
-    match normalized.as_str() {
-        "pending" | "leased" | "running" | "blocked" | "failed" | "handled" | "cancelled"
-        | "review_rework" => {
-            Ok(normalized)
-        }
-        _ => anyhow::bail!(
+fn canonical_queue_route_status(raw: &str) -> Result<QueueRouteStatus> {
+    QueueRouteStatus::parse(raw).with_context(|| {
+        format!(
             "unsupported queue route status '{raw}' (expected pending|leased|running|blocked|failed|handled|cancelled|review_rework)"
-        ),
-    }
+        )
+    })
 }
 
 fn current_queue_priority(message: &ChannelMessageView) -> String {

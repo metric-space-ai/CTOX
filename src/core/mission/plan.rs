@@ -26,6 +26,7 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
 use crate::channels;
+use crate::channels::QueueRouteStatus;
 use crate::governance;
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
@@ -1930,23 +1931,33 @@ fn set_queue_routing_status_tx(
     route_status: &str,
     now: &str,
 ) -> Result<()> {
+    let route_status = QueueRouteStatus::parse(route_status)
+        .with_context(|| format!("unsupported queue route status '{route_status}'"))?;
     anyhow::ensure!(
         matches!(
             route_status,
-            "pending" | "blocked" | "failed" | "handled" | "cancelled"
+            QueueRouteStatus::Pending
+                | QueueRouteStatus::Blocked
+                | QueueRouteStatus::Failed
+                | QueueRouteStatus::Handled
+                | QueueRouteStatus::Cancelled
         ),
-        "unsupported queue route status '{route_status}'"
+        "unsupported queue route status '{}'",
+        route_status.as_str()
     );
     let previous_route_status = channels::current_queue_route_status(tx, message_key)?;
     channels::enforce_queue_route_status_transition(
         tx,
         message_key,
         &previous_route_status,
-        route_status,
+        route_status.as_str(),
         "ctox-plan",
         "set_queue_routing_status",
     )?;
-    let acked_at = if matches!(route_status, "handled" | "cancelled") {
+    let acked_at = if matches!(
+        route_status,
+        QueueRouteStatus::Handled | QueueRouteStatus::Cancelled
+    ) {
         Some(now)
     } else {
         None
@@ -1965,7 +1976,7 @@ fn set_queue_routing_status_tx(
             last_error=NULL,
             updated_at=excluded.updated_at
         "#,
-        params![message_key, route_status, acked_at, now],
+        params![message_key, route_status.as_str(), acked_at, now],
     )?;
     Ok(())
 }

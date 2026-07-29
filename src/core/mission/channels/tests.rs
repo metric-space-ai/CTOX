@@ -442,36 +442,89 @@ fn duplicate_column_alter_error_is_recognized() {
 }
 
 #[test]
-fn queue_route_status_core_state_maps_all_canonical_arms() {
-    // tests-2: pin every canonical queue route_status -> CoreState mapping
-    // so a future edit cannot silently re-point one, and confirm an
-    // unmapped status bails rather than guessing a state.
-    let cases = [
-        ("", CoreState::Pending),
-        ("pending", CoreState::Pending),
-        ("PENDING", CoreState::Pending),
-        ("leased", CoreState::Leased),
-        ("running", CoreState::Running),
-        ("blocked", CoreState::Blocked),
-        ("approval-nag-handled", CoreState::Blocked),
-        ("review_rework", CoreState::ReworkRequired),
-        ("failed", CoreState::Failed),
-        ("handled", CoreState::Completed),
-        ("completed", CoreState::Completed),
-        ("cancelled", CoreState::Superseded),
-        ("superseded", CoreState::Superseded),
-    ];
-    for (input, expected) in cases {
+fn queue_route_status_parse_roundtrips_all_canonical_values() {
+    for status in QueueRouteStatus::ALL {
+        assert_eq!(QueueRouteStatus::parse(status.as_str()), Some(status));
         assert_eq!(
-            queue_route_status_core_state(input).unwrap(),
-            expected,
-            "route status {input:?} must map to the pinned core state"
+            QueueRouteStatus::parse(&status.as_str().to_ascii_uppercase()),
+            Some(status)
         );
     }
-    assert!(
-        queue_route_status_core_state("nonsense-status").is_err(),
-        "an unmapped route status must bail, not silently pick a state"
+}
+
+#[test]
+fn queue_route_status_parse_maps_every_legacy_alias() {
+    let aliases = [
+        ("approval-nag-handled", QueueRouteStatus::Blocked),
+        ("completed", QueueRouteStatus::Handled),
+        ("superseded", QueueRouteStatus::Cancelled),
+        ("duplicate", QueueRouteStatus::Blocked),
+        ("blocked_sender", QueueRouteStatus::Blocked),
+        ("meeting_scheduled", QueueRouteStatus::Blocked),
+    ];
+    for (alias, expected) in aliases {
+        assert_eq!(
+            QueueRouteStatus::parse(alias),
+            Some(expected),
+            "legacy alias {alias:?} must map to {}",
+            expected.as_str()
+        );
+    }
+    assert_eq!(
+        QueueRouteStatus::parse(""),
+        Some(QueueRouteStatus::Pending),
+        "historical blank rows remain readable as pending"
     );
+}
+
+#[test]
+fn queue_route_status_parse_rejects_unknown_values() {
+    assert_eq!(QueueRouteStatus::parse("nonsense-status"), None);
+    assert!(canonical_queue_route_status("nonsense-status").is_err());
+}
+
+#[test]
+fn current_queue_route_status_errors_on_unknown_persisted_value() {
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE communication_routing_state (message_key TEXT PRIMARY KEY, route_status TEXT NOT NULL);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO communication_routing_state (message_key, route_status) VALUES (?1, ?2)",
+        params!["queue:unknown", "nonsense-status"],
+    )
+    .unwrap();
+
+    let error = current_queue_route_status(&conn, "queue:unknown").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown queue route status for message `queue:unknown`"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[test]
+fn queue_route_status_core_state_maps_all_canonical_variants() {
+    let cases = [
+        (QueueRouteStatus::Pending, CoreState::Pending),
+        (QueueRouteStatus::Leased, CoreState::Leased),
+        (QueueRouteStatus::Running, CoreState::Running),
+        (QueueRouteStatus::Blocked, CoreState::Blocked),
+        (QueueRouteStatus::ReviewRework, CoreState::ReworkRequired),
+        (QueueRouteStatus::Failed, CoreState::Failed),
+        (QueueRouteStatus::Handled, CoreState::Completed),
+        (QueueRouteStatus::Cancelled, CoreState::Superseded),
+    ];
+    for (status, expected) in cases {
+        assert_eq!(
+            queue_route_status_core_state(status),
+            expected,
+            "route status {:?} must map to the pinned core state",
+            status
+        );
+    }
 }
 
 #[test]
@@ -4397,7 +4450,7 @@ fn metadata_marks_auto_submitted_consults_only_structured_fields() {
 
 #[test]
 fn route_status_is_terminal_covers_documented_terminal_states() {
-    for sticky in ["handled", "cancelled", "failed", "completed"] {
+    for sticky in ["handled", "cancelled", "failed", "completed", "superseded"] {
         assert!(
             route_status_is_terminal(sticky),
             "{sticky} must be terminal"
@@ -5106,22 +5159,24 @@ fn phase1_record_outbound_pending_send_does_not_reset_existing_sent_row() {
 
 #[test]
 fn routing_ack_statuses_are_core_mapped_with_policy_proofs() {
-    // duplicate/blocked_sender inbound routing acks now use the
-    // canonical "cancelled" status (Superseded); meeting acks use
-    // "handled" with a terminal policy proof. The former custom status
-    // strings bailed in the guard and the swallowed error re-leased the
-    // message forever.
+    // duplicate/blocked_sender inbound routing acks now write canonical
+    // "cancelled" (Superseded), while meeting acks write "handled" with a
+    // terminal policy proof. Historical custom rows remain readable as the
+    // blocked transition sources they represented before canonical healing.
     assert_eq!(
-        super::queue_route_status_core_state("cancelled").unwrap(),
+        super::queue_route_status_core_state(QueueRouteStatus::Cancelled),
         CoreState::Superseded
     );
     assert_eq!(
-        super::queue_route_status_core_state("handled").unwrap(),
+        super::queue_route_status_core_state(QueueRouteStatus::Handled),
         CoreState::Completed
     );
-    assert!(super::queue_route_status_core_state("duplicate").is_err());
-    assert!(super::queue_route_status_core_state("blocked_sender").is_err());
-    assert!(super::queue_route_status_core_state("meeting_scheduled").is_err());
+    for legacy in ["duplicate", "blocked_sender", "meeting_scheduled"] {
+        assert_eq!(
+            QueueRouteStatus::parse(legacy),
+            Some(QueueRouteStatus::Blocked)
+        );
+    }
     assert_eq!(
         super::queue_terminal_policy_proof("ctox-queue-ack", "meeting_scheduled").as_deref(),
         Some("policy:meeting-scheduled-terminal-no-send")

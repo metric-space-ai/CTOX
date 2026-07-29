@@ -8,7 +8,7 @@ use super::{
     ensure_queue_account, epoch_millis, load_queue_task_from_conn, now_iso_string, open_channel_db,
     resolve_db_path, sanitize_path_component, set_routing_status, sha256_hex,
     BusinessCommandClaimRequest, BusinessCommandControlClaim, BusinessCommandOutboxEvent,
-    BusinessCommandQueueClaim, QueueTaskCreateRequest,
+    BusinessCommandQueueClaim, QueueRouteStatus, QueueTaskCreateRequest,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -1032,19 +1032,19 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         },
     )?;
     let normalized_route = canonical_queue_route_status(route_status)?;
-    let persisted_route = if normalized_route == "running" {
-        "leased"
+    let persisted_route = if normalized_route == QueueRouteStatus::Running {
+        QueueRouteStatus::Leased
     } else {
-        normalized_route.as_str()
+        normalized_route
     };
-    let (to_phase, terminal_status) = match normalized_route.as_str() {
-        "handled" => ("terminal", "completed"),
-        "failed" => ("terminal", "failed"),
-        "cancelled" => ("terminal", "cancelled"),
-        "leased" => ("leased", "none"),
-        "running" => ("running", "none"),
-        "blocked" => ("blocked", "none"),
-        "pending"
+    let (to_phase, terminal_status) = match normalized_route {
+        QueueRouteStatus::Handled => ("terminal", "completed"),
+        QueueRouteStatus::Failed => ("terminal", "failed"),
+        QueueRouteStatus::Cancelled => ("terminal", "cancelled"),
+        QueueRouteStatus::Leased => ("leased", "none"),
+        QueueRouteStatus::Running => ("running", "none"),
+        QueueRouteStatus::Blocked => ("blocked", "none"),
+        QueueRouteStatus::Pending
             if matches!(
                 from_phase.as_str(),
                 "leased" | "running" | "awaiting_review" | "validating" | "retry_wait"
@@ -1052,7 +1052,7 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         {
             ("retry_wait", "none")
         }
-        _ => ("queued", "none"),
+        QueueRouteStatus::Pending | QueueRouteStatus::ReviewRework => ("queued", "none"),
     };
     if from_phase == "terminal" {
         anyhow::ensure!(
@@ -1069,12 +1069,16 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         // state, command state, and UI projections agree. Idempotent: the
         // settled row is terminal and is no longer selected by lease sweeps,
         // and the already-terminal command is never re-queued or duplicated.
-        let current_route = current_queue_route_status(tx, task_id)?;
-        if matches!(current_route.as_str(), "leased" | "running") {
+        let current_route =
+            canonical_queue_route_status(&current_queue_route_status(tx, task_id)?)?;
+        if matches!(
+            current_route,
+            QueueRouteStatus::Leased | QueueRouteStatus::Running
+        ) {
             let settled_route = match prior_terminal.as_str() {
-                "completed" => "handled",
-                "cancelled" => "cancelled",
-                _ => "failed",
+                "completed" => QueueRouteStatus::Handled,
+                "cancelled" => QueueRouteStatus::Cancelled,
+                _ => QueueRouteStatus::Failed,
             };
             let settle_reason = format!(
                 "orphaned queue lease settled to match terminal command ({prior_terminal}): {reason}"
@@ -1082,7 +1086,7 @@ pub(super) fn transition_business_command_for_task_in_transaction(
             set_routing_status(
                 tx,
                 task_id,
-                settled_route,
+                settled_route.as_str(),
                 &now_iso_string(),
                 "business-command-terminal-owner",
                 &settle_reason,
@@ -1115,7 +1119,7 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         );
     }
     let now = now_iso_string();
-    if persisted_route == "leased" {
+    if persisted_route == QueueRouteStatus::Leased {
         let owned_lease = tx
             .query_row(
                 "SELECT lease_owner, leased_at, lease_expires_at
@@ -1144,11 +1148,12 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         set_routing_status(
             &tx,
             task_id,
-            persisted_route,
+            persisted_route.as_str(),
             &now,
             "business-command-terminal-owner",
             reason,
-            error_message.or_else(|| (normalized_route == "failed").then_some(reason)),
+            error_message
+                .or_else(|| (normalized_route == QueueRouteStatus::Failed).then_some(reason)),
         )?;
     }
     let next_version = version.saturating_add(1);
@@ -1211,7 +1216,7 @@ pub(super) fn transition_business_command_for_task_in_transaction(
             reason,
             serde_json::to_string(&json!({
                 "task_id": task_id,
-                "route_status": persisted_route,
+                "route_status": persisted_route.as_str(),
                 "result": result,
                 "error_code": error_code,
                 "error_message": error_message,
@@ -1668,20 +1673,22 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
     }
     let (route_status, task_status) = if execution_phase == "terminal" {
         match terminal_status.as_str() {
-            "completed" => ("handled", "completed"),
-            "cancelled" => ("cancelled", "cancelled"),
-            _ => ("failed", "failed"),
+            "completed" => (QueueRouteStatus::Handled, "completed"),
+            "cancelled" => (QueueRouteStatus::Cancelled, "cancelled"),
+            _ => (QueueRouteStatus::Failed, "failed"),
         }
     } else {
         match execution_phase.as_str() {
-            "leased" | "running" | "awaiting_review" | "validating" => ("leased", "running"),
-            "blocked" | "waiting_dependencies" => ("blocked", "blocked"),
-            _ => ("pending", "queued"),
+            "leased" | "running" | "awaiting_review" | "validating" => {
+                (QueueRouteStatus::Leased, "running")
+            }
+            "blocked" | "waiting_dependencies" => (QueueRouteStatus::Blocked, "blocked"),
+            _ => (QueueRouteStatus::Pending, "queued"),
         }
     };
     object.insert(
         "route_status".to_string(),
-        Value::String(route_status.to_string()),
+        Value::String(route_status.as_str().to_string()),
     );
     object.insert(
         "task_status".to_string(),
