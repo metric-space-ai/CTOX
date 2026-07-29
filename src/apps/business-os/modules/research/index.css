@@ -212,6 +212,10 @@
 .research-graph-shell {
   min-height: 460px;
   overflow: hidden;
+  /* The query container sits on the shell, not on the stage: the stage holds
+     the WebGL canvas, and inline-size containment there changes how the canvas
+     measures itself — the graph renders zoomed out and near-empty. */
+  container: research-graph-stage / inline-size;
 }
 
 .research-graph-stage {
@@ -226,7 +230,6 @@
   color: #eef3f5;
   color-scheme: dark;
   isolation: isolate;
-  container: research-graph-stage / inline-size;
 }
 
 .research-graph-canvas,
@@ -2231,5 +2234,16 @@
   .research-graph-action {
     min-width: 34px;
     justify-content: center;
+  }
+
+  /* At this width the layer switch (fixed label set) and the insights panel
+     claim the same 12px of stage. The panel yields — its content reflows,
+     the switch labels would have to truncate. */
+  .research-graph-insights {
+    width: 258px;
+  }
+
+  .research-graph-stage.has-insights .research-graph-canvas {
+    right: 282px;
   }
 }
