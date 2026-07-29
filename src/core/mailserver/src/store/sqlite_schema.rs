@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS stalwart_mailboxes (
     id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
     name TEXT NOT NULL,
+    uid_validity INTEGER NOT NULL DEFAULT 1,
+    uid_next INTEGER NOT NULL DEFAULT 1,
     UNIQUE(owner, name)
 );
 
@@ -90,6 +92,8 @@ CREATE TABLE IF NOT EXISTS stalwart_messages (
     headers TEXT,
     is_read INTEGER NOT NULL DEFAULT 0,
     received_at INTEGER NOT NULL,
+    uid INTEGER,
+    is_deleted INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY(mailbox_id) REFERENCES stalwart_mailboxes(id) ON DELETE CASCADE
 );
 

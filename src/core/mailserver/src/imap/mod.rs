@@ -184,6 +184,8 @@ impl ImapServer {
                                 self.store.get_mailbox_id(username, mailbox_name)?
                             {
                                 let count = self.store.count_messages(&mailbox_id)?;
+                                let (uid_validity, uid_next) =
+                                    self.store.mailbox_uid_state(&mailbox_id)?;
                                 state = ImapState::Selected {
                                     username: username.clone(),
                                     mailbox_id: mailbox_id,
@@ -194,7 +196,13 @@ impl ImapServer {
                                     .await?;
                                 stream.write_all(b"* 0 RECENT\r\n").await?;
                                 stream
-                                    .write_all(b"* OK [UIDVALIDITY 1] UIDs valid\r\n")
+                                    .write_all(
+                                        format!(
+                                            "* OK [UIDVALIDITY {}] UIDs valid\r\n* OK [UIDNEXT {}] Predicted next UID\r\n",
+                                            uid_validity, uid_next
+                                        )
+                                        .as_bytes(),
+                                    )
                                     .await?;
                                 stream.write_all(b"* OK [FLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)] Flags permitted\r\n").await?;
                                 stream.write_all(b"* OK [PERMANENTFLAGS (\\Answered \\Flagged \\Deleted \\Draft \\Seen)] Permanent flags\r\n").await?;
@@ -244,7 +252,7 @@ impl ImapServer {
                             for idx in indices {
                                 let msg = &chron_messages[idx];
                                 let seq_num = idx + 1;
-                                let uid = idx + 1;
+                                let uid = msg.uid;
 
                                 let mut fetch_res = Vec::new();
 
@@ -252,8 +260,14 @@ impl ImapServer {
                                     fetch_res.push(format!("UID {}", uid));
                                 }
                                 if query_upper.contains("FLAGS") {
-                                    let flag_str = if msg.is_read { "\\Seen" } else { "" };
-                                    fetch_res.push(format!("FLAGS ({})", flag_str));
+                                    let mut flags = Vec::new();
+                                    if msg.is_read {
+                                        flags.push("\\Seen");
+                                    }
+                                    if msg.is_deleted {
+                                        flags.push("\\Deleted");
+                                    }
+                                    fetch_res.push(format!("FLAGS ({})", flags.join(" ")));
                                 }
                                 if query_upper.contains("INTERNALDATE") {
                                     fetch_res.push(format!(
@@ -350,26 +364,30 @@ impl ImapServer {
 
                             for idx in indices {
                                 let msg = &chron_messages[idx];
+                                // \Deleted flags; it must not remove — clients
+                                // expect the message to survive until EXPUNGE,
+                                // and physical deletion here shifted every
+                                // later sequence number under their feet.
                                 if is_deleted {
-                                    self.store.delete_message(&msg.id)?;
+                                    self.store.mark_message_deleted(&msg.id, true)?;
                                 } else {
                                     self.store.update_message_flags(&msg.id, is_seen)?;
                                 }
 
-                                let flag_str = if is_deleted {
-                                    "\\Deleted"
-                                } else if is_seen {
-                                    "\\Seen"
-                                } else {
-                                    ""
-                                };
+                                let mut flags = Vec::new();
+                                if is_seen || msg.is_read {
+                                    flags.push("\\Seen");
+                                }
+                                if is_deleted || msg.is_deleted {
+                                    flags.push("\\Deleted");
+                                }
                                 stream
                                     .write_all(
                                         format!(
                                             "* {} FETCH (FLAGS ({}) UID {})\r\n",
                                             idx + 1,
-                                            flag_str,
-                                            idx + 1
+                                            flags.join(" "),
+                                            msg.uid
                                         )
                                         .as_bytes(),
                                     )
@@ -387,9 +405,35 @@ impl ImapServer {
                         }
                     }
                     "EXPUNGE" => {
-                        stream
-                            .write_all(format!("{} OK EXPUNGE completed\r\n", tag).as_bytes())
-                            .await?;
+                        if let ImapState::Selected { ref mailbox_id, .. } = state {
+                            let mut chron_messages =
+                                self.store.get_message_summaries(mailbox_id)?;
+                            chron_messages.reverse(); // sequence 1 is oldest
+                            let mut expunged = 0usize;
+                            for (idx, msg) in chron_messages.iter().enumerate() {
+                                if !msg.is_deleted {
+                                    continue;
+                                }
+                                self.store.delete_message(&msg.id)?;
+                                // Each removal shifts the remaining sequence
+                                // numbers down by one.
+                                stream
+                                    .write_all(
+                                        format!("* {} EXPUNGE\r\n", idx + 1 - expunged).as_bytes(),
+                                    )
+                                    .await?;
+                                expunged += 1;
+                            }
+                            stream
+                                .write_all(format!("{} OK EXPUNGE completed\r\n", tag).as_bytes())
+                                .await?;
+                        } else {
+                            stream
+                                .write_all(
+                                    format!("{} NO Select a mailbox first\r\n", tag).as_bytes(),
+                                )
+                                .await?;
+                        }
                     }
                     _ => {
                         stream

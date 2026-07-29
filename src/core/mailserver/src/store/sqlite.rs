@@ -46,6 +46,8 @@ pub struct MessageSummary {
     pub subject: Option<String>,
     pub is_read: bool,
     pub received_at: u64,
+    pub uid: i64,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +100,7 @@ impl SqliteStore {
         let conn = self.connect()?;
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         conn.execute_batch(SQLITE_SCHEMA)?;
+        migrate_message_uids(&conn)?;
         Ok(())
     }
 
@@ -541,10 +544,19 @@ impl SqliteStore {
         let id = crate::util::generate_unique_id();
         let now = crate::util::now_utc_secs();
         self.with_connection(|conn| {
+            // Allocate the next persistent IMAP UID for this mailbox in one
+            // atomic statement — clients key their local cache on (uidvalidity,
+            // uid), so UIDs must never be re-derived from list positions.
+            let uid: i64 = conn.query_row(
+                "UPDATE stalwart_mailboxes SET uid_next = uid_next + 1
+                 WHERE id = ?1 RETURNING uid_next - 1",
+                params![mailbox_id],
+                |row| row.get(0),
+            )?;
             conn.execute(
-                "INSERT INTO stalwart_messages (id, mailbox_id, from_addr, to_addr, subject, body, headers, is_read, received_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8)",
-                params![id.as_str(), mailbox_id, from_addr, to_addr, subject, body, headers, now],
+                "INSERT INTO stalwart_messages (id, mailbox_id, from_addr, to_addr, subject, body, headers, is_read, received_at, uid, is_deleted)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, 0)",
+                params![id.as_str(), mailbox_id, from_addr, to_addr, subject, body, headers, now, uid],
             )?;
             Ok(id)
         })
@@ -605,13 +617,14 @@ impl SqliteStore {
     pub fn get_message_summaries(&self, mailbox_id: &str) -> StalwartResult<Vec<MessageSummary>> {
         self.with_connection(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, from_addr, to_addr, subject, is_read, received_at
+                "SELECT id, from_addr, to_addr, subject, is_read, received_at, uid, is_deleted
                  FROM stalwart_messages
                  WHERE mailbox_id = ?1
                  ORDER BY received_at DESC, id ASC",
             )?;
             let rows = stmt.query_map(params![mailbox_id], |row| {
                 let is_read_int: i32 = row.get(4)?;
+                let is_deleted_int: i32 = row.get(7)?;
                 Ok(MessageSummary {
                     id: row.get(0)?,
                     from_addr: row.get(1)?,
@@ -619,6 +632,8 @@ impl SqliteStore {
                     subject: row.get(3)?,
                     is_read: is_read_int != 0,
                     received_at: row.get(5)?,
+                    uid: row.get(6)?,
+                    is_deleted: is_deleted_int != 0,
                 })
             })?;
             let mut res = Vec::new();
@@ -660,6 +675,29 @@ impl SqliteStore {
         self.with_connection(|conn| {
             conn.execute("DELETE FROM stalwart_messages WHERE id = ?1", params![id])?;
             Ok(())
+        })
+    }
+
+    /// IMAP `\Deleted` semantics: flag only — the message stays visible (with
+    /// the flag) until an explicit EXPUNGE removes it.
+    pub fn mark_message_deleted(&self, id: &str, deleted: bool) -> StalwartResult<()> {
+        self.with_connection(|conn| {
+            conn.execute(
+                "UPDATE stalwart_messages SET is_deleted = ?2 WHERE id = ?1",
+                params![id, if deleted { 1 } else { 0 }],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// (uid_validity, uid_next) for the SELECT response.
+    pub fn mailbox_uid_state(&self, mailbox_id: &str) -> StalwartResult<(i64, i64)> {
+        self.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT uid_validity, uid_next FROM stalwart_mailboxes WHERE id = ?1",
+                params![mailbox_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?)
         })
     }
 
@@ -735,6 +773,59 @@ fn record_open_connection_for_test(db_path: &str) {
 
 #[cfg(not(test))]
 fn record_open_connection_for_test(_db_path: &str) {}
+
+/// One-time schema upgrade for databases created before persistent IMAP UIDs:
+/// adds the uid/is_deleted/uid_validity/uid_next columns and backfills UIDs in
+/// chronological order per mailbox so existing clients resync onto stable IDs.
+fn migrate_message_uids(conn: &Connection) -> StalwartResult<()> {
+    let has_column = |table: &str, column: &str| -> StalwartResult<bool> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for name in names {
+            if name? == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    if !has_column("stalwart_mailboxes", "uid_validity")? {
+        conn.execute_batch(
+            "ALTER TABLE stalwart_mailboxes ADD COLUMN uid_validity INTEGER NOT NULL DEFAULT 1;
+             ALTER TABLE stalwart_mailboxes ADD COLUMN uid_next INTEGER NOT NULL DEFAULT 1;",
+        )?;
+    }
+    if !has_column("stalwart_messages", "uid")? {
+        conn.execute_batch(
+            "ALTER TABLE stalwart_messages ADD COLUMN uid INTEGER;
+             ALTER TABLE stalwart_messages ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+    conn.execute(
+        "UPDATE stalwart_messages SET uid = (
+             SELECT COUNT(*) FROM stalwart_messages older
+             WHERE older.mailbox_id = stalwart_messages.mailbox_id
+               AND (older.received_at < stalwart_messages.received_at
+                    OR (older.received_at = stalwart_messages.received_at
+                        AND older.id <= stalwart_messages.id))
+         )
+         WHERE uid IS NULL",
+        [],
+    )?;
+    conn.execute(
+        "UPDATE stalwart_mailboxes SET uid_next = COALESCE(
+             (SELECT MAX(uid) + 1 FROM stalwart_messages
+              WHERE stalwart_messages.mailbox_id = stalwart_mailboxes.id),
+             uid_next
+         )
+         WHERE uid_next < COALESCE(
+             (SELECT MAX(uid) + 1 FROM stalwart_messages
+              WHERE stalwart_messages.mailbox_id = stalwart_mailboxes.id),
+             1
+         )",
+        [],
+    )?;
+    Ok(())
+}
 
 // --- Password hashing ---
 //
@@ -1054,6 +1145,83 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    #[test]
+    fn message_uids_are_persistent_across_deletions() -> StalwartResult<()> {
+        let (_temp, store, inbox) = test_store()?;
+        let first =
+            store.put_message(&inbox, "a@x", "alice@example.test", Some("one"), "1", None)?;
+        store.put_message(&inbox, "a@x", "alice@example.test", Some("two"), "2", None)?;
+        store.put_message(
+            &inbox,
+            "a@x",
+            "alice@example.test",
+            Some("three"),
+            "3",
+            None,
+        )?;
+        store.delete_message(&first)?;
+        store.put_message(&inbox, "a@x", "alice@example.test", Some("four"), "4", None)?;
+        let mut uids: Vec<i64> = store
+            .get_message_summaries(&inbox)?
+            .iter()
+            .map(|m| m.uid)
+            .collect();
+        uids.sort_unstable();
+        // UIDs 2 and 3 survive the deletion unchanged; the new message gets 4,
+        // and UID 1 is never reused.
+        assert_eq!(uids, vec![2, 3, 4]);
+        let (_validity, uid_next) = store.mailbox_uid_state(&inbox)?;
+        assert_eq!(uid_next, 5);
+
+        store.mark_message_deleted(&store.get_message_summaries(&inbox)?[0].id.clone(), true)?;
+        assert_eq!(
+            store
+                .get_message_summaries(&inbox)?
+                .iter()
+                .filter(|m| m.is_deleted)
+                .count(),
+            1,
+            "\\Deleted flags instead of removing"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_databases_get_uids_backfilled_chronologically() -> StalwartResult<()> {
+        let temp = tempdir()?;
+        let db_path = temp.path().join("legacy.sqlite3");
+        {
+            let conn = Connection::open(&db_path)?;
+            conn.execute_batch(
+                "CREATE TABLE stalwart_mailboxes (
+                     id TEXT PRIMARY KEY, owner TEXT NOT NULL, name TEXT NOT NULL,
+                     UNIQUE(owner, name));
+                 CREATE TABLE stalwart_messages (
+                     id TEXT PRIMARY KEY, mailbox_id TEXT NOT NULL,
+                     from_addr TEXT NOT NULL, to_addr TEXT NOT NULL, subject TEXT,
+                     body TEXT NOT NULL, headers TEXT,
+                     is_read INTEGER NOT NULL DEFAULT 0,
+                     received_at INTEGER NOT NULL);
+                 INSERT INTO stalwart_mailboxes VALUES ('inbox1', 'u@x', 'INBOX');
+                 INSERT INTO stalwart_messages
+                     (id, mailbox_id, from_addr, to_addr, subject, body, received_at)
+                     VALUES ('m_new', 'inbox1', 'a', 'b', 'newer', '.', 200),
+                            ('m_old', 'inbox1', 'a', 'b', 'older', '.', 100);",
+            )?;
+        }
+        let store = SqliteStore::new(db_path.to_str().expect("utf8 path"));
+        store.init()?;
+        let summaries = store.get_message_summaries("inbox1")?;
+        let by_subject: std::collections::HashMap<_, _> = summaries
+            .iter()
+            .map(|m| (m.subject.clone().unwrap_or_default(), m.uid))
+            .collect();
+        assert_eq!(by_subject["older"], 1, "oldest message gets UID 1");
+        assert_eq!(by_subject["newer"], 2);
+        assert_eq!(store.mailbox_uid_state("inbox1")?, (1, 3));
+        Ok(())
     }
 
     #[test]
