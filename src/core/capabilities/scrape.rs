@@ -5067,22 +5067,59 @@ fn canonical_json(value: &Value) -> String {
 fn acquire_target_run_lock(workspace_dir: &Path, target_key: &str) -> Result<TargetRunLock> {
     fs::create_dir_all(workspace_dir)?;
     let path = workspace_dir.join(".run.lock");
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&path)
-        .with_context(|| format!("scrape target `{target_key}` already has an active run"))?;
-    use std::io::Write;
-    writeln!(
-        file,
-        "{}",
-        serde_json::to_string(&json!({
-            "target_key": target_key,
-            "pid": process_id(),
-            "created_at": now_iso_string(),
-        }))?
-    )?;
-    Ok(TargetRunLock { path })
+    for attempt in 0..2 {
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                use std::io::Write;
+                writeln!(
+                    file,
+                    "{}",
+                    serde_json::to_string(&json!({
+                        "target_key": target_key,
+                        "pid": process_id(),
+                        "created_at": now_iso_string(),
+                    }))?
+                )?;
+                return Ok(TargetRunLock { path });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                // A lock left behind by a crashed/killed executor blocked the
+                // target forever ("already has an active run" until manual
+                // deletion). Probe the recorded pid; only a live holder keeps
+                // the lock. (Pid reuse can false-keep a stale lock — the
+                // benign direction.)
+                if run_lock_holder_is_alive(&path) {
+                    anyhow::bail!("scrape target `{target_key}` already has an active run");
+                }
+                let _ = fs::remove_file(&path);
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("scrape target `{target_key}` already has an active run")
+                });
+            }
+        }
+    }
+    anyhow::bail!("scrape target `{target_key}` already has an active run");
+}
+
+fn run_lock_holder_is_alive(path: &Path) -> bool {
+    let Some(pid) = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
+        .and_then(|value| value.get("pid").and_then(Value::as_i64))
+    else {
+        // Unreadable or garbled lock file: nobody provably holds it.
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    // EPERM: the process exists but belongs to someone else — still alive.
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn probe_portal_health(url: &str, skip_probe: bool) -> ProbeResult {
@@ -7071,6 +7108,30 @@ const PROTECTED_SOURCE_CONFIG = Object.freeze({
             ScrapeRunStatus::TemporaryUnreachable,
             "failed run with transient stderr keeps the retry classification"
         );
+    }
+
+    #[test]
+    fn stale_run_lock_from_dead_process_is_reclaimed() {
+        let dir = tempfile::tempdir().expect("temp workspace");
+        // A live holder (this process) keeps the lock.
+        std::fs::write(
+            dir.path().join(".run.lock"),
+            serde_json::to_string(&json!({"target_key": "t", "pid": process_id()})).unwrap(),
+        )
+        .expect("write live lock");
+        match acquire_target_run_lock(dir.path(), "t") {
+            Ok(_) => panic!("live lock must hold"),
+            Err(err) => assert!(err.to_string().contains("already has an active run")),
+        }
+
+        // A dead holder (impossible pid) is stale: acquisition succeeds.
+        std::fs::write(
+            dir.path().join(".run.lock"),
+            serde_json::to_string(&json!({"target_key": "t", "pid": 999_999_999i64})).unwrap(),
+        )
+        .expect("write stale lock");
+        let lock = acquire_target_run_lock(dir.path(), "t").expect("stale lock reclaimed");
+        drop(lock);
     }
 
     #[test]
