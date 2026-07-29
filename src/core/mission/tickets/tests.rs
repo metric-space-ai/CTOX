@@ -246,6 +246,7 @@ fn internal_work_terminology_firewall_keeps_self_work_legacy_only() -> Result<()
         "src/core/mission/channels/command_saga.rs",
         "src/core/mission/channels/outbound_review.rs",
         "src/core/mission/tickets/cli.rs",
+        "src/core/mission/tickets/source_skills.rs",
         "src/core/mission/channels/tests.rs",
         "src/core/mission/ticket_zammad_native.rs",
     ] {
