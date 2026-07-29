@@ -14,6 +14,9 @@ use url::Url;
 use crate::communication::adapters::{
     AdapterSyncCommandRequest, ChatSendCommandRequest, ChatTestCommandRequest,
 };
+use crate::communication::chat_outbox::{
+    self, NewOutboxItem, OutboxError, OutboxItem, OutboxSendSuccess,
+};
 use crate::communication::email_native as communication_email_native;
 use crate::communication::microsoft_graph_auth::urlencoding_encode;
 use crate::communication::runtime as communication_runtime;
@@ -36,11 +39,17 @@ const SLACK_SOCKET_MODE_MAX_ENVELOPES_PER_TICK: usize = 20;
 const CHAT_HTTP_BODY_EXCERPT_MAX_CHARS: usize = 1_024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ChatHttpError {
+pub(crate) struct ChatHttpError {
     status: u16,
     retry_after_seconds: Option<i64>,
     body_excerpt: String,
     url: String,
+}
+
+impl ChatHttpError {
+    pub(crate) fn to_outbox_error(&self, message: String) -> OutboxError {
+        OutboxError::typed_http(message, self.status, self.retry_after_seconds)
+    }
 }
 
 impl std::fmt::Display for ChatHttpError {
@@ -233,6 +242,7 @@ pub(crate) fn service_sync(
     root: &Path,
     settings: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
+    chat_outbox::process_chat_outbox(root)?;
     let runtime = crate::communication::gateway::runtime_settings_from_settings(
         root,
         platform_to_gateway_kind(platform),
@@ -484,6 +494,12 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
         bail!("{}", missing_config_message(options.platform));
     }
 
+    let outbox = chat_outbox::process_chat_outbox_for_channel_with_sender(
+        &options.db_path,
+        Some(options.platform.channel()),
+        chat_outbox::current_unix_millis(),
+        |item| send_outbox_item_with_options(options, item),
+    )?;
     let mut conn = open_channel_db(&options.db_path)?;
     let account_key = configured_account_key(options);
     ensure_account(
@@ -601,6 +617,10 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
                 "adapter": format!("native-rust-{}", options.platform.channel()),
                 "channelIds": options.channel_ids,
                 "updatedCount": updated_count,
+                "outboxAttempted": outbox.attempted,
+                "outboxSent": outbox.sent,
+                "outboxRequeued": outbox.requeued,
+                "outboxFailedPermanent": outbox.failed_permanent,
             }))?,
         },
     )?;
@@ -612,6 +632,12 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
         "fetchedCount": fetched_count,
         "storedCount": stored_count,
         "updatedCount": updated_count,
+        "outbox": {
+            "attempted": outbox.attempted,
+            "sent": outbox.sent,
+            "requeued": outbox.requeued,
+            "failedPermanent": outbox.failed_permanent,
+        },
         "errors": errors,
     }))
 }
@@ -630,52 +656,29 @@ fn execute_send(options: &ChatOptions, request: &ChatSendCommandRequest<'_>) -> 
 
     let destination = resolve_destination(options, request)?;
     let timestamp = now_iso_string();
-    let fallback_remote_id = format!(
-        "queued-{}",
-        stable_digest(&format!(
-            "{}:{}:{}",
-            options.platform.channel(),
-            destination,
-            request.body
-        ))
-    );
-    let send_result = if is_fake_mode(options) {
-        Ok(fake_send_result(options, request, &destination))
-    } else {
-        match options.platform {
-            ChatPlatform::Slack => send_slack_message(options, request, &destination),
-            ChatPlatform::Discord => send_discord_message(options, request, &destination),
-            ChatPlatform::Telegram => send_telegram_message(options, request, &destination),
-            ChatPlatform::Matrix => send_matrix_message(options, request, &destination),
-            ChatPlatform::Mattermost => send_mattermost_message(options, request, &destination),
-            ChatPlatform::Zulip => send_zulip_message(options, request, &destination),
-            ChatPlatform::GoogleChat => send_google_chat_message(options, request, &destination),
-        }
-    };
-    let delivery_confirmed = send_result.is_ok();
-    let sent_value = send_result.as_ref().ok();
-    let send_error_text = send_result
-        .as_ref()
-        .err()
-        .map(|error| redact_sensitive_text(options, &error.to_string()));
+    let local_id = chat_outbox::new_local_id();
+    let send_result = deliver_chat_message(options, request, &destination, &local_id);
     let send_adapter_status = match send_result.as_ref() {
         Ok(_) => adapter_status("send", true, None, last_cursor(options), options),
         Err(error) => adapter_status_from_error("send", error, last_cursor(options), options),
     };
-    let sent_remote_id = remote_id_from_send_result(options.platform, sent_value)
-        .unwrap_or_else(|| fallback_remote_id.clone());
+    let error = send_result
+        .as_ref()
+        .err()
+        .map(|error| outbox_error_from_anyhow(options, error));
     let account_key = if request.account_key.trim().is_empty() {
         configured_account_key(options)
     } else {
         request.account_key.trim().to_string()
     };
-    let thread_key = if request.thread_key.trim().is_empty() {
-        thread_key_for_destination(
-            options.platform,
-            &account_key,
-            &destination,
-            &sent_remote_id,
-        )
+    let remote_id = send_result
+        .as_ref()
+        .map(|success| success.remote_id.as_str())
+        .unwrap_or(local_id.as_str())
+        .to_string();
+    let generated_thread_key = request.thread_key.trim().is_empty();
+    let thread_key = if generated_thread_key {
+        thread_key_for_destination(options.platform, &account_key, &destination, &remote_id)
     } else {
         request.thread_key.trim().to_string()
     };
@@ -684,68 +687,233 @@ fn execute_send(options: &ChatOptions, request: &ChatSendCommandRequest<'_>) -> 
     } else {
         request.subject.trim().to_string()
     };
+    let sender_display = request.sender_display.unwrap_or("CTOX Bot");
+    let sender_address = configured_account_address(options);
+    let recipients_json = serde_json::to_string(&request.to)?;
+    let cc_json = serde_json::to_string(&request.cc)?;
+    let message_key = format!("{account_key}::SENT::{remote_id}");
+    let error_json = error
+        .as_ref()
+        .map(OutboxError::to_json)
+        .unwrap_or(Value::Null);
+    let provider_response = send_result
+        .as_ref()
+        .map(|success| success.provider_response.clone())
+        .unwrap_or(Value::Null);
+    let metadata_json = serde_json::to_string(&json!({
+        "adapter": options.platform.channel(),
+        "destination": destination,
+        "providerResponse": provider_response,
+        "error": error_json,
+        "outbox": {
+            "status": if send_result.is_ok() { "sent" } else { "queued" },
+            "attempt_count": if send_result.is_ok() { 0 } else { 1 },
+        },
+    }))?;
 
     let mut conn = open_channel_db(&options.db_path)?;
     ensure_account(
         &mut conn,
         &account_key,
         options.platform.channel(),
-        &configured_account_address(options),
+        &sender_address,
         options.platform.provider(),
         profile_json(options, &json!({}), send_adapter_status),
     )?;
-    if delivery_confirmed {
+
+    let mut schedule = None;
+    if let Some(error) = error.as_ref() {
+        let outbox = NewOutboxItem {
+            local_id: local_id.clone(),
+            message_key: message_key.clone(),
+            channel: options.platform.channel().to_string(),
+            account_key: account_key.clone(),
+            destination: destination.clone(),
+            thread_key: thread_key.clone(),
+            sender_display: sender_display.to_string(),
+            sender_address: sender_address.clone(),
+            recipient_addresses: request.to.to_vec(),
+            cc_addresses: request.cc.to_vec(),
+            subject: subject.clone(),
+            body_text: request.body.to_string(),
+            attachment_paths: Vec::new(),
+            provider_metadata: json!({"generatedThreadKey": generated_thread_key}),
+        };
+        schedule = Some(chat_outbox::persist_queued_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: &message_key,
+                channel: options.platform.channel(),
+                account_key: &account_key,
+                thread_key: &thread_key,
+                remote_id: &local_id,
+                direction: "outbound",
+                folder_hint: "SENT",
+                sender_display,
+                sender_address: &sender_address,
+                recipient_addresses_json: &recipients_json,
+                cc_addresses_json: &cc_json,
+                bcc_addresses_json: "[]",
+                subject: &subject,
+                preview: &preview_text(request.body, &subject),
+                body_text: request.body,
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "high",
+                status: "queued",
+                seen: true,
+                has_attachments: false,
+                external_created_at: &timestamp,
+                observed_at: &timestamp,
+                metadata_json: &metadata_json,
+            },
+            &outbox,
+            error,
+            chat_outbox::current_unix_millis(),
+        )?);
+    } else {
         mark_account_activity(&mut conn, &account_key, None, Some(&timestamp))?;
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: &message_key,
+                channel: options.platform.channel(),
+                account_key: &account_key,
+                thread_key: &thread_key,
+                remote_id: &remote_id,
+                direction: "outbound",
+                folder_hint: "SENT",
+                sender_display,
+                sender_address: &sender_address,
+                recipient_addresses_json: &recipients_json,
+                cc_addresses_json: &cc_json,
+                bcc_addresses_json: "[]",
+                subject: &subject,
+                preview: &preview_text(request.body, &subject),
+                body_text: request.body,
+                body_html: "",
+                raw_payload_ref: "",
+                trust_level: "high",
+                status: "sent",
+                seen: true,
+                has_attachments: false,
+                external_created_at: &timestamp,
+                observed_at: &timestamp,
+                metadata_json: &metadata_json,
+            },
+        )?;
     }
-    let message_key = format!("{account_key}::SENT::{sent_remote_id}");
-    upsert_communication_message(
-        &mut conn,
-        UpsertMessage {
-            message_key: &message_key,
-            channel: options.platform.channel(),
-            account_key: &account_key,
-            thread_key: &thread_key,
-            remote_id: &sent_remote_id,
-            direction: "outbound",
-            folder_hint: "SENT",
-            sender_display: request.sender_display.unwrap_or("CTOX Bot"),
-            sender_address: &configured_account_address(options),
-            recipient_addresses_json: &serde_json::to_string(&request.to)?,
-            cc_addresses_json: &serde_json::to_string(&request.cc)?,
-            bcc_addresses_json: "[]",
-            subject: &subject,
-            preview: &preview_text(request.body, &subject),
-            body_text: request.body,
-            body_html: "",
-            raw_payload_ref: "",
-            trust_level: "high",
-            status: if delivery_confirmed { "sent" } else { "failed" },
-            seen: true,
-            has_attachments: false,
-            external_created_at: &timestamp,
-            observed_at: &timestamp,
-            metadata_json: &serde_json::to_string(&json!({
-                "adapter": options.platform.channel(),
-                "destination": destination,
-                "providerResponse": sent_value,
-                "error": send_error_text.clone(),
-            }))?,
-        },
-    )?;
     refresh_thread(&mut conn, &thread_key)?;
 
     Ok(json!({
-        "ok": true,
+        "ok": send_result.is_ok(),
         "adapter": options.platform.channel(),
-        "status": if delivery_confirmed { "sent" } else { "failed" },
+        "status": if send_result.is_ok() { "sent" } else { "queued" },
         "delivery": {
-            "confirmed": delivery_confirmed,
+            "confirmed": send_result.is_ok(),
             "message_key": message_key,
-            "remote_id": sent_remote_id,
+            "remote_id": remote_id,
         },
-        "error": send_error_text,
-        "adapter_result": sent_value,
+        "outbox": schedule.map(|schedule| json!({
+            "attempt_count": schedule.attempt_count,
+            "next_attempt_at_ms": schedule.next_attempt_at_ms,
+        })),
+        "error": error.map(|error| error.to_json()),
+        "adapter_result": send_result.ok().map(|success| success.provider_response),
     }))
+}
+
+fn deliver_chat_message(
+    options: &ChatOptions,
+    request: &ChatSendCommandRequest<'_>,
+    destination: &str,
+    send_token: &str,
+) -> Result<OutboxSendSuccess> {
+    let value = if is_fake_mode(options) {
+        if options.base_url.contains("send-fail") {
+            return Err(anyhow::Error::new(ChatHttpError {
+                status: 503,
+                retry_after_seconds: Some(1),
+                body_excerpt: r#"{"error":"ctox fake send failure"}"#.to_string(),
+                url: options.base_url.clone(),
+            }));
+        }
+        fake_send_result(options, request, destination, send_token)
+    } else {
+        match options.platform {
+            ChatPlatform::Slack => send_slack_message(options, request, destination)?,
+            ChatPlatform::Discord => send_discord_message(options, request, destination)?,
+            ChatPlatform::Telegram => send_telegram_message(options, request, destination)?,
+            ChatPlatform::Matrix => send_matrix_message(options, request, destination, send_token)?,
+            ChatPlatform::Mattermost => send_mattermost_message(options, request, destination)?,
+            ChatPlatform::Zulip => send_zulip_message(options, request, destination)?,
+            ChatPlatform::GoogleChat => send_google_chat_message(options, request, destination)?,
+        }
+    };
+    let remote_id =
+        remote_id_from_send_result(options.platform, Some(&value)).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} send response did not include a remote message id",
+                options.platform.display_name()
+            )
+        })?;
+    Ok(OutboxSendSuccess::new(remote_id, value))
+}
+
+fn outbox_error_from_anyhow(options: &ChatOptions, error: &anyhow::Error) -> OutboxError {
+    let message = redact_sensitive_text(options, &error.to_string());
+    error
+        .downcast_ref::<ChatHttpError>()
+        .map(|http_error| http_error.to_outbox_error(message.clone()))
+        .unwrap_or_else(|| OutboxError::provider(message))
+}
+
+pub(crate) fn send_outbox_item(
+    root: &Path,
+    item: &OutboxItem,
+) -> std::result::Result<OutboxSendSuccess, OutboxError> {
+    let platform = chat_platform_from_channel(&item.channel).ok_or_else(|| {
+        OutboxError::provider(format!("unsupported chat outbox channel {}", item.channel))
+    })?;
+    let runtime = crate::communication::gateway::runtime_settings_from_root(
+        root,
+        platform_to_gateway_kind(platform),
+    );
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let options = options_from_runtime(platform, root, &runtime, &db_path);
+    send_outbox_item_with_options(&options, item)
+}
+
+fn send_outbox_item_with_options(
+    options: &ChatOptions,
+    item: &OutboxItem,
+) -> std::result::Result<OutboxSendSuccess, OutboxError> {
+    let request = ChatSendCommandRequest {
+        db_path: &options.db_path,
+        account_key: &item.account_key,
+        thread_key: &item.thread_key,
+        to: &item.recipient_addresses,
+        cc: &item.cc_addresses,
+        sender_display: Some(&item.sender_display),
+        subject: &item.subject,
+        body: &item.body_text,
+        attachments: &item.attachment_paths,
+    };
+    deliver_chat_message(options, &request, &item.destination, &item.local_id)
+        .map_err(|error| outbox_error_from_anyhow(options, &error))
+}
+
+fn chat_platform_from_channel(channel: &str) -> Option<ChatPlatform> {
+    match channel {
+        "slack" => Some(ChatPlatform::Slack),
+        "discord" => Some(ChatPlatform::Discord),
+        "telegram" => Some(ChatPlatform::Telegram),
+        "matrix" => Some(ChatPlatform::Matrix),
+        "mattermost" => Some(ChatPlatform::Mattermost),
+        "zulip" => Some(ChatPlatform::Zulip),
+        "google_chat" => Some(ChatPlatform::GoogleChat),
+        _ => None,
+    }
 }
 
 fn sync_slack_messages(
@@ -1919,8 +2087,13 @@ fn fake_send_result(
     options: &ChatOptions,
     request: &ChatSendCommandRequest<'_>,
     destination: &str,
+    send_token: &str,
 ) -> Value {
-    let remote_id = fake_remote_id(options, &format!("{destination}:{}", request.body));
+    let remote_id = format!(
+        "fake-{}-{}",
+        options.platform.channel(),
+        stable_digest(send_token)
+    );
     match options.platform {
         ChatPlatform::Slack => json!({
             "ok": true,
@@ -2065,8 +2238,9 @@ fn send_matrix_message(
     options: &ChatOptions,
     request: &ChatSendCommandRequest<'_>,
     destination: &str,
+    send_token: &str,
 ) -> Result<Value> {
-    let txn_id = stable_digest(&format!("{}:{}", destination, request.body));
+    let txn_id = stable_digest(send_token);
     http_json(
         "PUT",
         &api_url(
@@ -4365,7 +4539,7 @@ fn http_json(
     http_json_response(method, url, headers, body).map(|response| response.value)
 }
 
-fn chat_http_error_from_response(
+pub(crate) fn chat_http_error_from_response(
     status: u16,
     url: &str,
     headers: &BTreeMap<String, String>,
@@ -6084,6 +6258,75 @@ mod tests {
             },
         )
         .map_err(Into::into)
+    }
+
+    #[test]
+    fn failed_sends_are_honest_queued_and_collision_free() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let db_path = root.path().join("runtime/ctox.sqlite3");
+        let runtime = BTreeMap::from([
+            (
+                "CTO_SLACK_API_BASE_URL".to_string(),
+                "ctox-fake://slack-send-fail".to_string(),
+            ),
+            ("CTO_SLACK_BOT_TOKEN".to_string(), FAKE_TOKEN.to_string()),
+            ("CTO_SLACK_BOT_USER_ID".to_string(), "UFAIL".to_string()),
+            ("CTO_SLACK_CHANNEL_ID".to_string(), "CFAIL".to_string()),
+        ]);
+        let to = vec!["CFAIL".to_string()];
+        let empty = Vec::new();
+        let request = ChatSendCommandRequest {
+            db_path: &db_path,
+            account_key: "slack:UFAIL",
+            thread_key: "",
+            to: &to,
+            cc: &empty,
+            sender_display: Some("CTOX Test"),
+            subject: "same subject",
+            body: "same body",
+            attachments: &empty,
+        };
+
+        let first = send(ChatPlatform::Slack, root.path(), &runtime, &request)?;
+        let second = send(ChatPlatform::Slack, root.path(), &runtime, &request)?;
+        for result in [&first, &second] {
+            assert_eq!(result.get("ok").and_then(Value::as_bool), Some(false));
+            assert_eq!(result.get("status").and_then(Value::as_str), Some("queued"));
+            assert_eq!(
+                result.pointer("/error/type").and_then(Value::as_str),
+                Some("chat_http_error")
+            );
+            assert_eq!(
+                result.pointer("/error/http_status").and_then(Value::as_u64),
+                Some(503)
+            );
+        }
+        let first_id = first
+            .pointer("/delivery/remote_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        let second_id = second
+            .pointer("/delivery/remote_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(first_id.starts_with("queued-"));
+        assert!(second_id.starts_with("queued-"));
+        assert_ne!(first_id, second_id);
+
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let queued_messages: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM communication_messages WHERE channel = 'slack' AND status = 'queued'",
+            [],
+            |row| row.get(0),
+        )?;
+        let queued_outbox: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM communication_chat_outbox WHERE channel = 'slack' AND status = 'queued'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(queued_messages, 2);
+        assert_eq!(queued_outbox, 2);
+        Ok(())
     }
 
     #[test]

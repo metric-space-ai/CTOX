@@ -4,6 +4,7 @@
 pub(crate) mod adapters;
 pub(crate) mod attachments;
 pub(crate) mod chat_native;
+pub(crate) mod chat_outbox;
 pub(crate) mod discord_native;
 pub(crate) mod email_native;
 pub(crate) mod gateway;

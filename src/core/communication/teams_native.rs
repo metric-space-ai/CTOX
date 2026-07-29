@@ -10,6 +10,10 @@ use crate::communication::adapters::{
 use crate::communication::attachments::{
     load_outbound_attachments, refs_for_paths, AttachmentFile,
 };
+use crate::communication::chat_native::{chat_http_error_from_response, ChatHttpError};
+use crate::communication::chat_outbox::{
+    self, NewOutboxItem, OutboxError, OutboxItem, OutboxSendSuccess,
+};
 use crate::communication::email_native as communication_email_native;
 use crate::communication::microsoft_graph_auth::{
     acquire_app_token, acquire_ropc_token, urlencoding_encode, ROPC_PUBLIC_CLIENT_ID,
@@ -171,7 +175,12 @@ impl GraphTeamsClient {
             })
         };
         if !(200..300).contains(&response.status) {
-            bail!("Graph HTTP {}: {value}", response.status);
+            return Err(anyhow::Error::new(chat_http_error_from_response(
+                response.status,
+                url.as_str(),
+                &response.headers,
+                &value,
+            )));
         }
         Ok(value)
     }
@@ -197,7 +206,12 @@ impl GraphTeamsClient {
             })
         };
         if !(200..300).contains(&response.status) {
-            bail!("Graph HTTP {}: {value}", response.status);
+            return Err(anyhow::Error::new(chat_http_error_from_response(
+                response.status,
+                url.as_str(),
+                &response.headers,
+                &value,
+            )));
         }
         Ok(value)
     }
@@ -499,6 +513,7 @@ pub(crate) fn service_sync(
     root: &Path,
     settings: &BTreeMap<String, String>,
 ) -> Result<Option<Value>> {
+    chat_outbox::process_chat_outbox(root)?;
     let preferred_is_teams = settings
         .get("CTOX_OWNER_PREFERRED_CHANNEL")
         .map(|value| value.trim())
@@ -533,6 +548,22 @@ fn execute_sync(options: &TeamsOptions) -> Result<Value> {
         );
     }
     let client = GraphTeamsClient::from_options(options)?;
+    let outbox = chat_outbox::process_chat_outbox_for_channel_with_sender(
+        &options.db_path,
+        Some("teams"),
+        chat_outbox::current_unix_millis(),
+        |item| {
+            let destination = teams_destination_from_outbox(item)
+                .map_err(|error| outbox_error_from_anyhow(&error))?;
+            deliver_teams_message(
+                &client,
+                &item.body_text,
+                &item.attachment_paths,
+                &destination,
+            )
+            .map_err(|error| outbox_error_from_anyhow(&error))
+        },
+    )?;
     let self_identity = client.get_self_identity().unwrap_or_default();
     let mut conn = open_channel_db(&options.db_path)?;
     let account_key = account_key_for_teams(options);
@@ -592,7 +623,12 @@ fn execute_sync(options: &TeamsOptions) -> Result<Value> {
             fetched_count: total_synced as i64,
             stored_count: total_synced as i64,
             error_text: &error_text,
-            metadata_json: "{}",
+            metadata_json: &serde_json::to_string(&json!({
+                "outboxAttempted": outbox.attempted,
+                "outboxSent": outbox.sent,
+                "outboxRequeued": outbox.requeued,
+                "outboxFailedPermanent": outbox.failed_permanent,
+            }))?,
         },
     )?;
     Ok(json!({
@@ -600,6 +636,12 @@ fn execute_sync(options: &TeamsOptions) -> Result<Value> {
         "adapter": "teams",
         "account_key": account_key,
         "messages_synced": total_synced,
+        "outbox": {
+            "attempted": outbox.attempted,
+            "sent": outbox.sent,
+            "requeued": outbox.requeued,
+            "failedPermanent": outbox.failed_permanent,
+        },
         "errors": errors,
     }))
 }
@@ -1086,9 +1128,67 @@ fn execute_send(options: &TeamsOptions, request: &TeamsSendCommandRequest<'_>) -
             "Teams send requires either CTO_TEAMS_USERNAME + CTO_TEAMS_PASSWORD, or CTO_TEAMS_CLIENT_ID + CTO_TEAMS_CLIENT_SECRET"
         );
     }
-    let client = GraphTeamsClient::from_options(options)?;
-    let mut conn = open_channel_db(&options.db_path)?;
+    let attachment_refs = refs_for_paths(request.attachments)?;
+    let timestamp = now_iso_string();
+    let local_id = chat_outbox::new_local_id();
     let account_key = account_key_for_teams(options);
+    let generated_thread_key = request.thread_key.trim().is_empty();
+    let initial_thread_key = if generated_thread_key {
+        format!("{account_key}::outbound::{local_id}")
+    } else {
+        request.thread_key.to_string()
+    };
+    let destination = resolve_send_destination(&initial_thread_key, options)?;
+    let destination_metadata = teams_destination_metadata(&destination);
+    let send_result = GraphTeamsClient::from_options(options).and_then(|client| {
+        deliver_teams_message(&client, request.body, request.attachments, &destination)
+    });
+    let error = send_result.as_ref().err().map(outbox_error_from_anyhow);
+    let remote_id = send_result
+        .as_ref()
+        .map(|success| success.remote_id.as_str())
+        .unwrap_or(local_id.as_str())
+        .to_string();
+    let thread_key = if generated_thread_key {
+        initial_thread_key.replace(&local_id, &remote_id)
+    } else {
+        initial_thread_key
+    };
+    let subject = if request.subject.trim().is_empty() {
+        "(Teams)".to_string()
+    } else {
+        request.subject.to_string()
+    };
+    let sender_display = request.sender_display.unwrap_or("CTOX Bot");
+    let message_key = format!("{account_key}::SENT::{remote_id}");
+    let recipients_json = serde_json::to_string(request.to)?;
+    let raw_payload_ref = request.attachments.join("\n");
+    let provider_response = send_result
+        .as_ref()
+        .map(|success| success.provider_response.clone())
+        .unwrap_or(Value::Null);
+    let metadata_patch = send_result
+        .as_ref()
+        .map(|success| success.metadata_patch.clone())
+        .unwrap_or_else(|_| json!({}));
+    let error_json = error
+        .as_ref()
+        .map(OutboxError::to_json)
+        .unwrap_or(Value::Null);
+    let metadata_json = serde_json::to_string(&json!({
+        "teams_sent_message_id": if send_result.is_ok() { Value::String(remote_id.clone()) } else { Value::Null },
+        "teams_destination": destination_metadata,
+        "attachments": attachment_refs,
+        "providerResponse": provider_response,
+        "error": error_json,
+        "deliveryMetadata": metadata_patch,
+        "outbox": {
+            "status": if send_result.is_ok() { "sent" } else { "queued" },
+            "attempt_count": if send_result.is_ok() { 0 } else { 1 },
+        },
+    }))?;
+
+    let mut conn = open_channel_db(&options.db_path)?;
     ensure_account(
         &mut conn,
         &account_key,
@@ -1097,127 +1197,255 @@ fn execute_send(options: &TeamsOptions, request: &TeamsSendCommandRequest<'_>) -
         "microsoft-graph",
         build_profile_json(options),
     )?;
-    let timestamp = now_iso_string();
-    let remote_id = format!(
-        "queued-{}",
-        stable_digest(&format!("{}:{}", timestamp, request.body))
-    );
-    let thread_key = if request.thread_key.trim().is_empty() {
-        format!("{account_key}::outbound::{remote_id}")
-    } else {
-        request.thread_key.to_string()
-    };
-    let subject = if request.subject.trim().is_empty() {
-        "(Teams)".to_string()
-    } else {
-        request.subject.to_string()
-    };
 
-    let attachment_files = load_outbound_attachments(request.attachments)?;
+    let mut schedule = None;
+    if let Some(error) = error.as_ref() {
+        let outbox = NewOutboxItem {
+            local_id: local_id.clone(),
+            message_key: message_key.clone(),
+            channel: "teams".to_string(),
+            account_key: account_key.clone(),
+            destination: serde_json::to_string(&destination_metadata)?,
+            thread_key: thread_key.clone(),
+            sender_display: sender_display.to_string(),
+            sender_address: options.bot_id.clone(),
+            recipient_addresses: request.to.to_vec(),
+            cc_addresses: Vec::new(),
+            subject: subject.clone(),
+            body_text: request.body.to_string(),
+            attachment_paths: request.attachments.to_vec(),
+            provider_metadata: json!({
+                "generatedThreadKey": generated_thread_key,
+                "teamsDestination": destination_metadata,
+            }),
+        };
+        schedule = Some(chat_outbox::persist_queued_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: &message_key,
+                channel: "teams",
+                account_key: &account_key,
+                thread_key: &thread_key,
+                remote_id: &local_id,
+                direction: "outbound",
+                folder_hint: "SENT",
+                sender_display,
+                sender_address: &options.bot_id,
+                recipient_addresses_json: &recipients_json,
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: &subject,
+                preview: &preview_text(request.body, &subject),
+                body_text: request.body,
+                body_html: "",
+                raw_payload_ref: &raw_payload_ref,
+                trust_level: "high",
+                status: "queued",
+                seen: true,
+                has_attachments: !request.attachments.is_empty(),
+                external_created_at: &timestamp,
+                observed_at: &timestamp,
+                metadata_json: &metadata_json,
+            },
+            &outbox,
+            error,
+            chat_outbox::current_unix_millis(),
+        )?);
+    } else {
+        upsert_communication_message(
+            &mut conn,
+            UpsertMessage {
+                message_key: &message_key,
+                channel: "teams",
+                account_key: &account_key,
+                thread_key: &thread_key,
+                remote_id: &remote_id,
+                direction: "outbound",
+                folder_hint: "SENT",
+                sender_display,
+                sender_address: &options.bot_id,
+                recipient_addresses_json: &recipients_json,
+                cc_addresses_json: "[]",
+                bcc_addresses_json: "[]",
+                subject: &subject,
+                preview: &preview_text(request.body, &subject),
+                body_text: request.body,
+                body_html: "",
+                raw_payload_ref: &raw_payload_ref,
+                trust_level: "high",
+                status: "sent",
+                seen: true,
+                has_attachments: !request.attachments.is_empty(),
+                external_created_at: &timestamp,
+                observed_at: &timestamp,
+                metadata_json: &metadata_json,
+            },
+        )?;
+        conn.execute(
+            "UPDATE communication_accounts SET last_outbound_ok_at = ?2, updated_at = ?2 WHERE account_key = ?1",
+            rusqlite::params![account_key, timestamp],
+        )?;
+    }
+    refresh_thread(&mut conn, &thread_key)?;
+    Ok(json!({
+        "ok": send_result.is_ok(),
+        "status": if send_result.is_ok() { "sent" } else { "queued" },
+        "delivery": {
+            "confirmed": send_result.is_ok(),
+            "message_key": message_key,
+            "remote_id": remote_id,
+        },
+        "outbox": schedule.map(|schedule| json!({
+            "attempt_count": schedule.attempt_count,
+            "next_attempt_at_ms": schedule.next_attempt_at_ms,
+        })),
+        "error": error.map(|error| error.to_json()),
+    }))
+}
+
+fn deliver_teams_message(
+    client: &GraphTeamsClient,
+    body: &str,
+    attachment_paths: &[String],
+    destination: &TeamsSendDestination,
+) -> Result<OutboxSendSuccess> {
+    let attachment_files = load_outbound_attachments(attachment_paths)?;
     let uploaded_attachments = attachment_files
         .iter()
         .map(|attachment| client.upload_drive_attachment(attachment))
         .collect::<Result<Vec<_>>>()?;
-    let attachment_refs = refs_for_paths(request.attachments)?;
-    let raw_payload_ref = request.attachments.join("\n");
-    let destination = resolve_send_destination(&thread_key, options)?;
-    let (send_result, sent_team_id, sent_channel_id, sent_chat_id) = match &destination {
-        TeamsSendDestination::Chat { chat_id } => (
-            client.send_chat_message(chat_id, request.body, &uploaded_attachments),
-            String::new(),
-            String::new(),
-            chat_id.clone(),
-        ),
+    let value = match destination {
+        TeamsSendDestination::Chat { chat_id } => {
+            client.send_chat_message(chat_id, body, &uploaded_attachments)?
+        }
         TeamsSendDestination::Channel {
             team_id,
             channel_id,
             parent_message_id,
         } => {
-            let result = if let Some(parent_id) = parent_message_id {
+            if let Some(parent_id) = parent_message_id {
                 client.send_channel_reply(
                     team_id,
                     channel_id,
                     parent_id,
-                    request.body,
+                    body,
                     &uploaded_attachments,
-                )
+                )?
             } else {
-                client.send_channel_message(
-                    team_id,
-                    channel_id,
-                    request.body,
-                    &uploaded_attachments,
-                )
-            };
-            (result, team_id.clone(), channel_id.clone(), String::new())
+                client.send_channel_message(team_id, channel_id, body, &uploaded_attachments)?
+            }
         }
     };
-
-    let sent_remote_id = send_result
-        .as_ref()
-        .ok()
-        .and_then(|value| value.get("id"))
+    let remote_id = value
+        .get("id")
         .and_then(Value::as_str)
-        .unwrap_or(&remote_id);
-    let delivery_confirmed = send_result.is_ok();
-    let sender_display = request.sender_display.unwrap_or("CTOX Bot");
-    let message_key = format!("{account_key}::SENT::{sent_remote_id}");
-    upsert_communication_message(
-        &mut conn,
-        UpsertMessage {
-            message_key: &message_key,
-            channel: "teams",
-            account_key: &account_key,
-            thread_key: &thread_key,
-            remote_id: sent_remote_id,
-            direction: "outbound",
-            folder_hint: "SENT",
-            sender_display,
-            sender_address: &options.bot_id,
-            recipient_addresses_json: &serde_json::to_string(request.to)?,
-            cc_addresses_json: "[]",
-            bcc_addresses_json: "[]",
-            subject: &subject,
-            preview: &preview_text(request.body, &subject),
-            body_text: request.body,
-            body_html: "",
-            raw_payload_ref: &raw_payload_ref,
-            trust_level: "high",
-            status: if delivery_confirmed { "sent" } else { "failed" },
-            seen: true,
-            has_attachments: !request.attachments.is_empty(),
-            external_created_at: &timestamp,
-            observed_at: &timestamp,
-            metadata_json: &serde_json::to_string(&json!({
-                "teams_sent_message_id": sent_remote_id,
-                "teams_team_id": sent_team_id,
-                "teams_channel_id": sent_channel_id,
-                "teams_chat_id": sent_chat_id,
-                "attachments": attachment_refs,
-                "teams_uploaded_attachments": uploaded_attachments.iter().map(|attachment| json!({
-                    "id": attachment.id,
-                    "name": attachment.name,
-                    "contentType": attachment.content_type,
-                    "sourcePath": attachment.source_path,
-                    "sizeBytes": attachment.size_bytes,
-                    "webUrl": attachment.web_url,
-                    "driveItemId": attachment.drive_item_id,
-                    "deliveryMethod": "graph_drive_reference",
-                })).collect::<Vec<_>>(),
-            }))?,
-        },
-    )?;
-    refresh_thread(&mut conn, &thread_key)?;
-    Ok(json!({
-        "ok": true,
-        "status": if delivery_confirmed { "sent" } else { "failed" },
-        "delivery": {
-            "confirmed": delivery_confirmed,
-            "message_key": message_key,
-            "remote_id": sent_remote_id,
-        },
-        "error": send_result.as_ref().err().map(|error| error.to_string()),
-    }))
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .context("Teams send response did not include id")?;
+    let mut success = OutboxSendSuccess::new(remote_id.clone(), value);
+    success.metadata_patch = json!({
+        "teams_sent_message_id": remote_id,
+        "teams_destination": teams_destination_metadata(destination),
+        "teams_uploaded_attachments": uploaded_attachments.iter().map(|attachment| json!({
+            "id": attachment.id,
+            "name": attachment.name,
+            "contentType": attachment.content_type,
+            "sourcePath": attachment.source_path,
+            "sizeBytes": attachment.size_bytes,
+            "webUrl": attachment.web_url,
+            "driveItemId": attachment.drive_item_id,
+            "deliveryMethod": "graph_drive_reference",
+        })).collect::<Vec<_>>(),
+    });
+    Ok(success)
+}
+
+fn teams_destination_metadata(destination: &TeamsSendDestination) -> Value {
+    match destination {
+        TeamsSendDestination::Chat { chat_id } => json!({"kind": "chat", "chat_id": chat_id}),
+        TeamsSendDestination::Channel {
+            team_id,
+            channel_id,
+            parent_message_id,
+        } => json!({
+            "kind": "channel",
+            "team_id": team_id,
+            "channel_id": channel_id,
+            "parent_message_id": parent_message_id,
+        }),
+    }
+}
+
+fn teams_destination_from_outbox(item: &OutboxItem) -> Result<TeamsSendDestination> {
+    let value = item
+        .provider_metadata
+        .get("teamsDestination")
+        .cloned()
+        .or_else(|| serde_json::from_str::<Value>(&item.destination).ok())
+        .unwrap_or(Value::Null);
+    match value.get("kind").and_then(Value::as_str) {
+        Some("chat") => Ok(TeamsSendDestination::Chat {
+            chat_id: value
+                .get("chat_id")
+                .and_then(Value::as_str)
+                .context("Teams outbox chat destination is missing chat_id")?
+                .to_string(),
+        }),
+        Some("channel") => Ok(TeamsSendDestination::Channel {
+            team_id: value
+                .get("team_id")
+                .and_then(Value::as_str)
+                .context("Teams outbox channel destination is missing team_id")?
+                .to_string(),
+            channel_id: value
+                .get("channel_id")
+                .and_then(Value::as_str)
+                .context("Teams outbox channel destination is missing channel_id")?
+                .to_string(),
+            parent_message_id: value
+                .get("parent_message_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
+        _ => bail!("Teams outbox destination is invalid"),
+    }
+}
+
+fn outbox_error_from_anyhow(error: &anyhow::Error) -> OutboxError {
+    error
+        .downcast_ref::<ChatHttpError>()
+        .map(|http_error| http_error.to_outbox_error(error.to_string()))
+        .unwrap_or_else(|| OutboxError::provider(error.to_string()))
+}
+
+pub(crate) fn send_outbox_item(
+    root: &Path,
+    item: &OutboxItem,
+) -> std::result::Result<OutboxSendSuccess, OutboxError> {
+    let runtime = crate::communication::gateway::runtime_settings_from_root(
+        root,
+        crate::communication::gateway::CommunicationAdapterKind::Teams,
+    );
+    let db_path = root.join("runtime/ctox.sqlite3");
+    let options = base_options_from_runtime(root, &runtime, &db_path);
+    send_outbox_item_with_options(&options, item)
+}
+
+fn send_outbox_item_with_options(
+    options: &TeamsOptions,
+    item: &OutboxItem,
+) -> std::result::Result<OutboxSendSuccess, OutboxError> {
+    GraphTeamsClient::from_options(options)
+        .and_then(|client| {
+            let destination = teams_destination_from_outbox(item)?;
+            deliver_teams_message(
+                &client,
+                &item.body_text,
+                &item.attachment_paths,
+                &destination,
+            )
+        })
+        .map_err(|error| outbox_error_from_anyhow(&error))
 }
 
 fn execute_test(options: &TeamsOptions) -> Result<Value> {
@@ -1696,6 +1924,84 @@ mod tests {
     }
 
     #[test]
+    fn teams_http_send_failure_is_typed_and_queued() -> Result<()> {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut stream, _) = listener.accept()?;
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request)?;
+            let body = r#"{"error":{"code":"ServiceUnavailable","message":"retry"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nRetry-After: 2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )?;
+            stream.flush()?;
+            Ok(())
+        });
+
+        let root = tempfile::tempdir()?;
+        let db_path = root.path().join("runtime/ctox.sqlite3");
+        let mut options = test_options("", "bot-id", "tenant-id");
+        options.db_path = db_path.clone();
+        options.graph_access_token = "fake-access-token".to_string();
+        options.graph_base_url = format!("http://{address}");
+        options.chat_id = "chat-1".to_string();
+        let empty = Vec::new();
+        let result = execute_send(
+            &options,
+            &TeamsSendCommandRequest {
+                db_path: &db_path,
+                tenant_id: "tenant-id",
+                thread_key: "",
+                to: &empty,
+                sender_display: Some("CTOX Test"),
+                subject: "same subject",
+                body: "same body",
+                attachments: &empty,
+            },
+        )?;
+        server.join().expect("fake Graph server thread")?;
+
+        assert_eq!(result.get("ok").and_then(Value::as_bool), Some(false));
+        assert_eq!(result.get("status").and_then(Value::as_str), Some("queued"));
+        assert_eq!(
+            result.pointer("/error/type").and_then(Value::as_str),
+            Some("chat_http_error")
+        );
+        assert_eq!(
+            result.pointer("/error/http_status").and_then(Value::as_u64),
+            Some(503)
+        );
+        assert_eq!(
+            result
+                .pointer("/error/retry_after_seconds")
+                .and_then(Value::as_i64),
+            Some(2)
+        );
+        let local_id = result
+            .pointer("/delivery/remote_id")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert!(local_id.starts_with("queued-"));
+
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let row: (String, String, i64) = conn.query_row(
+            "SELECT communication_messages.status, communication_messages.remote_id, communication_chat_outbox.attempt_count FROM communication_messages JOIN communication_chat_outbox USING (message_key) WHERE communication_messages.channel = 'teams'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(row.0, "queued");
+        assert_eq!(row.1, local_id);
+        assert_eq!(row.2, 1);
+        Ok(())
+    }
+
+    #[test]
     fn normalize_teams_message_skips_system_messages() {
         let msg = json!({
             "id": "msg1",
@@ -1741,7 +2047,7 @@ mod tests {
 
     #[test]
     fn self_message_detection_uses_configured_bot_display_alias() {
-        let options = test_options("inf.demo@example.com", "INF.Demo@example.com", "");
+        let options = test_options("inf.demo@example.com", "Yoda@example.com", "");
         let identity = TeamsSelfIdentity::default();
         let self_msg = json!({
             "from": {"user": {"displayName": "Yoda", "id": "2cec2f2d-9b6d-4b36-9d47-ea3f7d7fb47e"}},
