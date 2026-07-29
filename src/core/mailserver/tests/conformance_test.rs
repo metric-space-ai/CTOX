@@ -454,8 +454,9 @@ async fn test_smtp_authenticated_relay_queues_external_mail() {
     let n = stream.read(&mut response).await.unwrap();
     assert!(String::from_utf8_lossy(&response[..n]).contains("354"));
 
+    // "..dotted" is a dot-stuffed line: the stored body must carry ".dotted".
     stream
-        .write_all(b"Subject: Outbound\r\n\r\nHello out there.\r\n.\r\n")
+        .write_all(b"Subject: Outbound\r\n\r\nHello out there.\r\n..dotted line\r\n.\r\n")
         .await
         .unwrap();
     let n = stream.read(&mut response).await.unwrap();
@@ -473,4 +474,9 @@ async fn test_smtp_authenticated_relay_queues_external_mail() {
     assert_eq!(pending[0].1, "relay@ctox.local");
     assert_eq!(pending[0].2, "friend@external.example");
     assert!(pending[0].3.contains("Hello out there."));
+    assert!(
+        pending[0].3.contains("\r\n.dotted line"),
+        "leading dot must be unstuffed in storage: {}",
+        pending[0].3
+    );
 }

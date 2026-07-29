@@ -65,6 +65,15 @@ impl SmtpOutboundClient {
             None => body.to_string(),
         };
 
+        // RFC 5321 §4.5.2 dot-stuffing: bodies are stored unstuffed, so any
+        // line starting with '.' must be doubled on the wire or it would
+        // terminate DATA early.
+        let signed_body = if signed_body.starts_with('.') {
+            format!(".{signed_body}")
+        } else {
+            signed_body
+        }
+        .replace("\r\n.", "\r\n..");
         self.send_command(&format!(
             "{}{}\r\n.\r\n",
             signed_body,

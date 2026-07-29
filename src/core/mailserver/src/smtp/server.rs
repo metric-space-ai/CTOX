@@ -63,6 +63,12 @@ impl SmtpInboundServer {
         let mut authenticated_user: Option<String> = None;
         let mut line_buffer = String::new();
 
+        // Both buffers grow from network input; without ceilings a single
+        // newline-free connection could balloon the process (RFC 5321 §4.5.3
+        // sizes: 1000-octet lines; message ceiling is ours to declare).
+        const MAX_LINE_BYTES: usize = 8 * 1024;
+        const MAX_MESSAGE_BYTES: usize = 25 * 1024 * 1024;
+
         #[derive(Debug, Clone, PartialEq)]
         enum AuthState {
             None,
@@ -79,6 +85,16 @@ impl SmtpInboundServer {
             }
 
             line_buffer.push_str(&String::from_utf8_lossy(&buf[..n]));
+            if line_buffer.len() > MAX_LINE_BYTES && !line_buffer.contains('\n') {
+                stream.write_all(b"500 5.5.2 Line too long\r\n").await?;
+                break;
+            }
+            if receiving_data && mail_body.len() + line_buffer.len() > MAX_MESSAGE_BYTES {
+                stream
+                    .write_all(b"552 5.3.4 Message size exceeds fixed limit\r\n")
+                    .await?;
+                break;
+            }
 
             while let Some(pos) = line_buffer.find('\n') {
                 let mut line = line_buffer[..pos].to_string();
@@ -216,7 +232,14 @@ impl SmtpInboundServer {
 
                         mail_body.clear();
                     } else {
-                        mail_body.push_str(&line);
+                        // RFC 5321 §4.5.2 dot-unstuffing: the client doubles a
+                        // leading dot in DATA; store the original single dot.
+                        if let Some(stripped) = line.strip_prefix("..") {
+                            mail_body.push('.');
+                            mail_body.push_str(stripped);
+                        } else {
+                            mail_body.push_str(&line);
+                        }
                         mail_body.push_str("\r\n");
                     }
                     continue;
