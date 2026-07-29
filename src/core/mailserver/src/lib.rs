@@ -5,7 +5,6 @@ pub mod util;
 pub mod calcard;
 pub mod caldav;
 pub mod carddav;
-pub mod directory;
 pub mod imap;
 pub mod smtp;
 pub mod store;
