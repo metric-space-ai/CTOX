@@ -3213,42 +3213,29 @@ fn clear_macos_execution_metadata(release_root: &Path) -> Result<()> {
     Ok(())
 }
 
-const BINARY_BUNDLE_REQUIRED_PATHS: &[&str] = &[
-    "install.sh",
-    "Cargo.toml",
-    "contracts/source_origins_manifest.json",
-    "src/apps/business-os/index.html",
-    "src/apps/business-os/app.js",
-    "src/apps/business-os/app.css",
-    "src/apps/business-os/rxdb/dist/ctox-rxdb-js.mjs",
-    "src/apps/business-os/scripts/validate-app-module.mjs",
-    "src/apps/business-os/modules/documents/index.js",
-    "src/apps/business-os/modules/spreadsheets/index.js",
-    "src/apps/business-os/office-engine/features.json",
-    "src/apps/business-os/vendor/ctox-office/ctox-office-document.mjs",
-    "src/apps/business-os/vendor/ctox-office/ctox-office-spreadsheet.mjs",
-    "src/apps/business-os/vendor/ctox-office/frame.html",
-    "src/apps/business-os/vendor/ctox-office/provenance.json",
-    "src/apps/business-os/vendor/ctox-office/runtime/ctox-documents.mjs",
-    "src/apps/business-os/vendor/ctox-office/runtime/ctox-spreadsheets.mjs",
-    "src/apps/business-os/vendor/ctox-office/forks/ctox-documents/manifest.json",
-    "src/apps/business-os/vendor/ctox-office/forks/ctox-documents/business-os.css",
-    "src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/manifest.json",
-    "src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/business-os.css",
-    "src/apps/business-os/vendor/ctox-office/forks/shared/business-os.css",
-    "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index.html",
-    "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/index.html",
-    "src/apps/business-os/vendor/ctox-office/upstream/sdkjs/word/sdk-all-min.js",
-    "src/apps/business-os/vendor/ctox-office/upstream/sdkjs/cell/sdk-all-min.js",
-    "src/core/harness/Cargo.toml",
-    "src/core/rxdb/Cargo.toml",
-    "src/core/rxdb/tools/local_signaling_server.js",
-    "src/skills/system",
-];
+/// Required runtime paths for a binary release bundle.
+///
+/// The list lives in `contracts/binary_bundle_manifest.txt` — ONE source of
+/// truth shared with the release packaging workflow, which verifies every
+/// listed path exists in the bundle before uploading. Keeping the list here
+/// as a literal and a second copy in CI is exactly the parallel-truth defect
+/// this campaign removes.
+const BINARY_BUNDLE_MANIFEST: &str = include_str!("../../../contracts/binary_bundle_manifest.txt");
+
+fn binary_bundle_required_paths() -> impl Iterator<Item = &'static str> {
+    BINARY_BUNDLE_MANIFEST
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+}
 
 fn validate_binary_bundle(source_root: &Path) -> Result<()> {
+    // Either launch-binary name is valid — `ctox-real` (the supervised real
+    // binary) or the plain `ctox` the release workflow ships. The check must
+    // match the contract its own error message documents.
+    let binary_real = source_root.join("bin/ctox-real");
     let binary = source_root.join("bin").join(bundle_binary_name());
-    if !binary.exists() {
+    if !binary_real.exists() && !binary.exists() {
         anyhow::bail!(
             "binary bundle is missing a real CTOX launch binary at {} or {}",
             source_root.join("bin/ctox-real").display(),
@@ -3256,7 +3243,7 @@ fn validate_binary_bundle(source_root: &Path) -> Result<()> {
         );
     }
     let mut missing = Vec::new();
-    for required_path in BINARY_BUNDLE_REQUIRED_PATHS {
+    for required_path in binary_bundle_required_paths() {
         let path = source_root.join(required_path);
         if !path.exists() {
             missing.push(path.display().to_string());
@@ -4690,7 +4677,12 @@ mod tests {
 
         let canonical = temp.path().join("bin").join(bundle_binary_name());
         assert_eq!(fs::read_to_string(&canonical).unwrap(), "release-binary");
-        validate_binary_bundle(temp.path()).unwrap();
+        // Full bundle validation is covered by
+        // binary_bundle_validation_accepts_release_runtime_workspace; this
+        // test pins normalization only. A bare normalized layout must fail
+        // validation on the missing runtime assets, not on the binary check.
+        let error = validate_binary_bundle(temp.path()).unwrap_err().to_string();
+        assert!(error.contains("missing required runtime paths"));
     }
 
     #[test]
@@ -4808,7 +4800,7 @@ mod tests {
         let bundle = temp.path().join("bundle");
         ensure_dir(&bundle.join("bin")).unwrap();
         fs::write(bundle.join("bin/ctox-real"), "binary\n").unwrap();
-        for required_path in BINARY_BUNDLE_REQUIRED_PATHS {
+        for required_path in binary_bundle_required_paths() {
             let path = bundle.join(required_path);
             if required_path.ends_with(".json")
                 || required_path.ends_with(".html")
@@ -4816,7 +4808,7 @@ mod tests {
                 || required_path.ends_with(".css")
                 || required_path.ends_with(".mjs")
                 || required_path.ends_with(".toml")
-                || required_path == &"install.sh"
+                || required_path == "install.sh"
             {
                 ensure_dir(path.parent().unwrap()).unwrap();
                 fs::write(path, "asset\n").unwrap();

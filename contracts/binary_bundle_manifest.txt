@@ -1,0 +1,35 @@
+# Binary release bundle — required runtime paths.
+# Single source of truth consumed by BOTH sides:
+#   - installer validation: src/core/install/mod.rs (include_str!)
+#   - release packaging:   .github/workflows/release.yml (verify step)
+# One path per line; lines starting with # are comments.
+install.sh
+Cargo.toml
+contracts/source_origins_manifest.json
+src/apps/business-os/index.html
+src/apps/business-os/app.js
+src/apps/business-os/app.css
+src/apps/business-os/rxdb/dist/ctox-rxdb-js.mjs
+src/apps/business-os/scripts/validate-app-module.mjs
+src/apps/business-os/modules/documents/index.js
+src/apps/business-os/modules/spreadsheets/index.js
+src/apps/business-os/office-engine/features.json
+src/apps/business-os/vendor/ctox-office/ctox-office-document.mjs
+src/apps/business-os/vendor/ctox-office/ctox-office-spreadsheet.mjs
+src/apps/business-os/vendor/ctox-office/frame.html
+src/apps/business-os/vendor/ctox-office/provenance.json
+src/apps/business-os/vendor/ctox-office/runtime/ctox-documents.mjs
+src/apps/business-os/vendor/ctox-office/runtime/ctox-spreadsheets.mjs
+src/apps/business-os/vendor/ctox-office/forks/ctox-documents/manifest.json
+src/apps/business-os/vendor/ctox-office/forks/ctox-documents/business-os.css
+src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/manifest.json
+src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/business-os.css
+src/apps/business-os/vendor/ctox-office/forks/shared/business-os.css
+src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index.html
+src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/spreadsheeteditor/main/index.html
+src/apps/business-os/vendor/ctox-office/upstream/sdkjs/word/sdk-all-min.js
+src/apps/business-os/vendor/ctox-office/upstream/sdkjs/cell/sdk-all-min.js
+src/core/harness/Cargo.toml
+src/core/rxdb/Cargo.toml
+src/core/rxdb/tools/local_signaling_server.js
+src/skills/system

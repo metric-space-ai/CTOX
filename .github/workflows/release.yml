@@ -695,6 +695,26 @@ jobs:
           cp install.sh bundle/
           cp LICENSE bundle/
           cp docs/legal/NOTICE bundle/NOTICE
+          # Runtime source assets the installed daemon serves (validated by
+          # the installer against contracts/binary_bundle_manifest.txt — the
+          # shared single source of truth for this bundle's contents).
+          cp Cargo.toml bundle/
+          mkdir -p bundle/contracts
+          cp contracts/source_origins_manifest.json bundle/contracts/
+          cp contracts/binary_bundle_manifest.txt bundle/contracts/
+          mkdir -p bundle/src/apps
+          cp -r src/apps/business-os bundle/src/apps/business-os
+          mkdir -p bundle/src/core/harness bundle/src/core/rxdb/tools
+          cp src/core/harness/Cargo.toml bundle/src/core/harness/
+          cp src/core/rxdb/Cargo.toml bundle/src/core/rxdb/
+          cp src/core/rxdb/tools/local_signaling_server.js bundle/src/core/rxdb/tools/
+          mkdir -p bundle/src/skills
+          cp -r src/skills/system bundle/src/skills/system
+          # Drift guard: every manifest path must exist in the bundle.
+          while IFS= read -r p; do
+            case "$p" in ''|'#'*) continue;; esac
+            [ -e "bundle/$p" ] || { echo "bundle missing required path: $p" >&2; exit 1; }
+          done < contracts/binary_bundle_manifest.txt
           cd bundle && tar czf ../${{ matrix.artifact }}.tar.gz .
           cd .. && shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
 
