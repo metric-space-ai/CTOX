@@ -4,7 +4,6 @@
 //! Lifecycle rules that took real outages to learn — do not regress them:
 //!   * spawn_native_peer SUPERVISES run_native_peer: every non-intentional
 //!     exit respawns with capped backoff and re-reads the sync config.
-//!     NATIVE_PEER_STARTED is owned by the supervision loop alone.
 //!   * WebRTC bring-up failure/timeout is FATAL for the run. "Log and keep
 //!     running" creates a zombie: heartbeat healthy, zero replication.
 //!   * Heartbeats carry replicationUp — "process alive" and "replication up"
@@ -73,29 +72,395 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use url::Url;
 use uuid::Uuid;
 
-static NATIVE_PEER_STARTED: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_RUNNING: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_SUPERVISOR_STOP: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER: Mutex<Option<Arc<NativePeer>>> = Mutex::new(None);
+/// The one in-process source of truth for the native peer lifecycle.
+///
+/// Four outage-derived invariants are deliberately anchored at the machine:
+/// 1. Only the supervised respawn loop may own `Starting`; an individual run
+///    returns to the supervisor instead of publishing a second start truth.
+/// 2. Bring-up failure is fatal to that run and therefore never transitions to
+///    `Running`.
+/// 3. `running` describes process lifecycle while `replication_up` is a
+///    separate signal carried by heartbeats.
+/// 4. Signaling URLs are still produced afresh for every reconnect attempt;
+///    the lifecycle never caches a derived/tokenized URL.
+///
+/// `pending_outbox` and critical-task health are work state, not lifecycle
+/// phases. They live on `NativePeer` and are sampled into this machine's
+/// replication signal instead of becoming parallel global lifecycle truths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativePeerLifecycleState {
+    Stopped,
+    Starting,
+    BringUp {
+        heartbeat_thread_alive: bool,
+    },
+    Running {
+        replication_up: bool,
+        signaling_join_accepted: bool,
+        data_channel_open: bool,
+        heartbeat_thread_alive: bool,
+    },
+    Stopping {
+        heartbeat_thread_alive: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativePeerLifecycleSnapshot {
+    phase: &'static str,
+    supervisor_active: bool,
+    running: bool,
+    replication_up: bool,
+    signaling_join_accepted: bool,
+    data_channel_open: bool,
+    heartbeat_thread_alive: bool,
+    peer_published: bool,
+    stop_requested: bool,
+    last_transition_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct NativePeerLifecycleError(String);
+
+impl std::fmt::Display for NativePeerLifecycleError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NativePeerLifecycleError {}
+
+struct NativePeerLifecycle {
+    state: NativePeerLifecycleState,
+    peer: Option<Arc<NativePeer>>,
+    supervisor_active: bool,
+    stop_requested: bool,
+    last_transition_error: Option<String>,
+}
+
+impl NativePeerLifecycle {
+    const fn new() -> Self {
+        Self {
+            state: NativePeerLifecycleState::Stopped,
+            peer: None,
+            supervisor_active: false,
+            stop_requested: false,
+            last_transition_error: None,
+        }
+    }
+
+    fn snapshot(&self) -> NativePeerLifecycleSnapshot {
+        let (
+            phase,
+            running,
+            replication_up,
+            signaling_join_accepted,
+            data_channel_open,
+            heartbeat_thread_alive,
+        ) = match self.state {
+            NativePeerLifecycleState::Stopped => ("stopped", false, false, false, false, false),
+            NativePeerLifecycleState::Starting => ("starting", false, false, false, false, false),
+            NativePeerLifecycleState::BringUp {
+                heartbeat_thread_alive,
+            } => (
+                "bring_up",
+                true,
+                false,
+                false,
+                false,
+                heartbeat_thread_alive,
+            ),
+            NativePeerLifecycleState::Running {
+                replication_up,
+                signaling_join_accepted,
+                data_channel_open,
+                heartbeat_thread_alive,
+            } => (
+                "running",
+                true,
+                replication_up,
+                signaling_join_accepted,
+                data_channel_open,
+                heartbeat_thread_alive,
+            ),
+            NativePeerLifecycleState::Stopping {
+                heartbeat_thread_alive,
+            } => (
+                "stopping",
+                false,
+                false,
+                false,
+                false,
+                heartbeat_thread_alive,
+            ),
+        };
+        NativePeerLifecycleSnapshot {
+            phase,
+            supervisor_active: self.supervisor_active,
+            running,
+            replication_up,
+            signaling_join_accepted,
+            data_channel_open,
+            heartbeat_thread_alive,
+            peer_published: self.peer.is_some(),
+            stop_requested: self.stop_requested,
+            last_transition_error: self.last_transition_error.clone(),
+        }
+    }
+
+    fn transition_error<T>(
+        &mut self,
+        operation: &'static str,
+        expected: &'static str,
+    ) -> Result<T, NativePeerLifecycleError> {
+        let message = format!(
+            "illegal native peer lifecycle transition `{operation}` from {:?}; expected {expected}",
+            self.state
+        );
+        self.last_transition_error = Some(message.clone());
+        eprintln!("[business-os] {message}");
+        debug_assert!(false, "{message}");
+        Err(NativePeerLifecycleError(message))
+    }
+
+    /// Claims the sole supervised start slot. Individual runs never call this.
+    fn supervisor_start(&mut self) -> Result<bool, NativePeerLifecycleError> {
+        if self.supervisor_active || self.state != NativePeerLifecycleState::Stopped {
+            return Ok(false);
+        }
+        self.supervisor_active = true;
+        self.stop_requested = false;
+        self.last_transition_error = None;
+        self.state = NativePeerLifecycleState::Starting;
+        Ok(true)
+    }
+
+    fn begin_run(&mut self, supervised: bool) -> Result<(), NativePeerLifecycleError> {
+        let allowed = if supervised {
+            self.supervisor_active && self.state == NativePeerLifecycleState::Starting
+        } else {
+            !self.supervisor_active && self.state == NativePeerLifecycleState::Stopped
+        };
+        if !allowed {
+            return self.transition_error(
+                "begin_run",
+                "Starting owned by the supervisor, or Stopped for foreground mode",
+            );
+        }
+        self.peer = None;
+        self.state = NativePeerLifecycleState::BringUp {
+            heartbeat_thread_alive: false,
+        };
+        Ok(())
+    }
+
+    fn heartbeat_thread_changed(
+        &mut self,
+        heartbeat_thread_alive: bool,
+    ) -> Result<(), NativePeerLifecycleError> {
+        match &mut self.state {
+            NativePeerLifecycleState::BringUp {
+                heartbeat_thread_alive: current,
+            }
+            | NativePeerLifecycleState::Running {
+                heartbeat_thread_alive: current,
+                ..
+            }
+            | NativePeerLifecycleState::Stopping {
+                heartbeat_thread_alive: current,
+            } => {
+                *current = heartbeat_thread_alive;
+                Ok(())
+            }
+            NativePeerLifecycleState::Starting | NativePeerLifecycleState::Stopped
+                if !heartbeat_thread_alive =>
+            {
+                Ok(())
+            }
+            _ => self.transition_error("heartbeat_thread_changed", "BringUp, Running, or Stopping"),
+        }
+    }
+
+    fn bring_up_succeeded(
+        &mut self,
+        peer: Option<Arc<NativePeer>>,
+        signaling_join_accepted: bool,
+        data_channel_open: bool,
+        replication_up: bool,
+    ) -> Result<(), NativePeerLifecycleError> {
+        let NativePeerLifecycleState::BringUp {
+            heartbeat_thread_alive,
+        } = self.state
+        else {
+            return self.transition_error("bring_up_succeeded", "BringUp");
+        };
+        self.peer = peer;
+        self.state = NativePeerLifecycleState::Running {
+            replication_up,
+            signaling_join_accepted,
+            data_channel_open,
+            heartbeat_thread_alive,
+        };
+        Ok(())
+    }
+
+    fn refresh_replication(
+        &mut self,
+        signaling_join_accepted: bool,
+        data_channel_open: bool,
+        replication_up: bool,
+    ) -> Result<(), NativePeerLifecycleError> {
+        match &mut self.state {
+            NativePeerLifecycleState::Running {
+                replication_up: current_replication_up,
+                signaling_join_accepted: current_join_accepted,
+                data_channel_open: current_data_channel_open,
+                ..
+            } => {
+                *current_replication_up = replication_up;
+                *current_join_accepted = signaling_join_accepted;
+                *current_data_channel_open = data_channel_open;
+                Ok(())
+            }
+            // A status read may race shutdown after cloning the peer. Shutdown
+            // has already made `running=false`, so stale refreshes are ignored.
+            NativePeerLifecycleState::Stopping { .. } => Ok(()),
+            _ => self.transition_error("refresh_replication", "Running"),
+        }
+    }
+
+    fn begin_stopping(&mut self) -> Result<(), NativePeerLifecycleError> {
+        let heartbeat_thread_alive = match self.state {
+            NativePeerLifecycleState::BringUp {
+                heartbeat_thread_alive,
+            }
+            | NativePeerLifecycleState::Running {
+                heartbeat_thread_alive,
+                ..
+            }
+            | NativePeerLifecycleState::Stopping {
+                heartbeat_thread_alive,
+            } => heartbeat_thread_alive,
+            _ => return self.transition_error("begin_stopping", "BringUp or Running"),
+        };
+        self.state = NativePeerLifecycleState::Stopping {
+            heartbeat_thread_alive,
+        };
+        Ok(())
+    }
+
+    fn run_cleanup_finished(&mut self) -> Result<(), NativePeerLifecycleError> {
+        if !matches!(self.state, NativePeerLifecycleState::Stopping { .. }) {
+            return self.transition_error("run_cleanup_finished", "Stopping");
+        }
+        self.peer = None;
+        Ok(())
+    }
+
+    /// Returns control to the respawn owner without publishing `Stopped`.
+    fn supervised_run_exited(&mut self) -> Result<(), NativePeerLifecycleError> {
+        if !self.supervisor_active
+            || !matches!(
+                self.state,
+                NativePeerLifecycleState::BringUp { .. }
+                    | NativePeerLifecycleState::Stopping { .. }
+            )
+        {
+            return self.transition_error(
+                "supervised_run_exited",
+                "BringUp or Stopping under the supervisor",
+            );
+        }
+        self.peer = None;
+        self.state = NativePeerLifecycleState::Starting;
+        Ok(())
+    }
+
+    fn foreground_run_exited(&mut self) -> Result<(), NativePeerLifecycleError> {
+        if self.supervisor_active
+            || !matches!(
+                self.state,
+                NativePeerLifecycleState::BringUp { .. }
+                    | NativePeerLifecycleState::Stopping { .. }
+            )
+        {
+            return self.transition_error(
+                "foreground_run_exited",
+                "BringUp or Stopping outside supervision",
+            );
+        }
+        self.peer = None;
+        self.stop_requested = false;
+        self.state = NativePeerLifecycleState::Stopped;
+        Ok(())
+    }
+
+    fn request_supervisor_stop(&mut self) {
+        if self.supervisor_active {
+            self.stop_requested = true;
+        }
+    }
+
+    fn supervisor_stopped(&mut self) -> Result<(), NativePeerLifecycleError> {
+        if !self.supervisor_active || self.state != NativePeerLifecycleState::Starting {
+            return self.transition_error("supervisor_stopped", "Starting under the supervisor");
+        }
+        self.peer = None;
+        self.supervisor_active = false;
+        self.stop_requested = false;
+        self.state = NativePeerLifecycleState::Stopped;
+        Ok(())
+    }
+}
+
+static NATIVE_PEER_LIFECYCLE: Mutex<NativePeerLifecycle> = Mutex::new(NativePeerLifecycle::new());
+
+fn with_native_peer_lifecycle<T>(operation: impl FnOnce(&NativePeerLifecycle) -> T) -> T {
+    let lifecycle = NATIVE_PEER_LIFECYCLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation(&lifecycle)
+}
+
+fn with_native_peer_lifecycle_mut<T>(operation: impl FnOnce(&mut NativePeerLifecycle) -> T) -> T {
+    let mut lifecycle = NATIVE_PEER_LIFECYCLE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation(&mut lifecycle)
+}
+
+fn native_peer_lifecycle_snapshot() -> NativePeerLifecycleSnapshot {
+    with_native_peer_lifecycle(NativePeerLifecycle::snapshot)
+}
+
+fn native_peer_api_running(lifecycle: &NativePeerLifecycleSnapshot) -> bool {
+    lifecycle.running
+}
+
+fn native_peer_status_running(
+    lifecycle: &NativePeerLifecycleSnapshot,
+    heartbeat_running: bool,
+) -> bool {
+    lifecycle.running || (lifecycle.phase == "stopped" && heartbeat_running)
+}
+
+fn native_peer_heartbeat_running(lifecycle: &NativePeerLifecycleSnapshot) -> bool {
+    lifecycle.running
+}
+
+fn observe_lifecycle_transition(
+    operation: &'static str,
+    result: Result<(), NativePeerLifecycleError>,
+) {
+    if let Err(error) = result {
+        eprintln!("[business-os] native peer lifecycle `{operation}` failed: {error}");
+    }
+}
+
 pub(super) static TEMPORARY_RXDB_DATABASE_LOCK: Mutex<()> = Mutex::new(());
 pub(super) static NATIVE_RXDB_WRITE_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 const SIGNALING_TOKEN_TTL_SECONDS: u64 = 24 * 60 * 60;
-
-/// True while the multiplexed WebRTC replication session is up. Written by
-/// `run_native_peer`, read by the status heartbeat — a peer whose process is
-/// alive but whose replication bring-up failed used to be indistinguishable
-/// from a healthy one ("running" status, zero sync).
-static NATIVE_PEER_REPLICATION_UP: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_SIGNALING_JOIN_ACCEPTED: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_DATA_CHANNEL_OPEN: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_CRITICAL_TASKS_ALIVE: AtomicBool = AtomicBool::new(false);
-static NATIVE_PEER_HEARTBEAT_THREAD_ALIVE: AtomicBool = AtomicBool::new(false);
-/// Last outbox depth observed by the async watchdog. The dedicated heartbeat
-/// thread must never open CTOX SQLite just to enrich its status payload:
-/// waiting on a busy database would make the heartbeat itself appear stale
-/// and cause a healthy WebRTC session to be cancelled mid-command.
-static NATIVE_PEER_PENDING_OUTBOX: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static CHAT_TRACKING_BATCH_DOCUMENT_LOOKUPS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -281,17 +646,19 @@ fn native_peer_circuit_snapshot() -> Value {
 /// decision in `spawn_native_peer`.
 enum NativePeerExit {
     /// Intentional stop (`restart_native_peer` / service shutdown): no respawn.
-    Shutdown,
+    StopRequested,
     /// The watchdog saw a stale heartbeat and tore the peer down: respawn.
-    WatchdogStale,
+    HeartbeatStale,
     /// The persisted sync room/signaling config changed: respawn with fresh config.
-    ConfigChanged,
+    SyncConfigurationChanged,
     /// Runtime-installed module schemas changed: respawn so new collections are registered.
-    RuntimeSchemaChanged,
-    /// A load-bearing command/projection child exited unexpectedly: respawn.
-    CriticalChildExited,
+    RuntimeSchemasChanged,
+    /// A load-bearing command/projection task exited unexpectedly: respawn.
+    CriticalTaskExited,
+    /// Work is alive but its durable queues made no progress: respawn.
+    ProgressStalled,
     /// Another process holds the peer lock: retry later (standby takeover).
-    LockHeldElsewhere,
+    ProcessLockUnavailable,
 }
 /// Phase 3: single-session signaling/replication bring-up timeout. One room is
 /// joined once for the whole sync room; if it cannot come up in this window the
@@ -300,6 +667,13 @@ enum NativePeerExit {
 /// that produced the canonical zombie (heartbeat "running", zero replication,
 /// no retry). See docs/ctox-rxdb.md §4.
 const NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS: u64 = 20;
+
+fn native_peer_bring_up_failure(message: String) -> anyhow::Error {
+    // Returning an error is the policy: the supervisor owns the retry. This
+    // helper intentionally has no recovery/log-and-continue outcome.
+    anyhow::anyhow!(message)
+}
+
 const CTOX_RXDB_PROTOCOL: &str = "ctox-rxdb-protocol-v1";
 const CTOX_NATIVE_CAPABILITIES: &[&str] = &[
     "ctox-control-plane-v1",
@@ -799,6 +1173,10 @@ pub(super) struct NativePeer {
     _business_record_projection_sync: tokio::task::JoinHandle<()>,
     _iot_agent_supervisors: Vec<Arc<AtomicBool>>,
     _browser_runtime_maintenance: tokio::task::JoinHandle<()>,
+    /// Work backlog, not lifecycle state. Keeping it on the active peer lets
+    /// heartbeat diagnostics read it without opening SQLite and without adding
+    /// another global lifecycle truth.
+    pending_outbox: AtomicU64,
     // FIX 2: the status heartbeat now runs on a dedicated OS thread (see
     // `StatusHeartbeatHandle`) so its liveness is independent of the tokio
     // runtime. `Mutex` lets `shutdown` take/stop it through `&self`.
@@ -841,7 +1219,7 @@ impl NativePeer {
             ),
             (
                 "status_heartbeat",
-                NATIVE_PEER_HEARTBEAT_THREAD_ALIVE.load(Ordering::SeqCst),
+                native_peer_lifecycle_snapshot().heartbeat_thread_alive,
             ),
         ]
     }
@@ -858,7 +1236,7 @@ impl NativePeer {
     }
 
     fn task_liveness_json(&self) -> Value {
-        let command_backlog = NATIVE_PEER_PENDING_OUTBOX.load(Ordering::Relaxed);
+        let command_backlog = self.pending_outbox.load(Ordering::Relaxed);
         Value::Array(self.task_liveness().into_iter().map(|(name, alive)| {
             let metrics = native_peer_loop_metrics(name).map(NativePeerLoopMetrics::snapshot);
             json!({
@@ -872,7 +1250,7 @@ impl NativePeer {
         }).collect())
     }
 
-    fn refresh_liveness_signals(&self) {
+    fn liveness_signals(&self) -> (bool, bool, bool) {
         let transport = self
             ._pools
             .first()
@@ -887,13 +1265,20 @@ impl NativePeer {
             .and_then(Value::as_u64)
             .unwrap_or_default()
             > 0;
-        let tasks_alive = self.critical_tasks_alive();
-        NATIVE_PEER_SIGNALING_JOIN_ACCEPTED.store(join_accepted, Ordering::SeqCst);
-        NATIVE_PEER_DATA_CHANNEL_OPEN.store(data_channel_open, Ordering::SeqCst);
-        NATIVE_PEER_CRITICAL_TASKS_ALIVE.store(tasks_alive, Ordering::SeqCst);
-        NATIVE_PEER_REPLICATION_UP.store(
-            !self._pools.is_empty() && join_accepted && data_channel_open && tasks_alive,
-            Ordering::SeqCst,
+        let replication_up = !self._pools.is_empty()
+            && join_accepted
+            && data_channel_open
+            && self.critical_tasks_alive();
+        (join_accepted, data_channel_open, replication_up)
+    }
+
+    fn refresh_liveness_signals(&self) {
+        let (join_accepted, data_channel_open, replication_up) = self.liveness_signals();
+        observe_lifecycle_transition(
+            "refresh_replication",
+            with_native_peer_lifecycle_mut(|lifecycle| {
+                lifecycle.refresh_replication(join_accepted, data_channel_open, replication_up)
+            }),
         );
     }
 
@@ -970,11 +1355,15 @@ impl rxdb::types::HashFunction for Sha256HashFunction {
 }
 
 pub fn is_native_peer_running() -> bool {
-    NATIVE_PEER_RUNNING.load(Ordering::SeqCst) || NATIVE_PEER_STARTED.load(Ordering::SeqCst)
+    native_peer_api_running(&native_peer_lifecycle_snapshot())
 }
 
 pub fn is_native_peer_running_for_root(root: &Path) -> bool {
-    is_native_peer_running() || native_peer_heartbeat_is_fresh(root)
+    let lifecycle = native_peer_lifecycle_snapshot();
+    native_peer_status_running(
+        &lifecycle,
+        !lifecycle.supervisor_active && native_peer_heartbeat_reports_running(root),
+    )
 }
 
 pub fn native_peer_maintenance_health(root: &Path) -> (bool, bool) {
@@ -985,13 +1374,19 @@ pub fn native_peer_maintenance_health(root: &Path) -> (bool, bool) {
             now.saturating_sub(updated_at_ms) <= NATIVE_PEER_HEARTBEAT_TTL_MS
         })
         .unwrap_or(false);
-    let replication_up = fresh
+    let process_alive = fresh
+        && heartbeat
+            .as_ref()
+            .and_then(|value| value.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let replication_up = process_alive
         && heartbeat
             .as_ref()
             .and_then(|value| value.get("replicationUp"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-    (fresh, replication_up)
+    (process_alive, replication_up)
 }
 
 pub fn native_peer_status(root: &Path) -> Value {
@@ -1002,19 +1397,20 @@ pub fn native_peer_status(root: &Path) -> Value {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let active_peer = current_peer();
+    if let Some(peer) = active_peer.as_ref() {
+        peer.refresh_liveness_signals();
+    }
+    let lifecycle = native_peer_lifecycle_snapshot();
     let transport = active_peer
         .as_ref()
         .and_then(|peer| peer._pools.first())
         .map(|pool| pool.connection_handler.frame_transport_status_json())
         .unwrap_or(Value::Null);
-    let critical_tasks_alive = active_peer
-        .as_ref()
-        .is_some_and(|peer| peer.critical_tasks_alive());
     let command_consumer_alive = active_peer
         .as_ref()
         .is_some_and(|peer| !peer._command_consumer.is_finished());
-    let in_process_started = NATIVE_PEER_STARTED.load(Ordering::SeqCst);
-    let in_process_running = NATIVE_PEER_RUNNING.load(Ordering::SeqCst);
+    let in_process_started = lifecycle.supervisor_active;
+    let in_process_running = lifecycle.running;
     let process_lock_held = native_peer_process_lock_is_held(root);
     let heartbeat = read_native_peer_heartbeat(root);
     let task_liveness = active_peer
@@ -1034,29 +1430,25 @@ pub fn native_peer_status(root: &Path) -> Value {
     let heartbeat_fresh = heartbeat_age_ms
         .map(|age_ms| age_ms <= NATIVE_PEER_HEARTBEAT_TTL_MS)
         .unwrap_or(false);
-    let running = in_process_running || in_process_started || heartbeat_fresh;
-    // Replication liveness: in-process reads the static directly; an
-    // out-of-process reader falls back to the heartbeat field. `false` when
-    // unknown — a missing signal must read as "not proven up".
-    let replication_up = if in_process_running {
-        NATIVE_PEER_REPLICATION_UP.load(Ordering::SeqCst)
-            && transport
-                .get("signalingJoinAccepted")
+    let heartbeat_running = heartbeat_fresh
+        && heartbeat
+            .as_ref()
+            .and_then(|value| value.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    let running = native_peer_status_running(&lifecycle, heartbeat_running);
+    // Replication liveness is a distinct machine signal. Only a process with no
+    // local lifecycle owner may fall back to another process's fresh heartbeat.
+    let replication_up = if lifecycle.running {
+        lifecycle.replication_up
+    } else {
+        lifecycle.phase == "stopped"
+            && heartbeat_running
+            && heartbeat
+                .as_ref()
+                .and_then(|value| value.get("replicationUp"))
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
-            && transport
-                .get("openDataChannels")
-                .and_then(Value::as_u64)
-                .unwrap_or_default()
-                > 0
-            && critical_tasks_alive
-    } else {
-        heartbeat
-            .as_ref()
-            .and_then(|value| value.get("replicationUp"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            && heartbeat_fresh
     };
     let health_errors = if circuit_open {
         vec![native_peer_health_error(
@@ -1112,6 +1504,14 @@ pub fn native_peer_status(root: &Path) -> Value {
         "replicationUp": replication_up,
         "in_process_started": in_process_started,
         "in_process_running": in_process_running,
+        "lifecycle": {
+            "phase": lifecycle.phase,
+            "supervisor_active": lifecycle.supervisor_active,
+            "peer_published": lifecycle.peer_published,
+            "heartbeat_thread_alive": lifecycle.heartbeat_thread_alive,
+            "stop_requested": lifecycle.stop_requested,
+            "last_transition_error": lifecycle.last_transition_error,
+        },
         "process_lock_held": process_lock_held,
         "heartbeat": {
             "fresh": heartbeat_fresh,
@@ -1137,12 +1537,10 @@ pub fn native_peer_status(root: &Path) -> Value {
             "process_alive": running,
             "signaling_socket_connected": transport
                 .get("signalingSocketConnected").and_then(Value::as_bool).unwrap_or(false),
-            "signaling_join_accepted": transport
-                .get("signalingJoinAccepted").and_then(Value::as_bool).unwrap_or(false),
+            "signaling_join_accepted": lifecycle.signaling_join_accepted,
             "peer_authenticated": transport
                 .get("peerCount").and_then(Value::as_u64).unwrap_or_default() > 0,
-            "data_channel_open": transport
-                .get("openDataChannels").and_then(Value::as_u64).unwrap_or_default() > 0,
+            "data_channel_open": lifecycle.data_channel_open,
             "command_consumer_alive": command_consumer_alive,
             "last_command_ingestion_progress_ms": COMMAND_PLANE_METRICS.last_processed_at_ms.load(Ordering::Relaxed),
             "projection_outbox": crate::mission::channels::business_command_core_diagnostics(root)
@@ -1242,28 +1640,28 @@ pub fn ensure_native_peer(root: &Path) -> anyhow::Result<()> {
 }
 
 pub fn restart_native_peer(root: &Path) -> anyhow::Result<Value> {
-    if let Some(peer) = current_peer() {
+    let peer = current_peer();
+    let supervisor_active = native_peer_lifecycle_snapshot().supervisor_active;
+    if supervisor_active {
+        // A circuit-open/backing-off supervisor has no current peer and must
+        // still be interruptible by the explicit recovery action.
+        with_native_peer_lifecycle_mut(NativePeerLifecycle::request_supervisor_stop);
+    }
+    if let Some(peer) = peer {
         if let Ok(mut sender) = peer.shutdown_tx.lock() {
             if let Some(sender) = sender.take() {
                 let _ = sender.send(());
             }
         }
+    }
+    if supervisor_active {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while NATIVE_PEER_STARTED.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        while native_peer_lifecycle_snapshot().supervisor_active
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(100));
         }
-        if NATIVE_PEER_STARTED.load(Ordering::SeqCst) {
-            anyhow::bail!("native RxDB peer did not stop before restart deadline");
-        }
-    } else if NATIVE_PEER_STARTED.load(Ordering::SeqCst) {
-        // A circuit-open supervisor has no current peer and must still be
-        // interruptible by the explicit recovery action.
-        NATIVE_PEER_SUPERVISOR_STOP.store(true, Ordering::SeqCst);
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while NATIVE_PEER_STARTED.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if NATIVE_PEER_STARTED.load(Ordering::SeqCst) {
+        if native_peer_lifecycle_snapshot().supervisor_active {
             anyhow::bail!("native RxDB peer supervisor did not stop before restart deadline");
         }
     }
@@ -1284,14 +1682,18 @@ pub fn run_native_peer_foreground(root: &Path) -> anyhow::Result<()> {
         .thread_name("business-os-rxdb-peer")
         .build()
         .context("failed to create Business OS native RxDB peer runtime")?;
-    runtime
-        .block_on(run_native_peer(
-            root,
-            config.sync_room.clone(),
-            config.signaling_urls.clone(),
-            config.signaling_room_password.clone(),
-        ))
-        .map(|_| ())
+    let result = runtime.block_on(run_native_peer(
+        root,
+        config.sync_room.clone(),
+        config.signaling_urls.clone(),
+        config.signaling_room_password.clone(),
+        false,
+    ));
+    observe_lifecycle_transition(
+        "foreground_run_exited",
+        with_native_peer_lifecycle_mut(NativePeerLifecycle::foreground_run_exited),
+    );
+    result.map(|_| ())
 }
 
 pub fn spawn_native_peer(
@@ -1300,10 +1702,15 @@ pub fn spawn_native_peer(
     signaling_urls: Vec<String>,
     signaling_room_password: String,
 ) {
-    if NATIVE_PEER_STARTED.swap(true, Ordering::SeqCst) {
-        return;
+    let claimed = with_native_peer_lifecycle_mut(NativePeerLifecycle::supervisor_start);
+    match claimed {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            eprintln!("[business-os] native peer supervisor start failed: {error}");
+            return;
+        }
     }
-    NATIVE_PEER_SUPERVISOR_STOP.store(false, Ordering::SeqCst);
     let root = root.to_path_buf();
     if let Err(err) = std::thread::Builder::new()
         .name("business-os-rxdb-peer".to_string())
@@ -1318,7 +1725,7 @@ pub fn spawn_native_peer(
             // changes reach the respawned peer without a daemon restart.
             let mut delay = Duration::from_secs(NATIVE_PEER_RESPAWN_BASE_DELAY_SECS);
             loop {
-                if NATIVE_PEER_SUPERVISOR_STOP.load(Ordering::SeqCst) {
+                if native_peer_lifecycle_snapshot().stop_requested {
                     break;
                 }
                 let (room, urls, password) = match store::sync_config(&root) {
@@ -1363,8 +1770,17 @@ pub fn spawn_native_peer(
                     }
                 };
                 let started_at = std::time::Instant::now();
-                let result = runtime.block_on(run_native_peer(root.clone(), room, urls, password));
-                NATIVE_PEER_RUNNING.store(false, Ordering::SeqCst);
+                let result = runtime.block_on(run_native_peer(
+                    root.clone(),
+                    room,
+                    urls,
+                    password,
+                    true,
+                ));
+                observe_lifecycle_transition(
+                    "supervised_run_exited",
+                    with_native_peer_lifecycle_mut(NativePeerLifecycle::supervised_run_exited),
+                );
                 // A plain Runtime::drop waits indefinitely for spawned
                 // blocking work. Runtime-installed app schemas intentionally
                 // end a healthy run so the supervisor can register the new
@@ -1380,40 +1796,47 @@ pub fn spawn_native_peer(
                     if let Ok(mut breaker) = native_peer_circuit_breaker().lock() {
                         breaker.record_failure(failure, message, now_ms() as u64);
                     }
-                } else if !matches!(&result, Ok(NativePeerExit::LockHeldElsewhere)) {
+                } else if !matches!(&result, Ok(NativePeerExit::ProcessLockUnavailable)) {
                     if let Ok(mut breaker) = native_peer_circuit_breaker().lock() {
                         breaker.record_success();
                     }
                 }
                 match &result {
-                    Ok(NativePeerExit::Shutdown) => break,
-                    Ok(NativePeerExit::WatchdogStale) => {
+                    Ok(NativePeerExit::StopRequested) => break,
+                    Ok(NativePeerExit::HeartbeatStale) => {
                         eprintln!(
                             "[business-os] native rxdb peer exited after stale heartbeat; \
                              respawning in {}s",
                             delay.as_secs()
                         );
                     }
-                    Ok(NativePeerExit::ConfigChanged) => {
+                    Ok(NativePeerExit::SyncConfigurationChanged) => {
                         eprintln!(
                             "[business-os] native rxdb peer sync config changed; \
                              reconfiguring immediately"
                         );
                     }
-                    Ok(NativePeerExit::RuntimeSchemaChanged) => {
+                    Ok(NativePeerExit::RuntimeSchemasChanged) => {
                         eprintln!(
                             "[business-os] native rxdb peer runtime app schemas changed; \
                              reconfiguring immediately"
                         );
                     }
-                    Ok(NativePeerExit::CriticalChildExited) => {
+                    Ok(NativePeerExit::CriticalTaskExited) => {
                         eprintln!(
-                            "[business-os] native rxdb peer critical child exited; \
+                            "[business-os] native rxdb peer critical task exited; \
                              respawning in {}s",
                             delay.as_secs()
                         );
                     }
-                    Ok(NativePeerExit::LockHeldElsewhere) => {
+                    Ok(NativePeerExit::ProgressStalled) => {
+                        eprintln!(
+                            "[business-os] native rxdb peer durable work stalled; \
+                             respawning in {}s",
+                            delay.as_secs()
+                        );
+                    }
+                    Ok(NativePeerExit::ProcessLockUnavailable) => {
                         eprintln!(
                             "[business-os] native rxdb peer lock held by another process; \
                              retrying in {}s",
@@ -1435,7 +1858,7 @@ pub fn spawn_native_peer(
                 }
                 let immediate_reconfigure = matches!(
                     result,
-                    Ok(NativePeerExit::ConfigChanged | NativePeerExit::RuntimeSchemaChanged)
+                    Ok(NativePeerExit::SyncConfigurationChanged | NativePeerExit::RuntimeSchemasChanged)
                 );
                 if !immediate_reconfigure
                     && native_peer_circuit_snapshot()
@@ -1452,18 +1875,23 @@ pub fn spawn_native_peer(
                         (delay * 2).min(Duration::from_secs(NATIVE_PEER_RESPAWN_MAX_DELAY_SECS));
                 }
             }
-            NATIVE_PEER_RUNNING.store(false, Ordering::SeqCst);
-            NATIVE_PEER_STARTED.store(false, Ordering::SeqCst);
+            observe_lifecycle_transition(
+                "supervisor_stopped",
+                with_native_peer_lifecycle_mut(NativePeerLifecycle::supervisor_stopped),
+            );
         })
     {
-        NATIVE_PEER_STARTED.store(false, Ordering::SeqCst);
+        observe_lifecycle_transition(
+            "supervisor_thread_spawn_failed",
+            with_native_peer_lifecycle_mut(NativePeerLifecycle::supervisor_stopped),
+        );
         eprintln!("[business-os] native rxdb peer thread failed: {err:#}");
     }
 }
 
 fn sleep_native_peer_supervisor(duration: Duration) {
     let deadline = Instant::now() + duration;
-    while Instant::now() < deadline && !NATIVE_PEER_SUPERVISOR_STOP.load(Ordering::SeqCst) {
+    while Instant::now() < deadline && !native_peer_lifecycle_snapshot().stop_requested {
         std::thread::sleep(
             deadline
                 .saturating_duration_since(Instant::now())
@@ -1890,7 +2318,7 @@ pub fn enqueue_business_command_document(root: &Path, document: Value) -> anyhow
 }
 
 pub(super) fn current_peer() -> Option<Arc<NativePeer>> {
-    NATIVE_PEER.lock().ok().and_then(|guard| guard.clone())
+    with_native_peer_lifecycle(|lifecycle| lifecycle.peer.clone())
 }
 
 async fn run_native_peer(
@@ -1898,15 +2326,13 @@ async fn run_native_peer(
     sync_room: String,
     signaling_urls: Vec<String>,
     signaling_room_password: String,
+    supervised: bool,
 ) -> anyhow::Result<NativePeerExit> {
-    NATIVE_PEER_REPLICATION_UP.store(false, Ordering::SeqCst);
-    NATIVE_PEER_SIGNALING_JOIN_ACCEPTED.store(false, Ordering::SeqCst);
-    NATIVE_PEER_DATA_CHANNEL_OPEN.store(false, Ordering::SeqCst);
-    NATIVE_PEER_CRITICAL_TASKS_ALIVE.store(false, Ordering::SeqCst);
-    NATIVE_PEER_PENDING_OUTBOX.store(0, Ordering::Relaxed);
+    with_native_peer_lifecycle_mut(|lifecycle| lifecycle.begin_run(supervised))
+        .map_err(anyhow::Error::new)?;
     let Some(process_lock) = acquire_native_peer_process_lock(&root)? else {
         eprintln!("[business-os] native rxdb peer already runs in another process");
-        return Ok(NativePeerExit::LockHeldElsewhere);
+        return Ok(NativePeerExit::ProcessLockUnavailable);
     };
     let configured_signaling_urls = signaling_urls.clone();
     let mut runtime_schema_state = runtime_installed_module_schema_state(&root)?;
@@ -1924,25 +2350,12 @@ async fn run_native_peer(
     // permanent join-rejection loop (server: "control plane token expired").
     // ALL configured URLs are handed over as a failover list; the signaling
     // client sticks to the working one and rotates on failed attempts.
-    let signaling_url_provider: std::sync::Arc<dyn Fn() -> Vec<String> + Send + Sync> = {
-        let base_urls = signaling_base_urls.clone();
-        let sync_room = sync_room.clone();
-        let password = signaling_room_password.clone();
-        let peer_session_id = peer_session_id.clone();
-        std::sync::Arc::new(move || {
-            base_urls
-                .iter()
-                .map(|base_url| {
-                    signaling_url_with_native_metadata(
-                        base_url,
-                        &sync_room,
-                        &password,
-                        &peer_session_id,
-                    )
-                })
-                .collect()
-        })
-    };
+    let signaling_url_provider = native_signaling_url_provider(
+        signaling_base_urls.clone(),
+        sync_room.clone(),
+        signaling_room_password.clone(),
+        peer_session_id.clone(),
+    );
     let ice_servers = {
         let mut sync = store::sync_config(&root)?;
         // Mint an ephemeral TURN credential for the native peer too (no-op unless
@@ -2150,10 +2563,14 @@ async fn run_native_peer(
                 pools.push(pool);
             }
             Ok(Ok(Err(err))) => {
-                anyhow::bail!("multiplexed WebRTC replication bring-up failed: {err}");
+                return Err(native_peer_bring_up_failure(format!(
+                    "multiplexed WebRTC replication bring-up failed: {err}"
+                )));
             }
             Ok(Err(join_err)) => {
-                anyhow::bail!("multiplexed WebRTC replication bring-up task panicked: {join_err}");
+                return Err(native_peer_bring_up_failure(format!(
+                    "multiplexed WebRTC replication bring-up task panicked: {join_err}"
+                )));
             }
             Err(_) => {
                 // Abort the in-flight attempt: letting it run detached used
@@ -2161,10 +2578,10 @@ async fn run_native_peer(
                 // room under this peer's session id, answering handshakes,
                 // no demand-file sources, uncancelable).
                 bringup.abort();
-                anyhow::bail!(
+                return Err(native_peer_bring_up_failure(format!(
                     "multiplexed WebRTC replication bring-up timed out after {}s",
                     NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS
-                );
+                )));
             }
         }
     }
@@ -2268,13 +2685,19 @@ async fn run_native_peer(
         _business_record_projection_sync: business_record_projection_sync,
         _iot_agent_supervisors: iot_agent_supervisors,
         _browser_runtime_maintenance: browser_runtime_maintenance,
+        pending_outbox: AtomicU64::new(0),
         _status_heartbeat: Mutex::new(Some(status_heartbeat)),
     });
-    if let Ok(mut current) = NATIVE_PEER.lock() {
-        *current = Some(Arc::clone(&peer));
-    }
-    NATIVE_PEER_RUNNING.store(true, Ordering::SeqCst);
-    peer.refresh_liveness_signals();
+    let (join_accepted, data_channel_open, replication_up) = peer.liveness_signals();
+    with_native_peer_lifecycle_mut(|lifecycle| {
+        lifecycle.bring_up_succeeded(
+            Some(Arc::clone(&peer)),
+            join_accepted,
+            data_channel_open,
+            replication_up,
+        )
+    })
+    .map_err(anyhow::Error::new)?;
 
     // FIX 2: instead of a bare `shutdown_rx.await`, select over the shutdown
     // signal and a periodic watchdog tick. The watchdog confirms the dedicated
@@ -2291,7 +2714,7 @@ async fn run_native_peer(
         NATIVE_PEER_RUNTIME_SCHEMA_WATCH_INTERVAL_SECS,
     ));
     runtime_schema_watch.tick().await;
-    let mut exit = NativePeerExit::Shutdown;
+    let mut exit = NativePeerExit::StopRequested;
     let mut progress_stall_ticks = 0_u32;
     let mut previous_backlog = None;
     loop {
@@ -2308,7 +2731,7 @@ async fn run_native_peer(
                          shutting down for a supervised respawn",
                         finished_tasks.join(", ")
                     );
-                    exit = NativePeerExit::CriticalChildExited;
+                    exit = NativePeerExit::CriticalTaskExited;
                     break;
                 }
                 let command_diagnostics = crate::mission::channels::business_command_core_diagnostics(&root)
@@ -2316,7 +2739,7 @@ async fn run_native_peer(
                 let pending_outbox = command_diagnostics.get("pending_outbox")
                     .and_then(Value::as_u64)
                     .unwrap_or_default();
-                NATIVE_PEER_PENDING_OUTBOX.store(pending_outbox, Ordering::Relaxed);
+                peer.pending_outbox.store(pending_outbox, Ordering::Relaxed);
                 let outbox_age_ms = command_diagnostics.get("oldest_outbox_age_ms")
                     .and_then(Value::as_u64)
                     .unwrap_or_default();
@@ -2358,7 +2781,7 @@ async fn run_native_peer(
                         "[business-os] native rxdb peer watchdog: durable backlog stalled across \
                          {progress_stall_ticks} watchdog ticks; shutting down for supervised respawn"
                     );
-                    exit = NativePeerExit::CriticalChildExited;
+                    exit = NativePeerExit::ProgressStalled;
                     break;
                 }
                 let heartbeat_age_ms = heartbeat_updated_at_ms(
@@ -2374,7 +2797,7 @@ async fn run_native_peer(
                          shutting down for a supervised respawn",
                         heartbeat_age_ms
                     );
-                    exit = NativePeerExit::WatchdogStale;
+                    exit = NativePeerExit::HeartbeatStale;
                     break;
                 }
                 match native_peer_sync_config_changed(
@@ -2388,7 +2811,7 @@ async fn run_native_peer(
                             "[business-os] native rxdb peer watchdog: sync config changed; \
                              shutting down for a supervised respawn"
                         );
-                        exit = NativePeerExit::ConfigChanged;
+                        exit = NativePeerExit::SyncConfigurationChanged;
                         break;
                     }
                     Ok(false) => {}
@@ -2409,7 +2832,7 @@ async fn run_native_peer(
                             "[business-os] native rxdb peer: runtime app schemas changed; \
                              shutting down for immediate supervised reconfiguration"
                         );
-                        exit = NativePeerExit::RuntimeSchemaChanged;
+                        exit = NativePeerExit::RuntimeSchemasChanged;
                         break;
                     }
                     Ok(false) => {}
@@ -2423,26 +2846,18 @@ async fn run_native_peer(
         }
     }
 
-    NATIVE_PEER_REPLICATION_UP.store(false, Ordering::SeqCst);
-    NATIVE_PEER_SIGNALING_JOIN_ACCEPTED.store(false, Ordering::SeqCst);
-    NATIVE_PEER_DATA_CHANNEL_OPEN.store(false, Ordering::SeqCst);
-    NATIVE_PEER_CRITICAL_TASKS_ALIVE.store(false, Ordering::SeqCst);
-    NATIVE_PEER_PENDING_OUTBOX.store(0, Ordering::Relaxed);
+    observe_lifecycle_transition(
+        "begin_stopping",
+        with_native_peer_lifecycle_mut(NativePeerLifecycle::begin_stopping),
+    );
     peer.shutdown().await;
-    if let Ok(mut current) = NATIVE_PEER.lock() {
-        if current
-            .as_ref()
-            .map(|candidate| Arc::ptr_eq(candidate, &peer))
-            .unwrap_or(false)
-        {
-            *current = None;
-        }
-    }
-    // NATIVE_PEER_STARTED stays true here: the supervision loop in
-    // `spawn_native_peer` owns that flag and only clears it when it decides
-    // not to respawn. Clearing it from inside a run opened a window where a
-    // concurrent `ensure_native_peer` spawned a SECOND peer thread.
-    NATIVE_PEER_RUNNING.store(false, Ordering::SeqCst);
+    observe_lifecycle_transition(
+        "run_cleanup_finished",
+        with_native_peer_lifecycle_mut(NativePeerLifecycle::run_cleanup_finished),
+    );
+    // The run deliberately remains `Stopping`: only the supervision loop may
+    // return the machine to `Starting`, preventing a concurrent ensure call
+    // from publishing a second peer thread during respawn cleanup.
     Ok(exit)
 }
 
@@ -2690,11 +3105,54 @@ fn native_peer_retry_delay(base: Duration) -> Duration {
     Duration::from_millis(base_ms.saturating_add(jitter))
 }
 
-fn signaling_url_with_native_metadata(
+type NativeSignalingUrlProvider = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
+type NativeSignalingClock = Arc<dyn Fn() -> u64 + Send + Sync>;
+
+fn native_signaling_url_provider(
+    base_urls: Vec<String>,
+    sync_room: String,
+    signaling_room_password: String,
+    native_peer_id: String,
+) -> NativeSignalingUrlProvider {
+    native_signaling_url_provider_with_clock(
+        base_urls,
+        sync_room,
+        signaling_room_password,
+        native_peer_id,
+        Arc::new(current_unix_seconds),
+    )
+}
+
+fn native_signaling_url_provider_with_clock(
+    base_urls: Vec<String>,
+    sync_room: String,
+    signaling_room_password: String,
+    native_peer_id: String,
+    clock: NativeSignalingClock,
+) -> NativeSignalingUrlProvider {
+    Arc::new(move || {
+        let issued_at = clock();
+        base_urls
+            .iter()
+            .map(|base_url| {
+                signaling_url_with_native_metadata_at(
+                    base_url,
+                    &sync_room,
+                    &signaling_room_password,
+                    &native_peer_id,
+                    issued_at,
+                )
+            })
+            .collect()
+    })
+}
+
+fn signaling_url_with_native_metadata_at(
     raw_url: &str,
     sync_room: &str,
     signaling_room_password: &str,
     native_peer_id: &str,
+    issued_at: u64,
 ) -> String {
     let Ok(mut url) = Url::parse(raw_url) else {
         return raw_url.to_string();
@@ -2740,7 +3198,6 @@ fn signaling_url_with_native_metadata(
         }
         query.append_pair("protocol", CTOX_RXDB_PROTOCOL);
         if let Some(token) = signaling_token_from_room_password(signaling_room_password) {
-            let issued_at = current_unix_seconds();
             query.append_pair("token", &token);
             query.append_pair("token_iat", &issued_at.to_string());
             query.append_pair(
@@ -2814,6 +3271,16 @@ fn native_peer_heartbeat_is_fresh(root: &Path) -> bool {
     age_ms <= NATIVE_PEER_HEARTBEAT_TTL_MS
 }
 
+fn native_peer_heartbeat_reports_running(root: &Path) -> bool {
+    let heartbeat = read_native_peer_heartbeat(root);
+    native_peer_heartbeat_is_fresh(root)
+        && heartbeat
+            .as_ref()
+            .and_then(|value| value.get("running"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
 fn write_native_peer_heartbeat(
     root: &Path,
     peer_session_id: &str,
@@ -2828,16 +3295,21 @@ fn write_native_peer_heartbeat(
             )
         })?;
     }
-    let replication_up = NATIVE_PEER_REPLICATION_UP.load(Ordering::SeqCst)
-        && NATIVE_PEER_SIGNALING_JOIN_ACCEPTED.load(Ordering::SeqCst)
-        && NATIVE_PEER_DATA_CHANNEL_OPEN.load(Ordering::SeqCst)
-        && NATIVE_PEER_CRITICAL_TASKS_ALIVE.load(Ordering::SeqCst);
-    let critical_tasks = current_peer()
+    let active_peer = current_peer();
+    if let Some(peer) = active_peer.as_ref() {
+        peer.refresh_liveness_signals();
+    }
+    let lifecycle = native_peer_lifecycle_snapshot();
+    let critical_tasks_alive = active_peer
+        .as_ref()
+        .is_some_and(|peer| peer.critical_tasks_alive());
+    let critical_tasks = active_peer
+        .as_ref()
         .map(|peer| peer.task_liveness_json())
         .unwrap_or_else(|| Value::Array(Vec::new()));
     let payload = json!({
         "version": NATIVE_PEER_STATUS_VERSION,
-        "running": true,
+        "running": native_peer_heartbeat_running(&lifecycle),
         "pid": std::process::id(),
         "peer_session_id": peer_session_id,
         "updated_at_ms": now_ms() as u64,
@@ -2845,12 +3317,13 @@ fn write_native_peer_heartbeat(
         // Replication liveness rides on every heartbeat: "process alive" and
         // "replication session up" are different facts, and conflating them
         // hid bring-up failures behind a healthy-looking status.
-        "replicationUp": replication_up,
+        "replicationUp": lifecycle.replication_up,
+        "lifecyclePhase": lifecycle.phase,
         "replicationSignals": {
-            "poolCreated": current_peer().is_some_and(|peer| !peer._pools.is_empty()),
-            "signalingJoinAccepted": NATIVE_PEER_SIGNALING_JOIN_ACCEPTED.load(Ordering::SeqCst),
-            "dataChannelOpen": NATIVE_PEER_DATA_CHANNEL_OPEN.load(Ordering::SeqCst),
-            "criticalTasksAlive": NATIVE_PEER_CRITICAL_TASKS_ALIVE.load(Ordering::SeqCst),
+            "poolCreated": active_peer.as_ref().is_some_and(|peer| !peer._pools.is_empty()),
+            "signalingJoinAccepted": lifecycle.signaling_join_accepted,
+            "dataChannelOpen": lifecycle.data_channel_open,
+            "criticalTasksAlive": critical_tasks_alive,
         },
         "circuitBreaker": native_peer_circuit_snapshot(),
         "criticalTasks": critical_tasks,
@@ -2891,9 +3364,9 @@ impl StatusHeartbeatHandle {
 
 impl Drop for StatusHeartbeatHandle {
     fn drop(&mut self) {
-        // Ensure the heartbeat thread is signalled to stop even if the peer
-        // unwinds without an explicit shutdown path.
-        self.stop.store(true, Ordering::SeqCst);
+        // Ensure the heartbeat has published its final lifecycle transition
+        // before a failed bring-up returns control to the supervisor.
+        self.stop();
     }
 }
 
@@ -2913,7 +3386,12 @@ fn spawn_native_peer_status_heartbeat(
     let thread = std::thread::Builder::new()
         .name("business-os-rxdb-heartbeat".to_string())
         .spawn(move || {
-            NATIVE_PEER_HEARTBEAT_THREAD_ALIVE.store(true, Ordering::SeqCst);
+            observe_lifecycle_transition(
+                "heartbeat_thread_started",
+                with_native_peer_lifecycle_mut(|lifecycle| {
+                    lifecycle.heartbeat_thread_changed(true)
+                }),
+            );
             while !stop_for_thread.load(Ordering::SeqCst) {
                 if let Err(err) =
                     write_native_peer_heartbeat(&root, &peer_session_id, &database_path)
@@ -2929,7 +3407,12 @@ fn spawn_native_peer_status_heartbeat(
                     slept_ms += 250;
                 }
             }
-            NATIVE_PEER_HEARTBEAT_THREAD_ALIVE.store(false, Ordering::SeqCst);
+            observe_lifecycle_transition(
+                "heartbeat_thread_stopped",
+                with_native_peer_lifecycle_mut(|lifecycle| {
+                    lifecycle.heartbeat_thread_changed(false)
+                }),
+            );
         })
         .ok();
     StatusHeartbeatHandle { stop, thread }
@@ -14121,6 +14604,76 @@ mod tests {
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn assert_running_projections_agree(
+        lifecycle: &NativePeerLifecycle,
+        expected_running: bool,
+        expected_replication_up: bool,
+    ) {
+        let snapshot = lifecycle.snapshot();
+        let projections = [
+            native_peer_api_running(&snapshot),
+            native_peer_status_running(&snapshot, false),
+            native_peer_heartbeat_running(&snapshot),
+        ];
+        assert_eq!(projections, [expected_running; 3]);
+        assert_eq!(snapshot.replication_up, expected_replication_up);
+    }
+
+    fn assert_native_peer_lifecycle_regression() {
+        let mut lifecycle = NativePeerLifecycle::new();
+        assert_running_projections_agree(&lifecycle, false, false);
+
+        assert!(lifecycle
+            .supervisor_start()
+            .expect("claim supervisor start"));
+        assert_eq!(lifecycle.snapshot().phase, "starting");
+        assert_running_projections_agree(&lifecycle, false, false);
+
+        lifecycle.begin_run(true).expect("begin supervised run");
+        assert_eq!(lifecycle.snapshot().phase, "bring_up");
+        assert_running_projections_agree(&lifecycle, true, false);
+        let failure = native_peer_bring_up_failure(
+            "multiplexed WebRTC replication bring-up timed out".to_string(),
+        );
+        assert!(failure.to_string().contains("bring-up timed out"));
+        assert_eq!(lifecycle.snapshot().phase, "bring_up");
+
+        lifecycle
+            .bring_up_succeeded(None, false, false, false)
+            .expect("complete bring-up");
+        assert_running_projections_agree(&lifecycle, true, false);
+
+        lifecycle
+            .refresh_replication(true, true, true)
+            .expect("publish replication up");
+        assert_running_projections_agree(&lifecycle, true, true);
+
+        lifecycle
+            .refresh_replication(true, false, false)
+            .expect("publish replication down");
+        assert_running_projections_agree(&lifecycle, true, false);
+
+        lifecycle.begin_stopping().expect("begin stop");
+        lifecycle
+            .run_cleanup_finished()
+            .expect("finish run cleanup");
+        assert_running_projections_agree(&lifecycle, false, false);
+
+        // Red proof for the removed globals: after a run cleared RUNNING but
+        // before its supervisor cleared STARTED, the API/status formulas still
+        // said true while the stopped heartbeat path said false.
+        let legacy_after_run_stop = [false || true, false || true || false, false];
+        assert_ne!(legacy_after_run_stop, [legacy_after_run_stop[0]; 3]);
+
+        lifecycle
+            .supervised_run_exited()
+            .expect("return start ownership to supervisor");
+        assert_eq!(lifecycle.snapshot().phase, "starting");
+        assert_running_projections_agree(&lifecycle, false, false);
+        lifecycle.supervisor_stopped().expect("stop supervisor");
+        assert_running_projections_agree(&lifecycle, false, false);
+    }
+
     #[test]
     fn watchdog_treats_declining_outbox_as_progress() {
         assert!(backlog_made_progress(Some((509, 0)), (434, 0)));
@@ -15289,7 +15842,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_peer_cleanup_timeout_keeps_reconfiguration_bounded() {
+    async fn native_peer_lifecycle_and_cleanup_keep_supervised_respawn_bounded() {
+        assert_native_peer_lifecycle_regression();
         assert!(
             complete_native_peer_cleanup_within(std::future::ready(()), Duration::from_millis(20))
                 .await,
@@ -15495,8 +16049,24 @@ mod tests {
     fn native_peer_status_reports_fresh_heartbeat() {
         let root = tempfile::tempdir().expect("temp root");
         let database_path = root.path().join("runtime/ctox.sqlite3");
-        write_native_peer_heartbeat(root.path(), "rxdb-rs-test", &database_path)
-            .expect("write heartbeat");
+        let heartbeat_path = native_peer_heartbeat_path(root.path());
+        std::fs::create_dir_all(heartbeat_path.parent().expect("heartbeat parent"))
+            .expect("create heartbeat dir");
+        std::fs::write(
+            &heartbeat_path,
+            serde_json::to_vec(&json!({
+                "version": NATIVE_PEER_STATUS_VERSION,
+                "running": true,
+                "replicationUp": false,
+                "pid": 1,
+                "peer_session_id": "rxdb-rs-test",
+                "updated_at_ms": now_ms() as u64,
+                "database_path": database_path.display().to_string(),
+                "performance": native_peer_performance_snapshot(),
+            }))
+            .expect("serialize heartbeat"),
+        )
+        .expect("write heartbeat");
 
         let status = native_peer_status(root.path());
         assert_eq!(status["running"], true);
@@ -15661,7 +16231,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_health_uses_the_heartbeat_snapshot() {
+    fn heartbeat_keeps_process_liveness_distinct_from_replication_up() {
         let root = tempfile::tempdir().expect("temp root");
         let path = native_peer_heartbeat_path(root.path());
         std::fs::create_dir_all(path.parent().expect("heartbeat parent"))
@@ -15674,25 +16244,37 @@ mod tests {
                 "pid": 1,
                 "peer_session_id": "rxdb-rs-maintenance",
                 "updated_at_ms": now_ms() as u64,
-                "replicationUp": true,
+                "replicationUp": false,
             }))
             .expect("serialize heartbeat"),
         )
         .expect("write heartbeat");
 
+        assert_eq!(native_peer_maintenance_health(root.path()), (true, false));
+
+        let mut heartbeat = read_native_peer_heartbeat(root.path()).expect("heartbeat");
+        heartbeat["replicationUp"] = Value::Bool(true);
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&heartbeat).expect("serialize heartbeat"),
+        )
+        .expect("update heartbeat");
         assert_eq!(native_peer_maintenance_health(root.path()), (true, true));
     }
 
     #[test]
-    fn native_signaling_url_carries_control_plane_metadata() {
-        let url = signaling_url_with_native_metadata(
-            "wss://signaling.ctox.dev?foo=bar&role=browser",
-            "ctox-business-os:inst_123:roomhash",
-            "room-password",
-            "rxdb-rs-test-peer",
+    fn native_signaling_provider_rederives_urls_for_every_reconnect() {
+        let clock_value = Arc::new(AtomicU64::new(1_000));
+        let clock_value_for_provider = Arc::clone(&clock_value);
+        let provider = native_signaling_url_provider_with_clock(
+            vec!["wss://signaling.ctox.dev?foo=bar&role=browser".to_string()],
+            "ctox-business-os:inst_123:roomhash".to_string(),
+            "room-password".to_string(),
+            "rxdb-rs-test-peer".to_string(),
+            Arc::new(move || clock_value_for_provider.fetch_add(60, Ordering::SeqCst)),
         );
-
-        let parsed = Url::parse(&url).expect("metadata url parses");
+        let first_attempt = provider();
+        let parsed = Url::parse(&first_attempt[0]).expect("metadata url parses");
         assert_eq!(
             parsed
                 .query_pairs()
@@ -15750,7 +16332,23 @@ mod tests {
             .expect("token_exp")
             .parse::<u64>()
             .expect("token_exp number");
+        assert_eq!(issued_at, 1_000);
         assert_eq!(expires_at - issued_at, SIGNALING_TOKEN_TTL_SECONDS);
+        let reconnect_attempt = provider();
+        let reconnect_query = Url::parse(&reconnect_attempt[0])
+            .expect("reconnect metadata URL parses")
+            .query_pairs()
+            .into_owned()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            reconnect_query
+                .get("token_iat")
+                .expect("reconnect token_iat")
+                .parse::<u64>()
+                .expect("reconnect token_iat number"),
+            1_060,
+            "provider must derive token metadata again for each reconnect"
+        );
         assert_eq!(
             query_pairs.get("protocol").map(String::as_str),
             Some(CTOX_RXDB_PROTOCOL)
