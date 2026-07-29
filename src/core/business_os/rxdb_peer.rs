@@ -3924,39 +3924,170 @@ async fn sync_desktop_file_index_background_loop(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProjectionStampStrategy {
+    /// Commit the source stamp observed before projection only after projection
+    /// succeeds. A concurrent source change therefore remains pending.
+    CapturedSourceAfterSuccessfulSync,
+    #[cfg(test)]
+    /// Regression-only representation of the unsafe historical discipline: a
+    /// post-sync re-read can absorb a change the projection did not observe.
+    ResampleSourceAfterSuccessfulSync,
+}
+
+#[derive(Clone, Copy)]
+struct BackgroundProjectionLoopConfig {
+    metrics: &'static NativePeerLoopMetrics,
+    active_interval_secs: u64,
+    failure_prefix: &'static str,
+    stamp_strategy: ProjectionStampStrategy,
+}
+
+const CHANNEL_STATE_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &CHANNEL_STATE_LOOP_METRICS,
+        active_interval_secs: CHANNEL_STATE_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb channel state sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const BUSINESS_USERS_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &BUSINESS_USERS_LOOP_METRICS,
+        active_interval_secs: BUSINESS_USERS_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb business users sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const RUNTIME_SETTINGS_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &RUNTIME_SETTINGS_LOOP_METRICS,
+        active_interval_secs: RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb runtime settings sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const WORKSPACE_BRANDING_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &WORKSPACE_BRANDING_LOOP_METRICS,
+        active_interval_secs: RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb workspace branding sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const MODULE_CATALOG_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &MODULE_CATALOG_LOOP_METRICS,
+        active_interval_secs: MODULE_CATALOG_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb module catalog sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const TICKET_STATE_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &TICKET_STATE_LOOP_METRICS,
+        active_interval_secs: TICKET_STATE_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb ticket state sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+const KNOWLEDGE_TABLES_PROJECTION_LOOP: BackgroundProjectionLoopConfig =
+    BackgroundProjectionLoopConfig {
+        metrics: &KNOWLEDGE_TABLES_LOOP_METRICS,
+        active_interval_secs: KNOWLEDGE_TABLES_SYNC_INTERVAL_SECS,
+        failure_prefix: "[business-os] native rxdb knowledge tables sync failed",
+        stamp_strategy: ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+    };
+
+async fn sync_projection_if_changed_with_strategy<
+    Stamp,
+    SourceStamp,
+    SourceStampFuture,
+    Project,
+    ProjectFuture,
+>(
+    last_source_stamp: &mut Option<Stamp>,
+    stamp_strategy: ProjectionStampStrategy,
+    source_stamp: &mut SourceStamp,
+    project: &mut Project,
+) -> anyhow::Result<usize>
+where
+    Stamp: PartialEq,
+    SourceStamp: FnMut() -> SourceStampFuture,
+    SourceStampFuture: std::future::Future<Output = anyhow::Result<Stamp>>,
+    Project: FnMut() -> ProjectFuture,
+    ProjectFuture: std::future::Future<Output = anyhow::Result<usize>>,
+{
+    let observed_source_stamp = source_stamp().await?;
+    if last_source_stamp.as_ref() == Some(&observed_source_stamp) {
+        return Ok(0);
+    }
+
+    let synced = project().await?;
+    let committed_source_stamp = match stamp_strategy {
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync => observed_source_stamp,
+        #[cfg(test)]
+        ProjectionStampStrategy::ResampleSourceAfterSuccessfulSync => source_stamp().await?,
+    };
+    *last_source_stamp = Some(committed_source_stamp);
+    Ok(synced)
+}
+
+async fn run_background_projection_loop<
+    Stamp,
+    SourceStamp,
+    SourceStampFuture,
+    Project,
+    ProjectFuture,
+>(
+    config: BackgroundProjectionLoopConfig,
+    mut source_stamp: SourceStamp,
+    mut project: Project,
+) where
+    Stamp: PartialEq,
+    SourceStamp: FnMut() -> SourceStampFuture,
+    SourceStampFuture: std::future::Future<Output = anyhow::Result<Stamp>>,
+    Project: FnMut() -> ProjectFuture,
+    ProjectFuture: std::future::Future<Output = anyhow::Result<usize>>,
+{
+    let mut last_source_stamp = None;
+    let mut consecutive_idle_rounds = 0u32;
+    loop {
+        let started = Instant::now();
+        let result = sync_projection_if_changed_with_strategy(
+            &mut last_source_stamp,
+            config.stamp_strategy,
+            &mut source_stamp,
+            &mut project,
+        )
+        .await;
+        record_native_peer_loop_result(config.metrics, &result, started.elapsed());
+        update_projection_idle_rounds(result, &mut consecutive_idle_rounds, config.failure_prefix);
+        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
+            config.active_interval_secs,
+            consecutive_idle_rounds,
+        )))
+        .await;
+    }
+}
+
 async fn sync_channel_state_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut last_projection_stamp: Option<ChannelStateProjectionStamp> = None;
-    let mut consecutive_idle_rounds = 0u32;
-    loop {
-        let started = Instant::now();
-        let result: anyhow::Result<usize> = async {
-            let projection_stamp = channel_state_projection_stamp_async(&root).await?;
-            if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        CHANNEL_STATE_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { channel_state_projection_stamp_async(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_channel_state_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_channel_state_with_database(&root, &database).await?;
-            last_projection_stamp = Some(projection_stamp);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&CHANNEL_STATE_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb channel state sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            CHANNEL_STATE_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_business_users_background_loop(
@@ -3964,34 +4095,24 @@ async fn sync_business_users_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut last_projection_stamp: Option<store::BusinessUsersProjectionStamp> = None;
-    let mut consecutive_idle_rounds = 0u32;
-    loop {
-        let started = Instant::now();
-        let result: anyhow::Result<usize> = async {
-            let projection_stamp = business_users_projection_stamp(&root).await?;
-            if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        BUSINESS_USERS_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { business_users_projection_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_business_users_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_business_users_with_database(&root, &database).await?;
-            last_projection_stamp = Some(business_users_projection_stamp(&root).await?);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&BUSINESS_USERS_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb business users sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            BUSINESS_USERS_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_runtime_settings_background_loop(
@@ -3999,34 +4120,24 @@ async fn sync_runtime_settings_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut last_projection_stamp: Option<store::RuntimeSettingsProjectionStamp> = None;
-    let mut consecutive_idle_rounds = 0u32;
-    loop {
-        let started = Instant::now();
-        let result: anyhow::Result<usize> = async {
-            let projection_stamp = runtime_settings_projection_stamp(&root).await?;
-            if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        RUNTIME_SETTINGS_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { runtime_settings_projection_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_runtime_settings_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_runtime_settings_with_database(&root, &database).await?;
-            last_projection_stamp = Some(projection_stamp);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&RUNTIME_SETTINGS_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb runtime settings sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_workspace_branding_background_loop(
@@ -4034,38 +4145,24 @@ async fn sync_workspace_branding_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut last_projection_stamp: Option<store::WorkspaceBrandingProjectionStamp> = None;
-    let mut consecutive_idle_rounds = 0u32;
-    loop {
-        let started = Instant::now();
-        let result: anyhow::Result<usize> = async {
-            let projection_stamp = workspace_branding_projection_stamp(&root).await?;
-            if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        WORKSPACE_BRANDING_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { workspace_branding_projection_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_workspace_branding_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_workspace_branding_with_database(&root, &database).await?;
-            last_projection_stamp = Some(projection_stamp);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(
-            &WORKSPACE_BRANDING_LOOP_METRICS,
-            &result,
-            started.elapsed(),
-        );
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb workspace branding sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_module_catalog_background_loop(
@@ -4073,34 +4170,24 @@ async fn sync_module_catalog_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut last_projection_stamp: Option<store::ModuleCatalogProjectionStamp> = None;
-    let mut consecutive_idle_rounds = 0u32;
-    loop {
-        let started = Instant::now();
-        let result: anyhow::Result<usize> = async {
-            let projection_stamp = module_catalog_projection_stamp(&root).await?;
-            if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        MODULE_CATALOG_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { module_catalog_projection_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_module_catalog_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_module_catalog_with_database(&root, &database).await?;
-            last_projection_stamp = Some(module_catalog_projection_stamp(&root).await?);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&MODULE_CATALOG_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb module catalog sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            MODULE_CATALOG_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_ticket_state_background_loop(
@@ -4108,34 +4195,24 @@ async fn sync_ticket_state_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut consecutive_idle_rounds = 0u32;
-    let mut last_source_stamp = None;
-    loop {
-        let started = Instant::now();
-        let result = async {
-            let source_stamp = ticket_state_source_stamp(&root).await?;
-            if last_source_stamp.as_ref() == Some(&source_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        TICKET_STATE_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { ticket_state_source_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_ticket_state_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_ticket_state_with_database(&root, &database).await?;
-            last_source_stamp = Some(source_stamp);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&TICKET_STATE_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb ticket state sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            TICKET_STATE_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_knowledge_tables_background_loop(
@@ -4143,34 +4220,24 @@ async fn sync_knowledge_tables_background_loop(
     database: Arc<RxDatabase>,
     database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let mut consecutive_idle_rounds = 0u32;
-    let mut last_source_stamp = None;
-    loop {
-        let started = Instant::now();
-        let result = async {
-            let source_stamp = knowledge_tables_source_stamp(&root).await?;
-            if last_source_stamp.as_ref() == Some(&source_stamp) {
-                return Ok(0);
+    let stamp_root = root.clone();
+    run_background_projection_loop(
+        KNOWLEDGE_TABLES_PROJECTION_LOOP,
+        move || {
+            let root = stamp_root.clone();
+            async move { knowledge_tables_source_stamp(&root).await }
+        },
+        move || {
+            let root = root.clone();
+            let database = Arc::clone(&database);
+            let database_write_lock = Arc::clone(&database_write_lock);
+            async move {
+                let _guard = database_write_lock.lock().await;
+                sync_knowledge_tables_with_database(&root, &database).await
             }
-
-            let _guard = database_write_lock.lock().await;
-            let synced = sync_knowledge_tables_with_database(&root, &database).await?;
-            last_source_stamp = Some(source_stamp);
-            Ok(synced)
-        }
-        .await;
-        record_native_peer_loop_result(&KNOWLEDGE_TABLES_LOOP_METRICS, &result, started.elapsed());
-        update_projection_idle_rounds(
-            result,
-            &mut consecutive_idle_rounds,
-            "[business-os] native rxdb knowledge tables sync failed",
-        );
-        tokio::time::sleep(Duration::from_secs(business_os_projection_sleep_secs(
-            KNOWLEDGE_TABLES_SYNC_INTERVAL_SECS,
-            consecutive_idle_rounds,
-        )))
-        .await;
-    }
+        },
+    )
+    .await;
 }
 
 async fn sync_business_record_projections_background_loop(
@@ -7773,14 +7840,15 @@ async fn sync_business_users_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_projection_stamp: &mut Option<store::BusinessUsersProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = business_users_projection_stamp(root).await?;
-    if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_business_users_with_database(root, database).await?;
-    *last_projection_stamp = Some(business_users_projection_stamp(root).await?);
-    Ok(synced)
+    let mut source_stamp = || business_users_projection_stamp(root);
+    let mut project = || sync_business_users_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_projection_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn business_users_projection_stamp(
@@ -7823,14 +7891,15 @@ async fn sync_runtime_settings_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_projection_stamp: &mut Option<store::RuntimeSettingsProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = runtime_settings_projection_stamp(root).await?;
-    if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_runtime_settings_with_database(root, database).await?;
-    *last_projection_stamp = Some(projection_stamp);
-    Ok(synced)
+    let mut source_stamp = || runtime_settings_projection_stamp(root);
+    let mut project = || sync_runtime_settings_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_projection_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn runtime_settings_projection_stamp(
@@ -7876,14 +7945,15 @@ async fn sync_workspace_branding_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_projection_stamp: &mut Option<store::WorkspaceBrandingProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = workspace_branding_projection_stamp(root).await?;
-    if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_workspace_branding_with_database(root, database).await?;
-    *last_projection_stamp = Some(projection_stamp);
-    Ok(synced)
+    let mut source_stamp = || workspace_branding_projection_stamp(root);
+    let mut project = || sync_workspace_branding_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_projection_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn workspace_branding_projection_stamp(
@@ -7926,14 +7996,15 @@ async fn sync_module_catalog_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_projection_stamp: &mut Option<store::ModuleCatalogProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = module_catalog_projection_stamp(root).await?;
-    if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_module_catalog_with_database(root, database).await?;
-    *last_projection_stamp = Some(module_catalog_projection_stamp(root).await?);
-    Ok(synced)
+    let mut source_stamp = || module_catalog_projection_stamp(root);
+    let mut project = || sync_module_catalog_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_projection_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn module_catalog_projection_stamp(
@@ -7992,14 +8063,15 @@ async fn sync_ticket_state_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_source_stamp: &mut Option<tickets::TicketStoreChangeStamp>,
 ) -> anyhow::Result<usize> {
-    let source_stamp = ticket_state_source_stamp(root).await?;
-    if last_source_stamp.as_ref() == Some(&source_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_ticket_state_with_database(root, database).await?;
-    *last_source_stamp = Some(source_stamp);
-    Ok(synced)
+    let mut source_stamp = || ticket_state_source_stamp(root);
+    let mut project = || sync_ticket_state_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_source_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn ticket_state_source_stamp(root: &Path) -> anyhow::Result<tickets::TicketStoreChangeStamp> {
@@ -8094,14 +8166,15 @@ async fn sync_knowledge_tables_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_source_stamp: &mut Option<crate::knowledge::KnowledgeTablesProjectionSourceStamp>,
 ) -> anyhow::Result<usize> {
-    let source_stamp = knowledge_tables_source_stamp(root).await?;
-    if last_source_stamp.as_ref() == Some(&source_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_knowledge_tables_with_database(root, database).await?;
-    *last_source_stamp = Some(source_stamp);
-    Ok(synced)
+    let mut source_stamp = || knowledge_tables_source_stamp(root);
+    let mut project = || sync_knowledge_tables_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_source_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn knowledge_tables_source_stamp(
@@ -10397,14 +10470,15 @@ async fn sync_channel_state_with_database_if_changed(
     database: &Arc<RxDatabase>,
     last_projection_stamp: &mut Option<ChannelStateProjectionStamp>,
 ) -> anyhow::Result<usize> {
-    let projection_stamp = channel_state_projection_stamp_async(root).await?;
-    if last_projection_stamp.as_ref() == Some(&projection_stamp) {
-        return Ok(0);
-    }
-
-    let synced = sync_channel_state_with_database(root, database).await?;
-    *last_projection_stamp = Some(projection_stamp);
-    Ok(synced)
+    let mut source_stamp = || channel_state_projection_stamp_async(root);
+    let mut project = || sync_channel_state_with_database(root, database);
+    sync_projection_if_changed_with_strategy(
+        last_projection_stamp,
+        ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+        &mut source_stamp,
+        &mut project,
+    )
+    .await
 }
 
 async fn channel_state_projection_stamp_async(
@@ -15587,6 +15661,7 @@ mod tests {
         const IDLE_MARKERS: &[&str] = &[
             "projection_sleep_secs(",
             "business_record_projection_loop_sleep_secs(",
+            "run_background_projection_loop(",
             "sleep_interval(",
             "wait_for_event(",
             "wait_for_table_change",
@@ -15612,7 +15687,9 @@ mod tests {
                 (None, None) => source.len(),
             };
             let body = &source[name_end..body_end];
-            if name.ends_with("_loop") && body.contains("loop {") {
+            if name.ends_with("_loop")
+                && (body.contains("loop {") || body.contains("run_background_projection_loop("))
+            {
                 let sanctioned = IDLE_MARKERS.iter().any(|marker| body.contains(marker));
                 assert!(
                     sanctioned,
@@ -15712,6 +15789,149 @@ mod tests {
             business_os_projection_sleep_secs(RUNTIME_SETTINGS_SYNC_INTERVAL_SECS, u32::MAX),
             BUSINESS_OS_PROJECTION_IDLE_SYNC_INTERVAL_SECS
         );
+    }
+
+    #[tokio::test]
+    async fn projection_change_during_sync_remains_pending_for_the_next_tick() {
+        let source = Arc::new(AtomicU64::new(0));
+        let projected = Arc::new(Mutex::new(Vec::new()));
+        let project_calls = Arc::new(AtomicU64::new(0));
+        let mut last_source_stamp = None;
+
+        let stamp_source = Arc::clone(&source);
+        let mut source_stamp =
+            move || std::future::ready(Ok::<_, anyhow::Error>(stamp_source.load(Ordering::SeqCst)));
+        let project_source = Arc::clone(&source);
+        let projected_values = Arc::clone(&projected);
+        let calls = Arc::clone(&project_calls);
+        let mut project = move || {
+            let snapshot = project_source.load(Ordering::SeqCst);
+            projected_values
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(snapshot);
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                // The first projection has already captured source version 0;
+                // version 1 arrives before that projection completes.
+                project_source.store(1, Ordering::SeqCst);
+            }
+            std::future::ready(Ok::<_, anyhow::Error>(1))
+        };
+
+        let first = sync_projection_if_changed_with_strategy(
+            &mut last_source_stamp,
+            ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+            &mut source_stamp,
+            &mut project,
+        )
+        .await
+        .expect("run first projection tick");
+        let second = sync_projection_if_changed_with_strategy(
+            &mut last_source_stamp,
+            ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync,
+            &mut source_stamp,
+            &mut project,
+        )
+        .await
+        .expect("run second projection tick");
+
+        assert_eq!(first, 1);
+        assert_eq!(
+            second, 1,
+            "the concurrent source change must trigger a retry"
+        );
+        assert_eq!(
+            *projected
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![0, 1]
+        );
+        assert_eq!(last_source_stamp, Some(1));
+    }
+
+    #[test]
+    fn generic_projection_runner_preserves_each_migrated_loop_policy() {
+        let cases = [
+            (
+                CHANNEL_STATE_PROJECTION_LOOP,
+                "channel_state",
+                CHANNEL_STATE_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb channel state sync failed",
+            ),
+            (
+                BUSINESS_USERS_PROJECTION_LOOP,
+                "business_users",
+                BUSINESS_USERS_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb business users sync failed",
+            ),
+            (
+                RUNTIME_SETTINGS_PROJECTION_LOOP,
+                "runtime_settings",
+                RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb runtime settings sync failed",
+            ),
+            (
+                WORKSPACE_BRANDING_PROJECTION_LOOP,
+                "workspace_branding",
+                RUNTIME_SETTINGS_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb workspace branding sync failed",
+            ),
+            (
+                MODULE_CATALOG_PROJECTION_LOOP,
+                "module_catalog",
+                MODULE_CATALOG_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb module catalog sync failed",
+            ),
+            (
+                TICKET_STATE_PROJECTION_LOOP,
+                "ticket_state",
+                TICKET_STATE_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb ticket state sync failed",
+            ),
+            (
+                KNOWLEDGE_TABLES_PROJECTION_LOOP,
+                "knowledge_tables",
+                KNOWLEDGE_TABLES_SYNC_INTERVAL_SECS,
+                "[business-os] native rxdb knowledge tables sync failed",
+            ),
+        ];
+
+        for (config, name, active_interval_secs, failure_prefix) in cases {
+            assert_eq!(config.metrics.name, name);
+            assert_eq!(config.active_interval_secs, active_interval_secs);
+            assert_eq!(config.failure_prefix, failure_prefix);
+            assert_eq!(
+                config.stamp_strategy,
+                ProjectionStampStrategy::CapturedSourceAfterSuccessfulSync
+            );
+
+            let mut idle_rounds = 0;
+            update_projection_idle_rounds(Ok(0), &mut idle_rounds, failure_prefix);
+            assert_eq!(idle_rounds, 1);
+            assert_eq!(
+                business_os_projection_sleep_secs(active_interval_secs, idle_rounds),
+                BUSINESS_OS_PROJECTION_IDLE_SYNC_INTERVAL_SECS
+            );
+
+            update_projection_idle_rounds(Ok(1), &mut idle_rounds, failure_prefix);
+            assert_eq!(idle_rounds, 0);
+            assert_eq!(
+                business_os_projection_sleep_secs(active_interval_secs, idle_rounds),
+                active_interval_secs
+            );
+
+            idle_rounds = 1;
+            update_projection_idle_rounds(
+                Err(anyhow::anyhow!("expected projection test failure")),
+                &mut idle_rounds,
+                failure_prefix,
+            );
+            assert_eq!(idle_rounds, 0);
+            assert_eq!(
+                business_os_projection_sleep_secs(active_interval_secs, idle_rounds),
+                active_interval_secs
+            );
+        }
     }
 
     #[test]
