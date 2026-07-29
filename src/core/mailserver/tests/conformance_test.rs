@@ -432,15 +432,19 @@ async fn test_smtp_authenticated_relay_queues_external_mail() {
     let n = stream.read(&mut response).await.unwrap();
     assert!(String::from_utf8_lossy(&response[..n]).contains("235"));
 
+    // Lowercase envelope commands are RFC-legal; the queue assertions below
+    // also pin that the command prefix is stripped case-insensitively
+    // (a raw "mail from:<...>" leaking into the envelope broke greylisting
+    // and the DKIM domain split).
     stream
-        .write_all(b"MAIL FROM:<relay@ctox.local>\r\n")
+        .write_all(b"mail from:<relay@ctox.local>\r\n")
         .await
         .unwrap();
     let n = stream.read(&mut response).await.unwrap();
     assert!(String::from_utf8_lossy(&response[..n]).contains("250"));
 
     stream
-        .write_all(b"RCPT TO:<friend@external.example>\r\n")
+        .write_all(b"rcpt to:<friend@external.example>\r\n")
         .await
         .unwrap();
     let n = stream.read(&mut response).await.unwrap();

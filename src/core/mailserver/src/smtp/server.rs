@@ -348,10 +348,14 @@ impl SmtpInboundServer {
                         }
                     }
                 } else if line_upper.starts_with("MAIL FROM:") {
-                    mail_from = line.replace("MAIL FROM:", "").trim().to_string();
+                    // Slice by prefix length: the command matched on the
+                    // uppercase copy, so a lowercase "mail from:" must not
+                    // survive into the envelope address (replace() on the
+                    // original line did exactly that).
+                    mail_from = line["MAIL FROM:".len()..].trim().to_string();
                     stream.write_all(b"250 2.1.0 Ok\r\n").await?;
                 } else if line_upper.starts_with("RCPT TO:") {
-                    let recipient = line.replace("RCPT TO:", "").trim().to_string();
+                    let recipient = line["RCPT TO:".len()..].trim().to_string();
                     let clean_recip = recipient
                         .trim_matches(|c| c == '<' || c == '>')
                         .trim()
