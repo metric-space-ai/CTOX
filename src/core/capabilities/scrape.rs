@@ -3381,7 +3381,14 @@ fn classify_outcome(
                 .unwrap_or_else(|| "portal_unreachable".to_string()),
         };
     }
-    if execution.timed_out || contains_transient_hint(&lower) {
+    // A run that exited 0 and delivered the expected records succeeded no
+    // matter what its stderr chattered about ("timeout", "429", ...). The
+    // transient classification must never outrank that: records only
+    // materialize on Succeeded, so misclassifying here silently drops them.
+    let full_success = execution.exit_code.unwrap_or(0) == 0
+        && records_found > 0
+        && records_found >= expected_min_records;
+    if execution.timed_out || (!full_success && contains_transient_hint(&lower)) {
         return Classification {
             status: ScrapeRunStatus::TemporaryUnreachable,
             should_queue_repair: false,
@@ -7021,6 +7028,49 @@ const PROTECTED_SOURCE_CONFIG = Object.freeze({
         let classification = classify_outcome(&payload, &probe, &execution, 1, 0);
         assert_eq!(classification.status, ScrapeRunStatus::Succeeded);
         assert!(!classification.should_queue_repair);
+    }
+
+    #[test]
+    fn classify_successful_run_with_transient_words_in_stderr_as_succeeded() {
+        let payload = json!({
+            "records": [
+                {"id": "entry-1", "title": "First"},
+                {"id": "entry-2", "title": "Second"}
+            ]
+        });
+        let probe = ProbeResult {
+            reachable: true,
+            status_code: Some(200),
+            final_url: "https://example.com/feed.xml".to_string(),
+            human_verification: false,
+            error: None,
+        };
+        let execution = CommandExecution {
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_text: serde_json::to_string(&payload).unwrap(),
+            stderr_text: "warn: retrying after timeout; upstream sent 429 once".to_string(),
+        };
+        // exit 0 + expected records delivered: stderr chatter must not flip
+        // the run to temporary_unreachable (that path drops the records).
+        let classification = classify_outcome(&payload, &probe, &execution, 2, 2);
+        assert_eq!(classification.status, ScrapeRunStatus::Succeeded);
+        assert!(!classification.should_queue_repair);
+
+        // The same stderr on a run that delivered nothing stays transient.
+        let empty_execution = CommandExecution {
+            exit_code: Some(0),
+            timed_out: false,
+            stdout_text: "{\"records\":[]}".to_string(),
+            stderr_text: "warn: retrying after timeout; upstream sent 429 once".to_string(),
+        };
+        let classification =
+            classify_outcome(&json!({"records": []}), &probe, &empty_execution, 0, 2);
+        assert_eq!(
+            classification.status,
+            ScrapeRunStatus::TemporaryUnreachable,
+            "failed run with transient stderr keeps the retry classification"
+        );
     }
 
     #[test]
