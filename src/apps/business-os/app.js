@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260729-research-knowledge-usability-v94';
+const APP_BUILD = '20260729-pairing-ice-inheritance-v95';
 
 ensureShellStylesheets();
 
@@ -10548,7 +10548,15 @@ async function readBusinessOsLaunchConfig() {
     window.ctoxBusinessOsLaunch,
     storedPairingConfig,
   );
-  const config = await normalizeBusinessOsLaunchConfig(launch);
+  // A packed launch payload carries room, signaling and session, but pairing
+  // links are minted without ICE servers. Without a fallback the pool starts
+  // with zero STUN/TURN: fine on loopback (host candidates), never connecting
+  // across NAT — the collections then sit in `reconnecting` with no lastError,
+  // so no recovery path fires. ICE is instance transport config, not identity.
+  const config = await normalizeBusinessOsLaunchConfig(launch, firstObject(
+    root.CTOX_BUSINESS_OS_CONFIG,
+    window.CTOX_BUSINESS_OS_CONFIG,
+  ));
   if (config) {
     launchConfigForPageSession = config;
     // The command bus and WebRTC handshake resolve the native capability from
@@ -10779,7 +10787,7 @@ function decodeUtf8Bytes(bytes) {
   return output;
 }
 
-async function normalizeBusinessOsLaunchConfig(config) {
+async function normalizeBusinessOsLaunchConfig(config, transportFallback = null) {
   if (!config || typeof config !== 'object') return null;
   const signalingUrls = Array.isArray(config.signaling_urls)
     ? config.signaling_urls
@@ -10796,9 +10804,20 @@ async function normalizeBusinessOsLaunchConfig(config) {
   const syncRoom = explicitSyncRoom || await deriveSyncRoomFromPassword(instanceId, roomPassword);
   const urls = signalingUrls.map((url) => String(url || '').trim()).filter(Boolean);
   if (!syncRoom || !urls.length) return null;
-  const iceServers = Array.isArray(config.ice_servers)
+  const declaredIceServers = Array.isArray(config.ice_servers)
     ? config.ice_servers
     : (Array.isArray(config.iceServers) ? config.iceServers : []);
+  const fallbackIceServers = Array.isArray(transportFallback?.ice_servers)
+    ? transportFallback.ice_servers
+    : (Array.isArray(transportFallback?.iceServers) ? transportFallback.iceServers : []);
+  const iceServers = declaredIceServers.length ? declaredIceServers : fallbackIceServers;
+  const iceServersRefreshUrl = String(
+    config.ice_servers_refresh_url
+      || config.iceServersRefreshUrl
+      || transportFallback?.ice_servers_refresh_url
+      || transportFallback?.iceServersRefreshUrl
+      || ''
+  ).trim();
   return {
     ok: config.ok !== false,
     app_hosting: config.app_hosting || config.appHosting || 'web_deploy',
@@ -10812,6 +10831,7 @@ async function normalizeBusinessOsLaunchConfig(config) {
     signaling_urls: urls,
     ice_servers: iceServers,
     iceServers,
+    ...(iceServersRefreshUrl ? { ice_servers_refresh_url: iceServersRefreshUrl } : {}),
     transport: 'webrtc',
     http_bridge_available: false,
     ctox_instance_required: config.ctox_instance_required !== false,
