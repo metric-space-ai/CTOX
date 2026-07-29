@@ -29,6 +29,7 @@
   "sessionsImport": "Sitzungen importieren",
   "sessionsExport": "Sitzungen exportieren",
   "sessionsEmpty": "Noch keine Browser-Sitzung. Öffne oben rechts eine neue.",
+  "sessionsSyncing": "Browser-Sitzungen werden synchronisiert.",
   "bandAll": "Alle",
   "bandActive": "Aktiv",
   "bandClosed": "Beendet",

@@ -29,6 +29,7 @@
   "sessionsImport": "Import sessions",
   "sessionsExport": "Export sessions",
   "sessionsEmpty": "No browser session yet. Open a new one at the top right.",
+  "sessionsSyncing": "Syncing browser sessions.",
   "bandAll": "All",
   "bandActive": "Active",
   "bandClosed": "Closed",
