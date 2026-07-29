@@ -51,10 +51,7 @@ pub type CollectionHookCallback = Arc<
 /// force the SQLite external-poll path to deserialize large chunk stores even
 /// when no live replication/read workload needs chunk change events.
 pub(crate) fn is_demand_only_chunk_collection_name(name: &str) -> bool {
-    matches!(
-        name,
-        "desktop_file_chunks" | "document_blob_chunks" | "spreadsheet_blob_chunks"
-    )
+    crate::collection_policy::collection_policy().is_demand_only_chunk_collection(name)
 }
 
 #[derive(Clone)]

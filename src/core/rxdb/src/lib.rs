@@ -20,6 +20,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod change_event_buffer;
+pub mod collection_policy;
 pub mod custom_index;
 pub mod doc_cache;
 pub mod event_reduce;

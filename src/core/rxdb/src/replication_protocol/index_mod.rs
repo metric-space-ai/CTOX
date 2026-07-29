@@ -28,14 +28,6 @@ use crate::types::{
     RxStorageInstanceReplicationState, StreamQueue,
 };
 
-const DESKTOP_FILE_CHUNKS_MASTER_RESPONSE_MAX_BYTES: usize = 96 * 1024;
-// Knowledge table chunks are large row-bearing documents (the SKF dataset is
-// roughly 380-414 KiB per document). Keep a single response comfortably below
-// the WebRTC transfer ceiling even when an older browser still asks for a
-// larger replication batch. The browser pull loop drains these truncated
-// responses until it receives an empty answer.
-const KNOWLEDGE_TABLES_MASTER_RESPONSE_MAX_BYTES: usize = 512 * 1024;
-
 // ref: rxdb/src/replication-protocol/index.ts:119-132
 /// Resolves once both initial syncs (down + up) have completed.
 pub async fn await_rx_storage_replication_first_in_sync(
@@ -289,8 +281,8 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         use crate::rx_schema_helper::get_primary_field_of_primary_key;
 
         let has_attachments = self.instance.schema().extra.contains_key("attachments");
-        let is_file_chunks = self.instance.collection_name() == "desktop_file_chunks";
-        let is_knowledge_tables = self.instance.collection_name() == "knowledge_tables";
+        let transfer_ceiling_bytes = crate::collection_policy::collection_policy()
+            .transfer_ceiling_bytes(self.instance.collection_name());
         let result = self
             .instance
             .get_changed_documents_since(batch_size, checkpoint.as_ref())
@@ -303,14 +295,9 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         } else {
             result.checkpoint
         };
-        let (documents, response_checkpoint) = if is_file_chunks || is_knowledge_tables {
+        let (documents, response_checkpoint) = if let Some(max_bytes) = transfer_ceiling_bytes {
             let primary_path =
                 get_primary_field_of_primary_key(&self.instance.schema().primary_key);
-            let max_bytes = if is_file_chunks {
-                DESKTOP_FILE_CHUNKS_MASTER_RESPONSE_MAX_BYTES
-            } else {
-                KNOWLEDGE_TABLES_MASTER_RESPONSE_MAX_BYTES
-            };
             let limited = limit_master_response(
                 result.documents,
                 &primary_path,
@@ -730,7 +717,9 @@ mod tests {
                 "id",
                 false,
                 true,
-                KNOWLEDGE_TABLES_MASTER_RESPONSE_MAX_BYTES,
+                crate::collection_policy::collection_policy()
+                    .transfer_ceiling_bytes("knowledge_tables")
+                    .expect("knowledge_tables ceiling"),
                 &fallback,
             );
             assert!(

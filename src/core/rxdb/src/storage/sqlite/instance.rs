@@ -57,7 +57,6 @@ use super::types::{
     sqlite_concurrent_reader_error, sqlite_error, sqlite_path_is_in_memory, SharedSqliteConnection,
 };
 
-const SQLITE_EXTERNAL_POLL_FILE_CHUNK_LIMIT: u64 = 2;
 const SQLITE_EXTERNAL_POLL_DEFAULT_LIMIT: u64 = 50;
 const SQLITE_EXTERNAL_POLL_MAX_BATCHES_PER_WAKE: usize = 32;
 const SQLITE_EXTERNAL_POLL_SAFETY_INTERVAL: Duration = Duration::from_secs(60);
@@ -184,24 +183,15 @@ fn join_error(err: tokio::task::JoinError) -> RxError {
     )
 }
 
-fn is_business_command_server_owned_status(status: &str) -> bool {
-    let status = status.trim();
-    !status.is_empty() && status != "pending_sync"
-}
-
 fn is_stale_replicated_business_command_pending_write(
     collection_name: &str,
     context: &str,
     write: &BulkWriteRow,
     document_in_db: &Value,
 ) -> bool {
-    collection_name == "business_commands"
-        && context == "replication-master-write"
-        && write.document.get("status").and_then(Value::as_str) == Some("pending_sync")
-        && document_in_db
-            .get("status")
-            .and_then(Value::as_str)
-            .is_some_and(is_business_command_server_owned_status)
+    crate::collection_policy::collection_policy()
+        .write_guard(collection_name, context)
+        .rejects(&write.document, document_in_db)
 }
 
 struct TableNotifier {
@@ -961,11 +951,10 @@ fn drain_external_changed_documents_since(
     table_name: &str,
     initial_checkpoint: Value,
 ) -> RxResult<ExternalPollDrain> {
-    let poll_limit = if table_name.contains("desktop_file_chunks") {
-        SQLITE_EXTERNAL_POLL_FILE_CHUNK_LIMIT
-    } else {
-        SQLITE_EXTERNAL_POLL_DEFAULT_LIMIT
-    };
+    let poll_limit = crate::collection_policy::collection_policy()
+        .poll_batch_limit(table_name)
+        .map(|limit| limit as u64)
+        .unwrap_or(SQLITE_EXTERNAL_POLL_DEFAULT_LIMIT);
     let mut checkpoint = initial_checkpoint;
     let mut batches = Vec::new();
     let mut rows = 0usize;
@@ -1211,7 +1200,10 @@ impl RxStorageInstance for RxStorageInstanceSqlite {
                     }
                 }
                 let mut server_owned_errors: Vec<crate::types::RxStorageWriteError> = Vec::new();
-                if collection_name == "business_commands" && context == "replication-master-write" {
+                if crate::collection_policy::collection_policy()
+                    .write_guard(&collection_name, &context)
+                    .is_active()
+                {
                     let mut kept = Vec::with_capacity(document_writes.len());
                     for write in document_writes.drain(..) {
                         let document_id = write
@@ -4164,7 +4156,10 @@ mod tests {
             .unwrap();
         let mut stream = instance.change_stream();
 
-        let total = SQLITE_EXTERNAL_POLL_FILE_CHUNK_LIMIT as usize * 3 + 1;
+        let chunk_limit = crate::collection_policy::collection_policy()
+            .poll_batch_limit("desktop_file_chunks")
+            .expect("desktop_file_chunks poll limit");
+        let total = chunk_limit * 3 + 1;
         {
             let mut conn = rusqlite::Connection::open(&database_path).unwrap();
             let tx = conn.transaction().unwrap();
