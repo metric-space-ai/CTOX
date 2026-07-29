@@ -1,0 +1,9 @@
+{
+  "name": "ctox-scrape-solo-harness",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Playwright harness: develop and live-verify one scrape adapter in isolation before porting it into scripts/v1.js.",
+  "dependencies": {
+    "playwright": "^1.54.0"
+  }
+}

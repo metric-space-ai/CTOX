@@ -1,4 +1,22 @@
 // bundesanzeiger.de - direct Playwright extractor for prospect.v1.
+//
+// Repaired 2026-07-29 against the LIVE site (see solo/probe.mjs for the
+// standalone plain-Playwright proof):
+//  - consent banner is clicked via role/name patterns (exact label first),
+//    tolerating late-rendering banners instead of requiring count === 1;
+//  - the search submit is honeypot-aware: the form contains a hidden
+//    decoy input[name="search-button"] (tabindex -1, no value); only the
+//    visible input[name="search-button"][value="Suchen"] is clicked;
+//  - an explicit "keine passenden Daten gefunden" page is recognised as a
+//    real (empty) results page instead of being misread as drift;
+//  - one resubmit retry covers Wicket session bounces back to the form;
+//  - the per-document "Sicherheitsabfrage" (image CAPTCHA) that gates every
+//    Rechnungslegung document is treated as an access challenge and is
+//    NEVER opened or solved; extraction stays on the public results table.
+//
+// Drift contract: if the selectors below stop matching but a result page
+// loads successfully, this script returns an empty records array with
+// failure_mode "portal_drift" - never a crash.
 
 "use strict";
 
@@ -140,6 +158,13 @@ function classifyBrowserResult(company, result) {
   }
   const entry = selectMatchingEntry(company, result.entries);
   if (entry) return { records: buildRecords(entry, sourceUrl.href) };
+  if (result.no_results === true) {
+    return {
+      records: [],
+      failure_mode: "temporary_unreachable",
+      detail: "bundesanzeiger.de found no publications for the exact company name",
+    };
+  }
   if (result.results_page === true) {
     return {
       records: [],
@@ -163,42 +188,79 @@ function browserSearch(company) {
 const searchUrl = ${JSON.stringify(SEARCH_URL)};
 const query = ${JSON.stringify(company)};
 await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-await page.waitForTimeout(800);
+await page.waitForTimeout(1500);
 
-const initialState = await page.evaluate(() => {
+const challengeState = async () => await page.evaluate(() => {
   const text = document.body ? document.body.innerText : "";
   const challenge = document.querySelector(
     'iframe[src*="captcha" i], iframe[src*="challenge" i], .g-recaptcha, [data-sitekey]',
   );
   return {
-    blocked: Boolean(challenge) || /schutzma(?:ß|ss)nahme|to_nlp_start|cf-chl-|turnstile|captcha|verify (?:that )?you are human|access denied|request blocked|zugriff verweigert|zu viele anfragen/i.test(text),
+    blocked: Boolean(challenge) || /schutzma(?:ß|ss)nahme|sicherheitsabfrage|to_nlp_start|cf-chl-|turnstile|captcha|verify (?:that )?you are human|access denied|request blocked|zugriff verweigert|zu viele anfragen/i.test(text),
+    noResults: /keine passenden Daten gefunden/i.test(text),
   };
 });
-if (initialState.blocked) {
+
+if ((await challengeState()).blocked) {
   return { url: page.url(), blocked: true, results_page: false, entries: [] };
 }
 
-const cookieButton = page.getByRole("button", {
-  name: "Nur technisch notwendige Cookies akzeptieren",
-});
-if (await cookieButton.count() === 1) await cookieButton.click();
+// Consent: exact label first, then generic patterns; tolerate late banners.
+for (const pattern of [
+  "Nur technisch notwendige Cookies akzeptieren",
+  /alle akzeptieren|akzeptieren|zustimmen|verstanden/i,
+]) {
+  const button = page.getByRole("button", { name: pattern }).first();
+  if (await button.count()) {
+    await button.click({ timeout: 2500 }).catch(() => null);
+    break;
+  }
+}
+await page.waitForTimeout(1200);
 
 const searchInput = page.locator('input[name="fulltext"]');
-const searchButton = page.locator('input[name="search-button"][value="Suchen"]');
-if (await searchInput.count() !== 1 || await searchButton.count() !== 1) {
+if (await searchInput.count() !== 1) {
   return { url: page.url(), blocked: false, results_page: false, entries: [] };
 }
-await searchInput.fill(query);
-await searchButton.click();
-await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
-await page.waitForSelector(".result_container", { timeout: 15000 }).catch(() => {});
+
+let onResults = false;
+for (let attempt = 0; attempt < 2 && !onResults; attempt += 1) {
+  await searchInput.fill(query);
+  // Honeypot-aware: a hidden decoy input[name="search-button"] exists; only
+  // the visible valued submit triggers the search.
+  const searchButton = page.locator('input[name="search-button"][value="Suchen"]');
+  if (await searchButton.count() === 1) {
+    await searchButton.click();
+  } else {
+    await searchInput.press("Enter");
+  }
+  await page.waitForLoadState("domcontentloaded", { timeout: 30000 }).catch(() => {});
+  onResults = await page.waitForSelector(".result_container", { timeout: 20000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!onResults) {
+    const state = await challengeState();
+    if (state.blocked) {
+      return { url: page.url(), blocked: true, results_page: false, entries: [] };
+    }
+    if (state.noResults) {
+      return { url: page.url(), blocked: false, results_page: true, entries: [], no_results: true };
+    }
+    // Wicket sometimes bounces back to the empty form; retry once.
+    if (attempt === 0 && (await searchInput.count()) === 1) {
+      await page.waitForTimeout(1500);
+      continue;
+    }
+    return { url: page.url(), blocked: false, results_page: false, entries: [] };
+  }
+}
 
 return await page.evaluate(() => {
   const text = document.body ? document.body.innerText : "";
   const challenge = document.querySelector(
     'iframe[src*="captcha" i], iframe[src*="challenge" i], .g-recaptcha, [data-sitekey]',
   );
-  const blocked = Boolean(challenge) || /schutzma(?:ß|ss)nahme|to_nlp_start|cf-chl-|turnstile|captcha|verify (?:that )?you are human|access denied|request blocked|zugriff verweigert|zu viele anfragen/i.test(text);
+  const blocked = Boolean(challenge) || /schutzma(?:ß|ss)nahme|sicherheitsabfrage|to_nlp_start|cf-chl-|turnstile|captcha|verify (?:that )?you are human|access denied|request blocked|zugriff verweigert|zu viele anfragen/i.test(text);
   const container = document.querySelector(".result_container");
   const entries = container
     ? [...container.querySelectorAll(":scope > .row")].map((row) => {

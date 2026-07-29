@@ -101,9 +101,17 @@ function canonicalProviderUrl(raw) {
 }
 
 function providerSearchUrl(company) {
-  const query = String(company || "").trim().replace(/\s+/g, "+");
-  return query
-    ? `https://www.companyhouse.de/s/${encodeURIComponent(query)}`
+  // Live finding (29.07.2026): the legacy `/s/` route is gone (404/403).
+  // Search results live under `/Suche/<query>` and the Cloudflare WAF
+  // hard-blocks `%20`-encoded spaces in the path — spaces must be `+`.
+  const encoded = String(company || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => encodeURIComponent(token))
+    .join("+");
+  return encoded
+    ? `https://www.companyhouse.de/Suche/${encoded}`
     : "https://www.companyhouse.de/";
 }
 
@@ -125,7 +133,11 @@ const alignBrowserIdentity = async () => {
   const version = runtimeVersion || currentUa.match(/Chrome\/(\d+(?:\.\d+){0,3})/)?.[1] || "";
   const major = String(version || "").match(/^(\\d+)/)?.[1];
   if (!major) return;
-  const userAgent = currentUa.replace(/Chrome\\/\\d+(?:\\.\\d+){0,3}/, "Chrome/" + version);
+  // The site WAF hard-blocks (403) any UA announcing "HeadlessChrome" —
+  // announce the same browser build as plain Chrome (live finding 29.07.2026).
+  const userAgent = currentUa
+    .replace(/Headless(?=Chrome\/)/, "")
+    .replace(/Chrome\\/\\d+(?:\\.\\d+){0,3}/, "Chrome/" + version);
   const platformName = process.platform === "darwin" ? "macOS"
     : process.platform === "win32" ? "Windows" : "Linux";
   const navigatorPlatform = process.platform === "darwin" ? "MacIntel"
@@ -190,7 +202,7 @@ const normalizedIdentity = (value) => String(value || "")
   .toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 const followCompanySearchResult = async () => {
   const path = new URL(page.url()).pathname.toLowerCase();
-  if (!path.startsWith("/s/") || !requestedCompany) return false;
+  if (!path.startsWith("/suche/") || !requestedCompany) return false;
   const expected = normalizedIdentity(requestedCompany);
   const candidate = await page.locator("a[href]").evaluateAll((anchors, expectedValue) => {
     const normalize = (value) => String(value || "")
@@ -202,7 +214,14 @@ const followCompanySearchResult = async () => {
         const pathName = url.pathname.toLowerCase();
         const host = url.hostname.toLowerCase().replace(/\\.$/, "");
         const text = normalize(anchor.textContent);
-        const profilePath = pathName.split("/").filter(Boolean).length === 1;
+        // Live finding (29.07.2026): company profiles moved from
+        // /<Firma>-<Ort> to /<Firma>-<Ort>/<Register>.
+        const segments = pathName.split("/").filter(Boolean);
+        const first = segments[0] || "";
+        const nonProfile = ["login", "register", "suche", "search", "impressum", "agb",
+          "datenschutz", "faq", "preise", "kontakt", "s", "l", "person", "personen"];
+        const profilePath = segments.length >= 1 && segments.length <= 2
+          && !nonProfile.includes(first);
         return {
           href: url.href,
           exact: text === expectedValue,
@@ -223,8 +242,8 @@ const followCompanySearchResult = async () => {
   await dismissConsent();
   return true;
 };
+await alignBrowserIdentity();
 if (unlockMode) {
-  await alignBrowserIdentity();
   await page.goto(homeUrl, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => null);
   await page.waitForTimeout(1800);
   await dismissConsent();

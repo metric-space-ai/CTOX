@@ -1,15 +1,23 @@
-// northdata.de — prospect.v1 extractor (Phase B initial revision).
+// northdata.de — prospect.v1 extractor (Phase B, hardened 2026-07-29).
 //
 // Reads CTOX_SCRAPE_INPUT_JSON for the company + country, drives the
-// CTOX web stack (`ctox web search` + `ctox web read`) to find a profile
-// page, then parses the page HTML for the field set documented in
-// `tools/web-stack/src/sources/EXCEL_MATRIX.md`.
+// CTOX web stack (`ctox web read` + `ctox web browser-automation`) to
+// load a profile page, then parses the page HTML for the field set
+// documented in `tools/web-stack/src/sources/EXCEL_MATRIX.md`.
+//
+// Hardening vs. the initial revision (live-verified with
+// `scrape-targets/northdata.de/solo/probe.mjs` on 2026-07-29 against
+// "BNT Chemicals GmbH" and "AKEMI chemisch technische Spezialfabrik
+// GmbH"): navigation timeouts raised to 45 s, one in-browser retry on
+// goto failure, and one outer retry that fires ONLY when no page
+// loaded at all (the 23.07 acceptance flakiness was
+// `temporary_unreachable`, i.e. failed loads, not drift).
 //
 // Drift contract: if the selectors below stop matching but a profile
-// page loads successfully, this script returns an empty records array.
-// `ctox scrape execute --allow-heal` then classifies the run as
-// `portal_drift` and enqueues a `universal-scraping` repair task that
-// will revise this very file.
+// page loads successfully, this script returns an empty records array
+// and does NOT retry. `ctox scrape execute --allow-heal` then
+// classifies the run as `portal_drift` and enqueues a
+// `universal-scraping` repair task that will revise this very file.
 
 "use strict";
 
@@ -18,6 +26,11 @@ const { execFileSync } = require("child_process");
 const SOURCE_ID = "northdata.de";
 const ALLOWED_HOST = "northdata.de";
 const MAX_HITS = 2;
+// Transient "temporarily unreachable" loads get one second chance; a
+// successfully loaded page with drifting selectors does NOT (drift
+// contract — empty records, portal_drift, heal task).
+const MAX_LOAD_ATTEMPTS = 2;
+const NAVIGATION_TIMEOUT_MS = 45_000;
 
 function readInput() {
   const raw = process.env.CTOX_SCRAPE_INPUT_JSON;
@@ -133,7 +146,7 @@ function readPage(url, country) {
   if (country) {
     args.push("--country", country);
   }
-  return runCtox(args, undefined, 20_000);
+  return runCtox(args, undefined, NAVIGATION_TIMEOUT_MS + 5_000);
 }
 
 function browserSessionId(value) {
@@ -273,24 +286,34 @@ function northdataBrowserSource(url, company) {
       };
     }, expectedCompany);
 
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // One in-browser retry per navigation: the 23.07 acceptance failure was
+    // flaky first loads ("temporarily unreachable"), not selector drift.
+    const gotoWithRetry = async (url) => {
+      try {
+        return await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+      } catch (_firstError) {
+        await page.waitForTimeout(2000);
+        return await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+      }
+    };
+    await gotoWithRetry(targetUrl);
     await installPageHelpers();
     await page.waitForFunction(() => {
       const helper = globalThis.__ctoxNorthdata;
       return Boolean(helper?.canonicalProfileUrl());
-    }, null, { timeout: 8000 }).catch(() => null);
+    }, null, { timeout: 12000 }).catch(() => null);
     const resolvedProfileUrl = await page.evaluate(() => {
       const helper = globalThis.__ctoxNorthdata;
       return helper?.canonicalProfileUrl() || null;
     });
     if (resolvedProfileUrl && resolvedProfileUrl !== page.url()) {
-      await page.goto(resolvedProfileUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await gotoWithRetry(resolvedProfileUrl);
       await installPageHelpers();
     }
     await page.waitForFunction(
       () => Boolean(globalThis.__ctoxNorthdata?.profileMarkerReady()),
       null,
-      { timeout: 10000 },
+      { timeout: 15000 },
     ).catch(() => null);
     return await page.evaluate(() => globalThis.__ctoxNorthdata?.snapshot() || {
       url: location.href,
@@ -304,7 +327,9 @@ function northdataBrowserSource(url, company) {
 
 function browserPage(url, company, sessionId = null) {
   const source = northdataBrowserSource(url, company);
-  const payload = runCtox(browserAutomationArgs(85_000, sessionId), source, 90_000);
+  // Budget covers the in-browser goto retry: up to two 45 s navigations
+  // plus the marker waits.
+  const payload = runCtox(browserAutomationArgs(150_000, sessionId), source, 160_000);
   if (!payload) return null;
   return { ...(payload.result || {}), ok: payload.ok === true, detection: payload.detection };
 }
@@ -683,30 +708,45 @@ function main() {
 
   let blocked = false;
   let blockedUrl = "";
-  for (const url of candidateUrls(input, company, country)) {
-    const direct = readPage(url, country);
-    const directBlocked = isBlockedPage(direct) || hasBlockedDetection(direct);
-    blocked ||= directBlocked;
-    if (directBlocked) blockedUrl ||= url;
-    if (direct?.ok && !direct.url) direct.url = url;
-    if (pageMatchesCompany(company, direct, country)) {
-      const records = recordsForPage(direct, company, country);
-      if (records.length > 0) {
-        process.stdout.write(JSON.stringify({ records }));
-        return;
+  for (let attempt = 0; attempt < MAX_LOAD_ATTEMPTS; attempt += 1) {
+    // A page that loaded but yields no identity-verified records is portal
+    // drift (or an identity mismatch), never a reason to hammer the origin.
+    let loadedAnyPage = false;
+    for (const url of candidateUrls(input, company, country)) {
+      const direct = readPage(url, country);
+      const directBlocked = isBlockedPage(direct) || hasBlockedDetection(direct);
+      blocked ||= directBlocked;
+      if (directBlocked) blockedUrl ||= url;
+      if (direct?.ok) {
+        loadedAnyPage = true;
+        if (!direct.url) direct.url = url;
+      }
+      if (pageMatchesCompany(company, direct, country)) {
+        const records = recordsForPage(direct, company, country);
+        if (records.length > 0) {
+          process.stdout.write(JSON.stringify({ records }));
+          return;
+        }
+      }
+
+      const browser = browserPage(url, company, persistentSessionId);
+      const browserBlocked = isBlockedPage(browser) || hasBlockedDetection(browser);
+      blocked ||= browserBlocked;
+      if (browserBlocked) blockedUrl ||= browser?.url || url;
+      if (browser?.ok) loadedAnyPage = true;
+      if (pageMatchesCompany(company, browser, country)) {
+        const records = recordsForPage(browser, company, country);
+        if (records.length > 0) {
+          process.stdout.write(JSON.stringify({ records }));
+          return;
+        }
       }
     }
-
-    const browser = browserPage(url, company, persistentSessionId);
-    const browserBlocked = isBlockedPage(browser) || hasBlockedDetection(browser);
-    blocked ||= browserBlocked;
-    if (browserBlocked) blockedUrl ||= browser?.url || url;
-    if (pageMatchesCompany(company, browser, country)) {
-      const records = recordsForPage(browser, company, country);
-      if (records.length > 0) {
-        process.stdout.write(JSON.stringify({ records }));
-        return;
-      }
+    if (loadedAnyPage || blocked) break;
+    // Nothing loaded at all (transient network/origin failure): wait once,
+    // then give the candidate URLs a single second chance.
+    if (attempt + 1 < MAX_LOAD_ATTEMPTS) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
     }
   }
 

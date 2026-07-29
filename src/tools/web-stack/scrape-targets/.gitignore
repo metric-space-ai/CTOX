@@ -1,0 +1,3 @@
+# Solo-harness Playwright install (local dev only; see _solo/README).
+_solo/node_modules/
+node_modules
