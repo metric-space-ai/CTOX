@@ -117,30 +117,49 @@ impl SmtpInboundServer {
                             extracted_body = mail_body.clone();
                         }
 
-                        // Deliver mail
-                        let mut delivered = false;
+                        // Deliver mail: local recipients go straight to their
+                        // inbox; non-local recipients of an authenticated
+                        // session go to the outbound queue (client_queue owns
+                        // remote delivery and retries). Every accepted RCPT
+                        // must end up in exactly one of the two — a recipient
+                        // that lands in neither is a delivery failure, never
+                        // a silent drop behind a 250.
+                        let clean_from = mail_from
+                            .trim_matches(|c| c == '<' || c == '>')
+                            .trim()
+                            .to_string();
+                        let mut handled_recipients = 0usize;
+                        let mut failed_recipients: Vec<String> = Vec::new();
                         for recipient in &rcpt_to {
                             // Extract raw email address (e.g. from <user@domain.com> to user@domain.com)
                             let clean_recip = recipient
                                 .trim_matches(|c| c == '<' || c == '>')
                                 .trim()
                                 .to_string();
+                            let mut handled = false;
                             if self.store.user_exists(&clean_recip)? {
                                 if let Some(inbox_id) =
                                     self.store.get_mailbox_id(&clean_recip, "INBOX")?
                                 {
-                                    let clean_from =
-                                        mail_from.trim_matches(|c| c == '<' || c == '>').trim();
                                     self.store.put_message(
                                         &inbox_id,
-                                        clean_from,
+                                        &clean_from,
                                         &clean_recip,
                                         subject.as_deref(),
                                         &extracted_body,
                                         headers_str.as_deref(),
                                     )?;
-                                    delivered = true;
+                                    handled = true;
                                 }
+                            } else if authenticated_user.is_some() {
+                                self.store
+                                    .queue_email(&clean_from, &clean_recip, &mail_body)?;
+                                handled = true;
+                            }
+                            if handled {
+                                handled_recipients += 1;
+                            } else {
+                                failed_recipients.push(clean_recip);
                             }
                         }
 
@@ -157,13 +176,36 @@ impl SmtpInboundServer {
                             );
                         }
 
-                        if delivered || !rcpt_to.is_empty() {
+                        if handled_recipients > 0 && failed_recipients.is_empty() {
                             stream
                                 .write_all(b"250 2.0.0 Ok: Message accepted for delivery\r\n")
                                 .await?;
-                        } else {
-                            // If no valid recipients and not a bounce
+                        } else if handled_recipients == 0 {
                             stream.write_all(b"550 5.1.1 User unknown\r\n").await?;
+                        } else {
+                            // Partial: the delivered inboxes already have the
+                            // message, so the transaction is accepted — but the
+                            // sender gets a bounce naming the failed recipients
+                            // (unless the envelope sender is null, i.e. this
+                            // message is itself a bounce).
+                            warn!(
+                                "partial delivery: {} recipient(s) failed: {}",
+                                failed_recipients.len(),
+                                failed_recipients.join(", ")
+                            );
+                            if !clean_from.is_empty() {
+                                self.store.queue_email(
+                                    "mailer-daemon@localhost",
+                                    &clean_from,
+                                    &format!(
+                                        "Subject: Undelivered Mail Returned to Sender\r\n\r\nDelivery failed for: {}",
+                                        failed_recipients.join(", ")
+                                    ),
+                                )?;
+                            }
+                            stream
+                                .write_all(b"250 2.0.0 Ok: Message accepted for delivery\r\n")
+                                .await?;
                         }
 
                         mail_body.clear();

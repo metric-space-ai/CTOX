@@ -380,3 +380,82 @@ fn test_greylisting_basic() {
         .unwrap();
     assert!(!is_allowed_second);
 }
+
+#[tokio::test]
+async fn test_smtp_authenticated_relay_queues_external_mail() {
+    use base64::prelude::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("relay.sqlite");
+    let store = SqliteStore::new(db_path.to_str().unwrap());
+    store.init().unwrap();
+    store.add_user("relay@ctox.local", "relaypass").unwrap();
+
+    let smtp_addr: std::net::SocketAddr = "127.0.0.1:25252".parse().unwrap();
+    let smtp_config = ctox_mailserver::config::SmtpConfig {
+        bind_address: smtp_addr,
+        outbound_throttle_per_min: 100,
+        max_connections: 10,
+    };
+    let smtp_server = std::sync::Arc::new(SmtpInboundServer::new(store.clone(), smtp_config));
+    let _smtp_handle = tokio::spawn(async move {
+        let _ = smtp_server.start().await;
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+    let mut stream = tokio::net::TcpStream::connect(smtp_addr).await.unwrap();
+    let mut response = vec![0u8; 1024];
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("220"));
+
+    stream.write_all(b"EHLO localhost\r\n").await.unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("250"));
+
+    let credentials = BASE64_STANDARD.encode("\0relay@ctox.local\0relaypass");
+    stream
+        .write_all(format!("AUTH PLAIN {credentials}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("235"));
+
+    stream
+        .write_all(b"MAIL FROM:<relay@ctox.local>\r\n")
+        .await
+        .unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("250"));
+
+    stream
+        .write_all(b"RCPT TO:<friend@external.example>\r\n")
+        .await
+        .unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("250"));
+
+    stream.write_all(b"DATA\r\n").await.unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("354"));
+
+    stream
+        .write_all(b"Subject: Outbound\r\n\r\nHello out there.\r\n.\r\n")
+        .await
+        .unwrap();
+    let n = stream.read(&mut response).await.unwrap();
+    assert!(String::from_utf8_lossy(&response[..n]).contains("250"));
+    stream.write_all(b"QUIT\r\n").await.unwrap();
+
+    // The external recipient must be waiting in the outbound queue —
+    // a 250 with no queue entry would be the silent-drop bug.
+    let pending = store.get_pending_emails().unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "external mail must be queued: {pending:?}"
+    );
+    assert_eq!(pending[0].1, "relay@ctox.local");
+    assert_eq!(pending[0].2, "friend@external.example");
+    assert!(pending[0].3.contains("Hello out there."));
+}
