@@ -242,6 +242,7 @@ fn internal_work_terminology_firewall_keeps_self_work_legacy_only() -> Result<()
         "src/core/service/harness_flow.rs",
         "src/core/service/process_mining.rs",
         "src/core/mission/channels/mod.rs",
+        "src/core/mission/channels/business_os_projection.rs",
         "src/core/mission/channels/tests.rs",
         "src/core/mission/ticket_zammad_native.rs",
     ] {
