@@ -142,6 +142,28 @@ test('empty states distinguish sync loading from search misses', () => {
   assert.match(hooks.emptyCatalogBody('all', 'zz-no-hit', 'ready'), /zz-no-hit/);
 });
 
+test('data-driven catalog empty gates on canonical collection readiness', () => {
+  // Unfiltered empty + initial replication pending -> syncing shell.
+  assert.equal(hooks.catalogEmptyShowsSyncing({ readiness: { ready: false, state: 'catching-up' } }), true);
+  assert.equal(hooks.catalogEmptyShowsSyncing({ readiness: { ready: false, state: 'never-synced' } }), true);
+  // Ready (or unknown) readiness keeps the plain empty state.
+  assert.equal(hooks.catalogEmptyShowsSyncing({ readiness: { ready: true, state: 'live' } }), false);
+  assert.equal(hooks.catalogEmptyShowsSyncing({ readiness: null }), false);
+  // Search/category/band-filtered empties are never gated.
+  assert.equal(hooks.catalogEmptyShowsSyncing({ query: 'zz', readiness: { ready: false } }), false);
+  assert.equal(hooks.catalogEmptyShowsSyncing({ categoryFilter: 'Operations', readiness: { ready: false } }), false);
+  assert.equal(hooks.catalogEmptyShowsSyncing({ centerBand: 'updates', readiness: { ready: false } }), false);
+  // The GitHub fetch error empty is never gated.
+  assert.equal(hooks.catalogEmptyShowsSyncing({ scope: 'marketplace', marketplaceStatus: 'error', readiness: { ready: false } }), false);
+  // The wiring uses the canonical readiness contract on the catalog source.
+  assert.match(source, /sync\?\.subscribeCollectionReadiness/);
+  assert.match(source, /state\.ctx\?\.sync\?\.collectionReadiness/);
+  assert.match(source, /read\.call\(state\.ctx\.sync, 'business_module_catalog'\)/);
+  assert.match(source, /subscribe\.call\(state\.ctx\.sync, 'business_module_catalog'/);
+  assert.match(source, /className = 'ctox-syncing store-empty-state'/);
+  assert.match(source, /syncing\.setAttribute\('aria-live', 'polite'\)/);
+});
+
 test('external GitHub action exposes an explicit external-link marker', () => {
   assert.match(hooks.externalLinkIcon(), /external-link-icon/);
   assert.match(hooks.externalLinkIcon(), /aria-hidden="true"/);
