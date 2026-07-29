@@ -33,6 +33,37 @@ const DISCORD_GATEWAY_INTENT_MESSAGE_CONTENT: i64 = 1 << 15;
 const SLACK_SOCKET_MODE_CONNECT_TIMEOUT_MS: u64 = 5_000;
 const SLACK_SOCKET_MODE_IDLE_TIMEOUT_MS: u64 = 1_500;
 const SLACK_SOCKET_MODE_MAX_ENVELOPES_PER_TICK: usize = 20;
+const CHAT_HTTP_BODY_EXCERPT_MAX_CHARS: usize = 1_024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChatHttpError {
+    status: u16,
+    retry_after_seconds: Option<i64>,
+    body_excerpt: String,
+    url: String,
+}
+
+impl std::fmt::Display for ChatHttpError {
+    /// This is a persisted wire format for `adapter_status.last_error`.
+    /// Keep it synchronized with `chat_http_error_fields_from_display`; the
+    /// display/parser coupling regression test must change with either side.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let retry_after = self
+            .retry_after_seconds
+            .map(|seconds| seconds.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        let url = serde_json::to_string(&self.url).map_err(|_| std::fmt::Error)?;
+        let body_excerpt =
+            serde_json::to_string(&self.body_excerpt).map_err(|_| std::fmt::Error)?;
+        write!(
+            formatter,
+            "HTTP {}; retry_after={retry_after}; url={url}; body_excerpt={body_excerpt}",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for ChatHttpError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChatPlatform {
@@ -321,6 +352,7 @@ fn execute_slack_socket_mode_service_sync(options: &ChatOptions) -> Result<Value
 
 fn slack_socket_mode_service_error(options: &ChatOptions, error: anyhow::Error) -> Value {
     let error_text = redact_sensitive_text(options, &error.to_string());
+    let status = adapter_status_from_error("realtime_sync", &error, last_cursor(options), options);
     let attempt = next_realtime_backoff_attempt(options);
     let backoff_until = record_realtime_backoff(options, "slack_socket_mode_failed", attempt)
         .map(Value::from)
@@ -334,17 +366,7 @@ fn slack_socket_mode_service_error(options: &ChatOptions, error: anyhow::Error) 
             options.platform.channel(),
             &configured_account_address(options),
             options.platform.provider(),
-            profile_json(
-                options,
-                &json!({}),
-                adapter_status(
-                    "realtime_sync",
-                    false,
-                    Some(error_text.clone()),
-                    last_cursor(options),
-                    options,
-                ),
-            ),
+            profile_json(options, &json!({}), status),
         );
     }
     json!({
@@ -435,6 +457,7 @@ fn execute_test(options: &ChatOptions) -> Result<Value> {
         }
         Err(error) => {
             let error_text = redact_sensitive_text(options, &error.to_string());
+            let status = adapter_status_from_error("test", &error, None, options);
             let mut conn = open_channel_db(&options.db_path)?;
             let account_key = configured_account_key(options);
             ensure_account(
@@ -443,11 +466,7 @@ fn execute_test(options: &ChatOptions) -> Result<Value> {
                 options.platform.channel(),
                 &configured_account_address(options),
                 options.platform.provider(),
-                profile_json(
-                    options,
-                    &json!({}),
-                    adapter_status("test", false, Some(error_text.clone()), None, options),
-                ),
+                profile_json(options, &json!({}), status),
             )?;
             Ok(json!({
                 "ok": false,
@@ -485,6 +504,7 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
     let mut stored_count = 0usize;
     let mut updated_count = 0usize;
     let mut errors = Vec::new();
+    let mut failed_adapter_status = None;
 
     let sync_output = if is_fake_mode(options) {
         fake_sync_messages(options, &account_key).map(ChatSyncOutput::messages)
@@ -524,7 +544,15 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
                     apply_chat_post_store_update(&mut conn, options, &account_key, update)?;
             }
         }
-        Err(error) => errors.push(redact_sensitive_text(options, &error.to_string())),
+        Err(error) => {
+            failed_adapter_status = Some(adapter_status_from_error(
+                "sync",
+                &error,
+                last_cursor(options),
+                options,
+            ));
+            errors.push(redact_sensitive_text(options, &error.to_string()));
+        }
     }
 
     ensure_routing_rows_for_inbound(&conn)?;
@@ -539,13 +567,9 @@ fn execute_sync(options: &ChatOptions) -> Result<Value> {
         profile_json(
             options,
             &json!({}),
-            adapter_status(
-                "sync",
-                errors.is_empty(),
-                (!errors.is_empty()).then(|| error_text.clone()),
-                last_cursor(options),
-                options,
-            ),
+            failed_adapter_status.unwrap_or_else(|| {
+                adapter_status("sync", true, None, last_cursor(options), options)
+            }),
         ),
     )?;
     if errors.is_empty() {
@@ -634,6 +658,10 @@ fn execute_send(options: &ChatOptions, request: &ChatSendCommandRequest<'_>) -> 
         .as_ref()
         .err()
         .map(|error| redact_sensitive_text(options, &error.to_string()));
+    let send_adapter_status = match send_result.as_ref() {
+        Ok(_) => adapter_status("send", true, None, last_cursor(options), options),
+        Err(error) => adapter_status_from_error("send", error, last_cursor(options), options),
+    };
     let sent_remote_id = remote_id_from_send_result(options.platform, sent_value)
         .unwrap_or_else(|| fallback_remote_id.clone());
     let account_key = if request.account_key.trim().is_empty() {
@@ -664,17 +692,7 @@ fn execute_send(options: &ChatOptions, request: &ChatSendCommandRequest<'_>) -> 
         options.platform.channel(),
         &configured_account_address(options),
         options.platform.provider(),
-        profile_json(
-            options,
-            &json!({}),
-            adapter_status(
-                "send",
-                delivery_confirmed,
-                send_error_text.clone(),
-                last_cursor(options),
-                options,
-            ),
-        ),
+        profile_json(options, &json!({}), send_adapter_status),
     )?;
     if delivery_confirmed {
         mark_account_activity(&mut conn, &account_key, None, Some(&timestamp))?;
@@ -3151,11 +3169,45 @@ fn adapter_status(
 ) -> Value {
     let error = error.map(|value| redact_sensitive_text(options, &value));
     let classified = classify_provider_error(options.platform, error.as_deref());
-    let rate_limited_until_ms = error
-        .as_deref()
-        .and_then(rate_limited_until_ms_from_error)
-        .map(Value::from)
-        .unwrap_or(Value::Null);
+    let rate_limited_until_ms = error.as_deref().and_then(rate_limited_until_ms_from_error);
+    adapter_status_value(
+        operation,
+        ok,
+        error,
+        cursor,
+        classified,
+        rate_limited_until_ms,
+        options,
+    )
+}
+
+fn adapter_status_from_error(
+    operation: &str,
+    error: &anyhow::Error,
+    cursor: Option<String>,
+    options: &ChatOptions,
+) -> Value {
+    let error_text = redact_sensitive_text(options, &error.to_string());
+    adapter_status_value(
+        operation,
+        false,
+        Some(error_text),
+        cursor,
+        classify_provider_error_from_anyhow(options.platform, error),
+        rate_limited_until_ms_from_anyhow(error),
+        options,
+    )
+}
+
+fn adapter_status_value(
+    operation: &str,
+    ok: bool,
+    error: Option<String>,
+    cursor: Option<String>,
+    classified: ProviderErrorClassification,
+    rate_limited_until_ms: Option<i64>,
+    options: &ChatOptions,
+) -> Value {
     let realtime_cursor_key = realtime_cursor_state_key(options.platform);
     json!({
         "auth_state": if ok { "ok" } else { classified.auth_state },
@@ -3167,7 +3219,7 @@ fn adapter_status(
             _ => "not_running",
         },
         "last_cursor": cursor,
-        "rate_limited_until_ms": rate_limited_until_ms,
+        "rate_limited_until_ms": rate_limited_until_ms.map(Value::from).unwrap_or(Value::Null),
         "last_error": error,
         "last_success_at_ms": ok.then(current_unix_millis),
         "last_operation": operation,
@@ -3875,6 +3927,50 @@ struct ProviderErrorClassification {
     remediation: &'static str,
 }
 
+fn classify_provider_error_from_anyhow(
+    platform: ChatPlatform,
+    error: &anyhow::Error,
+) -> ProviderErrorClassification {
+    if let Some(http_error) = error.downcast_ref::<ChatHttpError>() {
+        if let Some(classified) = classify_chat_http_status(platform, http_error.status) {
+            return classified;
+        }
+        return classify_provider_error(platform, Some(&http_error.body_excerpt));
+    }
+    classify_provider_error(platform, Some(&error.to_string()))
+}
+
+fn classify_chat_http_status(
+    platform: ChatPlatform,
+    status: u16,
+) -> Option<ProviderErrorClassification> {
+    match status {
+        401 => Some(ProviderErrorClassification {
+            kind: "deauthorized",
+            auth_state: "deauthorized",
+            scope_state: "unknown",
+            permission_state: "unknown",
+            remediation: "Reconnect the account or rotate the bot token in CTOX secrets.",
+        }),
+        403 => Some(ProviderErrorClassification {
+            kind: "missing_permission",
+            auth_state: "ok",
+            scope_state: "unknown",
+            permission_state: "missing_permission",
+            remediation: missing_permission_remediation(platform, ""),
+        }),
+        429 => Some(ProviderErrorClassification {
+            kind: "rate_limited",
+            auth_state: "ok",
+            scope_state: "unknown",
+            permission_state: "unknown",
+            remediation:
+                "Respect the provider Retry-After value and let the next scheduled sync retry.",
+        }),
+        _ => None,
+    }
+}
+
 fn classify_provider_error(
     platform: ChatPlatform,
     error: Option<&str>,
@@ -3888,6 +3984,10 @@ fn classify_provider_error(
             remediation: "No provider error observed.",
         };
     };
+    // Ordered fallback for non-HTTP errors and persisted probe strings. Specific
+    // rate/auth/scope signals intentionally precede broader permission probes;
+    // changing that order can change classifications. COMM-OUTBOX owns the full
+    // redesign, so keep this fallback bounded rather than adding more probes.
     let normalized = error.to_ascii_lowercase();
     if normalized.contains("http 429")
         || normalized.contains("rate_limited")
@@ -4107,16 +4207,40 @@ where
     }
 }
 
+fn rate_limited_until_ms_from_anyhow(error: &anyhow::Error) -> Option<i64> {
+    match error.downcast_ref::<ChatHttpError>() {
+        Some(http_error) => rate_limited_until_ms_from_chat_http_error(http_error),
+        None => rate_limited_until_ms_from_error(&error.to_string()),
+    }
+}
+
+fn rate_limited_until_ms_from_chat_http_error(error: &ChatHttpError) -> Option<i64> {
+    (error.status == 429).then(|| rate_limited_until_ms(error.retry_after_seconds.unwrap_or(60)))
+}
+
 fn rate_limited_until_ms_from_error(error: &str) -> Option<i64> {
-    if !(error.contains("HTTP 429") || error.to_ascii_lowercase().contains("rate")) {
+    let (status, retry_after_seconds) = chat_http_error_fields_from_display(error)?;
+    (status == 429).then(|| rate_limited_until_ms(retry_after_seconds.unwrap_or(60)))
+}
+
+fn rate_limited_until_ms(retry_after_seconds: i64) -> i64 {
+    current_unix_millis().saturating_add(retry_after_seconds.max(0).saturating_mul(1_000))
+}
+
+fn chat_http_error_fields_from_display(error: &str) -> Option<(u16, Option<i64>)> {
+    let fields = error.strip_prefix("HTTP ")?;
+    let (status, fields) = fields.split_once("; retry_after=")?;
+    let (retry_after, fields) = fields.split_once("; url=")?;
+    let (_, body_excerpt) = fields.split_once("; body_excerpt=")?;
+    if body_excerpt.is_empty() {
         return None;
     }
-    error
-        .split("retry_after=")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|value| value.trim_matches(['"', '\'']).parse::<i64>().ok())
-        .map(|seconds| current_unix_millis() + seconds.max(0) * 1000)
+    let status = status.parse::<u16>().ok()?;
+    let retry_after_seconds = match retry_after {
+        "none" => None,
+        value => Some(value.parse::<i64>().ok()?),
+    };
+    Some((status, retry_after_seconds))
 }
 
 fn current_unix_millis() -> i64 {
@@ -4241,6 +4365,35 @@ fn http_json(
     http_json_response(method, url, headers, body).map(|response| response.value)
 }
 
+fn chat_http_error_from_response(
+    status: u16,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    body: &Value,
+) -> ChatHttpError {
+    ChatHttpError {
+        status,
+        retry_after_seconds: headers
+            .get("retry-after")
+            .and_then(|value| value.trim().parse::<i64>().ok()),
+        body_excerpt: chat_http_body_excerpt(body),
+        url: url.to_string(),
+    }
+}
+
+fn chat_http_body_excerpt(body: &Value) -> String {
+    let body = body.to_string();
+    if body.chars().count() <= CHAT_HTTP_BODY_EXCERPT_MAX_CHARS {
+        return body;
+    }
+    let mut excerpt = body
+        .chars()
+        .take(CHAT_HTTP_BODY_EXCERPT_MAX_CHARS)
+        .collect::<String>();
+    excerpt.push('…');
+    excerpt
+}
+
 fn http_json_response(
     method: &str,
     url: &str,
@@ -4259,14 +4412,9 @@ fn http_json_response(
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&response.body).into_owned()))
     };
     if !(200..300).contains(&status) {
-        let retry_after = headers.get("retry-after").map(String::as_str).unwrap_or("");
-        if retry_after.is_empty() {
-            bail!("HTTP {} from {url}: {value}", status);
-        }
-        bail!(
-            "HTTP {} from {url}: {value}; retry_after={retry_after}",
-            status
-        );
+        return Err(anyhow::Error::new(chat_http_error_from_response(
+            status, url, &headers, &value,
+        )));
     }
     Ok(ChatHttpJsonResponse { headers, value })
 }
@@ -4296,18 +4444,12 @@ fn http_form(
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&response.body).into_owned()))
     };
     if !(200..300).contains(&response.status) {
-        let retry_after = response
-            .headers
-            .get("retry-after")
-            .map(String::as_str)
-            .unwrap_or("");
-        if retry_after.is_empty() {
-            bail!("HTTP {} from {url}: {value}", response.status);
-        }
-        bail!(
-            "HTTP {} from {url}: {value}; retry_after={retry_after}",
-            response.status
-        );
+        return Err(anyhow::Error::new(chat_http_error_from_response(
+            response.status,
+            url,
+            &response.headers,
+            &value,
+        )));
     }
     Ok(value)
 }
@@ -4984,6 +5126,65 @@ mod tests {
     }
 
     #[test]
+    fn typed_http_429_retry_after_header_sets_rate_limit_until() {
+        let headers = BTreeMap::from([("retry-after".to_string(), "7".to_string())]);
+        let http_error = chat_http_error_from_response(
+            429,
+            "https://chat.example.test/api/messages",
+            &headers,
+            &json!({"error": "slow down"}),
+        );
+        assert_eq!(http_error.retry_after_seconds, Some(7));
+
+        let error = anyhow::Error::new(http_error);
+        let before = current_unix_millis();
+        let until = rate_limited_until_ms_from_anyhow(&error).expect("typed 429 backoff");
+        let after = current_unix_millis();
+        assert!(until >= before + 7_000, "unexpected rate limit: {until}");
+        assert!(until <= after + 7_000, "unexpected rate limit: {until}");
+    }
+
+    #[test]
+    fn chat_http_error_display_and_persisted_parser_stay_coupled() {
+        let error = ChatHttpError {
+            status: 429,
+            retry_after_seconds: Some(13),
+            body_excerpt: "provider said: retry later".to_string(),
+            url: "https://chat.example.test/api/messages?room=a b".to_string(),
+        };
+        let displayed = error.to_string();
+
+        assert_eq!(
+            chat_http_error_fields_from_display(&displayed),
+            Some((429, Some(13)))
+        );
+        let before = current_unix_millis();
+        let until = rate_limited_until_ms_from_error(&displayed).expect("persisted 429 backoff");
+        assert!(until >= before + 13_000, "unexpected rate limit: {until}");
+    }
+
+    #[test]
+    fn typed_http_401_classifies_as_auth_without_text_probe() {
+        let http_error = ChatHttpError {
+            status: 401,
+            retry_after_seconds: None,
+            body_excerpt: "credentials rejected".to_string(),
+            url: "https://chat.example.test/api/session".to_string(),
+        };
+        assert_eq!(
+            classify_provider_error(ChatPlatform::Mattermost, Some(&http_error.body_excerpt)).kind,
+            "failed"
+        );
+
+        let classified = classify_provider_error_from_anyhow(
+            ChatPlatform::Mattermost,
+            &anyhow::Error::new(http_error),
+        );
+        assert_eq!(classified.kind, "deauthorized");
+        assert_eq!(classified.auth_state, "deauthorized");
+    }
+
+    #[test]
     fn provider_error_classification_maps_common_auth_scope_and_rate_states() {
         let slack_scope =
             classify_provider_error(ChatPlatform::Slack, Some("Slack API failed: missing_scope"));
@@ -5008,16 +5209,17 @@ mod tests {
         assert_eq!(deauth.auth_state, "deauthorized");
         assert!(deauth.remediation.contains("Reconnect"));
 
-        let rate = classify_provider_error(
-            ChatPlatform::Mattermost,
-            Some("HTTP 429 from https://chat.example.test/api/v4/posts: {}; retry_after=7"),
-        );
+        let rate_error = ChatHttpError {
+            status: 429,
+            retry_after_seconds: Some(7),
+            body_excerpt: "{}".to_string(),
+            url: "https://chat.example.test/api/v4/posts".to_string(),
+        }
+        .to_string();
+        let rate = classify_provider_error(ChatPlatform::Mattermost, Some(&rate_error));
         assert_eq!(rate.kind, "rate_limited");
         assert!(rate.remediation.contains("Retry-After"));
-        assert!(rate_limited_until_ms_from_error(
-            "HTTP 429 from https://chat.example.test/api/v4/posts: {}; retry_after=7"
-        )
-        .is_some());
+        assert!(rate_limited_until_ms_from_error(&rate_error).is_some());
 
         let root = Path::new("/tmp/ctox-test-root");
         let db_path = root.join("runtime/ctox.sqlite3");
@@ -5031,10 +5233,17 @@ mod tests {
             &db_path,
         );
         let before = current_unix_millis();
+        let persisted_rate_error = ChatHttpError {
+            status: 429,
+            retry_after_seconds: Some(7),
+            body_excerpt: r#"{"ok":false,"error":"ratelimited"}"#.to_string(),
+            url: "https://slack.com/api/conversations.history".to_string(),
+        }
+        .to_string();
         let slack_status = adapter_status(
             "sync",
             false,
-            Some("HTTP 429 from https://slack.com/api/conversations.history: {\"ok\":false,\"error\":\"ratelimited\"}; retry_after=7".to_string()),
+            Some(persisted_rate_error),
             None,
             &slack_options,
         );
