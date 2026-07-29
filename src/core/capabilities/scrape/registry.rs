@@ -9,7 +9,7 @@ use super::{
     target_sources, write_target_manifest, RegisteredTarget, ScrapeScriptRevisionRecord,
     ScrapeTargetView, SCHEMA,
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::fs;

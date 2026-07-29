@@ -5,7 +5,6 @@
 use super::classify::{Classification, ScrapeRunStatus};
 use super::execute::ProbeResult;
 use super::{host_within_domains, url_host_lower, RegisteredTarget};
-use anyhow::Result;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;

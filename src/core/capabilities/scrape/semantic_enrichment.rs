@@ -1,7 +1,7 @@
 // LLM enrichment and semantic search: configs, prompt build, response
 // parsing/apply, embedding transport (local socket first), index cache.
 
-use super::registry::{count_rows, load_registered_target, open_db, resolve_db_path};
+use super::registry::open_db;
 use super::{
     artifact_record, build_target_api_contract, canonical_json, compute_sha256,
     extract_first_json_object, invoke_responses_text, json_lookup_path,
@@ -17,7 +17,7 @@ use crate::inference::model_registry;
 use crate::inference::runtime_kernel;
 use crate::inference::runtime_state;
 use crate::inference::supervisor;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

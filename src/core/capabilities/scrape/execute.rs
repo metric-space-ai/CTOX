@@ -15,7 +15,7 @@ use super::{
     RegisteredTarget, ScrapeExecutionOutcome, DEFAULT_QUEUE_PRIORITY, SCRAPE_RUNNER_ENV_ALLOWLIST,
 };
 use crate::channels;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::fs;
 use std::fs::OpenOptions;

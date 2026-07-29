@@ -8,7 +8,7 @@ use super::{
     resolve_db_path, semantic_search, show_api, show_latest, show_target, summary_payload,
     upsert_target, DEFAULT_RUNTIME_ROOT,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
 use std::path::Path;
 
