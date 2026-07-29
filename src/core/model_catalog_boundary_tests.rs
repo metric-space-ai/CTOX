@@ -54,6 +54,10 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
             production_source(include_str!("capabilities/scrape/cli.rs")),
         ),
         (
+            "capabilities/scrape/registry.rs",
+            production_source(include_str!("capabilities/scrape/registry.rs")),
+        ),
+        (
             "ui/tui/mod.rs",
             production_source(include_str!("ui/tui/mod.rs")),
         ),
