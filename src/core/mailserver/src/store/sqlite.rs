@@ -428,7 +428,8 @@ impl SqliteStore {
 
     // --- User & Mailbox Operations ---
 
-    pub fn add_user(&self, username: &str, password_hash: &str) -> StalwartResult<()> {
+    pub fn add_user(&self, username: &str, password: &str) -> StalwartResult<()> {
+        let password_hash = hash_password(password);
         self.with_connection(|conn| {
             let now = crate::util::now_utc_secs();
             conn.execute(
@@ -455,18 +456,39 @@ impl SqliteStore {
         })
     }
 
-    pub fn authenticate_user(&self, username: &str, password_hash: &str) -> StalwartResult<bool> {
-        self.with_connection(|conn| {
+    pub fn authenticate_user(&self, username: &str, password: &str) -> StalwartResult<bool> {
+        let stored: Option<String> = self.with_connection(|conn| {
             let mut stmt =
                 conn.prepare("SELECT password_hash FROM stalwart_users WHERE username = ?1")?;
             let mut rows = stmt.query(params![username])?;
-            if let Some(row) = rows.next()? {
-                let db_pass: String = row.get(0)?;
-                Ok(db_pass == password_hash)
-            } else {
-                Ok(false)
+            match rows.next()? {
+                Some(row) => Ok(Some(row.get(0)?)),
+                None => Ok(None),
             }
-        })
+        })?;
+        let Some(stored) = stored else {
+            return Ok(false);
+        };
+        if let Some(parsed) = parse_password_hash(&stored) {
+            return Ok(verify_password(password, &parsed));
+        }
+        // Legacy row from before hashing: the column held the raw password.
+        // Verify in constant time, then rewrite the row hashed so the
+        // plaintext disappears on first successful login.
+        let matches =
+            ring::constant_time::verify_slices_are_equal(stored.as_bytes(), password.as_bytes())
+                .is_ok();
+        if matches {
+            let upgraded = hash_password(password);
+            self.with_connection(|conn| {
+                conn.execute(
+                    "UPDATE stalwart_users SET password_hash = ?1 WHERE username = ?2",
+                    params![upgraded, username],
+                )?;
+                Ok(())
+            })?;
+        }
+        Ok(matches)
     }
 
     pub fn user_exists(&self, username: &str) -> StalwartResult<bool> {
@@ -713,6 +735,77 @@ fn record_open_connection_for_test(db_path: &str) {
 
 #[cfg(not(test))]
 fn record_open_connection_for_test(_db_path: &str) {}
+
+// --- Password hashing ---
+//
+// Stored format: `pbkdf2-sha256$<iterations>$<salt-b64>$<derived-key-b64>`.
+// Rows without this prefix are legacy plaintext and get rewritten hashed on
+// their first successful authentication.
+
+const PASSWORD_HASH_PREFIX: &str = "pbkdf2-sha256";
+const PASSWORD_PBKDF2_ITERATIONS: u32 = 100_000;
+const PASSWORD_SALT_LEN: usize = 16;
+const PASSWORD_KEY_LEN: usize = 32;
+
+struct ParsedPasswordHash {
+    iterations: std::num::NonZeroU32,
+    salt: Vec<u8>,
+    derived_key: Vec<u8>,
+}
+
+fn hash_password(password: &str) -> String {
+    use base64::Engine as _;
+    use ring::rand::SecureRandom as _;
+    let mut salt = [0u8; PASSWORD_SALT_LEN];
+    ring::rand::SystemRandom::new()
+        .fill(&mut salt)
+        .expect("system randomness for password salt");
+    let mut derived_key = [0u8; PASSWORD_KEY_LEN];
+    ring::pbkdf2::derive(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        std::num::NonZeroU32::new(PASSWORD_PBKDF2_ITERATIONS).expect("non-zero iterations"),
+        &salt,
+        password.as_bytes(),
+        &mut derived_key,
+    );
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    format!(
+        "{PASSWORD_HASH_PREFIX}${PASSWORD_PBKDF2_ITERATIONS}${}${}",
+        b64.encode(salt),
+        b64.encode(derived_key)
+    )
+}
+
+fn parse_password_hash(stored: &str) -> Option<ParsedPasswordHash> {
+    use base64::Engine as _;
+    let mut parts = stored.split('$');
+    if parts.next()? != PASSWORD_HASH_PREFIX {
+        return None;
+    }
+    let iterations = std::num::NonZeroU32::new(parts.next()?.parse().ok()?)?;
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    let salt = b64.decode(parts.next()?).ok()?;
+    let derived_key = b64.decode(parts.next()?).ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(ParsedPasswordHash {
+        iterations,
+        salt,
+        derived_key,
+    })
+}
+
+fn verify_password(password: &str, parsed: &ParsedPasswordHash) -> bool {
+    ring::pbkdf2::verify(
+        ring::pbkdf2::PBKDF2_HMAC_SHA256,
+        parsed.iterations,
+        &parsed.salt,
+        password.as_bytes(),
+        &parsed.derived_key,
+    )
+    .is_ok()
+}
 
 #[cfg(test)]
 fn clear_connection_cache_for_test(db_path: &str) {
@@ -961,5 +1054,54 @@ mod tests {
             );
             Ok(())
         })
+    }
+
+    #[test]
+    fn passwords_are_stored_hashed_and_verify_roundtrip() -> StalwartResult<()> {
+        let (_temp, store, _inbox) = test_store()?;
+        store.add_user("carol@example.test", "s3cret pa55word")?;
+        let stored: String = store.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT password_hash FROM stalwart_users WHERE username = 'carol@example.test'",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert!(
+            !stored.contains("s3cret pa55word"),
+            "raw password must not appear in the stored credential: {stored}"
+        );
+        assert!(store.authenticate_user("carol@example.test", "s3cret pa55word")?);
+        assert!(!store.authenticate_user("carol@example.test", "wrong")?);
+        assert!(!store.authenticate_user("nobody@example.test", "s3cret pa55word")?);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_plaintext_rows_authenticate_once_and_upgrade_to_hash() -> StalwartResult<()> {
+        let (_temp, store, _inbox) = test_store()?;
+        store.with_connection(|conn| {
+            conn.execute(
+                "INSERT INTO stalwart_users (username, password_hash, created_at)
+                 VALUES ('legacy@example.test', 'oldplain', 0)",
+                [],
+            )?;
+            Ok(())
+        })?;
+        assert!(!store.authenticate_user("legacy@example.test", "wrong")?);
+        assert!(store.authenticate_user("legacy@example.test", "oldplain")?);
+        let stored: String = store.with_connection(|conn| {
+            Ok(conn.query_row(
+                "SELECT password_hash FROM stalwart_users WHERE username = 'legacy@example.test'",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        assert_ne!(
+            stored, "oldplain",
+            "plaintext must be gone after first login"
+        );
+        assert!(store.authenticate_user("legacy@example.test", "oldplain")?);
+        Ok(())
     }
 }
