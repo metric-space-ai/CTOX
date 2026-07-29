@@ -72,7 +72,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v93';
+const APP_BUILD = '20260729-research-knowledge-usability-v94';
 
 ensureShellStylesheets();
 
@@ -90,7 +90,8 @@ const CTOX_MAINTENANCE_POLL_MS = 2000;
 const CTOX_MAINTENANCE_LEASE_KEY = 'ctox.businessOs.maintenanceLease';
 const CTOX_MAINTENANCE_CLIENT_KEY = 'ctox.businessOs.maintenanceClient';
 const CTOX_UPDATE_CHECK_POLL_MS = 30 * 60 * 1000;
-const SYNC_RECOVERY_REPAIR_DELAY_MS = 15000;
+const SYNC_RECOVERY_REPAIR_DELAY_MS = 30000;
+const SYNC_RECOVERY_MIN_STALLED_MS = 25000;
 const SHELL_IMPORT_TIMEOUT_MS = 45000;
 const MODULE_SCRIPT_PRELOAD_STABLE_HEALTH_MS = 10000;
 const MODULE_SCRIPT_PRELOAD_INTERVAL_MS = 250;
@@ -2980,10 +2981,18 @@ function hasRecoverableWebRtcFailure(snapshot) {
   const collections = Object.values(snapshot.collections || {});
   const hadEstablishedConnection = collections.some((collection) => collection?.connectedAt || collection?.initialReplicationAt);
   if (!hadEstablishedConnection && !state.advancedStatusEverHealthy) return false;
-  const hasDataPlaneError = collections.some((collection) => collection?.lastError);
-  if (!hasDataPlaneError) return false;
-  if (snapshot.phase === 'reconnecting') return true;
-  return collections.some((collection) => collection?.connectionStatus === 'reconnecting');
+  return collections.some(isRecoverableWebRtcCollection);
+}
+
+function isRecoverableWebRtcCollection(collection, minStalledMs = 0) {
+  if (!collection?.lastError || collection.lastError.retryable === false) return false;
+  const reconnecting = collection.connectionStatus === 'reconnecting'
+    || collection.status === 'reconnecting';
+  if (!reconnecting) return false;
+  if (minStalledMs <= 0) return true;
+  const reconnectingSinceMs = Date.parse(String(collection.reconnectingSince || ''));
+  return Number.isFinite(reconnectingSinceMs)
+    && Date.now() - reconnectingSinceMs >= minStalledMs;
 }
 
 async function repairRecoveringDataPlane() {
@@ -2996,16 +3005,14 @@ async function repairRecoveringDataPlane() {
   try {
     const diagnostics = state.syncDiagnostics?.collections || {};
     const affectedCollections = Object.entries(diagnostics)
-      .filter(([, collection]) => (
-        collection?.lastError
-        || collection?.connectionStatus === 'reconnecting'
-        || collection?.status === 'reconnecting'
+      .filter(([, collection]) => isRecoverableWebRtcCollection(
+        collection,
+        SYNC_RECOVERY_MIN_STALLED_MS,
       ))
       .map(([collection]) => collection);
-    const activeCollections = state.sync.resourceSnapshot?.().activeCollections || [];
-    const collections = [...new Set([...affectedCollections, ...activeCollections])];
+    const collections = [...new Set(affectedCollections)];
     if (!collections.length) return;
-    console.warn('[business-os] restarting stalled RxDB/WebRTC collections');
+    console.warn('[business-os] restarting stalled RxDB/WebRTC collections', collections);
     setStatus('RxDB/WebRTC wird neu verbunden');
     await state.sync.restartCollections(collections);
     if (state.activeModule) {

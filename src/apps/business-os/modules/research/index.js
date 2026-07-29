@@ -7,7 +7,7 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v90';
+const BUILD = '20260729-research-knowledge-usability-v91';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -514,6 +514,7 @@ const state = {
   refreshDirty: false,
   researchRefreshTimer: null,
   knowledgeRefreshTimer: null,
+  pendingLocalRefreshCollections: new Set(),
   refreshSequences: {
     research: 0,
     knowledge: 0,
@@ -865,12 +866,7 @@ async function loadLocalState({ mountToken = null } = {}) {
 }
 
 function wireRealtime() {
-  const knowledgeLifecycleCollections = new Set([
-    'research_tasks',
-    'research_runs',
-    'business_commands',
-    'ctox_queue_tasks',
-  ]);
+  const knowledgeLifecycleCollections = new Set(['research_tasks']);
   const collections = [
     ['research_tasks', readableCollection('research_tasks')],
     ['research_runs', readableCollection('research_runs')],
@@ -881,7 +877,7 @@ function wireRealtime() {
   ].filter(([, collection]) => collection);
   for (const [name, collection] of collections) {
     const subscription = collection.$?.subscribe?.(() => {
-      scheduleLocalRefresh(80);
+      scheduleLocalRefresh(80, name);
       if (knowledgeLifecycleCollections.has(name)) scheduleKnowledgeRefresh(250);
     });
     if (subscription?.unsubscribe) state.cleanup.push(() => subscription.unsubscribe());
@@ -917,7 +913,8 @@ function schedulePostSyncRefresh(delay = 250) {
   scheduleKnowledgeRefresh(delay);
 }
 
-function scheduleLocalRefresh(delay = 80) {
+function scheduleLocalRefresh(delay = 80, collectionName = '') {
+  if (collectionName) state.pendingLocalRefreshCollections.add(collectionName);
   if (state.researchRefreshTimer) window.clearTimeout(state.researchRefreshTimer);
   const sequence = ++state.refreshSequences.research;
   const mountToken = state.mountToken;
@@ -925,9 +922,23 @@ function scheduleLocalRefresh(delay = 80) {
     if (sequence !== state.refreshSequences.research) return;
     state.researchRefreshTimer = null;
     if (!mountToken || state.mountToken !== mountToken) return;
+    const changedCollections = new Set(state.pendingLocalRefreshCollections);
+    state.pendingLocalRefreshCollections.clear();
     await loadLocalState({ mountToken });
     if (state.mountToken !== mountToken) return;
-    render();
+    if (changedCollections.has('research_tasks')) {
+      await loadDashboardData();
+      if (state.mountToken !== mountToken) return;
+      render();
+      return;
+    }
+    if (changedCollections.has('documents')) {
+      renderCenter();
+    }
+    // Queue, command and run documents update while work is active. They only
+    // affect the context pane; rebuilding the center pane here disconnects
+    // tabs, resets nested scroll containers and remounts the graph mid-click.
+    renderRight();
   }, delay);
 }
 
@@ -1364,7 +1375,7 @@ async function loadDashboardData() {
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
   const evidenceTable = tableForKey(base, 'evidence_points');
-  const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
+  const measurementTable = preferredDirectMeasurementTable(base, task);
   const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
     || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
@@ -3485,13 +3496,32 @@ function selectSourceFromUi(sourceId) {
 
   const centerMatch = [...(pane('center')?.querySelectorAll('[data-source-id]') || [])]
     .find((node) => node.dataset.sourceId === nextId && node.closest('.research-table-host'));
-  centerMatch?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+  scrollElementWithinNearestList(centerMatch);
 
   renderRight();
-  pane('right')?.querySelector('[data-selected-source-section]')?.scrollIntoView?.({
-    block: 'start',
-    inline: 'nearest',
-  });
+  scrollElementWithinNearestList(
+    pane('right')?.querySelector('[data-selected-source-section]'),
+  );
+}
+
+function scrollElementWithinNearestList(element) {
+  if (!element) return;
+  const container = element.closest(
+    '.research-sources-shards-scroll, .research-table-host, .research-left-scroll, .research-right-scroll',
+  );
+  if (!container || container === element) return;
+  const elementRect = element.getBoundingClientRect();
+  const containerRect = container.getBoundingClientRect();
+  if (elementRect.top < containerRect.top) {
+    container.scrollTop -= containerRect.top - elementRect.top;
+  } else if (elementRect.bottom > containerRect.bottom) {
+    container.scrollTop += elementRect.bottom - containerRect.bottom;
+  }
+  if (elementRect.left < containerRect.left) {
+    container.scrollLeft -= containerRect.left - elementRect.left;
+  } else if (elementRect.right > containerRect.right) {
+    container.scrollLeft += elementRect.right - containerRect.right;
+  }
 }
 
 function capturePaneScroll(root) {
@@ -5209,6 +5239,12 @@ function tableForKey(base, key) {
   return base.tables.find((table) => table.table_key === key) || null;
 }
 
+function preferredDirectMeasurementTable(base, task = null) {
+  return tableForKey(base, 'measured_load_points')
+    || tableForKey(base, task?.measurements_table_key)
+    || firstTableMatching(base, /measure|load|point/i);
+}
+
 function firstTableMatching(base, pattern) {
   return base?.tables?.find((table) => pattern.test(`${table.table_key} ${table.title} ${table.description}`)) || null;
 }
@@ -6249,6 +6285,7 @@ export const __researchTestHooks = {
   knowledgeLineageForPayload,
   knowledgeRefreshPayload,
   compactKnowledgeTableReferences,
+  preferredDirectMeasurementTable,
   graphDocumentLineage,
   latestEvidenceRunForTask,
   researchScoringContract,

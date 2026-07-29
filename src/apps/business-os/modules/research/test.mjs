@@ -76,11 +76,16 @@ test('research tasks keep evidence and direct measurements in separate tables', 
     tables: [
       { table_key: 'evidence_points' },
       { table_key: 'measured_load_points' },
+      { table_key: 'derived_bearing_loads' },
     ],
   };
 
   assert.equal(hooks.defaultMeasurementsTableKey(base), 'measured_load_points');
   assert.equal(hooks.defaultMeasurementsTableKey({ tables: [{ table_key: 'evidence_points' }] }), 'measured_load_points');
+  assert.equal(
+    hooks.preferredDirectMeasurementTable(base, { measurements_table_key: 'derived_bearing_loads' }).table_key,
+    'measured_load_points',
+  );
 });
 
 test('measurement rows require individually matching source snapshot lineage', () => {
@@ -872,7 +877,9 @@ test('research and knowledge events use independent refresh timers', () => {
   assert.match(researchSource, /function scheduleKnowledgeRefresh[\s\S]*?state\.knowledgeRefreshTimer/);
   assert.match(researchSource, /if \(state\.knowledgeRefreshInFlight\) return/);
   assert.match(researchSource, /const active = knowledgeTableLoads\.get\(key\);[\s\S]*?if \(active\) return active/);
-  assert.match(researchSource, /knowledgeLifecycleCollections[\s\S]*?'research_runs'[\s\S]*?'business_commands'[\s\S]*?'ctox_queue_tasks'/);
+  assert.match(researchSource, /knowledgeLifecycleCollections = new Set\(\['research_tasks'\]\)/);
+  assert.match(researchSource, /scheduleLocalRefresh\(80, name\)/);
+  assert.match(researchSource, /changedCollections\.has\('research_tasks'\)[\s\S]*?render\(\)[\s\S]*?renderRight\(\)/);
   assert.doesNotMatch(researchSource, /readableCollection\('knowledge_tables'\)\?\.\$\?\./);
   assert.doesNotMatch(researchSource, /state\.refreshTimer/);
   assert.match(researchSource, /rowLimitWarnings/);
@@ -894,7 +901,7 @@ test('research graph releases its WebGL context when the surface is remounted', 
   assert.match(researchSource, /replacementHost\?\.replaceWith\(preservedGraphHost\)[\s\S]*?state\.graphSurface\.setData\(projection\)/);
   assert.match(researchSource, /state\.graphTaskId = task\.id/);
   assert.match(researchSource, /state\.graphTaskId = ''/);
-  assert.match(researchGraphSource, /zoomToFit\?\.\([\s\S]*?projection\.visibleNodeIds\.has\(node\.id\)/);
+  assert.match(researchGraphSource, /const fitNodeIds = connectedVisibleNodeIds\.size >= 4[\s\S]*?zoomToFit\?\.\([\s\S]*?fitNodeIds\.has\(node\.id\)/);
   assert.match(researchGraphSource, /onNodeHover\(\(node\) => \{[\s\S]*?if \(!layoutLocked\) settleLayout\(\)/);
   assert.match(researchGraphSource, /function lockLayout\(\)[\s\S]*?node\.fx = node\.x[\s\S]*?node\.fy = node\.y[\s\S]*?graphLayoutLocked = 'true'/);
   assert.match(researchGraphSource, /function unlockLayout\(\)[\s\S]*?node\.fx = undefined[\s\S]*?graphLayoutLocked = 'false'/);

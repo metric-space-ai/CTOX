@@ -463,10 +463,21 @@ export function createResearchGraph(host, options = {}) {
   }
 
   function fit(duration = 700) {
+    const connectedVisibleNodeIds = new Set();
+    for (const link of projection.links) {
+      if (!projection.visibleLinkIds.has(link.id)) continue;
+      const source = nodeId(link.source);
+      const target = nodeId(link.target);
+      if (projection.visibleNodeIds.has(source)) connectedVisibleNodeIds.add(source);
+      if (projection.visibleNodeIds.has(target)) connectedVisibleNodeIds.add(target);
+    }
+    const fitNodeIds = connectedVisibleNodeIds.size >= 4
+      ? connectedVisibleNodeIds
+      : projection.visibleNodeIds;
     graph.zoomToFit?.(
       duration,
-      dimensions === 2 ? 96 : 78,
-      (node) => projection.visibleNodeIds.has(node.id),
+      dimensions === 2 ? 64 : 40,
+      (node) => fitNodeIds.has(node.id),
     );
   }
 

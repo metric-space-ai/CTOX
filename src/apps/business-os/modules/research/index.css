@@ -226,6 +226,7 @@
   color: #eef3f5;
   color-scheme: dark;
   isolation: isolate;
+  container: research-graph-stage / inline-size;
 }
 
 .research-graph-canvas,
@@ -283,7 +284,7 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  max-width: min(58%, 620px);
+  max-width: min(calc(100% - 330px), 620px);
   pointer-events: none;
 }
 
@@ -299,9 +300,13 @@
   letter-spacing: -0.01em;
 }
 
-.research-graph-meta span {
+.research-graph-meta > div > span {
+  display: block;
+  overflow: hidden;
   color: #7f8d94;
   font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .research-graph-live {
@@ -1794,13 +1799,15 @@
 }
 
 .research-source-card-title {
+  display: -webkit-box;
   font-size: 13.5px;
   font-weight: 850;
   line-height: 1.25;
   color: var(--research-text);
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .research-source-card-subtitle {
@@ -2190,4 +2197,39 @@
 
 .research-metric-progress-bar-fill.warn {
   background: var(--research-warn);
+}
+
+/* Die Graph-Steuerung kompaktiert nach Stage-Breite, nicht nur nach
+   Fensterbreite: im Desktop-Layout kann die Stage schmal bleiben, während das
+   Modulfenster breit ist (z. B. 1280er-Viewport oder 60%-Modulfenster). */
+@container research-graph-stage (max-width: 760px) {
+  .research-graph-meta > div > span,
+  .research-graph-live {
+    display: none;
+  }
+
+  .research-graph-actions span {
+    display: none;
+  }
+
+  .research-graph-action {
+    min-width: 34px;
+    justify-content: center;
+  }
+}
+
+@container research-graph-stage (max-width: 600px) {
+  .research-graph-insights {
+    inset: auto 8px 54px;
+    height: 170px;
+    width: auto;
+    max-height: none;
+  }
+
+  .research-graph-stage.has-insights .research-graph-canvas {
+    right: 0;
+    bottom: 232px;
+    width: 100% !important;
+    height: auto !important;
+  }
 }
