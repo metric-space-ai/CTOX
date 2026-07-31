@@ -21,10 +21,10 @@ use super::browser_control::{
     browser_context_related_document, browser_context_snapshot_with_database,
     browser_session_automation_with_database, browser_session_status_with_database,
     redact_browser_frame_data, redacted_browser_context_capture, redacted_browser_session_status,
-    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_INPUT_EVENT_GC_LIMIT,
-    BROWSER_INPUT_EVENT_RETENTION_SECS, BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS,
-    BROWSER_RUNTIME_COMMAND_LOCK, BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS,
-    BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
+    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_FRAME_RECENT_KEEP_COUNT,
+    BROWSER_INPUT_EVENT_GC_LIMIT, BROWSER_INPUT_EVENT_RETENTION_SECS,
+    BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS, BROWSER_RUNTIME_COMMAND_LOCK,
+    BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS, BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
 };
 use super::browser_runtime::{browser_runtime_manager, BrowserSessionAutomationRequest};
 use super::command_lifecycle_generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
@@ -4305,7 +4305,7 @@ async fn deliver_business_command_outbox_background_loop(root: PathBuf) {
             if idle_rounds > 0 && idle_rounds % 60 == 0 {
                 let reconcile_root = root.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::mission::channels::reconcile_business_command_invariants(
+                    crate::mission::channels::audit_and_migrate_business_command_storage(
                         &reconcile_root,
                         true,
                     )
@@ -6686,6 +6686,12 @@ async fn capture_and_store_browser_frame(
         None,
     )
     .await?;
+    // The frame and its active pointer are finished work. Retention is
+    // best-effort cleanup and must never turn that successful capture into an
+    // error returned to the maintenance loop.
+    if let Err(err) = prune_browser_session_frames(database, session_id).await {
+        eprintln!("[business-os] browser frame pruning failed for {session_id}: {err:#}");
+    }
     Ok(())
 }
 
@@ -6754,6 +6760,117 @@ async fn update_browser_session_input_state(
     Ok(())
 }
 
+/// Choose which frames from one session fall outside its recent-frame window.
+///
+/// The active frame always occupies one survivor slot, even if it is older than
+/// every other row. Remaining slots go to the highest sequence numbers. Rows
+/// from other sessions are ignored so a per-session prune cannot cross session
+/// boundaries even if its caller supplies a mixed result set.
+fn browser_frame_ids_to_retire(
+    rows: &[Value],
+    session_id: &str,
+    active_frame_id: Option<&str>,
+    keep_count: usize,
+) -> Vec<String> {
+    let mut frames = rows
+        .iter()
+        .filter(|row| row.get("session_id").and_then(Value::as_str) == Some(session_id))
+        .filter_map(|row| {
+            let id = row.get("id").and_then(Value::as_str)?.trim();
+            if id.is_empty() {
+                return None;
+            }
+            Some((
+                row.get("seq").and_then(Value::as_u64).unwrap_or(0),
+                row.get("captured_at_ms")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                id.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    frames.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| right.2.cmp(&left.2))
+    });
+
+    let active_frame_id = active_frame_id.filter(|id| !id.trim().is_empty());
+    let mut survivors = HashSet::new();
+    if let Some(active_frame_id) = active_frame_id {
+        if frames.iter().any(|(_, _, id)| id == active_frame_id) {
+            survivors.insert(active_frame_id.to_string());
+        }
+    }
+    for (_, _, id) in &frames {
+        if survivors.len() >= keep_count {
+            break;
+        }
+        survivors.insert(id.clone());
+    }
+
+    frames
+        .into_iter()
+        .filter_map(|(_, _, id)| (!survivors.contains(&id)).then_some(id))
+        .collect()
+}
+
+/// Retire all but the bounded recent-frame window for one session. The active
+/// pointer is read after the frame query so a capture that advanced it while the
+/// query was running remains protected.
+async fn prune_browser_session_frames(
+    database: &Arc<RxDatabase>,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    let frames = database
+        .collection("browser_frames")
+        .context("browser_frames collection is not registered")?;
+    let session_frames = frames
+        .find(Some(MangoQuery {
+            selector: Some(json!({ "session_id": { "$eq": session_id } })),
+            sort: Some(vec![[("seq".to_string(), "desc".to_string())]
+                .into_iter()
+                .collect()]),
+            ..Default::default()
+        }))
+        .map_err(|err| anyhow::anyhow!("query browser_frames for session {session_id}: {err}"))?
+        .exec(false)
+        .await
+        .map_err(|err| {
+            anyhow::anyhow!("exec browser_frames prune query for session {session_id}: {err}")
+        })?;
+    let Some(rows) = session_frames.as_array() else {
+        return Ok(0);
+    };
+    let session = find_browser_document(database, "browser_sessions", session_id).await?;
+    let active_frame_id = session
+        .get("active_frame_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty());
+    let ids = browser_frame_ids_to_retire(
+        rows,
+        session_id,
+        active_frame_id,
+        BROWSER_FRAME_RECENT_KEEP_COUNT,
+    );
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let ids = ids.into_iter().collect::<HashSet<_>>();
+    let retired = rows
+        .iter()
+        .filter(|row| {
+            row.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| ids.contains(id))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    redact_and_remove_browser_frames(database, &retired, "superseded").await
+}
+
 /// Remove expired frames so `browser_frames` does not grow without bound.
 async fn gc_expired_browser_frames(database: &Arc<RxDatabase>) -> anyhow::Result<usize> {
     let now = now_ms() as u64;
@@ -6773,6 +6890,14 @@ async fn gc_expired_browser_frames(database: &Arc<RxDatabase>) -> anyhow::Result
     let Some(rows) = expired.as_array() else {
         return Ok(0);
     };
+    redact_and_remove_browser_frames(database, rows, "expired").await
+}
+
+async fn redact_and_remove_browser_frames(
+    database: &Arc<RxDatabase>,
+    rows: &[Value],
+    reason: &str,
+) -> anyhow::Result<usize> {
     let ids: Vec<String> = rows
         .iter()
         .filter_map(|row| row.get("id").and_then(Value::as_str))
@@ -6781,24 +6906,27 @@ async fn gc_expired_browser_frames(database: &Arc<RxDatabase>) -> anyhow::Result
     if ids.is_empty() {
         return Ok(0);
     }
+    let frames = database
+        .collection("browser_frames")
+        .context("browser_frames collection is not registered")?;
     let redacted = rows
         .iter()
-        .filter_map(redacted_expired_browser_frame)
+        .filter_map(redacted_browser_frame_for_removal)
         .collect::<Vec<_>>();
     if !redacted.is_empty() {
         frames
             .bulk_upsert(redacted)
             .await
-            .map_err(|err| anyhow::anyhow!("redact expired browser_frames: {err}"))?;
+            .map_err(|err| anyhow::anyhow!("redact {reason} browser_frames: {err}"))?;
     }
     frames
         .bulk_remove_by_ids(ids)
         .await
-        .map_err(|err| anyhow::anyhow!("remove expired browser_frames: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("remove {reason} browser_frames: {err}"))?;
     Ok(rows.len())
 }
 
-fn redacted_expired_browser_frame(row: &Value) -> Option<Value> {
+fn redacted_browser_frame_for_removal(row: &Value) -> Option<Value> {
     let mut next = row.clone();
     let obj = next.as_object_mut()?;
     obj.remove("_rev");
@@ -14934,6 +15062,80 @@ mod tests {
         );
         assert!(!browser_updates_command_watermark("browser.input"));
         assert!(browser_updates_command_watermark("browser.navigate"));
+    }
+
+    #[test]
+    fn storing_a_new_browser_frame_retires_older_frames_beyond_the_keep_window() {
+        let rows = vec![
+            json!({ "id": "frame_1", "session_id": "session_1", "seq": 1 }),
+            json!({ "id": "frame_2", "session_id": "session_1", "seq": 2 }),
+            json!({ "id": "frame_3", "session_id": "session_1", "seq": 3 }),
+        ];
+
+        assert_eq!(
+            browser_frame_ids_to_retire(
+                &rows,
+                "session_1",
+                Some("frame_3"),
+                BROWSER_FRAME_RECENT_KEEP_COUNT,
+            ),
+            vec!["frame_1".to_string()]
+        );
+    }
+
+    #[test]
+    fn browser_frame_pruning_never_retires_the_active_frame() {
+        let rows = (1..=4)
+            .map(|seq| {
+                json!({
+                    "id": format!("frame_{seq}"),
+                    "session_id": "session_1",
+                    "seq": seq,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for active_frame_id in ["frame_1", "frame_2", "frame_3", "frame_4"] {
+            let retired = browser_frame_ids_to_retire(
+                &rows,
+                "session_1",
+                Some(active_frame_id),
+                BROWSER_FRAME_RECENT_KEEP_COUNT,
+            );
+            assert!(!retired.iter().any(|id| id == active_frame_id));
+            assert_eq!(retired.len(), rows.len() - BROWSER_FRAME_RECENT_KEEP_COUNT);
+        }
+        assert_eq!(
+            browser_frame_ids_to_retire(
+                &rows,
+                "session_1",
+                Some("frame_1"),
+                BROWSER_FRAME_RECENT_KEEP_COUNT,
+            ),
+            vec!["frame_3".to_string(), "frame_2".to_string()]
+        );
+    }
+
+    #[test]
+    fn browser_frame_pruning_does_not_touch_another_sessions_frames() {
+        let rows = vec![
+            json!({ "id": "session_1_frame_1", "session_id": "session_1", "seq": 1 }),
+            json!({ "id": "session_2_frame_1", "session_id": "session_2", "seq": 1 }),
+            json!({ "id": "session_1_frame_2", "session_id": "session_1", "seq": 2 }),
+            json!({ "id": "session_2_frame_2", "session_id": "session_2", "seq": 2 }),
+            json!({ "id": "session_1_frame_3", "session_id": "session_1", "seq": 3 }),
+            json!({ "id": "session_2_frame_3", "session_id": "session_2", "seq": 3 }),
+        ];
+
+        assert_eq!(
+            browser_frame_ids_to_retire(
+                &rows,
+                "session_1",
+                Some("session_1_frame_3"),
+                BROWSER_FRAME_RECENT_KEEP_COUNT,
+            ),
+            vec!["session_1_frame_1".to_string()]
+        );
     }
 
     fn issue_test_capability(root: &Path, user_id: &str, role: &str) -> String {
