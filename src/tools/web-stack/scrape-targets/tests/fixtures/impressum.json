@@ -12,15 +12,19 @@
     "firma_ort": "Musterstadt",
     "firma_telefon": "+49 123 456789",
     "firma_email": "info@beispiel-maschinenbau.de",
-    "firma_domain": "beispiel-maschinenbau.de"
+    "firma_domain": "beispiel-maschinenbau.de",
+    "person_vorname": "Max",
+    "person_nachname": "Mustermann",
+    "person_funktion": "Vorstand",
+    "person_titel": "Dr."
   },
   "browser": {
     "ok": true,
     "result": {
       "url": "https://www.beispiel-maschinenbau.de/impressum",
       "title": "Impressum – Beispiel Maschinenbau SE",
-      "body_text": "Impressum Angaben gemäß § 5 TMG Beispiel Maschinenbau SE Musterstrasse 1 12345 Musterstadt Telefon: +49 123 456789 E-Mail: info@beispiel-maschinenbau.de",
-      "html": "<html><head><title>Impressum – Beispiel Maschinenbau SE</title></head><body><nav><a href=\"/impressum\">Impressum</a></nav><main><h1>Impressum</h1><p>Angaben gemäß § 5 TMG</p><p>Beispiel Maschinenbau SE<br>Musterstrasse 1<br>12345 Musterstadt</p><p>Telefon: +49 123 456789<br>Telefax: +49 123 456780<br>E-Mail: <a href=\"mailto:info@beispiel-maschinenbau.de\">info@beispiel-maschinenbau.de</a></p><p>Vertretungsberechtigt: Max Mustermann (Vorstand)</p><p>Handelsregister: Amtsgericht Musterstadt, HRA 12345</p></main></body></html>"
+      "body_text": "Impressum Angaben gemäß § 5 TMG Beispiel Maschinenbau SE Musterstrasse 1 12345 Musterstadt Telefon: +49 123 456789 E-Mail: info@beispiel-maschinenbau.de Vertretungsberechtigt: Dr. Max Mustermann (Vorstand), Erika Musterfrau Handelsregister: Amtsgericht Musterstadt, HRA 12345",
+      "html": "<html><head><title>Impressum – Beispiel Maschinenbau SE</title></head><body><nav><a href=\"/impressum\">Impressum</a></nav><main><h1>Impressum</h1><p>Angaben gemäß § 5 TMG</p><p>Beispiel Maschinenbau SE<br>Musterstrasse 1<br>12345 Musterstadt</p><p>Telefon: +49 123 456789<br>Telefax: +49 123 456780<br>E-Mail: <a href=\"mailto:info@beispiel-maschinenbau.de\">info@beispiel-maschinenbau.de</a></p><p>Vertretungsberechtigt: Dr. Max Mustermann (Vorstand), Erika Musterfrau</p><p>Handelsregister: Amtsgericht Musterstadt, HRA 12345</p></main></body></html>"
     },
     "detection": {
       "markers": []

@@ -7,8 +7,13 @@
 // research policy expects from this source:
 //   firma_name, firma_anschrift, firma_plz, firma_ort, firma_telefon,
 //   firma_email, firma_domain
+// plus the legally required representatives (§ 5 DDG/TMG), one record set
+// per named person:
+//   person_vorname, person_nachname, person_funktion, person_titel
 // Prints ONE JSON object:
-//   {target, input, fetched_at, fields: {<field_key>: {value, source_url}}}
+//   {target, input, fetched_at, fields: {<field_key>: {value, source_url}},
+//    persons: [{person_vorname, person_nachname, person_funktion,
+//               person_titel?, source_url}]}
 // Exit 0 only when a real address (anschrift + plz + ort) plus a name were
 // extracted from the page itself; otherwise non-zero with a reason.
 // Only what the page states is extracted — never inferred, never guessed.
@@ -229,6 +234,139 @@ function isBlockedText(lines, title) {
   return /captcha|cloudflare|verify you are human|access denied|zugriff verweigert|sicherheitsüberprüfung|just a moment/i.test(corpus);
 }
 
+// ---------------------------------------------------------------------------
+// Representatives (§ 5 DDG/TMG): the notice names the authorised
+// representatives (Geschäftsführer, Vorstand, Inhaber, Vertretungsberechtigte).
+// Only what the notice itself states is extracted — never inferred from an
+// email address, and never attributed from a web agency's credit block (the
+// same discipline the contact window applies to phones and emails).
+// ---------------------------------------------------------------------------
+
+const PERSON_LABEL_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vertreten\s+durch|vertretungsberechtigte?r?(?:\(r\))?|vorstand|vorstände|inhaber(?:in)?)(?:\s*:\s*|\s+)(.*)$/i;
+
+const ROLE_PREFIX_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vorstand|inhaber(?:in)?|prokurist(?:in)?)\s*:\s*(.*)$/i;
+
+const ROLE_EXACT_RE = /^(?:geschäftsführer(?:in)?|geschäftsführung|vorstand|vorstandsmitglied|inhaber(?:in)?|prokurist(?:in)?|gesellschafter(?:in)?)$/i;
+
+const TITLE_PAREN_RE = /(?:dipl|dr|prof|mag|ing|kaufmann|kauffrau|betriebswirt|fachwirt|meister|techniker|ökonom|oekonom|med|rer|nat|jur|mba|msc|bsc|wirtschafts)/i;
+
+const TITLE_FIRST_RE = /^(?:prof\.?|pd|dr\.?|habil\.?|dipl\.?-[a-zäöü]+\.?|dipl\.?|mag\.?|ing\.?|mba|msc|m\.sc\.|bsc|b\.sc\.|ll\.?m\.?)$/i;
+
+const TITLE_CONT_RE = /^(?:med|rer|nat|jur|phil|dent|habil|techn|oec|pol|agr|ing|sc)\.?$/i;
+
+const NAME_PARTICLES = new Set(["von", "van", "de", "der", "den", "zu", "vom", "da", "di", "del", "la", "le", "ten"]);
+
+// Lines that end a person list: structural labels of the legal notice, the
+// agency credit block, or another person label.
+const PERSON_STOP_RE = /(?:handelsregister|registereintrag|registergericht|registernummer|umsatzsteuer|ust\.?-?id|steuernummer|telefon|telefax|fax\b|e-?mail|homepage|amtsgericht|anschrift|postfach|impressum|datenschutz|kontakt|haftungs|urheber|bildquellen|quellenangaben|konzeption|design|umsetzung|programmierung|agentur|verantwortlich|redaktion|betreiber|anbieter|ladungsfähig|ladungsfaehig|öffnungszeiten|geschäftsführer|geschaeftsfuehrer|vorstand|inhaber|vertretungsberechtigt)/i;
+
+// A person label standing next to an agency credit ("Umsetzung", "Webdesign",
+// "Betreuende Agentur" …) names the agency's staff, not the company's.
+const AGENCY_CONTEXT_RE = /(?:konzeption|screendesign|webdesign|webentwicklung|gestaltung|programmierung|realisierung|umsetzung|betreuende\s+agentur|\bagentur\b|erstellt\s+(?:von|durch)|design\s+by|made\s+by|fotograf|bildquellen|quellenangaben|webmaster)/i;
+
+function validNameTokens(tokens) {
+  if (tokens.length < 2 || tokens.length > 5) return false;
+  return tokens.every((token) =>
+    /^[A-ZÄÖÜ][A-Za-zÄÖÜäöüß'.-]*$/.test(token) || NAME_PARTICLES.has(token.toLowerCase()));
+}
+
+// One segment -> one person. Titles stated on the page (leading "Dr."/"Prof."
+// or a parenthetical like "(Dipl. Kaufmann)") become person_titel; a
+// parenthetical role word ("(Vorstand)") becomes person_funktion; anything
+// else in parentheses is a clause, not person data, and is dropped.
+function parsePerson(segment, funktion) {
+  let text = String(segment || "").replace(/\s+/g, " ").trim().replace(/[.,;:]+$/, "").trim();
+  if (!text || LEGAL_FORM_RE.test(text)) return null;
+  let titel = null;
+  let role = null;
+  text = text.replace(/\(([^)]{1,50})\)/g, (_m, inner) => {
+    const content = inner.replace(/\s+/g, " ").trim();
+    if (ROLE_EXACT_RE.test(content)) role = content;
+    else if (TITLE_PAREN_RE.test(content)) titel = titel ? titel + " " + content : content;
+    return " ";
+  }).replace(/\s+/g, " ").trim();
+  const tokens = text.split(/\s+/).filter(Boolean);
+  const leading = [];
+  while (tokens.length > 2 && TITLE_FIRST_RE.test(tokens[0])) {
+    leading.push(tokens.shift());
+    while (tokens.length > 2 && TITLE_CONT_RE.test(tokens[0])) leading.push(tokens.shift());
+  }
+  if (leading.length > 0) titel = titel ? leading.join(" ") + " " + titel : leading.join(" ");
+  if (!validNameTokens(tokens)) return null;
+  return {
+    vorname: tokens.slice(0, -1).join(" "),
+    nachname: tokens[tokens.length - 1],
+    funktion: role || funktion,
+    titel,
+  };
+}
+
+// Several people are separated by commas, semicolons, "und"/"sowie" or line
+// breaks. Commas inside parentheses belong to the parenthetical.
+function splitPersonSegments(text) {
+  const flattened = String(text || "").replace(/\(([^)]*)\)/g, (m) => m.replace(/[,;]/g, " "));
+  return flattened
+    .split(/[,;]|\s+und\s+|\s+sowie\s+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function isPersonContinuationLine(line) {
+  const text = String(line || "").trim();
+  if (!text || text.length > 90) return false;
+  if (/[:@]/.test(text) || /\d/.test(text)) return false;
+  if (PERSON_STOP_RE.test(text) || LEGAL_FORM_RE.test(text)) return false;
+  return splitPersonSegments(text).some((segment) => parsePerson(segment, "x") !== null);
+}
+
+function isAgencyContext(lines, index) {
+  // Only what precedes (or heads) the label line: an agency credit introduces
+  // its own staff below it; a credit AFTER a representative label does not
+  // make the company's representative agency staff.
+  for (let at = Math.max(0, index - 2); at <= index; at += 1) {
+    if (AGENCY_CONTEXT_RE.test(lines[at])) return true;
+  }
+  return false;
+}
+
+function personKey(person) {
+  return (person.vorname + " " + person.nachname).toLocaleLowerCase("de-DE");
+}
+
+// Every person the notice names, each as their own record set — never
+// collapsed into one.
+function extractPersons(region, finalUrl) {
+  const persons = [];
+  const seen = new Set();
+  for (let index = 0; index < region.length; index += 1) {
+    const match = region[index].match(PERSON_LABEL_RE);
+    if (!match) continue;
+    if (isAgencyContext(region, index)) continue;
+    let funktion = match[1].replace(/\s+/g, " ").trim();
+    let rest = String(match[2] || "").trim();
+    const rolePrefix = rest.match(ROLE_PREFIX_RE);
+    if (rolePrefix) {
+      funktion = rolePrefix[1].replace(/\s+/g, " ").trim();
+      rest = rolePrefix[2].trim();
+    }
+    const segments = [];
+    if (rest) segments.push(...splitPersonSegments(rest));
+    for (let next = index + 1; next < Math.min(region.length, index + 9); next += 1) {
+      if (!isPersonContinuationLine(region[next])) break;
+      segments.push(...splitPersonSegments(region[next]));
+    }
+    for (const segment of segments) {
+      const person = parsePerson(segment, funktion);
+      if (!person) continue;
+      const key = personKey(person);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      persons.push({ ...person, source_url: finalUrl });
+    }
+  }
+  return persons;
+}
+
 function extractImpressum(html, finalUrl) {
   const lines = htmlToLines(html);
   const title = htmlTitle(html);
@@ -252,6 +390,7 @@ function extractImpressum(html, finalUrl) {
   const windowLines = region.slice(windowStart, windowEnd);
   const phones = extractPhones(windowLines, html);
   const emails = extractEmails(windowLines, html, host);
+  const persons = extractPersons(region, finalUrl);
 
   const fields = {};
   const put = (key, value) => {
@@ -267,7 +406,7 @@ function extractImpressum(html, finalUrl) {
   put("firma_telefon", phones[0]);
   put("firma_email", emails);
   put("firma_domain", host);
-  return { blocked: false, fields, title, lineCount: lines.length };
+  return { blocked: false, fields, persons, title, lineCount: lines.length };
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +503,13 @@ try {
     input: rawInput,
     fetched_at: new Date().toISOString(),
     fields,
+    persons: (result.persons || []).map((person) => ({
+      person_vorname: person.vorname,
+      person_nachname: person.nachname,
+      person_funktion: person.funktion,
+      ...(person.titel ? { person_titel: person.titel } : {}),
+      source_url: person.source_url,
+    })),
   }, null, 2));
   process.exit(0);
 } finally {
