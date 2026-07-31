@@ -13,6 +13,14 @@ fn temp_db() -> std::path::PathBuf {
     path
 }
 
+fn remove_structured_mission_state(engine: &LcmEngine, conversation_id: i64) -> Result<()> {
+    engine.conn.execute(
+        "DELETE FROM mission_states WHERE conversation_id = ?1",
+        [conversation_id],
+    )?;
+    Ok(())
+}
+
 #[test]
 fn compacts_messages_and_supports_retrieval() -> Result<()> {
     let db_path = temp_db();
@@ -350,6 +358,7 @@ fn secret_rewrite_replaces_literals_across_memory_without_breaking_structure() -
         ordinal,
         vec![],
     )?;
+    remove_structured_mission_state(&engine, 91)?;
     engine.continuity_apply_diff(
         91,
         ContinuityKind::Focus,
@@ -424,6 +433,7 @@ fn mission_state_tracks_focus_contract_and_preserves_watcher_metadata() -> Resul
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(13)?;
+    remove_structured_mission_state(&engine, 13)?;
     engine.continuity_apply_diff(
         13,
         ContinuityKind::Focus,
@@ -461,6 +471,7 @@ fn mission_state_normalizes_free_form_focus_controls_and_preserves_mission() -> 
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(17)?;
+    remove_structured_mission_state(&engine, 17)?;
     engine.continuity_apply_diff(
         17,
         ContinuityKind::Focus,
@@ -500,8 +511,9 @@ fn continuity_init_documents_keeps_mission_state_on_focus_head() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
 
-    let continuity = engine.continuity_init_documents(18)?;
+    let _ = engine.continuity_init_documents(18)?;
     let mission = engine.mission_state(18)?;
+    let continuity = engine.stored_continuity_show_all(18)?;
 
     assert_eq!(
         mission.focus_head_commit_id,
@@ -517,6 +529,7 @@ fn continuity_apply_diff_updates_mission_state_to_new_focus_head() -> Result<()>
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(19)?;
+    remove_structured_mission_state(&engine, 19)?;
 
     let updated = engine.continuity_apply_diff(
         19,
@@ -533,41 +546,131 @@ fn continuity_apply_diff_updates_mission_state_to_new_focus_head() -> Result<()>
 }
 
 #[test]
-fn sync_mission_state_with_repair_canonicalizes_conflicting_focus_values() -> Result<()> {
+fn structured_mission_state_round_trips_without_changing_runtime_fields() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let continuity = engine.continuity_init_documents(52)?;
+    let record = MissionStateRecord {
+        conversation_id: 52,
+        mission: "Keep typed mission state authoritative.".to_string(),
+        mission_status: "blocked".to_string(),
+        continuation_mode: "continuous".to_string(),
+        trigger_intensity: "warm".to_string(),
+        blocker: "Waiting for schema verification.".to_string(),
+        next_slice: "Verify the persisted typed fieldset.".to_string(),
+        done_gate: "Roundtrip every runtime control unchanged.".to_string(),
+        closure_confidence: "medium".to_string(),
+        is_open: true,
+        allow_idle: false,
+        focus_head_commit_id: continuity.focus.head_commit_id,
+        last_synced_at: iso_now(),
+        watcher_last_triggered_at: Some("2026-07-31T08:00:00Z".to_string()),
+        watcher_trigger_count: 3,
+        agent_failure_count: 2,
+        deferred_reason: None,
+        rewrite_failure_count: 1,
+    };
+    let expected = MissionStateFields::try_from_record(&record)?;
+
+    engine.overwrite_mission_state(&record)?;
+    let stored = engine
+        .stored_mission_state(52)?
+        .context("structured mission state missing after write")?;
+    let actual = MissionStateFields::try_from_record(&stored)?;
+
+    assert_eq!(actual, expected);
+    assert_eq!(
+        stored.watcher_last_triggered_at,
+        record.watcher_last_triggered_at
+    );
+    assert_eq!(stored.watcher_trigger_count, 3);
+    assert_eq!(stored.agent_failure_count, 2);
+    assert_eq!(stored.rewrite_failure_count, 1);
+
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn legacy_status_and_mission_state_blocked_import_to_same_typed_state() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let legacy_status = engine.continuity_init_documents(53)?;
+    let mission_state = engine.continuity_init_documents(55)?;
+    let common = "\n- Mission: Keep blocked work visible.\n- Continuation mode: continuous.\n- Trigger intensity: hot.\n## Blocker\n- Current blocker: dependency unavailable.\n## Next\n- Next slice: retry after dependency recovery.\n## Done / Gate\n- Done gate: dependency verified.\n- Closure confidence: low.\n";
+    engine.conn.execute(
+        "UPDATE continuity_commits SET rendered_text = ?1 WHERE commit_id = ?2",
+        params![
+            format!("# ACTIVE FOCUS\n\n## Status\n- Status: blocked.{common}"),
+            legacy_status.focus.head_commit_id,
+        ],
+    )?;
+    engine.conn.execute(
+        "UPDATE continuity_commits SET rendered_text = ?1 WHERE commit_id = ?2",
+        params![
+            format!("# ACTIVE FOCUS\n\n## Status\n- Mission state: blocked.{common}"),
+            mission_state.focus.head_commit_id,
+        ],
+    )?;
+    remove_structured_mission_state(&engine, 53)?;
+    remove_structured_mission_state(&engine, 55)?;
+
+    let from_status = engine.mission_state(53)?;
+    let from_mission_state = engine.mission_state(55)?;
+
+    assert_eq!(from_status.mission_status, "blocked");
+    assert_eq!(
+        MissionStateFields::try_from_record(&from_status)?,
+        MissionStateFields::try_from_record(&from_mission_state)?
+    );
+
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn structured_mission_state_renders_over_conflicting_focus_text_without_reimport() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(54)?;
+    remove_structured_mission_state(&engine, 54)?;
     engine.continuity_apply_diff(
         54,
         ContinuityKind::Focus,
-        "## Status\n+ Mission: Old continuity head before partial-commit recovery.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: warm.\n## Blocker\n+ Current blocker: the recovery path still points at the old continuity head.\n## Next\n+ Next slice: advance to the new continuity head.\n## Done / Gate\n+ Done gate: resync the live mission state to the newest continuity head.\n+ Closure confidence: low.\n",
+        "## Status\n+ Mission: Keep the structured focus head primary.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: warm.\n## Blocker\n+ Current blocker: none.\n## Next\n+ Next slice: render from typed state.\n## Done / Gate\n+ Done gate: conflicting text cannot replace typed state.\n+ Closure confidence: low.\n",
     )?;
-    engine.continuity_apply_diff(
-        54,
-        ContinuityKind::Focus,
-        "## Status\n+ Mission: Keep the newest continuity head primary after partial-commit recovery.\n+ Trigger intensity: hot.\n## Blocker\n+ Current blocker: the live mission cache may still point at the old focus head.\n## Next\n+ Next slice: verify the newest focus head is the active runtime truth.\n## Done / Gate\n+ Done gate: keep the newest focus head primary and leave exactly one bounded continuation open.\n",
+    let baseline = engine.mission_state(54)?;
+    let head = engine.stored_continuity_show_all(54)?.focus.head_commit_id;
+    engine.conn.execute(
+        "UPDATE continuity_commits SET rendered_text = rendered_text || ?1 WHERE commit_id = ?2",
+        params![
+            "\n## Status\n- Mission: Malicious text-only replacement.\n- Mission state: done.\n- Trigger intensity: hot.\n",
+            head,
+        ],
     )?;
 
     let before = engine.stored_continuity_show_all(54)?;
     assert!(!focus_semantic_conflicts_local(&before.focus.content).is_empty());
 
-    let repair = engine.sync_mission_state_from_continuity_with_repair(54)?;
+    let render = engine.sync_mission_state_from_continuity_with_repair(54)?;
     let after = engine.stored_continuity_show_all(54)?;
 
-    assert!(repair.focus_repaired);
+    assert!(render.focus_repaired);
+    assert_eq!(render.mission_state.mission, baseline.mission);
+    assert_eq!(render.mission_state.mission_status, baseline.mission_status);
     assert_eq!(
-        repair.mission_state.mission,
-        "Keep the newest continuity head primary after partial-commit recovery."
+        render.mission_state.trigger_intensity,
+        baseline.trigger_intensity
     );
-    assert_eq!(repair.mission_state.trigger_intensity, "hot");
     assert!(focus_semantic_conflicts_local(&after.focus.content).is_empty());
     assert!(!after
         .focus
         .content
-        .contains("Mission: Old continuity head before partial-commit recovery."));
-    assert!(after.focus.content.contains(
-        "Mission: Keep the newest continuity head primary after partial-commit recovery."
-    ));
+        .contains("Malicious text-only replacement"));
+    assert!(after
+        .focus
+        .content
+        .contains("Mission: Keep the structured focus head primary."));
 
     let _ = std::fs::remove_file(db_path);
     Ok(())
@@ -578,6 +681,7 @@ fn mission_state_does_not_close_when_done_gate_mentions_completed_slice() -> Res
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(23)?;
+    remove_structured_mission_state(&engine, 23)?;
     engine.continuity_apply_diff(
         23,
         ContinuityKind::Focus,
@@ -597,43 +701,19 @@ fn mission_state_does_not_close_when_done_gate_mentions_completed_slice() -> Res
 }
 
 #[test]
-fn mission_state_ignores_empty_focus_template_placeholders() -> Result<()> {
+fn legacy_mission_state_import_ignores_empty_focus_template_placeholders() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
-    let _ = engine.continuity_init_documents(29)?;
-    let continuity = engine.continuity_show_all(29)?;
-    let previous = MissionStateRecord {
-        conversation_id: 29,
-        mission: String::new(),
-        mission_status: "active".to_string(),
-        continuation_mode: "continuous".to_string(),
-        trigger_intensity: "hot".to_string(),
-        blocker: "goal: stale placeholder".to_string(),
-        next_slice: "goal: stale placeholder".to_string(),
-        done_gate: String::new(),
-        closure_confidence: "low".to_string(),
-        is_open: true,
-        allow_idle: false,
-        focus_head_commit_id: continuity.focus.head_commit_id.clone(),
-        last_synced_at: iso_now(),
-        watcher_last_triggered_at: Some("2026-04-05T23:02:04Z".to_string()),
-        watcher_trigger_count: 16,
-        agent_failure_count: 0,
-        deferred_reason: None,
-        rewrite_failure_count: 0,
-    };
+    let continuity = engine.continuity_init_documents(29)?;
 
-    let mission = derive_mission_state_from_continuity(&continuity, Some(&previous));
+    let mission = import_legacy_mission_state(&continuity);
     assert_eq!(mission.mission, "");
     assert_eq!(mission.blocker, "");
     assert_eq!(mission.next_slice, "");
     assert_eq!(mission.done_gate, "");
     assert!(!mission.is_open);
-    assert_eq!(mission.watcher_trigger_count, 16);
-    assert_eq!(
-        mission.watcher_last_triggered_at.as_deref(),
-        Some("2026-04-05T23:02:04Z")
-    );
+    assert_eq!(mission.watcher_trigger_count, 0);
+    assert!(mission.watcher_last_triggered_at.is_none());
 
     let _ = std::fs::remove_file(db_path);
     Ok(())
@@ -644,34 +724,14 @@ fn mission_state_accepts_open_and_partial_focus_values_without_falling_back() ->
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(49)?;
+    remove_structured_mission_state(&engine, 49)?;
     engine.continuity_apply_diff(
         49,
         ContinuityKind::Focus,
         "## Status\n+ Mission: Rehydrate Split Brain Gate (reconcile seeded contradiction; treat live runtime track as canonical).\n+ Mission state: in_progress.\n+ Continuation mode: open.\n+ Trigger intensity: cold.\n## Blocker\n+ Current blocker: Seeded focus marks closed, but live runtime has work.\n## Next\n+ Next slice: Persist exactly one open canonical continuation in runtime state.\n## Done / Gate\n+ Done gate: Keep the continuation open until runtime state is verified.\n+ Closure confidence: partial (until runtime state is verified).\n",
     )?;
     let continuity = engine.continuity_show_all(49)?;
-    let previous = MissionStateRecord {
-        conversation_id: 49,
-        mission: "Legacy split-brain closure state.".to_string(),
-        mission_status: "done".to_string(),
-        continuation_mode: "closed".to_string(),
-        trigger_intensity: "cold".to_string(),
-        blocker: "continuity said closed".to_string(),
-        next_slice: "none".to_string(),
-        done_gate: "legacy closure".to_string(),
-        closure_confidence: "complete".to_string(),
-        is_open: false,
-        allow_idle: true,
-        focus_head_commit_id: continuity.focus.head_commit_id.clone(),
-        last_synced_at: iso_now(),
-        watcher_last_triggered_at: None,
-        watcher_trigger_count: 0,
-        agent_failure_count: 0,
-        deferred_reason: None,
-        rewrite_failure_count: 0,
-    };
-
-    let mission = derive_mission_state_from_continuity(&continuity, Some(&previous));
+    let mission = import_legacy_mission_state(&continuity);
     assert_eq!(
         mission.mission,
         "Rehydrate Split Brain Gate (reconcile seeded contradiction; treat live runtime track as canonical)."
@@ -691,6 +751,7 @@ fn mission_state_keeps_explicit_blank_focus_fields_blank() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(57)?;
+    remove_structured_mission_state(&engine, 57)?;
     engine.continuity_apply_diff(
         57,
         ContinuityKind::Focus,
@@ -921,6 +982,7 @@ fn continuity_apply_diff_routes_headerless_focus_fields_to_known_sections() -> R
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(47)?;
+    remove_structured_mission_state(&engine, 47)?;
 
     let updated = engine.continuity_apply_diff(
         47,
@@ -930,10 +992,10 @@ fn continuity_apply_diff_routes_headerless_focus_fields_to_known_sections() -> R
 
     assert!(updated
         .content
-        .contains("Mission: Keep gateway intake hardening as the main mission."));
+        .contains("Mission: keep gateway intake hardening primary"));
     assert!(updated
         .content
-        .contains("Next slice: record the interrupt buffer without changing the main mission."));
+        .contains("Next slice: record interrupt buffer and return to the main thread"));
     assert!(updated
         .content
         .contains("mission: keep gateway intake hardening primary"));
@@ -955,6 +1017,7 @@ fn continuity_apply_diff_accepts_indented_focus_diff_lines() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
     let _ = engine.continuity_init_documents(48)?;
+    remove_structured_mission_state(&engine, 48)?;
 
     let updated = engine.continuity_apply_diff(
         48,
@@ -964,13 +1027,13 @@ fn continuity_apply_diff_accepts_indented_focus_diff_lines() -> Result<()> {
 
     assert!(updated
         .content
-        .contains("Mission: Keep gateway intake hardening as the main mission."));
-    assert!(updated
-        .content
-        .contains("Next slice: record the interrupt buffer without changing the main mission."));
+        .contains("Mission: keep gateway intake hardening primary"));
+    assert!(updated.content.contains("## Next"));
+    assert!(focus_semantic_conflicts_local(&updated.content).is_empty());
 
     let mission = engine.mission_state(48)?;
     assert_eq!(mission.mission, "keep gateway intake hardening primary");
+    assert_eq!(mission.next_slice, "");
     assert_eq!(mission.mission_status, "active");
     assert!(mission.is_open);
 
@@ -1410,17 +1473,18 @@ fn continuity_refresh_prompt_pins_the_conversation_id() {
 }
 
 #[test]
-fn closure_claim_count_distinguishes_bare_from_regressed_schema() -> Result<()> {
-    // Bare connection (LCM never initialized): zero blockers, no error.
+fn closure_claim_count_fails_closed_when_claims_schema_is_missing() -> Result<()> {
     let bare = Connection::open_in_memory()?;
-    assert_eq!(count_open_closure_blocking_claims(&bare, 1)?, 0);
+    let err = count_open_closure_blocking_claims(&bare, 1)
+        .expect_err("missing claims schema must not open the closure gate");
+    assert!(err.to_string().contains("mission_claims schema"));
 
-    // Initialized LCM base schema but mission_claims missing: schema
-    // regression — the gate must refuse instead of reporting zero.
-    let regressed = Connection::open_in_memory()?;
-    regressed.execute_batch("CREATE TABLE messages (id INTEGER PRIMARY KEY);")?;
-    let err = count_open_closure_blocking_claims(&regressed, 1)
-        .expect_err("regressed schema must not open the closure gate");
-    assert!(err.to_string().contains("mission_claims"));
+    let incomplete = Connection::open_in_memory()?;
+    incomplete.execute_batch(
+        "CREATE TABLE mission_claims (conversation_id INTEGER, blocks_closure INTEGER);",
+    )?;
+    let err = count_open_closure_blocking_claims(&incomplete, 1)
+        .expect_err("incomplete claims schema must not open the closure gate");
+    assert!(err.to_string().contains("claim_status"));
     Ok(())
 }

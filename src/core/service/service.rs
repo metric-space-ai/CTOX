@@ -1573,7 +1573,6 @@ fn has_repairable_state_invariants(violation_codes: &[String]) -> bool {
         matches!(
             code.as_str(),
             "mission_focus_head_mismatch"
-                | "mission_state_requires_continuity_resync"
                 | "focus_semantic_conflict"
                 | "closed_mission_with_open_runtime_work"
                 | "idle_allowed_with_open_runtime_work"
@@ -1680,29 +1679,6 @@ fn attempt_state_invariant_repair(
         repair.mission_state = record;
         repair.reopened_for_open_runtime_work = true;
         report = state_invariants::evaluate_runtime_state_invariants(root, conversation_id)?;
-    }
-    let repaired_codes = report
-        .violations
-        .iter()
-        .map(|violation| violation.code.as_str())
-        .collect::<Vec<_>>();
-    if repaired_codes == vec!["mission_state_requires_continuity_resync"]
-        && report.mission_state.is_open
-        && (report.open_plan_count > 0 || report.open_queue_count > 0)
-    {
-        let mut repaired_record = report.mission_state.clone();
-        hydrate_sparse_open_mission_state_from_runtime(&report, &mut repaired_record);
-        let repaired_focus = engine.rewrite_focus_continuity_from_mission_state(
-            conversation_id,
-            &repaired_record,
-            "Rebuilt focus continuity from the current runtime state after turn-end continuity refresh was skipped.",
-        )?;
-        if repaired_focus {
-            repair.focus_repaired = true;
-            report = state_invariants::evaluate_runtime_state_invariants(root, conversation_id)?;
-            repair.mission_state = report.mission_state.clone();
-            repair.focus_head_commit_id = report.continuity_focus_head_commit_id.clone();
-        }
     }
     Ok((repair, report))
 }
@@ -11869,17 +11845,12 @@ fn parse_systematic_research_cli_call(arguments: &str) -> Option<SystematicResea
             Some(argv.join(" "))
         })?;
     let cmd = cmd.trim();
-    if cmd.is_empty()
-        || cmd.contains(['\n', '\r', '`'])
-        || cmd.contains("$(")
-        || cmd.contains("${")
+    if cmd.is_empty() || cmd.contains(['\n', '\r', '`']) || cmd.contains("$(") || cmd.contains("${")
     {
         return None;
     }
     let tokens = tokenize_systematic_research_cli(cmd)?;
-    const OPERATORS: [&str; 11] = [
-        "&&", "||", ";", "|", ">", ">>", "<", "<<", "&", "2>", "2>>",
-    ];
+    const OPERATORS: [&str; 11] = ["&&", "||", ";", "|", ">", ">>", "<", "<<", "&", "2>", "2>>"];
     if tokens
         .iter()
         .any(|token| OPERATORS.contains(&token.as_str()))
@@ -12093,7 +12064,10 @@ fn validate_systematic_research_discovery_receipt_from_conn(
             }
             match payload.get("type").and_then(Value::as_str) {
                 Some("function_call") => {
-                    let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let name = payload
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let Some(arguments) = payload.get("arguments").and_then(Value::as_str) else {
                         continue;
                     };
@@ -12107,8 +12081,7 @@ fn validate_systematic_research_discovery_receipt_from_conn(
                             .into_iter()
                             .find(|candidate| *candidate == name)
                             .expect("discovery tool membership checked above");
-                        let Ok(arguments_value) = serde_json::from_str::<Value>(arguments)
-                        else {
+                        let Ok(arguments_value) = serde_json::from_str::<Value>(arguments) else {
                             continue;
                         };
                         let depth = arguments_value
@@ -12127,7 +12100,12 @@ fn validate_systematic_research_discovery_receipt_from_conn(
                         if !SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&call.tool) {
                             continue;
                         }
-                        (call.tool, call.depth, call.no_workspace, " via exec_command")
+                        (
+                            call.tool,
+                            call.depth,
+                            call.no_workspace,
+                            " via exec_command",
+                        )
                     } else {
                         continue;
                     };
@@ -12328,23 +12306,25 @@ fn validate_systematic_research_discovery_coverage(
         }
         match payload.get("type").and_then(Value::as_str) {
             Some("function_call") if run_bound && command_bound && workspace_bound => {
-                let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
-                let tool: Option<&'static str> = if SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
-                    .contains(&name)
-                {
-                    SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
-                        .into_iter()
-                        .find(|candidate| *candidate == name)
-                } else if SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name) {
-                    payload
-                        .get("arguments")
-                        .and_then(Value::as_str)
-                        .and_then(parse_systematic_research_cli_call)
-                        .filter(|call| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&call.tool))
-                        .map(|call| call.tool)
-                } else {
-                    None
-                };
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let tool: Option<&'static str> =
+                    if SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&name) {
+                        SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS
+                            .into_iter()
+                            .find(|candidate| *candidate == name)
+                    } else if SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name) {
+                        payload
+                            .get("arguments")
+                            .and_then(Value::as_str)
+                            .and_then(parse_systematic_research_cli_call)
+                            .filter(|call| SYSTEMATIC_RESEARCH_DISCOVERY_TOOLS.contains(&call.tool))
+                            .map(|call| call.tool)
+                    } else {
+                        None
+                    };
                 let Some(tool) = tool else {
                     continue;
                 };
@@ -12587,7 +12567,10 @@ fn validate_systematic_research_typed_web_read_receipts_from_conn(
             }
             match payload.get("type").and_then(Value::as_str) {
                 Some("function_call") => {
-                    let name = payload.get("name").and_then(Value::as_str).unwrap_or_default();
+                    let name = payload
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let is_web_read = name == "ctox_web_read"
                         || (SYSTEMATIC_RESEARCH_EXEC_TOOLS.contains(&name)
                             && payload
@@ -27089,9 +27072,7 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("observed discovery calls: none"));
+        assert!(error.to_string().contains("observed discovery calls: none"));
 
         // A bare echo without the ctox CLI is never a discovery call.
         write_rollout("echo '{\"ok\":true,\"results\":[]}'");
@@ -27105,9 +27086,7 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("observed discovery calls: none"));
+        assert!(error.to_string().contains("observed discovery calls: none"));
 
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&codex_home);
@@ -29940,104 +29919,6 @@ Business OS command:
                 && event.reason == "turn_state_invariants_repaired"
                 && event.action_taken == "canonicalized_focus_and_reopened_mission_state"
         }));
-    }
-
-    #[test]
-    fn turn_end_state_invariant_check_hydrates_sparse_open_focus_from_runtime_title() {
-        let root = temp_root("turn-state-sparse-open-focus");
-        std::fs::create_dir_all(root.join("runtime")).unwrap();
-        let db_path = crate::paths::core_db(&root);
-        let engine = LcmEngine::open(&db_path, LcmConfig::default()).unwrap();
-        let _ = engine
-            .continuity_init_documents(turn_loop::CHAT_CONVERSATION_ID)
-            .unwrap();
-        plan::handle_plan_command(
-            &root,
-            &[
-                "ingest".to_string(),
-                "--title".to_string(),
-                "Spill restore: Deferred documentation review".to_string(),
-                "--prompt".to_string(),
-                "Restore the spilled queue task after pressure drops.".to_string(),
-            ],
-        )
-        .unwrap();
-
-        let current = engine
-            .stored_mission_state(turn_loop::CHAT_CONVERSATION_ID)
-            .unwrap()
-            .expect("missing stored mission state");
-        let conn = rusqlite::Connection::open(&db_path).unwrap();
-        conn.execute(
-            "UPDATE mission_states
-             SET mission = ?1, mission_status = ?2, continuation_mode = ?3, trigger_intensity = ?4,
-                 blocker = ?5, next_slice = ?6, done_gate = ?7, closure_confidence = ?8,
-                 is_open = ?9, allow_idle = ?10, focus_head_commit_id = ?11
-             WHERE conversation_id = ?12",
-            rusqlite::params![
-                "",
-                "active",
-                "continuous",
-                "hot",
-                "",
-                "",
-                "",
-                "low",
-                1,
-                0,
-                current.focus_head_commit_id,
-                turn_loop::CHAT_CONVERSATION_ID,
-            ],
-        )
-        .unwrap();
-        drop(conn);
-
-        let before = state_invariants::evaluate_runtime_state_invariants(
-            &root,
-            turn_loop::CHAT_CONVERSATION_ID,
-        )
-        .expect("failed to evaluate sparse-open invariants");
-        assert!(before
-            .violations
-            .iter()
-            .any(|issue| { issue.code == "mission_state_requires_continuity_resync" }));
-
-        let state = Arc::new(Mutex::new(SharedState::default()));
-        let repaired =
-            run_turn_end_state_invariant_check(&root, &state, turn_loop::CHAT_CONVERSATION_ID)
-                .expect("turn-end repair should return mission state");
-        assert_eq!(
-            repaired.mission,
-            "Spill restore: Deferred documentation review"
-        );
-        assert_eq!(
-            repaired.next_slice,
-            "Spill restore: Deferred documentation review"
-        );
-        assert!(repaired.is_open);
-
-        let report = state_invariants::evaluate_runtime_state_invariants(
-            &root,
-            turn_loop::CHAT_CONVERSATION_ID,
-        )
-        .expect("failed to evaluate invariants after sparse-open repair");
-        assert!(
-            report.is_clean(),
-            "unexpected violations: {:?}",
-            report.violations
-        );
-
-        let continuity = engine
-            .stored_continuity_show_all(turn_loop::CHAT_CONVERSATION_ID)
-            .expect("failed to reload continuity");
-        assert!(continuity
-            .focus
-            .content
-            .contains("- Mission: Spill restore: Deferred documentation review"));
-        assert!(continuity
-            .focus
-            .content
-            .contains("- Next slice: Spill restore: Deferred documentation review"));
     }
 
     #[test]

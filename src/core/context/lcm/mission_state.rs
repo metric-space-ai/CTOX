@@ -1,49 +1,225 @@
-// Mission state: load/persist with the clobber guard, derivation from
-// the free-text continuity document (the P8b review's core finding),
-// focus repair, and the status/mode canonicalizers.
+// Mission state: typed structured state, SQLite persistence, one-time
+// legacy continuity import, canonical focus rendering, and clobber guards.
 
 use super::{
-    continuity_commit_id, continuity_document_id, fetch_continuity_document_with, iso_now,
-    ContinuityKind, ContinuityShowAll, MissionClaimRecord, MissionStateRecord,
-    StrategicDirectiveRecord, VerificationRunRecord,
+    iso_now, ContinuityShowAll, MissionClaimRecord, MissionStateRecord, StrategicDirectiveRecord,
+    VerificationRunRecord,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::cell::RefCell;
 use std::path::Path;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MissionStatus {
+    Active,
+    Blocked,
+    Deferred,
+    Done,
+    Maintenance,
+    Scheduled,
+    Dormant,
+}
+
+impl MissionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Blocked => "blocked",
+            Self::Deferred => "deferred",
+            Self::Done => "done",
+            Self::Maintenance => "maintenance",
+            Self::Scheduled => "scheduled",
+            Self::Dormant => "dormant",
+        }
+    }
+
+    fn from_stored(value: &str) -> Result<Self> {
+        match value.trim() {
+            "active" => Ok(Self::Active),
+            "blocked" => Ok(Self::Blocked),
+            "deferred" => Ok(Self::Deferred),
+            "done" => Ok(Self::Done),
+            "maintenance" => Ok(Self::Maintenance),
+            "scheduled" => Ok(Self::Scheduled),
+            "dormant" => Ok(Self::Dormant),
+            other => bail!("unsupported structured mission status: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationMode {
+    Continuous,
+    Maintenance,
+    Scheduled,
+    Dormant,
+    Closed,
+}
+
+impl ContinuationMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Continuous => "continuous",
+            Self::Maintenance => "maintenance",
+            Self::Scheduled => "scheduled",
+            Self::Dormant => "dormant",
+            Self::Closed => "closed",
+        }
+    }
+
+    fn from_stored(value: &str) -> Result<Self> {
+        match value.trim() {
+            "continuous" => Ok(Self::Continuous),
+            "maintenance" => Ok(Self::Maintenance),
+            "scheduled" => Ok(Self::Scheduled),
+            "dormant" => Ok(Self::Dormant),
+            "closed" => Ok(Self::Closed),
+            other => bail!("unsupported structured continuation mode: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerIntensity {
+    Archive,
+    Cold,
+    Warm,
+    Hot,
+}
+
+impl TriggerIntensity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Archive => "archive",
+            Self::Cold => "cold",
+            Self::Warm => "warm",
+            Self::Hot => "hot",
+        }
+    }
+
+    fn from_stored(value: &str) -> Result<Self> {
+        match value.trim() {
+            "archive" => Ok(Self::Archive),
+            "cold" => Ok(Self::Cold),
+            "warm" => Ok(Self::Warm),
+            "hot" => Ok(Self::Hot),
+            other => bail!("unsupported structured trigger intensity: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosureConfidence {
+    Low,
+    Medium,
+    High,
+    Complete,
+}
+
+impl ClosureConfidence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Complete => "complete",
+        }
+    }
+
+    fn from_stored(value: &str) -> Result<Self> {
+        match value.trim() {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "complete" => Ok(Self::Complete),
+            other => bail!("unsupported structured closure confidence: {other}"),
+        }
+    }
+}
+
+/// Authoritative mission-state fieldset. Runtime control states are enums and
+/// booleans; free-text continuity is only a rendered view of these fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct MissionStateFields {
+    pub mission: String,
+    pub mission_status: MissionStatus,
+    pub continuation_mode: ContinuationMode,
+    pub trigger_intensity: TriggerIntensity,
+    pub blocker: String,
+    pub next_slice: String,
+    pub done_gate: String,
+    pub closure_confidence: ClosureConfidence,
+    pub is_open: bool,
+    pub allow_idle: bool,
+}
+
+impl MissionStateFields {
+    pub fn try_from_record(record: &MissionStateRecord) -> Result<Self> {
+        Ok(Self {
+            mission: record.mission.clone(),
+            mission_status: MissionStatus::from_stored(&record.mission_status)?,
+            continuation_mode: ContinuationMode::from_stored(&record.continuation_mode)?,
+            trigger_intensity: TriggerIntensity::from_stored(&record.trigger_intensity)?,
+            blocker: record.blocker.clone(),
+            next_slice: record.next_slice.clone(),
+            done_gate: record.done_gate.clone(),
+            closure_confidence: ClosureConfidence::from_stored(&record.closure_confidence)?,
+            is_open: record.is_open,
+            allow_idle: record.allow_idle,
+        })
+    }
+}
+
 pub(super) fn load_mission_state_with(
     conn: &Connection,
     conversation_id: i64,
 ) -> Result<Option<MissionStateRecord>> {
-    conn.query_row(
-        "SELECT mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count FROM mission_states WHERE conversation_id = ?1",
-        [conversation_id],
-        |row| {
-            Ok(MissionStateRecord {
-                conversation_id,
-                mission: row.get(0)?,
-                mission_status: row.get(1)?,
-                continuation_mode: row.get(2)?,
-                trigger_intensity: row.get(3)?,
-                blocker: row.get(4)?,
-                next_slice: row.get(5)?,
-                done_gate: row.get(6)?,
-                closure_confidence: row.get(7)?,
-                is_open: row.get::<_, i64>(8)? != 0,
-                allow_idle: row.get::<_, i64>(9)? != 0,
-                focus_head_commit_id: row.get(10)?,
-                last_synced_at: row.get(11)?,
-                watcher_last_triggered_at: row.get(12)?,
-                watcher_trigger_count: row.get(13)?,
-                agent_failure_count: row.get(14)?,
-                deferred_reason: row.get(15)?,
-                rewrite_failure_count: row.get(16)?,
-            })
-        },
-    )
-    .optional()
-    .context("failed to load mission state")
+    let loaded = conn
+        .query_row(
+            "SELECT mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count, structured_state_version FROM mission_states WHERE conversation_id = ?1",
+            [conversation_id],
+            |row| {
+                Ok((
+                    MissionStateRecord {
+                        conversation_id,
+                        mission: row.get(0)?,
+                        mission_status: row.get(1)?,
+                        continuation_mode: row.get(2)?,
+                        trigger_intensity: row.get(3)?,
+                        blocker: row.get(4)?,
+                        next_slice: row.get(5)?,
+                        done_gate: row.get(6)?,
+                        closure_confidence: row.get(7)?,
+                        is_open: row.get::<_, i64>(8)? != 0,
+                        allow_idle: row.get::<_, i64>(9)? != 0,
+                        focus_head_commit_id: row.get(10)?,
+                        last_synced_at: row.get(11)?,
+                        watcher_last_triggered_at: row.get(12)?,
+                        watcher_trigger_count: row.get(13)?,
+                        agent_failure_count: row.get(14)?,
+                        deferred_reason: row.get(15)?,
+                        rewrite_failure_count: row.get(16)?,
+                    },
+                    row.get::<_, i64>(17)?,
+                ))
+            },
+        )
+        .optional()
+        .context("failed to load mission state")?;
+    let Some((record, version)) = loaded else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        version == 1,
+        "unsupported structured mission-state version {version} for conversation {conversation_id}"
+    );
+    MissionStateFields::try_from_record(&record).context("invalid structured mission-state row")?;
+    Ok(Some(record))
 }
 
 pub(super) fn load_mission_states_with(
@@ -52,37 +228,53 @@ pub(super) fn load_mission_states_with(
 ) -> Result<Vec<MissionStateRecord>> {
     let mut stmt = conn
         .prepare(
-            "SELECT conversation_id, mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count
+            "SELECT conversation_id, mission, mission_status, continuation_mode, trigger_intensity, blocker, next_slice, done_gate, closure_confidence, is_open, allow_idle, focus_head_commit_id, last_synced_at, watcher_last_triggered_at, watcher_trigger_count, agent_failure_count, deferred_reason, rewrite_failure_count, structured_state_version
              FROM mission_states
              WHERE (?1 = 0 OR is_open = 1)
              ORDER BY is_open DESC, last_synced_at DESC, conversation_id ASC",
         )
         .context("failed to prepare mission state listing query")?;
     let rows = stmt.query_map(params![if open_only { 1 } else { 0 }], |row| {
-        Ok(MissionStateRecord {
-            conversation_id: row.get(0)?,
-            mission: row.get(1)?,
-            mission_status: row.get(2)?,
-            continuation_mode: row.get(3)?,
-            trigger_intensity: row.get(4)?,
-            blocker: row.get(5)?,
-            next_slice: row.get(6)?,
-            done_gate: row.get(7)?,
-            closure_confidence: row.get(8)?,
-            is_open: row.get::<_, i64>(9)? != 0,
-            allow_idle: row.get::<_, i64>(10)? != 0,
-            focus_head_commit_id: row.get(11)?,
-            last_synced_at: row.get(12)?,
-            watcher_last_triggered_at: row.get(13)?,
-            watcher_trigger_count: row.get(14)?,
-            agent_failure_count: row.get(15)?,
-            deferred_reason: row.get(16)?,
-            rewrite_failure_count: row.get(17)?,
-        })
+        Ok((
+            MissionStateRecord {
+                conversation_id: row.get(0)?,
+                mission: row.get(1)?,
+                mission_status: row.get(2)?,
+                continuation_mode: row.get(3)?,
+                trigger_intensity: row.get(4)?,
+                blocker: row.get(5)?,
+                next_slice: row.get(6)?,
+                done_gate: row.get(7)?,
+                closure_confidence: row.get(8)?,
+                is_open: row.get::<_, i64>(9)? != 0,
+                allow_idle: row.get::<_, i64>(10)? != 0,
+                focus_head_commit_id: row.get(11)?,
+                last_synced_at: row.get(12)?,
+                watcher_last_triggered_at: row.get(13)?,
+                watcher_trigger_count: row.get(14)?,
+                agent_failure_count: row.get(15)?,
+                deferred_reason: row.get(16)?,
+                rewrite_failure_count: row.get(17)?,
+            },
+            row.get::<_, i64>(18)?,
+        ))
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
+    let rows = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(anyhow::Error::from)
-        .context("failed to load mission states")
+        .context("failed to load mission states")?;
+    rows.into_iter()
+        .map(|(record, version)| {
+            anyhow::ensure!(
+                version == 1,
+                "unsupported structured mission-state version {version} for conversation {}",
+                record.conversation_id
+            );
+            MissionStateFields::try_from_record(&record)
+                .context("invalid structured mission-state row")?;
+            Ok(record)
+        })
+        .collect()
 }
 
 /// One recorded attempt to clobber a protected `mission_states` field. The
@@ -197,13 +389,9 @@ pub(super) fn persist_mission_state_with(
     //
     // Production smoke-test (Befund C) saw `next_slice` (81 chars) and
     // `done_gate` (289 chars) silently collapse to length 0 within ~25
-    // minutes while `mission` (217 chars) was preserved. The suspected
-    // writer is `derive_mission_state_from_continuity`, which produces
-    // empty `next_slice` / `done_gate` strings whenever the focus
-    // continuity document does not currently carry an explicit
-    // `next_slice:` / `done_gate:` line. That overwrite path is a
-    // mission-continuity-normalize pass triggered by every
-    // `continuity_apply_diff` / full-replace / string-replace / sync.
+    // minutes while `mission` (217 chars) was preserved. Structured state is
+    // now authoritative, but the guard remains as defense in depth for
+    // callers constructing the compatibility `MissionStateRecord` directly.
     //
     // We install a one-way ratchet on `next_slice` and `done_gate`: once
     // they hold non-empty content, automation may only replace them with
@@ -246,6 +434,12 @@ pub(super) fn persist_mission_state_with(
         }
     }
 
+    let mut effective_record = record.clone();
+    effective_record.next_slice = effective_next_slice;
+    effective_record.done_gate = effective_done_gate;
+    let fields = MissionStateFields::try_from_record(&effective_record)
+        .context("refusing to persist invalid structured mission state")?;
+
     conn.execute(
         "INSERT INTO mission_states (
             conversation_id,
@@ -265,8 +459,9 @@ pub(super) fn persist_mission_state_with(
             watcher_trigger_count,
             agent_failure_count,
             deferred_reason,
-            rewrite_failure_count
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+            rewrite_failure_count,
+            structured_state_version
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 1)
         ON CONFLICT(conversation_id) DO UPDATE SET
             mission = excluded.mission,
             mission_status = excluded.mission_status,
@@ -284,35 +479,37 @@ pub(super) fn persist_mission_state_with(
             watcher_trigger_count = excluded.watcher_trigger_count,
             agent_failure_count = excluded.agent_failure_count,
             deferred_reason = excluded.deferred_reason,
-            rewrite_failure_count = excluded.rewrite_failure_count",
+            rewrite_failure_count = excluded.rewrite_failure_count,
+            structured_state_version = 1",
         params![
-            record.conversation_id,
-            record.mission,
-            record.mission_status,
-            record.continuation_mode,
-            record.trigger_intensity,
-            record.blocker,
-            effective_next_slice,
-            effective_done_gate,
-            record.closure_confidence,
-            if record.is_open { 1 } else { 0 },
-            if record.allow_idle { 1 } else { 0 },
-            record.focus_head_commit_id,
-            record.last_synced_at,
-            record.watcher_last_triggered_at,
-            record.watcher_trigger_count,
-            record.agent_failure_count,
-            record.deferred_reason,
-            record.rewrite_failure_count,
+            effective_record.conversation_id,
+            fields.mission,
+            fields.mission_status.as_str(),
+            fields.continuation_mode.as_str(),
+            fields.trigger_intensity.as_str(),
+            fields.blocker,
+            fields.next_slice,
+            fields.done_gate,
+            fields.closure_confidence.as_str(),
+            if fields.is_open { 1 } else { 0 },
+            if fields.allow_idle { 1 } else { 0 },
+            effective_record.focus_head_commit_id,
+            effective_record.last_synced_at,
+            effective_record.watcher_last_triggered_at,
+            effective_record.watcher_trigger_count,
+            effective_record.agent_failure_count,
+            effective_record.deferred_reason,
+            effective_record.rewrite_failure_count,
         ],
     )?;
     Ok(())
 }
 
-pub(super) fn derive_mission_state_from_continuity(
-    continuity: &ContinuityShowAll,
-    previous: Option<&MissionStateRecord>,
-) -> MissionStateRecord {
+/// Legacy import only. Parse a continuity document that predates structured
+/// mission-state persistence. Write-capable migration paths persist the result;
+/// read-only inspectors may keep it in memory. Never invoke this parser once a
+/// structured row exists.
+pub(super) fn import_legacy_mission_state(continuity: &ContinuityShowAll) -> MissionStateRecord {
     let contract_lines = continuity_section_lines(&continuity.focus.content, "Contract");
     let state_lines = continuity_section_lines(&continuity.focus.content, "State");
     let legacy_status_lines = continuity_section_lines(&continuity.focus.content, "Status");
@@ -325,29 +522,25 @@ pub(super) fn derive_mission_state_from_continuity(
         .or_else(|| first_non_meta_line(&contract_lines))
         .or_else(|| first_non_meta_line(&legacy_status_lines))
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| previous.map(|record| record.mission.clone()))
         .unwrap_or_default();
     let mission_status = canonicalize_mission_status(
         last_named_value(&contract_lines, &["mission_state", "mission state"])
-            .or_else(|| last_named_value(&legacy_status_lines, &["Mission state"]))
+            .or_else(|| last_named_value(&legacy_status_lines, &["Mission state", "Status"]))
             .as_deref(),
     )
-    .or_else(|| previous.map(|record| record.mission_status.clone()))
-    .unwrap_or_else(|| "active".to_string());
+    .unwrap_or(MissionStatus::Active);
     let continuation_mode = canonicalize_continuation_mode(
         last_named_value(&contract_lines, &["continuation_mode", "continuation mode"])
             .or_else(|| last_named_value(&legacy_status_lines, &["Continuation mode"]))
             .as_deref(),
     )
-    .or_else(|| previous.map(|record| record.continuation_mode.clone()))
-    .unwrap_or_else(|| "continuous".to_string());
+    .unwrap_or(ContinuationMode::Continuous);
     let trigger_intensity = canonicalize_trigger_intensity(
         last_named_value(&contract_lines, &["trigger_intensity", "trigger intensity"])
             .or_else(|| last_named_value(&legacy_status_lines, &["Trigger intensity"]))
             .as_deref(),
     )
-    .or_else(|| previous.map(|record| record.trigger_intensity.clone()))
-    .unwrap_or_else(|| "hot".to_string());
+    .unwrap_or(TriggerIntensity::Hot);
     let blocker = last_named_value_allow_empty(&state_lines, &["blocker", "current blocker"])
         .or_else(|| last_named_value_allow_empty(&legacy_blocker_lines, &["Current blocker"]))
         .or_else(|| first_meaningful_line(&state_lines))
@@ -368,98 +561,36 @@ pub(super) fn derive_mission_state_from_continuity(
             .or_else(|| last_named_value(&legacy_gate_lines, &["Closure confidence"]))
             .as_deref(),
     )
-    .or_else(|| previous.map(|record| record.closure_confidence.clone()))
-    .unwrap_or_else(|| "low".to_string());
+    .unwrap_or(ClosureConfidence::Low);
     let is_open = mission_is_open(
         &mission,
-        &mission_status,
-        &continuation_mode,
+        mission_status,
+        continuation_mode,
         &next_slice,
         &done_gate,
-        &closure_confidence,
     );
-    let allow_idle = mission_allows_idle(&mission_status, &continuation_mode, &trigger_intensity);
+    let allow_idle = mission_allows_idle(mission_status, continuation_mode, trigger_intensity);
 
     MissionStateRecord {
         conversation_id: continuity.conversation_id,
         mission,
-        mission_status,
-        continuation_mode,
-        trigger_intensity,
+        mission_status: mission_status.as_str().to_string(),
+        continuation_mode: continuation_mode.as_str().to_string(),
+        trigger_intensity: trigger_intensity.as_str().to_string(),
         blocker,
         next_slice,
         done_gate,
-        closure_confidence,
+        closure_confidence: closure_confidence.as_str().to_string(),
         is_open,
         allow_idle,
         focus_head_commit_id: continuity.focus.head_commit_id.clone(),
         last_synced_at: iso_now(),
-        watcher_last_triggered_at: previous
-            .and_then(|record| record.watcher_last_triggered_at.clone()),
-        watcher_trigger_count: previous
-            .map(|record| record.watcher_trigger_count)
-            .unwrap_or(0),
-        agent_failure_count: previous
-            .map(|record| record.agent_failure_count)
-            .unwrap_or(0),
-        deferred_reason: previous.and_then(|record| record.deferred_reason.clone()),
-        rewrite_failure_count: previous
-            .map(|record| record.rewrite_failure_count)
-            .unwrap_or(0),
+        watcher_last_triggered_at: None,
+        watcher_trigger_count: 0,
+        agent_failure_count: 0,
+        deferred_reason: None,
+        rewrite_failure_count: 0,
     }
-}
-
-pub(super) fn maybe_repair_focus_continuity_with(
-    conn: &Connection,
-    continuity: &mut ContinuityShowAll,
-    previous: Option<&MissionStateRecord>,
-) -> Result<bool> {
-    if focus_semantic_conflicts_local(&continuity.focus.content).is_empty() {
-        return Ok(false);
-    }
-
-    let repaired_content = render_canonical_focus_continuity(continuity, previous);
-    if repaired_content.trim() == continuity.focus.content.trim() {
-        return Ok(false);
-    }
-
-    let created_at = iso_now();
-    let commit_id = continuity_commit_id(
-        continuity.conversation_id,
-        ContinuityKind::Focus,
-        "## Status\n+ Canonicalized conflicting focus fields during mission-state resync.\n",
-        &repaired_content,
-        &created_at,
-    );
-    let document_id = continuity_document_id(continuity.conversation_id, ContinuityKind::Focus);
-    conn.execute(
-        "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            commit_id,
-            document_id,
-            continuity.focus.head_commit_id,
-            "## Status\n+ Canonicalized conflicting focus fields during mission-state resync.\n",
-            repaired_content,
-            created_at
-        ],
-    )?;
-    conn.execute(
-        "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
-        params![commit_id, created_at, document_id],
-    )?;
-    continuity.focus =
-        fetch_continuity_document_with(conn, continuity.conversation_id, ContinuityKind::Focus)?
-            .context("focus continuity missing after repair")?;
-    Ok(true)
-}
-
-pub(super) fn render_canonical_focus_continuity(
-    continuity: &ContinuityShowAll,
-    previous: Option<&MissionStateRecord>,
-) -> String {
-    let record = derive_mission_state_from_continuity(continuity, previous);
-    render_focus_continuity_from_record(continuity, &record)
 }
 
 pub(super) fn render_focus_continuity_from_record(
@@ -686,12 +817,34 @@ pub(super) fn map_mission_claim_row(
 /// exposes as `closure_blocking_claims`, but counted authoritatively (no
 /// display `LIMIT`) so the gate sees every open blocker.
 ///
-/// Tolerates a database whose LCM schema has not been initialized yet
-/// (`mission_claims` absent) by reporting zero open blockers, so a transition
-/// guard running against a bare connection never errors on the lookup.
+/// The closure gate is fail-closed: the claims table and every column used by
+/// the predicate must exist before the count is trusted.
 pub fn count_open_closure_blocking_claims(conn: &Connection, conversation_id: i64) -> Result<i64> {
+    let mut schema = conn
+        .prepare("PRAGMA table_info(mission_claims)")
+        .context("failed to inspect mission_claims schema")?;
+    let columns = schema
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<std::collections::BTreeSet<_>>>()?;
+    let required = [
+        "conversation_id",
+        "blocks_closure",
+        "claim_status",
+        "expires_at",
+    ];
+    let missing = required
+        .iter()
+        .filter(|column| !columns.contains(**column))
+        .copied()
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        missing.is_empty(),
+        "mission_claims schema missing required columns: {}",
+        missing.join(", ")
+    );
+
     let now_millis: i64 = iso_now().parse().unwrap_or(i64::MAX);
-    let result = conn.query_row(
+    conn.query_row(
         "SELECT COUNT(*) FROM mission_claims
          WHERE conversation_id = ?1
            AND blocks_closure = 1
@@ -699,31 +852,8 @@ pub fn count_open_closure_blocking_claims(conn: &Connection, conversation_id: i6
                 OR (expires_at IS NOT NULL AND CAST(expires_at AS INTEGER) <= ?2))",
         params![conversation_id, now_millis],
         |row| row.get::<_, i64>(0),
-    );
-    match result {
-        Ok(count) => Ok(count),
-        Err(rusqlite::Error::SqliteFailure(_, Some(message)))
-            if message.contains("no such table") =>
-        {
-            // A bare connection (LCM schema never initialized) legitimately
-            // has zero blockers. A database that HAS the LCM base tables but
-            // lost mission_claims is a schema regression — the closure gate
-            // must fail loudly instead of silently swinging open.
-            let lcm_initialized: i64 = conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
-                [],
-                |row| row.get(0),
-            )?;
-            if lcm_initialized != 0 {
-                bail!(
-                    "mission_claims table is missing from an initialized LCM database — \
-                     refusing to report zero closure-blocking claims"
-                );
-            }
-            Ok(0)
-        }
-        Err(err) => Err(err.into()),
-    }
+    )
+    .map_err(Into::into)
 }
 
 pub(super) fn map_strategic_directive_row(
@@ -821,87 +951,92 @@ pub(super) fn first_meaningful_line(lines: &[String]) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-pub(super) fn canonicalize_mission_status(raw: Option<&str>) -> Option<String> {
+pub(super) fn canonicalize_mission_status(raw: Option<&str>) -> Option<MissionStatus> {
     let raw = raw?;
     let normalized = normalize_mission_text(raw);
     match normalized.as_str() {
-        "done" | "complete" | "completed" | "closed" | "abgeschlossen" => Some("done".to_string()),
-        "maintenance" => Some("maintenance".to_string()),
-        "scheduled" => Some("scheduled".to_string()),
-        "dormant" => Some("dormant".to_string()),
-        "open" | "active" | "ongoing" | "in progress" => Some("active".to_string()),
+        "done" | "complete" | "completed" | "closed" | "abgeschlossen" => Some(MissionStatus::Done),
+        "blocked" | "blockiert" => Some(MissionStatus::Blocked),
+        "deferred" => Some(MissionStatus::Deferred),
+        "maintenance" => Some(MissionStatus::Maintenance),
+        "scheduled" => Some(MissionStatus::Scheduled),
+        "dormant" => Some(MissionStatus::Dormant),
+        "open" | "active" | "ongoing" | "in progress" => Some(MissionStatus::Active),
         _ => None,
     }
 }
 
-pub(super) fn canonicalize_continuation_mode(raw: Option<&str>) -> Option<String> {
+pub(super) fn canonicalize_continuation_mode(raw: Option<&str>) -> Option<ContinuationMode> {
     let raw = raw?;
     let normalized = normalize_mission_text(raw);
     match normalized.as_str() {
-        "maintenance" => Some("maintenance".to_string()),
-        "scheduled" | "cron" => Some("scheduled".to_string()),
-        "dormant" | "archive" => Some("dormant".to_string()),
-        "closed" => Some("closed".to_string()),
+        "maintenance" => Some(ContinuationMode::Maintenance),
+        "scheduled" | "cron" => Some(ContinuationMode::Scheduled),
+        "dormant" | "archive" => Some(ContinuationMode::Dormant),
+        "closed" => Some(ContinuationMode::Closed),
         "continuous" | "continue" | "open" | "reopen" | "reopened" | "resume" | "active"
-        | "ongoing" => Some("continuous".to_string()),
+        | "ongoing" => Some(ContinuationMode::Continuous),
         _ => None,
     }
 }
 
-pub(super) fn canonicalize_trigger_intensity(raw: Option<&str>) -> Option<String> {
+pub(super) fn canonicalize_trigger_intensity(raw: Option<&str>) -> Option<TriggerIntensity> {
     let raw = raw?;
     let normalized = normalize_mission_text(raw);
     match normalized.as_str() {
-        "archive" => Some("archive".to_string()),
-        "cold" | "low" => Some("cold".to_string()),
-        "warm" | "medium" | "moderate" => Some("warm".to_string()),
-        "hot" | "high" | "urgent" => Some("hot".to_string()),
+        "archive" => Some(TriggerIntensity::Archive),
+        "cold" | "low" => Some(TriggerIntensity::Cold),
+        "warm" | "medium" | "moderate" => Some(TriggerIntensity::Warm),
+        "hot" | "high" | "urgent" => Some(TriggerIntensity::Hot),
         _ => None,
     }
 }
 
-pub(super) fn canonicalize_closure_confidence(raw: Option<&str>) -> Option<String> {
+pub(super) fn canonicalize_closure_confidence(raw: Option<&str>) -> Option<ClosureConfidence> {
     let raw = raw?;
     let normalized = normalize_mission_text(raw);
     match normalized.as_str() {
-        "complete" | "completed" | "certain" => Some("complete".to_string()),
-        "high" => Some("high".to_string()),
-        "medium" | "moderate" => Some("medium".to_string()),
+        "complete" | "completed" | "certain" => Some(ClosureConfidence::Complete),
+        "high" => Some(ClosureConfidence::High),
+        "medium" | "moderate" => Some(ClosureConfidence::Medium),
         "low" | "partial" | "provisional" | "tentative" | "pending" | "unverified" | "unclear"
-        | "unknown" => Some("low".to_string()),
+        | "unknown" => Some(ClosureConfidence::Low),
         _ => None,
     }
 }
 
 pub(super) fn mission_is_open(
     mission: &str,
-    mission_status: &str,
-    continuation_mode: &str,
+    mission_status: MissionStatus,
+    continuation_mode: ContinuationMode,
     next_slice: &str,
     done_gate: &str,
-    closure_confidence: &str,
 ) -> bool {
-    let status = normalize_mission_text(mission_status);
-    let mode = normalize_mission_text(continuation_mode);
-    let _ = closure_confidence;
-    if status == "done" || mode == "closed" || mode == "dormant" {
+    if matches!(
+        mission_status,
+        MissionStatus::Done | MissionStatus::Deferred | MissionStatus::Dormant
+    ) || matches!(
+        continuation_mode,
+        ContinuationMode::Closed | ContinuationMode::Dormant
+    ) {
         return false;
     }
     !mission.trim().is_empty() || !next_slice.trim().is_empty() || !done_gate.trim().is_empty()
 }
 
 pub(super) fn mission_allows_idle(
-    mission_status: &str,
-    continuation_mode: &str,
-    trigger_intensity: &str,
+    mission_status: MissionStatus,
+    continuation_mode: ContinuationMode,
+    trigger_intensity: TriggerIntensity,
 ) -> bool {
-    let status = normalize_mission_text(mission_status);
-    let mode = normalize_mission_text(continuation_mode);
-    let intensity = normalize_mission_text(trigger_intensity);
-    status == "done"
-        || mode == "closed"
-        || mode == "dormant"
-        || (mode == "scheduled" && intensity != "hot")
+    matches!(
+        mission_status,
+        MissionStatus::Done | MissionStatus::Deferred | MissionStatus::Dormant
+    ) || matches!(
+        continuation_mode,
+        ContinuationMode::Closed | ContinuationMode::Dormant
+    ) || (continuation_mode == ContinuationMode::Scheduled
+        && trigger_intensity != TriggerIntensity::Hot)
 }
 
 pub(super) fn normalize_mission_text(value: &str) -> String {

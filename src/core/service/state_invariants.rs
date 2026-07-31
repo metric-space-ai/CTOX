@@ -62,11 +62,11 @@ pub fn evaluate_runtime_state_invariants(
     let lcm_db_path = root.join("runtime/ctox.sqlite3");
     let engine = lcm::LcmEngine::open(&lcm_db_path, lcm::LcmConfig::default())?;
     let continuity = engine.stored_continuity_show_all(conversation_id)?;
-    let preview_synced_mission_state =
-        engine.preview_mission_state_from_continuity(conversation_id)?;
-    let mission_state = engine
-        .stored_mission_state(conversation_id)?
-        .unwrap_or_else(|| preview_synced_mission_state.clone());
+    // Inspect structured state without rendering or persisting anything. Focus
+    // text is now a rendered view, not a second source of truth, so there is no
+    // honest field-level "continuity resync" comparison to perform here. The
+    // durable focus-head pointer comparison below remains the drift check.
+    let mission_state = engine.peek_mission_state(conversation_id)?;
 
     let queue_tasks = channels::list_queue_tasks(
         root,
@@ -156,18 +156,6 @@ pub fn evaluate_runtime_state_invariants(
         });
     }
 
-    let resync_diffs = mission_state_differences(&mission_state, &preview_synced_mission_state);
-    if !resync_diffs.is_empty() {
-        violations.push(RuntimeStateInvariantViolation {
-            code: "mission_state_requires_continuity_resync".to_string(),
-            summary: "Mission state would change after a continuity resync.".to_string(),
-            detail: format!(
-                "stored mission_state diverges from continuity-derived state: {}",
-                resync_diffs.join("; ")
-            ),
-        });
-    }
-
     let focus_conflicts = focus_semantic_conflicts(&continuity.focus.content);
     if !focus_conflicts.is_empty() {
         violations.push(RuntimeStateInvariantViolation {
@@ -212,73 +200,6 @@ fn normalize_token(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn mission_state_differences(
-    stored: &lcm::MissionStateRecord,
-    synced: &lcm::MissionStateRecord,
-) -> Vec<String> {
-    let mut diffs = Vec::new();
-    push_mission_state_diff(&mut diffs, "mission", &stored.mission, &synced.mission);
-    push_mission_state_diff(
-        &mut diffs,
-        "mission_status",
-        &stored.mission_status,
-        &synced.mission_status,
-    );
-    push_mission_state_diff(
-        &mut diffs,
-        "continuation_mode",
-        &stored.continuation_mode,
-        &synced.continuation_mode,
-    );
-    push_mission_state_diff(
-        &mut diffs,
-        "trigger_intensity",
-        &stored.trigger_intensity,
-        &synced.trigger_intensity,
-    );
-    push_mission_state_diff(&mut diffs, "blocker", &stored.blocker, &synced.blocker);
-    push_mission_state_diff(
-        &mut diffs,
-        "next_slice",
-        &stored.next_slice,
-        &synced.next_slice,
-    );
-    push_mission_state_diff(
-        &mut diffs,
-        "done_gate",
-        &stored.done_gate,
-        &synced.done_gate,
-    );
-    push_mission_state_diff(
-        &mut diffs,
-        "closure_confidence",
-        &stored.closure_confidence,
-        &synced.closure_confidence,
-    );
-    if stored.is_open != synced.is_open {
-        diffs.push(format!("is_open={} -> {}", stored.is_open, synced.is_open));
-    }
-    if stored.allow_idle != synced.allow_idle {
-        diffs.push(format!(
-            "allow_idle={} -> {}",
-            stored.allow_idle, synced.allow_idle
-        ));
-    }
-    if stored.focus_head_commit_id != synced.focus_head_commit_id {
-        diffs.push(format!(
-            "focus_head_commit_id={} -> {}",
-            stored.focus_head_commit_id, synced.focus_head_commit_id
-        ));
-    }
-    diffs
-}
-
-fn push_mission_state_diff(diffs: &mut Vec<String>, field: &str, stored: &str, synced: &str) {
-    if normalize_token(stored) != normalize_token(synced) {
-        diffs.push(format!("{field}={stored:?} -> {synced:?}"));
-    }
 }
 
 fn focus_semantic_conflicts(content: &str) -> Vec<String> {
@@ -336,11 +257,18 @@ mod tests {
     use crate::channels;
     use crate::lcm::{ContinuityKind, LcmConfig, LcmEngine};
     use crate::plan;
-    use anyhow::Context;
     use rusqlite::params;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    // The timestamp alone is not unique: the test binary runs these in
+    // parallel and two of them can start inside the same clock tick, which
+    // made them share a root and stomp on each other's SQLite file — a
+    // different test failed on almost every run. The counter makes the root
+    // unique per test regardless of clock resolution.
+    static TEMP_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn temp_root() -> PathBuf {
         let mut path = std::env::temp_dir();
@@ -348,7 +276,11 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_nanos())
             .unwrap_or(0);
-        path.push(format!("ctox-state-invariants-{nanos}"));
+        let sequence = TEMP_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        path.push(format!(
+            "ctox-state-invariants-{}-{nanos}-{sequence}",
+            std::process::id()
+        ));
         path
     }
 
@@ -356,7 +288,6 @@ mod tests {
         fs::create_dir_all(root.join("runtime"))?;
         let db_path = root.join("runtime/ctox.sqlite3");
         let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
-        let _ = engine.continuity_init_documents(1)?;
         engine.continuity_apply_diff(1, ContinuityKind::Focus, focus_diff)?;
         Ok(engine)
     }
@@ -453,6 +384,17 @@ mod tests {
             .iter()
             .any(|issue| issue.code == "mission_focus_head_mismatch"));
 
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        let stored = engine
+            .stored_mission_state(1)?
+            .expect("missing stored mission state after invariant inspection");
+        assert_eq!(stored.focus_head_commit_id, "stale_focus_head");
+        assert_eq!(
+            engine.stored_continuity_show_all(1)?.focus.head_commit_id,
+            report.continuity_focus_head_commit_id
+        );
+        drop(engine);
+
         let _ = fs::remove_dir_all(root);
         Ok(())
     }
@@ -487,62 +429,25 @@ mod tests {
     }
 
     #[test]
-    fn detects_mission_state_that_requires_continuity_resync() -> anyhow::Result<()> {
-        let root = temp_root();
-        let engine = seed_focus(
-            &root,
-            "## Status\n+ Mission: Keep continuity truth primary after stale mission cache repair.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: hot.\n## Blocker\n+ Current blocker: stale mission cache rows may disagree with durable continuity.\n## Next\n+ Next slice: verify that durable continuity stays primary and record the recovery.\n## Done / Gate\n+ Done gate: keep the continuity-backed mission primary and leave exactly one bounded continuation open.\n+ Closure confidence: low.\n",
-        )?;
-        let current = engine
-            .stored_mission_state(1)?
-            .context("missing stored mission state")?;
-        let db_path = root.join("runtime/ctox.sqlite3");
-        let conn = rusqlite::Connection::open(&db_path)?;
-        conn.execute(
-            "UPDATE mission_states
-             SET mission = ?1, mission_status = ?2, continuation_mode = ?3, trigger_intensity = ?4,
-                 blocker = ?5, next_slice = ?6, done_gate = ?7, closure_confidence = ?8,
-                 is_open = ?9, allow_idle = ?10, focus_head_commit_id = ?11
-             WHERE conversation_id = 1",
-            params![
-                "Archive the stale mission cache row. This seeded value is not live work.",
-                "done",
-                "closed",
-                "cold",
-                "stale mission cache row only",
-                "do not trust the stale mission cache row",
-                "stale cache row should not decide the live mission",
-                "high",
-                0,
-                1,
-                current.focus_head_commit_id,
-            ],
-        )?;
-        drop(conn);
-        drop(engine);
-
-        let report = evaluate_runtime_state_invariants(&root, 1)?;
-        assert!(report
-            .violations
-            .iter()
-            .any(|issue| issue.code == "mission_state_requires_continuity_resync"));
-
-        let _ = fs::remove_dir_all(root);
-        Ok(())
-    }
-
-    #[test]
     fn detects_focus_semantic_conflict_from_duplicate_values() -> anyhow::Result<()> {
         let root = temp_root();
         let engine = seed_focus(
             &root,
             "## Status\n+ Mission: Old continuity head before partial-commit recovery.\n+ Mission state: active.\n+ Continuation mode: continuous.\n+ Trigger intensity: warm.\n## Blocker\n+ Current blocker: the recovery path still points at the old continuity head.\n## Next\n+ Next slice: advance to the new continuity head.\n## Done / Gate\n+ Done gate: resync the live mission state to the newest continuity head.\n+ Closure confidence: low.\n",
         )?;
-        engine.continuity_apply_diff(
-            1,
-            ContinuityKind::Focus,
-            "## Status\n+ Mission: Keep the newest continuity head primary after partial-commit recovery.\n+ Trigger intensity: hot.\n## Blocker\n+ Current blocker: the live mission cache may still point at the old focus head.\n## Next\n+ Next slice: verify the newest focus head is the active runtime truth.\n## Done / Gate\n+ Done gate: keep the newest focus head primary and leave exactly one bounded continuation open.\n",
+        let focus_head = engine.stored_continuity_show_all(1)?.focus.head_commit_id;
+        let db_path = root.join("runtime/ctox.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute(
+            "UPDATE continuity_commits
+             SET rendered_text = rendered_text || ?1
+             WHERE commit_id = ?2",
+            params![
+                "\n- Mission: Keep the newest continuity head primary after partial-commit recovery.\n- Trigger intensity: hot.\n",
+                focus_head,
+            ],
         )?;
+        drop(conn);
         drop(engine);
 
         let report = evaluate_runtime_state_invariants(&root, 1)?;

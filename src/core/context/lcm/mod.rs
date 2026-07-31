@@ -4,14 +4,14 @@ pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
 pub use mission_state::{
     count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
-};
-use mission_state::{
-    derive_mission_state_from_continuity, load_mission_state_with, load_mission_states_with,
-    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
-    maybe_repair_focus_continuity_with, persist_mission_state_with,
-    render_focus_continuity_from_record, OwnerIntentClearGuard,
+    ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
 };
 use mission_state::{focus_semantic_conflicts_local, normalize_mission_text};
+use mission_state::{
+    import_legacy_mission_state, load_mission_state_with, load_mission_states_with,
+    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
+    persist_mission_state_with, render_focus_continuity_from_record, OwnerIntentClearGuard,
+};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -936,7 +936,8 @@ impl LcmEngine {
                 watcher_trigger_count INTEGER NOT NULL DEFAULT 0,
                 agent_failure_count INTEGER NOT NULL DEFAULT 0,
                 deferred_reason TEXT,
-                rewrite_failure_count INTEGER NOT NULL DEFAULT 0
+                rewrite_failure_count INTEGER NOT NULL DEFAULT 0,
+                structured_state_version INTEGER NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS verification_runs (
@@ -1080,6 +1081,15 @@ impl LcmEngine {
             "mission_states",
             "rewrite_failure_count",
             "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        // P8b: marks rows whose runtime controls are stored in the typed-v1
+        // fieldset. Added idempotently through the PRAGMA table_info guard in
+        // `ensure_column`; pre-existing rows already contain these columns and
+        // become typed-v1 without re-reading continuity text.
+        self.ensure_column(
+            "mission_states",
+            "structured_state_version",
+            "INTEGER NOT NULL DEFAULT 1",
         )?;
         Ok(())
     }
@@ -1605,12 +1615,14 @@ impl LcmEngine {
             rusqlite::TransactionBehavior::Immediate,
         )
         .context("failed to begin continuity init transaction")?;
-        let show_all = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let previous = load_mission_state_with(&tx, conversation_id)?;
-        persist_mission_state_with(
-            &tx,
-            &derive_mission_state_from_continuity(&show_all, previous.as_ref()),
-        )?;
+        let mut show_all = load_or_init_continuity_show_all(&tx, conversation_id)?;
+        let (record, imported) = load_or_import_mission_state_with(&tx, &show_all)?;
+        let reason = if imported {
+            "Imported legacy focus continuity into typed mission state and rendered its canonical view."
+        } else {
+            "Rendered focus continuity from typed mission state."
+        };
+        let _ = render_focus_continuity_with(&tx, &mut show_all, &record, reason)?;
         tx.commit()
             .context("failed to commit continuity init transaction")?;
         Ok(show_all)
@@ -1699,14 +1711,21 @@ impl LcmEngine {
             "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
             params![commit_id, created_at, document_id],
         )?;
-        let document = fetch_continuity_document_with(&tx, conversation_id, kind)?
-            .context("continuity document missing after diff apply")?;
-        let continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let previous = load_mission_state_with(&tx, conversation_id)?;
-        persist_mission_state_with(
-            &tx,
-            &derive_mission_state_from_continuity(&continuity, previous.as_ref()),
-        )?;
+        let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
+        if kind == ContinuityKind::Focus {
+            let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
+            let reason = if imported {
+                "Imported the legacy focus document once and rendered typed mission state."
+            } else {
+                "Rendered focus continuity from typed mission state after a focus diff."
+            };
+            let _ = render_focus_continuity_with(&tx, &mut continuity, &record, reason)?;
+        }
+        let document = match kind {
+            ContinuityKind::Narrative => continuity.narrative,
+            ContinuityKind::Anchors => continuity.anchors,
+            ContinuityKind::Focus => continuity.focus,
+        };
         tx.commit()
             .context("failed to commit continuity apply transaction")?;
         Ok(document)
@@ -1755,14 +1774,21 @@ impl LcmEngine {
             "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
             params![commit_id, created_at, document_id],
         )?;
-        let document = fetch_continuity_document_with(&tx, conversation_id, kind)?
-            .context("continuity document missing after full-replace apply")?;
-        let continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let previous = load_mission_state_with(&tx, conversation_id)?;
-        persist_mission_state_with(
-            &tx,
-            &derive_mission_state_from_continuity(&continuity, previous.as_ref()),
-        )?;
+        let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
+        if kind == ContinuityKind::Focus {
+            let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
+            let reason = if imported {
+                "Imported the legacy focus document once and rendered typed mission state."
+            } else {
+                "Rendered focus continuity from typed mission state after a full replacement."
+            };
+            let _ = render_focus_continuity_with(&tx, &mut continuity, &record, reason)?;
+        }
+        let document = match kind {
+            ContinuityKind::Narrative => continuity.narrative,
+            ContinuityKind::Anchors => continuity.anchors,
+            ContinuityKind::Focus => continuity.focus,
+        };
         tx.commit()
             .context("failed to commit continuity full-replace transaction")?;
         Ok(document)
@@ -1832,14 +1858,21 @@ impl LcmEngine {
             "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
             params![commit_id, created_at, document_id],
         )?;
-        let document = fetch_continuity_document_with(&tx, conversation_id, kind)?
-            .context("continuity document missing after string-replace apply")?;
-        let continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let previous = load_mission_state_with(&tx, conversation_id)?;
-        persist_mission_state_with(
-            &tx,
-            &derive_mission_state_from_continuity(&continuity, previous.as_ref()),
-        )?;
+        let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
+        if kind == ContinuityKind::Focus {
+            let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
+            let reason = if imported {
+                "Imported the legacy focus document once and rendered typed mission state."
+            } else {
+                "Rendered focus continuity from typed mission state after a string replacement."
+            };
+            let _ = render_focus_continuity_with(&tx, &mut continuity, &record, reason)?;
+        }
+        let document = match kind {
+            ContinuityKind::Narrative => continuity.narrative,
+            ContinuityKind::Anchors => continuity.anchors,
+            ContinuityKind::Focus => continuity.focus,
+        };
         tx.commit()
             .context("failed to commit continuity string-replace transaction")?;
         Ok(document)
@@ -1942,22 +1975,24 @@ impl LcmEngine {
         load_mission_state_with(&self.conn, conversation_id)
     }
 
+    /// Read structured mission state without rendering focus continuity or
+    /// persisting the legacy fallback. This is the inspection path for guards
+    /// that must report drift without repairing it.
+    pub fn peek_mission_state(&self, conversation_id: i64) -> Result<MissionStateRecord> {
+        if let Some(record) = self.stored_mission_state(conversation_id)? {
+            return Ok(record);
+        }
+        let continuity = self.stored_continuity_show_all(conversation_id)?;
+        Ok(import_legacy_mission_state(&continuity))
+    }
+
     pub fn list_mission_states(&self, open_only: bool) -> Result<Vec<MissionStateRecord>> {
         load_mission_states_with(&self.conn, open_only)
     }
 
-    pub fn preview_mission_state_from_continuity(
-        &self,
-        conversation_id: i64,
-    ) -> Result<MissionStateRecord> {
-        let continuity = load_continuity_show_all_with(&self.conn, conversation_id)?;
-        let previous = load_mission_state_with(&self.conn, conversation_id)?;
-        Ok(derive_mission_state_from_continuity(
-            &continuity,
-            previous.as_ref(),
-        ))
-    }
-
+    /// Compatibility name retained for service callers. The old repair loop is
+    /// gone: this loads (or one-time imports) structured state and normally
+    /// renders focus continuity from that source.
     pub fn sync_mission_state_from_continuity_with_repair(
         &self,
         conversation_id: i64,
@@ -1966,21 +2001,24 @@ impl LcmEngine {
             &self.conn,
             rusqlite::TransactionBehavior::Immediate,
         )
-        .context("failed to begin mission sync transaction")?;
+        .context("failed to begin mission render transaction")?;
         let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let previous = load_mission_state_with(&tx, conversation_id)?;
         let previous_focus_head_commit_id = continuity.focus.head_commit_id.clone();
-        let focus_repaired =
-            maybe_repair_focus_continuity_with(&tx, &mut continuity, previous.as_ref())?;
-        let record = derive_mission_state_from_continuity(&continuity, previous.as_ref());
-        persist_mission_state_with(&tx, &record)?;
+        let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
+        let reason = if imported {
+            "Imported legacy focus continuity into typed mission state and rendered it."
+        } else {
+            "Rendered focus continuity from typed mission state."
+        };
+        let (record, focus_rendered) =
+            render_focus_continuity_with(&tx, &mut continuity, &record, reason)?;
         tx.commit()
-            .context("failed to commit mission sync transaction")?;
+            .context("failed to commit mission render transaction")?;
         Ok(MissionStateRepairOutcome {
             mission_state: record,
             previous_focus_head_commit_id,
             focus_head_commit_id: continuity.focus.head_commit_id.clone(),
-            focus_repaired,
+            focus_repaired: focus_rendered,
             reopened_for_open_runtime_work: false,
         })
     }
@@ -2148,47 +2186,18 @@ impl LcmEngine {
             rusqlite::TransactionBehavior::Immediate,
         )
         .context("failed to begin focus continuity rewrite transaction")?;
-        let continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
-        let repaired_content = render_focus_continuity_from_record(&continuity, record);
-        if repaired_content.trim() == continuity.focus.content.trim() {
-            tx.commit()
-                .context("failed to commit no-op focus continuity rewrite transaction")?;
-            return Ok(false);
-        }
-
-        let created_at = iso_now();
-        let diff_text = format!("## Status\n+ {reason}\n");
-        let commit_id = continuity_commit_id(
-            conversation_id,
-            ContinuityKind::Focus,
-            &diff_text,
-            &repaired_content,
-            &created_at,
+        anyhow::ensure!(
+            record.conversation_id == conversation_id,
+            "mission-state conversation id does not match focus render target"
         );
-        let document_id = continuity_document_id(conversation_id, ContinuityKind::Focus);
-        tx.execute(
-            "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                commit_id,
-                document_id,
-                continuity.focus.head_commit_id,
-                diff_text,
-                repaired_content,
-                created_at
-            ],
-        )?;
-        tx.execute(
-            "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
-            params![commit_id, created_at, document_id],
-        )?;
-        let mut updated_record = record.clone();
-        updated_record.focus_head_commit_id = commit_id;
-        updated_record.last_synced_at = created_at;
-        persist_mission_state_with(&tx, &updated_record)?;
+        let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
+        persist_mission_state_with(&tx, record)?;
+        let effective = load_mission_state_with(&tx, conversation_id)?
+            .context("mission state missing before focus render")?;
+        let (_, rendered) = render_focus_continuity_with(&tx, &mut continuity, &effective, reason)?;
         tx.commit()
-            .context("failed to commit focus continuity rewrite transaction")?;
-        Ok(true)
+            .context("failed to commit focus continuity render transaction")?;
+        Ok(rendered)
     }
 
     pub fn persist_verification_run(
@@ -4543,8 +4552,92 @@ fn merge_fixture_config(config: Option<LcmFixtureConfig>) -> LcmConfig {
 
 impl LcmEngine {
     fn persist_mission_state(&self, record: &MissionStateRecord) -> Result<()> {
-        persist_mission_state_with(&self.conn, record)
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )
+        .context("failed to begin structured mission-state write")?;
+        let mut continuity = load_or_init_continuity_show_all(&tx, record.conversation_id)?;
+        persist_mission_state_with(&tx, record)?;
+        let effective = load_mission_state_with(&tx, record.conversation_id)?
+            .context("mission state missing after structured write")?;
+        let _ = render_focus_continuity_with(
+            &tx,
+            &mut continuity,
+            &effective,
+            "Rendered focus continuity after a structured mission-state write.",
+        )?;
+        tx.commit()
+            .context("failed to commit structured mission-state write")?;
+        Ok(())
     }
+}
+
+fn load_or_import_mission_state_with(
+    conn: &Connection,
+    continuity: &ContinuityShowAll,
+) -> Result<(MissionStateRecord, bool)> {
+    if let Some(record) = load_mission_state_with(conn, continuity.conversation_id)? {
+        return Ok((record, false));
+    }
+    let record = import_legacy_mission_state(continuity);
+    persist_mission_state_with(conn, &record)?;
+    Ok((record, true))
+}
+
+/// Render the focus document from authoritative structured state and persist
+/// the resulting focus head back onto that same state row.
+fn render_focus_continuity_with(
+    conn: &Connection,
+    continuity: &mut ContinuityShowAll,
+    record: &MissionStateRecord,
+    reason: &str,
+) -> Result<(MissionStateRecord, bool)> {
+    let rendered_content = render_focus_continuity_from_record(continuity, record);
+    let changed = rendered_content.trim() != continuity.focus.content.trim();
+    let synced_at = iso_now();
+    if changed {
+        let diff_text = format!("## Status\n+ {reason}\n");
+        let commit_identity = format!("{diff_text}\n<parent:{}>", continuity.focus.head_commit_id);
+        let commit_id = continuity_commit_id(
+            continuity.conversation_id,
+            ContinuityKind::Focus,
+            &commit_identity,
+            &rendered_content,
+            &synced_at,
+        );
+        let document_id = continuity_document_id(continuity.conversation_id, ContinuityKind::Focus);
+        conn.execute(
+            "INSERT INTO continuity_commits (commit_id, document_id, parent_commit_id, diff_text, rendered_text, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                commit_id,
+                document_id,
+                continuity.focus.head_commit_id,
+                diff_text,
+                rendered_content,
+                synced_at,
+            ],
+        )?;
+        conn.execute(
+            "UPDATE continuity_documents SET head_commit_id = ?1, updated_at = ?2 WHERE document_id = ?3",
+            params![commit_id, synced_at, document_id],
+        )?;
+        continuity.focus = fetch_continuity_document_with(
+            conn,
+            continuity.conversation_id,
+            ContinuityKind::Focus,
+        )?
+        .context("focus continuity missing after structured-state render")?;
+    }
+
+    let mut synced_record = record.clone();
+    synced_record.focus_head_commit_id = continuity.focus.head_commit_id.clone();
+    synced_record.last_synced_at = synced_at;
+    persist_mission_state_with(conn, &synced_record)?;
+    let stored = load_mission_state_with(conn, continuity.conversation_id)?
+        .context("mission state missing after structured-state render")?;
+    Ok((stored, changed))
 }
 
 fn load_or_init_continuity_show_all(
