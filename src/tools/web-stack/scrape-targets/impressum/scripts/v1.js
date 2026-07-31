@@ -191,9 +191,19 @@ function candidateHostsFromCompany(company) {
     .split(/\s+/)
     .filter(Boolean);
   if (words.length === 0) return [];
-  const hosts = [words.join("") + ".de", words.join("") + ".com"];
+  // Ordered by how German companies actually name their sites, because the
+  // first verified candidate wins and every miss costs a request: the leading
+  // word alone (aeroxon.de), then the hyphenated full name (bnt-chemicals.de),
+  // then the concatenation, then .com, then initials. The first canary pass
+  // tried only the concatenation and missed notices sitting one hyphen away.
+  const joined = words.join("");
+  const hyphenated = words.join("-");
+  const hosts = [];
+  if (words.length > 1) hosts.push(words[0] + ".de", hyphenated + ".de");
+  hosts.push(joined + ".de");
+  if (words.length > 1) hosts.push(words[0] + ".com", hyphenated + ".com");
+  hosts.push(joined + ".com");
   if (words.length > 1) {
-    hosts.push(words[0] + ".de", words[0] + ".com");
     const initials = words.map((word) => word[0]).join("");
     if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
   }

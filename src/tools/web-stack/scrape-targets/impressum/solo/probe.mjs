@@ -119,9 +119,19 @@ function candidateHostsFromCompany(company) {
     .split(/\s+/)
     .filter(Boolean);
   if (words.length === 0) return [];
-  const hosts = [words.join("") + ".de", words.join("") + ".com"];
+  // Keep this list and its ORDER identical to scripts/v1.js. The probe is the
+  // solo-first proving ground — if the two drift apart, a probe run stops
+  // saying anything about what the deployed adapter will do. Ordered by how
+  // German companies actually name their sites: leading word (aeroxon.de),
+  // hyphenated full name (bnt-chemicals.de), concatenation, then .com.
+  const joined = words.join("");
+  const hyphenated = words.join("-");
+  const hosts = [];
+  if (words.length > 1) hosts.push(words[0] + ".de", hyphenated + ".de");
+  hosts.push(joined + ".de");
+  if (words.length > 1) hosts.push(words[0] + ".com", hyphenated + ".com");
+  hosts.push(joined + ".com");
   if (words.length > 1) {
-    hosts.push(words[0] + ".de", words[0] + ".com");
     const initials = words.map((word) => word[0]).join("");
     if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
   }
