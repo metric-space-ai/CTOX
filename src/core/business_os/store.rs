@@ -25,6 +25,19 @@ use super::policy::{
 use super::policy::{
     owner_transfer_policy_decision, policy_actor_from_session, policy_decision_payload,
 };
+pub use super::store_projections::repair_queue_projections;
+#[cfg(test)]
+use super::store_projections::tests::{create_repair_rxdb_tables, insert_rxdb_test_record};
+pub(super) use super::store_projections::upsert_business_record;
+use super::store_projections::{
+    business_chat_id, business_chat_owner_user_id, business_chat_payload, business_chat_title,
+    business_command_queue_task_payload, enrich_queue_projection_payload, is_business_chat_command,
+    materialize_control_business_chat_state, materialize_pending_business_chat,
+    normalize_queue_status, persist_terminal_business_chat_command_projection,
+    queue_projection_command_id, queue_projection_execution_phase,
+    queue_projection_terminal_status, queue_task_payload, refresh_queue_task_projection,
+    write_queue_task_projection,
+};
 use crate::capabilities::scrape;
 use crate::mission::channels;
 use anyhow::Context;
@@ -142,7 +155,7 @@ const BUSINESS_USER_PROFILE_VALUE_MAX_CHARS: usize = 512;
 const BUSINESS_USER_PROFILE_JSON_MAX_BYTES: usize = 16 * 1024;
 const CV_PRINT_PDF_TEXT_MAX_CHARS: usize = 24_000;
 const CV_PRINT_PDF_MAX_BYTES: u64 = 32 * 1024 * 1024;
-const BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS: i64 = 10 * 60 * 1_000;
+pub(super) const BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS: i64 = 10 * 60 * 1_000;
 const BUSINESS_OS_CHAT_ATTACHMENT_CHUNK_SIZE: usize = 16 * 1024;
 const BUSINESS_OS_CHAT_ATTACHMENT_CONTENT_HASH_SCHEME: &str = "sha256-bytes-v1";
 const BUSINESS_OS_LEGACY_SHA256_CONTENT_HASH_SCHEME: &str = "sha256";
@@ -187,7 +200,7 @@ fn rxdb_collection_writer_counter_key(root: &Path, collection: &str) -> String {
 }
 
 #[cfg(test)]
-fn reset_rxdb_table_column_load_count(root: &Path, table: &str) {
+pub(super) fn reset_rxdb_table_column_load_count(root: &Path, table: &str) {
     let key = rxdb_table_column_counter_key(&rxdb_store_path(root), table);
     let mut counts = RXDB_TABLE_COLUMN_LOADS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -197,7 +210,7 @@ fn reset_rxdb_table_column_load_count(root: &Path, table: &str) {
 }
 
 #[cfg(test)]
-fn rxdb_table_column_load_count(root: &Path, table: &str) -> usize {
+pub(super) fn rxdb_table_column_load_count(root: &Path, table: &str) -> usize {
     let key = rxdb_table_column_counter_key(&rxdb_store_path(root), table);
     let counts = RXDB_TABLE_COLUMN_LOADS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -207,7 +220,7 @@ fn rxdb_table_column_load_count(root: &Path, table: &str) -> usize {
 }
 
 #[cfg(test)]
-fn reset_rxdb_collection_writer_open_count(root: &Path, collection: &str) {
+pub(super) fn reset_rxdb_collection_writer_open_count(root: &Path, collection: &str) {
     let key = rxdb_collection_writer_counter_key(root, collection);
     let mut counts = RXDB_COLLECTION_WRITER_OPENS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -217,7 +230,7 @@ fn reset_rxdb_collection_writer_open_count(root: &Path, collection: &str) {
 }
 
 #[cfg(test)]
-fn rxdb_collection_writer_open_count(root: &Path, collection: &str) -> usize {
+pub(super) fn rxdb_collection_writer_open_count(root: &Path, collection: &str) -> usize {
     let key = rxdb_collection_writer_counter_key(root, collection);
     let counts = RXDB_COLLECTION_WRITER_OPENS
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -16464,64 +16477,6 @@ pub fn complete_business_command_from_queue_reply(
     Ok(Some(accepted_value))
 }
 
-fn persist_terminal_business_chat_command_projection(
-    root: &Path,
-    conn: &Connection,
-    command_id: &str,
-    command: &BusinessCommand,
-    task_id: &str,
-    accepted: &Value,
-) -> anyhow::Result<()> {
-    let completed_at_ms = now_ms() as i64;
-    conn.execute(
-        "UPDATE business_commands SET status='completed', observed_at_ms=?2 WHERE command_id=?1",
-        params![command_id, completed_at_ms],
-    )?;
-    let result = accepted.get("result").cloned().unwrap_or(Value::Null);
-    let reply_text = accepted
-        .get("outbound_text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let payload = serde_json::json!({
-        "id": command_id,
-        "command_id": command_id,
-        "module": command.module.clone(),
-        "command_type": command.command_type.clone(),
-        "record_id": command.record_id.clone().unwrap_or_default(),
-        "status": "completed",
-        "execution_mode": "queue",
-        "execution_phase": "terminal",
-        "terminal_status": "completed",
-        "route_status": "handled",
-        "inbound_channel": command_inbound_channel(command),
-        "task_id": task_id,
-        "task_status": "completed",
-        "payload": command.payload.clone(),
-        "client_context": command.client_context.clone(),
-        "result": result,
-        "outbound_text": reply_text,
-        "response": reply_text,
-        "answer": reply_text,
-        "updated_at_ms": completed_at_ms
-    });
-    upsert_business_record(
-        conn,
-        "business_commands",
-        command_id,
-        completed_at_ms,
-        payload.clone(),
-    )?;
-    let mut rxdb_writers = RxdbProjectionWriterCache::new(root);
-    upsert_rxdb_collection_record_cached(
-        root,
-        Some(&mut rxdb_writers),
-        "business_commands",
-        command_id,
-        completed_at_ms,
-        payload,
-    )
-}
-
 fn ensure_business_command_terminal_gate_ready(root: &Path, task_id: &str) -> anyhow::Result<bool> {
     let Some(phase) =
         channels::inspect_business_command_for_task(root, task_id)?.and_then(|context| {
@@ -17329,364 +17284,6 @@ pub fn pull_business_command_status_record(
     Ok(Some(record))
 }
 
-pub fn repair_queue_projections(
-    root: &Path,
-    options: QueueProjectionRepairOptions,
-) -> anyhow::Result<Value> {
-    let apply = options.apply;
-    let conn = open_store(root)?;
-    let now = now_ms() as i64;
-    let projection_rows = {
-        let mut statement = conn.prepare(
-            "SELECT record_id, payload_json, updated_at_ms
-             FROM business_records
-             WHERE collection = 'ctox_queue_tasks'
-               AND deleted = 0
-             ORDER BY updated_at_ms ASC, record_id ASC",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        })?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-
-    let mut counters: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut actions: Vec<Value> = Vec::new();
-    let mut touched_commands = HashSet::new();
-    let mut rxdb_writers = RxdbProjectionWriterCache::new(root);
-
-    for (task_id, payload_json, projection_updated_at_ms) in projection_rows {
-        let mut payload = serde_json::from_str::<Value>(&payload_json).unwrap_or_else(|_| {
-            serde_json::json!({
-                "id": task_id,
-                "status": "queued",
-                "route_status": "pending"
-            })
-        });
-        let command_id = payload
-            .get("command_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| queue_projection_command_id(&conn, &task_id).ok().flatten());
-        let projection_route_status = payload
-            .get("route_status")
-            .and_then(Value::as_str)
-            .or_else(|| payload.get("status").and_then(Value::as_str))
-            .unwrap_or_default()
-            .to_string();
-        let projection_status = payload
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-        let projection_task_status = payload
-            .get("task_status")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
-
-        match channels::load_queue_task(root, &task_id)? {
-            Some(mut task) => {
-                let mut desired_route_status = task.route_status.clone();
-                let mut repair_kind = None;
-                if desired_route_status == "leased"
-                    && queue_status_note_is_terminal_success(task.status_note.as_deref())
-                {
-                    desired_route_status = "handled".to_string();
-                    repair_kind = Some("leased_terminal_success_note");
-                    if apply {
-                        let note = task
-                            .status_note
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("Business OS queued command completed.");
-                        channels::update_queue_task(
-                            root,
-                            channels::QueueTaskUpdateRequest {
-                                message_key: task_id.clone(),
-                                route_status: Some("handled".to_string()),
-                                status_note: Some(format!("business-os:terminal-success: {note}")),
-                                ..Default::default()
-                            },
-                        )?;
-                        if let Some(reloaded) = channels::load_queue_task(root, &task_id)? {
-                            task = reloaded;
-                        }
-                    }
-                } else if desired_route_status == "leased"
-                    && queue_status_note_is_terminal_failure(task.status_note.as_deref())
-                {
-                    desired_route_status = "failed".to_string();
-                    repair_kind = Some("leased_terminal_failure_note");
-                    if apply {
-                        let reason = task
-                            .status_note
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("leased queue task had terminal failure note");
-                        let _ = channels::ack_leased_messages_with_failure_reason(
-                            root,
-                            std::slice::from_ref(&task_id),
-                            "failed",
-                            reason,
-                        )?;
-                        if let Some(reloaded) = channels::load_queue_task(root, &task_id)? {
-                            task = reloaded;
-                        }
-                    }
-                }
-                if apply {
-                    desired_route_status = task.route_status.clone();
-                }
-                let fallback_error_note =
-                    if desired_route_status == "failed" && task.status_note.is_none() {
-                        channels::load_queue_task_last_error(root, &task_id)?
-                    } else {
-                        None
-                    };
-                let canonical_note = task
-                    .status_note
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .or_else(|| fallback_error_note.as_deref());
-
-                let desired_status = normalize_queue_status(&desired_route_status).to_string();
-                let needs_projection_repair = projection_route_status != desired_route_status
-                    || projection_status != desired_status
-                    || projection_task_status != desired_status
-                    || repair_kind.is_some();
-                if needs_projection_repair {
-                    let class = match desired_route_status.as_str() {
-                        "failed" => "failed_from_canonical",
-                        "handled" => "completed_from_canonical",
-                        "cancelled" => "cancelled_from_canonical",
-                        "blocked" => "blocked_from_canonical",
-                        "leased" => "running_from_canonical",
-                        _ => "queued_from_canonical",
-                    };
-                    *counters.entry(class).or_insert(0) += 1;
-                    push_repair_action(
-                        &mut actions,
-                        class,
-                        &task_id,
-                        command_id.as_deref(),
-                        &projection_route_status,
-                        &desired_route_status,
-                        canonical_note,
-                    );
-                    if apply {
-                        payload = apply_queue_projection_status_fields(
-                            payload,
-                            &task,
-                            &desired_route_status,
-                            now,
-                        );
-                        if let Some(object) = payload.as_object_mut() {
-                            object.insert(
-                                "repair_note".to_string(),
-                                Value::String(format!(
-                                    "queue projection repaired from canonical route_status={desired_route_status}"
-                                )),
-                            );
-                            if desired_route_status == "failed" {
-                                if let Some(note) = canonical_note {
-                                    object.insert(
-                                        "status_note".to_string(),
-                                        Value::String(note.to_string()),
-                                    );
-                                    object.insert(
-                                        "error".to_string(),
-                                        Value::String(note.to_string()),
-                                    );
-                                }
-                            }
-                        }
-                        upsert_business_record(
-                            &conn,
-                            "ctox_queue_tasks",
-                            &task_id,
-                            now,
-                            payload.clone(),
-                        )?;
-                        rxdb_writers.upsert("ctox_queue_tasks", &task_id, now, payload)?;
-                    }
-                }
-
-                if let Some(command_id) = command_id.as_deref() {
-                    if command_status_for_queue_route_status(&desired_route_status).is_some() {
-                        *counters.entry("commands_updated_from_queue").or_insert(0) += 1;
-                        touched_commands.insert(command_id.to_string());
-                        if apply {
-                            upsert_command_projection_from_queue_status(
-                                root,
-                                &conn,
-                                Some(&mut rxdb_writers),
-                                command_id,
-                                Some(&task),
-                                &desired_route_status,
-                                now,
-                                if desired_route_status == "failed" {
-                                    canonical_note
-                                } else {
-                                    None
-                                },
-                            )?;
-                        }
-                    }
-                }
-            }
-            None => {
-                let command_status = command_id.as_deref().and_then(|command_id| {
-                    conn.query_row(
-                        "SELECT status FROM business_commands WHERE command_id = ?1",
-                        params![command_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()
-                    .ok()
-                    .flatten()
-                });
-                if let Some(route_status) = command_status
-                    .as_deref()
-                    .and_then(projection_route_status_for_command_status)
-                {
-                    let desired_status = normalize_queue_status(route_status).to_string();
-                    if projection_route_status != route_status
-                        || projection_status != desired_status
-                        || projection_task_status != desired_status
-                    {
-                        *counters
-                            .entry("projection_repaired_from_command")
-                            .or_insert(0) += 1;
-                        push_repair_action(
-                            &mut actions,
-                            "projection_repaired_from_command",
-                            &task_id,
-                            command_id.as_deref(),
-                            &projection_route_status,
-                            route_status,
-                            None,
-                        );
-                        if apply {
-                            if let Some(object) = payload.as_object_mut() {
-                                object.insert("status".to_string(), Value::String(desired_status));
-                                object.insert(
-                                    "route_status".to_string(),
-                                    Value::String(route_status.to_string()),
-                                );
-                                object.insert(
-                                    "task_status".to_string(),
-                                    Value::String(normalize_queue_status(route_status).to_string()),
-                                );
-                                object.insert("updated_at_ms".to_string(), Value::from(now));
-                                object.insert(
-                                    "repair_note".to_string(),
-                                    Value::String(
-                                        "queue projection repaired from terminal command status"
-                                            .to_string(),
-                                    ),
-                                );
-                            }
-                            upsert_business_record(
-                                &conn,
-                                "ctox_queue_tasks",
-                                &task_id,
-                                now,
-                                payload.clone(),
-                            )?;
-                            rxdb_writers.upsert("ctox_queue_tasks", &task_id, now, payload)?;
-                        }
-                    }
-                } else if projection_status_is_active(&projection_status)
-                    && now.saturating_sub(projection_updated_at_ms)
-                        > BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS
-                {
-                    let error = "Queue task is no longer present in the CTOX durable queue; marking stale Business OS projection as failed.";
-                    *counters.entry("orphaned_active_projection").or_insert(0) += 1;
-                    push_repair_action(
-                        &mut actions,
-                        "orphaned_active_projection",
-                        &task_id,
-                        command_id.as_deref(),
-                        &projection_route_status,
-                        "failed",
-                        Some(error),
-                    );
-                    if apply {
-                        if let Some(object) = payload.as_object_mut() {
-                            object
-                                .insert("status".to_string(), Value::String("failed".to_string()));
-                            object.insert(
-                                "route_status".to_string(),
-                                Value::String("failed".to_string()),
-                            );
-                            object.insert(
-                                "task_status".to_string(),
-                                Value::String("failed".to_string()),
-                            );
-                            object.insert("error".to_string(), Value::String(error.to_string()));
-                            object.insert("updated_at_ms".to_string(), Value::from(now));
-                            object.insert(
-                                "repair_note".to_string(),
-                                Value::String(
-                                    "orphaned active queue projection failed".to_string(),
-                                ),
-                            );
-                        }
-                        upsert_business_record(
-                            &conn,
-                            "ctox_queue_tasks",
-                            &task_id,
-                            now,
-                            payload.clone(),
-                        )?;
-                        rxdb_writers.upsert("ctox_queue_tasks", &task_id, now, payload)?;
-                        if let Some(command_id) = command_id.as_deref() {
-                            touched_commands.insert(command_id.to_string());
-                            upsert_command_projection_from_queue_status(
-                                root,
-                                &conn,
-                                Some(&mut rxdb_writers),
-                                command_id,
-                                None,
-                                "failed",
-                                now,
-                                Some(error),
-                            )?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let redacted = repair_inline_payload_artifacts(root, &conn, apply, now)?;
-    if redacted > 0 {
-        counters.insert("oversized_inline_artifacts_redacted", redacted);
-    }
-    let legacy_records = count_legacy_http_fallback_records(&conn)?;
-    if legacy_records > 0 {
-        counters.insert("legacy_http_fallback_records", legacy_records);
-    }
-
-    Ok(serde_json::json!({
-        "ok": true,
-        "apply": apply,
-        "counts": counters,
-        "actions": actions,
-        "touched_commands": touched_commands.into_iter().collect::<Vec<_>>(),
-    }))
-}
-
 fn pull_rxdb_collection_table_records(
     root: &Path,
     collection: &str,
@@ -17742,7 +17339,7 @@ fn pull_rxdb_collection_table_records(
     Ok(None)
 }
 
-fn load_rxdb_collection_record(
+pub(super) fn load_rxdb_collection_record(
     root: &Path,
     collection: &str,
     record_id: &str,
@@ -17826,7 +17423,7 @@ fn find_rxdb_collection_record_by_string_field(
     Ok(Some((id, record)))
 }
 
-fn upsert_rxdb_collection_record(
+pub(super) fn upsert_rxdb_collection_record(
     root: &Path,
     collection: &str,
     record_id: &str,
@@ -17839,7 +17436,7 @@ fn upsert_rxdb_collection_record(
     Ok(())
 }
 
-fn upsert_rxdb_collection_record_cached(
+pub(super) fn upsert_rxdb_collection_record_cached(
     root: &Path,
     mut writers: Option<&mut RxdbProjectionWriterCache>,
     collection: &str,
@@ -17854,20 +17451,20 @@ fn upsert_rxdb_collection_record_cached(
     }
 }
 
-struct RxdbProjectionWriterCache {
+pub(super) struct RxdbProjectionWriterCache {
     root: PathBuf,
     writers: HashMap<String, Option<RxdbCollectionWriter>>,
 }
 
 impl RxdbProjectionWriterCache {
-    fn new(root: &Path) -> Self {
+    pub(super) fn new(root: &Path) -> Self {
         Self {
             root: root.to_path_buf(),
             writers: HashMap::new(),
         }
     }
 
-    fn upsert(
+    pub(super) fn upsert(
         &mut self,
         collection: &str,
         record_id: &str,
@@ -36082,490 +35679,6 @@ fn handle_ats_mutating_command(
     }
 }
 
-fn is_business_chat_command(command: &BusinessCommand) -> bool {
-    matches!(
-        command.command_type.as_str(),
-        "business_os.chat.task" | "business_os.context.ask" | "business_os.data.modify"
-    ) || first_string_field(
-        &command.payload,
-        &["response_channel", "outbound_channel", "inbound_channel"],
-    )
-    .or_else(|| {
-        first_string_field(
-            &command.client_context,
-            &["response_channel", "outbound_channel", "inbound_channel"],
-        )
-    })
-    .map(|value| {
-        matches!(
-            value.as_str(),
-            "business_os_chat" | "business_os.llm.chat" | "business-os-chat"
-        )
-    })
-    .unwrap_or(false)
-}
-
-fn business_chat_id(command: &BusinessCommand, command_id: &str) -> String {
-    first_string_field(&command.payload, &["reply_to", "chat_id"])
-        .or_else(|| first_string_field(&command.client_context, &["chat_id", "reply_to"]))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("chat_{command_id}"))
-}
-
-fn business_chat_title(command: &BusinessCommand) -> String {
-    first_string_field(&command.payload, &["title"])
-        .or_else(|| first_string_field(&command.client_context, &["title", "source_title"]))
-        .map(|value| clip_text(&value, 42))
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "CTOX".to_string())
-}
-
-fn business_chat_owner_user_id(command: &BusinessCommand) -> String {
-    first_string_field(&command.client_context, &["owner_user_id", "user_id"])
-        .or_else(|| {
-            command
-                .client_context
-                .pointer("/actor/id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "local-dev".to_string())
-}
-
-fn materialize_pending_business_chat(
-    conn: &Connection,
-    command_id: &str,
-    command: &BusinessCommand,
-    queue_task: Option<&channels::QueueTaskView>,
-    updated_at_ms: i64,
-) -> anyhow::Result<String> {
-    let chat_id = business_chat_id(command, command_id);
-    let title = business_chat_title(command);
-    let owner_user_id = business_chat_owner_user_id(command);
-    let task_id = queue_task
-        .map(|task| task.message_key.clone())
-        .unwrap_or_default();
-    let status = queue_task
-        .map(|task| normalize_queue_status(&task.route_status).to_string())
-        .unwrap_or_else(|| "accepted".to_string());
-    let user_message_id = first_string_field(&command.payload, &["message_id"])
-        .or_else(|| first_string_field(&command.client_context, &["message_id"]))
-        .unwrap_or_else(|| format!("chatmsg_{command_id}"));
-    let user_text = first_string_field(
-        &command.payload,
-        &["user_message", "instruction", "prompt", "message"],
-    )
-    .or_else(|| first_string_field(&command.client_context, &["user_message", "message"]))
-    .unwrap_or_else(|| {
-        queue_task
-            .map(|task| task.prompt.clone())
-            .unwrap_or_default()
-    });
-    let mut chat = conn
-        .query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_chats' AND record_id = ?1",
-            params![chat_id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "id": chat_id,
-                "title": title,
-                "open": true,
-                "minimized": false,
-                "owner_user_id": owner_user_id,
-                "lastTrackingId": task_id,
-                "messages": [],
-                "draft": "",
-                "createdAt": updated_at_ms,
-                "updated_at_ms": updated_at_ms
-            })
-        });
-    let obj = chat
-        .as_object_mut()
-        .context("pending business chat payload is not an object")?;
-    obj.insert("id".to_string(), Value::String(chat_id.clone()));
-    obj.entry("title".to_string())
-        .or_insert_with(|| Value::String(title));
-    obj.insert("open".to_string(), Value::Bool(true));
-    obj.entry("minimized".to_string())
-        .or_insert_with(|| Value::Bool(false));
-    obj.insert("owner_user_id".to_string(), Value::String(owner_user_id));
-    obj.insert(
-        "lastTrackingId".to_string(),
-        Value::String(if task_id.is_empty() {
-            command_id.to_string()
-        } else {
-            task_id.clone()
-        }),
-    );
-    obj.entry("draft".to_string())
-        .or_insert_with(|| Value::String(String::new()));
-    obj.entry("createdAt".to_string())
-        .or_insert_with(|| Value::from(updated_at_ms));
-    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-    if !obj.get("messages").is_some_and(Value::is_array) {
-        obj.insert("messages".to_string(), Value::Array(Vec::new()));
-    }
-    let messages = obj
-        .get_mut("messages")
-        .and_then(Value::as_array_mut)
-        .context("pending business chat messages is not an array")?;
-    if !user_text.trim().is_empty()
-        && !messages
-            .iter()
-            .any(|item| item.get("id").and_then(Value::as_str) == Some(user_message_id.as_str()))
-    {
-        messages.push(serde_json::json!({
-            "id": user_message_id,
-            "role": "user",
-            "text": user_text,
-            "createdAt": updated_at_ms.saturating_sub(1)
-        }));
-    }
-    let status_message_id = format!("status_{command_id}");
-    if let Some(existing) = messages
-        .iter_mut()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(status_message_id.as_str()))
-    {
-        existing["commandId"] = Value::String(command_id.to_string());
-        existing["taskId"] = Value::String(task_id.clone());
-        existing["status"] = Value::String(status.clone());
-    } else {
-        messages.push(serde_json::json!({
-            "id": status_message_id,
-            "role": "ctox",
-            "text": "Task angelegt und in der CTOX Queue. Antwort erscheint hier, sobald CTOX ihn verarbeitet.",
-            "commandId": command_id,
-            "taskId": task_id,
-            "status": status,
-            "createdAt": updated_at_ms
-        }));
-    }
-    if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
-    }
-    update_business_chat_tracking_fields(obj);
-    upsert_business_record(conn, "business_chats", &chat_id, updated_at_ms, chat)?;
-    Ok(chat_id)
-}
-
-fn materialize_control_business_chat_state(
-    root: &Path,
-    conn: &Connection,
-    command_id: &str,
-    command: &BusinessCommand,
-    status: &str,
-    result: &Value,
-    terminal: bool,
-    updated_at_ms: i64,
-) -> anyhow::Result<String> {
-    let chat_id =
-        materialize_pending_business_chat(conn, command_id, command, None, updated_at_ms)?;
-    let mut chat = conn
-        .query_row(
-            "SELECT payload_json FROM business_records
-             WHERE collection = 'business_chats' AND record_id = ?1",
-            params![chat_id.as_str()],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-        .context("native control chat was not materialized")?;
-    let obj = chat
-        .as_object_mut()
-        .context("native control chat payload is not an object")?;
-    obj.insert("open".to_string(), Value::Bool(true));
-    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-    obj.insert(
-        "lastTrackingId".to_string(),
-        Value::String(command_id.to_string()),
-    );
-    let messages = obj
-        .get_mut("messages")
-        .and_then(Value::as_array_mut)
-        .context("native control chat messages is not an array")?;
-    let message_id = format!("status_{command_id}");
-    let normalized_status = normalize_business_chat_tracking_status(status);
-    let text = first_string_field(result, &["summary", "message", "error"])
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| {
-            if terminal {
-                if normalized_status == "completed" {
-                    "Aufgabe abgeschlossen.".to_string()
-                } else {
-                    "Aufgabe konnte nicht abgeschlossen werden.".to_string()
-                }
-            } else if normalized_status == "running" {
-                "Aufgabe wird ausgeführt.".to_string()
-            } else {
-                "Aufgabe wurde angenommen.".to_string()
-            }
-        });
-    if let Some(message) = messages
-        .iter_mut()
-        .find(|item| item.get("id").and_then(Value::as_str) == Some(message_id.as_str()))
-    {
-        message["text"] = Value::String(text);
-        message["commandId"] = Value::String(command_id.to_string());
-        message["taskId"] = Value::String(String::new());
-        message["status"] = Value::String(normalized_status);
-        message["createdAt"] = Value::from(updated_at_ms);
-    } else {
-        messages.push(serde_json::json!({
-            "id": message_id,
-            "role": "ctox",
-            "text": text,
-            "commandId": command_id,
-            "taskId": "",
-            "status": normalized_status,
-            "createdAt": updated_at_ms
-        }));
-    }
-    if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
-    }
-    update_business_chat_tracking_fields(obj);
-    upsert_business_record(
-        conn,
-        "business_chats",
-        &chat_id,
-        updated_at_ms,
-        chat.clone(),
-    )?;
-    upsert_rxdb_collection_record(root, "business_chats", &chat_id, updated_at_ms, chat)?;
-    Ok(chat_id)
-}
-
-fn business_chat_payload(
-    conn: &Connection,
-    chat_id: &str,
-    title: &str,
-    owner_user_id: &str,
-    user_message_id: &str,
-    user_text: &str,
-    command_id: &str,
-    task_id: &str,
-    reply_text: &str,
-    updated_at_ms: i64,
-) -> anyhow::Result<Value> {
-    let mut chat = conn
-        .query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_chats' AND record_id = ?1",
-            params![chat_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-        .unwrap_or_else(|| {
-            serde_json::json!({
-                "id": chat_id,
-                "title": title,
-                "open": true,
-                "minimized": false,
-                "owner_user_id": owner_user_id,
-                "lastTrackingId": task_id,
-                "messages": [],
-                "draft": "",
-                "createdAt": updated_at_ms,
-                "updated_at_ms": updated_at_ms
-            })
-        });
-
-    let obj = chat
-        .as_object_mut()
-        .context("business chat payload is not an object")?;
-    obj.insert("id".to_string(), Value::String(chat_id.to_string()));
-    obj.entry("title".to_string())
-        .or_insert_with(|| Value::String(title.to_string()));
-    obj.insert("open".to_string(), Value::Bool(true));
-    obj.entry("minimized".to_string())
-        .or_insert_with(|| Value::Bool(false));
-    obj.insert(
-        "owner_user_id".to_string(),
-        Value::String(owner_user_id.to_string()),
-    );
-    obj.insert(
-        "lastTrackingId".to_string(),
-        Value::String(task_id.to_string()),
-    );
-    obj.entry("draft".to_string())
-        .or_insert_with(|| Value::String(String::new()));
-    obj.entry("createdAt".to_string())
-        .or_insert_with(|| Value::from(updated_at_ms));
-    obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-
-    if !obj.get("messages").is_some_and(Value::is_array) {
-        obj.insert("messages".to_string(), Value::Array(Vec::new()));
-    }
-    let messages = obj
-        .get_mut("messages")
-        .and_then(Value::as_array_mut)
-        .context("business chat messages is not an array")?;
-
-    if !user_text.trim().is_empty()
-        && !messages
-            .iter()
-            .any(|item| item.get("id").and_then(Value::as_str) == Some(user_message_id))
-    {
-        messages.push(serde_json::json!({
-            "id": user_message_id,
-            "role": "user",
-            "text": user_text,
-            "createdAt": updated_at_ms.saturating_sub(1)
-        }));
-    }
-
-    let reply_for = if task_id.is_empty() {
-        command_id
-    } else {
-        task_id
-    };
-    if !messages
-        .iter()
-        .any(|item| item.get("replyFor").and_then(Value::as_str) == Some(reply_for))
-    {
-        messages.push(serde_json::json!({
-            "id": format!("reply_{command_id}"),
-            "role": "ctox",
-            "text": reply_text,
-            "replyFor": reply_for,
-            "commandId": command_id,
-            "taskId": task_id,
-            "status": "completed",
-            "createdAt": updated_at_ms
-        }));
-    }
-
-    if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
-    }
-
-    update_business_chat_tracking_fields(obj);
-    Ok(chat)
-}
-
-fn update_business_chat_tracking_fields(obj: &mut serde_json::Map<String, Value>) {
-    let summary = business_chat_tracking_summary(
-        obj.get("messages")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]),
-    );
-    obj.insert("tracking_active".to_string(), Value::Bool(summary.active));
-    obj.insert("tracking_status".to_string(), Value::String(summary.status));
-    obj.insert(
-        "tracking_id".to_string(),
-        Value::String(summary.tracking_id),
-    );
-    obj.insert(
-        "tracking_command_id".to_string(),
-        Value::String(summary.command_id),
-    );
-    obj.insert(
-        "tracking_task_id".to_string(),
-        Value::String(summary.task_id),
-    );
-    obj.insert(
-        "tracking_message_id".to_string(),
-        Value::String(summary.message_id),
-    );
-}
-
-struct BusinessChatTrackingSummary {
-    active: bool,
-    status: String,
-    tracking_id: String,
-    command_id: String,
-    task_id: String,
-    message_id: String,
-}
-
-fn business_chat_tracking_summary(messages: &[Value]) -> BusinessChatTrackingSummary {
-    for message in messages.iter().rev() {
-        let Some(object) = message.as_object() else {
-            continue;
-        };
-        let trackable = object
-            .get("trackable")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let command_id = object
-            .get("commandId")
-            .or_else(|| object.get("command_id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string();
-        let task_id = object
-            .get("taskId")
-            .or_else(|| object.get("task_id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string();
-        if command_id.is_empty() && task_id.is_empty() {
-            continue;
-        }
-        let status = object
-            .get("status")
-            .and_then(Value::as_str)
-            .map(normalize_business_chat_tracking_status)
-            .unwrap_or_else(|| "queued".to_string());
-        let message_id = object
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or_default()
-            .to_string();
-        return BusinessChatTrackingSummary {
-            active: trackable && business_chat_tracking_status_is_active(&status),
-            status,
-            tracking_id: if task_id.is_empty() {
-                command_id.clone()
-            } else {
-                task_id.clone()
-            },
-            command_id,
-            task_id,
-            message_id,
-        };
-    }
-    BusinessChatTrackingSummary {
-        active: false,
-        status: String::new(),
-        tracking_id: String::new(),
-        command_id: String::new(),
-        task_id: String::new(),
-        message_id: String::new(),
-    }
-}
-
-fn normalize_business_chat_tracking_status(status: &str) -> String {
-    match status.trim().to_lowercase().as_str() {
-        "accepted" | "pending" | "pending_sync" | "waiting" => "queued".to_string(),
-        "processing" | "executing" | "active" | "working" | "leased" => "running".to_string(),
-        "success" | "done" | "erledigt" => "completed".to_string(),
-        "error" => "failed".to_string(),
-        value if value.is_empty() => "queued".to_string(),
-        value => value.to_string(),
-    }
-}
-
-fn business_chat_tracking_status_is_active(status: &str) -> bool {
-    matches!(status, "queued" | "running")
-}
-
 fn maybe_writeback_documents_chat_markdown_edit(
     root: &Path,
     conn: &Connection,
@@ -37254,7 +36367,7 @@ pub(super) fn hex_sha256(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn clip_text(value: &str, max_chars: usize) -> String {
+pub(super) fn clip_text(value: &str, max_chars: usize) -> String {
     let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max_chars {
         return collapsed;
@@ -37267,83 +36380,7 @@ fn clip_text(value: &str, max_chars: usize) -> String {
     clipped
 }
 
-fn refresh_queue_task_projection(
-    root: &Path,
-    conn: &Connection,
-    rxdb_writers: Option<&mut RxdbProjectionWriterCache>,
-    command_id: &str,
-    command: &BusinessCommand,
-    original_task: Option<&channels::QueueTaskView>,
-    updated_at_ms: i64,
-) -> anyhow::Result<()> {
-    let Some(task_id) = original_task
-        .map(|task| task.message_key.clone())
-        .or_else(|| find_queue_task_for_command(root, command_id))
-    else {
-        return Ok(());
-    };
-    let Some(task) = channels::load_queue_task(root, &task_id)? else {
-        return Ok(());
-    };
-    let inbound_channel = command_inbound_channel(command);
-    let payload = business_command_queue_task_payload(
-        command_id,
-        command,
-        &task,
-        &inbound_channel,
-        updated_at_ms,
-    );
-    upsert_business_record(
-        conn,
-        "ctox_queue_tasks",
-        &task.message_key,
-        updated_at_ms,
-        payload.clone(),
-    )?;
-    upsert_rxdb_collection_record_cached(
-        root,
-        rxdb_writers,
-        "ctox_queue_tasks",
-        &task.message_key,
-        updated_at_ms,
-        payload,
-    )
-}
-
-fn business_command_queue_task_payload(
-    command_id: &str,
-    command: &BusinessCommand,
-    task: &channels::QueueTaskView,
-    inbound_channel: &str,
-    updated_at_ms: i64,
-) -> Value {
-    let route_status = effective_queue_projection_route_status(task);
-    let mut payload = serde_json::json!({
-        "id": task.message_key,
-        "command_id": command_id,
-        "title": task.title,
-        "status": normalize_queue_status(&route_status),
-        "route_status": route_status,
-        "module": "ctox",
-        "source_module": command.module.clone(),
-        "inbound_channel": inbound_channel,
-        "command_type": command.command_type.clone(),
-        "priority": task.priority,
-        "thread_key": task.thread_key,
-        "prompt": task.prompt,
-        "workspace_root": task.workspace_root,
-        "updated_at_ms": updated_at_ms
-    });
-    enrich_queue_projection_payload(&mut payload, task, &route_status);
-    if let Some(artifact) = browser_context_artifact_for_command(command) {
-        if let Some(object) = payload.as_object_mut() {
-            object.insert("browser_context_artifact".to_string(), artifact);
-        }
-    }
-    payload
-}
-
-fn browser_context_artifact_for_command(command: &BusinessCommand) -> Option<Value> {
+pub(super) fn browser_context_artifact_for_command(command: &BusinessCommand) -> Option<Value> {
     if command.command_type != "ctox.browser_context.capture" {
         return None;
     }
@@ -37391,172 +36428,7 @@ fn browser_context_artifact_for_command(command: &BusinessCommand) -> Option<Val
     }))
 }
 
-fn write_queue_task_projection(
-    conn: &Connection,
-    command_id: Option<&str>,
-    task: &channels::QueueTaskView,
-    updated_at_ms: i64,
-) -> anyhow::Result<()> {
-    upsert_business_record(
-        conn,
-        "ctox_queue_tasks",
-        &task.message_key,
-        updated_at_ms,
-        queue_task_payload(command_id, task, updated_at_ms),
-    )
-}
-
-fn queue_task_payload(
-    command_id: Option<&str>,
-    task: &channels::QueueTaskView,
-    updated_at_ms: i64,
-) -> Value {
-    let route_status = effective_queue_projection_route_status(task);
-    let mut payload = serde_json::json!({
-        "id": task.message_key,
-        "command_id": command_id.unwrap_or_default(),
-        "title": task.title,
-        "status": normalize_queue_status(&route_status),
-        "route_status": route_status,
-        "module": "ctox",
-        "source_module": "ctox",
-        "inbound_channel": "business_os.llm.chat",
-        "command_type": "business_os.chat.task",
-        "priority": task.priority,
-        "thread_key": task.thread_key,
-        "prompt": task.prompt,
-        "workspace_root": task.workspace_root,
-        "updated_at_ms": updated_at_ms
-    });
-    enrich_queue_projection_payload(&mut payload, task, &route_status);
-    payload
-}
-
-fn effective_queue_projection_route_status(task: &channels::QueueTaskView) -> String {
-    if task.route_status == "leased"
-        && queue_status_note_is_terminal_success(task.status_note.as_deref())
-    {
-        return "handled".to_string();
-    }
-    if task.route_status == "leased"
-        && queue_status_note_is_terminal_failure(task.status_note.as_deref())
-    {
-        return "failed".to_string();
-    }
-    // F-002 status coherence: a `leased` route without a durable owner or
-    // lease timestamp is an orphaned/incomplete lease — no live worker can
-    // own it. Surface it as failed/stalled, never as healthy progress.
-    if task.route_status == "leased"
-        && (task
-            .lease_owner
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .is_none()
-            || task
-                .leased_at
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .is_none())
-    {
-        return "failed".to_string();
-    }
-    task.route_status.clone()
-}
-
-fn enrich_queue_projection_payload(
-    payload: &mut Value,
-    task: &channels::QueueTaskView,
-    route_status: &str,
-) {
-    let Some(object) = payload.as_object_mut() else {
-        return;
-    };
-    object.insert(
-        "status".to_string(),
-        Value::String(normalize_queue_status(route_status).to_string()),
-    );
-    object.insert(
-        "route_status".to_string(),
-        Value::String(route_status.to_string()),
-    );
-    object.insert(
-        "task_status".to_string(),
-        Value::String(normalize_queue_status(route_status).to_string()),
-    );
-    if let Some(note) = task
-        .status_note
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        object.insert("status_note".to_string(), Value::String(note.to_string()));
-        if route_status == "failed" {
-            object.insert("error".to_string(), Value::String(note.to_string()));
-        }
-    } else {
-        object.remove("status_note");
-        if route_status != "failed" {
-            object.remove("error");
-        }
-    }
-    if let Some(owner) = task
-        .lease_owner
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        object.insert("lease_owner".to_string(), Value::String(owner.to_string()));
-    } else {
-        object.remove("lease_owner");
-    }
-    if let Some(leased_at) = task
-        .leased_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        object.insert(
-            "leased_at".to_string(),
-            Value::String(leased_at.to_string()),
-        );
-    } else {
-        object.remove("leased_at");
-    }
-    if let Some(acked_at) = task
-        .acked_at
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        object.insert("acked_at".to_string(), Value::String(acked_at.to_string()));
-    } else {
-        object.remove("acked_at");
-    }
-}
-
-fn queue_projection_command_id(conn: &Connection, task_id: &str) -> anyhow::Result<Option<String>> {
-    let value = conn
-        .query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
-            params![task_id],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    Ok(value
-        .and_then(|payload| serde_json::from_str::<Value>(&payload).ok())
-        .and_then(|payload| {
-            payload
-                .get("command_id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        }))
-}
-
-fn command_status_for_queue_route_status(route_status: &str) -> Option<&'static str> {
+pub(super) fn command_status_for_queue_route_status(route_status: &str) -> Option<&'static str> {
     match route_status {
         "handled" => Some("completed"),
         "failed" => Some("failed"),
@@ -37566,7 +36438,7 @@ fn command_status_for_queue_route_status(route_status: &str) -> Option<&'static 
     }
 }
 
-fn projection_route_status_for_command_status(status: &str) -> Option<&'static str> {
+pub(super) fn projection_route_status_for_command_status(status: &str) -> Option<&'static str> {
     match status {
         "completed" | "handled" | "done" => Some("handled"),
         "failed" | "error" => Some("failed"),
@@ -37576,14 +36448,14 @@ fn projection_route_status_for_command_status(status: &str) -> Option<&'static s
     }
 }
 
-fn projection_status_is_active(status: &str) -> bool {
+pub(super) fn projection_status_is_active(status: &str) -> bool {
     matches!(
         status,
         "queued" | "running" | "accepted" | "pending" | "pending_sync" | "leased"
     )
 }
 
-fn queue_status_note_is_terminal_success(note: Option<&str>) -> bool {
+pub(super) fn queue_status_note_is_terminal_success(note: Option<&str>) -> bool {
     let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };
@@ -37594,7 +36466,7 @@ fn queue_status_note_is_terminal_success(note: Option<&str>) -> bool {
         || (lower.contains("completed.") && lower.contains("verified "))
 }
 
-fn queue_status_note_is_terminal_failure(note: Option<&str>) -> bool {
+pub(super) fn queue_status_note_is_terminal_failure(note: Option<&str>) -> bool {
     let Some(note) = note.map(str::trim).filter(|value| !value.is_empty()) else {
         return false;
     };
@@ -37604,7 +36476,7 @@ fn queue_status_note_is_terminal_failure(note: Option<&str>) -> bool {
         || lower.contains("turn/start failed")
 }
 
-fn apply_queue_projection_status_fields(
+pub(super) fn apply_queue_projection_status_fields(
     mut payload: Value,
     task: &channels::QueueTaskView,
     route_status: &str,
@@ -37634,7 +36506,7 @@ fn apply_queue_projection_status_fields(
     payload
 }
 
-fn upsert_command_projection_from_queue_status(
+pub(super) fn upsert_command_projection_from_queue_status(
     root: &Path,
     conn: &Connection,
     mut rxdb_writers: Option<&mut RxdbProjectionWriterCache>,
@@ -37734,7 +36606,7 @@ fn upsert_command_projection_from_queue_status(
     Ok(())
 }
 
-fn push_repair_action(
+pub(super) fn push_repair_action(
     actions: &mut Vec<Value>,
     class: &str,
     task_id: &str,
@@ -37756,7 +36628,7 @@ fn push_repair_action(
     }));
 }
 
-fn repair_inline_payload_artifacts(
+pub(super) fn repair_inline_payload_artifacts(
     root: &Path,
     conn: &Connection,
     apply: bool,
@@ -37894,7 +36766,7 @@ fn redact_inline_report_artifacts(value: &mut Value) -> bool {
     }
 }
 
-fn count_legacy_http_fallback_records(conn: &Connection) -> anyhow::Result<usize> {
+pub(super) fn count_legacy_http_fallback_records(conn: &Connection) -> anyhow::Result<usize> {
     let count: i64 = conn.query_row(
         "SELECT COUNT(*)
          FROM business_records
@@ -38803,7 +37675,7 @@ fn command_queue_thread_key(command_id: &str, command: &BusinessCommand) -> Stri
         .unwrap_or_else(|| format!("business-os/{}", command.module))
 }
 
-fn command_inbound_channel(command: &BusinessCommand) -> String {
+pub(super) fn command_inbound_channel(command: &BusinessCommand) -> String {
     const CHANNEL_KEYS: &[&str] = &[
         "inbound_channel",
         "channel",
@@ -38820,7 +37692,7 @@ fn command_inbound_channel(command: &BusinessCommand) -> String {
         .unwrap_or_else(|| command.module.clone())
 }
 
-fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
+pub(super) fn first_string_field(value: &Value, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| {
         value
             .get(*key)
@@ -39009,7 +37881,7 @@ fn redact_client_context_secrets(client_context: &Value) -> Value {
 /// FINAL payload after any merge with the existing record, so a token that
 /// survived a deep-merge from an earlier (browser-authored) document is also
 /// stripped.
-fn redact_document_client_context_secrets(payload: &mut Value) {
+pub(super) fn redact_document_client_context_secrets(payload: &mut Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
     };
@@ -39408,81 +38280,6 @@ fn display_command_type(value: &str) -> String {
         .replace("business_os.", "")
         .replace("ctox.", "")
         .replace(['_', '.', '-'], " ")
-}
-
-fn normalize_queue_status(route_status: &str) -> &str {
-    match route_status {
-        "pending" => "queued",
-        "leased" => "running",
-        "handled" => "completed",
-        "cancelled" => "cancelled",
-        "blocked" => "blocked",
-        "failed" => "failed",
-        other => other,
-    }
-}
-
-fn queue_projection_execution_phase(route_status: &str, canonical_phase: Option<String>) -> String {
-    match route_status {
-        "handled" | "failed" | "cancelled" => "terminal".to_string(),
-        "leased" => "leased".to_string(),
-        "running" => "running".to_string(),
-        "blocked" => "blocked".to_string(),
-        "pending" => match canonical_phase.as_deref() {
-            Some("accepted" | "queued" | "retry_wait" | "waiting_dependencies") => {
-                canonical_phase.unwrap_or_else(|| "queued".to_string())
-            }
-            _ => "queued".to_string(),
-        },
-        _ => canonical_phase.unwrap_or_else(|| "queued".to_string()),
-    }
-}
-
-fn queue_projection_terminal_status(route_status: &str) -> &str {
-    match route_status {
-        "handled" => "completed",
-        "failed" => "failed",
-        "cancelled" => "cancelled",
-        _ => "none",
-    }
-}
-
-pub(super) fn upsert_business_record(
-    conn: &Connection,
-    collection: &str,
-    record_id: &str,
-    updated_at_ms: i64,
-    mut payload: Value,
-) -> anyhow::Result<()> {
-    let rev = format!("rev_{}", Uuid::new_v4());
-    if let Some(obj) = payload.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(record_id.to_string()));
-        obj.insert("_rev".to_string(), Value::String(rev.clone()));
-        obj.insert("_deleted".to_string(), Value::Bool(false));
-        obj.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
-    }
-    // SECURITY: strip bearer credentials (capability_token, …) from client_context
-    // before this record replicates to peers. The verified token is retained only
-    // in the native business_commands.client_context_json column, never here.
-    redact_document_client_context_secrets(&mut payload);
-    conn.execute(
-        "INSERT INTO business_records
-            (collection, record_id, rev, deleted, updated_at_ms, payload_json)
-         VALUES (?1, ?2, ?3, 0, ?4, ?5)
-         ON CONFLICT(collection, record_id) DO UPDATE SET
-            rev = excluded.rev,
-            deleted = excluded.deleted,
-            updated_at_ms = excluded.updated_at_ms,
-            payload_json = excluded.payload_json",
-        params![
-            collection,
-            record_id,
-            rev,
-            updated_at_ms,
-            serde_json::to_string(&payload)?
-        ],
-    )?;
-    Ok(())
 }
 
 fn upsert_business_record_tombstone(
@@ -41818,7 +40615,7 @@ fn read_core_db_business_record(
     }
 }
 
-fn find_queue_task_for_command(root: &Path, command_id: &str) -> Option<String> {
+pub(super) fn find_queue_task_for_command(root: &Path, command_id: &str) -> Option<String> {
     let command_id = command_id.trim();
     if command_id.is_empty() {
         return None;
@@ -56560,618 +55357,6 @@ mod tests {
             task.pointer("/payload/last_error/command_id")
                 .and_then(Value::as_str),
             Some("cmd_research_failed")
-        );
-        Ok(())
-    }
-
-    fn create_repair_rxdb_tables(root: &Path) -> anyhow::Result<Connection> {
-        fs::create_dir_all(root.join("runtime"))?;
-        let conn = Connection::open(rxdb_store_path(root))?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__ctox_queue_tasks__v0 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL DEFAULT 0,
-                lastWriteTime REAL NOT NULL DEFAULT 0,
-                data TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__business_commands__v1 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL DEFAULT 0,
-                lastWriteTime REAL NOT NULL DEFAULT 0,
-                data TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__research_tasks__v0 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL DEFAULT 0,
-                lastWriteTime REAL NOT NULL DEFAULT 0,
-                data TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__research_runs__v0 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL DEFAULT 0,
-                lastWriteTime REAL NOT NULL DEFAULT 0,
-                data TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE ctox_business_os__knowledge_tables__v0 (
-                id TEXT PRIMARY KEY NOT NULL,
-                revision TEXT,
-                deleted INTEGER NOT NULL DEFAULT 0,
-                lastWriteTime REAL NOT NULL DEFAULT 0,
-                data TEXT NOT NULL
-            )",
-            [],
-        )?;
-        Ok(conn)
-    }
-
-    fn insert_rxdb_test_record(
-        conn: &Connection,
-        table: &str,
-        id: &str,
-        payload: Value,
-    ) -> anyhow::Result<()> {
-        conn.execute(
-            &format!(
-                "INSERT INTO {table} (id, revision, deleted, lastWriteTime, data)
-                 VALUES (?1, 'rev_stale', 0, 1.0, ?2)"
-            ),
-            params![id, serde_json::to_string(&payload)?],
-        )?;
-        Ok(())
-    }
-
-    #[test]
-    fn repair_queue_projections_updates_failed_canonical_queue_and_command() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let accepted = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_repair_failed_queue",
-                "command_id": "cmd_repair_failed_queue",
-                "module": "research",
-                "command_type": "business_os.chat.task",
-                "record_id": "research",
-                "status": "pending_sync",
-                "payload": {
-                    "title": "Kontext-Aufgabe · Web Research",
-                    "instruction": "teste repair failure",
-                    "prompt": "teste repair failure"
-                },
-                "client_context": {
-                    "source": "business-os-chat",
-                    "module": "research"
-                }
-            }),
-        )?;
-        let task_id = accepted
-            .get("task_id")
-            .and_then(Value::as_str)
-            .context("expected queue task id")?
-            .to_string();
-        channels::lease_queue_task(root, &task_id, "ctox-service")?;
-        channels::ack_leased_messages_with_failure_reason(
-            root,
-            std::slice::from_ref(&task_id),
-            "failed",
-            "Input exceeds the maximum length of 1048576 characters.",
-        )?;
-        let rxdb_conn = create_repair_rxdb_tables(root)?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__ctox_queue_tasks__v0",
-            &task_id,
-            serde_json::json!({
-                "id": task_id,
-                "command_id": "cmd_repair_failed_queue",
-                "status": "queued",
-                "route_status": "pending",
-                "task_status": "queued",
-                "updated_at_ms": 1
-            }),
-        )?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__business_commands__v1",
-            "cmd_repair_failed_queue",
-            serde_json::json!({
-                "id": "cmd_repair_failed_queue",
-                "command_id": "cmd_repair_failed_queue",
-                "status": "accepted",
-                "route_status": "pending",
-                "task_status": "queued",
-                "updated_at_ms": 1
-            }),
-        )?;
-        drop(rxdb_conn);
-
-        let dry_run =
-            repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/failed_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            dry_run
-                .pointer("/counts/commands_updated_from_queue")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-
-        let conn = open_store(root)?;
-        let stale_queue_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
-            params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let stale_queue: Value = serde_json::from_str(&stale_queue_payload)?;
-        assert_eq!(
-            stale_queue.get("status").and_then(Value::as_str),
-            Some("queued"),
-            "dry-run must not mutate stale queue projection"
-        );
-        drop(conn);
-        let stale_rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected stale rxdb queue row after dry-run")?;
-        assert_eq!(
-            stale_rxdb_queue.get("status").and_then(Value::as_str),
-            Some("queued"),
-            "dry-run must not mutate active RxDB projection"
-        );
-
-        reset_rxdb_table_column_load_count(root, "ctox_business_os__ctox_queue_tasks__v0");
-        reset_rxdb_table_column_load_count(root, "ctox_business_os__business_commands__v1");
-        reset_rxdb_collection_writer_open_count(root, "ctox_queue_tasks");
-        reset_rxdb_collection_writer_open_count(root, "business_commands");
-        let applied = repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        assert_eq!(
-            applied
-                .pointer("/counts/failed_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-
-        let conn = open_store(root)?;
-        let queue_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
-            params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let queue_projection: Value = serde_json::from_str(&queue_payload)?;
-        assert_eq!(
-            queue_projection.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            queue_projection.get("route_status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            queue_projection.get("error").and_then(Value::as_str),
-            Some("Input exceeds the maximum length of 1048576 characters.")
-        );
-
-        let command_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_repair_failed_queue'",
-            [],
-            |row| row.get(0),
-        )?;
-        let command_projection: Value = serde_json::from_str(&command_payload)?;
-        assert_eq!(
-            command_projection.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            command_projection
-                .get("task_status")
-                .and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            command_projection.get("error").and_then(Value::as_str),
-            Some("Input exceeds the maximum length of 1048576 characters.")
-        );
-        let rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected repaired rxdb queue row")?;
-        assert_eq!(
-            rxdb_queue.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            rxdb_queue.get("route_status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            rxdb_queue.get("error").and_then(Value::as_str),
-            Some("Input exceeds the maximum length of 1048576 characters.")
-        );
-        let rxdb_command =
-            load_rxdb_collection_record(root, "business_commands", "cmd_repair_failed_queue")?
-                .context("expected repaired rxdb command row")?;
-        assert_eq!(
-            rxdb_command.get("status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            rxdb_command.get("task_status").and_then(Value::as_str),
-            Some("failed")
-        );
-        assert_eq!(
-            rxdb_table_column_load_count(root, "ctox_business_os__ctox_queue_tasks__v0"),
-            1,
-            "queue repair must cache ctox_queue_tasks table metadata"
-        );
-        assert_eq!(
-            rxdb_table_column_load_count(root, "ctox_business_os__business_commands__v1"),
-            1,
-            "queue repair must cache business_commands table metadata"
-        );
-        assert_eq!(
-            rxdb_collection_writer_open_count(root, "ctox_queue_tasks"),
-            1,
-            "queue repair must reuse one ctox_queue_tasks writer"
-        );
-        assert_eq!(
-            rxdb_collection_writer_open_count(root, "business_commands"),
-            1,
-            "queue repair must reuse one business_commands writer"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn repair_queue_projections_acks_leased_terminal_success_note() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let accepted = accept_rxdb_business_command(
-            root,
-            serde_json::json!({
-                "id": "cmd_repair_leased_success",
-                "command_id": "cmd_repair_leased_success",
-                "module": "research",
-                "command_type": "business_os.chat.task",
-                "record_id": "research",
-                "status": "pending_sync",
-                "payload": {
-                    "title": "Kontext-Aufgabe · Web Research",
-                    "instruction": "teste terminal success repair",
-                    "prompt": "teste terminal success repair"
-                },
-                "client_context": {
-                    "source": "business-os-chat",
-                    "module": "research"
-                }
-            }),
-        )?;
-        let task_id = accepted
-            .get("task_id")
-            .and_then(Value::as_str)
-            .context("expected queue task id")?
-            .to_string();
-        channels::lease_queue_task(root, &task_id, "ctox-service")?;
-        channels::update_queue_task(
-            root,
-            channels::QueueTaskUpdateRequest {
-                message_key: task_id.clone(),
-                status_note: Some(
-                    "Business-OS documents bug report completed. Changed editor rendering. Verified in browser."
-                        .to_string(),
-                ),
-                ..Default::default()
-            },
-        )?;
-        let conn = open_store(root)?;
-        upsert_business_record(
-            &conn,
-            "ctox_queue_tasks",
-            &task_id,
-            now_ms() as i64,
-            serde_json::json!({
-                "id": task_id,
-                "command_id": "cmd_repair_leased_success",
-                "status": "completed",
-                "route_status": "handled",
-                "task_status": "running"
-            }),
-        )?;
-        drop(conn);
-        let rxdb_conn = create_repair_rxdb_tables(root)?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__ctox_queue_tasks__v0",
-            &task_id,
-            serde_json::json!({
-                "id": task_id,
-                "command_id": "cmd_repair_leased_success",
-                "status": "completed",
-                "route_status": "handled",
-                "task_status": "running",
-                "updated_at_ms": 1
-            }),
-        )?;
-        drop(rxdb_conn);
-
-        let dry_run =
-            repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/completed_from_canonical")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            channels::load_queue_task(root, &task_id)?
-                .context("queue task after dry-run")?
-                .route_status,
-            "leased",
-            "dry-run must not ack leased tasks"
-        );
-
-        repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        let canonical =
-            channels::load_queue_task(root, &task_id)?.context("queue task after apply")?;
-        assert_eq!(canonical.route_status, "handled");
-
-        let conn = open_store(root)?;
-        let queue_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'ctox_queue_tasks' AND record_id = ?1",
-            params![task_id.as_str()],
-            |row| row.get(0),
-        )?;
-        let queue_projection: Value = serde_json::from_str(&queue_payload)?;
-        assert_eq!(
-            queue_projection.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            queue_projection.get("route_status").and_then(Value::as_str),
-            Some("handled")
-        );
-        assert_eq!(
-            queue_projection.get("task_status").and_then(Value::as_str),
-            Some("completed")
-        );
-
-        let command_payload: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_repair_leased_success'",
-            [],
-            |row| row.get(0),
-        )?;
-        let command_projection: Value = serde_json::from_str(&command_payload)?;
-        assert_eq!(
-            command_projection.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            command_projection
-                .get("task_status")
-                .and_then(Value::as_str),
-            Some("completed")
-        );
-        let rxdb_queue = load_rxdb_collection_record(root, "ctox_queue_tasks", &task_id)?
-            .context("expected repaired rxdb queue row")?;
-        assert_eq!(
-            rxdb_queue.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            rxdb_queue.get("route_status").and_then(Value::as_str),
-            Some("handled")
-        );
-        assert_eq!(
-            rxdb_queue.get("task_status").and_then(Value::as_str),
-            Some("completed")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn repair_queue_projections_updates_task_status_from_terminal_command() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let now = now_ms() as i64;
-        let conn = open_store(root)?;
-        conn.execute(
-            "INSERT INTO business_commands
-                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
-             VALUES (?1, 'documents', 'business_os.chat.task', 'documents', 'completed', ?2, ?3, ?4)",
-            params![
-                "cmd_repair_from_terminal_command",
-                serde_json::to_string(&serde_json::json!({"prompt": "done"}))?,
-                serde_json::to_string(&serde_json::json!({"source": "test"}))?,
-                now,
-            ],
-        )?;
-        upsert_business_record(
-            &conn,
-            "ctox_queue_tasks",
-            "queue:system::repair_from_terminal_command",
-            now,
-            serde_json::json!({
-                "id": "queue:system::repair_from_terminal_command",
-                "command_id": "cmd_repair_from_terminal_command",
-                "status": "completed",
-                "route_status": "handled",
-                "task_status": "handled",
-                "updated_at_ms": now
-            }),
-        )?;
-        drop(conn);
-        let rxdb_conn = create_repair_rxdb_tables(root)?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__ctox_queue_tasks__v0",
-            "queue:system::repair_from_terminal_command",
-            serde_json::json!({
-                "id": "queue:system::repair_from_terminal_command",
-                "command_id": "cmd_repair_from_terminal_command",
-                "status": "completed",
-                "route_status": "handled",
-                "task_status": "handled",
-                "updated_at_ms": now
-            }),
-        )?;
-        drop(rxdb_conn);
-
-        let dry_run =
-            repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/projection_repaired_from_command")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-
-        repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        let rxdb_queue = load_rxdb_collection_record(
-            root,
-            "ctox_queue_tasks",
-            "queue:system::repair_from_terminal_command",
-        )?
-        .context("expected repaired rxdb queue row")?;
-        assert_eq!(
-            rxdb_queue.get("status").and_then(Value::as_str),
-            Some("completed")
-        );
-        assert_eq!(
-            rxdb_queue.get("route_status").and_then(Value::as_str),
-            Some("handled")
-        );
-        assert_eq!(
-            rxdb_queue.get("task_status").and_then(Value::as_str),
-            Some("completed")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn repair_queue_projections_redacts_inline_report_artifacts_and_counts_legacy_records(
-    ) -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let root = temp.path();
-        let conn = open_store(root)?;
-        let inline_image = format!("data:image/png;base64,{}", "A".repeat(12_000));
-        let inline_payload = serde_json::json!({
-            "id": "cmd_inline_report_payload",
-            "command_id": "cmd_inline_report_payload",
-            "module": "documents",
-            "command_type": "business_os.bug_report",
-            "status": "accepted",
-            "payload": {
-                "title": "Gleichungen in word editor",
-                "attachment": {
-                    "data_url": inline_image
-                },
-                "strokes": [
-                    [{"x": 1, "y": 2}],
-                    [{"x": 3, "y": 4}]
-                ]
-            },
-            "client_context": {
-                "transport": "business-os-http-command-fallback"
-            }
-        });
-        upsert_business_record(
-            &conn,
-            "business_commands",
-            "cmd_inline_report_payload",
-            now_ms() as i64,
-            inline_payload.clone(),
-        )?;
-        drop(conn);
-        let rxdb_conn = create_repair_rxdb_tables(root)?;
-        insert_rxdb_test_record(
-            &rxdb_conn,
-            "ctox_business_os__business_commands__v1",
-            "cmd_inline_report_payload",
-            inline_payload,
-        )?;
-        drop(rxdb_conn);
-
-        let dry_run =
-            repair_queue_projections(root, QueueProjectionRepairOptions { apply: false })?;
-        assert_eq!(
-            dry_run
-                .pointer("/counts/oversized_inline_artifacts_redacted")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-        assert_eq!(
-            dry_run
-                .pointer("/counts/legacy_http_fallback_records")
-                .and_then(Value::as_u64),
-            Some(1)
-        );
-
-        repair_queue_projections(root, QueueProjectionRepairOptions { apply: true })?;
-        let conn = open_store(root)?;
-        let payload_json: String = conn.query_row(
-            "SELECT payload_json FROM business_records WHERE collection = 'business_commands' AND record_id = 'cmd_inline_report_payload'",
-            [],
-            |row| row.get(0),
-        )?;
-        assert!(
-            !payload_json.contains("data:image/png;base64"),
-            "inline image payload must be redacted"
-        );
-        let payload: Value = serde_json::from_str(&payload_json)?;
-        assert_eq!(
-            payload
-                .pointer("/payload/attachment/data_url/redacted")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            payload
-                .pointer("/payload/strokes/redacted")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            payload
-                .pointer("/payload/strokes/stroke_count")
-                .and_then(Value::as_u64),
-            Some(2)
-        );
-        assert_eq!(
-            payload
-                .pointer("/client_context/transport")
-                .and_then(Value::as_str),
-            Some("business-os-http-command-fallback"),
-            "legacy transport context is counted and quarantined, not rewritten or replayed"
-        );
-        let rxdb_payload =
-            load_rxdb_collection_record(root, "business_commands", "cmd_inline_report_payload")?
-                .context("expected redacted rxdb reporter command row")?;
-        assert_eq!(
-            rxdb_payload
-                .pointer("/payload/attachment/data_url/redacted")
-                .and_then(Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(
-            rxdb_payload
-                .pointer("/payload/strokes/redacted")
-                .and_then(Value::as_bool),
-            Some(true)
         );
         Ok(())
     }
