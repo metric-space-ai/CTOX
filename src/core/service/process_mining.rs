@@ -1,8 +1,8 @@
 // Origin: CTOX
 // License: AGPL-3.0-only
 
-use crate::service::core_state_machine as csm;
-use crate::service::core_transition_guard;
+use crate::core_state as csm;
+use crate::core_state::guard as core_transition_guard;
 use anyhow::Context;
 use anyhow::Result;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};

@@ -26,10 +26,9 @@ context -> service = 0
 mission -> capabilities = 0
 
 # --- Ratchets: existing edges, allowed to shrink only -------------------
-# mission reaches into service for the core state machine, the transition
-# guard and harness flow. Those types arguably belong below both; until they
-# move, this is the honest count.
-mission -> service = 12
+# Mission still reaches into service for harness flow/mining and governance;
+# the core state machine and transition guard now live below both modules.
+mission -> service = 6
 # mission projects channel state into Business OS shapes
 # (channels/business_os_projection.rs). A projection is a legitimate seam,
 # but it points the wrong way and should become a Business OS-side pull.
@@ -46,7 +45,7 @@ mission -> business_os = 7
 communication -> mission = 18
 # mission drives communication adapters directly.
 mission -> communication = 10
-# Business OS uses the service-side core state machine and governance.
+# Business OS still uses service-side harness flow and Business OS bridges.
 business_os -> service = 12
 # One capability reaches the service layer.
 capabilities -> service = 1

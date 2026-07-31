@@ -135,7 +135,15 @@ fn write_state(conn: &Connection, work_id: &str, state: &str) -> rusqlite::Resul
         let mut paths = String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| line.starts_with("src/"))
-            .map(PathBuf::from)
+            .map(|line| match line {
+                "src/core/service/core_state_machine.rs" => {
+                    PathBuf::from("src/core/core_state/mod.rs")
+                }
+                "src/core/service/core_transition_guard.rs" => {
+                    PathBuf::from("src/core/core_state/guard.rs")
+                }
+                _ => PathBuf::from(line),
+            })
             .collect::<Vec<_>>();
         paths.sort();
         Ok(paths)

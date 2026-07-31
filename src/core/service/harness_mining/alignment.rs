@@ -17,7 +17,7 @@
 // We bound the search by max_states_explored so a pathological trace
 // cannot wedge the analysis.
 
-use crate::service::core_state_machine as csm;
+use crate::core_state as csm;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};

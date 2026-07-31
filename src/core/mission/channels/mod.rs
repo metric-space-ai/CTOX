@@ -119,15 +119,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::communication::adapters as communication_adapters;
 use crate::communication::adapters::CommunicationTransportAdapter;
 use crate::communication::gateway as communication_gateway;
-use crate::mission::review::HoldReason;
-use crate::secrets;
-use crate::service::core_state_machine::{
-    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
-};
-use crate::service::core_transition_guard::{
+use crate::core_state::guard::{
     enforce_core_spawn, enforce_core_spawn_in_transaction, enforce_core_transition,
     ensure_core_transition_guard_schema, evaluate_core_spawn, CoreSpawnProof, CoreSpawnRequest,
 };
+use crate::core_state::{
+    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
+};
+use crate::mission::review::HoldReason;
+use crate::secrets;
 use crate::service::harness_flow::{
     record_harness_flow_event_lossy, RecordHarnessFlowEventRequest,
 };

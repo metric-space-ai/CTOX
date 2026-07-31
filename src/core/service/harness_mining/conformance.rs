@@ -16,7 +16,7 @@
 // what the preventive layer accepted AND by what the unbypassable trigger
 // ledger actually recorded?"
 
-use crate::service::core_state_machine as csm;
+use crate::core_state as csm;
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};

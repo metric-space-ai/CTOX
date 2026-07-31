@@ -1101,6 +1101,32 @@ pub fn tool_descriptors() -> Vec<BusinessOsMcpToolDescriptor> {
             object_schema(vec![]),
         ),
         read_tool(
+            "business_os.list_design_templates",
+            "Use this when you need the locally installed Business OS desktop design templates and their editable CSS.",
+            object_schema(vec![]),
+        ),
+        read_tool(
+            "business_os.get_design_template",
+            "Use this when you need one locally installed Business OS desktop design template and its editable CSS.",
+            object_schema(vec![required_string("id")]),
+        ),
+        write_tool(
+            "business_os.save_design_template",
+            "Use this when an authorized workspace administrator needs to create or update a local Business OS desktop design template.",
+            object_schema(vec![
+                required_string("id"),
+                required_string("title"),
+                optional_string("description"),
+                optional_string("base_style"),
+                required_string("css"),
+            ]),
+        ),
+        destructive_tool(
+            "business_os.delete_design_template",
+            "Use this when an authorized workspace administrator explicitly asks to remove a local Business OS desktop design template. The template is moved to a recoverable local archive.",
+            object_schema(vec![required_string("id")]),
+        ),
+        read_tool(
             "business_os.get_module",
             "Use this when you need metadata for one Business OS module.",
             object_schema(vec![required_string("module_id")]),
@@ -2558,6 +2584,45 @@ fn call_tool_inner(
     let result = match tool_name {
         "business_os.status" => mcp_status(root, &context)?,
         "business_os.list_modules" => serde_json::to_value(list_modules(root, &context)?)?,
+        "business_os.list_design_templates" => super::server::list_design_template_documents(root)?,
+        "business_os.get_design_template" => {
+            let id = required_arg(&arguments, "id")?;
+            let payload = super::server::list_design_template_documents(root)?;
+            let template = payload
+                .get("templates")
+                .and_then(Value::as_array)
+                .and_then(|templates| {
+                    templates
+                        .iter()
+                        .find(|template| template.get("id").and_then(Value::as_str) == Some(&id))
+                })
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("design template `{id}` does not exist"))?;
+            serde_json::json!({ "ok": true, "template": template })
+        }
+        "business_os.save_design_template" => {
+            enforce_business_os_mcp_policy(
+                root,
+                &context,
+                "business_os.save_design_template",
+                &arguments,
+            )?;
+            let request = serde_json::from_value::<super::server::DesignTemplateUpdateRequest>(
+                arguments.clone(),
+            )
+            .context("invalid design template payload")?;
+            super::server::save_design_template(root, request)?
+        }
+        "business_os.delete_design_template" => {
+            enforce_business_os_mcp_policy(
+                root,
+                &context,
+                "business_os.delete_design_template",
+                &arguments,
+            )?;
+            let id = required_arg(&arguments, "id")?;
+            super::server::delete_design_template(root, &id)?
+        }
         "business_os.get_module" => {
             let module_id = required_arg(&arguments, "module_id")?;
             serde_json::to_value(get_module(root, &context, &module_id)?)?
@@ -5038,6 +5103,16 @@ fn business_os_mcp_policy_decision(
                 Some("business_os_mcp"),
             )?))
         }
+        "business_os.list_design_templates"
+        | "business_os.get_design_template"
+        | "business_os.save_design_template"
+        | "business_os.delete_design_template" => Ok(Some(trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::WorkspaceBrandingManage,
+            BusinessOsScopeType::Workspace,
+            None,
+        )?)),
         "business_os.get_module"
         | "business_os.list_entities"
         | "business_os.list_module_actions"
@@ -5767,6 +5842,8 @@ fn tool_policy_class(tool_name: &str) -> McpToolPolicyClass {
         | "business_os.create_app"
         | "business_os.modify_app"
         | "business_os.prepare_app_source"
+        | "business_os.save_design_template"
+        | "business_os.delete_design_template"
         | "business_os.upsert_record"
         | "business_os.upsert_user"
         | "business_os.write_app_file"
@@ -6409,6 +6486,23 @@ fn write_tool(name: &str, description: &str, input_schema: Value) -> BusinessOsM
         annotations: Some(serde_json::json!({
             "readOnlyHint": false,
             "destructiveHint": false,
+            "openWorldHint": false
+        })),
+    }
+}
+
+fn destructive_tool(
+    name: &str,
+    description: &str,
+    input_schema: Value,
+) -> BusinessOsMcpToolDescriptor {
+    BusinessOsMcpToolDescriptor {
+        name: name.to_string(),
+        description: description.to_string(),
+        input_schema,
+        annotations: Some(serde_json::json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
             "openWorldHint": false
         })),
     }
@@ -7436,6 +7530,26 @@ mod tests {
     fn tool_descriptors_expose_only_typed_business_os_tools() {
         let tools = tool_descriptors();
         assert!(tools.iter().any(|tool| tool.name == "business_os.status"));
+        for name in [
+            "business_os.list_design_templates",
+            "business_os.get_design_template",
+            "business_os.save_design_template",
+            "business_os.delete_design_template",
+        ] {
+            assert!(tools.iter().any(|tool| tool.name == name), "{name}");
+        }
+        let delete_template = tools
+            .iter()
+            .find(|tool| tool.name == "business_os.delete_design_template")
+            .expect("delete design template descriptor");
+        assert_eq!(
+            delete_template
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get("destructiveHint"))
+                .and_then(Value::as_bool),
+            Some(true)
+        );
         assert!(tools
             .iter()
             .any(|tool| tool.name == "business_os.query_records"));
@@ -7541,6 +7655,93 @@ mod tests {
                 "{forbidden} must not be exposed as a Business OS MCP tool"
             );
         }
+    }
+
+    #[test]
+    fn design_template_mcp_tools_share_validated_recoverable_crud() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_default_mcp_admin(root)?;
+        let context = serde_json::json!({
+            "actor": "chatgpt:test-user",
+            "workspace": "test"
+        });
+
+        let saved = call_tool(
+            root,
+            "business_os.save_design_template",
+            serde_json::json!({
+                "id": "hypo-rem",
+                "title": "Hypo REM",
+                "description": "REM desktop shell",
+                "base_style": "windows",
+                "css": ":root[data-design-template=\"hypo-rem\"] { --accent: #1f8288; }",
+                "_context": context.clone()
+            }),
+        )?;
+        assert_eq!(
+            saved.pointer("/template/id").and_then(Value::as_str),
+            Some("hypo-rem")
+        );
+
+        let listed = call_tool(
+            root,
+            "business_os.list_design_templates",
+            serde_json::json!({ "_context": context.clone() }),
+        )?;
+        assert_eq!(
+            listed.pointer("/templates/0/title").and_then(Value::as_str),
+            Some("Hypo REM")
+        );
+
+        let fetched = call_tool(
+            root,
+            "business_os.get_design_template",
+            serde_json::json!({ "id": "hypo-rem", "_context": context.clone() }),
+        )?;
+        assert!(fetched
+            .pointer("/template/css")
+            .and_then(Value::as_str)
+            .is_some_and(|css| css.contains("--accent")));
+
+        let deleted = call_tool(
+            root,
+            "business_os.delete_design_template",
+            serde_json::json!({ "id": "hypo-rem", "_context": context }),
+        )?;
+        assert_eq!(
+            deleted.get("recoverable").and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn design_template_mcp_write_requires_workspace_branding_permission() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_business_user(root, "chatgpt:member", "user")?;
+
+        let error = call_tool(
+            root,
+            "business_os.save_design_template",
+            serde_json::json!({
+                "id": "unauthorized",
+                "title": "Unauthorized",
+                "css": ":root[data-design-template=\"unauthorized\"] { --accent: red; }",
+                "_context": {
+                    "actor": "chatgpt:member",
+                    "workspace": "test"
+                }
+            }),
+        )
+        .expect_err("workspace branding permission must gate design writes");
+        let typed = error
+            .downcast_ref::<BusinessOsMcpError>()
+            .expect("typed permission error");
+        assert_eq!(typed.code, BusinessOsMcpErrorCode::PermissionDenied);
+        assert_eq!(typed.field.as_deref(), Some("business_os_policy"));
+        Ok(())
     }
 
     #[test]

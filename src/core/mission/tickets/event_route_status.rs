@@ -1,4 +1,4 @@
-use crate::service::core_state_machine::{CoreEvent, CoreState};
+use crate::core_state::{CoreEvent, CoreState};
 use anyhow::{bail, Result};
 
 /// Durable statuses stored in `ticket_event_routing_state.route_status`.

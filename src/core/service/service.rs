@@ -76,6 +76,14 @@ use tiny_http::StatusCode;
 use crate::channels;
 use crate::communication::adapters as communication_adapters;
 use crate::context_health;
+use crate::core_state::guard::{
+    enforce_core_transition, ensure_core_transition_guard_schema, evaluate_core_spawn,
+    CoreSpawnRequest,
+};
+use crate::core_state::{
+    ArtifactKind, ArtifactRef, CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState,
+    CoreTransitionRequest, RuntimeLane,
+};
 use crate::governance;
 use crate::inference::runtime_control;
 use crate::inference::runtime_env;
@@ -89,14 +97,6 @@ use crate::review;
 use crate::schedule;
 use crate::scrape;
 use crate::secrets;
-use crate::service::core_state_machine::{
-    ArtifactKind, ArtifactRef, CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState,
-    CoreTransitionRequest, RuntimeLane,
-};
-use crate::service::core_transition_guard::{
-    enforce_core_transition, ensure_core_transition_guard_schema, evaluate_core_spawn,
-    CoreSpawnRequest,
-};
 use crate::service::harness_flow;
 use crate::state_invariants;
 use crate::verification;

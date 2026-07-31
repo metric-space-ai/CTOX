@@ -85,6 +85,13 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::{Duration, UNIX_EPOCH};
 
+use crate::core_state::guard::{
+    enforce_core_spawn, enforce_core_transition, ensure_core_transition_guard_schema,
+    CoreSpawnRequest,
+};
+use crate::core_state::{
+    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
+};
 use crate::inference::engine;
 use crate::inference::local_transport::LocalTransport;
 use crate::inference::model_registry;
@@ -94,13 +101,6 @@ use crate::mission::ticket_adapters;
 use crate::mission::ticket_gateway;
 use crate::mission::ticket_protocol;
 use crate::mission::ticket_translation;
-use crate::service::core_state_machine::{
-    CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
-};
-use crate::service::core_transition_guard::{
-    enforce_core_spawn, enforce_core_transition, ensure_core_transition_guard_schema,
-    CoreSpawnRequest,
-};
 use crate::service::harness_flow::{
     record_harness_flow_event_lossy, RecordHarnessFlowEventRequest,
 };

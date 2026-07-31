@@ -131,6 +131,45 @@ struct TemplateManifest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+struct LocalDesignTemplateManifest {
+    id: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    base_style: String,
+    #[serde(default)]
+    stylesheet: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct DesignTemplateUpdateRequest {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub base_style: String,
+    pub css: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(super) struct DesignTemplateDeleteRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DesignTemplateDescriptor {
+    id: String,
+    title: String,
+    description: String,
+    base_style: String,
+    stylesheet_href: String,
+}
+
+const MAX_DESIGN_TEMPLATE_CSS_BYTES: usize = 256 * 1024;
+
+#[derive(Debug, Clone, Deserialize)]
 struct KnowledgeCommandRequest {
     args: Vec<String>,
 }
@@ -328,6 +367,50 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
             } else {
                 let payload = mcp_connect_info_payload(root, &request)?;
                 respond_json_value_no_store(request, payload)?;
+            }
+        }
+        (Method::Get, "/api/business-os/design-templates") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_workspace_branding(root, &session)? {
+                respond_status(request, 403, "workspace branding rights required")?;
+            } else {
+                respond_json_value_no_store(request, list_design_template_documents(root)?)?;
+            }
+        }
+        (Method::Post, "/api/business-os/design-templates") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_workspace_branding(root, &session)? {
+                respond_status(request, 403, "workspace branding rights required")?;
+            } else {
+                let mutation = serde_json::from_value(read_json(&mut request)?)?;
+                let result = save_design_template(root, mutation)?;
+                if let Some(id) = result.pointer("/template/id").and_then(Value::as_str) {
+                    store::record_design_template_change_event(root, &session, id, "saved")?;
+                }
+                respond_json_value_no_store(request, result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/design-templates/delete") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_workspace_branding(root, &session)? {
+                respond_status(request, 403, "workspace branding rights required")?;
+            } else {
+                let mutation: DesignTemplateDeleteRequest =
+                    serde_json::from_value(read_json(&mut request)?)?;
+                let result = delete_design_template(root, &mutation.id)?;
+                store::record_design_template_change_event(
+                    root,
+                    &session,
+                    &mutation.id,
+                    "deleted",
+                )?;
+                respond_json_value_no_store(request, result)?;
             }
         }
         (Method::Post, "/api/business-os/ctox/subscription-auth/start") => {
@@ -809,6 +892,11 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             // bearer token, so it is a no-store control-plane route and never
             // crosses the RxDB/WebRTC business-data plane.
             | "/api/business-os/mcp/connect-info"
+            // Instance-local design files are bootstrap/static configuration,
+            // not Business OS records. Reads and writes are permission-gated
+            // through workspace.branding.manage and never carry RxDB data.
+            | "/api/business-os/design-templates"
+            | "/api/business-os/design-templates/delete"
             // Peer-lifecycle control for the rxdb-soak rollover mode: restarts
             // the in-process native peer. No Business OS records flow here and
             // the route itself answers 403 unless
@@ -2044,6 +2132,271 @@ fn load_template_manifests(app_root: &Path) -> anyhow::Result<Vec<TemplateManife
     Ok(templates)
 }
 
+fn load_design_template_manifests(root: &Path) -> anyhow::Result<Vec<DesignTemplateDescriptor>> {
+    let templates_root = resolve_business_os_installed_app_root(root).join("design-templates");
+    let mut templates = Vec::new();
+    if !templates_root.is_dir() {
+        return Ok(templates);
+    }
+    for entry in fs::read_dir(&templates_root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let Some(directory_id) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let manifest_path = entry.path().join("template.json");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let text = match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!(
+                    "[business-os] skipping unreadable design template {}: {error}",
+                    manifest_path.display()
+                );
+                continue;
+            }
+        };
+        let manifest: LocalDesignTemplateManifest = match serde_json::from_str(&text) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!(
+                    "[business-os] skipping invalid design template {}: {error}",
+                    manifest_path.display()
+                );
+                continue;
+            }
+        };
+        let id = manifest.id.trim().to_lowercase();
+        let title = manifest.title.trim();
+        let stylesheet = if manifest.stylesheet.trim().is_empty() {
+            "theme.css"
+        } else {
+            manifest.stylesheet.trim()
+        };
+        let safe_stylesheet = Path::new(stylesheet).components().count() == 1
+            && !stylesheet.starts_with('.')
+            && stylesheet
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+            && Path::new(stylesheet)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("css"));
+        if id != directory_id
+            || id != sanitize_slug(&id)
+            || id.is_empty()
+            || id.len() > 64
+            || title.is_empty()
+            || title.chars().count() > 80
+            || !safe_stylesheet
+            || !entry.path().join(stylesheet).is_file()
+        {
+            eprintln!(
+                "[business-os] skipping unsafe design template {}",
+                manifest_path.display()
+            );
+            continue;
+        }
+        let base_style = match manifest.base_style.trim().to_lowercase().as_str() {
+            "windows" => "windows",
+            "macos" => "macos",
+            _ => "ctox",
+        };
+        templates.push(DesignTemplateDescriptor {
+            id: id.clone(),
+            title: title.to_owned(),
+            description: manifest.description.trim().chars().take(240).collect(),
+            base_style: base_style.to_owned(),
+            stylesheet_href: format!("design-templates/{id}/{stylesheet}"),
+        });
+    }
+    templates.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(templates)
+}
+
+pub(super) fn list_design_template_documents(root: &Path) -> anyhow::Result<Value> {
+    let runtime_root = resolve_business_os_installed_app_root(root);
+    let templates = load_design_template_manifests(root)?
+        .into_iter()
+        .map(|template| {
+            let stylesheet_path = runtime_root.join(&template.stylesheet_href);
+            let css = fs::read_to_string(&stylesheet_path).with_context(|| {
+                format!(
+                    "failed to read design template stylesheet {}",
+                    stylesheet_path.display()
+                )
+            })?;
+            Ok(serde_json::json!({
+                "id": template.id,
+                "title": template.title,
+                "description": template.description,
+                "base_style": template.base_style,
+                "stylesheet_href": template.stylesheet_href,
+                "css": css
+            }))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "templates": templates
+    }))
+}
+
+pub(super) fn save_design_template(
+    root: &Path,
+    request: DesignTemplateUpdateRequest,
+) -> anyhow::Result<Value> {
+    let id = request.id.trim().to_lowercase();
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= 64 && id == sanitize_slug(&id),
+        "design template id must be a lowercase slug"
+    );
+    let title = request.title.trim();
+    anyhow::ensure!(
+        !title.is_empty() && title.chars().count() <= 80,
+        "design template title must contain 1 to 80 characters"
+    );
+    let description = request
+        .description
+        .trim()
+        .chars()
+        .take(240)
+        .collect::<String>();
+    let base_style = match request.base_style.trim().to_lowercase().as_str() {
+        "windows" => "windows",
+        "macos" => "macos",
+        "ctox" | "" => "ctox",
+        _ => anyhow::bail!("design template base_style must be ctox, windows, or macos"),
+    };
+    let css = request.css.trim();
+    anyhow::ensure!(!css.is_empty(), "design template css is required");
+    anyhow::ensure!(
+        css.len() <= MAX_DESIGN_TEMPLATE_CSS_BYTES,
+        "design template css exceeds the 256 KiB limit"
+    );
+    anyhow::ensure!(
+        css.contains("data-design-template") && css.contains(&id),
+        "design template css must scope rules to its data-design-template id"
+    );
+    let css_lower = css.to_ascii_lowercase();
+    anyhow::ensure!(
+        !css_lower.contains("@import") && !css_lower.contains("url("),
+        "design template css must not import or load external assets"
+    );
+
+    let target = resolve_business_os_installed_app_root(root)
+        .join("design-templates")
+        .join(&id);
+    fs::create_dir_all(&target)
+        .with_context(|| format!("failed to create design template {}", target.display()))?;
+    let manifest = serde_json::json!({
+        "id": id,
+        "title": title,
+        "description": description,
+        "base_style": base_style,
+        "stylesheet": "theme.css"
+    });
+    let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+    manifest_bytes.push(b'\n');
+    write_design_template_file_atomic(&target.join("template.json"), &manifest_bytes)?;
+    let mut css_bytes = css.as_bytes().to_vec();
+    css_bytes.push(b'\n');
+    write_design_template_file_atomic(&target.join("theme.css"), &css_bytes)?;
+
+    let saved = list_design_template_documents(root)?
+        .get("templates")
+        .and_then(Value::as_array)
+        .and_then(|templates| {
+            templates
+                .iter()
+                .find(|template| template.get("id").and_then(Value::as_str) == Some(&id))
+        })
+        .cloned()
+        .context("saved design template is not discoverable")?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": "saved",
+        "template": saved
+    }))
+}
+
+pub(super) fn delete_design_template(root: &Path, template_id: &str) -> anyhow::Result<Value> {
+    let id = template_id.trim().to_lowercase();
+    anyhow::ensure!(
+        !id.is_empty() && id.len() <= 64 && id == sanitize_slug(&id),
+        "design template id must be a lowercase slug"
+    );
+    let templates_root = resolve_business_os_installed_app_root(root).join("design-templates");
+    let target = templates_root.join(&id);
+    anyhow::ensure!(target.is_dir(), "design template `{id}` does not exist");
+    let trash_root = templates_root.join(".trash");
+    fs::create_dir_all(&trash_root)?;
+    let archived_name = format!("{}-{}", id, chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let archived_path = trash_root.join(archived_name);
+    fs::rename(&target, &archived_path).with_context(|| {
+        format!(
+            "failed to archive design template {} to {}",
+            target.display(),
+            archived_path.display()
+        )
+    })?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "action": "deleted",
+        "id": id,
+        "recoverable": true,
+        "archived_path": archived_path
+    }))
+}
+
+fn write_design_template_file_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .context("design template file requires a parent directory")?;
+    fs::create_dir_all(parent)?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("design-template"),
+        Uuid::new_v4()
+    ));
+    fs::write(&temp_path, bytes)
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    let backup_path = parent.join(format!(
+        ".{}.{}.bak",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("design-template"),
+        Uuid::new_v4()
+    ));
+    let had_existing = path.is_file();
+    if had_existing {
+        fs::rename(path, &backup_path)
+            .with_context(|| format!("failed to stage existing {}", path.display()))?;
+    }
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        if had_existing {
+            let _ = fs::rename(&backup_path, path);
+        }
+        return Err(error).with_context(|| format!("failed to replace {}", path.display()));
+    }
+    if had_existing {
+        fs::remove_file(&backup_path)
+            .with_context(|| format!("failed to remove {}", backup_path.display()))?;
+    }
+    Ok(())
+}
+
 fn module_layout_path(root: &Path) -> PathBuf {
     root.join("runtime").join("business-os-module-layout.json")
 }
@@ -2995,7 +3348,9 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
             None
         };
         let html = String::from_utf8(bytes).context("Business OS index.html is not UTF-8")?;
-        bytes = inject_launch_context(html, &session, sync_config.as_ref())?.into_bytes();
+        let design_templates = load_design_template_manifests(root)?;
+        bytes = inject_launch_context(html, &session, sync_config.as_ref(), &design_templates)?
+            .into_bytes();
     }
     let cache_control = business_os_static_cache_control(is_index, &rel, request.url());
     respond_static_success(request, &bytes, mime, cache_control)?;
@@ -3012,7 +3367,10 @@ fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str
     // shell can still request the previous URL. Revalidation prevents that
     // shell from mixing a cached old entry module with the new dependency
     // tree after a release.
-    if rel.starts_with("installed-modules/") || rel.starts_with("local-modules/") {
+    if rel.starts_with("installed-modules/")
+        || rel.starts_with("local-modules/")
+        || rel.starts_with("design-templates/")
+    {
         return "no-cache, must-revalidate";
     }
 
@@ -3029,7 +3387,10 @@ fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str
 }
 
 fn resolve_business_os_static_file(root: &Path, app_root: &Path, rel: &str) -> PathBuf {
-    if rel.starts_with("installed-modules/") || rel.starts_with("local-modules/") {
+    if rel.starts_with("installed-modules/")
+        || rel.starts_with("local-modules/")
+        || rel.starts_with("design-templates/")
+    {
         return resolve_business_os_installed_app_root(root).join(rel);
     }
 
@@ -3057,15 +3418,17 @@ fn inject_launch_context(
     html: String,
     session: &store::BusinessOsSession,
     sync_config: Option<&Value>,
+    design_templates: &[DesignTemplateDescriptor],
 ) -> anyhow::Result<String> {
     let html = ensure_shell_stylesheets_in_index(html);
     let script = format!(
-        "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};</script>",
+        "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES={};</script>",
         script_json(session)?,
         sync_config
             .map(script_json)
             .transpose()?
-            .unwrap_or_else(|| "null".to_owned())
+            .unwrap_or_else(|| "null".to_owned()),
+        script_json(design_templates)?
     );
     if let Some(idx) = html.find("</head>") {
         let mut injected = String::with_capacity(html.len() + script.len());
@@ -3118,7 +3481,7 @@ fn ensure_shell_stylesheets_in_index(html: String) -> String {
     }
 }
 
-fn script_json<T: Serialize>(value: &T) -> anyhow::Result<String> {
+fn script_json<T: Serialize + ?Sized>(value: &T) -> anyhow::Result<String> {
     Ok(serde_json::to_string(value)?.replace("</", "<\\/"))
 }
 
@@ -3432,11 +3795,13 @@ mod tests {
             "<html><head></head><body></body></html>".to_owned(),
             &session,
             None,
+            &[],
         )
         .expect("inject launch context");
 
         assert!(html.contains("window.CTOX_BUSINESS_OS_SESSION="));
         assert!(html.contains("window.CTOX_BUSINESS_OS_CONFIG=null"));
+        assert!(html.contains("window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES=[]"));
         assert!(html.contains(r#"href="app.css?v=20260623-shell-icons""#));
         assert!(html.contains(r#"href="shared/base.css?v=20260609-base1""#));
         assert!(!html.contains("sync_room"));
@@ -3520,11 +3885,134 @@ mod tests {
         assert_eq!(
             business_os_static_cache_control(
                 false,
+                "design-templates/hypo-rem/theme.css",
+                "/design-templates/hypo-rem/theme.css"
+            ),
+            "no-cache, must-revalidate"
+        );
+        assert_eq!(
+            business_os_static_cache_control(
+                false,
                 "modules/calendar/index.js",
                 "/modules/calendar/index.js?v=shell-release"
             ),
             "no-cache, must-revalidate"
         );
+    }
+
+    #[test]
+    fn local_design_templates_load_from_the_ignored_runtime_directory() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let template_root = root
+            .path()
+            .join("runtime/business-os/design-templates/hypo-rem");
+        fs::create_dir_all(&template_root)?;
+        fs::write(
+            template_root.join("template.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "id": "hypo-rem",
+                "title": "Hypo REM",
+                "description": "REM product shell",
+                "base_style": "windows",
+                "stylesheet": "theme.css"
+            }))?,
+        )?;
+        fs::write(
+            template_root.join("theme.css"),
+            b":root { --accent: teal; }",
+        )?;
+
+        let templates = load_design_template_manifests(root.path())?;
+
+        assert_eq!(templates.len(), 1);
+        assert_eq!(templates[0].id, "hypo-rem");
+        assert_eq!(templates[0].base_style, "windows");
+        assert_eq!(
+            templates[0].stylesheet_href,
+            "design-templates/hypo-rem/theme.css"
+        );
+        assert_eq!(
+            resolve_business_os_static_file(
+                root.path(),
+                &root.path().join("src/apps/business-os"),
+                "design-templates/hypo-rem/theme.css"
+            ),
+            template_root.join("theme.css")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn local_design_templates_support_validated_crud_and_recoverable_delete() -> anyhow::Result<()>
+    {
+        let root = tempfile::tempdir()?;
+        let saved = save_design_template(
+            root.path(),
+            DesignTemplateUpdateRequest {
+                id: "hypo-rem".to_owned(),
+                title: "Hypo REM".to_owned(),
+                description: "REM product shell".to_owned(),
+                base_style: "windows".to_owned(),
+                css: r#":root[data-design-template="hypo-rem"] { --accent: #1f8288; }"#.to_owned(),
+            },
+        )?;
+        assert_eq!(
+            saved
+                .get("template")
+                .and_then(|template| template.get("id"))
+                .and_then(Value::as_str),
+            Some("hypo-rem")
+        );
+
+        let updated = save_design_template(
+            root.path(),
+            DesignTemplateUpdateRequest {
+                id: "hypo-rem".to_owned(),
+                title: "Hypo REM Desktop".to_owned(),
+                description: String::new(),
+                base_style: "ctox".to_owned(),
+                css: r#":root[data-design-template="hypo-rem"] { --accent: #eb5d64; }"#.to_owned(),
+            },
+        )?;
+        assert_eq!(
+            updated
+                .get("template")
+                .and_then(|template| template.get("title"))
+                .and_then(Value::as_str),
+            Some("Hypo REM Desktop")
+        );
+
+        let rejected = save_design_template(
+            root.path(),
+            DesignTemplateUpdateRequest {
+                id: "remote-assets".to_owned(),
+                title: "Remote Assets".to_owned(),
+                description: String::new(),
+                base_style: "ctox".to_owned(),
+                css: r#":root[data-design-template="remote-assets"] { background: url(https://example.com/a.png); }"#
+                    .to_owned(),
+            },
+        )
+        .expect_err("remote design assets must be rejected");
+        assert!(rejected
+            .to_string()
+            .contains("must not import or load external assets"));
+
+        let deleted = delete_design_template(root.path(), "hypo-rem")?;
+        assert_eq!(
+            deleted.get("recoverable").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!root
+            .path()
+            .join("runtime/business-os/design-templates/hypo-rem")
+            .exists());
+        let archived_path = deleted
+            .get("archived_path")
+            .and_then(Value::as_str)
+            .context("archived path")?;
+        assert!(Path::new(archived_path).is_dir());
+        Ok(())
     }
 
     #[test]

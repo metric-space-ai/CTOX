@@ -39,12 +39,12 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::inference::runtime_env;
-use crate::mission::{channels, plan, tickets};
-use crate::service::core_state_machine::{
+use crate::core_state::guard::enforce_core_transition;
+use crate::core_state::{
     CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState, CoreTransitionRequest, RuntimeLane,
 };
-use crate::service::core_transition_guard::enforce_core_transition;
+use crate::inference::runtime_env;
+use crate::mission::{channels, plan, tickets};
 use crate::service::governance;
 
 const DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";

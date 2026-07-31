@@ -349,7 +349,7 @@ fn actor_may_replicate_document(
         return false;
     }
     if collection == "business_commands" {
-        return ctox_command_document_visible_to_user(document, user_id);
+        return ctox_command_document_visible_to_user(root, document, user_id);
     }
     if collection == "ctox_queue_tasks" {
         return ctox_task_document_visible_to_user(root, document, user_id);
@@ -4164,7 +4164,7 @@ fn ensure_source_context_read_policy(
     Ok(())
 }
 
-fn ctox_command_document_visible_to_user(document: &Value, user_id: &str) -> bool {
+fn ctox_command_document_directly_visible_to_user(document: &Value, user_id: &str) -> bool {
     document_mentions_user(document, user_id)
         || nested_string(document, &["client_context", "actor", "id"]).as_deref() == Some(user_id)
         || nested_string(document, &["client_context", "user", "id"]).as_deref() == Some(user_id)
@@ -4173,6 +4173,36 @@ fn ctox_command_document_visible_to_user(document: &Value, user_id: &str) -> boo
             == Some(user_id)
         || nested_string(document, &["payload", "approval", "reviewer_user_id"]).as_deref()
             == Some(user_id)
+}
+
+fn ctox_command_document_visible_to_user(root: &Path, document: &Value, user_id: &str) -> bool {
+    if ctox_command_document_directly_visible_to_user(document, user_id) {
+        return true;
+    }
+    for parent_key in [
+        "parent_command_id",
+        "orchestrator_command_id",
+        "workflow_id",
+        "campaign_run_id",
+    ] {
+        let Some(parent_command_id) = nested_string(document, &["payload", parent_key]) else {
+            continue;
+        };
+        if parent_command_id == value_string(document, "command_id")
+            || parent_command_id == value_string(document, "id")
+        {
+            continue;
+        }
+        if load_record(root, "business_commands", &parent_command_id)
+            .ok()
+            .flatten()
+            .as_ref()
+            .is_some_and(|parent| ctox_command_document_directly_visible_to_user(parent, user_id))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn ctox_task_document_visible_to_user(root: &Path, document: &Value, user_id: &str) -> bool {
@@ -4188,7 +4218,7 @@ fn ctox_task_document_visible_to_user(root: &Path, document: &Value, user_id: &s
     load_record(root, "business_commands", &command_id)
         .ok()
         .flatten()
-        .map(|command| ctox_command_document_visible_to_user(&command, user_id))
+        .map(|command| ctox_command_document_visible_to_user(root, &command, user_id))
         .unwrap_or(false)
 }
 
@@ -4738,6 +4768,44 @@ mod tests {
             .get("updated_at_ms")
             .and_then(Value::as_i64)
             .context("approval updated_at_ms")
+    }
+
+    #[test]
+    fn child_command_inherits_parent_visibility_through_workflow_id() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let conn = store::open_store(temp.path())?;
+        store::upsert_business_record(
+            &conn,
+            "business_commands",
+            "parent-command",
+            now_ms(),
+            json!({
+                "id": "parent-command",
+                "command_id": "parent-command",
+                "client_context": {
+                    "actor": { "id": "alice" }
+                }
+            }),
+        )?;
+        let child = json!({
+            "id": "child-command",
+            "command_id": "child-command",
+            "payload": {
+                "workflow_id": "parent-command"
+            }
+        });
+
+        assert!(ctox_command_document_visible_to_user(
+            temp.path(),
+            &child,
+            "alice"
+        ));
+        assert!(!ctox_command_document_visible_to_user(
+            temp.path(),
+            &child,
+            "bob"
+        ));
+        Ok(())
     }
 
     #[test]

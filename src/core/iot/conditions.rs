@@ -19,9 +19,9 @@
 // ref: JsonRulesBuilder.java:86-1519  (predicate build + duration windowing)
 // ref: AssetQueryPredicate.java:188-302  (asAttributeMatcher / NameValuePredicate)
 
+use crate::core_state::guard;
 use crate::iot::model::{AttributeEvent, AttributeValue, MetaMap};
 use crate::iot::{now_iso, store, Result};
-use crate::service::core_transition_guard as guard;
 use anyhow::{bail, Context};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;

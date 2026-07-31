@@ -20,6 +20,7 @@ mod capabilities;
 mod coding_agents;
 mod communication;
 mod context;
+mod core_state;
 mod doc_stack;
 mod execution;
 mod export;

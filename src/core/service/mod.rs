@@ -3,8 +3,6 @@
 
 pub mod business_os;
 pub mod business_os_harness_bench;
-pub mod core_state_machine;
-pub mod core_transition_guard;
 pub mod db_migration;
 pub mod governance;
 pub mod harness_flow;

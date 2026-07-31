@@ -678,7 +678,7 @@ fn internal_work_terminology_firewall_keeps_self_work_legacy_only() -> Result<()
     }
     for relative in [
         "src/core/service/service.rs",
-        "src/core/service/core_state_machine.rs",
+        "src/core/core_state/mod.rs",
         "src/core/service/harness_flow.rs",
         "src/core/service/process_mining.rs",
         "src/core/mission/channels/mod.rs",
