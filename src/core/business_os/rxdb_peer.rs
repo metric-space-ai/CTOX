@@ -6350,19 +6350,21 @@ async fn run_browser_runtime_maintenance(database: &Arc<RxDatabase>) -> anyhow::
 /// controller lease: the UI can only show a picture once a first frame exists,
 /// and a user can only take the lease by acting on that picture. Gating the
 /// first frame on the lease is the deadlock that kept `browser_frames` empty.
-/// Afterwards a frame is only worth capturing while somebody is actually
-/// watching, so an expired lease stops the stream instead of screenshotting
-/// abandoned sessions forever.
+/// Afterwards an *expired* lease stops the stream instead of screenshotting an
+/// abandoned session forever. A session carrying no lease at all is a different
+/// case: several lifecycle writers never record one, and treating "absent" as
+/// "expired" would cut the stream off after its very first frame. Those stream
+/// as long as the runtime still holds the page.
 fn browser_frame_capture_due(
     now_ms: u64,
     last_frame_ms: Option<u64>,
-    lease_expires_ms: u64,
+    lease_expires_ms: Option<u64>,
     frame_rate_target: u64,
 ) -> bool {
     let Some(last_frame_ms) = last_frame_ms else {
         return true;
     };
-    if lease_expires_ms <= now_ms {
+    if lease_expires_ms.is_some_and(|expires_ms| expires_ms <= now_ms) {
         return false;
     }
     let min_interval_ms = 1000 / frame_rate_target.max(1);
@@ -6409,7 +6411,7 @@ async fn refresh_browser_session_frame(
         session_doc
             .get("controller_lease_expires_at_ms")
             .and_then(Value::as_u64)
-            .unwrap_or(0),
+            .filter(|expires_ms| *expires_ms > 0),
         session_doc
             .get("frame_rate_target")
             .and_then(Value::as_u64)
@@ -24490,21 +24492,21 @@ mod tests {
         // controller holds a lease. Without this the UI never shows a picture,
         // so nobody can ever take the lease: the deadlock that left every
         // session on the tenant frameless.
-        assert!(browser_frame_capture_due(NOW, None, 0, RATE));
-        assert!(browser_frame_capture_due(NOW, None, NOW - 1, RATE));
+        assert!(browser_frame_capture_due(NOW, None, None, RATE));
+        assert!(browser_frame_capture_due(NOW, None, Some(NOW - 1), RATE));
 
         // With a frame in place the lease decides. A watched session is
         // captured once the rate-limit window has passed, not before.
         assert!(!browser_frame_capture_due(
             NOW,
             Some(NOW - 100),
-            NOW + 60_000,
+            Some(NOW + 60_000),
             RATE
         ));
         assert!(browser_frame_capture_due(
             NOW,
             Some(NOW - 500),
-            NOW + 60_000,
+            Some(NOW + 60_000),
             RATE
         ));
 
@@ -24513,21 +24515,27 @@ mod tests {
         assert!(!browser_frame_capture_due(
             NOW,
             Some(NOW - 60_000),
-            NOW,
+            Some(NOW),
             RATE
         ));
         assert!(!browser_frame_capture_due(
             NOW,
             Some(NOW - 60_000),
-            NOW - 1,
+            Some(NOW - 1),
             RATE
         ));
+
+        // A session that records no lease at all keeps streaming: several
+        // lifecycle writers never record one, and reading "absent" as "expired"
+        // would end the stream after its very first frame.
+        assert!(browser_frame_capture_due(NOW, Some(NOW - 500), None, RATE));
+        assert!(!browser_frame_capture_due(NOW, Some(NOW - 100), None, RATE));
 
         // A stored rate of zero must never divide by zero or freeze the stream.
         assert!(browser_frame_capture_due(
             NOW,
             Some(NOW - 1_000),
-            NOW + 60_000,
+            Some(NOW + 60_000),
             0
         ));
     }
