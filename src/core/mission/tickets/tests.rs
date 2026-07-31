@@ -151,6 +151,110 @@ fn ticket_case_event_path_rejects_unknown_state_instead_of_creating_ticket() {
 }
 
 #[test]
+fn ticket_event_route_status_canonical_values_round_trip() -> Result<()> {
+    for status in event_route_status::TicketEventRouteStatus::ALL {
+        assert_eq!(
+            event_route_status::TicketEventRouteStatus::parse(status.as_str())?,
+            status
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn ticket_event_route_status_rejects_unknown_values() {
+    let error = event_route_status::TicketEventRouteStatus::parse("future_status")
+        .expect_err("unknown ticket event route statuses must fail closed");
+    assert!(error.to_string().contains("future_status"));
+}
+
+fn assert_ticket_event_route_core_pair(
+    status: event_route_status::TicketEventRouteStatus,
+    expected_state: CoreState,
+    expected_event: CoreEvent,
+) {
+    assert_eq!(
+        (status.core_state(), status.core_event()),
+        (expected_state, expected_event),
+        "event route status {} must keep its core state/event pair",
+        status.as_str()
+    );
+}
+
+#[test]
+fn ticket_event_route_pending_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Pending,
+        CoreState::Pending,
+        CoreEvent::Release,
+    );
+}
+
+#[test]
+fn ticket_event_route_leased_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Leased,
+        CoreState::Leased,
+        CoreEvent::Lease,
+    );
+}
+
+#[test]
+fn ticket_event_route_observed_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Observed,
+        CoreState::Completed,
+        CoreEvent::Complete,
+    );
+}
+
+#[test]
+fn ticket_event_route_handled_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Handled,
+        CoreState::Completed,
+        CoreEvent::Complete,
+    );
+}
+
+#[test]
+fn ticket_event_route_failed_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Failed,
+        CoreState::Failed,
+        CoreEvent::Fail,
+    );
+}
+
+#[test]
+fn ticket_event_route_duplicate_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Duplicate,
+        CoreState::Superseded,
+        CoreEvent::Supersede,
+    );
+}
+
+#[test]
+fn ticket_event_route_blocked_core_pair_is_pinned() {
+    assert_ticket_event_route_core_pair(
+        event_route_status::TicketEventRouteStatus::Blocked,
+        CoreState::Blocked,
+        CoreEvent::Block,
+    );
+}
+
+#[test]
+fn ticket_event_route_core_maps_reject_unknown_status_instead_of_pending() {
+    let state_error = ticket_event_route_core_state("future_status")
+        .expect_err("unknown route status must not default to Pending");
+    let event_error = ticket_event_route_core_event("future_status")
+        .expect_err("unknown route status must not default to Release");
+    assert!(state_error.to_string().contains("future_status"));
+    assert!(event_error.to_string().contains("future_status"));
+}
+
+#[test]
 fn ticket_terminal_magic_actor_and_reason_do_not_create_a_grant() -> Result<()> {
     let conn = Connection::open_in_memory()?;
     enforce_ticket_event_route_status_transition(

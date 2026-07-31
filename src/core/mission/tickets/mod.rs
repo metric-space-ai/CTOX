@@ -10,6 +10,8 @@ pub(crate) use source_skills::{
 use source_skills::{default_skill_for_self_work_kind, resolve_skill_bundle_dir_hint};
 
 mod case_state;
+mod event_route_status;
+use event_route_status::TicketEventRouteStatus;
 mod cases;
 pub use cases::list_cases;
 #[cfg(test)]
@@ -3259,8 +3261,8 @@ fn enforce_ticket_event_route_status_transition_with_grant(
     if from_status == to_status {
         return Ok(());
     }
-    let from_core = ticket_event_route_core_state(from_status);
-    let to_core = ticket_event_route_core_state(to_status);
+    let from_core = ticket_event_route_core_state(from_status)?;
+    let to_core = ticket_event_route_core_state(to_status)?;
     let entity_id = format!("ticket-event:{event_key}");
     if to_core == CoreState::Completed && ticket_event_has_terminal_success_proof(conn, &entity_id)?
     {
@@ -3290,7 +3292,7 @@ fn enforce_ticket_event_route_status_transition_with_grant(
             lane: RuntimeLane::P2MissionDelivery,
             from_state: from_core,
             to_state: to_core,
-            event: ticket_event_route_core_event(to_status),
+            event: ticket_event_route_core_event(to_status)?,
             actor: actor.to_string(),
             evidence: CoreEvidenceRefs::default(),
             metadata,
@@ -3324,26 +3326,12 @@ fn ticket_event_has_terminal_success_proof(conn: &Connection, entity_id: &str) -
     Ok(count > 0)
 }
 
-fn ticket_event_route_core_state(route_status: &str) -> CoreState {
-    match route_status.trim().to_ascii_lowercase().as_str() {
-        "leased" => CoreState::Leased,
-        "blocked" => CoreState::Blocked,
-        "failed" => CoreState::Failed,
-        "handled" | "observed" => CoreState::Completed,
-        "duplicate" => CoreState::Superseded,
-        _ => CoreState::Pending,
-    }
+fn ticket_event_route_core_state(route_status: &str) -> Result<CoreState> {
+    Ok(TicketEventRouteStatus::parse(route_status)?.core_state())
 }
 
-fn ticket_event_route_core_event(route_status: &str) -> CoreEvent {
-    match route_status.trim().to_ascii_lowercase().as_str() {
-        "leased" => CoreEvent::Lease,
-        "blocked" => CoreEvent::Block,
-        "failed" => CoreEvent::Fail,
-        "handled" | "observed" => CoreEvent::Complete,
-        "duplicate" => CoreEvent::Supersede,
-        _ => CoreEvent::Release,
-    }
+fn ticket_event_route_core_event(route_status: &str) -> Result<CoreEvent> {
+    Ok(TicketEventRouteStatus::parse(route_status)?.core_event())
 }
 
 fn initial_route_status_for_inbound_event(
@@ -5520,16 +5508,7 @@ fn normalize_token(raw: &str) -> String {
 }
 
 fn canonical_ticket_event_route_status(raw: &str) -> Result<&'static str> {
-    match raw.trim() {
-        "pending" => Ok("pending"),
-        "leased" => Ok("leased"),
-        "observed" => Ok("observed"),
-        "handled" => Ok("handled"),
-        "failed" => Ok("failed"),
-        "duplicate" => Ok("duplicate"),
-        "blocked" => Ok("blocked"),
-        other => anyhow::bail!("unsupported ticket event route status: {other}"),
-    }
+    Ok(TicketEventRouteStatus::parse(raw)?.as_str())
 }
 
 fn canonical_control_approval_mode(raw: &str) -> Result<&'static str> {
