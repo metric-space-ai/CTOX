@@ -1,6 +1,7 @@
 // Ticket cases: dry runs, approvals, close/create/state core transitions,
 // clarification plumbing, executability guards and failed writebacks.
 
+use super::case_state::TicketCaseState;
 use super::{
     action_rationale, canonical_approval_status, canonical_autonomy_level,
     canonical_learning_candidate_status, canonical_verification_status, collapse_inline,
@@ -43,7 +44,9 @@ pub(super) fn create_dry_run(
     let (label_assignment, bundle, effective_control) = resolve_ticket_control(root, ticket_key)?;
     let now = now_iso_string();
     let case_id = format!("case:{}:{}", ticket_key, stable_digest(&now));
-    let state = initial_case_state_for_approval_mode(&effective_control.approval_mode);
+    let state = TicketCaseState::parse(initial_case_state_for_approval_mode(
+        &effective_control.approval_mode,
+    ))?;
     let risk_level = risk_level_override
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -53,7 +56,7 @@ pub(super) fn create_dry_run(
         &conn,
         &case_id,
         ticket_key,
-        state,
+        state.as_str(),
         &label_assignment.label,
         &bundle.support_mode,
         "ctox-ticket",
@@ -72,7 +75,7 @@ pub(super) fn create_dry_run(
             label_assignment.label,
             bundle.label,
             bundle.bundle_version,
-            state,
+            state.as_str(),
             effective_control.approval_mode,
             effective_control.autonomy_level,
             bundle.support_mode,
@@ -375,20 +378,20 @@ pub(super) fn decide_case_approval(
         ],
     )?;
     let next_state = if canonical_status == "approved" {
-        "executable"
+        TicketCaseState::Executable
     } else {
-        "blocked"
+        TicketCaseState::Blocked
     };
     enforce_ticket_case_state_transition(
         &conn,
         &case,
-        next_state,
+        next_state.as_str(),
         "approver",
         "approval_decision",
     )?;
     conn.execute(
         "UPDATE ticket_cases SET state = ?2, updated_at = ?3 WHERE case_id = ?1",
-        params![case_id, next_state, now],
+        params![case_id, next_state.as_str(), now],
     )?;
     record_audit(
         &mut conn,
@@ -433,10 +436,17 @@ pub(super) fn record_execution_action(
             now,
         ],
     )?;
-    enforce_ticket_case_state_transition(&conn, &case, "executing", "agent", "execution_case")?;
+    let next_state = TicketCaseState::Executing;
+    enforce_ticket_case_state_transition(
+        &conn,
+        &case,
+        next_state.as_str(),
+        "agent",
+        "execution_case",
+    )?;
     conn.execute(
-        "UPDATE ticket_cases SET state = 'executing', updated_at = ?2 WHERE case_id = ?1",
-        params![case_id, now],
+        "UPDATE ticket_cases SET state = ?2, updated_at = ?3 WHERE case_id = ?1",
+        params![case_id, next_state.as_str(), now],
     )?;
     record_audit(
         &mut conn,
@@ -479,20 +489,20 @@ pub(super) fn record_verification(
         ],
     )?;
     let next_state = if canonical_status == "passed" {
-        "writeback_pending"
+        TicketCaseState::WritebackPending
     } else {
-        "blocked"
+        TicketCaseState::Blocked
     };
     enforce_ticket_case_state_transition(
         &conn,
         &case,
-        next_state,
+        next_state.as_str(),
         "verification_engine",
         "verification_record",
     )?;
     conn.execute(
         "UPDATE ticket_cases SET state = ?2, updated_at = ?3 WHERE case_id = ?1",
-        params![case_id, next_state, now],
+        params![case_id, next_state.as_str(), now],
     )?;
     record_audit(
         &mut conn,
@@ -803,16 +813,17 @@ pub(super) fn resolve_ticket_clarification_request(
                 case.state.as_str(),
                 "blocked" | "blocked_needs_clarification"
             ) {
+                let resume_state = TicketCaseState::parse(&clarification.resume_state)?;
                 enforce_ticket_case_state_transition(
                     &conn,
                     &case,
-                    &clarification.resume_state,
+                    resume_state.as_str(),
                     "clarification_engine",
                     "clarification_resolved",
                 )?;
                 conn.execute(
                     "UPDATE ticket_cases SET state = ?2, updated_at = ?3 WHERE case_id = ?1",
-                    params![case_id, clarification.resume_state, now],
+                    params![case_id, resume_state.as_str(), now],
                 )?;
             }
         }
@@ -1510,7 +1521,7 @@ pub(super) fn enforce_ticket_case_create_transition(
             lane: RuntimeLane::P2MissionDelivery,
             from_state: CoreState::Created,
             to_state: to_core_state,
-            event: ticket_case_core_event(state),
+            event: ticket_case_core_event(state)?,
             actor: actor.to_string(),
             evidence: CoreEvidenceRefs::default(),
             metadata,
@@ -1543,7 +1554,7 @@ pub(super) fn enforce_ticket_case_state_transition(
             lane: RuntimeLane::P2MissionDelivery,
             from_state,
             to_state: to_core_state,
-            event: ticket_case_core_event(to_state),
+            event: ticket_case_core_event(to_state)?,
             actor: actor.to_string(),
             evidence: CoreEvidenceRefs::default(),
             metadata,
@@ -1592,36 +1603,11 @@ pub(super) fn latest_ticket_review_audit_key(
 }
 
 pub(super) fn ticket_case_core_state(raw: &str) -> Result<CoreState> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "created" | "open" | "queued" => Ok(CoreState::Created),
-        "classified" => Ok(CoreState::Classified),
-        "planned" | "ready" | "executable" => Ok(CoreState::Planned),
-        "executing" | "in_progress" | "running" => Ok(CoreState::Executing),
-        "approval_pending" | "awaiting_review" | "review" | "reviewing" => {
-            Ok(CoreState::AwaitingReview)
-        }
-        "rework_required" | "rework" => Ok(CoreState::ReworkRequired),
-        "awaiting_verification" | "verification" => Ok(CoreState::AwaitingVerification),
-        "verified" | "writeback_pending" => Ok(CoreState::Verified),
-        "closed" | "done" | "completed" => Ok(CoreState::Closed),
-        "blocked" | "blocked_needs_clarification" => Ok(CoreState::Blocked),
-        other => anyhow::bail!("ticket case state is not mapped to core state machine: {other}"),
-    }
+    Ok(TicketCaseState::parse(raw)?.core_state())
 }
 
-pub(super) fn ticket_case_core_event(state: &str) -> CoreEvent {
-    match state.trim().to_ascii_lowercase().as_str() {
-        "classified" => CoreEvent::Classify,
-        "planned" | "ready" | "executable" => CoreEvent::Plan,
-        "executing" | "in_progress" | "running" => CoreEvent::Execute,
-        "approval_pending" | "awaiting_review" | "review" | "reviewing" => CoreEvent::RequestReview,
-        "rework_required" | "rework" => CoreEvent::RequireRework,
-        "awaiting_verification" | "verification" => CoreEvent::Verify,
-        "verified" | "writeback_pending" => CoreEvent::Verify,
-        "closed" | "done" | "completed" => CoreEvent::Close,
-        "blocked" | "blocked_needs_clarification" => CoreEvent::Block,
-        _ => CoreEvent::CreateTicket,
-    }
+pub(super) fn ticket_case_core_event(raw: &str) -> Result<CoreEvent> {
+    Ok(TicketCaseState::parse(raw)?.core_event())
 }
 
 pub(super) fn create_learning_candidate(

@@ -9,6 +9,7 @@ pub(crate) use source_skills::{
 };
 use source_skills::{default_skill_for_self_work_kind, resolve_skill_bundle_dir_hint};
 
+mod case_state;
 mod cases;
 pub use cases::list_cases;
 #[cfg(test)]

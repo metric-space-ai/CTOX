@@ -18,6 +18,139 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn ticket_case_state_canonical_values_round_trip() -> Result<()> {
+    for state in case_state::TicketCaseState::ALL {
+        assert_eq!(case_state::TicketCaseState::parse(state.as_str())?, state);
+    }
+    Ok(())
+}
+
+#[test]
+fn ticket_case_state_reads_every_documented_alias() -> Result<()> {
+    use case_state::TicketCaseState;
+
+    for (alias, expected) in [
+        ("in_progress", TicketCaseState::Executing),
+        ("running", TicketCaseState::Executing),
+        ("review", TicketCaseState::AwaitingReview),
+        ("reviewing", TicketCaseState::AwaitingReview),
+        ("rework", TicketCaseState::ReworkRequired),
+        ("verification", TicketCaseState::AwaitingVerification),
+        ("done", TicketCaseState::Closed),
+        ("completed", TicketCaseState::Closed),
+    ] {
+        assert_eq!(TicketCaseState::parse(alias)?, expected, "alias {alias}");
+    }
+    Ok(())
+}
+
+#[test]
+fn ticket_case_state_rejects_unknown_values() {
+    let error = case_state::TicketCaseState::parse("future_state")
+        .expect_err("unknown ticket case states must fail closed");
+    assert!(error.to_string().contains("future_state"));
+}
+
+#[test]
+fn ticket_case_state_core_state_and_event_mappings_stay_paired() {
+    use case_state::TicketCaseState;
+
+    for (state, expected_state, expected_event) in [
+        (
+            TicketCaseState::Created,
+            CoreState::Created,
+            CoreEvent::CreateTicket,
+        ),
+        (
+            TicketCaseState::Open,
+            CoreState::Created,
+            CoreEvent::CreateTicket,
+        ),
+        (
+            TicketCaseState::Queued,
+            CoreState::Created,
+            CoreEvent::CreateTicket,
+        ),
+        (
+            TicketCaseState::Classified,
+            CoreState::Classified,
+            CoreEvent::Classify,
+        ),
+        (
+            TicketCaseState::Planned,
+            CoreState::Planned,
+            CoreEvent::Plan,
+        ),
+        (TicketCaseState::Ready, CoreState::Planned, CoreEvent::Plan),
+        (
+            TicketCaseState::Executable,
+            CoreState::Planned,
+            CoreEvent::Plan,
+        ),
+        (
+            TicketCaseState::Executing,
+            CoreState::Executing,
+            CoreEvent::Execute,
+        ),
+        (
+            TicketCaseState::ApprovalPending,
+            CoreState::AwaitingReview,
+            CoreEvent::RequestReview,
+        ),
+        (
+            TicketCaseState::AwaitingReview,
+            CoreState::AwaitingReview,
+            CoreEvent::RequestReview,
+        ),
+        (
+            TicketCaseState::ReworkRequired,
+            CoreState::ReworkRequired,
+            CoreEvent::RequireRework,
+        ),
+        (
+            TicketCaseState::AwaitingVerification,
+            CoreState::AwaitingVerification,
+            CoreEvent::Verify,
+        ),
+        (
+            TicketCaseState::Verified,
+            CoreState::Verified,
+            CoreEvent::Verify,
+        ),
+        (
+            TicketCaseState::WritebackPending,
+            CoreState::Verified,
+            CoreEvent::Verify,
+        ),
+        (TicketCaseState::Closed, CoreState::Closed, CoreEvent::Close),
+        (
+            TicketCaseState::Blocked,
+            CoreState::Blocked,
+            CoreEvent::Block,
+        ),
+        (
+            TicketCaseState::BlockedNeedsClarification,
+            CoreState::Blocked,
+            CoreEvent::Block,
+        ),
+    ] {
+        assert_eq!(
+            (state.core_state(), state.core_event()),
+            (expected_state, expected_event),
+            "case state {} must keep its core state/event pair",
+            state.as_str()
+        );
+    }
+}
+
+#[test]
+fn ticket_case_event_path_rejects_unknown_state_instead_of_creating_ticket() {
+    let error = cases::ticket_case_core_event("future_state")
+        .expect_err("unknown event-path state must not default to CreateTicket");
+    assert!(error.to_string().contains("future_state"));
+}
+
+#[test]
 fn ticket_terminal_magic_actor_and_reason_do_not_create_a_grant() -> Result<()> {
     let conn = Connection::open_in_memory()?;
     enforce_ticket_event_route_status_transition(
