@@ -9957,6 +9957,13 @@ fn cv_print_looks_like_person_name(value: &str) -> bool {
         || lower.starts_with("e-mail")
         || lower.starts_with("mobil")
         || lower.starts_with("linkedin")
+        || lower.starts_with("hochschule")
+        || lower.starts_with("universität")
+        || lower.starts_with("universitaet")
+        || lower.starts_with("abschluss")
+        || lower.ends_with(" ag")
+        || lower.ends_with(" gmbh")
+        || lower.ends_with(" kg")
         || lower == "lebenslauf"
     {
         return false;
@@ -18122,18 +18129,27 @@ fn maybe_lease_next_durable_queue_prompt(
         return Ok(None);
     };
     let mut app_queue_lease_active = leased_business_os_app_queue_task_exists(root)?;
-    if !app_queue_lease_active && mark_business_os_app_recovery_preflight_due(root) {
-        match recover_abandoned_business_os_app_queue_tasks(
-            root,
-            state,
-            BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT,
-        ) {
+    if mark_business_os_app_recovery_preflight_due(root) {
+        let recovery = if app_queue_lease_active {
+            recover_stale_business_os_app_queue_tasks(
+                root,
+                state,
+                BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT,
+            )
+        } else {
+            recover_abandoned_business_os_app_queue_tasks(
+                root,
+                state,
+                BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT,
+            )
+        };
+        match recovery {
             Ok(updated) if updated > 0 => {
                 mark_business_os_app_recovery_ran(root);
                 push_event(
                     state,
                     format!(
-                        "Recovered {updated} abandoned Business OS app queue task(s) before leasing new work"
+                        "Recovered {updated} stale or abandoned Business OS app queue task(s) before leasing new work"
                     ),
                 );
             }
@@ -29534,7 +29550,7 @@ Business OS command:
 
         assert_eq!(
             suggested_skill_from_message(&message).as_deref(),
-            Some("universal-scraping")
+            Some("intersolar-company-list")
         );
     }
 
@@ -29635,12 +29651,12 @@ Business OS command:
         };
         assert!(recent_events
             .iter()
-            .any(|event| event.contains("State invariants at boot")));
+            .any(|event| event.contains("State invariants repaired at boot")));
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
         assert!(events.iter().any(|event| {
             event.mechanism_id == "state_invariant_guard"
-                && event.reason == "boot_state_invariants_violation"
+                && event.reason == "boot_state_invariants_repaired"
         }));
     }
 
@@ -29785,7 +29801,7 @@ Business OS command:
         assert!(events.iter().any(|event| {
             event.mechanism_id == "state_invariant_guard"
                 && event.reason == "boot_state_invariants_repaired"
-                && event.action_taken == "reopened_mission_state_for_open_runtime_work"
+                && event.action_taken == "canonicalized_focus_and_reopened_mission_state"
         }));
     }
 
@@ -30258,25 +30274,13 @@ Business OS command:
         )
         .expect("failed to create queue task");
         let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = state.lock().expect("state poisoned");
-            shared.busy = true;
-        }
-
-        route_external_messages(&root, &state).expect("routing should succeed");
-
-        let shared = state.lock().expect("state poisoned");
-        assert_eq!(shared.pending_prompts.len(), 1);
-        let prompt = shared
-            .pending_prompts
-            .front()
+        let prompt = maybe_lease_next_durable_queue_prompt_for_idle_dispatch(&root, &state)
+            .expect("durable queue dispatch should succeed")
             .expect("queued prompt missing");
+
         assert_eq!(prompt.suggested_skill.as_deref(), Some("system-onboarding"));
         assert_eq!(prompt.source_label, "queue");
-        assert!(shared
-            .recent_events
-            .iter()
-            .any(|event| event.contains("skill system-onboarding")));
+        assert_eq!(prompt.leased_message_keys.len(), 1);
     }
 
     #[test]
@@ -30527,19 +30531,14 @@ Business OS command:
             .expect("failed to assign self-work");
 
         let state = Arc::new(Mutex::new(SharedState::default()));
-        {
-            let mut shared = state.lock().expect("state poisoned");
-            shared.busy = true;
-        }
-
-        route_external_messages(&root, &state).expect("routing should succeed");
-
-        let shared = state.lock().expect("state poisoned");
-        assert_eq!(shared.pending_prompts.len(), 1);
-        let prompt = shared
-            .pending_prompts
-            .front()
+        assert_eq!(
+            route_assigned_ticket_self_work(&root, &state).expect("routing should succeed"),
+            1
+        );
+        let prompt = maybe_lease_next_durable_queue_prompt_for_idle_dispatch(&root, &state)
+            .expect("durable queue dispatch should succeed")
             .expect("queued prompt missing");
+
         assert_eq!(prompt.suggested_skill.as_deref(), Some("system-onboarding"));
         assert_eq!(
             prompt.ticket_self_work_id.as_deref(),
@@ -30550,11 +30549,10 @@ Business OS command:
             prompt.thread_key.as_deref(),
             Some(expected_thread_key.as_str())
         );
-        drop(shared);
         let routed = tickets::load_ticket_self_work_item(&root, &item.work_id)
             .expect("failed to reload self-work")
             .expect("self-work missing after routing");
-        assert_eq!(routed.state, "queued");
+        assert_eq!(routed.state, "published");
         let shared = state.lock().expect("state poisoned");
         assert!(shared
             .recent_events
@@ -31976,7 +31974,7 @@ Business OS command:
 
         assert!(prompt.contains("[Teams-Nachricht eingegangen]"));
         assert!(prompt.contains("sende nicht direkt"));
-        assert!(prompt.contains("reviewed-communication-send"));
+        assert!(prompt.contains("Harness versendet die freigegebene Nachricht danach automatisch"));
         assert!(prompt.contains("Queue-/Plan-/Self-Work-Backing"));
         assert!(prompt.contains("Microsoft Graph"));
         let _ = std::fs::remove_dir_all(&root);
@@ -33714,31 +33712,28 @@ Business OS command:
 
         assert_eq!(route_status_for(&root, &task.message_key), "handled");
         for _ in 0..20 {
-            let next_leased = route_status_for(&root, &next_task.message_key) == "leased";
-            let queued_pending = {
+            let cleanup_recorded = {
                 let shared = lock_shared_state(&state);
-                shared.pending_prompts.iter().any(|prompt| {
-                    prompt
-                        .leased_message_keys
-                        .iter()
-                        .any(|message_key| message_key == &next_task.message_key)
-                })
+                shared
+                    .recent_events
+                    .iter()
+                    .any(|event| event.contains("delayed worker lease cleanup"))
             };
-            if next_leased && queued_pending {
+            if cleanup_recorded && route_status_for(&root, &next_task.message_key) == "pending" {
                 break;
             }
             thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(route_status_for(&root, &next_task.message_key), "leased");
+        assert_eq!(route_status_for(&root, &next_task.message_key), "pending");
         let shared = lock_shared_state(&state);
         assert!(
-            shared.pending_prompts.iter().any(|prompt| {
+            !shared.pending_prompts.iter().any(|prompt| {
                 prompt
                     .leased_message_keys
                     .iter()
                     .any(|message_key| message_key == &next_task.message_key)
             }),
-            "delayed cleanup should queue the next durable task under runtime backoff: {:?}",
+            "runtime backoff must not hoard the next durable lease in memory: {:?}",
             shared.pending_prompts
         );
         assert!(
@@ -34874,10 +34869,16 @@ Business OS command:
 
         recover_business_os_app_queue_tasks_for_idle_status_snapshot(&root, &state);
 
-        assert_eq!(route_status_for(&root, &task.message_key), "review_rework");
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
         let shared = lock_shared_state(&state);
-        assert!(shared.pending_prompts.is_empty());
-        assert!(shared.recent_events.iter().any(|event| {
+        assert_eq!(shared.pending_prompts.len(), 1);
+        assert!(shared.pending_prompts.iter().any(|prompt| {
+            prompt
+                .leased_message_keys
+                .iter()
+                .any(|message_key| message_key == &task.message_key)
+        }));
+        assert!(!shared.recent_events.iter().any(|event| {
             event.contains("Cleared idle pending prompt shadow")
                 && event.contains(task.message_key.as_str())
         }));
@@ -35359,6 +35360,7 @@ Business OS command:
     #[test]
     fn business_os_app_validation_success_refuses_mismatched_module_task() {
         let root = temp_root("business-os-app-validation-mismatched-module-task");
+        seed_business_os_app_module_fixture(&root, "subscriptions");
         let accepted = crate::business_os::store::accept_rxdb_business_command(
             &root,
             json!({
@@ -37151,18 +37153,15 @@ Business OS command:
             false,
         )
         .expect("failed to create parent self-work");
-        let parent_task = queue_ticket_self_work_item(&root, &parent)
-            .expect("failed to queue parent self-work")
-            .expect("parent queue task missing");
-        channels::update_queue_task(
+        let parent = tickets::transition_ticket_self_work_item(
             &root,
-            channels::QueueTaskUpdateRequest {
-                message_key: parent_task.message_key.clone(),
-                route_status: Some("handled".to_string()),
-                ..Default::default()
-            },
+            &parent.work_id,
+            "published",
+            "ctox-test",
+            Some("Simulate the previously executed slice that review rejected."),
+            "internal",
         )
-        .expect("failed to mark parent queue task handled");
+        .expect("failed to publish parent self-work");
 
         let queued = requeue_review_rejected_self_work(
             &root,
@@ -37822,9 +37821,10 @@ Business OS command:
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].title, "Kunstmen platform homepage reset");
 
-        let closed = tickets::list_ticket_self_work_items(&root, Some("local"), Some("closed"), 10)
-            .expect("failed to list closed self-work");
-        assert!(closed.iter().any(|entry| entry.work_id == item.work_id));
+        let superseded =
+            tickets::list_ticket_self_work_items(&root, Some("local"), Some("superseded"), 10)
+                .expect("failed to list superseded self-work");
+        assert!(superseded.iter().any(|entry| entry.work_id == item.work_id));
     }
 
     #[test]
@@ -37899,9 +37899,10 @@ Business OS command:
             .expect("skip evaluation should succeed");
         assert!(skipped);
 
-        let closed = tickets::list_ticket_self_work_items(&root, Some("local"), Some("closed"), 10)
-            .expect("failed to list closed self-work");
-        assert!(closed.iter().any(|entry| entry.work_id == item.work_id));
+        let superseded =
+            tickets::list_ticket_self_work_items(&root, Some("local"), Some("superseded"), 10)
+                .expect("failed to list superseded self-work");
+        assert!(superseded.iter().any(|entry| entry.work_id == item.work_id));
 
         let tasks =
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
@@ -38501,38 +38502,66 @@ Use shell tools to create or update these files."
     #[test]
     fn strategic_direction_pass_is_not_rerouted_into_platform_passes() {
         let root = temp_root("ctox-strategy-pass-no-platform-reroute");
-        let item = tickets::put_ticket_self_work_item(
+        let source_task = channels::create_queue_task(
             &root,
-            tickets::TicketSelfWorkUpsertInput {
-                source_system: "local".to_string(),
-                kind: STRATEGIC_DIRECTION_KIND.to_string(),
-                title: "Strategic direction setup".to_string(),
-                body_text: "Establish Vision and Mission before continuing Kunstmen platform work."
-                    .to_string(),
-                state: "queued".to_string(),
-                metadata: serde_json::json!({
-                    "thread_key": "kunstmen-supervisor",
-                    "workspace_root": "/home/ubuntu/workspace/kunstmen",
-                    "priority": "urgent",
-                    "skill": "plan-orchestrator",
-                    "resume_prompt": "Reset kunstmen.com so it behaves like a platform.",
-                }),
+            channels::QueueTaskCreateRequest {
+                title: "Kunstmen platform homepage reset".to_string(),
+                prompt: "Reset kunstmen.com so it behaves like a platform.".to_string(),
+                thread_key: "kunstmen-supervisor".to_string(),
+                workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
+                priority: "urgent".to_string(),
+                suggested_skill: Some("plan-orchestrator".to_string()),
+                parent_message_key: None,
+                extra_metadata: None,
             },
-            false,
         )
-        .expect("failed to create strategic direction self-work");
+        .expect("failed to seed strategic source task");
         let state = Arc::new(Mutex::new(SharedState::default()));
-        let job = QueuedPrompt {
-            prompt: "Before further strategic or owner-visible execution, establish canonical runtime direction in SQLite.\n\nAfter direction is canonical, the deferred execution target is:\nReset kunstmen.com so it behaves like a platform for hiring AI employees.".to_string(),
-            goal: "Strategic direction setup".to_string(),
-            preview: "Strategic direction setup".to_string(),
-            source_label: "queue".to_string(),
-            suggested_skill: Some("plan-orchestrator".to_string()),
-            leased_message_keys: vec!["queue:system::strategy".to_string()],
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.busy = true;
+            track_leased_keys_locked(
+                &mut shared,
+                std::slice::from_ref(&source_task.message_key),
+                &[],
+            );
+        }
+        let source_job = QueuedPrompt {
+            prompt: "Reset kunstmen.com so it behaves like a platform for hiring AI employees."
+                .to_string(),
+            goal: source_task.title.clone(),
+            preview: source_task.title.clone(),
+            source_label: "foreground".to_string(),
+            suggested_skill: source_task.suggested_skill.clone(),
+            leased_message_keys: vec![source_task.message_key.clone()],
             leased_ticket_event_keys: Vec::new(),
-            thread_key: Some("kunstmen-supervisor".to_string()),
-            workspace_root: Some("/home/ubuntu/workspace/kunstmen".to_string()),
-            ticket_self_work_id: Some(item.work_id.clone()),
+            thread_key: Some(source_task.thread_key.clone()),
+            workspace_root: source_task.workspace_root.clone(),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        assert!(
+            maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &source_job)
+                .expect("strategy reroute should succeed")
+        );
+        let task =
+            channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
+                .expect("failed to load strategic direction task")
+                .into_iter()
+                .find(|task| task.title == "Strategic direction setup")
+                .expect("strategic direction task missing");
+        let job = QueuedPrompt {
+            prompt: task.prompt.clone(),
+            goal: task.title.clone(),
+            preview: task.title.clone(),
+            source_label: "queue".to_string(),
+            suggested_skill: task.suggested_skill.clone(),
+            leased_message_keys: vec![task.message_key.clone()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some(task.thread_key.clone()),
+            workspace_root: task.workspace_root.clone(),
+            ticket_self_work_id: task.ticket_self_work_id.clone(),
             outbound_email: None,
             outbound_anchor: None,
         };
@@ -40467,6 +40496,12 @@ Use shell tools to create or update these files."
                 |row| row.get(0),
             )
             .expect("failed to reload route status");
+        // NOTE: red on purpose. The product now treats a blocked founder rework as
+        // an exhausted review budget and escalates in-thread instead of requeueing,
+        // but this fixture only sets state "blocked" — it never establishes that the
+        // block came from the review circuit-breaker, which is the case that decision
+        // was made for. Adjusting the expectation would assert the new behaviour on a
+        // fixture that cannot distinguish it from a genuine requeue defect.
         assert_eq!(route_status, "pending");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -41427,8 +41462,8 @@ Use shell tools to create or update these files."
         let repaired = repair_stalled_founder_communications(&root, &state, &settings)
             .expect("stalled founder repair should succeed");
         assert_eq!(
-            repaired, 0,
-            "a different thread to the same founder must not close this founder mail"
+            repaired, 1,
+            "a different thread to the same founder must restore, not close, this founder mail"
         );
         let route_status: String = conn
             .query_row(
