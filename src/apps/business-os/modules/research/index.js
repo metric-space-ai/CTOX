@@ -1423,7 +1423,13 @@ async function loadDashboardData() {
   state.candidateModels = buildSourceModels(task, candidateRows, [], []);
   state.sourceModels = buildSourceModels(task, sourceRows, curatedRows, measurementRows, evidenceRows);
   const evidenceMeasurementRows = filterMeasurementRowsForEvidence(measurementRows, state.sourceModels);
-  const evidenceGraphRows = filterGraphRowsForEvidence(graphNodeRows, graphEdgeRows, evidenceSourceIds(state.sourceModels));
+  state.sourceCatalogComplete = sourceCatalogRowsComplete(sourceTable, sourceRows);
+  const evidenceGraphRows = filterGraphRowsForEvidence(
+    graphNodeRows,
+    graphEdgeRows,
+    evidenceSourceIds(state.sourceModels),
+    state.sourceCatalogComplete,
+  );
   state.graphContractStatus = evidenceGraphRows.status || '';
   state.graphContractErrors = evidenceGraphRows.errors || [];
   state.graphProjection = buildResearchGraphProjection({
@@ -1707,8 +1713,22 @@ function filterMeasurementRowsForEvidence(rows, sourceModels = state.sourceModel
   });
 }
 
-function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds) {
+function sourceCatalogRowsComplete(sourceTable, sourceRows) {
+  if (!sourceTable) return true;
+  const payload = sourceTable.payload && typeof sourceTable.payload === 'object' ? sourceTable.payload : {};
+  if ((payload.rows_complete ?? sourceTable.rows_complete) === false) return false;
+  const expected = Number(payload.row_count ?? sourceTable.row_count ?? 0);
+  if (!Number.isFinite(expected) || expected <= 0) return true;
+  return (sourceRows || []).length >= Math.min(expected, ROW_LIMIT);
+}
+
+function filterGraphRowsForEvidence(nodeRows, edgeRows, eligibleIds, sourcesComplete = true) {
   if (!(nodeRows || []).length && !(edgeRows || []).length) return { nodes: [], edges: [], status: '', errors: [] };
+  // The contract can only be judged once the source catalogue is fully loaded.
+  // While chunks are still arriving, every not-yet-known source id looks like a
+  // violation — that turned a normal loading window into a permanent
+  // `invalid_graph_contract` panel even though the stored graph was intact.
+  if (!sourcesComplete) return { nodes: [], edges: [], status: 'pending_sources', errors: [] };
   const errors = [];
   const nodes = (nodeRows || []).map((row) => {
     const nodeId = firstString(row, ['node_id', 'id', 'concept_id', 'key']);
@@ -2440,7 +2460,12 @@ function formatGraphProvenance(value) {
 }
 
 function currentGraphProjection(task = selectedTask()) {
-  const evidenceGraphRows = filterGraphRowsForEvidence(state.graphNodeRows, state.graphEdgeRows, evidenceSourceIds(state.sourceModels));
+  const evidenceGraphRows = filterGraphRowsForEvidence(
+    state.graphNodeRows,
+    state.graphEdgeRows,
+    evidenceSourceIds(state.sourceModels),
+    state.sourceCatalogComplete !== false,
+  );
   const key = graphProjectionFingerprint(task, evidenceGraphRows, state.graph.layer, state.sourceModels, state.measurementRows);
   const cached = state.graphProjectionCache.get(key);
   const baseProjection = cached || enrichGraphSemanticMetadata(buildResearchGraphProjection({
@@ -2546,7 +2571,9 @@ async function scheduleResearchGraphMount(task, projection) {
   const token = ++state.graphMountToken;
   const loading = root.querySelector('[data-research-graph-loading]');
   if (!projection.nodes.length) {
-    if (loading) loading.innerHTML = projection.status === 'invalid_graph_contract'
+    if (loading) loading.innerHTML = projection.status === 'pending_sources'
+      ? `<span class="research-spinner" aria-hidden="true"></span><span>${escapeHtml(state.t('graphAwaitingSources', 'Quellen werden geladen — der Graph erscheint, sobald der Quellenkatalog vollständig ist.'))}</span>`
+      : projection.status === 'invalid_graph_contract'
       ? '<strong>invalid_graph_contract</strong><span>Persistierte Graphdaten erfüllen den Evidence-/Provenienzvertrag nicht.</span>'
       : `<span>${escapeHtml(state.t('graphNoData', 'Noch keine Begriffe. Starte eine Nachrecherche oder füge Quellen hinzu.'))}</span>`;
     return;
@@ -5230,17 +5257,26 @@ function latestRunForTask(taskId) {
 function researchRunInfo(task) {
   const run = latestRunForTask(task?.id);
   const fallbackCommand = latestResearchCommandForTask(task?.id);
-  const commandId = run?.command_id || run?.payload?.result?.command_id || fallbackCommand?.command_id || fallbackCommand?.id || '';
-  const taskQueueId = run?.task_queue_id || run?.payload?.result?.task_id || '';
+  // A run row only records that a run was requested; the command and the queue
+  // task carry its outcome. A run whose command already finished — or that is
+  // older than the newest command for this task — describes a past attempt.
+  // Treating its `queued` as live state left "Research fortsetzen" permanently
+  // disabled with "läuft bereits" while nothing was running at all.
+  const runStale = Boolean(fallbackCommand)
+    && Number(fallbackCommand.updated_at_ms || 0) > Number(run?.updated_at_ms || 0);
+  const commandId = (runStale ? '' : (run?.command_id || run?.payload?.result?.command_id || ''))
+    || fallbackCommand?.command_id || fallbackCommand?.id || '';
+  const taskQueueId = runStale ? '' : (run?.task_queue_id || run?.payload?.result?.task_id || '');
   const command = commandId
-    ? state.commands.find((item) => item.command_id === commandId || item.id === commandId)
+    ? (state.commands.find((item) => item.command_id === commandId || item.id === commandId) || fallbackCommand)
     : fallbackCommand;
   const queueTask = taskQueueId
     ? state.queueTasks.find((item) => item.id === taskQueueId)
     : commandId
       ? state.queueTasks.find((item) => item.command_id === commandId)
       : null;
-  const status = queueTask?.status || command?.task_status || command?.status || run?.status || '';
+  const runStatus = runStale ? '' : (run?.status || '');
+  const status = queueTask?.status || command?.task_status || command?.status || runStatus || '';
   const statusKind = statusKindFor(status);
   return {
     run,

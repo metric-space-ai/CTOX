@@ -982,3 +982,31 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.match(css, /\.research-ai-prompt-pre/);
   assert.match(css, /@keyframes research-spin/);
 });
+
+test('a stale research run never keeps the continue action disabled', () => {
+  // Production defect: the newest command had already failed while an older
+  // research_run row still said "queued". runInfo fell back to the run status,
+  // so "Research fortsetzen" stayed disabled with "läuft bereits" forever.
+  assert.match(researchSource, /const runStale = Boolean\(fallbackCommand\)[\s\S]*?updated_at_ms \|\| 0\) > Number\(run\?\.updated_at_ms \|\| 0\)/);
+  assert.match(researchSource, /const runStatus = runStale \? '' : \(run\?\.status \|\| ''\)/);
+  assert.match(researchSource, /const status = queueTask\?\.status \|\| command\?\.task_status \|\| command\?\.status \|\| runStatus \|\| ''/);
+});
+
+test('graph contract is only judged once the source catalogue is fully loaded', () => {
+  // Production defect: while source chunks were still arriving, every unknown
+  // source id read as a contract violation and the graph was replaced by a
+  // permanent `invalid_graph_contract` panel — although the stored graph was
+  // fully consistent (178 nodes / 62 edges, every source id resolvable).
+  const nodes = [{ node_id: 'n1', source_ids_json: JSON.stringify(['SRC-0001']) }];
+  const edges = [{ edge_id: 'e1', source_id: 'n1', target_id: 'n1', source_ids_json: JSON.stringify(['SRC-0001']) }];
+  const incomplete = hooks.filterGraphRowsForEvidence(nodes, edges, new Set(), false);
+  assert.equal(incomplete.status, 'pending_sources');
+  assert.deepEqual(incomplete.errors, []);
+
+  const complete = hooks.filterGraphRowsForEvidence(nodes, edges, new Set(['SRC-0001']), true);
+  assert.equal(complete.status, '');
+  assert.equal(complete.nodes.length, 1);
+
+  const violated = hooks.filterGraphRowsForEvidence(nodes, edges, new Set(['SRC-9999']), true);
+  assert.equal(violated.status, 'invalid_graph_contract');
+});

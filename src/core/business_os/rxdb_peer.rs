@@ -7712,6 +7712,7 @@ async fn sync_knowledge_catalog_with_database(
         .unwrap_or_default()
         .into_iter()
         .filter(|document| document.get("kind").and_then(Value::as_str) != Some("dataframe"))
+        .filter(|document| retain_projectable_knowledge_item(document))
         .collect::<Vec<_>>();
     let runbook_documents = payload
         .get("runbooks")
@@ -7725,6 +7726,31 @@ async fn sync_knowledge_catalog_with_database(
     count += sync_knowledge_catalog_collection(database, "knowledge_runbooks", runbook_documents)
         .await?;
     Ok(count)
+}
+
+/// A projected knowledge document travels to the browser as one query-fetch
+/// document. A document larger than the wire chunk budget can never be framed,
+/// and the browser's initial replication for the whole collection then stalls
+/// silently — `initialReplicationAt` stays null, no error is raised, and every
+/// other item in that collection (skillbooks, runbooks, customer sources)
+/// becomes invisible. Such documents are dropped from the projection and
+/// tombstoned by the caller's reconcile pass, so one oversized entry can no
+/// longer take the collection down with it.
+fn retain_projectable_knowledge_item(document: &Value) -> bool {
+    const MAX_PROJECTED_DOCUMENT_BYTES: usize = 262_144;
+    let bytes = serde_json::to_vec(document).map(|raw| raw.len()).unwrap_or(0);
+    if bytes <= MAX_PROJECTED_DOCUMENT_BYTES {
+        return true;
+    }
+    let id = document
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    let title = document.get("title").and_then(Value::as_str).unwrap_or("");
+    eprintln!(
+        "[business-os] skipping oversized knowledge item {id} ({title}): {bytes} bytes exceeds the {MAX_PROJECTED_DOCUMENT_BYTES} byte wire budget; it would stall replication for the whole collection"
+    );
+    false
 }
 
 async fn sync_knowledge_catalog_collection(
