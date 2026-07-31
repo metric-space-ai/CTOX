@@ -188,29 +188,42 @@ export function initBusinessChat({
     chat.contextMeta = chatContextMetaFromDetail(detail);
     focusChatForUser(state, chat);
     chat.draft = '';
-    const submission = await submitChatMessage({
-      state,
-      chat,
-      text,
-      commandBus,
-      db,
-      sync: syncFacade,
-      getActiveModule,
-      meta: detail,
-      onPending: () => {
-        persistChatState({ state, db, remote: false }).catch(() => {});
-        renderChatRoot({ root, state, commandBus, db, getActiveModule });
-      },
-    });
-    await persistChatState({ state, db });
-    renderChatRoot({ root, state, commandBus, db, getActiveModule });
-    syncAfterSubmit();
-    if (submission) detail.resolveSubmission?.(submission);
-    else detail.rejectSubmission?.(new Error('CTOX konnte den Task nicht an die Queue übergeben.'));
+    try {
+      const submission = await submitChatMessage({
+        state,
+        chat,
+        text,
+        commandBus,
+        db,
+        sync: syncFacade,
+        getActiveModule,
+        meta: detail,
+        onPending: () => {
+          persistChatState({ state, db, remote: false }).catch(() => {});
+          renderChatRoot({ root, state, commandBus, db, getActiveModule });
+        },
+      });
+      if (!submission) {
+        throw new Error('CTOX konnte den Task nicht an die Queue übergeben.');
+      }
+
+      // Queue acceptance is the app-facing contract. Remote chat persistence
+      // must not keep the originating workflow in a false pending state.
+      detail.resolveSubmission?.(submission);
+      await persistChatState({ state, db });
+      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      syncAfterSubmit();
+    } catch (error) {
+      detail.rejectSubmission?.(
+        error instanceof Error ? error : new Error(String(error || 'Task konnte nicht übergeben werden.')),
+      );
+      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+    }
   };
 
   const handleExternalOpen = async (event) => {
     const detail = event.detail || {};
+    await hydrateChatsFromRxDb({ state, db, session }).catch(() => false);
     state.selectedDate = getLocalDateString(Date.now());
     const chat = resolveChatForOpenDetail(state, session, detail);
     chat.title = String(detail.title || chat.title || 'CTOX').trim() || 'CTOX';
@@ -236,6 +249,7 @@ export function initBusinessChat({
     }
     state.preCollapseExpandedChatIds = [];
     touchChats(state, [chat]);
+    renderChatRoot({ root, state, commandBus, db, getActiveModule });
     await persistChatState({ state, db });
     renderChatRoot({ root, state, commandBus, db, getActiveModule });
   };
@@ -848,8 +862,14 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
             ? chatMessagesMarkup(chat.messages)
             : '<div class="ctox-chat-empty">CTOX Aufgabe eingeben.</div>')).trim();
         if (messagesContainer.innerHTML.trim() !== expectedHtml) {
+          // Only follow new messages when the reader was already at the bottom.
+          // Scrolling up is an explicit intent to read history; a running task
+          // that keeps appending messages must not yank the view back down.
+          const wasPinnedToBottom = isScrolledToBottom(messagesContainer);
+          const previousScrollTop = messagesContainer.scrollTop;
           messagesContainer.innerHTML = expectedHtml;
-          messagesContainer.scrollTop = messagesContainer.scrollHeight;
+          if (wasPinnedToBottom) messagesContainer.scrollTop = messagesContainer.scrollHeight;
+          else messagesContainer.scrollTop = previousScrollTop;
         }
       }
 
@@ -2336,16 +2356,31 @@ function shouldDeferRemoteChatHydration(root, state) {
   return !needsTrackingSync && lastMutation > 0 && Date.now() - lastMutation < 2500;
 }
 
+// A reader who has scrolled up is reading; only a view already resting at the
+// bottom should follow new messages. The threshold absorbs sub-pixel rounding
+// and the last rendered line's descent, so "close enough to the bottom" still
+// counts as following.
+const CHAT_BOTTOM_PIN_THRESHOLD_PX = 24;
+
+function isScrolledToBottom(container) {
+  if (!container) return true;
+  const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+  return distanceFromBottom <= CHAT_BOTTOM_PIN_THRESHOLD_PX;
+}
+
 function scrollActiveChatIntoView(root, state) {
   const activeChip = Array.from(root.querySelectorAll('[data-chat-focus]'))
     .find((node) => node.dataset.chatFocus === state.activeChatId);
   activeChip?.scrollIntoView?.({ inline: 'center', block: 'nearest', behavior: 'smooth' });
   updateChatStripOverflowState(root);
-  
-  // Auto-scroll messages list to bottom for all open/expanded windows
+
+  // Follow new messages only in windows the reader left at the bottom. This ran
+  // unconditionally over EVERY open window before, so scrolling up in one chat
+  // was undone on the next render — including renders caused by an unrelated
+  // chat receiving a message.
   root.querySelectorAll('[data-chat-id]:not(.is-minimized)').forEach((node) => {
     const messagesContainer = node.querySelector('.ctox-chat-messages');
-    if (messagesContainer) {
+    if (messagesContainer && isScrolledToBottom(messagesContainer)) {
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
   });
@@ -2411,6 +2446,10 @@ function messageMarkup(message) {
       ${tracking || meta ? `<footer>${tracking}${meta ? `<span>${escapeHtml(meta)}</span>` : ''}</footer>` : ''}
     </article>
   `;
+}
+
+function chatMessagesMarkup(messages = []) {
+  return messages.map((message) => messageMarkup(message)).join('');
 }
 
 async function submitChatMessage({
@@ -2535,6 +2574,9 @@ async function submitChatMessage({
         } : {}),
       },
     };
+    if (!declaredControlCommand) {
+      await flushChatTrackingCollections({ sync, db });
+    }
     const result = await commandBus.dispatch(command, declaredControlCommand ? { until: 'local' } : {});
     const acceptedCommandId = result.command_id || commandId;
     const controlCommand = declaredControlCommand
@@ -2865,7 +2907,7 @@ function canonicalTrackingStatus(status) {
   const value = String(status || '').trim().toLowerCase();
   if (value === 'handled' || value === 'success' || value === 'done' || value === 'passed') return 'completed';
   if (value === 'leased' || value === 'processing' || value === 'executing' || value === 'active') return 'running';
-  if (value === 'waiting' || value === 'pending_sync' || value === 'pending') return 'queued';
+  if (['waiting', 'pending_sync', 'pending', 'retry_wait', 'retry-wait', 'review_rework', 'review-rework'].includes(value)) return 'queued';
   return value;
 }
 
@@ -2899,7 +2941,7 @@ function isFailureStatus(status) {
 }
 
 function isActiveTrackingStatus(status) {
-  return ['accepted', 'queued', 'pending', 'pending_sync', 'waiting', 'running', 'processing', 'executing', 'active'].includes(String(status || '').toLowerCase());
+  return ['accepted', 'queued', 'pending', 'pending_sync', 'waiting', 'retry_wait', 'retry-wait', 'review_rework', 'review-rework', 'running', 'processing', 'executing', 'active'].includes(String(status || '').toLowerCase());
 }
 
 function trackingMessageAgeMs(message) {

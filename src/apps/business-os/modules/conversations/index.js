@@ -1337,7 +1337,11 @@ export async function mount(ctx) {
       .find((node) => node.dataset.messageKey === view.highlightedMessageKey);
     if (highlighted) {
       highlighted.scrollIntoView({ block: 'center' });
-    } else {
+    } else if (
+      refs.timeline.scrollHeight - refs.timeline.scrollTop - refs.timeline.clientHeight <= 24
+    ) {
+      // Jump to the newest message only when the reader was already at the
+      // bottom; otherwise their position in the history is preserved.
       refs.timeline.scrollTop = refs.timeline.scrollHeight;
     }
   }

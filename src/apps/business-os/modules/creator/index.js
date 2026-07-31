@@ -979,8 +979,11 @@ function addConsoleLog(text, type = '') {
   const el = document.createElement('div');
   el.className = `console-log-entry ${type}`;
   el.textContent = text;
+  // Follow the log only while the reader is at the bottom. Scrolling up to read
+  // an earlier line is an explicit intent that a new entry must not override.
+  const wasAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight <= 24;
   container.appendChild(el);
-  container.scrollTop = container.scrollHeight;
+  if (wasAtBottom) container.scrollTop = container.scrollHeight;
 }
 
 export function buildAppCreateCommand({
