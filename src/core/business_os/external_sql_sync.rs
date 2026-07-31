@@ -50,6 +50,8 @@ struct ExternalSqlSourceConfig {
     enabled: bool,
     #[serde(default)]
     display_name: String,
+    #[serde(default)]
+    allowed_modules: Vec<String>,
     connection: ExternalSqlConnectionConfig,
     #[serde(default = "default_sync_interval_seconds")]
     sync_interval_seconds: u64,
@@ -369,20 +371,35 @@ pub(crate) fn projection_collection_is_server_owned(root: &Path, collection: &st
     }
 }
 
+fn resolve_source_for_module(
+    sources: Vec<ExternalSqlSourceConfig>,
+    module: &str,
+    source_id: &str,
+) -> anyhow::Result<ExternalSqlSourceConfig> {
+    sources
+        .into_iter()
+        .find(|source| {
+            source.id == source_id
+                && (source.module_id == module
+                    || source
+                        .allowed_modules
+                        .iter()
+                        .any(|allowed_module| allowed_module == module))
+        })
+        .with_context(|| {
+            format!(
+                "external SQL source `{source_id}` is not registered for local module `{module}`"
+            )
+        })
+}
+
 pub(crate) fn handle_business_command(
     root: &Path,
     command: &BusinessCommand,
 ) -> anyhow::Result<Value> {
     let source_id = required_string(&command.payload, "source_id")?;
-    let source = load_source_configs(root)?
-        .into_iter()
-        .find(|source| source.module_id == command.module && source.id == source_id)
-        .with_context(|| {
-            format!(
-                "external SQL source `{source_id}` is not registered for local module `{}`",
-                command.module
-            )
-        })?;
+    let source =
+        resolve_source_for_module(load_source_configs(root)?, &command.module, &source_id)?;
     validate_source(&source)?;
     let source_key = format!("{}:{}", source.module_id, source.id);
     let _lease = SourceLease::acquire(source_key)?;
@@ -2157,6 +2174,60 @@ mod tests {
             "projections":[{"id":"items","collection":"inventory_items","record_id_field":"item_id","query":"SELECT item_id,name FROM dbo.items ORDER BY item_id OFFSET @P1 ROWS FETCH NEXT @P2 ROWS ONLY"}],
             "write_operations":[{"id":"item_update","statements":[{"sql":"UPDATE dbo.items SET name=@P1 WHERE item_id=@P2","parameters":[{"path":"values.name","type":"string"},{"path":"item_id","type":"i64"}]}]}]
         })).expect("source config")
+    }
+
+    #[test]
+    fn owner_module_still_resolves_its_own_source() {
+        let mut source = source();
+        source.allowed_modules = vec!["outbound".into()];
+
+        let resolved = resolve_source_for_module(vec![source], "inventory", "erp-primary")
+            .expect("owner source");
+
+        assert_eq!(resolved.module_id, "inventory");
+        assert_eq!(resolved.id, "erp-primary");
+    }
+
+    #[test]
+    fn allowed_module_resolves_shared_source() {
+        let mut source = source();
+        source.allowed_modules = vec!["thesen-outbound".into()];
+
+        let resolved = resolve_source_for_module(vec![source], "thesen-outbound", "erp-primary")
+            .expect("shared source");
+
+        assert_eq!(resolved.module_id, "inventory");
+        assert_eq!(resolved.id, "erp-primary");
+    }
+
+    #[test]
+    fn module_not_in_share_list_is_rejected_with_existing_error() {
+        let mut source = source();
+        source.allowed_modules = vec!["thesen-outbound".into()];
+
+        let error = resolve_source_for_module(vec![source], "other-outbound", "erp-primary")
+            .expect_err("unlisted module must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "external SQL source `erp-primary` is not registered for local module `other-outbound`"
+        );
+    }
+
+    #[test]
+    fn source_config_without_allowed_modules_defaults_to_owner_only() {
+        let source = source();
+        assert!(source.allowed_modules.is_empty());
+        assert!(
+            resolve_source_for_module(vec![source.clone()], "inventory", "erp-primary").is_ok()
+        );
+
+        let error = resolve_source_for_module(vec![source], "thesen-outbound", "erp-primary")
+            .expect_err("missing allow-list must preserve owner-only behavior");
+        assert_eq!(
+            error.to_string(),
+            "external SQL source `erp-primary` is not registered for local module `thesen-outbound`"
+        );
     }
 
     #[test]
