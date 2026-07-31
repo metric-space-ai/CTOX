@@ -29668,6 +29668,21 @@ Business OS command:
             )
             .unwrap();
 
+        // Simulate the partial commit this test is named for: the continuity
+        // commit landed, the mission row's pointer to it did not. The write
+        // path itself can no longer leave that gap — it persists structured
+        // state and renders in one transaction — so the condition is injected
+        // directly, which is also a truer model of a crash between the two
+        // writes than relying on a write-path side effect ever was.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE mission_states SET focus_head_commit_id = ?1 WHERE conversation_id = ?2",
+                rusqlite::params!["stale-partial-commit-head", turn_loop::CHAT_CONVERSATION_ID],
+            )
+            .unwrap();
+        }
+
         let state = Arc::new(Mutex::new(SharedState::default()));
         run_boot_state_invariant_check(&root, &state);
 
@@ -29925,13 +29940,24 @@ Business OS command:
             .content
             .contains("- Continuation mode: continuous"));
 
+        // The mission is reopened because durable work is open. The action no
+        // longer mentions canonicalizing the focus: the structured write path
+        // renders it canonical when it is written, so there is nothing left
+        // for the guard to canonicalize.
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(events.iter().any(|event| {
-            event.mechanism_id == "state_invariant_guard"
-                && event.reason == "turn_state_invariants_repaired"
-                && event.action_taken == "canonicalized_focus_and_reopened_mission_state"
-        }));
+        assert!(
+            events.iter().any(|event| {
+                event.mechanism_id == "state_invariant_guard"
+                    && event.reason == "turn_state_invariants_repaired"
+                    && event.action_taken == "reopened_mission_state_for_open_runtime_work"
+            }),
+            "expected a reopen repair event, got {:?}",
+            events
+                .iter()
+                .map(|event| (&event.reason, &event.action_taken))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -29957,6 +29983,20 @@ Business OS command:
                 "## Status\n+ Mission: Keep the newest focus head authoritative after turn-end repair.\n+ Trigger intensity: hot.\n## Blocker\n+ Current blocker: the mission cache may still be partially committed to the old head.\n## Next\n+ Next slice: verify the newest head is now the live truth.\n## Done / Gate\n+ Done gate: canonicalize the newest focus head and leave one bounded continuation open.\n",
             )
             .unwrap();
+
+        // Simulate the partial commit: the continuity commit landed, the
+        // mission row's pointer to it did not. The write path can no longer
+        // leave that gap (structured persist and render share one
+        // transaction), so inject the condition directly — a truer model of a
+        // crash between the two writes than a write-path side effect.
+        {
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            conn.execute(
+                "UPDATE mission_states SET focus_head_commit_id = ?1 WHERE conversation_id = ?2",
+                rusqlite::params!["stale-partial-commit-head", turn_loop::CHAT_CONVERSATION_ID],
+            )
+            .unwrap();
+        }
 
         let state = Arc::new(Mutex::new(SharedState::default()));
         let repaired =
@@ -29984,11 +30024,21 @@ Business OS command:
 
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(events.iter().any(|event| {
-            event.mechanism_id == "state_invariant_guard"
-                && event.reason == "turn_state_invariants_repaired"
-                && event.action_taken == "canonicalized_focus_and_resynced_mission_state"
-        }));
+        // The guard resyncs the stale pointer. It no longer reports a focus
+        // canonicalization, because the focus text was already canonical when
+        // it was written — that is the point of the structured write path.
+        assert!(
+            events.iter().any(|event| {
+                event.mechanism_id == "state_invariant_guard"
+                    && event.reason == "turn_state_invariants_repaired"
+                    && event.action_taken == "resynced_mission_state_from_continuity"
+            }),
+            "expected a resync repair event, got {:?}",
+            events
+                .iter()
+                .map(|event| (&event.reason, &event.action_taken))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

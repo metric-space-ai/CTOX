@@ -2,16 +2,17 @@ mod mission_state;
 pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 #[cfg(test)]
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
+use mission_state::{
+    apply_canonical_focus_diff_to_mission_state, import_legacy_mission_state,
+    load_mission_state_with, load_mission_states_with, map_mission_claim_row,
+    map_strategic_directive_row, map_verification_run_row, persist_mission_state_with,
+    render_focus_continuity_from_record, OwnerIntentClearGuard,
+};
 pub use mission_state::{
     count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
     ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
 };
 use mission_state::{focus_semantic_conflicts_local, normalize_mission_text};
-use mission_state::{
-    import_legacy_mission_state, load_mission_state_with, load_mission_states_with,
-    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
-    persist_mission_state_with, render_focus_continuity_from_record, OwnerIntentClearGuard,
-};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -1714,10 +1715,23 @@ impl LcmEngine {
         let mut continuity = load_or_init_continuity_show_all(&tx, conversation_id)?;
         if kind == ContinuityKind::Focus {
             let (record, imported) = load_or_import_mission_state_with(&tx, &continuity)?;
+            let record = if imported {
+                record
+            } else {
+                let updated = apply_canonical_focus_diff_to_mission_state(
+                    &record,
+                    &continuity.focus.content,
+                    &normalized_diff,
+                    &continuity.focus.head_commit_id,
+                )?;
+                persist_mission_state_with(&tx, &updated)?;
+                load_mission_state_with(&tx, conversation_id)?
+                    .context("mission state missing after applying canonical focus fields")?
+            };
             let reason = if imported {
                 "Imported the legacy focus document once and rendered typed mission state."
             } else {
-                "Rendered focus continuity from typed mission state after a focus diff."
+                "Applied canonical focus fields to typed mission state and rendered them."
             };
             let _ = render_focus_continuity_with(&tx, &mut continuity, &record, reason)?;
         }

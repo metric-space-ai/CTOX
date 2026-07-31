@@ -546,6 +546,201 @@ fn continuity_apply_diff_updates_mission_state_to_new_focus_head() -> Result<()>
 }
 
 #[test]
+fn focus_diff_mission_only_updates_mission_and_preserves_other_structured_fields() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let continuity = engine.continuity_init_documents(58)?;
+    let baseline = MissionStateRecord {
+        conversation_id: 58,
+        mission: "Keep the original mission.".to_string(),
+        mission_status: "blocked".to_string(),
+        continuation_mode: "maintenance".to_string(),
+        trigger_intensity: "warm".to_string(),
+        blocker: "Waiting for the writeback fix.".to_string(),
+        next_slice: "Apply a mission-only focus diff.".to_string(),
+        done_gate: "All untouched fields survive the partial update.".to_string(),
+        closure_confidence: "medium".to_string(),
+        is_open: true,
+        allow_idle: false,
+        focus_head_commit_id: continuity.focus.head_commit_id,
+        last_synced_at: iso_now(),
+        watcher_last_triggered_at: Some("2026-07-31T09:00:00Z".to_string()),
+        watcher_trigger_count: 4,
+        agent_failure_count: 2,
+        deferred_reason: Some("prior retry boundary".to_string()),
+        rewrite_failure_count: 1,
+    };
+    engine.overwrite_mission_state(&baseline)?;
+    let before = engine
+        .stored_mission_state(58)?
+        .context("baseline mission state missing")?;
+
+    let focus = engine.continuity_apply_diff(
+        58,
+        ContinuityKind::Focus,
+        "## Status\n+ Mission: Keep the mission-only writeback authoritative.\n",
+    )?;
+    let after = engine
+        .stored_mission_state(58)?
+        .context("updated mission state missing")?;
+
+    assert_eq!(
+        after.mission,
+        "Keep the mission-only writeback authoritative."
+    );
+    assert_eq!(after.mission_status, before.mission_status);
+    assert_eq!(after.continuation_mode, before.continuation_mode);
+    assert_eq!(after.trigger_intensity, before.trigger_intensity);
+    assert_eq!(after.blocker, before.blocker);
+    assert_eq!(after.next_slice, before.next_slice);
+    assert_eq!(after.done_gate, before.done_gate);
+    assert_eq!(after.closure_confidence, before.closure_confidence);
+    assert_eq!(after.is_open, before.is_open);
+    assert_eq!(after.allow_idle, before.allow_idle);
+    assert_eq!(
+        after.watcher_last_triggered_at,
+        before.watcher_last_triggered_at
+    );
+    assert_eq!(after.watcher_trigger_count, before.watcher_trigger_count);
+    assert_eq!(after.agent_failure_count, before.agent_failure_count);
+    assert_eq!(after.deferred_reason, before.deferred_reason);
+    assert_eq!(after.rewrite_failure_count, before.rewrite_failure_count);
+    assert_eq!(after.focus_head_commit_id, focus.head_commit_id);
+
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn consecutive_focus_diffs_persist_the_second_mission_value() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let continuity = engine.continuity_init_documents(59)?;
+    engine.overwrite_mission_state(&MissionStateRecord {
+        conversation_id: 59,
+        mission: "Mission before either diff.".to_string(),
+        mission_status: "active".to_string(),
+        continuation_mode: "continuous".to_string(),
+        trigger_intensity: "hot".to_string(),
+        blocker: String::new(),
+        next_slice: "Apply both focus diffs.".to_string(),
+        done_gate: "The second value is canonical.".to_string(),
+        closure_confidence: "low".to_string(),
+        is_open: true,
+        allow_idle: false,
+        focus_head_commit_id: continuity.focus.head_commit_id,
+        last_synced_at: iso_now(),
+        watcher_last_triggered_at: None,
+        watcher_trigger_count: 0,
+        agent_failure_count: 0,
+        deferred_reason: None,
+        rewrite_failure_count: 0,
+    })?;
+
+    engine.continuity_apply_diff(
+        59,
+        ContinuityKind::Focus,
+        "## Status\n+ Mission: First focus-diff mission.\n",
+    )?;
+    let focus = engine.continuity_apply_diff(
+        59,
+        ContinuityKind::Focus,
+        "## Status\n+ Mission: Second focus-diff mission.\n",
+    )?;
+    let mission = engine.mission_state(59)?;
+
+    assert_eq!(mission.mission, "Second focus-diff mission.");
+    assert!(focus
+        .content
+        .contains("- Mission: Second focus-diff mission."));
+    assert!(!focus.content.contains("First focus-diff mission."));
+
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
+fn invalid_canonical_focus_control_value_fails_without_changing_state() -> Result<()> {
+    let db_path = temp_db();
+    let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+    let continuity = engine.continuity_init_documents(60)?;
+    engine.overwrite_mission_state(&MissionStateRecord {
+        conversation_id: 60,
+        mission: "Preserve valid state when a diff is broken.".to_string(),
+        mission_status: "active".to_string(),
+        continuation_mode: "continuous".to_string(),
+        trigger_intensity: "warm".to_string(),
+        blocker: "No blocker.".to_string(),
+        next_slice: "Reject the invalid value atomically.".to_string(),
+        done_gate: "The prior row and focus head remain unchanged.".to_string(),
+        closure_confidence: "low".to_string(),
+        is_open: true,
+        allow_idle: false,
+        focus_head_commit_id: continuity.focus.head_commit_id,
+        last_synced_at: iso_now(),
+        watcher_last_triggered_at: Some("2026-07-31T09:30:00Z".to_string()),
+        watcher_trigger_count: 2,
+        agent_failure_count: 1,
+        deferred_reason: None,
+        rewrite_failure_count: 3,
+    })?;
+    let before_state = engine
+        .stored_mission_state(60)?
+        .context("baseline mission state missing")?;
+    let before_focus = engine.stored_continuity_show_all(60)?.focus;
+
+    let error = engine
+        .continuity_apply_diff(
+            60,
+            ContinuityKind::Focus,
+            "## Status\n+ Mission state: bewildered.\n",
+        )
+        .expect_err("unknown canonical mission state must fail loudly");
+    assert!(
+        error
+            .to_string()
+            .contains("invalid canonical focus value for Mission state"),
+        "unexpected error: {error:#}"
+    );
+
+    let after_state = engine
+        .stored_mission_state(60)?
+        .context("mission state missing after rejected diff")?;
+    let after_focus = engine.stored_continuity_show_all(60)?.focus;
+    assert_eq!(
+        MissionStateFields::try_from_record(&after_state)?,
+        MissionStateFields::try_from_record(&before_state)?
+    );
+    assert_eq!(
+        after_state.focus_head_commit_id,
+        before_state.focus_head_commit_id
+    );
+    assert_eq!(after_state.last_synced_at, before_state.last_synced_at);
+    assert_eq!(
+        after_state.watcher_last_triggered_at,
+        before_state.watcher_last_triggered_at
+    );
+    assert_eq!(
+        after_state.watcher_trigger_count,
+        before_state.watcher_trigger_count
+    );
+    assert_eq!(
+        after_state.agent_failure_count,
+        before_state.agent_failure_count
+    );
+    assert_eq!(after_state.deferred_reason, before_state.deferred_reason);
+    assert_eq!(
+        after_state.rewrite_failure_count,
+        before_state.rewrite_failure_count
+    );
+    assert_eq!(after_focus.head_commit_id, before_focus.head_commit_id);
+    assert_eq!(after_focus.content, before_focus.content);
+
+    let _ = std::fs::remove_file(db_path);
+    Ok(())
+}
+
+#[test]
 fn structured_mission_state_round_trips_without_changing_runtime_fields() -> Result<()> {
     let db_path = temp_db();
     let engine = LcmEngine::open(&db_path, LcmConfig::default())?;

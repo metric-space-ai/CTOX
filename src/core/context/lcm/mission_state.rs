@@ -593,6 +593,200 @@ pub(super) fn import_legacy_mission_state(continuity: &ContinuityShowAll) -> Mis
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CanonicalFocusField {
+    Mission,
+    MissionStatus,
+    ContinuationMode,
+    TriggerIntensity,
+    Blocker,
+    NextSlice,
+    DoneGate,
+    ClosureConfidence,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CanonicalFocusFieldSpec {
+    field: CanonicalFocusField,
+    section: &'static str,
+    name: &'static str,
+}
+
+/// Apply only canonical, section-qualified focus fields that were explicitly
+/// added by this diff. Values are read back from the already-applied focus
+/// document, so the write order is text -> structured state -> canonical
+/// render. Untouched fields stay on the existing structured record.
+///
+/// This is intentionally not a legacy parser. The accepted names are exactly
+/// the names emitted by `render_focus_continuity_from_record`; aliases such as
+/// `Status`, case-insensitive matches, and prose fallbacks remain confined to
+/// `import_legacy_mission_state`.
+pub(super) fn apply_canonical_focus_diff_to_mission_state(
+    existing: &MissionStateRecord,
+    applied_focus: &str,
+    normalized_diff: &str,
+    applied_focus_head_commit_id: &str,
+) -> Result<MissionStateRecord> {
+    let mut updated = existing.clone();
+    for spec in canonical_focus_assignments(normalized_diff) {
+        let value = exact_focus_field_value(applied_focus, spec).with_context(|| {
+            format!(
+                "canonical focus field {} / {} was set by the diff but is missing from the applied document",
+                spec.section, spec.name
+            )
+        })?;
+        match spec.field {
+            CanonicalFocusField::Mission => updated.mission = value,
+            CanonicalFocusField::MissionStatus => {
+                updated.mission_status =
+                    parse_canonical_mission_status(&value)?.as_str().to_string();
+            }
+            CanonicalFocusField::ContinuationMode => {
+                updated.continuation_mode = parse_canonical_continuation_mode(&value)?
+                    .as_str()
+                    .to_string();
+            }
+            CanonicalFocusField::TriggerIntensity => {
+                updated.trigger_intensity = parse_canonical_trigger_intensity(&value)?
+                    .as_str()
+                    .to_string();
+            }
+            CanonicalFocusField::Blocker => updated.blocker = value,
+            CanonicalFocusField::NextSlice => updated.next_slice = value,
+            CanonicalFocusField::DoneGate => updated.done_gate = value,
+            CanonicalFocusField::ClosureConfidence => {
+                updated.closure_confidence = parse_canonical_closure_confidence(&value)?
+                    .as_str()
+                    .to_string();
+            }
+        }
+    }
+
+    let mission_status = MissionStatus::from_stored(&updated.mission_status)?;
+    let continuation_mode = ContinuationMode::from_stored(&updated.continuation_mode)?;
+    let trigger_intensity = TriggerIntensity::from_stored(&updated.trigger_intensity)?;
+    updated.is_open = mission_is_open(
+        &updated.mission,
+        mission_status,
+        continuation_mode,
+        &updated.next_slice,
+        &updated.done_gate,
+    );
+    updated.allow_idle = mission_allows_idle(mission_status, continuation_mode, trigger_intensity);
+    updated.focus_head_commit_id = applied_focus_head_commit_id.to_string();
+    updated.last_synced_at = iso_now();
+    Ok(updated)
+}
+
+fn canonical_focus_assignments(diff: &str) -> Vec<CanonicalFocusFieldSpec> {
+    let mut section = None;
+    let mut assignments = Vec::new();
+    for raw_line in diff.lines() {
+        let line = raw_line.trim();
+        if let Some(header) = line.strip_prefix("## ") {
+            section = Some(header);
+            continue;
+        }
+        let Some(added) = line.strip_prefix('+').map(str::trim) else {
+            continue;
+        };
+        let Some((name, _)) = added.split_once(':') else {
+            continue;
+        };
+        if let Some(spec) = canonical_focus_field_spec(section.unwrap_or_default(), name.trim()) {
+            assignments.push(spec);
+        }
+    }
+    assignments
+}
+
+fn canonical_focus_field_spec(section: &str, name: &str) -> Option<CanonicalFocusFieldSpec> {
+    let field = match (section, name) {
+        ("Status", "Mission") => CanonicalFocusField::Mission,
+        ("Status", "Mission state") => CanonicalFocusField::MissionStatus,
+        ("Status", "Continuation mode") => CanonicalFocusField::ContinuationMode,
+        ("Status", "Trigger intensity") => CanonicalFocusField::TriggerIntensity,
+        ("Blocker", "Current blocker") => CanonicalFocusField::Blocker,
+        ("Next", "Next slice") => CanonicalFocusField::NextSlice,
+        ("Done / Gate", "Done gate") => CanonicalFocusField::DoneGate,
+        ("Done / Gate", "Closure confidence") => CanonicalFocusField::ClosureConfidence,
+        ("Contract", "mission") => CanonicalFocusField::Mission,
+        ("Contract", "mission_state") => CanonicalFocusField::MissionStatus,
+        ("Contract", "continuation_mode") => CanonicalFocusField::ContinuationMode,
+        ("Contract", "trigger_intensity") => CanonicalFocusField::TriggerIntensity,
+        ("State", "goal") => CanonicalFocusField::Mission,
+        ("State", "blocker") => CanonicalFocusField::Blocker,
+        ("State", "next_slice") => CanonicalFocusField::NextSlice,
+        ("State", "done_gate") => CanonicalFocusField::DoneGate,
+        ("State", "closure_confidence") => CanonicalFocusField::ClosureConfidence,
+        _ => return None,
+    };
+    let (section, name) = match (section, name) {
+        ("Status", "Mission") => ("Status", "Mission"),
+        ("Status", "Mission state") => ("Status", "Mission state"),
+        ("Status", "Continuation mode") => ("Status", "Continuation mode"),
+        ("Status", "Trigger intensity") => ("Status", "Trigger intensity"),
+        ("Blocker", "Current blocker") => ("Blocker", "Current blocker"),
+        ("Next", "Next slice") => ("Next", "Next slice"),
+        ("Done / Gate", "Done gate") => ("Done / Gate", "Done gate"),
+        ("Done / Gate", "Closure confidence") => ("Done / Gate", "Closure confidence"),
+        ("Contract", "mission") => ("Contract", "mission"),
+        ("Contract", "mission_state") => ("Contract", "mission_state"),
+        ("Contract", "continuation_mode") => ("Contract", "continuation_mode"),
+        ("Contract", "trigger_intensity") => ("Contract", "trigger_intensity"),
+        ("State", "goal") => ("State", "goal"),
+        ("State", "blocker") => ("State", "blocker"),
+        ("State", "next_slice") => ("State", "next_slice"),
+        ("State", "done_gate") => ("State", "done_gate"),
+        ("State", "closure_confidence") => ("State", "closure_confidence"),
+        _ => unreachable!(),
+    };
+    Some(CanonicalFocusFieldSpec {
+        field,
+        section,
+        name,
+    })
+}
+
+fn exact_focus_field_value(applied_focus: &str, spec: CanonicalFocusFieldSpec) -> Option<String> {
+    continuity_section_lines(applied_focus, spec.section)
+        .iter()
+        .filter_map(|line| line.split_once(':'))
+        .filter(|(name, _)| name.trim() == spec.name)
+        .map(|(_, value)| value.trim().to_string())
+        .last()
+}
+
+fn parse_canonical_mission_status(value: &str) -> Result<MissionStatus> {
+    MissionStatus::from_stored(&normalize_mission_text(value)).with_context(|| {
+        format!("invalid canonical focus value for Mission state / mission_state: {value:?}")
+    })
+}
+
+fn parse_canonical_continuation_mode(value: &str) -> Result<ContinuationMode> {
+    ContinuationMode::from_stored(&normalize_mission_text(value)).with_context(|| {
+        format!(
+            "invalid canonical focus value for Continuation mode / continuation_mode: {value:?}"
+        )
+    })
+}
+
+fn parse_canonical_trigger_intensity(value: &str) -> Result<TriggerIntensity> {
+    TriggerIntensity::from_stored(&normalize_mission_text(value)).with_context(|| {
+        format!(
+            "invalid canonical focus value for Trigger intensity / trigger_intensity: {value:?}"
+        )
+    })
+}
+
+fn parse_canonical_closure_confidence(value: &str) -> Result<ClosureConfidence> {
+    ClosureConfidence::from_stored(&normalize_mission_text(value)).with_context(|| {
+        format!(
+            "invalid canonical focus value for Closure confidence / closure_confidence: {value:?}"
+        )
+    })
+}
+
 pub(super) fn render_focus_continuity_from_record(
     continuity: &ContinuityShowAll,
     record: &MissionStateRecord,
