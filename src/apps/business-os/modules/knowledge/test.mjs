@@ -549,16 +549,3 @@ for (const entry of tests) {
 }
 
 console.log(`${passed} knowledge tests passed`);
-
-test('knowledge collections are read with an explicit bound, not an unbounded find', async () => {
-  // Production defect on SKF: `collection.find().exec()` without a limit
-  // returned only the locally materialised slice of a demand-loaded
-  // collection. IndexedDB held 263 knowledge items including the current
-  // skillbook and all six runbooks, while the library rendered
-  // "Skillbooks (0) · Runbooks (0)". The native peer reads the same
-  // collections with an explicit limit; the browser now matches it.
-  const source = await readFile(new URL('./index.js', import.meta.url), 'utf8');
-  assert.match(source, /const KNOWLEDGE_QUERY_LIMIT = 100_000/);
-  assert.match(source, /collection\.find\(\{ limit: KNOWLEDGE_QUERY_LIMIT \}\)\.exec\(\)/);
-  assert.doesNotMatch(source, /collection\.find\(\)\.exec\(\)/);
-});

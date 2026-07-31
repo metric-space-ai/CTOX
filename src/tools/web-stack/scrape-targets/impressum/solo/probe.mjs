@@ -105,35 +105,76 @@ function legalFormMatches(company, candidate) {
 const MAX_CANDIDATE_HOSTS = 6;
 const CANDIDATE_POLITENESS_MS = 1500;
 
+// Filler words a German company name carries but its domain drops: industry
+// words and honorifics, never the distinguishing words. "Chemische Fabrik
+// Berg" runs cfb.de, "Carbosulf Chemische Werke" runs carbosulf.de.
+// Measured 2026-07-31 against the live THESEN leads.
+const DOMAIN_FILLER_TOKENS = new Set([
+  "chemische", "chemisches", "chemischer", "chemisch", "chem",
+  "werke", "werk", "fabrik", "fabriken",
+  "laboratorium", "labor", "manufacturing",
+  "produktions", "produktion", "handelsges", "handelsgesellschaft",
+  "techn", "technische", "technischer", "technisches", "artikel",
+  "dr", "prof", "u", "und",
+]);
+
+// Trailing place names qualify WHERE a plant sits; the domain belongs to the
+// name without the place: "Beiersdorf Manufacturing Leipzig" generates only
+// junk from "leipzig" (measured 2026-07-31: beiersdorf-leipzig.de/.com and
+// beiersdorfleipzig.de are NXDOMAIN, bml.de is an unrelated third party)
+// while the plausible host is the group's beiersdorf.de. Dropping the place
+// stops the probe from knocking on foreign doors; the identity gate still
+// decides whether the group's notice may stand in (for a GmbH plant under an
+// AG parent it must not — and does not).
+const DOMAIN_LOCATION_TOKENS = new Set([
+  "berlin", "hamburg", "muenchen", "koeln", "frankfurt", "stuttgart",
+  "duesseldorf", "dortmund", "essen", "leipzig", "bremen", "dresden",
+  "hannover", "nuernberg", "wien", "zuerich",
+]);
+
 function candidateHostsFromCompany(company) {
   const withoutLegalForm = String(company || "")
+    .replace(/[®™©]/g, " ")
     .replace(/&\s*Co\.?/gi, " ")
     .replace(/\b(?:gmbh|mbh|kgaa|ag|se|kg|ohg|gbr|ug|ltd|llc|inc|co)\b\.?/gi, " ");
   const transliterated = withoutLegalForm
     .replace(/ä/g, "ae").replace(/ö/g, "oe").replace(/ü/g, "ue")
     .replace(/Ä/g, "Ae").replace(/Ö/g, "Oe").replace(/Ü/g, "Ue")
     .replace(/ß/g, "ss");
-  const words = transliterated.toLowerCase()
+  const allWords = transliterated.toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim()
     .split(/\s+/)
     .filter(Boolean);
-  if (words.length === 0) return [];
-  // Keep this list and its ORDER identical to scripts/v1.js. The probe is the
-  // solo-first proving ground — if the two drift apart, a probe run stops
-  // saying anything about what the deployed adapter will do. Ordered by how
-  // German companies actually name their sites: leading word (aeroxon.de),
-  // hyphenated full name (bnt-chemicals.de), concatenation, then .com.
-  const joined = words.join("");
-  const hyphenated = words.join("-");
+  if (allWords.length === 0) return [];
+  const significant = allWords.filter((word) => !DOMAIN_FILLER_TOKENS.has(word));
+  let words = significant.length > 0 ? significant : allWords;
+  // A trailing location qualifier is not part of the domain ("… Manufacturing
+  // Leipzig" plants live under the group's host). Never drop the last word.
+  while (words.length > 1 && DOMAIN_LOCATION_TOKENS.has(words[words.length - 1])) {
+    words = words.slice(0, -1);
+  }
+  // Keep this list and its ORDER identical to scripts/v1.js (the probe is
+  // the solo-first proving ground; drift between the two was already a
+  // defect once). Ordered by how German companies actually name their sites,
+  // measured live on 2026-07-31: leading significant word (aeroxon.de,
+  // carbosulf.de), the first TWO significant words hyphenated
+  // (additiv-chemie.de), the full hyphenation (bnt-chemicals.de), leading
+  // word .com (chemofast.com), initials of ALL name words including fillers
+  // (cfb.de = Chemische Fabrik Berg), then the concatenation.
   const hosts = [];
-  if (words.length > 1) hosts.push(words[0] + ".de", hyphenated + ".de");
-  hosts.push(joined + ".de");
-  if (words.length > 1) hosts.push(words[0] + ".com", hyphenated + ".com");
-  hosts.push(joined + ".com");
+  hosts.push(words[0] + ".de");
+  if (words.length > 1) hosts.push(words.slice(0, 2).join("-") + ".de");
+  if (words.length > 2) hosts.push(words.join("-") + ".de");
+  hosts.push(words[0] + ".com");
+  if (allWords.length > 1) {
+    const initials = allWords.map((word) => word[0]).join("");
+    if (initials.length >= 2 && initials.length <= 6) hosts.push(initials + ".de");
+  }
   if (words.length > 1) {
-    const initials = words.map((word) => word[0]).join("");
-    if (initials.length >= 2) hosts.push(initials + ".de", initials + ".com");
+    hosts.push(words.join("") + ".de");
+    hosts.push(words.slice(0, 2).join("-") + ".com");
+    hosts.push(words.join("") + ".com");
   }
   return [...new Set(hosts)].slice(0, MAX_CANDIDATE_HOSTS);
 }
@@ -328,7 +369,10 @@ function isBlockedText(lines, title) {
 // same discipline the contact window applies to phones and emails).
 // ---------------------------------------------------------------------------
 
-const PERSON_LABEL_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vertreten\s+durch|vertretungsberechtigte?r?(?:\(r\))?|vorstand|vorstände|inhaber(?:in)?)(?:\s*:\s*|\s+)(.*)$/i;
+// The label may stand alone on its own line (|$) with the names on the
+// following lines: "Geschäftsführer" / "Dipl. Kfm. Roger Wintzen" — measured
+// on chemofast.com 2026-07-31.
+const PERSON_LABEL_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vertreten\s+durch|vertretungsberechtigte?r?(?:\(r\))?|vorstand|vorstände|inhaber(?:in)?)(?:\s*:\s*|\s+|$)(.*)$/i;
 
 const ROLE_PREFIX_RE = /^(geschäftsführer(?:in)?|geschäftsführung|vorstand|inhaber(?:in)?|prokurist(?:in)?)\s*:\s*(.*)$/i;
 
@@ -336,9 +380,9 @@ const ROLE_EXACT_RE = /^(?:geschäftsführer(?:in)?|geschäftsführung|vorstand|
 
 const TITLE_PAREN_RE = /(?:dipl|dr|prof|mag|ing|kaufmann|kauffrau|betriebswirt|fachwirt|meister|techniker|ökonom|oekonom|med|rer|nat|jur|mba|msc|bsc|wirtschafts)/i;
 
-const TITLE_FIRST_RE = /^(?:prof\.?|pd|dr\.?|habil\.?|dipl\.?-[a-zäöü]+\.?|dipl\.?|mag\.?|ing\.?|mba|msc|m\.sc\.|bsc|b\.sc\.|ll\.?m\.?)$/i;
+const TITLE_FIRST_RE = /^(?:prof\.?|pd|dr\.?|habil\.?|dipl\.?-[a-zäöü]+\.?|dipl\.?|mag\.?|ing\.?|kfm\.?|kffr\.?|mba|msc|m\.sc\.|bsc|b\.sc\.|ll\.?m\.?)$/i;
 
-const TITLE_CONT_RE = /^(?:med|rer|nat|jur|phil|dent|habil|techn|oec|pol|agr|ing|sc)\.?$/i;
+const TITLE_CONT_RE = /^(?:med|rer|nat|jur|phil|dent|habil|techn|oec|pol|agr|ing|sc|kfm|kffr|kfr|kaufm)\.?$/i;
 
 const NAME_PARTICLES = new Set(["von", "van", "de", "der", "den", "zu", "vom", "da", "di", "del", "la", "le", "ten"]);
 
@@ -421,6 +465,16 @@ function personKey(person) {
 
 // Every person the notice names, each as their own record set — never
 // collapsed into one.
+// "Vertreten durch" is a label introducing the representative, not a job
+// title — writing it into person_funktion would put a preposition where a role
+// belongs. The legal role it denotes is "Vertretungsberechtigt". Labels that
+// ARE roles ("Geschäftsführer", "Vorstand", "Inhaber") pass through unchanged.
+function normalizeRepresentativeLabel(label) {
+  const text = String(label || "").replace(/\s+/g, " ").trim();
+  if (/^vertret(?:en\s+durch|ungsberechtigt\w*)/i.test(text)) return "Vertretungsberechtigt";
+  return text;
+}
+
 function extractPersons(region, finalUrl) {
   const persons = [];
   const seen = new Set();
@@ -428,7 +482,7 @@ function extractPersons(region, finalUrl) {
     const match = region[index].match(PERSON_LABEL_RE);
     if (!match) continue;
     if (isAgencyContext(region, index)) continue;
-    let funktion = match[1].replace(/\s+/g, " ").trim();
+    let funktion = normalizeRepresentativeLabel(match[1]);
     let rest = String(match[2] || "").trim();
     const rolePrefix = rest.match(ROLE_PREFIX_RE);
     if (rolePrefix) {
@@ -531,42 +585,89 @@ function looksLikeImpressumHtml(html) {
 
 const candidatePaths = ["/impressum", "/de/impressum", "/impressum.html"];
 
+// A bare host often 301s every path to the www homepage, DROPPING the path
+// (measured 2026-07-31: aeroxon.de/impressum -> www.aeroxon.de/,
+// chemotechnik.de/meta/impressum/ -> www.chemotechnik.de/index.php). The www
+// variant of the same host serves the real pages, so every origin is tried
+// as given AND under its www/toggled variant — same as scripts/v1.js.
+function originVariants(origin) {
+  try {
+    const url = new URL(origin);
+    const host = url.hostname;
+    if (host.startsWith("www.")) return [origin, url.protocol + "//" + host.slice(4)];
+    return [origin, url.protocol + "//www." + host];
+  } catch (_err) {
+    return [origin];
+  }
+}
+
+// A page only counts as the notice when extraction yields a full address —
+// the same drift contract the adapter's consider() applies. Without it a
+// guessed path that 302s to the bare homepage (measured 2026-07-31:
+// chemofast.com/impressum -> /home/startseite.php) passes the
+// looks-like-impressum test through the footer link alone and poisons the
+// candidate before the real notice link is ever followed.
+function hasFullAddress(html, finalUrl) {
+  const check = extractImpressum(html, finalUrl);
+  const fields = check.fields || {};
+  return Boolean(fields.firma_anschrift && fields.firma_plz && fields.firma_ort);
+}
+
 // Returns { url, html } for the notice page of an origin, or { reason }.
 // A reason means the origin is unreachable or shows no notice — callers
 // doing domain discovery skip such a candidate, never retry it.
 async function locateImpressum(originUrl) {
-  for (const candidate of candidatePaths) {
-    const response = await goto(originUrl + candidate);
-    await sleep(2000); // politeness between navigations
+  let reason = "start page unreachable from " + originUrl;
+  for (const variant of originVariants(originUrl)) {
+    for (const candidate of candidatePaths) {
+      const response = await goto(variant + candidate);
+      await sleep(2000); // politeness between navigations
+      if (!response || !response.ok()) continue;
+      const content = await page.content();
+      if (looksLikeImpressumHtml(content) && hasFullAddress(content, page.url())) {
+        return { url: page.url(), html: content };
+      }
+    }
+
+    // Fall back to the start page and follow an Impressum/Imprint link. The
+    // live DOM resolves relative hrefs against the page's <base href> —
+    // chemofast.com serves <base href="/home/">, so its notice lives at
+    // /home/rechtliches/impressum.php, not at the origin root (measured
+    // 2026-07-31; resolving against the root hits the site's soft-404).
+    const response = await goto(variant + "/");
+    await sleep(2000);
     if (!response || !response.ok()) continue;
+    await clickConsent();
+    const link = await page.evaluate(() => {
+      const anchors = Array.from(document.querySelectorAll("a[href]"));
+      const match = anchors.find((anchor) =>
+        /impressum|imprint/i.test(anchor.textContent || "")
+          || /impressum|imprint/i.test(anchor.getAttribute("href") || ""));
+      return match ? match.href : null;
+    }).catch(() => null);
+    if (!link) {
+      reason = "no Impressum link found on " + variant;
+      continue;
+    }
+    const target = new URL(link, variant);
+    const sameOrigin = target.hostname.replace(/^www\./, "") === new URL(variant).hostname.replace(/^www\./, "");
+    if (!sameOrigin) {
+      reason = "impressum link points off-origin: " + target.href;
+      continue;
+    }
+    const linked = await goto(target.href);
+    await sleep(2000);
+    if (!linked || !linked.ok()) {
+      reason = "impressum link unreachable: " + target.href;
+      continue;
+    }
     const content = await page.content();
-    if (looksLikeImpressumHtml(content)) {
+    if (hasFullAddress(content, page.url())) {
       return { url: page.url(), html: content };
     }
+    reason = "notice page without full address: " + target.href;
   }
-
-  // Fall back to the start page and follow an Impressum/Imprint link.
-  const response = await goto(originUrl + "/");
-  await sleep(2000);
-  if (!response || !response.ok()) {
-    return { reason: "start page unreachable from " + originUrl };
-  }
-  await clickConsent();
-  const link = await page.evaluate(() => {
-    const anchors = Array.from(document.querySelectorAll("a[href]"));
-    const match = anchors.find((anchor) =>
-      /impressum|imprint/i.test(anchor.textContent || "")
-        || /impressum|imprint/i.test(anchor.getAttribute("href") || ""));
-    return match ? match.href : null;
-  }).catch(() => null);
-  if (!link) return { reason: "no Impressum link found on " + originUrl };
-  const target = new URL(link, originUrl);
-  const sameOrigin = target.hostname.replace(/^www\./, "") === new URL(originUrl).hostname.replace(/^www\./, "");
-  if (!sameOrigin) return { reason: "impressum link points off-origin: " + target.href };
-  const linked = await goto(target.href);
-  await sleep(2000);
-  if (!linked || !linked.ok()) return { reason: "impressum link unreachable: " + target.href };
-  return { url: page.url(), html: await page.content() };
+  return { reason };
 }
 
 function printSuccess(result, extra) {

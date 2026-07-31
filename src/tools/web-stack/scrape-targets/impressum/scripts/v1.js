@@ -190,6 +190,20 @@ const DOMAIN_FILLER_TOKENS = new Set([
   "dr", "prof", "u", "und",
 ]);
 
+// Trailing place names qualify WHERE a plant sits; the domain belongs to the
+// name without the place: "Beiersdorf Manufacturing Leipzig" generates only
+// junk from "leipzig" (measured 2026-07-31: beiersdorf-leipzig.de/.com and
+// beiersdorfleipzig.de are NXDOMAIN, bml.de is an unrelated third party)
+// while the plausible host is the group's beiersdorf.de. Dropping the place
+// stops the probe from knocking on foreign doors; the identity gate still
+// decides whether the group's notice may stand in (for a GmbH plant under an
+// AG parent it must not — and does not).
+const DOMAIN_LOCATION_TOKENS = new Set([
+  "berlin", "hamburg", "muenchen", "koeln", "frankfurt", "stuttgart",
+  "duesseldorf", "dortmund", "essen", "leipzig", "bremen", "dresden",
+  "hannover", "nuernberg", "wien", "zuerich",
+]);
+
 function candidateHostsFromCompany(company) {
   const withoutLegalForm = String(company || "")
     .replace(/[®™©]/g, " ")
@@ -206,7 +220,12 @@ function candidateHostsFromCompany(company) {
     .filter(Boolean);
   if (allWords.length === 0) return [];
   const significant = allWords.filter((word) => !DOMAIN_FILLER_TOKENS.has(word));
-  const words = significant.length > 0 ? significant : allWords;
+  let words = significant.length > 0 ? significant : allWords;
+  // A trailing location qualifier is not part of the domain ("… Manufacturing
+  // Leipzig" plants live under the group's host). Never drop the last word.
+  while (words.length > 1 && DOMAIN_LOCATION_TOKENS.has(words[words.length - 1])) {
+    words = words.slice(0, -1);
+  }
   // Keep this list and its ORDER identical to solo/probe.mjs (the probe is
   // the solo-first proving ground; drift between the two was already a
   // defect once). Ordered by how German companies actually name their sites,

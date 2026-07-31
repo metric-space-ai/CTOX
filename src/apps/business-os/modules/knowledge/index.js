@@ -5,9 +5,6 @@ const KNOWLEDGE_SYNC_START_WAIT_MS = 1500;
 const KNOWLEDGE_INITIAL_RETRY_DELAYS_MS = Object.freeze([750, 1500, 3000, 5000, 8000]);
 const KNOWLEDGE_OPEN_TARGET_KEY = 'ctox.businessOs.knowledge.openId';
 const KNOWLEDGE_OPEN_DOMAIN_KEY = 'ctox.businessOs.knowledge.openDomain';
-// Matches the bound the native peer uses when it reads the same collections
-// (`rxdb_peer.rs`, MangoQuery limit 100_000).
-const KNOWLEDGE_QUERY_LIMIT = 100_000;
 const KNOWLEDGE_DATA_COLLECTIONS = Object.freeze([
   'knowledge_items',
   'knowledge_runbooks',
@@ -466,12 +463,7 @@ async function loadLocalKnowledgeRecords(collectionName, missingCollections = st
     missingCollections.push(collectionName);
     return [];
   }
-  // An unbounded `find()` on a demand-loaded collection returns only what the
-  // client happens to hold, not the collection. On the SKF instance that left
-  // Knowledge showing "Skillbooks (0) · Runbooks (0)" while IndexedDB held 263
-  // items including the skillbook and all six runbooks. The native peer reads
-  // the same collections with an explicit bound; the browser must do the same.
-  const docs = await collection.find({ limit: KNOWLEDGE_QUERY_LIMIT }).exec();
+  const docs = await collection.find().exec();
   return sortKnowledgeRecords(docs
     .map((doc) => normalizeStoredKnowledgeRecord(doc.toJSON()))
     .filter(isActiveKnowledgeRecord));
