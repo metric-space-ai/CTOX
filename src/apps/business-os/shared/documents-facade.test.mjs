@@ -73,9 +73,14 @@ class MemoryCollection {
       exec: async () => {
         let documents = Array.from(this.rows.values());
         const blobId = query.selector?.blob_id;
+        const documentId = query.selector?.document_id;
         if (blobId) documents = documents.filter((document) => document.blob_id === blobId);
-        documents.sort((left, right) => left.idx - right.idx);
-        if (this.reverseFind) documents.reverse();
+        if (documentId) {
+          documents = documents.filter((document) => document.document_id === documentId);
+        }
+        const sortField = Object.keys(query.sort?.[0] || {})[0] || 'idx';
+        documents.sort((left, right) => Number(left[sortField]) - Number(right[sortField]));
+        if (this.reverseFind && blobId) documents.reverse();
         return documents.map((document) => new MemoryDocument(this, document));
       },
     };
@@ -127,7 +132,43 @@ test('createDocx and loadVersion roundtrip bytes and generic provenance', async 
   assert.deepEqual(loaded.version.provenance, createInput().provenance);
 });
 
-test('createMailMerge stores one document with navigable recipient versions', async () => {
+test('createMailMerge appends two export runs with the same logicalDocumentKey as two versions of one document', async () => {
+  const db = createMemoryDb();
+  let timestamp = 123456;
+  const documents = createDocumentsFacade({ db, now: () => timestamp++ });
+  const base = {
+    filename: 'sommeraktion-serienbrief.docx',
+    title: 'Sommeraktion Serienbrief',
+    mimeType: DOCX_MIME_TYPE,
+    logicalDocumentKey: 'sellify:campaign-mail-merge:selection-7:template-2',
+    variants: [{
+      recipientId: 'person-1',
+      recipientLabel: 'Ada Lovelace',
+      filename: 'sommeraktion-ada-lovelace.docx',
+      bytes: new Uint8Array([0x50, 0x4b, 1]),
+    }],
+  };
+
+  const first = await documents.createMailMerge({ ...base, idempotencyKey: 'export-run-1' });
+  const second = await documents.createMailMerge({
+    ...base,
+    idempotencyKey: 'export-run-2',
+    variants: [{ ...base.variants[0], bytes: new Uint8Array([0x50, 0x4b, 2]) }],
+  });
+
+  assert.equal(first.documentId, second.documentId);
+  assert.notEqual(first.versionId, second.versionId);
+  assert.equal(db.collections.documents.rows.size, 1);
+  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.deepEqual(
+    Array.from(db.collections.document_versions.rows.values()).map((version) => version.version),
+    [1, 2],
+  );
+  assert.equal(second.document.current_version_id, second.versionId);
+  assert.equal(second.document.mail_merge.version_count, 2);
+});
+
+test('createMailMerge stores N recipient variants in one export version', async () => {
   const db = createMemoryDb();
   const documents = createDocumentsFacade({ db, now: () => 123456 });
   const input = {
@@ -135,6 +176,7 @@ test('createMailMerge stores one document with navigable recipient versions', as
     title: 'Sommeraktion Serienbrief',
     mimeType: DOCX_MIME_TYPE,
     idempotencyKey: 'summer-mail-merge:v1',
+    logicalDocumentKey: 'sellify:campaign-mail-merge:campaign-7:letter-standard',
     indexText: 'Kosten senken Beschaffung',
     tags: ['kampagne', 'brief'],
     linkedRecords: [{ collection: 'campaigns', id: 'campaign-7' }],
@@ -165,29 +207,35 @@ test('createMailMerge stores one document with navigable recipient versions', as
   const retry = await documents.createMailMerge(input);
   const second = await documents.loadVersion({
     documentId: created.documentId,
-    versionId: created.versions[1].versionId,
-    expectedSha256: created.versions[1].sha256,
+    versionId: created.versionId,
+    recipientId: 'person-2',
+    expectedSha256: created.variants[1].sha256,
   });
 
   assert.equal(db.collections.documents.rows.size, 1);
-  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.equal(db.collections.document_versions.rows.size, 1);
+  assert.equal(created.versions.length, 1);
   assert.equal(created.recipientCount, 2);
   assert.equal(created.document.document_type, 'mail_merge');
-  assert.equal(created.document.mail_merge.bundle_id, 'summer-mail-merge:v1');
+  assert.equal(
+    created.document.mail_merge.bundle_id,
+    'sellify:campaign-mail-merge:campaign-7:letter-standard',
+  );
   assert.equal(created.document.mail_merge.recipient_count, 2);
   assert.deepEqual(created.document.tags, ['kampagne', 'brief']);
   assert.match(created.document.index_text, /Kosten senken Beschaffung/);
   assert.match(created.document.index_text, /Persönlicher Brief an Ada/);
   assert.equal(created.document.provenance.app_id, 'crm');
-  assert.deepEqual(created.versions.map(({ recipientLabel }) => recipientLabel), [
+  assert.deepEqual(created.version.mail_merge_variants.map(({ recipientLabel }) => recipientLabel), [
     'Ada Lovelace',
     'Grace Hopper',
   ]);
   assert.deepEqual(second.bytes, input.variants[1].bytes);
-  assert.equal(second.version.mail_merge_recipient.label, 'Grace Hopper');
+  assert.equal(second.recipientId, 'person-2');
+  assert.equal(second.recipientLabel, 'Grace Hopper');
   assert.equal(retry.idempotent, true);
   assert.equal(db.collections.documents.rows.size, 1);
-  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.equal(db.collections.document_versions.rows.size, 1);
 });
 
 test('createMailMerge rejects duplicate recipients and empty variant sets', async () => {
@@ -223,7 +271,7 @@ test('createMailMerge rejects duplicate recipients and empty variant sets', asyn
   );
 });
 
-test('createMailMerge reuses completed recipient payloads for the same idempotency key', async () => {
+test('createMailMerge replaying the same idempotencyKey does not add a version', async () => {
   const db = createMemoryDb();
   const documents = createDocumentsFacade({ db });
   const input = {
@@ -260,13 +308,14 @@ test('createMailMerge reuses completed recipient payloads for the same idempoten
   });
 
   assert.equal(retry.idempotent, true);
+  assert.equal(retry.versionId, created.versionId);
   assert.equal(retry.versions[0].sha256, created.versions[0].sha256);
   assert.deepEqual(loaded.bytes, input.variants[0].bytes);
   assert.equal(db.collections.documents.rows.size, 1);
-  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.equal(db.collections.document_versions.rows.size, 1);
 });
 
-test('createMailMerge repairs a missing recipient version without duplicating the parent', async () => {
+test('createMailMerge repairs missing recipient variant blobs without duplicating the parent', async () => {
   const db = createMemoryDb();
   const documents = createDocumentsFacade({ db });
   const input = {
@@ -289,13 +338,19 @@ test('createMailMerge repairs a missing recipient version without duplicating th
     ],
   };
   const created = await documents.createMailMerge(input);
-  db.collections.document_versions.rows.delete(created.versions[1].versionId);
+  const secondBlobId = created.variants[1].blobId;
+  for (const [chunkId, chunk] of db.collections.document_blob_chunks.rows) {
+    if (chunk.blob_id === secondBlobId) db.collections.document_blob_chunks.rows.delete(chunkId);
+  }
 
   const repaired = await documents.createMailMerge(input);
 
   assert.equal(repaired.idempotent, true);
   assert.equal(db.collections.documents.rows.size, 1);
-  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.equal(db.collections.document_versions.rows.size, 1);
+  assert.ok(Array.from(db.collections.document_blob_chunks.rows.values()).some(
+    (chunk) => chunk.blob_id === secondBlobId,
+  ));
 });
 
 test('createMailMerge resumes partial recipient data when the parent was not stored', async () => {
@@ -326,10 +381,10 @@ test('createMailMerge resumes partial recipient data when the parent was not sto
 
   const resumed = await documents.createMailMerge(input);
 
-  assert.equal(resumed.idempotent, false);
+  assert.equal(resumed.idempotent, true);
   assert.equal(resumed.document.provenance.app_id, 'crm');
   assert.equal(db.collections.documents.rows.size, 1);
-  assert.equal(db.collections.document_versions.rows.size, 2);
+  assert.equal(db.collections.document_versions.rows.size, 1);
 });
 
 test('createMailMerge repairs stale recipient hashes when partial blobs are missing', async () => {
@@ -363,7 +418,7 @@ test('createMailMerge repairs stale recipient hashes when partial blobs are miss
   const repaired = await documents.createMailMerge(input);
   const repairedVersion = db.collections.document_versions.rows.get(versionId);
 
-  assert.equal(repaired.idempotent, false);
+  assert.equal(repaired.idempotent, true);
   assert.equal(repairedVersion.source_sha256, created.versions[0].sha256);
   assert.equal(db.collections.document_blob_chunks.rows.size, 1);
   assert.equal(db.collections.documents.rows.size, 1);

@@ -80,6 +80,7 @@ export function createDocumentsFacade({
         resolveFacadeAppId(creatorAppId),
       );
       const fingerprint = canonicalJson({
+        logicalDocumentKey: normalized.logicalDocumentKey,
         filename: normalized.filename,
         title: normalized.title,
         ownerId: normalized.ownerId,
@@ -158,43 +159,110 @@ export function createDocumentsFacade({
 }
 
 async function createStoredMailMerge({ collections, input, cryptoProvider, now }) {
+  const bundleKey = input.logicalDocumentKey || input.idempotencyKey;
   const idHash = await sha256Hex(
-    new TextEncoder().encode(`ctox-documents:create-mail-merge:${input.idempotencyKey}`),
+    new TextEncoder().encode(`ctox-documents:create-mail-merge:${bundleKey}`),
     cryptoProvider,
   );
   const documentId = `doc_${idHash.slice(0, 40)}`;
   const createdAtMs = finiteTimestamp(now());
-  const versions = input.variants.map((variant, index) => {
-    const versionId = `${documentId}_v${index + 1}`;
-    const blobId = `${versionId}_blob`;
+  const existingDocumentDoc = await findOne(collections.documents, documentId);
+  let existingDocument = existingDocumentDoc ? documentJson(existingDocumentDoc) : null;
+  const existingVersionDocs = await findDocumentVersions(collections.document_versions, documentId);
+  const existingVersions = existingVersionDocs.map(documentJson);
+  const replayVersionIndex = existingVersions.findIndex(
+    (version) => version.idempotency_key === input.idempotencyKey,
+  );
+  const isReplay = replayVersionIndex >= 0;
+  const versionNumber = isReplay
+    ? Number(existingVersions[replayVersionIndex].version)
+    : nextDocumentVersionNumber(existingVersions);
+  const expected = buildStoredMailMergeVersion({
+    documentId,
+    versionNumber,
+    input,
+    createdAtMs,
+  });
+  const tracker = { chunks: [], versions: [], document: false };
+  let stored;
+
+  try {
+    stored = await resolveStoredMailMergeVersion({
+      collections,
+      document: existingDocument || buildStoredMailMergeDocument({
+        documentId,
+        input,
+        version: expected.version,
+        versionCount: existingVersions.length || 1,
+        createdAtMs,
+      }),
+      expected,
+      existingVersionDoc: isReplay ? existingVersionDocs[replayVersionIndex] : null,
+      cryptoProvider,
+      tracker,
+    });
+
+    if (existingDocument) {
+      assertStoredMailMergeBundle(existingDocument, { documentId, input, bundleKey });
+      if (!isReplay) {
+        const updatedDocument = buildStoredMailMergeDocument({
+          documentId,
+          input,
+          version: stored.version,
+          versionCount: existingVersions.length + 1,
+          createdAtMs: existingDocument.created_at_ms,
+          updatedAtMs: createdAtMs,
+          idempotencyKey: existingDocument.idempotency_key,
+        });
+        await patchStoredDocument(collections.documents, existingDocumentDoc, updatedDocument);
+        existingDocument = updatedDocument;
+      }
+    } else {
+      existingDocument = buildStoredMailMergeDocument({
+        documentId,
+        input,
+        version: stored.version,
+        versionCount: Math.max(existingVersions.length, 1),
+        createdAtMs,
+      });
+      await collections.documents.insert(existingDocument);
+      tracker.document = true;
+    }
+  } catch (error) {
+    await cleanupFailedMailMerge(
+      collections,
+      { id: documentId, idempotency_key: input.idempotencyKey },
+      tracker,
+    ).catch(() => {});
+    throw error;
+  }
+
+  return attachDocumentSyncPayload(
+    mailMergeCreationResult(existingDocument, stored.version, isReplay),
+    existingDocument,
+    [stored.version],
+    stored.chunks,
+  );
+}
+
+function buildStoredMailMergeVersion({ documentId, versionNumber, input, createdAtMs }) {
+  const versionId = `${documentId}_v${versionNumber}`;
+  const variants = input.variants.map((variant, index) => {
+    const blobId = `${versionId}_recipient_${index + 1}_blob`;
     const base64 = bytesToBase64(variant.bytes);
     const totalChunks = Math.ceil(base64.length / DOCUMENT_BLOB_CHUNK_BASE64_SIZE) || 1;
     return {
-      recipientId: variant.recipientId,
-      recipientLabel: variant.recipientLabel,
-      version: {
-        id: versionId,
-        document_id: documentId,
-        version: index + 1,
-        source_kind: 'mail_merge_recipient',
+      descriptor: {
+        recipientId: variant.recipientId,
+        recipientLabel: variant.recipientLabel,
+        index,
+        total: input.variants.length,
+        filename: variant.filename,
         blob_id: blobId,
         source_sha256: variant.sha256,
-        filename: variant.filename,
-        mime_type: DOCX_MIME_TYPE,
-        idempotency_key: `${input.idempotencyKey}:recipient:${variant.recipientId}`,
         linked_records: cloneJson(variant.linkedRecords),
-        template_ref: cloneJson(input.templateRef),
         provenance: cloneJson(variant.provenance),
-        mail_merge_recipient: {
-          id: variant.recipientId,
-          label: variant.recipientLabel,
-          index,
-          total: input.variants.length,
-        },
-        model_json: {},
-        diagnostics: [],
-        created_at_ms: createdAtMs,
-        updated_at_ms: createdAtMs,
+        index_text: variant.indexText,
       },
       chunks: Array.from({ length: totalChunks }, (_, chunkIndex) => ({
         id: `${blobId}_${chunkIndex}`,
@@ -213,8 +281,48 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
       })),
     };
   });
-  const firstVersion = versions[0].version;
-  const document = {
+  const firstVariant = variants[0].descriptor;
+  return {
+    version: {
+      id: versionId,
+      document_id: documentId,
+      version: versionNumber,
+      source_kind: 'mail_merge_export',
+      blob_id: firstVariant.blob_id,
+      source_sha256: firstVariant.source_sha256,
+      filename: input.filename,
+      mime_type: DOCX_MIME_TYPE,
+      idempotency_key: input.idempotencyKey,
+      linked_records: cloneJson(input.linkedRecords),
+      template_ref: cloneJson(input.templateRef),
+      provenance: cloneJson(input.provenance),
+      mail_merge: {
+        recipient_count: variants.length,
+        requested_count: variants.length + input.failures.length,
+        failed_count: input.failures.length,
+        failures: cloneJson(input.failures),
+      },
+      mail_merge_variants: variants.map(({ descriptor }) => descriptor),
+      model_json: {},
+      diagnostics: [],
+      created_at_ms: createdAtMs,
+      updated_at_ms: createdAtMs,
+    },
+    variants,
+  };
+}
+
+function buildStoredMailMergeDocument({
+  documentId,
+  input,
+  version,
+  versionCount,
+  createdAtMs,
+  updatedAtMs = createdAtMs,
+  idempotencyKey = input.idempotencyKey,
+}) {
+  const bundleKey = input.logicalDocumentKey || input.idempotencyKey;
+  return {
     id: documentId,
     title: input.title,
     filename: input.filename,
@@ -222,21 +330,24 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
     status: input.failures.length ? 'CreatedWithWarnings' : 'Created',
     document_type: 'mail_merge',
     owner_id: input.ownerId,
-    current_version_id: firstVersion.id,
-    source_sha256: firstVersion.source_sha256,
+    current_version_id: version.id,
+    source_sha256: version.source_sha256,
     page_count: 0,
     diagnostics_count: input.failures.length,
     tags: cloneJson(input.tags),
     linked_records: cloneJson(input.linkedRecords),
     template_ref: cloneJson(input.templateRef),
     provenance: cloneJson(input.provenance),
-    idempotency_key: input.idempotencyKey,
+    idempotency_key: idempotencyKey,
+    logical_document_key: input.logicalDocumentKey,
     mail_merge: {
-      bundle_id: input.idempotencyKey,
-      recipient_count: versions.length,
-      requested_count: versions.length + input.failures.length,
-      failed_count: input.failures.length,
-      failures: cloneJson(input.failures),
+      bundle_id: bundleKey,
+      version_count: versionCount,
+      recipient_count: version.mail_merge_variants.length,
+      requested_count: version.mail_merge.requested_count,
+      failed_count: version.mail_merge.failed_count,
+      failures: cloneJson(version.mail_merge.failures),
+      latest_run_idempotency_key: version.idempotency_key,
     },
     display_cache: {},
     index_text: [
@@ -245,161 +356,152 @@ async function createStoredMailMerge({ collections, input, cryptoProvider, now }
       ...input.variants.flatMap((variant) => [variant.recipientLabel, variant.indexText]),
     ].filter(Boolean).join(' '),
     is_deleted: false,
-    created_at_ms: createdAtMs,
-    updated_at_ms: createdAtMs,
+    created_at_ms: finiteTimestamp(createdAtMs),
+    updated_at_ms: finiteTimestamp(updatedAtMs),
   };
-
-  const existingDocumentDoc = await findOne(collections.documents, documentId);
-  if (existingDocumentDoc) {
-    let existingDocument = documentJson(existingDocumentDoc);
-    assertEquivalentFields(existingDocument, document, [
-      'id',
-      'current_version_id',
-      'filename',
-      'mime_type',
-      'document_type',
-      'idempotency_key',
-      'linked_records',
-      'template_ref',
-      'provenance',
-      'mail_merge',
-      'tags',
-      'index_text',
-    ]);
-    const storedVersions = [];
-    const repaired = { chunks: [], versions: [], document: false };
-    try {
-      for (const expected of versions) {
-        const stored = await resolveStoredMailMergeRecipient({
-          collections,
-          document: existingDocument,
-          expected,
-          cryptoProvider,
-          tracker: repaired,
-        });
-        storedVersions.push(stored.version);
-      }
-      const currentVersion = storedVersions.find(
-        (version) => version.id === existingDocument.current_version_id,
-      ) || storedVersions[0];
-      if (currentVersion && existingDocument.source_sha256 !== currentVersion.source_sha256) {
-        await patchStoredDocument(collections.documents, existingDocumentDoc, {
-          source_sha256: currentVersion.source_sha256,
-          updated_at_ms: createdAtMs,
-        });
-        existingDocument = {
-          ...existingDocument,
-          source_sha256: currentVersion.source_sha256,
-          updated_at_ms: createdAtMs,
-        };
-      }
-    } catch (error) {
-      await cleanupFailedMailMerge(collections, document, repaired).catch(() => {});
-      throw error;
-    }
-    return attachDocumentSyncPayload(
-      mailMergeCreationResult(existingDocument, storedVersions, true),
-      existingDocument,
-      storedVersions,
-      versions.flatMap((entry) => entry.chunks),
-    );
-  }
-
-  const created = { chunks: [], versions: [], document: false };
-  const storedVersions = [];
-  try {
-    for (const expected of versions) {
-      const stored = await resolveStoredMailMergeRecipient({
-        collections,
-        document,
-        expected,
-        cryptoProvider,
-        tracker: created,
-      });
-      storedVersions.push(stored.version);
-    }
-    document.current_version_id = storedVersions[0].id;
-    document.source_sha256 = storedVersions[0].source_sha256;
-    await collections.documents.insert(document);
-    created.document = true;
-  } catch (error) {
-    await cleanupFailedMailMerge(collections, document, created).catch(() => {});
-    throw error;
-  }
-
-  return attachDocumentSyncPayload(
-    mailMergeCreationResult(document, storedVersions, false),
-    document,
-    storedVersions,
-    versions.flatMap((entry) => entry.chunks),
-  );
 }
 
-async function resolveStoredMailMergeRecipient({
+function assertStoredMailMergeBundle(document, { documentId, input, bundleKey }) {
+  assertEquivalentFields(document, {
+    id: documentId,
+    mime_type: DOCX_MIME_TYPE,
+    document_type: 'mail_merge',
+    logical_document_key: input.logicalDocumentKey,
+  }, ['id', 'mime_type', 'document_type', 'logical_document_key']);
+  if (document.mail_merge?.bundle_id !== bundleKey) {
+    throw documentsError(
+      'DOCUMENTS_IDEMPOTENCY_CONFLICT',
+      'Stored mail merge bundle differs from logicalDocumentKey.',
+    );
+  }
+}
+
+async function resolveStoredMailMergeVersion({
   collections,
   document,
   expected,
+  existingVersionDoc,
   cryptoProvider,
   tracker,
 }) {
-  let versionDoc = await findOne(collections.document_versions, expected.version.id);
+  let versionDoc = existingVersionDoc || await findOne(
+    collections.document_versions,
+    expected.version.id,
+  );
   let version = versionDoc ? documentJson(versionDoc) : null;
   if (version) {
     assertIdempotentVersion(version, expected.version, { allowSourceHashMismatch: true });
-    assertEquivalentFields(version, expected.version, ['mail_merge_recipient']);
+    assertEquivalentFields(version, expected.version, ['version', 'source_kind', 'mail_merge']);
+    assertMailMergeVariantsEquivalent(version.mail_merge_variants, expected.version.mail_merge_variants);
   }
 
-  let chunks = (await findChunks(
-    collections.document_blob_chunks,
-    expected.version.blob_id,
-  )).map(documentJson);
-  if (chunks.length) {
-    chunks = assertChunkSet(chunks, {
-      blobId: expected.version.blob_id,
-      documentId: document.id,
-      versionId: expected.version.id,
-      expectedTotal: version ? undefined : expected.chunks.length,
-    });
-    if (!version && canonicalJson(chunks.map((chunk) => chunk.data))
-        !== canonicalJson(expected.chunks.map((chunk) => chunk.data))) {
-      throw documentsError(
-        'DOCUMENTS_IDEMPOTENCY_CONFLICT',
-        'Stored mail merge chunks differ from the payload for this idempotencyKey.',
-      );
-    }
-  } else {
-    await insertChunks(collections.document_blob_chunks, expected.chunks);
-    tracker.chunks.push(...expected.chunks);
-    chunks = expected.chunks;
-    if (version && version.source_sha256 !== expected.version.source_sha256) {
-      await patchStoredDocument(collections.document_versions, versionDoc, {
-        source_sha256: expected.version.source_sha256,
-        updated_at_ms: expected.version.updated_at_ms,
+  const storedChunks = [];
+  let variantsNeedPatch = false;
+  const resolvedVariants = [];
+  for (let index = 0; index < expected.variants.length; index += 1) {
+    const expectedVariant = expected.variants[index];
+    const storedVariant = version?.mail_merge_variants?.[index] || expectedVariant.descriptor;
+    let chunks = (await findChunks(
+      collections.document_blob_chunks,
+      storedVariant.blob_id,
+    )).map(documentJson);
+    if (chunks.length) {
+      chunks = assertChunkSet(chunks, {
+        blobId: storedVariant.blob_id,
+        documentId: document.id,
+        versionId: expected.version.id,
+        expectedTotal: version ? undefined : expectedVariant.chunks.length,
       });
-      versionDoc = await findOne(collections.document_versions, expected.version.id);
-      version = documentJson(versionDoc);
+      if (!version && canonicalJson(chunks.map((chunk) => chunk.data))
+          !== canonicalJson(expectedVariant.chunks.map((chunk) => chunk.data))) {
+        throw documentsError(
+          'DOCUMENTS_IDEMPOTENCY_CONFLICT',
+          'Stored mail merge chunks differ from the payload for this idempotencyKey.',
+        );
+      }
+      resolvedVariants.push(storedVariant);
+    } else {
+      await insertChunks(collections.document_blob_chunks, expectedVariant.chunks);
+      tracker.chunks.push(...expectedVariant.chunks);
+      chunks = expectedVariant.chunks;
+      if (version && (
+        storedVariant.source_sha256 !== expectedVariant.descriptor.source_sha256
+        || (index === 0 && version.source_sha256 !== expectedVariant.descriptor.source_sha256)
+      )) {
+        resolvedVariants.push(expectedVariant.descriptor);
+        variantsNeedPatch = true;
+      } else {
+        resolvedVariants.push(storedVariant);
+      }
     }
+    storedChunks.push(...chunks);
   }
 
   if (!versionDoc) {
     versionDoc = await collections.document_versions.insert(expected.version);
     tracker.versions.push(expected.version);
     version = documentJson(versionDoc);
+  } else if (variantsNeedPatch) {
+    const patch = {
+      mail_merge_variants: resolvedVariants,
+      updated_at_ms: expected.version.updated_at_ms,
+    };
+    if (resolvedVariants[0]?.source_sha256 !== version.source_sha256) {
+      patch.source_sha256 = resolvedVariants[0].source_sha256;
+    }
+    await patchStoredDocument(collections.document_versions, versionDoc, patch);
+    versionDoc = await findOne(collections.document_versions, expected.version.id);
+    version = documentJson(versionDoc);
   }
 
-  const verificationDocument = {
-    ...document,
-    ...(document.current_version_id === version.id
-      ? { source_sha256: version.source_sha256 }
-      : {}),
-  };
-  await verifyStoredBytes(
-    { document: verificationDocument, version, chunks },
-    version.source_sha256,
-    cryptoProvider,
-  );
-  await requeueStoredChunks(collections.document_blob_chunks, chunks);
-  return { version, chunks };
+  for (const variant of version.mail_merge_variants) {
+    const chunks = storedChunks.filter((chunk) => chunk.blob_id === variant.blob_id);
+    await verifyStoredBytes({
+      document: {
+        ...document,
+        current_version_id: version.id,
+        source_sha256: variant.source_sha256,
+      },
+      version: {
+        ...version,
+        blob_id: variant.blob_id,
+        source_sha256: variant.source_sha256,
+      },
+      chunks,
+    }, variant.source_sha256, cryptoProvider);
+    await requeueStoredChunks(collections.document_blob_chunks, chunks);
+  }
+  return { version, chunks: storedChunks };
+}
+
+function assertMailMergeVariantsEquivalent(actual, expected) {
+  if (!Array.isArray(actual) || actual.length !== expected.length) {
+    throw documentsError(
+      'DOCUMENTS_IDEMPOTENCY_CONFLICT',
+      'Stored mail merge recipients differ from the payload for this idempotencyKey.',
+    );
+  }
+  const fields = [
+    'recipientId',
+    'recipientLabel',
+    'index',
+    'total',
+    'filename',
+    'blob_id',
+    'linked_records',
+    'provenance',
+    'index_text',
+  ];
+  for (let index = 0; index < expected.length; index += 1) {
+    assertEquivalentFields(actual[index], expected[index], fields);
+  }
+}
+
+function nextDocumentVersionNumber(versions) {
+  return versions.reduce((highest, version) => {
+    const number = Number(version.version);
+    return Number.isSafeInteger(number) && number > highest ? number : highest;
+  }, 0) + 1;
 }
 
 async function createStoredDocx({ collections, input, cryptoProvider, now }) {
@@ -684,18 +786,58 @@ async function loadStoredVersion(collections, request, cryptoProvider) {
   if (version.document_id !== documentId) {
     throw documentsError('DOCUMENTS_INTEGRITY_ERROR', 'Document version belongs to another document.');
   }
-  const blobId = requireId(version.blob_id, 'version.blob_id');
+  const variant = selectMailMergeVariant(version, request);
+  const blobId = requireId(variant?.blob_id || version.blob_id, 'version.blob_id');
   const chunks = (await findChunks(collections.document_blob_chunks, blobId)).map(documentJson);
-  const stored = { document, version, chunks };
-  const verified = await verifyStoredBytes(stored, expectedSha256, cryptoProvider);
+  const verificationVersion = variant
+    ? { ...version, blob_id: variant.blob_id, source_sha256: variant.source_sha256 }
+    : version;
+  const verificationDocument = variant
+    ? { ...document, source_sha256: variant.source_sha256 }
+    : document;
+  const verified = await verifyStoredBytes(
+    { document: verificationDocument, version: verificationVersion, chunks },
+    expectedSha256,
+    cryptoProvider,
+  );
   return {
     document,
     version,
+    ...(variant ? {
+      recipientId: variant.recipientId,
+      recipientLabel: variant.recipientLabel,
+      variant: cloneJson(variant),
+    } : {}),
     bytes: verified.bytes,
     sha256: verified.sha256,
-    filename: document.filename,
+    filename: variant?.filename || document.filename,
     mimeType: DOCX_MIME_TYPE,
   };
+}
+
+function selectMailMergeVariant(version, request) {
+  const variants = Array.isArray(version.mail_merge_variants)
+    ? version.mail_merge_variants
+    : [];
+  if (!variants.length) return null;
+  const requestedRecipientId = request.recipientId == null || request.recipientId === ''
+    ? ''
+    : requireId(request.recipientId, 'recipientId');
+  const requestedRecipientLabel = request.recipientLabel == null || request.recipientLabel === ''
+    ? ''
+    : requireText(request.recipientLabel, 'recipientLabel', 512);
+  if (!requestedRecipientId && !requestedRecipientLabel) return variants[0];
+  const variant = variants.find((candidate) => (
+    (!requestedRecipientId || candidate.recipientId === requestedRecipientId)
+    && (!requestedRecipientLabel || candidate.recipientLabel === requestedRecipientLabel)
+  ));
+  if (!variant) {
+    throw documentsError(
+      'DOCUMENTS_NOT_FOUND',
+      'The requested mail merge recipient was not found in this version.',
+    );
+  }
+  return variant;
 }
 
 async function verifyStoredBytes(stored, expectedSha256, cryptoProvider) {
@@ -825,6 +967,9 @@ async function normalizeCreateMailMergeInput(input, cryptoProvider, facadeAppId)
   }
   const filename = validateFilename(input.filename);
   const idempotencyKey = requireText(input.idempotencyKey, 'idempotencyKey', 512);
+  const logicalDocumentKey = input.logicalDocumentKey == null || input.logicalDocumentKey === ''
+    ? ''
+    : requireText(input.logicalDocumentKey, 'logicalDocumentKey', 512);
   const title = input.title == null || input.title === ''
     ? filename.replace(/\.docx$/i, '')
     : requireText(input.title, 'title', 512);
@@ -906,6 +1051,7 @@ async function normalizeCreateMailMergeInput(input, cryptoProvider, facadeAppId)
     title,
     ownerId,
     idempotencyKey,
+    logicalDocumentKey,
     linkedRecords,
     templateRef,
     provenance,
@@ -925,7 +1071,7 @@ function requireDocumentCollections(db, { write = false } = {}) {
     const collection = collections[name];
     const canRead = collection
       && typeof collection.findOne === 'function'
-      && (name !== 'document_blob_chunks' || typeof collection.find === 'function');
+      && (name === 'documents' || typeof collection.find === 'function');
     const canWrite = !write
       || (typeof collection?.insert === 'function'
         && (name !== 'document_blob_chunks'
@@ -967,6 +1113,19 @@ async function findChunks(collection, blobId) {
   }
   const chunks = await query.exec();
   return Array.isArray(chunks) ? chunks : [];
+}
+
+async function findDocumentVersions(collection, documentId) {
+  const query = collection.find({ selector: { document_id: documentId } });
+  if (!query || typeof query.exec !== 'function') {
+    throw documentsError('DOCUMENTS_COLLECTIONS_UNAVAILABLE', 'RxDB find().exec() is required.');
+  }
+  const versions = await query.exec();
+  return Array.isArray(versions)
+    ? [...versions].sort((left, right) => (
+      Number(documentJson(left).version) - Number(documentJson(right).version)
+    ))
+    : [];
 }
 
 async function insertChunks(collection, chunks) {
@@ -1254,18 +1413,29 @@ function creationResult(stored, idempotent) {
   };
 }
 
-function mailMergeCreationResult(document, versions, idempotent) {
+function mailMergeCreationResult(document, version, idempotent) {
+  const variants = version.mail_merge_variants.map((variant) => ({
+    versionId: version.id,
+    recipientId: variant.recipientId,
+    recipientLabel: variant.recipientLabel,
+    filename: variant.filename,
+    blobId: variant.blob_id,
+    sha256: variant.source_sha256,
+  }));
   return {
     documentId: document.id,
-    versionId: versions[0].id,
-    recipientCount: versions.length,
+    versionId: version.id,
+    recipientCount: variants.length,
     document: cloneJson(document),
-    versions: versions.map((version) => ({
+    version: cloneJson(version),
+    variants,
+    versions: [{
       versionId: version.id,
-      recipientId: version.mail_merge_recipient?.id || '',
-      recipientLabel: version.mail_merge_recipient?.label || '',
+      version: version.version,
       sha256: version.source_sha256,
-    })),
+      recipientCount: variants.length,
+      variants: cloneJson(variants),
+    }],
     idempotent,
   };
 }
