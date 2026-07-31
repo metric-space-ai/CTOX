@@ -1931,8 +1931,40 @@ mod tests {
         let address = listener.local_addr()?;
         let server = std::thread::spawn(move || -> std::io::Result<()> {
             let (mut stream, _) = listener.accept()?;
-            let mut request = [0_u8; 4096];
-            let _ = stream.read(&mut request)?;
+            // Drain the whole request before answering. A single read can
+            // return a partial request when the client's headers and body
+            // land in separate segments; responding at that point closes the
+            // connection under the client's remaining write, which surfaces
+            // as a transport error instead of the 503 this test is about.
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            loop {
+                let read = stream.read(&mut chunk)?;
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..read]);
+                let Some(headers_end) = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                else {
+                    continue;
+                };
+                let content_length = String::from_utf8_lossy(&request[..headers_end])
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.trim()
+                            .eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                if request.len() >= headers_end + content_length {
+                    break;
+                }
+            }
             let body = r#"{"error":{"code":"ServiceUnavailable","message":"retry"}}"#;
             write!(
                 stream,

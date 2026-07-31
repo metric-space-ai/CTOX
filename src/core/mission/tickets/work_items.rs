@@ -15,13 +15,14 @@ use super::{
     ticket_self_work_list_cache_key, ticket_self_work_list_cache_stamp,
     ticket_store_change_stamp_for_path, ticket_workflow_materialize_cache_key, AuditRequest,
     CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreSpawnRequest, CoreState,
-    CoreTransitionRequest, RecordHarnessFlowEventRequest, RuntimeLane, TicketKnowledgeEntryView,
-    TicketKnowledgeUpsertInput, TicketSelfWorkAssignmentView, TicketSelfWorkItemView,
-    TicketSelfWorkNoteView, TicketSelfWorkUpsertInput, TicketWorkflowMaterializeResult,
-    TicketWorkflowStartInput, TicketWorkflowStepInput, TicketWorkflowStepView, TicketWorkflowView,
-    WorkItemStatus, WorkflowDelta, WORKFLOW_CASE_KIND, WORKFLOW_MATERIALIZE_DEFAULT_LIMIT,
-    WORKFLOW_MAX_STEPS_PER_WORKFLOW, WORKFLOW_ORCHESTRATOR_SKILL, WORKFLOW_ROLE_CASE,
-    WORKFLOW_ROLE_LEAF, WORKFLOW_ROLE_REDUCER, WORKFLOW_STEP_KIND,
+    CoreTransitionRequest, RecordHarnessFlowEventRequest, RuntimeLane, TerminalPolicyGrant,
+    TicketKnowledgeEntryView, TicketKnowledgeUpsertInput, TicketSelfWorkAssignmentView,
+    TicketSelfWorkItemView, TicketSelfWorkNoteView, TicketSelfWorkUpsertInput,
+    TicketWorkflowMaterializeResult, TicketWorkflowStartInput, TicketWorkflowStepInput,
+    TicketWorkflowStepView, TicketWorkflowView, WorkItemStatus, WorkflowDelta, WORKFLOW_CASE_KIND,
+    WORKFLOW_MATERIALIZE_DEFAULT_LIMIT, WORKFLOW_MAX_STEPS_PER_WORKFLOW,
+    WORKFLOW_ORCHESTRATOR_SKILL, WORKFLOW_ROLE_CASE, WORKFLOW_ROLE_LEAF, WORKFLOW_ROLE_REDUCER,
+    WORKFLOW_STEP_KIND,
 };
 #[cfg(test)]
 use super::{
@@ -1636,11 +1637,9 @@ pub(crate) fn set_ticket_approval_gate_state_from_authorized_reply(
     {
         anyhow::bail!("authorized approval reply ledger proof does not match the requested state");
     }
-    let terminal_policy_proof = format!(
-        "policy:authorized-approval-reply:{}:{}",
-        approval_message_key,
-        body_sha256.chars().take(16).collect::<String>()
-    );
+    let terminal_policy_grant =
+        TerminalPolicyGrant::authorized_approval_reply(approval_message_key, &body_sha256);
+    let terminal_policy_proof = terminal_policy_grant.proof();
     let failure_reason = (status == WorkItemStatus::Failed)
         .then_some("authorized approval reply rejected the internal work item");
     let item = set_ticket_self_work_state_internal_with_policy(
@@ -1648,7 +1647,7 @@ pub(crate) fn set_ticket_approval_gate_state_from_authorized_reply(
         work_id,
         state,
         failure_reason,
-        Some(&terminal_policy_proof),
+        Some(&terminal_policy_grant),
     )?;
     record_audit(
         &mut conn,
@@ -1869,7 +1868,7 @@ pub(super) fn enforce_ticket_self_work_state_transition(
     actor: &str,
     reason: &str,
     failure_reason: Option<&str>,
-    terminal_policy_proof: Option<&str>,
+    terminal_policy_grant: Option<&TerminalPolicyGrant>,
 ) -> Result<()> {
     let from_core = ticket_self_work_core_state(from_state)?;
     let to_core = ticket_self_work_core_state(to_state)?;
@@ -1883,14 +1882,8 @@ pub(super) fn enforce_ticket_self_work_state_transition(
     metadata.insert("from_state".to_string(), from_state.to_string());
     metadata.insert("to_state".to_string(), to_state.to_string());
     metadata.insert("reason".to_string(), reason.to_string());
-    if let Some(policy_proof) = terminal_policy_proof
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        metadata.insert(
-            "terminal_policy_proof".to_string(),
-            policy_proof.to_string(),
-        );
+    if let Some(policy_proof) = terminal_policy_grant.map(TerminalPolicyGrant::proof) {
+        metadata.insert("terminal_policy_proof".to_string(), policy_proof);
     }
     if to_core == CoreState::Failed {
         let failure_reason = failure_reason
@@ -1939,9 +1932,10 @@ pub(super) fn work_item_has_rework_witness_proof(conn: &Connection, work_id: &st
           AND entity_id = ?1
           AND to_state = 'ReworkRequired'
           AND accepted = 1
+          AND json_valid(request_json) = 1
           AND (
-                request_json LIKE '%"review_checkpoint":"true"%'
-             OR request_json LIKE '%"validator_rework":"true"%'
+                json_extract(request_json, '$.metadata.review_checkpoint') = 'true'
+             OR json_extract(request_json, '$.metadata.validator_rework') = 'true'
           )
         "#,
         params![work_id],
@@ -1963,9 +1957,13 @@ pub(super) fn work_item_has_terminal_success_proof(
           AND entity_id = ?1
           AND to_state = 'Closed'
           AND accepted = 1
+          AND json_valid(request_json) = 1
           AND (
-                request_json LIKE '%"reviewed_work_terminal_success":"true"%'
-             OR request_json LIKE '%"terminal_policy_proof"%'
+                json_extract(request_json, '$.metadata.reviewed_work_terminal_success') = 'true'
+             OR (
+                    json_type(request_json, '$.metadata.terminal_policy_proof') = 'text'
+                AND TRIM(json_extract(request_json, '$.metadata.terminal_policy_proof')) <> ''
+             )
           )
         "#,
         params![work_id],
@@ -2039,7 +2037,7 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
     work_id: &str,
     state: &str,
     failure_reason: Option<&str>,
-    terminal_policy_proof: Option<&str>,
+    terminal_policy_grant: Option<&TerminalPolicyGrant>,
 ) -> Result<TicketSelfWorkItemView> {
     let status = parse_work_item_status(state)?;
     let state = status.as_str();
@@ -2053,7 +2051,7 @@ pub(super) fn set_ticket_self_work_state_internal_with_policy(
         "ctox-ticket",
         "set_ticket_self_work_state",
         failure_reason,
-        terminal_policy_proof,
+        terminal_policy_grant,
     )?;
     let now = now_iso_string();
     conn.execute(

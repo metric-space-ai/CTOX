@@ -18,6 +18,134 @@ fn temp_root(label: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn ticket_terminal_magic_actor_and_reason_do_not_create_a_grant() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    enforce_ticket_event_route_status_transition(
+        &conn,
+        "no-grant-event",
+        "leased",
+        "handled",
+        "ctox-ticket-routing",
+        "force_ticket_event_routed_state",
+        None,
+    )
+    .expect_err("ticket routing actor/reason strings must not authorize completion");
+    let (accepted, proof_type): (i64, Option<String>) = conn.query_row(
+        "SELECT accepted, json_type(request_json, '$.metadata.terminal_policy_proof') \
+         FROM ctox_core_transition_proofs WHERE entity_id='ticket-event:no-grant-event'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    assert_eq!(accepted, 0);
+    assert_eq!(proof_type, None);
+    Ok(())
+}
+
+#[test]
+fn every_ticket_terminal_policy_grant_passes_its_terminal_guard() -> Result<()> {
+    for (event_key, grant) in [
+        (
+            "outbound-event-grant",
+            TerminalPolicyGrant::outbound_ticket_event(),
+        ),
+        (
+            "baseline-event-grant",
+            TerminalPolicyGrant::baseline_observed_inbound_ticket_event(),
+        ),
+    ] {
+        let conn = Connection::open_in_memory()?;
+        enforce_ticket_event_route_status_transition_with_grant(
+            &conn,
+            event_key,
+            "leased",
+            "handled",
+            "audit-actor",
+            "audit reason only",
+            None,
+            Some(&grant),
+        )?;
+        let entity_id = format!("ticket-event:{event_key}");
+        assert!(ticket_event_has_terminal_success_proof(&conn, &entity_id)?);
+    }
+
+    let conn = Connection::open_in_memory()?;
+    let grant = TerminalPolicyGrant::authorized_approval_reply(
+        "approval-message-1",
+        "0123456789abcdef0123456789abcdef",
+    );
+    work_items::enforce_ticket_self_work_state_transition(
+        &conn,
+        "approval-work-1",
+        "verified",
+        "closed",
+        "audit-actor",
+        "authorized approval audit",
+        None,
+        Some(&grant),
+    )?;
+    assert!(work_items::work_item_has_terminal_success_proof(
+        &conn,
+        "approval-work-1"
+    )?);
+    Ok(())
+}
+
+fn insert_legacy_ticket_transition_proof(
+    conn: &Connection,
+    proof_id: &str,
+    entity_id: &str,
+    request_json: &str,
+) -> Result<()> {
+    ensure_core_transition_guard_schema(conn)?;
+    conn.execute(
+        r#"
+        INSERT INTO ctox_core_transition_proofs (
+            proof_id, entity_type, entity_id, lane, from_state, to_state,
+            core_event, actor, accepted, violation_codes_json, request_json,
+            report_json, created_at, updated_at
+        ) VALUES (
+            ?1, 'QueueItem', ?2, 'P2MissionDelivery', 'Leased', 'Completed',
+            'Complete', 'legacy-test', 1, '[]', ?3, '{}',
+            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
+        )
+        "#,
+        params![proof_id, entity_id, request_json],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn ticket_proof_lookup_uses_structured_json_and_keeps_legacy_rows() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    insert_legacy_ticket_transition_proof(
+        &conn,
+        "ticket-random-substring",
+        "ticket-event:random-substring",
+        r#"{"metadata":{"unrelated":"terminal_policy_proof is only prose here"}}"#,
+    )?;
+    assert!(!ticket_event_has_terminal_success_proof(
+        &conn,
+        "ticket-event:random-substring"
+    )?);
+
+    insert_legacy_ticket_transition_proof(
+        &conn,
+        "ticket-legacy-policy",
+        "ticket-event:legacy-policy",
+        r#"{
+            "metadata": {
+                "terminal_policy_proof": "policy:legacy-ticket-routing"
+            }
+        }"#,
+    )?;
+    assert!(ticket_event_has_terminal_success_proof(
+        &conn,
+        "ticket-event:legacy-policy"
+    )?);
+    Ok(())
+}
+
+#[test]
 fn ticket_self_work_migration_preserves_rows_and_drops_unique() -> Result<()> {
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(

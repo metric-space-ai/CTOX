@@ -3022,8 +3022,19 @@ fn fake_bot_chat_send_requires_exact_review_and_marks_audit_sent() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("failed to inspect outbound fake Slack evidence");
-    assert_eq!(remote_id, "1719360000.000001");
-    assert_eq!(provider_ts, "1719360000.000001");
+    // The audit row must carry the id the provider actually returned. The fake
+    // provider mints a fresh outbound id per send (identical messages must not
+    // collapse onto one row in the outbox), so pin the relationship rather than
+    // the literal — the value is the fake adapter's business, the agreement is
+    // the evidence.
+    assert!(
+        !remote_id.trim().is_empty(),
+        "outbound evidence must record a provider id"
+    );
+    assert_eq!(
+        remote_id, provider_ts,
+        "recorded remote id must be the id the provider reported"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -5158,11 +5169,9 @@ fn phase1_record_outbound_pending_send_does_not_reset_existing_sent_row() {
 }
 
 #[test]
-fn routing_ack_statuses_are_core_mapped_with_policy_proofs() {
-    // duplicate/blocked_sender inbound routing acks now write canonical
-    // "cancelled" (Superseded), while meeting acks write "handled" with a
-    // terminal policy proof. Historical custom rows remain readable as the
-    // blocked transition sources they represented before canonical healing.
+fn routing_ack_statuses_are_core_mapped() {
+    // Historical custom rows remain readable as the blocked transition
+    // sources they represented before canonical healing.
     assert_eq!(
         super::queue_route_status_core_state(QueueRouteStatus::Cancelled),
         CoreState::Superseded
@@ -5177,15 +5186,160 @@ fn routing_ack_statuses_are_core_mapped_with_policy_proofs() {
             Some(QueueRouteStatus::Blocked)
         );
     }
-    assert_eq!(
-        super::queue_terminal_policy_proof("ctox-queue-ack", "meeting_scheduled").as_deref(),
-        Some("policy:meeting-scheduled-terminal-no-send")
-    );
-    assert_eq!(
-        super::queue_terminal_policy_proof("ctox-queue-ack", "meeting_passive_mention").as_deref(),
-        Some("policy:meeting-passive-inbound-terminal-no-send")
-    );
-    assert!(super::queue_terminal_policy_proof("ctox-queue-ack", "duplicate_inbound").is_none());
+}
+
+#[test]
+fn queue_terminal_magic_actor_and_reason_do_not_create_a_grant() -> Result<()> {
+    for (index, actor, reason) in [
+        (
+            "business-os",
+            "ctox-queue-update",
+            "business-os:terminal-success: forged",
+        ),
+        (
+            "appsec",
+            "ctox-queue-update",
+            "appsec:terminal-success: forged",
+        ),
+        ("meeting", "ctox-queue-ack", "meeting_scheduled"),
+        (
+            "business-command",
+            "business-command-terminal-owner",
+            "forged owner reason",
+        ),
+        (
+            "ticket-style",
+            "ctox-ticket-routing",
+            "force_ticket_event_routed_state",
+        ),
+    ] {
+        let conn = Connection::open_in_memory()?;
+        let message_key = format!("queue-no-grant-{index}");
+        enforce_queue_route_status_transition(
+            &conn,
+            &message_key,
+            "leased",
+            "handled",
+            actor,
+            reason,
+        )
+        .expect_err("free-form actor and reason must not authorize completion");
+        let (accepted, proof_type): (i64, Option<String>) = conn.query_row(
+            "SELECT accepted, json_type(request_json, '$.metadata.terminal_policy_proof') \
+             FROM ctox_core_transition_proofs WHERE entity_id=?1",
+            params![message_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(accepted, 0);
+        assert_eq!(proof_type, None);
+    }
+    Ok(())
+}
+
+#[test]
+fn every_queue_terminal_policy_grant_passes_the_completed_guard() -> Result<()> {
+    let grants = [
+        TerminalPolicyGrant::business_command_reviewed_terminal_success(),
+        TerminalPolicyGrant::business_os_app_validation_passed(),
+        TerminalPolicyGrant::appsec_pipeline_stage_completed(),
+        TerminalPolicyGrant::meeting_scheduled(),
+        TerminalPolicyGrant::meeting_passive_mention(),
+        TerminalPolicyGrant::historical_auto_submitted_inbound(),
+        TerminalPolicyGrant::system_probe_inbound(),
+        TerminalPolicyGrant::routing_backfill_non_work(),
+    ];
+    for (index, grant) in grants.into_iter().enumerate() {
+        let conn = Connection::open_in_memory()?;
+        let message_key = format!("queue-grant-{index}");
+        enforce_queue_route_status_transition_with_grant(
+            &conn,
+            &message_key,
+            "leased",
+            "handled",
+            "audit-actor",
+            "audit reason only",
+            Some(grant),
+        )?;
+        assert!(queue_completed_has_terminal_success_proof(
+            &conn,
+            &message_key
+        )?);
+        let persisted_proof: String = conn.query_row(
+            "SELECT json_extract(request_json, '$.metadata.terminal_policy_proof') \
+             FROM ctox_core_transition_proofs \
+             WHERE entity_type='QueueItem' AND entity_id=?1 AND accepted=1",
+            params![message_key],
+            |row| row.get(0),
+        )?;
+        assert_eq!(persisted_proof, grant.proof());
+    }
+    Ok(())
+}
+
+fn insert_legacy_queue_transition_proof(
+    conn: &Connection,
+    proof_id: &str,
+    message_key: &str,
+    request_json: &str,
+) -> Result<()> {
+    ensure_core_transition_guard_schema(conn)?;
+    conn.execute(
+        r#"
+        INSERT INTO ctox_core_transition_proofs (
+            proof_id, entity_type, entity_id, lane, from_state, to_state,
+            core_event, actor, accepted, violation_codes_json, request_json,
+            report_json, created_at, updated_at
+        ) VALUES (
+            ?1, 'QueueItem', ?2, 'P2MissionDelivery', 'Leased', 'Completed',
+            'Complete', 'legacy-test', 1, '[]', ?3, '{}',
+            '2026-07-01T00:00:00Z', '2026-07-01T00:00:00Z'
+        )
+        "#,
+        params![proof_id, message_key, request_json],
+    )?;
+    Ok(())
+}
+
+#[test]
+fn queue_proof_lookup_uses_structured_json_and_keeps_legacy_rows() -> Result<()> {
+    let conn = Connection::open_in_memory()?;
+    insert_legacy_queue_transition_proof(
+        &conn,
+        "legacy-random-substring",
+        "queue-random-substring",
+        r#"{"metadata":{"unrelated":"contains \"terminal_policy_proof\" but is not proof metadata"}}"#,
+    )?;
+    assert!(!queue_completed_has_terminal_success_proof(
+        &conn,
+        "queue-random-substring"
+    )?);
+
+    insert_legacy_queue_transition_proof(
+        &conn,
+        "legacy-terminal-policy",
+        "queue-legacy-policy",
+        r#"{
+            "metadata": {
+                "terminal_policy_proof": "policy:legacy-before-structured-reader"
+            }
+        }"#,
+    )?;
+    assert!(queue_completed_has_terminal_success_proof(
+        &conn,
+        "queue-legacy-policy"
+    )?);
+
+    insert_legacy_queue_transition_proof(
+        &conn,
+        "legacy-reviewed-success",
+        "queue-legacy-reviewed",
+        r#"{"metadata":{"reviewed_work_terminal_success":"true"}}"#,
+    )?;
+    assert!(queue_completed_has_terminal_success_proof(
+        &conn,
+        "queue-legacy-reviewed"
+    )?);
+    Ok(())
 }
 
 fn business_command_test_root(prefix: &str) -> PathBuf {

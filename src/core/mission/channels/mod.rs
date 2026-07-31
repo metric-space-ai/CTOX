@@ -321,6 +321,87 @@ pub struct QueueTaskCreateRequest {
     pub extra_metadata: Option<Value>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TerminalPolicyGrantKind {
+    BusinessCommandReviewedTerminalSuccess,
+    BusinessOsAppValidationPassed,
+    AppSecPipelineStageCompleted,
+    MeetingScheduled,
+    MeetingPassiveMention,
+    HistoricalAutoSubmittedInbound,
+    SystemProbeInbound,
+    RoutingBackfillNonWork,
+}
+
+/// Capability minted only by code paths that have established the matching
+/// terminal policy condition. Actor and reason remain audit data and cannot
+/// create this grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TerminalPolicyGrant(TerminalPolicyGrantKind);
+
+impl TerminalPolicyGrant {
+    fn business_command_reviewed_terminal_success() -> Self {
+        Self(TerminalPolicyGrantKind::BusinessCommandReviewedTerminalSuccess)
+    }
+
+    pub(crate) fn business_os_app_validation_passed() -> Self {
+        Self(TerminalPolicyGrantKind::BusinessOsAppValidationPassed)
+    }
+
+    pub(crate) fn appsec_pipeline_stage_completed() -> Self {
+        Self(TerminalPolicyGrantKind::AppSecPipelineStageCompleted)
+    }
+
+    pub(crate) fn meeting_scheduled() -> Self {
+        Self(TerminalPolicyGrantKind::MeetingScheduled)
+    }
+
+    pub(crate) fn meeting_passive_mention() -> Self {
+        Self(TerminalPolicyGrantKind::MeetingPassiveMention)
+    }
+
+    fn historical_auto_submitted_inbound() -> Self {
+        Self(TerminalPolicyGrantKind::HistoricalAutoSubmittedInbound)
+    }
+
+    fn system_probe_inbound() -> Self {
+        Self(TerminalPolicyGrantKind::SystemProbeInbound)
+    }
+
+    fn routing_backfill_non_work() -> Self {
+        Self(TerminalPolicyGrantKind::RoutingBackfillNonWork)
+    }
+
+    fn proof(self) -> &'static str {
+        match self.0 {
+            TerminalPolicyGrantKind::BusinessCommandReviewedTerminalSuccess => {
+                "policy:business-command-reviewed-terminal-success"
+            }
+            TerminalPolicyGrantKind::BusinessOsAppValidationPassed => {
+                "policy:business-os-app-validation-terminal-success"
+            }
+            TerminalPolicyGrantKind::AppSecPipelineStageCompleted => {
+                "policy:appsec-pipeline-stage-terminal-success"
+            }
+            TerminalPolicyGrantKind::MeetingScheduled => {
+                "policy:meeting-scheduled-terminal-no-send"
+            }
+            TerminalPolicyGrantKind::MeetingPassiveMention => {
+                "policy:meeting-passive-inbound-terminal-no-send"
+            }
+            TerminalPolicyGrantKind::HistoricalAutoSubmittedInbound => {
+                "policy:auto-submitted-inbound-terminal-no-send"
+            }
+            TerminalPolicyGrantKind::SystemProbeInbound => {
+                "policy:system-probe-inbound-terminal-no-send"
+            }
+            TerminalPolicyGrantKind::RoutingBackfillNonWork => {
+                "policy:routing-backfill-non-work-terminal-no-send"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct QueueTaskUpdateRequest {
     pub message_key: String,
@@ -1042,13 +1123,14 @@ pub fn reclassify_historical_auto_submitted_inbounds(root: &Path) -> Result<usiz
         )?;
         let route_status = QueueRouteStatus::Handled;
         let previous_route_status = current_queue_route_status(&conn, &candidate.message_key)?;
-        enforce_queue_route_status_transition(
+        enforce_queue_route_status_transition_with_grant(
             &conn,
             &candidate.message_key,
             &previous_route_status,
             route_status.as_str(),
             "ctox-boot-reclassifier",
             "mark_historical_auto_submitted_inbound_handled",
+            Some(TerminalPolicyGrant::historical_auto_submitted_inbound()),
         )?;
         conn.execute(
             r#"
@@ -1718,6 +1800,7 @@ pub fn handle_channel_command(root: &Path, args: &[String]) -> Result<()> {
                 status.as_str(),
                 failure_note,
                 ack_reason,
+                None,
             )?;
             print_json(&json!({
                 "ok": true,
@@ -2236,13 +2319,11 @@ pub fn ack_leased_messages(root: &Path, message_keys: &[String], status: &str) -
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
-    ack_messages(&mut conn, message_keys, status.as_str(), None, None)
+    ack_messages(&mut conn, message_keys, status.as_str(), None, None, None)
 }
 
-/// Ack with an explicit routing reason. The reason feeds the core-transition
-/// audit trail and, for terminal-success policy paths (e.g. an inbound
-/// message fully handled by scheduling a meeting), selects the matching
-/// `queue_terminal_policy_proof` entry.
+/// Ack with an explicit routing reason. The reason is audit data only and does
+/// not authorize a terminal-success transition.
 pub fn ack_leased_messages_with_reason(
     root: &Path,
     message_keys: &[String],
@@ -2253,7 +2334,35 @@ pub fn ack_leased_messages_with_reason(
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
-    ack_messages(&mut conn, message_keys, status.as_str(), None, Some(reason))
+    ack_messages(
+        &mut conn,
+        message_keys,
+        status.as_str(),
+        None,
+        Some(reason),
+        None,
+    )
+}
+
+pub(crate) fn ack_leased_messages_with_reason_and_grant(
+    root: &Path,
+    message_keys: &[String],
+    status: &str,
+    reason: &str,
+    terminal_policy_grant: TerminalPolicyGrant,
+) -> Result<usize> {
+    let status = canonical_queue_route_status(status)?;
+    let db_path = resolve_db_path(root, None);
+    let mut conn = open_channel_db(&db_path)?;
+    guard_founder_handled_ack(root, &conn, message_keys, status.as_str())?;
+    ack_messages(
+        &mut conn,
+        message_keys,
+        status.as_str(),
+        None,
+        Some(reason),
+        Some(terminal_policy_grant),
+    )
 }
 
 pub fn ack_leased_messages_with_failure_reason(
@@ -2275,6 +2384,7 @@ pub fn ack_leased_messages_with_failure_reason(
         message_keys,
         status.as_str(),
         Some(failure_reason),
+        None,
         None,
     )
 }
@@ -2315,6 +2425,7 @@ pub fn hold_leased_messages(
                         route_status.as_str(),
                         None,
                         Some("waiting_external"),
+                        None,
                     )?;
                 } else {
                     updated += 1;
@@ -2395,6 +2506,7 @@ pub fn hold_leased_messages(
                         next_status.as_str(),
                         exhausted.then_some(summary.trim()),
                         (!exhausted).then_some("budgeted_completion_hold"),
+                        None,
                     )?;
                 } else {
                     updated += 1;
@@ -2912,6 +3024,26 @@ pub fn load_queue_task_last_error(root: &Path, message_key: &str) -> Result<Opti
 }
 
 pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result<QueueTaskView> {
+    update_queue_task_with_optional_terminal_policy_grant(root, request, None)
+}
+
+pub(crate) fn update_queue_task_with_terminal_policy_grant(
+    root: &Path,
+    request: QueueTaskUpdateRequest,
+    terminal_policy_grant: TerminalPolicyGrant,
+) -> Result<QueueTaskView> {
+    update_queue_task_with_optional_terminal_policy_grant(
+        root,
+        request,
+        Some(terminal_policy_grant),
+    )
+}
+
+fn update_queue_task_with_optional_terminal_policy_grant(
+    root: &Path,
+    request: QueueTaskUpdateRequest,
+    terminal_policy_grant: Option<TerminalPolicyGrant>,
+) -> Result<QueueTaskView> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
     ensure_queue_account(&mut conn)?;
@@ -3084,6 +3216,7 @@ pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result
                 "ctox-queue-update",
                 "update_queue_task",
                 status_note,
+                terminal_policy_grant,
             )?;
         }
     }
@@ -4611,13 +4744,15 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     for (message_key, raw_route_status, acked_at, updated_at) in missing {
         let route_status = canonical_queue_route_status(&raw_route_status)?;
         let previous_route_status = current_queue_route_status(conn, &message_key)?;
-        enforce_queue_route_status_transition(
+        enforce_queue_route_status_transition_with_grant(
             conn,
             &message_key,
             &previous_route_status,
             route_status.as_str(),
             "ctox-routing-backfill",
             "ensure_routing_rows_for_inbound",
+            (route_status == QueueRouteStatus::Handled)
+                .then_some(TerminalPolicyGrant::routing_backfill_non_work()),
         )?;
         conn.execute(
             r#"
@@ -4647,13 +4782,14 @@ pub(crate) fn ensure_routing_rows_for_inbound(conn: &Connection) -> Result<()> {
     drop(statement);
     let route_status = QueueRouteStatus::Handled;
     for (message_key, previous_route_status) in probe_updates {
-        enforce_queue_route_status_transition(
+        enforce_queue_route_status_transition_with_grant(
             conn,
             &message_key,
             &previous_route_status,
             route_status.as_str(),
             "ctox-routing-backfill",
             "normalize_system_probe_messages",
+            Some(TerminalPolicyGrant::system_probe_inbound()),
         )?;
     }
     conn.execute(
@@ -5138,9 +5274,17 @@ fn ack_messages(
     status: &str,
     failure_note: Option<&str>,
     ack_reason: Option<&str>,
+    terminal_policy_grant: Option<TerminalPolicyGrant>,
 ) -> Result<usize> {
     let tx = conn.unchecked_transaction()?;
-    let updated = ack_messages_in_transaction(&tx, message_keys, status, failure_note, ack_reason)?;
+    let updated = ack_messages_in_transaction(
+        &tx,
+        message_keys,
+        status,
+        failure_note,
+        ack_reason,
+        terminal_policy_grant,
+    )?;
     tx.commit()?;
     Ok(updated)
 }
@@ -5151,6 +5295,7 @@ fn ack_messages_in_transaction(
     status: &str,
     failure_note: Option<&str>,
     ack_reason: Option<&str>,
+    terminal_policy_grant: Option<TerminalPolicyGrant>,
 ) -> Result<usize> {
     let status = canonical_queue_route_status(status)?;
     let now = now_iso_string();
@@ -5175,13 +5320,14 @@ fn ack_messages_in_transaction(
     let mut updated = 0usize;
     for message_key in message_keys {
         let previous_route_status = current_queue_route_status(&tx, message_key)?;
-        enforce_queue_route_status_transition(
+        enforce_queue_route_status_transition_with_grant(
             &tx,
             message_key,
             &previous_route_status,
             status.as_str(),
             "ctox-queue-ack",
             ack_reason.or(failure_note).unwrap_or("ack_messages"),
+            terminal_policy_grant,
         )?;
         let routing_updates = tx.execute(
             r#"
@@ -6010,6 +6156,7 @@ fn set_routing_status(
     actor: &str,
     reason: &str,
     status_note: Option<&str>,
+    terminal_policy_grant: Option<TerminalPolicyGrant>,
 ) -> Result<()> {
     let route_status = canonical_queue_route_status(route_status)?;
     let failure_note = if route_status == QueueRouteStatus::Failed {
@@ -6030,13 +6177,14 @@ fn set_routing_status(
             .filter(|value| !value.is_empty())
             .unwrap_or(reason)
     };
-    enforce_queue_route_status_transition(
+    enforce_queue_route_status_transition_with_grant(
         conn,
         message_key,
         &previous_route_status,
         route_status.as_str(),
         actor,
         transition_reason,
+        terminal_policy_grant,
     )?;
     let acked_at = if matches!(
         route_status,
@@ -6101,6 +6249,26 @@ pub(crate) fn enforce_queue_route_status_transition(
     actor: &str,
     reason: &str,
 ) -> Result<()> {
+    enforce_queue_route_status_transition_with_grant(
+        conn,
+        message_key,
+        from_route_status,
+        to_route_status,
+        actor,
+        reason,
+        None,
+    )
+}
+
+fn enforce_queue_route_status_transition_with_grant(
+    conn: &Connection,
+    message_key: &str,
+    from_route_status: &str,
+    to_route_status: &str,
+    actor: &str,
+    reason: &str,
+    terminal_policy_grant: Option<TerminalPolicyGrant>,
+) -> Result<()> {
     let from_route_status = canonical_queue_route_status(from_route_status)?;
     let to_route_status = canonical_queue_route_status(to_route_status)?;
     let from_state = queue_route_status_core_state(from_route_status);
@@ -6134,8 +6302,11 @@ pub(crate) fn enforce_queue_route_status_transition(
         );
     }
     if to_state == CoreState::Completed {
-        if let Some(policy_proof) = queue_terminal_policy_proof(actor, reason) {
-            metadata.insert("terminal_policy_proof".to_string(), policy_proof);
+        if let Some(policy_proof) = terminal_policy_grant.map(TerminalPolicyGrant::proof) {
+            metadata.insert(
+                "terminal_policy_proof".to_string(),
+                policy_proof.to_string(),
+            );
         }
     }
     enforce_core_transition(
@@ -6178,9 +6349,13 @@ fn queue_completed_has_terminal_success_proof(
           AND entity_id = ?1
           AND to_state = 'Completed'
           AND accepted = 1
+          AND json_valid(request_json) = 1
           AND (
-                request_json LIKE '%"reviewed_work_terminal_success":"true"%'
-             OR request_json LIKE '%"terminal_policy_proof"%'
+                json_extract(request_json, '$.metadata.reviewed_work_terminal_success') = 'true'
+             OR (
+                    json_type(request_json, '$.metadata.terminal_policy_proof') = 'text'
+                AND TRIM(json_extract(request_json, '$.metadata.terminal_policy_proof')) <> ''
+             )
           )
         "#,
         params![message_key],
@@ -6199,53 +6374,16 @@ fn queue_rework_has_witness_proof(conn: &Connection, message_key: &str) -> Resul
           AND entity_id = ?1
           AND to_state = 'ReworkRequired'
           AND accepted = 1
+          AND json_valid(request_json) = 1
           AND (
-                request_json LIKE '%"review_checkpoint":"true"%'
-             OR request_json LIKE '%"validator_rework":"true"%'
+                json_extract(request_json, '$.metadata.review_checkpoint') = 'true'
+             OR json_extract(request_json, '$.metadata.validator_rework') = 'true'
           )
         "#,
         params![message_key],
         |row| row.get::<_, i64>(0),
     )?;
     Ok(count > 0)
-}
-
-fn queue_terminal_policy_proof(actor: &str, reason: &str) -> Option<String> {
-    if actor == "business-command-terminal-owner" {
-        // This actor is reachable only through
-        // `transition_business_command_for_task`, which has already verified
-        // the immutable typed result plus passed review and validation in the
-        // same core transaction.
-        return Some("policy:business-command-reviewed-terminal-success".to_string());
-    }
-    if actor == "ctox-queue-update" && reason.starts_with("business-os:terminal-success:") {
-        return Some("policy:business-os-queued-command-terminal-success".to_string());
-    }
-    if actor == "ctox-queue-update" && reason.starts_with("appsec:terminal-success:") {
-        return Some("policy:appsec-pipeline-stage-terminal-success".to_string());
-    }
-    match (actor, reason) {
-        // Inbound mail fully handled by scheduling the requested meeting:
-        // routing closes the message without a worker/review pass.
-        ("ctox-queue-ack", "meeting_scheduled") => {
-            Some("policy:meeting-scheduled-terminal-no-send".to_string())
-        }
-        // Inbound mail that only passively mentions a meeting; routing
-        // closes it as non-work without a worker/review pass.
-        ("ctox-queue-ack", "meeting_passive_mention") => {
-            Some("policy:meeting-passive-inbound-terminal-no-send".to_string())
-        }
-        ("ctox-boot-reclassifier", "mark_historical_auto_submitted_inbound_handled") => {
-            Some("policy:auto-submitted-inbound-terminal-no-send".to_string())
-        }
-        ("ctox-routing-backfill", "normalize_system_probe_messages") => {
-            Some("policy:system-probe-inbound-terminal-no-send".to_string())
-        }
-        ("ctox-routing-backfill", "ensure_routing_rows_for_inbound") => {
-            Some("policy:routing-backfill-non-work-terminal-no-send".to_string())
-        }
-        _ => None,
-    }
 }
 
 fn queue_route_status_core_state(route_status: QueueRouteStatus) -> CoreState {

@@ -8,7 +8,7 @@ use super::{
     ensure_queue_account, epoch_millis, load_queue_task_from_conn, now_iso_string, open_channel_db,
     resolve_db_path, sanitize_path_component, set_routing_status, sha256_hex,
     BusinessCommandClaimRequest, BusinessCommandControlClaim, BusinessCommandOutboxEvent,
-    BusinessCommandQueueClaim, QueueRouteStatus, QueueTaskCreateRequest,
+    BusinessCommandQueueClaim, QueueRouteStatus, QueueTaskCreateRequest, TerminalPolicyGrant,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -1091,6 +1091,8 @@ pub(super) fn transition_business_command_for_task_in_transaction(
                 "business-command-terminal-owner",
                 &settle_reason,
                 Some(settle_reason.as_str()),
+                (settled_route == QueueRouteStatus::Handled)
+                    .then_some(TerminalPolicyGrant::business_command_reviewed_terminal_success()),
             )?;
         }
         return Ok(true);
@@ -1154,6 +1156,8 @@ pub(super) fn transition_business_command_for_task_in_transaction(
             reason,
             error_message
                 .or_else(|| (normalized_route == QueueRouteStatus::Failed).then_some(reason)),
+            (persisted_route == QueueRouteStatus::Handled)
+                .then_some(TerminalPolicyGrant::business_command_reviewed_terminal_success()),
         )?;
     }
     let next_version = version.saturating_add(1);

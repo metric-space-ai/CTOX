@@ -1864,7 +1864,7 @@ fn appsec_pipeline_worker_execute_task(
                 "appsec:terminal-success: pipeline stage completed with coverage evidence for {}",
                 appsec_stage_id(&stage).unwrap_or("unknown-stage")
             );
-            channels::update_queue_task(
+            channels::update_queue_task_with_terminal_policy_grant(
                 root,
                 channels::QueueTaskUpdateRequest {
                     message_key: leased.message_key.clone(),
@@ -1872,6 +1872,7 @@ fn appsec_pipeline_worker_execute_task(
                     status_note: Some(note.clone()),
                     ..Default::default()
                 },
+                channels::TerminalPolicyGrant::appsec_pipeline_stage_completed(),
             )?;
             final_status = "handled".to_string();
             final_note = note;

@@ -11006,7 +11006,7 @@ fn complete_business_os_app_validation_success_to_leased_queue(
                     )
                 })?;
                 if task.route_status != "handled" {
-                    channels::update_queue_task(
+                    channels::update_queue_task_with_terminal_policy_grant(
                         root,
                         channels::QueueTaskUpdateRequest {
                             message_key: message_key.clone(),
@@ -11016,6 +11016,7 @@ fn complete_business_os_app_validation_success_to_leased_queue(
                             ),
                             ..Default::default()
                         },
+                        channels::TerminalPolicyGrant::business_os_app_validation_passed(),
                     )
                     .with_context(|| {
                         format!(
@@ -11039,7 +11040,7 @@ fn complete_business_os_app_validation_success_to_leased_queue(
     }
     if !fallback_message_keys.is_empty() {
         for message_key in &fallback_message_keys {
-            channels::update_queue_task(
+            channels::update_queue_task_with_terminal_policy_grant(
                 root,
                 channels::QueueTaskUpdateRequest {
                     message_key: message_key.clone(),
@@ -11049,6 +11050,7 @@ fn complete_business_os_app_validation_success_to_leased_queue(
                     ),
                     ..Default::default()
                 },
+                channels::TerminalPolicyGrant::business_os_app_validation_passed(),
             )
             .with_context(|| {
                 format!("failed to mark app-validation-verified queue task {message_key} handled")
@@ -17773,21 +17775,23 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
     }
     if !meeting_handled.is_empty() {
         router_did_work = true;
-        let result = channels::ack_leased_messages_with_reason(
+        let result = channels::ack_leased_messages_with_reason_and_grant(
             root,
             &meeting_handled,
             "handled",
             "meeting_scheduled",
+            channels::TerminalPolicyGrant::meeting_scheduled(),
         );
         log_ack_failure("meeting_scheduled", &meeting_handled, result);
     }
     if !meeting_passive.is_empty() {
         router_did_work = true;
-        let result = channels::ack_leased_messages_with_reason(
+        let result = channels::ack_leased_messages_with_reason_and_grant(
             root,
             &meeting_passive,
             "handled",
             "meeting_passive_mention",
+            channels::TerminalPolicyGrant::meeting_passive_mention(),
         );
         log_ack_failure("meeting_passive_mention", &meeting_passive, result);
     }
@@ -26221,13 +26225,22 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    // Hundreds of tests share this binary and run in parallel; a nanosecond
+    // stamp does not separate two that start inside the same tick. They then
+    // shared a root and stomped on each other's SQLite state, which is why a
+    // rotating handful of service tests failed per aggregate run while every
+    // one of them passed in isolation.
+    static TEMP_ROOT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     fn temp_root(prefix: &str) -> std::path::PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "ctox-service-{prefix}-{}",
+            "ctox-service-{prefix}-{}-{}-{}",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
-                .as_nanos()
+                .as_nanos(),
+            TEMP_ROOT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
         root

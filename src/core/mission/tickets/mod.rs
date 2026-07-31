@@ -102,6 +102,55 @@ use crate::service::harness_flow::{
 
 const DEFAULT_DB_RELATIVE_PATH: &str = "runtime/ctox.sqlite3";
 const DEFAULT_LIST_LIMIT: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalPolicyGrantKind {
+    OutboundTicketEvent,
+    BaselineObservedInboundTicketEvent,
+    AuthorizedApprovalReply {
+        approval_message_key: String,
+        body_sha256_prefix: String,
+    },
+}
+
+/// Ticket terminal-policy capability created only after the corresponding
+/// structured condition has been checked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalPolicyGrant(TerminalPolicyGrantKind);
+
+impl TerminalPolicyGrant {
+    fn outbound_ticket_event() -> Self {
+        Self(TerminalPolicyGrantKind::OutboundTicketEvent)
+    }
+
+    fn baseline_observed_inbound_ticket_event() -> Self {
+        Self(TerminalPolicyGrantKind::BaselineObservedInboundTicketEvent)
+    }
+
+    fn authorized_approval_reply(approval_message_key: &str, body_sha256: &str) -> Self {
+        Self(TerminalPolicyGrantKind::AuthorizedApprovalReply {
+            approval_message_key: approval_message_key.to_string(),
+            body_sha256_prefix: body_sha256.chars().take(16).collect(),
+        })
+    }
+
+    fn proof(&self) -> String {
+        match &self.0 {
+            TerminalPolicyGrantKind::OutboundTicketEvent => {
+                "policy:ticket-event-outbound-terminal".to_string()
+            }
+            TerminalPolicyGrantKind::BaselineObservedInboundTicketEvent => {
+                "policy:ticket-event-baseline-observed-terminal".to_string()
+            }
+            TerminalPolicyGrantKind::AuthorizedApprovalReply {
+                approval_message_key,
+                body_sha256_prefix,
+            } => format!(
+                "policy:authorized-approval-reply:{approval_message_key}:{body_sha256_prefix}"
+            ),
+        }
+    }
+}
 const DEFAULT_AUDIT_LIMIT: usize = 30;
 const DEFAULT_APPROVAL_MODE: &str = "human_approval_required";
 const DEFAULT_AUTONOMY_LEVEL: &str = "A0";
@@ -2965,6 +3014,13 @@ pub(crate) fn upsert_ticket_event_from_adapter(
     } else {
         initial_route_status_for_inbound_event(&conn, request.system, request.external_created_at)?
     };
+    let terminal_policy_grant = match (effective_direction, initial_route_status) {
+        ("outbound", "handled") => Some(TerminalPolicyGrant::outbound_ticket_event()),
+        ("inbound", "observed") => {
+            Some(TerminalPolicyGrant::baseline_observed_inbound_ticket_event())
+        }
+        _ => None,
+    };
     let existing = conn
         .query_row(
             r#"
@@ -3017,7 +3073,12 @@ pub(crate) fn upsert_ticket_event_from_adapter(
                 changed: false,
             });
         }
-        force_ticket_event_routed_state(&conn, &event_key, initial_route_status)?;
+        force_ticket_event_routed_state(
+            &conn,
+            &event_key,
+            initial_route_status,
+            terminal_policy_grant.as_ref(),
+        )?;
         return Ok(AdapterTicketUpsertResult {
             key: event_key,
             changed: true,
@@ -3049,7 +3110,12 @@ pub(crate) fn upsert_ticket_event_from_adapter(
             observed_at,
         ],
     )?;
-    force_ticket_event_routed_state(&conn, &event_key, initial_route_status)?;
+    force_ticket_event_routed_state(
+        &conn,
+        &event_key,
+        initial_route_status,
+        terminal_policy_grant.as_ref(),
+    )?;
     Ok(AdapterTicketUpsertResult {
         key: event_key,
         changed: true,
@@ -3082,7 +3148,12 @@ fn mark_remote_events_outbound(
             "UPDATE ticket_events SET direction = 'outbound' WHERE event_key = ?1",
             params![event_key],
         )?;
-        force_ticket_event_routed_state(&conn, &event_key, "handled")?;
+        force_ticket_event_routed_state(
+            &conn,
+            &event_key,
+            "handled",
+            Some(&TerminalPolicyGrant::outbound_ticket_event()),
+        )?;
     }
     Ok(())
 }
@@ -3091,9 +3162,10 @@ fn force_ticket_event_routed_state(
     conn: &Connection,
     event_key: &str,
     route_status: &str,
+    terminal_policy_grant: Option<&TerminalPolicyGrant>,
 ) -> Result<()> {
     let now = now_iso_string();
-    force_ticket_event_routed_state_at(conn, event_key, route_status, &now)
+    force_ticket_event_routed_state_at(conn, event_key, route_status, &now, terminal_policy_grant)
 }
 
 fn force_ticket_event_routed_state_at(
@@ -3101,9 +3173,10 @@ fn force_ticket_event_routed_state_at(
     event_key: &str,
     route_status: &str,
     updated_at: &str,
+    terminal_policy_grant: Option<&TerminalPolicyGrant>,
 ) -> Result<()> {
     let previous_route_status = current_ticket_event_route_status(conn, event_key)?;
-    enforce_ticket_event_route_status_transition(
+    enforce_ticket_event_route_status_transition_with_grant(
         conn,
         event_key,
         &previous_route_status,
@@ -3111,6 +3184,7 @@ fn force_ticket_event_routed_state_at(
         "ctox-ticket-routing",
         "force_ticket_event_routed_state",
         None,
+        terminal_policy_grant,
     )?;
     conn.execute(
         r#"
@@ -3157,6 +3231,28 @@ fn enforce_ticket_event_route_status_transition(
     reason: &str,
     failure_class: Option<&str>,
 ) -> Result<()> {
+    enforce_ticket_event_route_status_transition_with_grant(
+        conn,
+        event_key,
+        from_status,
+        to_status,
+        actor,
+        reason,
+        failure_class,
+        None,
+    )
+}
+
+fn enforce_ticket_event_route_status_transition_with_grant(
+    conn: &Connection,
+    event_key: &str,
+    from_status: &str,
+    to_status: &str,
+    actor: &str,
+    reason: &str,
+    failure_class: Option<&str>,
+    terminal_policy_grant: Option<&TerminalPolicyGrant>,
+) -> Result<()> {
     let from_status = canonical_ticket_event_route_status(from_status)?;
     let to_status = canonical_ticket_event_route_status(to_status)?;
     if from_status == to_status {
@@ -3181,7 +3277,7 @@ fn enforce_ticket_event_route_status_transition(
         );
     }
     if to_core == CoreState::Completed {
-        if let Some(policy_proof) = ticket_event_terminal_policy_proof(actor, reason) {
+        if let Some(policy_proof) = terminal_policy_grant.map(TerminalPolicyGrant::proof) {
             metadata.insert("terminal_policy_proof".to_string(), policy_proof);
         }
     }
@@ -3212,24 +3308,19 @@ fn ticket_event_has_terminal_success_proof(conn: &Connection, entity_id: &str) -
           AND entity_id = ?1
           AND to_state = 'Completed'
           AND accepted = 1
+          AND json_valid(request_json) = 1
           AND (
-                request_json LIKE '%"reviewed_work_terminal_success":"true"%'
-             OR request_json LIKE '%"terminal_policy_proof"%'
+                json_extract(request_json, '$.metadata.reviewed_work_terminal_success') = 'true'
+             OR (
+                    json_type(request_json, '$.metadata.terminal_policy_proof') = 'text'
+                AND TRIM(json_extract(request_json, '$.metadata.terminal_policy_proof')) <> ''
+             )
           )
         "#,
         params![entity_id],
         |row| row.get::<_, i64>(0),
     )?;
     Ok(count > 0)
-}
-
-fn ticket_event_terminal_policy_proof(actor: &str, reason: &str) -> Option<String> {
-    match (actor, reason) {
-        ("ctox-ticket-routing", "force_ticket_event_routed_state") => {
-            Some("policy:ticket-event-routing-observed-or-outbound-terminal".to_string())
-        }
-        _ => None,
-    }
 }
 
 fn ticket_event_route_core_state(route_status: &str) -> CoreState {
@@ -5175,7 +5266,15 @@ fn ensure_ticket_event_routing_rows(conn: &Connection) -> Result<()> {
     let missing = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
     for (event_key, route_status, observed_at) in missing {
-        force_ticket_event_routed_state_at(conn, &event_key, &route_status, &observed_at)?;
+        let terminal_policy_grant =
+            (route_status == "handled").then_some(TerminalPolicyGrant::outbound_ticket_event());
+        force_ticket_event_routed_state_at(
+            conn,
+            &event_key,
+            &route_status,
+            &observed_at,
+            terminal_policy_grant.as_ref(),
+        )?;
     }
     migrate_ticket_self_work_items_schema(conn)?;
     Ok(())
