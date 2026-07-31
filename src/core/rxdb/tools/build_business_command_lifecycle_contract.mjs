@@ -21,7 +21,7 @@ const jsPath = resolve(
 );
 const rustPath = resolve(
   repoRoot,
-  'core/business_os/command_lifecycle_generated.rs',
+  'core/command_lifecycle/generated.rs',
 );
 
 const fixture = JSON.parse(readFileSync(lifecycleFixturePath, 'utf8'));

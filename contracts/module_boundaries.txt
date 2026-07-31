@@ -24,15 +24,14 @@ communication -> service = 0
 context -> business_os = 0
 context -> service = 0
 mission -> capabilities = 0
+# The command lifecycle contract and transition validator live below Mission
+# and Business OS, so Mission no longer reaches upward for lifecycle decisions.
+mission -> business_os = 0
 
 # --- Ratchets: existing edges, allowed to shrink only -------------------
 # Mission still reaches into service for harness flow/mining and governance;
 # the core state machine and transition guard now live below both modules.
 mission -> service = 6
-# mission projects channel state into Business OS shapes
-# (channels/business_os_projection.rs). A projection is a legitimate seam,
-# but it points the wrong way and should become a Business OS-side pull.
-mission -> business_os = 7
 # Not the queue vocabulary, as first assumed. Measured, it is
 # communication's own message store living in mission: open_channel_db,
 # upsert_communication_message, refresh_thread, preview_text. The queue and

@@ -33,7 +33,7 @@ const GENERATED = [
   'src/core/rxdb/src/plugins/replication_webrtc/protocol_contract_generated.rs',
   'src/apps/business-os/rxdb/src/frame-contract.generated.mjs',
   'src/apps/business-os/rxdb/src/protocol-contract.generated.mjs',
-  'src/core/business_os/command_lifecycle_generated.rs',
+  'src/core/command_lifecycle/generated.rs',
   'src/apps/business-os/shared/command-lifecycle.generated.js',
 ];
 

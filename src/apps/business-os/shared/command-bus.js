@@ -9,7 +9,15 @@ const COMMAND_SYNC_FLUSH_TIMEOUT_MS = 15000;
 // by a native browser dialog. That failover legitimately takes longer than a
 // normal leader-side push, so it needs a separate deadline.
 const COMMAND_FOLLOWER_SYNC_FLUSH_TIMEOUT_MS = 45000;
-const COMMAND_CAPABILITY_TIMEOUT_MS = 5000;
+// Acquiring a capability is not a local call: the control plane resolves the
+// session and then runs `business-os auth issue-capability` on the instance
+// over SSH. Measured round-trip is 0.6-1.1s from a warm connection, but a cold
+// serverless invocation plus an SSH handshake routinely exceeds 5s — and the
+// issued token is valid for 12 hours, so paying for one slow acquisition is
+// cheap while failing it strands the whole submit. Two attempts (12s + 125ms
+// backoff + 12s) still fit inside the 30s chat-submit deadline that reports
+// "der Auftrag wurde nicht rechtzeitig an die Queue übergeben".
+const COMMAND_CAPABILITY_TIMEOUT_MS = 12000;
 const COMMAND_CAPABILITY_TERMINAL_NEGATIVE_CACHE_MS = 10000;
 // Transient failures only need enough suppression to avoid an immediate request
 // storm. The submit retry waits slightly longer, so it always performs a fresh

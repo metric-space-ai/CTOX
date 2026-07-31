@@ -18,6 +18,7 @@ mod autonomy;
 mod business_os;
 mod capabilities;
 mod coding_agents;
+mod command_lifecycle;
 mod communication;
 mod context;
 mod core_state;

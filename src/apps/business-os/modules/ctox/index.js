@@ -12,7 +12,7 @@ const MAX_ZOOM = 1.8;
 const HARNESS_REFRESH_MS = 4000;
 const LOCAL_RENDER_DEBOUNCE_MS = 80;
 const HARNESS_STALL_GRACE_MS = 90 * 1000;
-const HARNESS_WAITING_STATUSES = new Set(['queued', 'pending', 'accepted']);
+const HARNESS_WAITING_STATUSES = new Set(['queued', 'pending', 'accepted', 'review_rework']);
 const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'drafting']);
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
@@ -2994,6 +2994,7 @@ function observedPathFromFlow(flowResult) {
 }
 
 function reconcileObservedPathWithAuthoritativeTask(observedIds, task, flowResult) {
+  if (!task) return observedIds;
   const currentNodeId = authoritativeTaskNodeId(task);
   if (!currentNodeId) return observedIds;
   const base = flowMatchesTask(flowResult, task)
@@ -3491,7 +3492,7 @@ function authoritativeTaskNodeId(task = {}) {
 
 function normalizeCommandStatus(status) {
   const value = String(status || '').toLowerCase();
-  if (['accepted', 'pending', 'waiting_dependencies', 'waiting-dependencies', 'retry_wait', 'retry-wait'].includes(value)) return 'queued';
+  if (['accepted', 'pending', 'waiting_dependencies', 'waiting-dependencies', 'retry_wait', 'retry-wait', 'review_rework', 'review-rework'].includes(value)) return 'queued';
   if (value === 'leased' || value === 'working') return 'running';
   if (['awaiting_review', 'awaiting-review', 'validating'].includes(value)) return 'review';
   if (value === 'done') return 'completed';
@@ -3646,12 +3647,11 @@ async function loadLocalCollection(ctx, collectionName) {
   const collection = ctoxCollection(ctx, collectionName);
   if (!collection) return [];
   const query = collection.find();
-  const previewQuery = typeof query?.limit === 'function' ? query.limit(200) : query;
+  const previewQuery = typeof query?.limit === 'function' ? query.limit(1000) : query;
   const localDocs = await previewQuery.exec();
   return localDocs
     .map((doc) => doc.toJSON())
-    .sort((left, right) => (right.updated_at_ms || 0) - (left.updated_at_ms || 0))
-    .slice(0, 20);
+    .sort((left, right) => (right.updated_at_ms || 0) - (left.updated_at_ms || 0));
 }
 
 function ctoxCollection(ctx, collectionName) {
@@ -4378,6 +4378,7 @@ export const __ctoxTestHooks = {
   formatRelativeAge,
   friendlyWebStackStatus,
   labels,
+  loadLocalCollection,
   mergeBundleWithCommands,
   progressPercent,
   safeTaskDisplayText,

@@ -79,6 +79,38 @@ Local mode enforces the same structural, data-boundary, and design rules as
 installed mode; only the business-behavior requirements (mandatory automation
 command, create affordance) are relaxed for quick test apps.
 
+### Local Design Templates (git-ignored instance themes)
+
+Instance-local shell designs live beside local modules under:
+
+```text
+runtime/business-os/design-templates/<id>/
+  template.json
+  theme.css
+```
+
+`runtime/` is already git-ignored. The native server discovers valid template
+directories, exposes their stylesheet as a no-cache static asset, and adds the
+template to the shell's **Fenster / Window** selector after the built-in CTOX,
+Windows, and macOS designs. A minimal manifest is:
+
+```json
+{
+  "id": "customer-design",
+  "title": "Customer Design",
+  "description": "Instance-local light and dark shell treatment.",
+  "base_style": "windows",
+  "stylesheet": "theme.css"
+}
+```
+
+`id` must match the directory name. `base_style` is `ctox`, `windows`, or
+`macos`; the custom stylesheet then overrides that base and should scope every
+rule to `:root[data-design-template="<id>"]`. Put light tokens on that selector
+and dark overrides on the same selector combined with `[data-theme="dark"]`.
+Custom design files survive source upgrades and never enter the public
+repository.
+
 The shell loads module manifests through the native Rust API and mounts modules
 as plain browser modules. React may be embedded for menus, settings, and dense
 forms, but the working views should remain direct, inspectable ESM.

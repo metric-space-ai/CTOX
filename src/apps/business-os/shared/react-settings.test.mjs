@@ -105,6 +105,11 @@ test('settings appearance tab renders admin branding controls', () => {
   assert.match(html, /data-branding-save/);
   assert.match(html, /data-branding-reset/);
   assert.match(html, /Acme Corporate/);
+  assert.match(html, /Design-Templates/);
+  assert.match(html, /data-design-template-id/);
+  assert.match(html, /data-design-template-css/);
+  assert.match(html, /data-design-template-save/);
+  assert.match(html, /data-design-template-delete/);
 });
 
 test('compact settings tabs expose their complete labels on hover and to assistive technology', () => {

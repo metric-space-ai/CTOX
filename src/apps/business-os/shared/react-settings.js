@@ -12,6 +12,10 @@ import {
   WORKSPACE_BRANDING_DOCUMENT_ID,
 } from './branding.js?v=20260714-chat-queue-v56';
 import {
+  currentShellDesignValue,
+  shellDesignOptions,
+} from './design-templates.js?v=20260728-custom-design-templates-v1';
+import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
@@ -69,6 +73,13 @@ export async function openReactSettings({
       jsonText: '',
       error: '',
       canManage: canManageBranding,
+    },
+    designTemplates: {
+      loading: false,
+      items: [],
+      selectedId: '',
+      draft: null,
+      error: '',
     },
     mcp: {
       loading: false,
@@ -220,6 +231,38 @@ export async function openReactSettings({
     render();
   };
 
+  const refreshDesignTemplates = async ({ selectedId } = {}) => {
+    if (!settingsState.branding.canManage) return;
+    settingsState.designTemplates = {
+      ...settingsState.designTemplates,
+      loading: true,
+      error: '',
+    };
+    render();
+    try {
+      const payload = await requestDesignTemplates('/api/business-os/design-templates');
+      const items = Array.isArray(payload.templates) ? payload.templates : [];
+      const nextSelectedId = selectedId === undefined
+        ? (settingsState.designTemplates.selectedId || items[0]?.id || '')
+        : selectedId;
+      settingsState.designTemplates = {
+        loading: false,
+        items,
+        selectedId: items.some((item) => item.id === nextSelectedId) ? nextSelectedId : '',
+        draft: null,
+        error: '',
+      };
+      publishDesignTemplates(items);
+    } catch (error) {
+      settingsState.designTemplates = {
+        ...settingsState.designTemplates,
+        loading: false,
+        error: String(error?.message || error),
+      };
+    }
+    render();
+  };
+
   const refreshActivity = async () => {
     if (!isAdmin) return;
     if (activityRetryTimer) {
@@ -304,6 +347,9 @@ export async function openReactSettings({
     if (settingsState.tab === 'appearance' && settingsState.branding.canManage && !settingsState.branding.document) {
       refreshBranding();
     }
+    if (settingsState.tab === 'appearance' && settingsState.branding.canManage && !settingsState.designTemplates.loading) {
+      refreshDesignTemplates();
+    }
     if (settingsState.tab === 'admin' && settingsState.templates === null) {
       refreshManagedModules();
     }
@@ -360,6 +406,7 @@ export async function openReactSettings({
       canManageUsers: settingsState.canManageUsers,
       activity: settingsState.activity,
       branding: settingsState.branding,
+      designTemplates: settingsState.designTemplates,
       editingModuleId: settingsState.editingModuleId,
       moduleWhyDiagnostics: settingsState.moduleWhyDiagnostics,
       moduleWhyStatus: settingsState.moduleWhyStatus,
@@ -432,6 +479,88 @@ export async function openReactSettings({
     });
     body.querySelector('[data-runtime-refresh]')?.addEventListener('click', refreshRuntimeSettings);
     body.querySelector('[data-branding-refresh]')?.addEventListener('click', refreshBranding);
+    body.querySelector('[data-design-template-refresh]')?.addEventListener('click', () => {
+      refreshDesignTemplates();
+    });
+    body.querySelector('[data-design-template-select]')?.addEventListener('change', (event) => {
+      settingsState.designTemplates = {
+        ...settingsState.designTemplates,
+        selectedId: event.currentTarget.value || '',
+        draft: null,
+        error: '',
+      };
+      render();
+    });
+    body.querySelector('[data-design-template-new]')?.addEventListener('click', () => {
+      settingsState.designTemplates = {
+        ...settingsState.designTemplates,
+        selectedId: '',
+        draft: newDesignTemplateDraft(),
+        error: '',
+      };
+      settingsState.commandStatus = 'Neues Design-Template.';
+      render();
+    });
+    body.querySelector('[data-design-template-save]')?.addEventListener('click', async () => {
+      const payload = designTemplatePayloadFromForm(body);
+      settingsState.designTemplates = {
+        ...settingsState.designTemplates,
+        loading: true,
+        error: '',
+      };
+      settingsState.commandStatus = 'Design-Template wird gespeichert...';
+      render();
+      try {
+        const result = await requestDesignTemplates('/api/business-os/design-templates', {
+          method: 'POST',
+          body: payload,
+        });
+        const savedId = result.template?.id || payload.id;
+        settingsState.commandStatus = `Design-Template „${result.template?.title || savedId}“ gespeichert.`;
+        await refreshDesignTemplates({ selectedId: savedId });
+      } catch (error) {
+        settingsState.designTemplates = {
+          ...settingsState.designTemplates,
+          loading: false,
+          draft: payload,
+          error: String(error?.message || error),
+        };
+        settingsState.commandStatus = String(error?.message || error);
+        render();
+      }
+    });
+    body.querySelector('[data-design-template-delete]')?.addEventListener('click', async () => {
+      const id = body.querySelector('[data-design-template-id]')?.value?.trim() || '';
+      if (!id) return;
+      const confirmed = await showBusinessConfirm(`Design-Template „${id}“ archivieren?`, {
+        title: 'Design-Template entfernen',
+        confirmLabel: 'Archivieren',
+      });
+      if (!confirmed) return;
+      settingsState.designTemplates = {
+        ...settingsState.designTemplates,
+        loading: true,
+        error: '',
+      };
+      settingsState.commandStatus = 'Design-Template wird archiviert...';
+      render();
+      try {
+        await requestDesignTemplates('/api/business-os/design-templates/delete', {
+          method: 'POST',
+          body: { id },
+        });
+        settingsState.commandStatus = `Design-Template „${id}“ wurde wiederherstellbar archiviert.`;
+        await refreshDesignTemplates({ selectedId: '' });
+      } catch (error) {
+        settingsState.designTemplates = {
+          ...settingsState.designTemplates,
+          loading: false,
+          error: String(error?.message || error),
+        };
+        settingsState.commandStatus = String(error?.message || error);
+        render();
+      }
+    });
     body.querySelector('[data-branding-save]')?.addEventListener('click', async () => {
       const input = body.querySelector('[data-branding-json]');
       const raw = input?.value || '';
@@ -789,6 +918,7 @@ export async function openReactSettings({
   }
   if (settingsState.tab === 'appearance' && settingsState.branding.canManage) {
     refreshBranding();
+    refreshDesignTemplates();
   }
   refreshUsers();
   startUsersSub();
@@ -826,6 +956,7 @@ function settingsTemplate({
   canManageUsers,
   activity,
   branding,
+  designTemplates,
   editingModuleId,
   moduleWhyDiagnostics,
   moduleWhyStatus,
@@ -865,7 +996,7 @@ function settingsTemplate({
       ${tab === 'runtime' ? runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth) : ''}
       ${tab === 'channels' ? channelsPanel(channels) : ''}
       ${tab === 'sync' ? syncPanel(syncConfig, isAdmin) : ''}
-      ${tab === 'appearance' && branding?.canManage ? appearancePanel(branding) : ''}
+      ${tab === 'appearance' && branding?.canManage ? appearancePanel(branding, designTemplates) : ''}
       ${tab === 'mcp' && isAdmin ? mcpPanel(mcp) : ''}
       ${tab === 'users' ? usersPanel(user, role, isAdmin, users, canManageUsers) : ''}
       ${tab === 'activity' && isAdmin ? activityPanel(activity) : ''}
@@ -891,8 +1022,7 @@ function settingsTemplate({
 
 function settingsPreferenceControls() {
   const lang = document.documentElement.lang === 'en' ? 'en' : 'de';
-  const rawShellStyle = document.documentElement.dataset.shellStyle;
-  const shellStyle = rawShellStyle === 'macos' || rawShellStyle === 'windows' ? rawShellStyle : 'ctox';
+  const shellStyle = currentShellDesignValue();
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   const copy = lang === 'en'
     ? {
@@ -918,9 +1048,7 @@ function settingsPreferenceControls() {
       <label class="settings-preference-control">
         <span data-shell-t="shellStyleLabel">${escapeHtml(copy.shellStyle)}</span>
         <select class="header-select" data-shell-style-select aria-label="${escapeAttr(copy.shellStyleAria)}" data-shell-t-aria="shellStyleAria">
-          ${option('ctox', 'CTOX', shellStyle)}
-          ${option('windows', 'Windows', shellStyle)}
-          ${option('macos', 'macOS', shellStyle)}
+          ${settingsShellDesignOptions(shellStyle, lang)}
         </select>
       </label>
       <label class="settings-preference-control">
@@ -939,6 +1067,20 @@ function settingsPreferenceControls() {
       </label>
     </div>
   `;
+}
+
+function settingsShellDesignOptions(selected, lang) {
+  const options = shellDesignOptions();
+  const builtins = options
+    .filter((entry) => !entry.templateId)
+    .map((entry) => option(entry.value, entry.label, selected))
+    .join('');
+  const custom = options.filter((entry) => entry.templateId);
+  if (!custom.length) return builtins;
+  const label = lang === 'de' ? 'Eigene Designs' : 'Custom designs';
+  return `${builtins}<optgroup label="${escapeAttr(label)}">${custom
+    .map((entry) => option(entry.value, entry.label, selected))
+    .join('')}</optgroup>`;
 }
 
 function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth = null) {
@@ -1051,10 +1193,16 @@ function syncPanel(syncConfig, isAdmin) {
   `;
 }
 
-function appearancePanel(branding = {}) {
+function appearancePanel(branding = {}, designTemplates = {}) {
   const document = branding.document || {};
   const isCustom = document.custom === true;
   const jsonText = branding.jsonText || brandingExportJson(document);
+  const items = Array.isArray(designTemplates.items) ? designTemplates.items : [];
+  const selected = designTemplates.draft
+    || items.find((item) => item.id === designTemplates.selectedId)
+    || items[0]
+    || newDesignTemplateDraft();
+  const isPersisted = items.some((item) => item.id === selected.id);
   return `
     <section class="settings-section">
       <header>
@@ -1076,6 +1224,46 @@ function appearancePanel(branding = {}) {
         <button class="text-button" type="button" data-branding-reset ${branding.loading ? 'disabled' : ''}>CTOX Default</button>
       </div>
       ${branding.error ? `<p class="settings-note">${escapeHtml(branding.error)}</p>` : ''}
+    </section>
+    <section class="settings-section">
+      <header>
+        <h3>Design-Templates</h3>
+        <span>${escapeHtml(designTemplates.loading ? 'Templates werden gelesen.' : `${items.length} lokale Templates`)}</span>
+      </header>
+      <p class="settings-note">Vollständige Desktop-Designs für CTOX, macOS und Windows. Sie liegen lokal unter <code>runtime/business-os/design-templates/</code> und werden nicht in Git eingecheckt.</p>
+      <div class="settings-grid is-one">
+        <label>
+          <span>Vorhandenes Template</span>
+          <select data-design-template-select ${designTemplates.loading ? 'disabled' : ''}>
+            <option value="">Neues Template</option>
+            ${items.map((item) => `<option value="${escapeAttr(item.id)}" ${item.id === selected.id ? 'selected' : ''}>${escapeHtml(item.title)} (${escapeHtml(item.id)})</option>`).join('')}
+          </select>
+        </label>
+      </div>
+      <div class="runtime-actions">
+        <button class="text-button" type="button" data-design-template-new ${designTemplates.loading ? 'disabled' : ''}>Neu</button>
+        <button class="text-button" type="button" data-design-template-refresh ${designTemplates.loading ? 'disabled' : ''}>Neu laden</button>
+      </div>
+      <div class="settings-grid">
+        <label><span>ID</span><input data-design-template-id value="${escapeAttr(selected.id || '')}" placeholder="mein-design" ${isPersisted ? 'readonly' : ''} /></label>
+        <label><span>Name</span><input data-design-template-title value="${escapeAttr(selected.title || '')}" placeholder="Mein Design" /></label>
+        <label>
+          <span>Basis-Chrome</span>
+          <select data-design-template-base-style>
+            ${['ctox', 'windows', 'macos'].map((style) => `<option value="${style}" ${selected.base_style === style ? 'selected' : ''}>${style === 'macos' ? 'macOS' : (style === 'windows' ? 'Windows' : 'CTOX')}</option>`).join('')}
+          </select>
+        </label>
+        <label><span>Beschreibung</span><input data-design-template-description value="${escapeAttr(selected.description || '')}" placeholder="Kurzbeschreibung" /></label>
+      </div>
+      <div class="settings-grid is-one">
+        <label><span>Theme CSS</span><textarea data-design-template-css rows="18" spellcheck="false">${escapeHtml(selected.css || '')}</textarea></label>
+      </div>
+      <div class="runtime-actions">
+        <button class="text-button settings-primary" type="button" data-design-template-save ${designTemplates.loading ? 'disabled' : ''}>Template speichern</button>
+        <button class="text-button" type="button" data-design-template-delete ${!isPersisted || designTemplates.loading ? 'disabled' : ''}>Archivieren</button>
+      </div>
+      <p class="settings-note">CSS muss auf <code>:root[data-design-template="id"]</code> begrenzt sein. Externe Imports und URLs sind gesperrt; maximal 256 KiB.</p>
+      ${designTemplates.error ? `<p class="settings-note">${escapeHtml(designTemplates.error)}</p>` : ''}
     </section>
   `;
 }
@@ -2883,6 +3071,72 @@ async function loadMcpConnectInfo() {
     throw new Error(payload?.message || payload?.error || 'MCP Status konnte nicht geladen werden.');
   }
   return payload;
+}
+
+function newDesignTemplateDraft() {
+  return {
+    id: '',
+    title: '',
+    description: '',
+    base_style: 'windows',
+    css: [
+      ':root[data-design-template="mein-design"] {',
+      '  --accent: #1f8288;',
+      '  --accent-strong: #156364;',
+      '}',
+      '',
+      ':root[data-theme="dark"][data-design-template="mein-design"] {',
+      '  --accent: #71b6b3;',
+      '}',
+    ].join('\n'),
+  };
+}
+
+function designTemplatePayloadFromForm(root) {
+  return {
+    id: root.querySelector('[data-design-template-id]')?.value?.trim() || '',
+    title: root.querySelector('[data-design-template-title]')?.value?.trim() || '',
+    description: root.querySelector('[data-design-template-description]')?.value?.trim() || '',
+    base_style: root.querySelector('[data-design-template-base-style]')?.value || 'ctox',
+    css: root.querySelector('[data-design-template-css]')?.value || '',
+  };
+}
+
+async function requestDesignTemplates(path, { method = 'GET', body = null } = {}) {
+  const response = await fetch(path, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    credentials: 'same-origin',
+    cache: 'no-store',
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    payload = null;
+  }
+  if (!response.ok || !payload?.ok) {
+    throw new Error(payload?.message || payload?.error || text || `Design-Templates konnten nicht verarbeitet werden (${response.status}).`);
+  }
+  return payload;
+}
+
+function publishDesignTemplates(items) {
+  globalThis.CTOX_BUSINESS_OS_DESIGN_TEMPLATES = items.map((item) => ({
+    id: item.id,
+    title: item.title,
+    description: item.description,
+    base_style: item.base_style,
+    stylesheet_href: item.stylesheet_href,
+  }));
+  globalThis.dispatchEvent?.(new CustomEvent('ctox-business-os-design-templates-changed', {
+    detail: { templates: globalThis.CTOX_BUSINESS_OS_DESIGN_TEMPLATES },
+  }));
 }
 
 async function saveModule(payload, { commandBus, db, session } = {}) {

@@ -26,6 +26,8 @@
   "viewList": "Listenansicht",
   "appsCount": "{count} Apps",
   "loadingText": "GitHub Discovery wird synchronisiert.",
+  "syncingCatalogTitle": "Katalog wird synchronisiert",
+  "syncingCatalogBody": "Der App-Katalog wird initial repliziert. Einträge erscheinen automatisch, sobald die ersten Daten eintreffen.",
   "drawerKicker": "Katalog",
   "drawerNoSelection": "Keine App ausgewählt",
   "drawerCloseTitle": "Details schließen",

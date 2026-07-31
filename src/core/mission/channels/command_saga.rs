@@ -74,14 +74,9 @@ pub(crate) fn claim_business_command_with_queue(
 
     let now_ms = epoch_millis();
     if from_phase != "local" {
-        crate::business_os::command_lifecycle::validate_execution_phase_transition(
-            &from_phase,
-            "accepted",
-        )?;
+        crate::command_lifecycle::validate_execution_phase_transition(&from_phase, "accepted")?;
     }
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(
-        "accepted", "queued",
-    )?;
+    crate::command_lifecycle::validate_execution_phase_transition("accepted", "queued")?;
     if !aggregate_exists {
         tx.execute(
             "INSERT INTO business_command_aggregates
@@ -829,7 +824,7 @@ pub(crate) fn complete_business_control_command(
             );
         }
     }
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(&phase, "terminal")?;
+    crate::command_lifecycle::validate_execution_phase_transition(&phase, "terminal")?;
     let next_version = version.saturating_add(1);
     let now_ms = epoch_millis();
     let error_code = result.get("error_code").and_then(Value::as_str);
@@ -921,10 +916,7 @@ pub(crate) fn progress_business_control_command(
         tx.commit()?;
         return Ok(());
     }
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(
-        &phase,
-        execution_phase,
-    )?;
+    crate::command_lifecycle::validate_execution_phase_transition(&phase, execution_phase)?;
     let next_version = version.saturating_add(1);
     let now_ms = epoch_millis();
     tx.execute(
@@ -1097,10 +1089,7 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         }
         return Ok(true);
     }
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(
-        &from_phase,
-        to_phase,
-    )?;
+    crate::command_lifecycle::validate_execution_phase_transition(&from_phase, to_phase)?;
     if terminal_status == "completed" {
         let review_passed = tx.query_row(
             "SELECT EXISTS(
@@ -1285,10 +1274,7 @@ pub(crate) fn persist_business_command_worker_result(
         tx.commit()?;
         return Ok(true);
     }
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(
-        &from_phase,
-        "awaiting_review",
-    )?;
+    crate::command_lifecycle::validate_execution_phase_transition(&from_phase, "awaiting_review")?;
     let existing = tx
         .query_row(
             "SELECT user_reply FROM business_command_results WHERE command_id = ?1 AND attempt = ?2",
@@ -1441,10 +1427,7 @@ pub(crate) fn record_business_command_review(
     } else {
         "blocked"
     };
-    crate::business_os::command_lifecycle::validate_execution_phase_transition(
-        &from_phase,
-        to_phase,
-    )?;
+    crate::command_lifecycle::validate_execution_phase_transition(&from_phase, to_phase)?;
     let next_version = version.saturating_add(1);
     let now_ms = epoch_millis();
     tx.execute(

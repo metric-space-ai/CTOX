@@ -22,6 +22,12 @@ import {
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
 } from './shared/branding.js?v=20260714-chat-queue-v56';
+import {
+  currentShellDesignValue,
+  normalizeBuiltinShellStyle,
+  resolveShellDesign,
+  shellDesignOptions,
+} from './shared/design-templates.js?v=20260728-custom-design-templates-v1';
 import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260714-chat-queue-v56';
 import {
   launchesInWindow,
@@ -72,7 +78,8 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260728-research-knowledge-usability-v89';
+const APP_BUILD = '20260729-business-chat-submit-confirm-v91';
+const SHELL_DESIGN_STYLESHEET_ID = 'ctox-shell-design-template';
 
 ensureShellStylesheets();
 
@@ -409,6 +416,8 @@ if (new URLSearchParams(window.location.search).has('rxdbSmoke')) {
     createLiveDbFacade,
     createModuleContext,
     createModulePermissionFacade,
+    applyShellStyle,
+    applyShellTheme,
     storageKeys: businessOsStorageKeys,
     renderTabs,
     listLaunchTargets,
@@ -1885,6 +1894,17 @@ function wireShellActions() {
     console.log('[business-os] modules changed event received:', event.detail);
     await refreshModules();
   });
+  window.addEventListener('ctox-business-os-design-templates-changed', () => {
+    const preferredStyle = readAccountPrefs().shellStyle || 'ctox';
+    const resolved = resolveShellDesign(preferredStyle);
+    const customTemplateMissing = preferredStyle.startsWith('custom:') && !resolved.templateId;
+    applyShellStyle(
+      customTemplateMissing ? 'ctox' : preferredStyle,
+      { persist: customTemplateMissing, reloadStylesheet: true },
+    );
+    syncHeaderControls();
+    postCurrentPreferencesToModule();
+  });
   window.addEventListener('hashchange', () => {
     if (state.navTransitioning) return;
     const id = currentHashModuleId();
@@ -1981,7 +2001,11 @@ function wireShellActions() {
       syncHeaderControls();
       postCurrentPreferencesToModule();
     } else if (control.matches('[data-shell-style-select]')) {
-      applyShellStyle(control.value);
+      applyShellStyle(control.value, {
+        // A custom template may have been edited through Settings or MCP
+        // while this browser kept the previous stylesheet in memory.
+        reloadStylesheet: String(control.value || '').startsWith('custom:'),
+      });
       syncHeaderControls();
       postCurrentPreferencesToModule();
     }
@@ -2446,7 +2470,7 @@ function formatLifecycleTimestamp(value) {
 }
 
 function shellPreferenceControlsTemplate() {
-  const shellStyle = normalizeShellStyle(document.documentElement.dataset.shellStyle);
+  const shellStyle = currentShellDesignValue();
   const language = shellLang();
   const theme = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   return `
@@ -2454,9 +2478,7 @@ function shellPreferenceControlsTemplate() {
       <label class="settings-preference-control">
         <span data-shell-t="shellStyleLabel">${escapeHtml(shellText('shellStyleLabel') || 'Window')}</span>
         <select class="header-select" data-shell-style-select aria-label="${escapeHtml(shellText('shellStyleAria') || 'Style')}" data-shell-t-aria="shellStyleAria">
-          ${preferenceOption('ctox', 'CTOX', shellStyle)}
-          ${preferenceOption('windows', 'Windows', shellStyle)}
-          ${preferenceOption('macos', 'macOS', shellStyle)}
+          ${shellDesignOptionsTemplate(shellStyle)}
         </select>
       </label>
       <label class="settings-preference-control">
@@ -2479,6 +2501,20 @@ function shellPreferenceControlsTemplate() {
 
 function preferenceOption(value, label, selected) {
   return `<option value="${escapeHtml(value)}" ${selected === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+}
+
+function shellDesignOptionsTemplate(selected) {
+  const options = shellDesignOptions();
+  const builtins = options
+    .filter((option) => !option.templateId)
+    .map((option) => preferenceOption(option.value, option.label, selected))
+    .join('');
+  const custom = options.filter((option) => option.templateId);
+  if (!custom.length) return builtins;
+  const label = shellLang() === 'de' ? 'Eigene Designs' : 'Custom designs';
+  return `${builtins}<optgroup label="${escapeHtml(label)}">${custom
+    .map((option) => preferenceOption(option.value, option.label, selected))
+    .join('')}</optgroup>`;
 }
 
 
@@ -4036,7 +4072,18 @@ async function openDesktopApp(appId, options = {}) {
 async function openWindowedModule(mod, options = {}) {
   if (!state.windowManager || !mod?.id) return null;
   const descriptor = desktopAppDescriptorForModule(mod);
-  const existing = descriptor.multiInstance ? null : findDesktopWindow(mod.id);
+  let existing = descriptor.multiInstance ? null : findDesktopWindow(mod.id);
+  if (existing && options.force === true) {
+    state.windowManager.destroy(existing.id);
+    const deadline = Date.now() + 2000;
+    while (findDesktopWindow(mod.id) && Date.now() < deadline) {
+      await delay(25);
+    }
+    existing = findDesktopWindow(mod.id);
+    if (existing) {
+      throw new Error(`Module window could not be replaced: ${mod.id}`);
+    }
+  }
   if (existing) {
     restoreAndFocusWindow(existing);
     const launchDelivered = dispatchDesktopAppLaunch(existing, mod.id, options.args);
@@ -4267,18 +4314,50 @@ function applyShellTheme(theme, options = {}) {
 }
 
 function normalizeShellStyle(style) {
-  if (style === 'macos' || style === 'windows') return style;
-  return 'ctox';
+  return normalizeBuiltinShellStyle(resolveShellDesign(style).shellStyle);
 }
 
 function applyShellStyle(style, options = {}) {
-  const value = normalizeShellStyle(style);
+  const design = resolveShellDesign(style);
+  const value = design.shellStyle;
   document.documentElement.dataset.shellStyle = value;
+  if (design.templateId) {
+    document.documentElement.dataset.designTemplate = design.templateId;
+  } else {
+    document.documentElement.removeAttribute('data-design-template');
+  }
+  syncShellDesignStylesheet(design, {
+    force: options.reloadStylesheet === true,
+  });
   // The window manager only distinguishes control layouts; the CTOX style
   // uses the windows layout (controls right) under its own visual chrome.
   state.windowManager?.setChromeLayout(value === 'macos' ? 'macos' : 'windows');
   if (options.persist !== false) {
-    writeAccountPrefs({ shellStyle: value });
+    writeAccountPrefs({ shellStyle: design.value });
+  }
+}
+
+function syncShellDesignStylesheet(design, { force = false } = {}) {
+  const existing = document.getElementById(SHELL_DESIGN_STYLESHEET_ID);
+  if (!design?.stylesheet) {
+    existing?.remove();
+    return;
+  }
+  const stylesheetUrl = new URL(design.stylesheet, document.baseURI);
+  const canonicalHref = stylesheetUrl.href;
+  if (!force && existing?.href === canonicalHref) return;
+  if (force) {
+    stylesheetUrl.searchParams.set('ctox-template-reload', String(Date.now()));
+  }
+  const link = document.createElement('link');
+  link.id = SHELL_DESIGN_STYLESHEET_ID;
+  link.rel = 'stylesheet';
+  link.href = stylesheetUrl.href;
+  link.dataset.designTemplate = design.templateId;
+  if (existing) {
+    existing.replaceWith(link);
+  } else {
+    document.head.appendChild(link);
   }
 }
 
@@ -4290,7 +4369,7 @@ function syncHeaderControls() {
     select.value = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   });
   document.querySelectorAll('[data-shell-style-select]').forEach((select) => {
-    select.value = normalizeShellStyle(document.documentElement.dataset.shellStyle);
+    select.value = currentShellDesignValue();
   });
 }
 
@@ -4372,6 +4451,8 @@ function postCurrentPreferencesToModule() {
   const detail = {
     theme: document.documentElement.dataset.theme === 'light' ? 'light' : 'dark',
     language: document.documentElement.lang === 'en' ? 'en' : 'de',
+    shellStyle: normalizeShellStyle(document.documentElement.dataset.shellStyle),
+    designTemplate: String(document.documentElement.dataset.designTemplate || ''),
     branding: brandingForPreferencePayload(state.workspaceBranding),
   };
   window.dispatchEvent(new CustomEvent('ctox-business-os-preferences', { detail }));
@@ -5028,6 +5109,7 @@ async function openModule(moduleId, options = {}) {
         ? 'focus'
         : resolvePresentation(mod).defaultMode),
       args: launchArgs,
+      force: options.force === true,
     });
     return;
   }

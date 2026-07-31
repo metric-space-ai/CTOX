@@ -11,6 +11,10 @@ const CTOX_DOCUMENTS_MAX_RECOVERY_ATTEMPTS = 3;
 const CHUNK_SIZE = 256000;
 const DOCX_TOOLBAR_VISIBILITY_KEY = 'ctox.businessOs.documents.docxToolbarVisible';
 const DOCUMENT_RENDER_DEBOUNCE_MS = 80;
+// Collections whose initial replication state gates a data-driven empty
+// state. The document list is backed by 'documents'; versions, runbooks and
+// knowledge collections only feed selection- or drawer-scoped surfaces.
+const READINESS_GATED_COLLECTIONS = ['documents'];
 const DOCUMENTS_ASSET_REVISION = '20260723-documents-workspace-v1034';
 const MAIL_MERGE_SOURCE_NAMES = new Set([
   'campaign-mail-merge',
@@ -205,6 +209,11 @@ export async function mount(ctx) {
     enqueueDocumentOpenFile(state, payload.args?.openFile);
   }) || null;
   state.localSubscriptionCleanup = wireLocalRealtime(state);
+  // Collection readiness (shell-owned sync contract): re-render the document
+  // list when the backing collection flips its replication state so an empty
+  // list swaps between the syncing shell and the real empty state without
+  // waiting for data changes. Readiness is a render hint, never a blocker.
+  state.readinessCleanup = wireReadiness(state);
   // Mount the workbench immediately. Seed/query work can legitimately wait
   // for WebRTC catch-up and must not leave the window-manager promise pending
   // after the visible app is already usable.
@@ -233,6 +242,7 @@ export async function mount(ctx) {
     state.contextMenu?.remove();
     state.contextMenu = null;
     state.localSubscriptionCleanup?.();
+    state.readinessCleanup?.();
     state.launchCleanup?.();
     state.paneCleanup?.();
     flushActiveEditorDraft(state).catch((error) => console.error('[documents] final editor draft save failed', error));
@@ -625,6 +635,62 @@ function wireLocalRealtime(state) {
 
 function documentCollection(ctx, collectionName) {
   return ctx?.db?.collection?.(collectionName) || null;
+}
+
+// Canonical readiness subscription for the collections whose initial
+// replication state gates a data-driven empty state. The listener receives a
+// snapshot immediately and on every state change; the document list is the
+// only surface reading it, so re-rendering the left pane is enough.
+function wireReadiness(state) {
+  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
+  if (typeof subscribe !== 'function') return null;
+  const unsubscribers = READINESS_GATED_COLLECTIONS
+    .map((name) => {
+      try {
+        return subscribe.call(state.ctx.sync, name, () => {
+          if (state.disposed) return;
+          renderLeft(state);
+        });
+      } catch {
+        return null;
+      }
+    })
+    .filter((unsubscribe) => typeof unsubscribe === 'function');
+  if (!unsubscribers.length) return null;
+  return () => {
+    for (const unsubscribe of unsubscribers) {
+      try { unsubscribe(); } catch {}
+    }
+  };
+}
+
+// Sync readiness is a render hint, never a mount blocker: when the shell
+// exposes no readiness API (older shells, tests) the collection counts as
+// ready and the previous empty-state behaviour is preserved.
+function collectionSyncReadiness(state, name) {
+  const sync = state.ctx?.sync;
+  if (typeof sync?.collectionReadiness !== 'function') return null;
+  try {
+    return sync.collectionReadiness(name) || null;
+  } catch {
+    return null;
+  }
+}
+
+// Pure gate: only an empty unfiltered source (no document rows at all) whose
+// backing collection has not finished its initial replication may show the
+// syncing shell. Rows always win; filter/selection empties keep their copy.
+function dataEmptyShowsSyncing(sourceEmpty, readiness) {
+  return Boolean(sourceEmpty) && readiness?.ready === false;
+}
+
+function renderSyncingShell(state) {
+  const syncing = document.createElement('div');
+  syncing.className = 'ctox-syncing';
+  syncing.setAttribute('role', 'status');
+  syncing.setAttribute('aria-live', 'polite');
+  syncing.textContent = state.t('syncingDocuments', 'Dokumente werden synchronisiert.');
+  return syncing;
 }
 
 async function refreshDocumentsFromLocal(state) {
@@ -1208,6 +1274,15 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
     list.append(card);
   }
   if (!records.length) {
+    // Data-driven empty branch: the unfiltered source holds no documents. If
+    // the backing 'documents' collection has not finished its initial
+    // replication, show the kit syncing shell instead of "no documents".
+    // Filter empties (rows exist) keep their copy below.
+    if (!state.documents.length
+        && dataEmptyShowsSyncing(true, collectionSyncReadiness(state, 'documents'))) {
+      list.append(renderSyncingShell(state));
+      return;
+    }
     const empty = document.createElement('div');
     empty.className = 'documents-empty';
     empty.innerHTML = state.documents.length
@@ -4049,6 +4124,10 @@ export const __documentsTestHooks = {
   isTransientOfficeStartupError,
   resolveLocalFirst,
   openOfficeEditorInstance,
+  collectionSyncReadiness,
+  dataEmptyShowsSyncing,
+  renderSyncingShell,
+  populateDocumentList,
 };
 
 function escapeHtml(value) {

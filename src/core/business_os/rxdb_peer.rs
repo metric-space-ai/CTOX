@@ -27,11 +27,11 @@ use super::browser_control::{
     BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS, BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
 };
 use super::browser_runtime::{browser_runtime_manager, BrowserSessionAutomationRequest};
-use super::command_lifecycle_generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use super::desktop_files::*;
 use super::iot_supervision::spawn_iot_agent_supervisors;
 use super::policy::BusinessOsPermission;
 use super::store;
+use crate::command_lifecycle::generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
 use crate::mission::channels;
 use crate::mission::tickets;
 use anyhow::Context;
@@ -5287,7 +5287,7 @@ fn enrich_native_command_lifecycle(document: &mut Value, accepted: &Value) -> an
         );
         object.insert("retryable".to_string(), Value::Bool(false));
     }
-    super::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
+    crate::command_lifecycle::validate_document(document).map_err(|error| anyhow::anyhow!(error))
 }
 
 async fn project_support_command_result(

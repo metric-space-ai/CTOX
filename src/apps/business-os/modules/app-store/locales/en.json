@@ -26,6 +26,8 @@
   "viewList": "List view",
   "appsCount": "{count} apps",
   "loadingText": "Syncing GitHub discovery.",
+  "syncingCatalogTitle": "Syncing catalog",
+  "syncingCatalogBody": "The app catalog is replicating initially. Entries appear automatically as soon as the first data arrives.",
   "drawerKicker": "Catalog",
   "drawerNoSelection": "No app selected",
   "drawerCloseTitle": "Close details",

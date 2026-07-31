@@ -9,8 +9,31 @@
   "collections": [
     "business_commands"
   ],
+  "launch_kind": "desktop-app",
+  "presentation": {
+    "default_mode": "window",
+    "supported_modes": [
+      "window",
+      "maximized",
+      "focus"
+    ],
+    "initial_size": {
+      "width": 1320,
+      "height": 840
+    },
+    "minimum_size": {
+      "width": 720,
+      "height": 520
+    },
+    "multi_instance": false,
+    "auto_restore": false
+  },
   "layout": {
-    "shell": "full-workspace",
+    "shell": "windowed",
+    "default_width": 1320,
+    "default_height": 840,
+    "min_width": 720,
+    "min_height": 520,
     "left": "Persistente Vorgänge",
     "center": "REM-App",
     "right": "Agent und Human-in-the-loop"
