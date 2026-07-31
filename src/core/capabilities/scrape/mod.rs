@@ -1,7 +1,7 @@
 mod registry;
 use registry::{
     count_rows, list_targets, open_db, register_script, register_source_module, resolve_db_path,
-    show_api, show_target, upsert_target, workspace_belongs_to_stale_release,
+    show_api, show_target, upsert_target,
 };
 mod execute;
 pub(crate) use execute::execute_scrape_with_outcome;
@@ -841,21 +841,7 @@ fn load_target_view(conn: &Connection, target_key: &str) -> Result<Option<Scrape
 }
 
 fn resolve_registered_workspace(root: &Path, view: &ScrapeTargetView) -> PathBuf {
-    let canonical_root = fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let configured = resolve_workspace_dir(&canonical_root, &view.workspace_dir);
-    let canonical_configured =
-        fs::canonicalize(&configured).unwrap_or_else(|_| configured.to_path_buf());
-    let default = canonical_root
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join(&view.target_key);
-    if workspace_belongs_to_stale_release(&canonical_root, &canonical_configured) {
-        return fs::canonicalize(&default).unwrap_or(default);
-    }
-    if canonical_configured.exists() {
-        return canonical_configured;
-    }
-    fs::canonicalize(&default).unwrap_or(default)
+    resolve_workspace_dir(root, &view.workspace_dir)
 }
 
 fn registered_script_matches(path: &Path, expected_sha256: &str) -> bool {

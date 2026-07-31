@@ -291,6 +291,13 @@ fn upsert_target_creates_workspace_and_manifest() {
     });
     let target = upsert_target(&root, DEFAULT_RUNTIME_ROOT, payload).unwrap();
     assert_eq!(target.target_key, "acme-jobs");
+    assert_eq!(
+        PathBuf::from(&target.workspace_dir),
+        PathBuf::from(DEFAULT_RUNTIME_ROOT)
+            .join("targets")
+            .join("acme-jobs")
+    );
+    assert!(!Path::new(&target.workspace_dir).is_absolute());
     assert!(resolve_workspace_dir(&root, &target.workspace_dir)
         .join("manifest.json")
         .is_file());
@@ -459,7 +466,7 @@ fn registered_target_loads_only_the_activated_script_revision() {
 }
 
 #[test]
-fn deduplicated_script_registration_recovers_a_removed_release_path() {
+fn explicit_deduplicated_registration_rewrites_a_removed_path() {
     let root = temp_root("reactivate-script-removed-release");
     let target = upsert_target(
         &root,
@@ -527,19 +534,36 @@ fn deduplicated_script_registration_recovers_a_removed_release_path() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(PathBuf::from(stored_path), revision_path);
+    let stored_path = PathBuf::from(stored_path);
+    assert!(!stored_path.is_absolute());
+    assert_eq!(root.join(stored_path), revision_path);
     cleanup_test_root(&root);
 }
 
+#[cfg(unix)]
 #[test]
-fn registered_script_is_restored_after_runtime_release_path_changes() {
-    let root = temp_root("restore-script-path");
+fn registered_paths_resolve_after_runtime_release_switch_without_repair() {
+    use std::os::unix::fs::symlink;
+
+    let install = temp_root("relative-path-release-switch");
+    let releases = install.join("releases");
+    let old_release = releases.join("old-release");
+    let new_release = releases.join("new-release");
+    let shared_runtime = install.join("runtime-state");
+    let current_link = install.join("current");
+    fs::create_dir_all(&old_release).unwrap();
+    fs::create_dir_all(&new_release).unwrap();
+    fs::create_dir_all(&shared_runtime).unwrap();
+    symlink(&shared_runtime, old_release.join("runtime")).unwrap();
+    symlink(&shared_runtime, new_release.join("runtime")).unwrap();
+    symlink(&old_release, &current_link).unwrap();
+
     let target = upsert_target(
-        &root,
+        &current_link,
         DEFAULT_RUNTIME_ROOT,
         json!({
-            "target_key": "restore-script-path",
-            "display_name": "Restore Script Path",
+            "target_key": "release-bound-target",
+            "display_name": "Release-bound Target",
             "start_url": "https://example.com",
             "target_kind": "company",
             "config": {"skip_probe": true},
@@ -547,8 +571,119 @@ fn registered_script_is_restored_after_runtime_release_path_changes() {
         }),
     )
     .unwrap();
-    let source = root.join("adapter.js");
-    let body = "process.stdout.write(JSON.stringify({records: []}));\n";
+    let source = install.join("extractor.js");
+    let body = "console.log(JSON.stringify({records: []}));\n";
+    fs::write(&source, body).unwrap();
+    register_script(
+        &current_link,
+        DEFAULT_RUNTIME_ROOT,
+        &target.target_key,
+        source.to_str().unwrap(),
+        "javascript",
+        Some("initial"),
+        None,
+    )
+    .unwrap();
+
+    let conn = open_db(&current_link).unwrap();
+    let (stored_workspace, stored_script): (String, String) = conn
+        .query_row(
+            r#"
+            SELECT t.workspace_dir, r.script_path
+            FROM scrape_target t
+            JOIN scrape_script_revision r ON r.target_id = t.target_id
+            WHERE t.target_id = ?1
+            "#,
+            params![target.target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(!Path::new(&stored_workspace).is_absolute());
+    assert!(!Path::new(&stored_script).is_absolute());
+    drop(conn);
+
+    fs::remove_file(&current_link).unwrap();
+    symlink(&new_release, &current_link).unwrap();
+
+    let conn = open_db(&current_link).unwrap();
+    let changes_before = conn.total_changes();
+    let loaded = load_registered_target(&current_link, &conn, &target.target_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(conn.total_changes(), changes_before);
+    assert_eq!(loaded.workspace_root, current_link.join(&stored_workspace));
+    assert_eq!(
+        PathBuf::from(&loaded.script.script_path),
+        current_link.join(&stored_script)
+    );
+    assert_eq!(
+        fs::read_to_string(&loaded.script.script_path).unwrap(),
+        body
+    );
+    cleanup_test_root(&install);
+}
+
+#[test]
+fn loading_registered_target_does_not_change_the_database() {
+    let root = temp_root("load-is-read-only");
+    let target = upsert_target(
+        &root,
+        DEFAULT_RUNTIME_ROOT,
+        json!({
+            "target_key": "read-only-load",
+            "display_name": "Read-only Load",
+            "start_url": "https://example.com",
+            "target_kind": "company",
+            "config": {"skip_probe": true},
+            "output_schema": {"schema_key": "company.v1"}
+        }),
+    )
+    .unwrap();
+    let source = root.join("extractor.js");
+    fs::write(&source, "console.log(JSON.stringify({records: []}));\n").unwrap();
+    register_script(
+        &root,
+        DEFAULT_RUNTIME_ROOT,
+        &target.target_key,
+        source.to_str().unwrap(),
+        "javascript",
+        Some("initial"),
+        None,
+    )
+    .unwrap();
+
+    let conn = open_db(&root).unwrap();
+    let changes_before = conn.total_changes();
+    let loaded = load_registered_target(&root, &conn, &target.target_key)
+        .unwrap()
+        .unwrap();
+    assert!(Path::new(&loaded.script.script_path).is_absolute());
+    assert_eq!(
+        conn.total_changes(),
+        changes_before,
+        "load_registered_target must not issue INSERT, UPDATE, or DELETE statements"
+    );
+    cleanup_test_root(&root);
+}
+
+#[test]
+fn opening_database_migrates_legacy_absolute_paths_once() {
+    let root = temp_root("migrate-absolute-paths");
+    let target = upsert_target(
+        &root,
+        DEFAULT_RUNTIME_ROOT,
+        json!({
+            "target_key": "legacy-paths",
+            "display_name": "Legacy Paths",
+            "start_url": "https://example.com",
+            "target_kind": "company",
+            "config": {"skip_probe": true},
+            "output_schema": {"schema_key": "company.v1"}
+        }),
+    )
+    .unwrap();
+    let source = root.join("extractor.js");
+    let body = "console.log(JSON.stringify({records: []}));\n";
     fs::write(&source, body).unwrap();
     let registered = register_script(
         &root,
@@ -560,57 +695,71 @@ fn registered_script_is_restored_after_runtime_release_path_changes() {
         None,
     )
     .unwrap();
-    let revision_path = PathBuf::from(registered["script_path"].as_str().unwrap());
-    let file_name = revision_path.file_name().unwrap().to_owned();
-    fs::remove_file(&revision_path).unwrap();
+    let absolute_workspace = root.join(&target.workspace_dir);
+    let absolute_script = PathBuf::from(registered["script_path"].as_str().unwrap());
 
     let conn = open_db(&root).unwrap();
     conn.execute(
-        "UPDATE scrape_script_revision SET script_path = ?1 WHERE target_id = ?2",
-        params![
-            format!(
-                "/removed/ctox-release/runtime/scraping/{target_key}/{name}",
-                target_key = target.target_key,
-                name = file_name.to_string_lossy()
-            ),
-            target.target_id
-        ],
+        "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
+        params![target.target_id, absolute_workspace.to_string_lossy()],
     )
     .unwrap();
+    conn.execute(
+        "UPDATE scrape_script_revision SET script_path = ?2 WHERE target_id = ?1",
+        params![target.target_id, absolute_script.to_string_lossy()],
+    )
+    .unwrap();
+    drop(conn);
 
-    let loaded = load_registered_target(&root, &conn, &target.target_key)
+    // The migration runs once per database per process; production only ever
+    // meets legacy rows that predate the process. This test stages them after
+    // the fact, so clear that memory to exercise the migration itself.
+    super::registry::forget_path_migrations_for_test();
+
+    let migrated = open_db(&root).unwrap();
+    assert_eq!(migrated.total_changes(), 2);
+    let (stored_workspace, stored_script): (String, String) = migrated
+        .query_row(
+            r#"
+            SELECT t.workspace_dir, r.script_path
+            FROM scrape_target t
+            JOIN scrape_script_revision r ON r.target_id = t.target_id
+            WHERE t.target_id = ?1
+            "#,
+            params![target.target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(root.join(&stored_workspace), absolute_workspace);
+    assert_eq!(root.join(&stored_script), absolute_script);
+    assert!(!Path::new(&stored_workspace).is_absolute());
+    assert!(!Path::new(&stored_script).is_absolute());
+    let loaded = load_registered_target(&root, &migrated, &target.target_key)
         .unwrap()
         .unwrap();
-    let restored = PathBuf::from(&loaded.script.script_path);
-    assert!(restored.is_file());
-    assert!(restored.starts_with(&loaded.workspace_root));
-    assert_eq!(fs::read_to_string(restored).unwrap(), body);
+    assert_eq!(loaded.workspace_root, absolute_workspace);
+    assert_eq!(PathBuf::from(loaded.script.script_path), absolute_script);
+    drop(migrated);
+
+    let reopened = open_db(&root).unwrap();
+    assert_eq!(
+        reopened.total_changes(),
+        0,
+        "the root-relative migration is idempotent after its first run"
+    );
     cleanup_test_root(&root);
 }
 
 #[test]
-fn registered_workspace_ignores_an_existing_stale_release_directory() {
-    let install = temp_root("prefer-current-release-workspace");
-    let releases = install.join("releases");
-    let root = releases.join("current-release");
-    let stale_workspace = releases
-        .join("old-release")
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join("release-bound-target");
-    let current_workspace = root
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join("release-bound-target");
-    fs::create_dir_all(&stale_workspace).unwrap();
-    fs::create_dir_all(&current_workspace).unwrap();
-
-    let mut target = upsert_target(
+fn opening_database_leaves_paths_outside_root_absolute() {
+    let root = temp_root("outside-root-paths");
+    let external = temp_root("outside-root-storage");
+    let target = upsert_target(
         &root,
         DEFAULT_RUNTIME_ROOT,
         json!({
-            "target_key": "release-bound-target",
-            "display_name": "Release-bound Target",
+            "target_key": "external-paths",
+            "display_name": "External Paths",
             "start_url": "https://example.com",
             "target_kind": "company",
             "config": {"skip_probe": true},
@@ -618,88 +767,11 @@ fn registered_workspace_ignores_an_existing_stale_release_directory() {
         }),
     )
     .unwrap();
-    target.workspace_dir = stale_workspace.to_string_lossy().to_string();
-
-    assert_eq!(
-        resolve_registered_workspace(&root, &target),
-        fs::canonicalize(&current_workspace).unwrap()
-    );
-    cleanup_test_root(&install);
-}
-
-#[cfg(unix)]
-#[test]
-fn registered_workspace_resolves_current_release_symlink_before_stale_check() {
-    use std::os::unix::fs::symlink;
-
-    let install = temp_root("prefer-current-release-symlink-workspace");
-    let releases = install.join("releases");
-    let current_release = releases.join("current-release");
-    let current_link = install.join("current");
-    let stale_workspace = releases
-        .join("old-release")
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join("release-bound-target");
-    let current_workspace = current_release
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join("release-bound-target");
-    fs::create_dir_all(&stale_workspace).unwrap();
-    fs::create_dir_all(&current_workspace).unwrap();
-    symlink(&current_release, &current_link).unwrap();
-
-    let mut target = upsert_target(
-        &current_release,
-        DEFAULT_RUNTIME_ROOT,
-        json!({
-            "target_key": "release-bound-target",
-            "display_name": "Release-bound Target",
-            "start_url": "https://example.com",
-            "target_kind": "company",
-            "config": {"skip_probe": true},
-            "output_schema": {"schema_key": "company.v1"}
-        }),
-    )
-    .unwrap();
-    target.workspace_dir = stale_workspace.to_string_lossy().to_string();
-
-    assert_eq!(
-        resolve_registered_workspace(&current_link, &target),
-        fs::canonicalize(&current_workspace).unwrap()
-    );
-    cleanup_test_root(&install);
-}
-
-#[cfg(unix)]
-#[test]
-fn loading_registered_target_persists_current_workspace_and_script_paths() {
-    use std::os::unix::fs::symlink;
-
-    let install = temp_root("persist-current-release-workspace");
-    let releases = install.join("releases");
-    let current_release = releases.join("current-release");
-    let current_link = install.join("current");
-    fs::create_dir_all(&current_release).unwrap();
-    symlink(&current_release, &current_link).unwrap();
-
-    let target = upsert_target(
-        &current_link,
-        DEFAULT_RUNTIME_ROOT,
-        json!({
-            "target_key": "release-bound-target",
-            "display_name": "Release-bound Target",
-            "start_url": "https://example.com",
-            "target_kind": "company",
-            "config": {"skip_probe": true},
-            "output_schema": {"schema_key": "company.v1"}
-        }),
-    )
-    .unwrap();
-    let source = current_release.join("extractor.js");
-    fs::write(&source, "console.log(JSON.stringify({records: []}));").unwrap();
+    let source = root.join("extractor.js");
+    let body = "console.log(JSON.stringify({records: []}));\n";
+    fs::write(&source, body).unwrap();
     let registered = register_script(
-        &current_link,
+        &root,
         DEFAULT_RUNTIME_ROOT,
         &target.target_key,
         source.to_str().unwrap(),
@@ -708,58 +780,51 @@ fn loading_registered_target_persists_current_workspace_and_script_paths() {
         None,
     )
     .unwrap();
-    let current_script = PathBuf::from(
-        registered["script_path"]
-            .as_str()
-            .expect("registered script path"),
+    let external_workspace = external.join("targets/external-paths");
+    let external_script = external_workspace.join("scripts/revisions").join(
+        Path::new(registered["script_path"].as_str().unwrap())
+            .file_name()
+            .unwrap(),
     );
+    fs::create_dir_all(external_script.parent().unwrap()).unwrap();
+    fs::write(&external_script, body).unwrap();
 
-    let stale_workspace = releases
-        .join("old-release")
-        .join(DEFAULT_RUNTIME_ROOT)
-        .join("targets")
-        .join(&target.target_key);
-    let stale_script = stale_workspace
-        .join("scripts")
-        .join("revisions")
-        .join(current_script.file_name().unwrap());
-    fs::create_dir_all(stale_script.parent().unwrap()).unwrap();
-    fs::copy(&current_script, &stale_script).unwrap();
-
-    let conn = open_db(&current_link).unwrap();
+    let conn = open_db(&root).unwrap();
     conn.execute(
         "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
-        params![target.target_id, stale_workspace.to_string_lossy()],
+        params![target.target_id, external_workspace.to_string_lossy()],
     )
     .unwrap();
     conn.execute(
         "UPDATE scrape_script_revision SET script_path = ?2 WHERE target_id = ?1",
-        params![target.target_id, stale_script.to_string_lossy()],
+        params![target.target_id, external_script.to_string_lossy()],
     )
     .unwrap();
+    drop(conn);
 
-    let loaded = load_registered_target(&current_link, &conn, &target.target_key)
+    let reopened = open_db(&root).unwrap();
+    assert_eq!(reopened.total_changes(), 0);
+    let (stored_workspace, stored_script): (String, String) = reopened
+        .query_row(
+            r#"
+            SELECT t.workspace_dir, r.script_path
+            FROM scrape_target t
+            JOIN scrape_script_revision r ON r.target_id = t.target_id
+            WHERE t.target_id = ?1
+            "#,
+            params![target.target_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(PathBuf::from(&stored_workspace), external_workspace);
+    assert_eq!(PathBuf::from(&stored_script), external_script);
+    let loaded = load_registered_target(&root, &reopened, &target.target_key)
         .unwrap()
         .unwrap();
-    let stored_workspace: String = conn
-        .query_row(
-            "SELECT workspace_dir FROM scrape_target WHERE target_id = ?1",
-            params![target.target_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-    let stored_script: String = conn
-        .query_row(
-            "SELECT script_path FROM scrape_script_revision WHERE target_id = ?1",
-            params![target.target_id],
-            |row| row.get(0),
-        )
-        .unwrap();
-
-    assert_eq!(PathBuf::from(stored_workspace), loaded.workspace_root);
-    assert_eq!(stored_script, loaded.script.script_path);
-    assert!(PathBuf::from(stored_script).starts_with(&loaded.workspace_root));
-    cleanup_test_root(&install);
+    assert_eq!(loaded.workspace_root, external_workspace);
+    assert_eq!(PathBuf::from(loaded.script.script_path), external_script);
+    cleanup_test_root(&root);
+    cleanup_test_root(&external);
 }
 
 #[test]
@@ -1248,9 +1313,7 @@ fn execute_with_reachable_failure_creates_repair_bundle_and_queue_task() {
         tasks[0].suggested_skill.as_deref(),
         Some(DEFAULT_REPAIR_SKILL)
     );
-    let expected_workspace = resolve_workspace_dir(&root, &target.workspace_dir)
-        .canonicalize()
-        .unwrap();
+    let expected_workspace = resolve_workspace_dir(&root, &target.workspace_dir);
     assert_eq!(
         tasks[0].workspace_root.as_deref(),
         Some(expected_workspace.to_string_lossy().as_ref())

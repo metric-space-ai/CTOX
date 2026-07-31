@@ -1,5 +1,5 @@
 // Target/script registry: SQLite schema access, target upsert/load,
-// script registration and the release-stale workspace resolution.
+// root-relative path persistence, and script registration.
 
 use super::{
     build_target_api_contract, compute_sha256, default_entry_command, ensure_target_workspace,
@@ -120,6 +120,7 @@ pub(super) fn upsert_target(
     let target_id = format!("scrape_target-{}", stable_digest(&target_key));
     let runtime_root = resolve_runtime_root(root, runtime_root_arg);
     let workspace_dir = ensure_target_workspace(&runtime_root, &target_key)?;
+    let stored_workspace_dir = path_for_storage(root, &workspace_dir);
     let conn = open_db(root)?;
     let existing = conn
         .query_row(
@@ -173,7 +174,7 @@ pub(super) fn upsert_target(
             schedule_hint,
             serde_json::to_string(&config)?,
             serde_json::to_string(&output_schema)?,
-            workspace_dir.to_string_lossy(),
+            stored_workspace_dir.to_string_lossy(),
             latest_script_revision_no,
             latest_script_sha256,
             created_at,
@@ -269,6 +270,7 @@ pub(super) fn register_script(
             )
         })?;
         let activated_at = now_iso_string();
+        let persisted_revision_path = path_for_storage(root, &revision_path);
         conn.execute(
             r#"
             UPDATE scrape_script_revision
@@ -278,7 +280,7 @@ pub(super) fn register_script(
             params![
                 target.target_id,
                 revision_no,
-                revision_path.to_string_lossy()
+                persisted_revision_path.to_string_lossy()
             ],
         )?;
         conn.execute(
@@ -344,6 +346,7 @@ pub(super) fn register_script(
     })?;
     let created_at = now_iso_string();
     let entry_command = default_entry_command(language);
+    let stored_revision_path = path_for_storage(root, &revision_path);
     conn.execute(
         r#"
         INSERT INTO scrape_script_revision (
@@ -354,7 +357,7 @@ pub(super) fn register_script(
         params![
             target.target_id,
             next_revision,
-            revision_path.to_string_lossy(),
+            stored_revision_path.to_string_lossy(),
             language,
             serde_json::to_string(&entry_command)?,
             script_sha256,
@@ -557,6 +560,93 @@ pub(super) fn register_source_module(
     }))
 }
 
+fn path_under_root(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+
+    let canonical_root = fs::canonicalize(root).ok()?;
+    let canonical_path = fs::canonicalize(path).ok()?;
+    canonical_path
+        .strip_prefix(canonical_root)
+        .ok()
+        .map(Path::to_path_buf)
+}
+
+fn path_for_storage(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path_under_root(root, path).unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> Result<bool> {
+    let sql = format!("PRAGMA table_info({table})");
+    let mut statement = conn.prepare(&sql)?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_registered_paths(root: &Path, conn: &Connection) -> Result<()> {
+    if table_has_column(conn, "scrape_target", "workspace_dir")? {
+        let rows = {
+            let mut statement =
+                conn.prepare("SELECT target_id, workspace_dir FROM scrape_target")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (target_id, stored_path) in rows {
+            let path = PathBuf::from(&stored_path);
+            if !path.is_absolute() {
+                continue;
+            }
+            let Some(relative) = path_under_root(root, &path) else {
+                // Historical paths outside this root are deliberately retained:
+                // there is no safe root-relative representation for them.
+                continue;
+            };
+            conn.execute(
+                "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
+                params![target_id, relative.to_string_lossy()],
+            )?;
+        }
+    }
+
+    if table_has_column(conn, "scrape_script_revision", "script_path")? {
+        let rows = {
+            let mut statement =
+                conn.prepare("SELECT revision_id, script_path FROM scrape_script_revision")?;
+            let rows = statement.query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (revision_id, stored_path) in rows {
+            let path = PathBuf::from(&stored_path);
+            if !path.is_absolute() {
+                continue;
+            }
+            let Some(relative) = path_under_root(root, &path) else {
+                // See workspace_dir above: outside-root paths remain absolute.
+                continue;
+            };
+            conn.execute(
+                "UPDATE scrape_script_revision SET script_path = ?2 WHERE revision_id = ?1",
+                params![revision_id, relative.to_string_lossy()],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn open_db(root: &Path) -> Result<Connection> {
     let path = resolve_db_path(root);
     if let Some(parent) = path.parent() {
@@ -566,7 +656,48 @@ pub(super) fn open_db(root: &Path) -> Result<Connection> {
     let conn = Connection::open(&path)
         .with_context(|| format!("failed to open scrape db {}", path.display()))?;
     conn.execute_batch(SCHEMA)?;
+    migrate_registered_paths_once(&path, || migrate_registered_paths(root, &conn))?;
     Ok(conn)
+}
+
+/// Migrating historical absolute paths is a one-time repair, but it used to run
+/// on every open of the shared core database — two table scans plus conditional
+/// writes per scrape operation. Under the parallel test suite that was enough
+/// to fail 45 unrelated Business OS commands. Legacy rows only ever arrive
+/// before the process starts, so running it once per database is sufficient.
+static MIGRATED_PATHS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn migrate_registered_paths_once(
+    db_path: &Path,
+    migrate: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let migrated = MIGRATED_PATHS.get_or_init(Default::default);
+    if migrated
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .contains(db_path)
+    {
+        return Ok(());
+    }
+    migrate()?;
+    migrated
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .insert(db_path.to_path_buf());
+    Ok(())
+}
+
+/// The migration runs once per database per process. Tests that stage legacy
+/// rows after a database has already been opened need that memory cleared.
+#[cfg(test)]
+pub(super) fn forget_path_migrations_for_test() {
+    if let Some(migrated) = MIGRATED_PATHS.get() {
+        migrated
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .clear();
+    }
 }
 
 pub(super) fn resolve_db_path(root: &Path) -> PathBuf {
@@ -617,34 +748,15 @@ pub(super) fn load_registered_target(
         return Ok(None);
     };
     let workspace_root = resolve_registered_workspace(root, &view);
-    let resolved_workspace = workspace_root.to_string_lossy().to_string();
-    if view.workspace_dir != resolved_workspace {
-        conn.execute(
-            "UPDATE scrape_target SET workspace_dir = ?2 WHERE target_id = ?1",
-            params![view.target_id, resolved_workspace],
-        )?;
-        view.workspace_dir = resolved_workspace;
-    }
-
-    let resolved_script = resolve_registered_script_path(
-        &workspace_root,
+    view.workspace_dir = workspace_root.to_string_lossy().to_string();
+    script.script_path = resolve_registered_script_path(
+        root,
         &script.script_path,
         &script.script_sha256,
         &script_body,
     )?
     .to_string_lossy()
     .to_string();
-    if script.script_path != resolved_script {
-        conn.execute(
-            r#"
-            UPDATE scrape_script_revision
-            SET script_path = ?3
-            WHERE target_id = ?1 AND revision_no = ?2
-            "#,
-            params![view.target_id, script.revision_no, resolved_script],
-        )?;
-        script.script_path = resolved_script;
-    }
 
     Ok(Some(RegisteredTarget {
         view,
@@ -653,55 +765,23 @@ pub(super) fn load_registered_target(
     }))
 }
 
-pub(super) fn workspace_belongs_to_stale_release(root: &Path, workspace: &Path) -> bool {
-    let Some(releases_dir) = root
-        .parent()
-        .filter(|parent| parent.file_name().is_some_and(|name| name == "releases"))
-    else {
-        return false;
-    };
-    workspace.starts_with(releases_dir) && !workspace.starts_with(root)
-}
-
 pub(super) fn resolve_registered_script_path(
-    workspace_root: &Path,
+    root: &Path,
     stored_path: &str,
     expected_sha256: &str,
     script_body: &str,
 ) -> Result<PathBuf> {
-    let stored = PathBuf::from(stored_path);
-    let file_name = stored
-        .file_name()
-        .context("registered scrape script path has no file name")?;
-    let workspace_revision = workspace_root
-        .join("scripts")
-        .join("revisions")
-        .join(file_name);
-    if registered_script_matches(&workspace_revision, expected_sha256) {
-        return Ok(
-            fs::canonicalize(&workspace_revision).unwrap_or_else(|_| workspace_revision.clone())
-        );
-    }
-    if stored.starts_with(workspace_root) && registered_script_matches(&stored, expected_sha256) {
-        return Ok(fs::canonicalize(&stored).unwrap_or(stored));
-    }
-
-    fs::create_dir_all(
-        workspace_revision
-            .parent()
-            .context("registered scrape script revision has no parent")?,
-    )?;
     anyhow::ensure!(
         compute_sha256(script_body.trim()) == expected_sha256,
         "persisted scrape script body does not match registered SHA-256"
     );
-    fs::write(&workspace_revision, script_body).with_context(|| {
-        format!(
-            "failed to restore registered scrape script {}",
-            workspace_revision.display()
-        )
-    })?;
-    Ok(fs::canonicalize(&workspace_revision).unwrap_or(workspace_revision))
+    let resolved = resolve_input_path(root, stored_path);
+    anyhow::ensure!(
+        registered_script_matches(&resolved, expected_sha256),
+        "registered scrape script is missing or does not match SHA-256: {}",
+        resolved.display()
+    );
+    Ok(resolved)
 }
 
 pub(super) fn count_rows(conn: &Connection, table: &str) -> Result<i64> {
