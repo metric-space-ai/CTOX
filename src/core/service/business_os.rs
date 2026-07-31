@@ -519,6 +519,11 @@ fn build_desktop_invite(root: &Path, args: &[String]) -> anyhow::Result<serde_js
         "native_peer_id": config.native_peer_id,
         "signaling_urls": config.signaling_urls,
         "signaling_room_password": config.signaling_room_password,
+        // Pairing clients have no other source for STUN/TURN. Without these the
+        // browser pool starts with zero ICE servers and only ever connects on
+        // the same host; across NAT every collection stalls in `reconnecting`.
+        "ice_servers": config.ice_servers,
+        "ice_servers_refresh_url": config.ice_servers_refresh_url,
         "transport": "webrtc",
         "expires_at": expires_at,
         "data_plane": "rxdb-webrtc",

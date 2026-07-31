@@ -38,6 +38,7 @@ test('measurement semantics never fall back to legacy radial load and retain zer
   assert.equal(hooks.tangentialEquivalentForce({ radial_load_N: 4 }), '');
   assert.equal(hooks.tangentialEquivalentForce({ radial_load_N: 4, tangential_equivalent_force_N: 0 }), 0);
   assert.equal(hooks.metricPropellerLength({ prop_diameter_mm: 0, prop_diameter_in: 9 }, 'prop_diameter'), 0);
+  assert.equal(hooks.metricPropellerLength({ input_D_m: 0.2159 }, 'prop_diameter'), 215.9);
 
   const measurements = hooks.aggregateMeasurements([
     { source_id: 'source-1', evidence_id: 'evidence-1', snapshot_id: 'snap-1', snapshot_path: 'runtime/snapshots/source-1.html', retrieved_at: '2026-07-17T00:00:00Z', url_role: 'original_content', content_scope: 'full_text', snapshot_hash: `sha256:${'1'.repeat(64)}`, canonical_url: 'https://example.test/source-1', radial_load_N: 4, rpm: 0 },
@@ -47,16 +48,44 @@ test('measurement semantics never fall back to legacy radial load and retain zer
   assert.equal(measurements.get('source-1').maxRpm, 0);
 });
 
+test('derived propeller rows inherit geometry without overwriting derived values', () => {
+  const [row] = hooks.derivedMeasurementDisplayRows(
+    [{
+      measurement_id: 'MEAS-1',
+      source_id: 'SRC-1',
+      input_rpm: 2489,
+      derived_thrust_N: 0.479,
+      derived_torque_Nm: 0.0089,
+    }],
+    [{
+      measurement_id: 'MEAS-1',
+      propeller_size_original: '8.5x6',
+      prop_diameter_in: 8.5,
+      prop_pitch_in: 6,
+      rpm: 2500,
+    }],
+  );
+  assert.equal(row.propeller_size_original, '8.5x6');
+  assert.equal(row.prop_pitch_in, 6);
+  assert.equal(row.input_rpm, 2489);
+  assert.equal(row.derived_thrust_N, 0.479);
+});
+
 test('research tasks keep evidence and direct measurements in separate tables', () => {
   const base = {
     tables: [
       { table_key: 'evidence_points' },
       { table_key: 'measured_load_points' },
+      { table_key: 'derived_bearing_loads' },
     ],
   };
 
   assert.equal(hooks.defaultMeasurementsTableKey(base), 'measured_load_points');
   assert.equal(hooks.defaultMeasurementsTableKey({ tables: [{ table_key: 'evidence_points' }] }), 'measured_load_points');
+  assert.equal(
+    hooks.preferredDirectMeasurementTable(base, { measurements_table_key: 'derived_bearing_loads' }).table_key,
+    'measured_load_points',
+  );
 });
 
 test('measurement rows require individually matching source snapshot lineage', () => {
@@ -870,7 +899,9 @@ test('research and knowledge events use independent refresh timers', () => {
   assert.match(researchSource, /function scheduleKnowledgeRefresh[\s\S]*?state\.knowledgeRefreshTimer/);
   assert.match(researchSource, /if \(state\.knowledgeRefreshInFlight\) return/);
   assert.match(researchSource, /const active = knowledgeTableLoads\.get\(key\);[\s\S]*?if \(active\) return active/);
-  assert.match(researchSource, /knowledgeLifecycleCollections[\s\S]*?'research_runs'[\s\S]*?'business_commands'[\s\S]*?'ctox_queue_tasks'/);
+  assert.match(researchSource, /knowledgeLifecycleCollections = new Set\(\['research_tasks'\]\)/);
+  assert.match(researchSource, /scheduleLocalRefresh\(80, name\)/);
+  assert.match(researchSource, /changedCollections\.has\('research_tasks'\)[\s\S]*?render\(\)[\s\S]*?renderRight\(\)/);
   assert.doesNotMatch(researchSource, /readableCollection\('knowledge_tables'\)\?\.\$\?\./);
   assert.doesNotMatch(researchSource, /state\.refreshTimer/);
   assert.match(researchSource, /rowLimitWarnings/);
@@ -888,7 +919,17 @@ test('discovery graph prefers persisted citation paths over inferred tag cluster
 });
 
 test('research graph releases its WebGL context when the surface is remounted', () => {
-  assert.match(researchGraphSource, /zoomToFit\?\.\([\s\S]*?projection\.visibleNodeIds\.has\(node\.id\)/);
+  assert.match(researchSource, /const preservedGraphHost = state\.showDiagram[\s\S]*?state\.graphTaskId === task\.id/);
+  assert.match(researchSource, /replacementHost\?\.replaceWith\(preservedGraphHost\)[\s\S]*?state\.graphSurface\.setData\(projection\)/);
+  assert.match(researchSource, /state\.graphTaskId = task\.id/);
+  assert.match(researchSource, /state\.graphTaskId = ''/);
+  assert.match(researchGraphSource, /const fitNodeIds = connectedVisibleNodeIds\.size >= 4[\s\S]*?zoomToFit\?\.\([\s\S]*?fitNodeIds\.has\(node\.id\)/);
+  assert.match(researchGraphSource, /onNodeHover\(\(node\) => \{[\s\S]*?if \(!layoutLocked\) settleLayout\(\)/);
+  assert.match(researchGraphSource, /function lockLayout\(\)[\s\S]*?node\.fx = node\.x[\s\S]*?node\.fy = node\.y[\s\S]*?graphLayoutLocked = 'true'/);
+  assert.match(researchGraphSource, /function unlockLayout\(\)[\s\S]*?node\.fx = undefined[\s\S]*?graphLayoutLocked = 'false'/);
+  assert.match(researchGraphSource, /if \(topologyChanged\) \{[\s\S]*?cancelLayoutLock\(\);[\s\S]*?unlockLayout\(\)/);
+  assert.match(researchGraphSource, /function scheduleLayoutLock\(\) \{\s*if \(layoutLockTimer \|\| layoutLocked\) return;/);
+  assert.doesNotMatch(researchGraphSource, /function fit\(duration = 700\) \{\s*graph\.resumeAnimation/);
   assert.match(researchGraphSource, /graph\.pauseAnimation\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.dispose\?\.\(\)/);
   assert.match(researchGraphSource, /renderer\?\.forceContextLoss\?\.\(\)/);
@@ -935,7 +976,8 @@ test('presentation layer stays compact and shell-native', async () => {
   assert.doesNotMatch(source, /box-shadow:\s*(?:0|inset|rgba|color-mix)/);
   assert.doesNotMatch(source, /linear-gradient|radial-gradient/);
   assert.match(css, /grid-template-columns: var\(--research-left-width\) 6px minmax\(0, 1fr\) 6px var\(--research-right-width\)/);
-  assert.match(css, /@container business-app-window \(max-width: 980px\)[\s\S]*?\.ctox-workspace\.research-module\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(css, /@container business-app-window \(max-width: 1120px\)[\s\S]*?\.ctox-workspace\.research-module\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /grid-template-areas:\s*"research-center research-center"\s*"research-left research-right"/);
   assert.match(css, /grid-template-areas:\s*"research-center"\s*"research-left"\s*"research-right"/);
   assert.match(css, /\.research-ai-prompt-pre/);
   assert.match(css, /@keyframes research-spin/);

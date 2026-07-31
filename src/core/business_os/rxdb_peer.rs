@@ -19324,6 +19324,21 @@ mod tests {
             vec!["VERIFY".to_string()],
         )
         .expect("create runbook");
+        crate::mission::tickets::add_or_update_runbook_item(
+            root.path(),
+            "projection.item.v1",
+            "projection.runbook.v1",
+            "projection.skillbook.v1",
+            "VERIFY",
+            "Verify source receipt",
+            "research",
+            "Load the original source, verify its receipt and hash, then persist cited evidence.",
+            "v1",
+            "active",
+            None,
+            true,
+        )
+        .expect("create runbook item");
 
         let synced = sync_business_record_projections(root.path())
             .expect("sync procedural knowledge projections");
@@ -19347,6 +19362,16 @@ mod tests {
             skillbook.get("kind").and_then(Value::as_str),
             Some("skillbook")
         );
+        let skillbook_markdown = skillbook
+            .pointer("/payload/markdown")
+            .and_then(Value::as_str)
+            .expect("projected skillbook markdown");
+        assert!(skillbook_markdown.contains("## Mission"));
+        assert!(skillbook_markdown.contains("Fail closed when evidence is missing."));
+        assert_eq!(
+            skillbook.get("markdown").and_then(Value::as_str),
+            Some(skillbook_markdown)
+        );
 
         let runbook_json: String = conn
             .query_row(
@@ -19363,6 +19388,16 @@ mod tests {
         assert_eq!(
             runbook.get("skillbook_id").and_then(Value::as_str),
             Some("projection.skillbook.v1")
+        );
+        let runbook_markdown = runbook
+            .pointer("/payload/markdown")
+            .and_then(Value::as_str)
+            .expect("projected runbook markdown");
+        assert!(runbook_markdown.contains("## VERIFY · Verify source receipt"));
+        assert!(runbook_markdown.contains("verify its receipt and hash"));
+        assert_eq!(
+            runbook.get("markdown").and_then(Value::as_str),
+            Some(runbook_markdown)
         );
     }
 

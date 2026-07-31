@@ -22,6 +22,7 @@ const { __knowledgeTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   buildKnowledgeBundles,
+  skillbookContext,
   isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,
@@ -203,6 +204,96 @@ test('groups linked SKF skillbooks, runbooks, resources, and tables into one dom
   ]));
   assert.ok(hub.runbookIds.includes('runbook:verification'));
   assert.equal(groups.some((group) => group.id === 'bundle/drone-bearing-design-verified-v1'), false);
+});
+
+test('publishes only the current SKF skillbook lineage while retaining legacy source resources', () => {
+  const groups = buildKnowledgeBundles([
+    {
+      id: 'skillbook:drone-bearing-design-verified-v1',
+      kind: 'skillbook',
+      title: 'Legacy evidence import',
+      linked_runbook_ids: ['runbook:legacy-import'],
+      updated_at_ms: 1,
+    },
+    {
+      id: 'runbook:legacy-import',
+      kind: 'runbook',
+      title: 'Legacy import',
+      skillbook_id: 'drone-bearing-design-verified-v1',
+    },
+    {
+      id: 'skillbook:drone-bearing-design-verified-v2',
+      kind: 'skillbook',
+      title: 'SKF UAV- und Drohnenmotor-Lagerauslegung',
+      linked_runbook_ids: ['drone-bearing-load-points'],
+      updated_at_ms: 2,
+    },
+    {
+      id: 'runbook:drone-bearing-load-points',
+      kind: 'runbook',
+      title: 'Propellerlasten bestimmen',
+      skillbook_id: 'drone-bearing-design-verified-v2',
+    },
+    {
+      id: 'resource:verified-source',
+      kind: 'resource',
+      title: 'Verified source',
+      skillbook_id: 'drone-bearing-design-verified-v1',
+    },
+    {
+      id: 'runbook:skf-rb-iso281-scope-and-life',
+      kind: 'runbook',
+      title: 'ISO 281 equivalent dynamic load and rating-life scope and limitations',
+      subtitle: 'Runbook · active · bearing_standards_iso_281',
+      skillbook_id: 'drone-bearing-design-verified-v1',
+    },
+  ], [{
+    id: 'drone-bearing-load-points',
+    title: 'Propellerlasten bestimmen',
+  }, {
+    id: 'legacy-import',
+    title: 'Legacy import',
+  }], []);
+
+  const hub = groups.find((group) => group.id === 'research/drone-design/drone-bearing-loads');
+  assert.ok(hub);
+  assert.equal(hub.title, 'UAV-Antriebslager');
+  assert.deepEqual(hub.entries.map((entry) => entry.id), [
+    'skillbook:drone-bearing-design-verified-v2',
+    'runbook:drone-bearing-load-points',
+    'resource:verified-source',
+  ]);
+  assert.deepEqual(hub.runbookIds, ['runbook:drone-bearing-load-points']);
+  assert.equal(groups.some((group) => group.entries.some((entry) => entry.id === 'skillbook:drone-bearing-design-verified-v1')), false);
+  assert.equal(
+    groups.some((group) => group.entries.some((entry) => entry.id === 'runbook:skf-rb-iso281-scope-and-life')),
+    false,
+    'legacy lineage runbooks must be absorbed instead of publishing their own active group',
+  );
+});
+
+test('selected skillbook remains the visible Skill document instead of an arbitrary bundle skill', () => {
+  const skillbook = {
+    id: 'skillbook:drone-bearing-design-verified-v2',
+    kind: 'skillbook',
+    title: 'UAV bearing design',
+    linked_runbook_ids: ['runbook:drone-bearing-validation'],
+  };
+  const importedSkill = {
+    id: 'skill:recent-validation-fragment',
+    kind: 'skill',
+    title: 'Prüfstand und Validierung planen',
+  };
+  const group = {
+    id: 'research/drone-design/drone-bearing-loads',
+    entries: [importedSkill, skillbook],
+    runbookIds: [],
+    tableIds: [],
+  };
+
+  const context = skillbookContext(group, skillbook);
+
+  assert.equal(context.skill?.id, skillbook.id);
 });
 
 test('normalizes RxDB payload records without dropping table rows or schema', () => {

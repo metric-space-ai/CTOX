@@ -20,6 +20,11 @@ assert.match(
   /!host\.isConnected[\s\S]*lease\?\.release/,
   'late leases are released when their module host has closed',
 );
+assert.match(
+  facadeMatch[0],
+  /subscribeCollectionChanges:[\s\S]*ctox-rxdb-storage-change[\s\S]*detail\.collection/,
+  'module ctx.sync exposes lifecycle-bound replicated collection change events',
+);
 
 const settingsDrawerMatch = source.match(/async function openSettingsDrawer\(options = \{\}\) \{[\s\S]*?\n\}/);
 assert.ok(settingsDrawerMatch, 'settings drawer entrypoint exists');

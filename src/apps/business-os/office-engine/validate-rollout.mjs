@@ -53,13 +53,17 @@ const expectedStatus = rollout.legacy_removal_authorized
 for (const feature of features) assert.equal(feature.status, expectedStatus, `${feature.id} rollout status`);
 
 assert.match(documents, /officeEngine:\s*'ctox_documents'/);
-assert.match(spreadsheets, /officeEngine:\s*'ctox_spreadsheets'/);
-for (const source of [documents, spreadsheets]) {
-  if (!rollout.legacy_removal_authorized) assert.match(source, /===\s*'legacy'/, 'typed Legacy rollback must remain before authorization');
+assert.match(spreadsheets, /createCtoxSpreadsheetsEditor/);
+assert.doesNotMatch(spreadsheets, /===\s*'legacy'/, 'CTOX Spreadsheets must not restore the removed legacy viewer');
+if (!rollout.legacy_removal_authorized) {
+  assert.match(documents, /===\s*'legacy'/, 'typed Documents Legacy rollback must remain before authorization');
 }
 assert.match(store, /"documents_engine":\s*"ctox_documents"/);
 assert.match(store, /"spreadsheets_engine":\s*"ctox_spreadsheets"/);
-if (!rollout.legacy_removal_authorized) assert.match(store, /\(_,\s*"legacy"\)\s*=>\s*Ok\("legacy"\)/);
+if (!rollout.legacy_removal_authorized) {
+  assert.match(store, /\("document",\s*"legacy"\)\s*=>\s*Ok\("legacy"\)/);
+  assert.match(store, /\("spreadsheet",\s*"legacy"\)\s*=>\s*Ok\("ctox_spreadsheets"\)/);
+}
 
 assert.equal(restartEvidence.status, 'passed');
 assert.deepEqual(restartEvidence.cases.map(({ kind, status }) => ({ kind, status })), [
