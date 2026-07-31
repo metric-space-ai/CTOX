@@ -28,8 +28,27 @@ etablierte Temp-Index/CAS-Weg.
 1. **S-CUT1** `backup_restore.rs` — Drill-/Restore-/Prune-Familie (~35 fns;
    P7e bescheinigt Geschlossenheit).
 2. **S-CUT2** `module_lifecycle.rs` — Install/Release/Rollback/Katalog
-   (~130 fns) inkl. der drei Repair-Schichten (unverändert mitbewegen —
-   Löschung ist S-FIX).
+   inkl. der drei Repair-Schichten (unverändert mitbewegen — Löschung ist
+   S-FIX). **Karte 01.08.: ESCAPE-HATCH GEZOGEN, Reihenfolge ändern.**
+
+   Gemessen: 52 Funktionen der Familie, 2.321 Zeilen, verteilt auf SIEBEN
+   Cluster zwischen Zeile 68 und 14136 — anders als die geschlossene
+   Backup-Familie aus S-CUT1. Entscheidend: **35 der 52 werden von
+   ausserhalb aufgerufen**, also 35 neue `pub(super)`-Nähte gegen die im
+   Plan festgelegte Stopgrenze von 20.
+
+   Die Nähte ballen sich: `module_catalog_for_rxdb` (13 Aufrufe),
+   `record_module_version` (10), `write_module_catalog_projection_to_rxdb`
+   (9), `record_module_release` (7) tragen 39 der Aufrufstellen. Und sechs
+   Funktionen der Familie sind projektionsartig
+   (`*_for_rxdb`, `*_projection_*`) — sie gehören fachlich in S-CUT3,
+   nicht hierher.
+
+   **Empfehlung: S-CUT3 (Projektionen) VOR S-CUT2 ziehen.** Wandern die
+   Projektionen zuerst, verlassen die beiden schwersten Nahtträger die
+   Lebenszyklus-Familie, und S-CUT2 wird neu vermessen sehr wahrscheinlich
+   unter die 20er-Grenze fallen. Die bisherige Reihenfolge S-CUT2 → S-CUT3
+   war eine Annahme, keine Messung.
 3. **S-CUT3** `store_projections.rs` — die business_records-/Queue-/Chat-
    Kompatibilitätsprojektionen (~74 fns) inkl. `repair_queue_projections`.
 4. **S-CUT4** `command_plane.rs` — Acceptance/Routing/Outcomes/Outbox
