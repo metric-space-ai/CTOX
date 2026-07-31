@@ -1,12 +1,21 @@
 // moneyhouse.ch - prospect.v1 extractor with browser/unlock fallback.
+//
+// Page-content acquisition runs through `ctox web browser-capture`
+// (full page.html on disk); the truncated `ctox web read` path is kept
+// only as a compatibility fallback for runtimes that do not expose the
+// subcommand yet. Mirrors the verified northdata.de conversion.
 
 "use strict";
 
 const { execFileSync } = require("child_process");
+const { mkdtempSync, mkdirSync, readFileSync, rmSync } = require("fs");
+const { tmpdir } = require("os");
+const path = require("path");
 
 const SOURCE_ID = "moneyhouse.ch";
 const ALLOWED_HOST = "moneyhouse.ch";
 const MAX_HITS = 6;
+const CAPTURE_TIMEOUT_MS = 45_000;
 
 function readInput() {
   try {
@@ -93,7 +102,7 @@ function blockingMarkers(page) {
     page?.html, page?.command_error, detection.join(" "),
   ].filter(Boolean).join(" "));
   const markers = detection.filter((marker) =>
-    /captcha|cloudflare|challenge|human|access.?denied|blocked|rate.?limit|too.?many/i.test(marker)
+    /captcha|cloudflare|challenge|human|access.?denied|blocked|rate.?limit|too.?many|sorry|enablejs/i.test(marker)
   );
   if ([401, 403, 429].includes(Number(page?.http_status))) {
     markers.push(`http-${page.http_status}`);
@@ -242,10 +251,86 @@ function candidateUrls(input, company, country) {
   return { urls, discovery };
 }
 
-function readPage(url, country) {
+function browserCapturePage(url) {
+  if (!isAllowedUrl(url)) return { page: null, commandUnavailable: false };
+  const captureRoot = process.env.CTOX_SCRAPE_OUTPUT_DIR || tmpdir();
+  mkdirSync(captureRoot, { recursive: true });
+  const outDir = mkdtempSync(path.join(captureRoot, "moneyhouse-browser-capture-"));
+  try {
+    const args = [
+      "web", "browser-capture",
+      "--url", url,
+      "--out-dir", outDir,
+      "--timeout-ms", String(CAPTURE_TIMEOUT_MS),
+    ];
+    let payload;
+    try {
+      const out = execFileSync(process.env.CTOX_BIN || "ctox", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: (CAPTURE_TIMEOUT_MS * 2) + 20_000,
+      });
+      payload = JSON.parse(out);
+    } catch (err) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || "");
+      return {
+        page: null,
+        commandUnavailable: /unsupported|unknown|unrecognized|usage:/i.test(detail),
+      };
+    }
+
+    const markerMap = payload?.markers && typeof payload.markers === "object"
+      ? payload.markers
+      : {};
+    const markers = Object.entries(markerMap)
+      .filter(([, detected]) => detected === true)
+      .map(([marker]) => marker);
+    if (!payload?.ok) {
+      return {
+        page: {
+          ok: false,
+          url: payload?.finalUrl || payload?.targetUrl || url,
+          title: payload?.title || "",
+          capture_markers: markerMap,
+          detection: { markers },
+        },
+        commandUnavailable: false,
+      };
+    }
+
+    const html = readFileSync(path.join(outDir, "page.html"), "utf8");
+    return {
+      page: {
+        ok: true,
+        url: payload.finalUrl || payload.targetUrl || url,
+        final_url: payload.finalUrl || null,
+        title: payload.title || "",
+        html,
+        raw_html: html,
+        capture_markers: markerMap,
+        detection: { markers },
+      },
+      commandUnavailable: false,
+    };
+  } finally {
+    // Mandatory: every capture writes a full Chrome profile and a >12 MB
+    // netlog; the production tenant's disk must not fill up.
+    rmSync(outDir, { recursive: true, force: true });
+  }
+}
+
+function readPageViaLegacyRead(url, country) {
   const args = ["web", "read", "--url", url];
   if (country) args.push("--country", country);
   return runCtox(args);
+}
+
+function readPage(url, country) {
+  const capture = browserCapturePage(url);
+  // Compatibility only for runtimes that do not expose browser-capture yet.
+  // A capture that ran and failed is never retried through another transport.
+  return capture.commandUnavailable ? readPageViaLegacyRead(url, country) : capture.page;
 }
 
 function browserPage(url) {
@@ -479,6 +564,7 @@ if (require.main === module) main();
 
 module.exports = {
   blockingMarkers,
+  browserCapturePage,
   candidateUrls,
   directPortalSearchResult,
   failureResult,

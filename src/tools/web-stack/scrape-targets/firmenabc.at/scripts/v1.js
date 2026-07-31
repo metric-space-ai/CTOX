@@ -1,8 +1,15 @@
 // firmenabc.at - prospect.v1 extractor with browser/unlock fallback.
+//
+// Page-content acquisition uses `ctox web browser-capture` (full page.html);
+// the truncated `ctox web read` path only remains as a compatibility
+// fallback for runtimes that do not expose the subcommand yet.
 
 "use strict";
 
 const { execFileSync } = require("child_process");
+const { mkdtempSync, mkdirSync, readFileSync, rmSync } = require("fs");
+const { tmpdir } = require("os");
+const path = require("path");
 
 const SOURCE_ID = "firmenabc.at";
 const ALLOWED_HOST = "firmenabc.at";
@@ -181,6 +188,121 @@ function readPage(url, country) {
   const args = ["web", "read", "--url", url];
   if (country) args.push("--country", country);
   return runCtox(args);
+}
+
+// ---------------------------------------------------------------------------
+// Full-page capture (mirrors scrape-targets/northdata.de/scripts/v1.js).
+// `ctox web read` truncates the page (page_text null, empty excerpts), which
+// drops the address/register fields below the cutoff and ends runs in
+// temporary_unreachable. `ctox web browser-capture` writes a full page.html.
+// ---------------------------------------------------------------------------
+
+function titleFromHtml(html) {
+  const match = String(html || "").match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? match[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "";
+}
+
+function captureBodyText(html) {
+  // Preserve block-element line breaks: bodyProfile() parses the profile
+  // line-by-line (street line, then "<plz> <ort>").
+  const text = String(html || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<br\b[^>]*>/gi, "\n")
+    .replace(/<\/(?:p|div|li|tr|td|th|dd|dt|h[1-6]|section|article|header|footer|ul|ol|table)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'");
+  return text.split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+function captureJsonLd(html) {
+  const blocks = [];
+  const re = /<script\b[^>]*type\s*=\s*(["'])application\/ld\+json\1[^>]*>([\s\S]*?)<\/script>/gi;
+  for (const match of String(html || "").matchAll(re)) {
+    if (blocks.length >= 20) break;
+    blocks.push(match[2]);
+  }
+  return blocks;
+}
+
+function browserCapturePage(url) {
+  if (!isAllowedUrl(url)) return { page: null, commandUnavailable: false };
+  const captureRoot = process.env.CTOX_SCRAPE_OUTPUT_DIR || tmpdir();
+  mkdirSync(captureRoot, { recursive: true });
+  const outDir = mkdtempSync(path.join(captureRoot, "firmenabc-browser-capture-"));
+  try {
+    const args = [
+      "web", "browser-capture",
+      "--url", url,
+      "--out-dir", outDir,
+      "--timeout-ms", String(BROWSER_TIMEOUT_MS),
+    ];
+    let payload;
+    try {
+      const out = execFileSync(process.env.CTOX_BIN || "ctox", args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: (BROWSER_TIMEOUT_MS * 2) + 20_000,
+      });
+      payload = JSON.parse(out);
+    } catch (err) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || "");
+      return {
+        page: null,
+        commandUnavailable: /unsupported|unknown|unrecognized|usage:/i.test(detail),
+      };
+    }
+
+    const markerMap = payload?.markers && typeof payload.markers === "object"
+      ? payload.markers
+      : {};
+    const markers = Object.entries(markerMap)
+      .filter(([, detected]) => detected === true)
+      .map(([marker]) => marker);
+    const finalUrl = payload?.finalUrl || payload?.targetUrl || url;
+    if (!payload?.ok) {
+      // Surface the capture's challenge markers so blockingMarkers() classifies
+      // a captcha/sorry/enablejs page as blocked, never as an empty success.
+      return {
+        page: {
+          ok: false,
+          url: finalUrl,
+          title: payload?.title || "",
+          capture_markers: markerMap,
+          detection: { markers },
+        },
+        commandUnavailable: false,
+      };
+    }
+
+    const html = readFileSync(path.join(outDir, "page.html"), "utf8");
+    return {
+      page: {
+        ok: true,
+        url: finalUrl,
+        final_url: payload?.finalUrl || null,
+        title: payload?.title || titleFromHtml(html),
+        html,
+        raw_html: html,
+        body_text: captureBodyText(html),
+        json_ld: captureJsonLd(html),
+        capture_markers: markerMap,
+        detection: { markers },
+      },
+      commandUnavailable: false,
+    };
+  } finally {
+    // Mandatory: every capture writes a full Chrome profile and a >12 MB
+    // netlog; the production tenant's disk must not fill up.
+    rmSync(outDir, { recursive: true, force: true });
+  }
 }
 
 function providerBrowserSource(url, unlockMode = false) {
@@ -409,7 +531,10 @@ function main() {
       return;
     }
 
-    const direct = readPage(url, country);
+    const capture = browserCapturePage(url);
+    // Compatibility only for runtimes that do not expose browser-capture yet.
+    // A capture that ran and failed is never retried through another transport.
+    const direct = capture.commandUnavailable ? readPage(url, country) : capture.page;
     const directMarkers = blockingMarkers(direct);
     if (directMarkers.length > 0) {
       blockedUrl = direct?.url || url;
@@ -460,6 +585,7 @@ if (require.main === module) main();
 
 module.exports = {
   blockingMarkers,
+  browserCapturePage,
   browserSessionId,
   bodyProfile,
   failureResult,
