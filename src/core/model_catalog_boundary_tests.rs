@@ -58,6 +58,10 @@ fn production_surfaces_keep_model_catalog_data_in_registry() {
             production_source(include_str!("capabilities/scrape/registry.rs")),
         ),
         (
+            "capabilities/scrape/queries.rs",
+            production_source(include_str!("capabilities/scrape/queries.rs")),
+        ),
+        (
             "capabilities/scrape/execute.rs",
             production_source(include_str!("capabilities/scrape/execute.rs")),
         ),
