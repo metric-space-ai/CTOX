@@ -1,8 +1,8 @@
 // northdata.de — prospect.v1 extractor (Phase B, hardened 2026-07-29).
 //
 // Reads CTOX_SCRAPE_INPUT_JSON for the company + country, drives the
-// CTOX web stack (`ctox web read` + `ctox web browser-automation`) to
-// load a profile page, then parses the page HTML for the field set
+// CTOX web stack (`ctox web search` + `ctox web browser-capture`) to
+// discover and capture a full profile page, then parses page.html for the field set
 // documented in `tools/web-stack/src/sources/EXCEL_MATRIX.md`.
 //
 // Hardening vs. the initial revision (live-verified with
@@ -22,6 +22,9 @@
 "use strict";
 
 const { execFileSync } = require("child_process");
+const { mkdtempSync, mkdirSync, readFileSync, rmSync } = require("fs");
+const { tmpdir } = require("os");
+const path = require("path");
 
 const SOURCE_ID = "northdata.de";
 const ALLOWED_HOST = "northdata.de";
@@ -137,16 +140,77 @@ function searchHits(company, country) {
 function candidateUrls(input, company, country) {
   const explicit = [input.url, input.source_url, input.profile_url].filter(isAllowedUrl);
   if (explicit.length > 0) return [...new Set(explicit)];
+  const discovered = searchHits(company, country);
+  if (discovered.length > 0) return discovered;
   const portalSearchUrl = `https://www.northdata.de/${encodeURIComponent(company).replace(/%20/g, "+")}`;
   return [portalSearchUrl];
 }
 
-function readPage(url, country) {
-  const args = ["web", "read", "--url", url];
-  if (country) {
-    args.push("--country", country);
+function browserCapturePage(url) {
+  if (!isAllowedUrl(url)) return { page: null, commandUnavailable: false };
+  const captureRoot = process.env.CTOX_SCRAPE_OUTPUT_DIR || tmpdir();
+  mkdirSync(captureRoot, { recursive: true });
+  const outDir = mkdtempSync(path.join(captureRoot, "northdata-browser-capture-"));
+  try {
+    const args = [
+      "web", "browser-capture",
+      "--url", url,
+      "--out-dir", outDir,
+      "--timeout-ms", String(NAVIGATION_TIMEOUT_MS),
+    ];
+    let payload;
+    try {
+      const out = execFileSync(ctoxBin(), args, {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+        maxBuffer: 32 * 1024 * 1024,
+        timeout: (NAVIGATION_TIMEOUT_MS * 2) + 20_000,
+      });
+      payload = JSON.parse(out);
+    } catch (err) {
+      const detail = String(err?.stderr || err?.stdout || err?.message || "");
+      return {
+        page: null,
+        commandUnavailable: /unsupported|unknown|unrecognized|usage:/i.test(detail),
+      };
+    }
+
+    const markerMap = payload?.markers && typeof payload.markers === "object"
+      ? payload.markers
+      : {};
+    const markers = Object.entries(markerMap)
+      .filter(([, detected]) => detected === true)
+      .map(([marker]) => marker);
+    if (!payload?.ok) {
+      return {
+        page: {
+          ok: false,
+          url: payload?.finalUrl || payload?.targetUrl || url,
+          title: payload?.title || "",
+          capture_markers: markerMap,
+          detection: { markers },
+        },
+        commandUnavailable: false,
+      };
+    }
+
+    const html = readFileSync(path.join(outDir, "page.html"), "utf8");
+    return {
+      page: {
+        ok: true,
+        url: payload.finalUrl || payload.targetUrl || url,
+        final_url: payload.finalUrl || null,
+        title: payload.title || "",
+        html,
+        raw_html: html,
+        capture_markers: markerMap,
+        detection: { markers },
+      },
+      commandUnavailable: false,
+    };
+  } finally {
+    rmSync(outDir, { recursive: true, force: true });
   }
-  return runCtox(args, undefined, NAVIGATION_TIMEOUT_MS + 5_000);
 }
 
 function browserSessionId(value) {
@@ -713,29 +777,21 @@ function main() {
     // drift (or an identity mismatch), never a reason to hammer the origin.
     let loadedAnyPage = false;
     for (const url of candidateUrls(input, company, country)) {
-      const direct = readPage(url, country);
-      const directBlocked = isBlockedPage(direct) || hasBlockedDetection(direct);
-      blocked ||= directBlocked;
-      if (directBlocked) blockedUrl ||= url;
-      if (direct?.ok) {
-        loadedAnyPage = true;
-        if (!direct.url) direct.url = url;
+      const capture = browserCapturePage(url);
+      // Compatibility only for runtimes that do not expose browser-capture yet.
+      // A capture that ran and failed is never retried through another transport.
+      const page = capture.commandUnavailable
+        ? browserPage(url, company, persistentSessionId)
+        : capture.page;
+      const pageBlocked = isBlockedPage(page) || hasBlockedDetection(page);
+      blocked ||= pageBlocked;
+      if (pageBlocked) {
+        blockedUrl ||= page?.url || url;
+        break;
       }
-      if (pageMatchesCompany(company, direct, country)) {
-        const records = recordsForPage(direct, company, country);
-        if (records.length > 0) {
-          process.stdout.write(JSON.stringify({ records }));
-          return;
-        }
-      }
-
-      const browser = browserPage(url, company, persistentSessionId);
-      const browserBlocked = isBlockedPage(browser) || hasBlockedDetection(browser);
-      blocked ||= browserBlocked;
-      if (browserBlocked) blockedUrl ||= browser?.url || url;
-      if (browser?.ok) loadedAnyPage = true;
-      if (pageMatchesCompany(company, browser, country)) {
-        const records = recordsForPage(browser, company, country);
+      if (page?.ok) loadedAnyPage = true;
+      if (pageMatchesCompany(company, page, country)) {
+        const records = recordsForPage(page, company, country);
         if (records.length > 0) {
           process.stdout.write(JSON.stringify({ records }));
           return;
@@ -756,7 +812,7 @@ function main() {
     records: [],
     failure_mode: blocked ? "blocked" : "temporary_unreachable",
     detail: blocked
-      ? "Northdata challenge recorded by CTOX browser automation for web-unlock"
+      ? "Northdata challenge recorded by CTOX browser capture for web-unlock"
       : "no origin- and identity-verified Northdata profile data",
   }));
 }
@@ -767,6 +823,7 @@ if (require.main === module) {
 
 module.exports = {
   browserAutomationArgs,
+  browserCapturePage,
   browserSessionId,
   candidateUrls,
   extractRecords,
