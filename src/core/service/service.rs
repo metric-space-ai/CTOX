@@ -31694,7 +31694,10 @@ Business OS command:
             account_key: "email:cto1@example.com".to_string(),
             thread_key: "t1".to_string(),
             sender_display: "Mallory".to_string(),
-            sender_address: "mallory@example.com".to_string(),
+            // Outside the allowed employee domain: senders *inside* it are
+            // deliberately allowed as domain users, so the old address tested
+            // the opposite of what this test's name and expected message say.
+            sender_address: "mallory@outside.example".to_string(),
             subject: "test".to_string(),
             preview: "test".to_string(),
             body_text: "test".to_string(),
