@@ -7,7 +7,6 @@ const repoRoot = path.resolve(__dirname, '../../../..');
 const modulesRoot = path.join(repoRoot, 'src/apps/business-os/modules');
 const registryPath = path.join(modulesRoot, 'registry.json');
 const systemAppsPath = path.join(repoRoot, 'src/apps/business-os/system-apps.json');
-const BACKEND_ONLY_MODULE_IDS = new Set(['creator']);
 
 export const COMPATIBILITY_DESKTOP_APPS = Object.freeze([
   Object.freeze({ id: 'explorer', title: 'Files', kind: 'desktop-app', cohort: 'compatibility' }),
@@ -26,7 +25,6 @@ export function loadBusinessOsAppInventory() {
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .filter((id) => fs.existsSync(path.join(modulesRoot, id, 'module.json')))
-    .filter((id) => !BACKEND_ONLY_MODULE_IDS.has(id))
     .sort();
 
   assertUnique(registryIds, 'modules/registry.json');
@@ -42,8 +40,7 @@ export function loadBusinessOsAppInventory() {
     aliases: module.id === 'notes' ? ['Notes'] : [],
   }));
   const coreApps = sourceApps.filter((app) => app.installScope === 'core');
-  assertKnownIds(systemAppIds, registryIds, 'system-apps.json', 'modules/registry.json');
-  assertContainsIds(systemAppIds, coreApps.map((app) => app.id), 'system-apps.json', 'core module manifests');
+  assertExactIds(systemAppIds, coreApps.map((app) => app.id), 'system-apps.json', 'core module manifests');
 
   if (sourceApps.length !== 34) {
     throw new Error(`Business OS source inventory must contain exactly 34 apps; found ${sourceApps.length}`);
@@ -63,22 +60,17 @@ export function loadBusinessOsAppInventory() {
   });
 }
 
-function assertContainsIds(containerIds, requiredIds, containerSource, requiredSource) {
-  const container = new Set(containerIds);
-  const missing = requiredIds.filter((id) => !container.has(id));
-  if (missing.length) {
+function assertExactIds(expectedIds, actualIds, expectedSource, actualSource) {
+  const expected = new Set(expectedIds);
+  const actual = new Set(actualIds);
+  const missing = expectedIds.filter((id) => !actual.has(id));
+  const unexpected = actualIds.filter((id) => !expected.has(id));
+  if (missing.length || unexpected.length) {
     throw new Error([
-      `Business OS system app drift between ${containerSource} and ${requiredSource}.`,
+      `Business OS system app drift between ${expectedSource} and ${actualSource}.`,
       `missing: ${missing.join(', ') || 'none'}`,
+      `unexpected: ${unexpected.join(', ') || 'none'}`,
     ].join(' '));
-  }
-}
-
-function assertKnownIds(ids, knownIds, source, knownSource) {
-  const known = new Set(knownIds);
-  const unknown = ids.filter((id) => !known.has(id));
-  if (unknown.length) {
-    throw new Error(`${source} contains apps missing from ${knownSource}: ${unknown.join(', ')}`);
   }
 }
 

@@ -163,26 +163,6 @@ export async function mount(ctx) {
       ?.catch?.((error) => console.warn(`[browser] ${collectionName} sync start failed`, error));
   }
 
-  // Canonical collection readiness: while browser_sessions has not finished
-  // its initial replication (ready === false), an empty replicated source
-  // renders as a syncing shell instead of "no sessions". Render-hint only —
-  // never a mount blocker. Unsubscribe rides the existing cleanups idiom.
-  const subscribeReadiness = ctx.sync?.subscribeCollectionReadiness;
-  if (typeof subscribeReadiness === 'function') {
-    const unsubscribeReadiness = subscribeReadiness.call(ctx.sync, 'browser_sessions', (snapshot) => {
-      state.sessionsReadiness = snapshot || null;
-      renderSessions(
-        refs,
-        sessionRenderList(state),
-        state.latestSession,
-        state.leftView,
-        sessionTabCounts(state.tabs),
-        sessionsEmptyContext(ctx, state),
-      );
-    });
-    if (typeof unsubscribeReadiness === 'function') cleanups.push(unsubscribeReadiness);
-  }
-
   for (const collection of [
     browserCollection(ctx, 'business_commands'),
     browserCollection(ctx, 'browser_sessions'),
@@ -207,7 +187,7 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), sessionsEmptyContext(ctx, state));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
   };
   root.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   cleanups.push(() => root.removeEventListener('ctox-pane-grammar-change', onLeftGrammarChange));
@@ -475,11 +455,7 @@ export async function mount(ctx) {
       readCollection(browserCollection(ctx, 'ctox_queue_tasks'), { limit: 50 }),
     ]);
     const actorIds = browserActorIds(ctx.session);
-    // Unfiltered replicated source: ownership (actor) filtering happens after
-    // this, so a permission-empty never counts as a data-empty.
-    const replicatedSessions = mergeRequestedSession(sessions, requestedSession);
-    state.replicatedSessions = replicatedSessions;
-    const visibleSessions = replicatedSessions
+    const visibleSessions = mergeRequestedSession(sessions, requestedSession)
       .filter((session) => actorIds.includes(String(session.owner_user_id || '')));
     if (state.selectedSessionId
       && state.selectedSessionId !== state.requestedSessionId
@@ -538,7 +514,7 @@ export async function mount(ctx) {
         filters: grammar.filters || {},
       };
     }
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), sessionsEmptyContext(ctx, state));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
     // Auto-reveal: the remote work surface is meaningful once a session is
     // selected (visible = hasSelection && !userCollapsed). No session -> the
     // canvas shows its empty state instead of stale chrome.
@@ -1273,65 +1249,10 @@ function sessionTabCounts(tabs) {
   return counts;
 }
 
-// Canonical readiness for the sessions data-empty: the snapshot captured by
-// the subscription wins; a direct read is the fallback before the first emit
-// (or in harnesses without the subscribe API).
-function readSessionsReadiness(ctx, state) {
-  if (state?.sessionsReadiness) return state.sessionsReadiness;
-  const read = ctx?.sync?.collectionReadiness;
-  return typeof read === 'function' ? read.call(ctx.sync, 'browser_sessions') : null;
-}
-
-// Inputs for the sessions empty-state gate. sourceEmpty reflects the
-// UNFILTERED replicated browser_sessions source — ownership-, filter- and
-// search-empties must never downgrade to the syncing shell.
-function sessionsEmptyContext(ctx, state) {
-  return {
-    sourceEmpty: !Array.isArray(state?.replicatedSessions) || state.replicatedSessions.length === 0,
-    readiness: readSessionsReadiness(ctx, state),
-  };
-}
-
-function browserSessionsViewIsFiltered(view = {}) {
-  if (String(view.search || '').trim()) return true;
-  if (view.band && view.band !== 'all') return true;
-  const profile = view.filters?.profile;
-  return Boolean(profile && profile !== 'all');
-}
-
-// Data-driven empty gate (canonical readiness contract): only an empty,
-// unfiltered replicated source may show the syncing shell, and only while
-// browser_sessions reports ready === false. Every other empty — filtered,
-// permission, or a finished sync with genuinely zero sessions — stays the
-// static empty state. Without a readiness API this keeps the legacy empty.
-function browserSessionsEmptyKind({ rowCount = 0, sourceEmpty = true, viewFiltered = false, readiness = null } = {}) {
-  if (rowCount > 0) return 'hidden';
-  if (!viewFiltered && sourceEmpty && readiness?.ready === false) return 'syncing';
-  return 'empty';
-}
-
-function renderSessionsEmpty(refs, kind) {
-  if (!refs.sessionsEmpty) return;
-  refs.sessionsEmpty.hidden = kind === 'hidden';
-  if (kind === 'hidden') return;
-  const syncing = kind === 'syncing';
-  refs.sessionsEmpty.classList.toggle('ctox-syncing', syncing);
-  refs.sessionsEmpty.classList.toggle('ctox-empty', !syncing);
-  if (syncing) {
-    refs.sessionsEmpty.setAttribute('role', 'status');
-    refs.sessionsEmpty.setAttribute('aria-live', 'polite');
-    refs.sessionsEmpty.textContent = t('sessionsSyncing', 'Browser-Sitzungen werden synchronisiert.');
-  } else {
-    refs.sessionsEmpty.removeAttribute('role');
-    refs.sessionsEmpty.removeAttribute('aria-live');
-    refs.sessionsEmpty.textContent = t('sessionsEmpty', 'Noch keine Browser-Sitzung. Öffne oben rechts eine neue.');
-  }
-}
-
 // Rebuild the sessions well ONLY when the rendered data changed (signature
 // guard). Selection is applied in place via markActiveSession so a re-render
 // never clamps the well scroll or moves the operator.
-function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}, emptyContext = {}) {
+function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}) {
   if (!refs.sessions) return;
   const all = Array.isArray(sessions) ? sessions : [];
   const filtered = filterSessionsForView(all, view);
@@ -1345,12 +1266,7 @@ function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}
       .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0))
       .join('');
   }
-  renderSessionsEmpty(refs, browserSessionsEmptyKind({
-    rowCount: filtered.length,
-    sourceEmpty: emptyContext.sourceEmpty !== false,
-    viewFiltered: browserSessionsViewIsFiltered(view),
-    readiness: emptyContext.readiness || null,
-  }));
+  if (refs.sessionsEmpty) refs.sessionsEmpty.hidden = filtered.length > 0;
   markActiveSession(refs, activeSession?.id || '');
 
   const counts = browserSessionViewCounts(all, view);
@@ -1564,7 +1480,7 @@ function importBrowserSessions(ctx, state, refs) {
       return;
     }
     state.importedSessions = imported;
-    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs), sessionsEmptyContext(ctx, state));
+    renderSessions(refs, sessionRenderList(state), state.latestSession, state.leftView, sessionTabCounts(state.tabs));
     ctx.notifications?.show?.({ type: 'info', title: 'Browser', message: `${imported.length} Sitzungen geladen (nur lokal).` });
   });
   input.click();
@@ -2098,8 +2014,6 @@ export const __browserTestHooks = {
   parseBrowserSessionsImport,
   sessionRenderList,
   sessionTabCounts,
-  browserSessionsEmptyKind,
-  browserSessionsViewIsFiltered,
 };
 
 async function ensureStyles() {

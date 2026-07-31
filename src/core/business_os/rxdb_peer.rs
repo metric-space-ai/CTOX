@@ -21,9 +21,10 @@ use super::browser_control::{
     browser_context_related_document, browser_context_snapshot_with_database,
     browser_session_automation_with_database, browser_session_status_with_database,
     redact_browser_frame_data, redacted_browser_context_capture, redacted_browser_session_status,
-    BROWSER_FRAME_GC_LIMIT, BROWSER_INPUT_EVENT_GC_LIMIT, BROWSER_INPUT_EVENT_RETENTION_SECS,
-    BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS, BROWSER_RUNTIME_COMMAND_LOCK,
-    BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS, BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
+    BROWSER_FRAME_GC_LIMIT, BROWSER_FRAME_RATE_TARGET_DEFAULT, BROWSER_INPUT_EVENT_GC_LIMIT,
+    BROWSER_INPUT_EVENT_RETENTION_SECS, BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS,
+    BROWSER_RUNTIME_COMMAND_LOCK, BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS,
+    BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS,
 };
 use super::browser_runtime::{browser_runtime_manager, BrowserSessionAutomationRequest};
 use super::command_lifecycle_generated::CTOX_COMMAND_LIFECYCLE_CAPABILITY;
@@ -6328,9 +6329,103 @@ async fn run_browser_runtime_maintenance(database: &Arc<RxDatabase>) -> anyhow::
             }
         }
     }
+    for session_id in manager.active_session_ids() {
+        match refresh_browser_session_frame(database, &session_id).await {
+            Ok(session_rows) => {
+                rows_touched = rows_touched.saturating_add(session_rows);
+            }
+            Err(err) => {
+                eprintln!("[business-os] browser frame refresh failed for {session_id}: {err:#}");
+            }
+        }
+    }
     rows_touched = rows_touched.saturating_add(gc_expired_browser_frames(database).await?);
     rows_touched = rows_touched.saturating_add(gc_consumed_browser_input_events(database).await?);
     Ok(rows_touched)
+}
+
+/// Decide whether a live session owes the browser a fresh frame.
+///
+/// A session that has never produced a frame always does, even without a live
+/// controller lease: the UI can only show a picture once a first frame exists,
+/// and a user can only take the lease by acting on that picture. Gating the
+/// first frame on the lease is the deadlock that kept `browser_frames` empty.
+/// Afterwards a frame is only worth capturing while somebody is actually
+/// watching, so an expired lease stops the stream instead of screenshotting
+/// abandoned sessions forever.
+fn browser_frame_capture_due(
+    now_ms: u64,
+    last_frame_ms: Option<u64>,
+    lease_expires_ms: u64,
+    frame_rate_target: u64,
+) -> bool {
+    let Some(last_frame_ms) = last_frame_ms else {
+        return true;
+    };
+    if lease_expires_ms <= now_ms {
+        return false;
+    }
+    let min_interval_ms = 1000 / frame_rate_target.max(1);
+    now_ms.saturating_sub(last_frame_ms) >= min_interval_ms
+}
+
+/// Capture a frame for one live session when one is due, so the browser has a
+/// picture without the user having to send input first.
+async fn refresh_browser_session_frame(
+    database: &Arc<RxDatabase>,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    let manager = browser_runtime_manager();
+    let Some(session) = manager.get(session_id) else {
+        return Ok(0);
+    };
+    let session_doc = find_browser_document(database, "browser_sessions", session_id).await?;
+
+    let frames_collection = database
+        .collection("browser_frames")
+        .context("browser_frames collection is not registered")?;
+    let newest = frames_collection
+        .find(Some(MangoQuery {
+            selector: Some(json!({ "session_id": { "$eq": session_id } })),
+            sort: Some(vec![[("captured_at_ms".to_string(), "desc".to_string())]
+                .into_iter()
+                .collect()]),
+            limit: Some(1),
+            ..Default::default()
+        }))
+        .map_err(|err| anyhow::anyhow!("query newest browser_frames: {err}"))?
+        .exec(false)
+        .await
+        .map_err(|err| anyhow::anyhow!("exec newest browser_frames query: {err}"))?;
+    let last_frame_ms = newest
+        .as_array()
+        .and_then(|rows| rows.first())
+        .and_then(|row| row.get("captured_at_ms"))
+        .and_then(Value::as_u64);
+
+    let due = browser_frame_capture_due(
+        now_ms() as u64,
+        last_frame_ms,
+        session_doc
+            .get("controller_lease_expires_at_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        session_doc
+            .get("frame_rate_target")
+            .and_then(Value::as_u64)
+            .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT),
+    );
+    if !due {
+        return Ok(0);
+    }
+
+    // A failed capture must not abort the maintenance round for the other
+    // sessions; the runtime may simply be mid-navigation.
+    if let Err(err) = capture_and_store_browser_frame(database, &session, session_id, None).await {
+        eprintln!("[business-os] browser frame capture failed for {session_id}: {err:#}");
+        return Ok(0);
+    }
+    Ok(1)
 }
 
 /// Replay all pending `browser_input_events` for one session against its live
@@ -6963,6 +7058,14 @@ pub(super) async fn upsert_browser_session(
         .get("controller_lease_expires_at_ms")
         .and_then(Value::as_u64)
         .unwrap_or(0);
+    // A stored `0` means "never streamed" — the sessions written before the
+    // frame loop existed all carry it — so it heals to the default instead of
+    // pinning the session at zero frames per second forever.
+    let frame_rate_target = existing
+        .get("frame_rate_target")
+        .and_then(Value::as_u64)
+        .filter(|rate| *rate > 0)
+        .unwrap_or(BROWSER_FRAME_RATE_TARGET_DEFAULT);
     let tenant_id = access
         .and_then(|value| value.tenant_id.as_deref())
         .unwrap_or(preserved_tenant_id);
@@ -7029,7 +7132,7 @@ pub(super) async fn upsert_browser_session(
         "viewport_w": viewport_w,
         "viewport_h": viewport_h,
         "device_scale_factor": 1,
-        "frame_rate_target": 0,
+        "frame_rate_target": frame_rate_target,
         "active_frame_id": frame_id.unwrap_or_default(),
         "last_frame_seq": frame_seq,
         "last_input_seq": preserved_last_input_seq,
@@ -7738,7 +7841,9 @@ async fn sync_knowledge_catalog_with_database(
 /// longer take the collection down with it.
 fn retain_projectable_knowledge_item(document: &Value) -> bool {
     const MAX_PROJECTED_DOCUMENT_BYTES: usize = 262_144;
-    let bytes = serde_json::to_vec(document).map(|raw| raw.len()).unwrap_or(0);
+    let bytes = serde_json::to_vec(document)
+        .map(|raw| raw.len())
+        .unwrap_or(0);
     if bytes <= MAX_PROJECTED_DOCUMENT_BYTES {
         return true;
     }
@@ -24374,6 +24479,57 @@ mod tests {
                     >= 32
             );
         });
+    }
+
+    #[test]
+    fn browser_frame_capture_breaks_the_cold_start_deadlock() {
+        const NOW: u64 = 1_000_000;
+        const RATE: u64 = BROWSER_FRAME_RATE_TARGET_DEFAULT; // 2 fps -> 500 ms
+
+        // A session that never produced a frame is captured even though no
+        // controller holds a lease. Without this the UI never shows a picture,
+        // so nobody can ever take the lease: the deadlock that left every
+        // session on the tenant frameless.
+        assert!(browser_frame_capture_due(NOW, None, 0, RATE));
+        assert!(browser_frame_capture_due(NOW, None, NOW - 1, RATE));
+
+        // With a frame in place the lease decides. A watched session is
+        // captured once the rate-limit window has passed, not before.
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 100),
+            NOW + 60_000,
+            RATE
+        ));
+        assert!(browser_frame_capture_due(
+            NOW,
+            Some(NOW - 500),
+            NOW + 60_000,
+            RATE
+        ));
+
+        // An expired lease stops the stream instead of screenshotting an
+        // abandoned session forever.
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 60_000),
+            NOW,
+            RATE
+        ));
+        assert!(!browser_frame_capture_due(
+            NOW,
+            Some(NOW - 60_000),
+            NOW - 1,
+            RATE
+        ));
+
+        // A stored rate of zero must never divide by zero or freeze the stream.
+        assert!(browser_frame_capture_due(
+            NOW,
+            Some(NOW - 1_000),
+            NOW + 60_000,
+            0
+        ));
     }
 
     #[test]

@@ -102,17 +102,17 @@ assert.match(documents, /officeEngine:\s*'ctox_documents'/);
 assert.match(spreadsheets, /vendor\/ctox-office\/ctox-office-spreadsheet\.mjs/);
 assert.match(spreadsheets, /createCtoxSpreadsheetsEditor/);
 assert.match(spreadsheets, /kind:\s*'ctox-spreadsheets'/);
-assert.doesNotMatch(spreadsheets, /===\s*'legacy'/);
-assert.equal(documentsManifest.title, 'Dokumente');
+assert.match(spreadsheets, /officeEngine:\s*'ctox_spreadsheets'/);
+assert.equal(documentsManifest.title, 'CTOX Documents');
 assert.equal(spreadsheetsManifest.title, 'CTOX Spreadsheets');
 assert.match(documentsBundle, /createCtoxDocumentsEditor/);
 assert.match(documentsBundle, /CTOX_DOCUMENTS_PRODUCT_ID/);
 assert.match(spreadsheetsBundle, /createCtoxSpreadsheetsEditor/);
 assert.match(spreadsheetsBundle, /CTOX_SPREADSHEETS_PRODUCT_ID/);
-assert.match(documents, /ctx\.db/);
-assert.match(documents, /ctx\.commandBus/);
-assert.match(spreadsheets, /ctx\?\.db/);
-assert.match(spreadsheets, /state\.ctx\.commandBus/);
+for (const source of [documents, spreadsheets]) {
+  assert.match(source, /ctx\.db/);
+  assert.match(source, /ctx\.commandBus/);
+}
 
 for (const operation of ['prepare', 'apply_changes', 'export', 'inspect']) {
   assert.match(rustEngine, new RegExp(`pub fn ${operation}\\b`));

@@ -10,8 +10,6 @@ const KNOWLEDGE_DATA_COLLECTIONS = Object.freeze([
   'knowledge_runbooks',
   'knowledge_tables',
 ]);
-const SKF_BEARING_DOMAIN = 'drone_bearing_design_verified';
-const SKF_BEARING_CURRENT_SKILLBOOK_ID = 'drone-bearing-design-verified-v2';
 
 const labels = {
   de: {
@@ -537,20 +535,11 @@ function wireLocalRealtime() {
   const subscriptions = collections
     .map((collectionName) => knowledgeCollection(collectionName)?.$?.subscribe?.(schedule) || null)
     .filter(Boolean);
-  const subscribeChanges = state.ctx?.sync?.subscribeCollectionChanges;
-  const storageUnsubscribes = typeof subscribeChanges === 'function'
-    ? collections.map((collectionName) => (
-      subscribeChanges.call(state.ctx.sync, collectionName, schedule)
-    )).filter((unsubscribe) => typeof unsubscribe === 'function')
-    : [];
   return () => {
     if (timer) window.clearTimeout(timer);
     timer = null;
     for (const sub of subscriptions) {
       try { sub.unsubscribe?.(); } catch {}
-    }
-    for (const unsubscribe of storageUnsubscribes) {
-      try { unsubscribe(); } catch {}
     }
   };
 }
@@ -575,11 +564,6 @@ function wireCollectionReadiness() {
       renderRunbooks();
       if (state.activeTab === 'runbooks') {
         renderRunbookWorkspace().catch((error) => console.warn('[knowledge] readiness re-render failed', error));
-      }
-      if (snapshot?.state === 'ready') {
-        loadKnowledgeFromLocal().catch((error) => {
-          console.warn('[knowledge] readiness reload failed', error);
-        });
       }
     });
     return typeof unsubscribe === 'function' ? unsubscribe : () => {};
@@ -703,74 +687,42 @@ function buildKnowledgeBundles(items, runbooks, tables) {
       .some((id) => droneRunbookIds.has(id));
   });
   const droneSkillbookIds = new Set(droneSkillbooks.map((entry) => bareKnowledgeId(entry.id)));
-  const currentDroneSkillbook = droneSkillbooks.find((entry) => (
-    bareKnowledgeId(entry.id) === SKF_BEARING_CURRENT_SKILLBOOK_ID
-  )) || [...droneSkillbooks].sort((a, b) => (
-    Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0)
-  ))[0];
-  const currentDroneRunbookIds = new Set(extractRunbookIds(
-    currentDroneSkillbook?.linked_runbook_ids
-      ?? currentDroneSkillbook?.linked_runbooks_json
-      ?? currentDroneSkillbook?.linked_runbooks,
-  ).map(normaliseRunbookId));
+  const linkedDroneRunbookIds = new Set(droneSkillbooks.flatMap((skillbook) => (
+    extractRunbookIds(skillbook.linked_runbook_ids ?? skillbook.linked_runbooks_json ?? skillbook.linked_runbooks)
+      .map(normaliseRunbookId)
+  )));
   const linkedDroneRunbooks = runbookItems.filter((entry) => (
-    currentDroneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
-    || bareKnowledgeId(entry.skillbook_id) === bareKnowledgeId(currentDroneSkillbook?.id)
-  ));
-  const droneResources = resourceItems.filter((entry) => (
-    isDroneBearingKnowledge(entry)
+    droneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
+    || linkedDroneRunbookIds.has(normaliseRunbookId(runbookIdForItem(entry)))
     || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))
   ));
-  const droneTables = tableItems.filter((item) => {
-      const table = tableForItem(item, tables);
-      const domain = table?.domain || item.domain || item.payload?.domain || '';
-      const rowCount = Number(table?.row_count ?? item.row_count ?? item.payload?.row_count ?? 0);
-      const tableKey = String(table?.table_key || item.table_key || item.payload?.table_key || item.id || '');
-      return (
-        isDroneBearingKnowledge(item)
-        || isDroneBearingTable(table)
-        || domain === SKF_BEARING_DOMAIN
-      ) && rowCount > 0 && !/quarantine/i.test(tableKey);
-    });
-  const currentDroneSkills = skillItems.filter((entry) => (
-    bareKnowledgeId(entry.skillbook_id) === bareKnowledgeId(currentDroneSkillbook?.id)
-  ));
-  const allDroneEntries = uniqueById([
+  const droneEntries = uniqueById([
     ...skillItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
     ...droneSkillbooks,
-    ...runbookItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
-    ...droneResources,
+    ...linkedDroneRunbooks,
+    ...resourceItems.filter((entry) => isDroneBearingKnowledge(entry) || droneSkillbookIds.has(bareKnowledgeId(entry.skillbook_id))),
     ...tableItems.filter((item) => {
       const table = tableForItem(item, tables);
+      const domain = table?.domain || item.domain || item.payload?.domain || '';
       return isDroneBearingKnowledge(item)
         || isDroneBearingTable(table)
-        || (table?.domain || item.domain || item.payload?.domain) === SKF_BEARING_DOMAIN;
+        || domain === 'drone_bearing_design_verified';
     }),
-  ]);
-  for (const entry of allDroneEntries) used.add(entry.id);
-  const droneEntries = uniqueById([
-    currentDroneSkillbook,
-    ...currentDroneSkills,
-    ...linkedDroneRunbooks,
-    ...droneResources,
-    ...droneTables,
   ]);
   const groups = [];
   if (droneEntries.length) {
     groups.push(makeGroup({
       id: 'research/drone-design/drone-bearing-loads',
-      title: 'UAV-Antriebslager',
-      domainLabel: 'Research / SKF',
-      domain: SKF_BEARING_DOMAIN,
-      summary: 'Verifiziertes Fachwissen, ausführbare Runbooks, Quellen und Datentabellen für die Auslegung von UAV-Antriebslagern.',
+      title: 'Drone Bearing Loads',
+      domainLabel: 'Research / Drone Design',
+      domain: 'drone_bearing_design_verified',
+      summary: 'Skill, Skillbook, Runbook und DataFrames für Drone-Bearing-Load-Recherche.',
       entries: droneEntries,
       runbookIds: uniqueStrings([
         ...linkedDroneRunbooks.map(runbookIdForItem),
-        ...runbooks
-          .filter((runbook) => currentDroneRunbookIds.has(normaliseRunbookId(runbook.id || runbook.runbook_id)))
-          .map((runbook) => runbook.id || runbook.runbook_id),
+        ...runbooks.filter(isDroneBearingKnowledge).map((runbook) => runbook.id),
       ]),
-      primaryItemId: currentDroneSkillbook?.id || droneEntries[0]?.id,
+      primaryItemId: droneEntries.find((entry) => entry.kind === 'skillbook')?.id || droneEntries[0]?.id,
     }));
   }
 
@@ -1090,12 +1042,7 @@ function skillbooksForGroup(group) {
 }
 
 function firstSkillbookForGroup(group) {
-  const skillbooks = skillbooksForGroup(group);
-  return skillbooks.find((entry) => (
-    bareKnowledgeId(entry.id) === SKF_BEARING_CURRENT_SKILLBOOK_ID
-  )) || [...skillbooks].sort((a, b) => (
-    Number(b.updated_at_ms || 0) - Number(a.updated_at_ms || 0)
-  ))[0] || null;
+  return skillbooksForGroup(group)[0] || null;
 }
 
 function selectedSkillbookForGroup(group) {
@@ -1115,9 +1062,9 @@ function skillbookContext(group = activeGroup(), skillbook = selectedSkillbookFo
     ? group.entries
     : group.entries.filter((entry) => entry.id === skillbookEntry.id || relatedToSkillbook(skillbookEntry, entry));
   const entries = scopedEntries.length ? scopedEntries : group.entries;
-  const skill = skillbookEntry
-    || entries.find((entry) => entry.kind === 'skill')
+  const skill = entries.find((entry) => entry.kind === 'skill')
     || group.entries.find((entry) => entry.kind === 'skill')
+    || skillbookEntry
     || group.entries.find((entry) => entry.kind === 'skillbook')
     || group.entries[0]
     || null;
@@ -1253,12 +1200,7 @@ function knowledgeEmptyStateMessage(copy, term = '') {
 
 function sourceScopeFor(entry) {
   const source = String(entry?.source_path || entry?.source_system || entry?.subtitle || '').toLowerCase();
-  if (
-    source.startsWith('embedded:skills/system')
-    || source.includes('ctox_core')
-    || source.includes('/src/skills/')
-    || source.includes('/skills/packs/')
-  ) return 'system';
+  if (source.startsWith('embedded:skills/system') || source.includes('ctox_core')) return 'system';
   return 'user';
 }
 
@@ -3378,7 +3320,6 @@ function isKnowledgeActionFormReady(values, requiredFields = []) {
 
 export const __knowledgeTestHooks = {
   buildKnowledgeBundles,
-  skillbookContext,
   isInternalSkillOnlyGroup,
   canEditSelectedMarkdown,
   isKnowledgeActionFormReady,

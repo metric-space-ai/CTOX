@@ -30,6 +30,9 @@ pub(super) static BROWSER_RUNTIME_COMMAND_LOCK: tokio::sync::Mutex<()> =
 pub(super) const BROWSER_RUNTIME_ACTIVE_MAINTENANCE_INTERVAL_MS: u64 = 300;
 pub(super) const BROWSER_RUNTIME_IDLE_MAINTENANCE_INTERVAL_SECS: u64 = 10;
 pub(super) const BROWSER_RUNTIME_IDLE_BACKOFF_AFTER_TICKS: u32 = 1;
+/// Frames per second a watched session streams at. The 300 ms active
+/// maintenance cadence above carries this comfortably.
+pub(super) const BROWSER_FRAME_RATE_TARGET_DEFAULT: u64 = 2;
 pub(super) const BROWSER_FRAME_GC_LIMIT: u64 = 256;
 pub(super) const BROWSER_INPUT_EVENT_GC_LIMIT: u64 = 512;
 pub(super) const BROWSER_INPUT_EVENT_RETENTION_SECS: u64 = 60 * 60;

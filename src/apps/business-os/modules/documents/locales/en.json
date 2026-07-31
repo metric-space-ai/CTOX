@@ -41,7 +41,6 @@
   "adjustSearchFilter": "Adjust search or filters.",
   "clearFilters": "Reset filters",
   "noDocuments": "No documents",
-  "syncingDocuments": "Documents are being synced.",
   "importPrompt": "Import DOCX or Markdown, or create a new Word document.",
   "manageDocument": "manage",
   "loadingDocument": "Loading document",

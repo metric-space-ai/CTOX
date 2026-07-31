@@ -403,42 +403,4 @@ assert.equal(
 // Shard meta is a single muted selector line.
 assert.match(hooks.browserSessionShardMeta(sampleSessions[0], 2), /Persönlich · .+ · 2 Tabs/);
 
-// Canonical readiness contract: the sessions data-empty is wired to the
-// collection readiness API and renders the kit syncing shell while the
-// unfiltered replicated source is empty and not yet ready.
-assert.match(js, /subscribeCollectionReadiness/);
-assert.match(js, /collectionReadiness/);
-assert.match(js, /ctox-syncing/);
-assert.match(js, /role', 'status'\);[\s\S]*?aria-live', 'polite'/);
-assert.equal(hooks.browserSessionsEmptyKind({ rowCount: 2 }), 'hidden');
-assert.equal(
-  hooks.browserSessionsEmptyKind({ rowCount: 0, sourceEmpty: true, readiness: { ready: false, state: 'catching-up' } }),
-  'syncing',
-  'empty unfiltered source + not-ready collection => syncing shell',
-);
-assert.equal(
-  hooks.browserSessionsEmptyKind({ rowCount: 0, sourceEmpty: true, readiness: { ready: true, state: 'live' } }),
-  'empty',
-  'a finished initial replication with zero sessions is a real empty state',
-);
-assert.equal(
-  hooks.browserSessionsEmptyKind({ rowCount: 0, sourceEmpty: true, viewFiltered: true, readiness: { ready: false } }),
-  'empty',
-  'filter/search/band empties are never gated on readiness',
-);
-assert.equal(
-  hooks.browserSessionsEmptyKind({ rowCount: 0, sourceEmpty: false, readiness: { ready: false } }),
-  'empty',
-  'permission empties (replicated source non-empty) are never gated on readiness',
-);
-assert.equal(
-  hooks.browserSessionsEmptyKind({ rowCount: 0, sourceEmpty: true, readiness: null }),
-  'empty',
-  'without a readiness API the legacy empty state stays',
-);
-assert.equal(hooks.browserSessionsViewIsFiltered({ search: 'acme' }), true);
-assert.equal(hooks.browserSessionsViewIsFiltered({ band: 'closed' }), true);
-assert.equal(hooks.browserSessionsViewIsFiltered({ filters: { profile: 'private' } }), true);
-assert.equal(hooks.browserSessionsViewIsFiltered({ band: 'all', filters: { profile: 'all' } }), false);
-
 console.log('browser module pure contract smoke OK');

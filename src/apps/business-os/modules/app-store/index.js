@@ -51,7 +51,6 @@ const state = {
   status: null,
   operations: {},
   unsubscribe: null,
-  unsubscribeReadiness: null,
   viewMode: 'shelf',
   drawerOpen: false,
   // Canonical grammar state + the retail-box shelf (vendor/store-shelf).
@@ -103,7 +102,6 @@ export async function mount(ctx) {
         render();
       }
     }) || null;
-  state.unsubscribeReadiness = wireReadiness();
   render();
 
   // Column resizing is owned by the shell-global resizer (setupModuleResizers
@@ -112,28 +110,7 @@ export async function mount(ctx) {
 
   return () => {
     try { state.unsubscribe?.unsubscribe?.(); } catch {}
-    try { state.unsubscribeReadiness?.(); } catch {}
-    state.unsubscribeReadiness = null;
   };
-}
-
-// Canonical collection readiness (shared/sync-contract.js via ctx.sync):
-// business_module_catalog is the replicated list source; business_commands is
-// a write path only. Readiness is a render hint — it never blocks mount. While
-// the catalog has not finished its initial replication (ready === false), an
-// empty, unfiltered catalog renders as a syncing shell instead of "no apps".
-function catalogReadiness() {
-  const read = state.ctx?.sync?.collectionReadiness;
-  return typeof read === 'function' ? read.call(state.ctx.sync, 'business_module_catalog') : null;
-}
-
-function wireReadiness() {
-  const subscribe = state.ctx?.sync?.subscribeCollectionReadiness;
-  if (typeof subscribe !== 'function') return null;
-  const unsubscribe = subscribe.call(state.ctx.sync, 'business_module_catalog', () => {
-    render();
-  });
-  return typeof unsubscribe === 'function' ? unsubscribe : null;
 }
 
 function ensureStylesheet() {
@@ -898,10 +875,7 @@ function render({ resetScroll = false } = {}) {
   syncGrammarSurfaces(items, searched);
   syncCategoryOptions();
 
-  // A data-driven syncing shell (initial replication pending) renders through
-  // the list path even in shelf mode — an empty shelf would swallow it.
-  const syncingShell = !items.length && catalogEmptyShowsSyncing();
-  const shelfMode = state.viewMode === 'shelf' && !state.shelfUnavailable && !syncingShell;
+  const shelfMode = state.viewMode === 'shelf' && !state.shelfUnavailable;
   // Data re-renders never move the operator: preserve the well's scroll
   // offset across the list rebuild (intentional resets — search/view/band/
   // filter/scope — pass resetScroll because the content set changed). The
@@ -1022,40 +996,10 @@ async function syncShelf(items) {
 
 function renderCatalogBody(items) {
   if (items.length) return items.map(renderCard);
-  if (catalogEmptyShowsSyncing()) return [renderSyncingCatalogState()];
   return [renderEmptyCatalogState({
     title: emptyCatalogTitle(state.scope, state.query, state.marketplaceStatus),
     body: emptyCatalogBody(state.scope, state.query, state.marketplaceStatus, state.marketplaceMessage),
   })];
-}
-
-// Data-driven empties only: the unfiltered, replicated catalog source is
-// empty. Search hits, category/band filters and the GitHub fetch error state
-// keep their own empties (never gated). While business_module_catalog reports
-// ready === false, "empty" means "still syncing", not "no apps".
-function catalogEmptyShowsSyncing({
-  scope = state.scope,
-  query = state.query,
-  categoryFilter = state.categoryFilter,
-  centerBand = state.centerBand,
-  marketplaceStatus = state.marketplaceStatus,
-  readiness = catalogReadiness(),
-} = {}) {
-  if (query || categoryFilter !== 'all' || centerBand !== 'catalog') return false;
-  if (scope === 'marketplace' && marketplaceStatus === 'error') return false;
-  return readiness?.ready === false;
-}
-
-function renderSyncingCatalogState() {
-  const syncing = document.createElement('section');
-  syncing.className = 'ctox-syncing store-empty-state';
-  syncing.setAttribute('role', 'status');
-  syncing.setAttribute('aria-live', 'polite');
-  syncing.innerHTML = `
-    <strong>${escapeHtml(state.t('syncingCatalogTitle', 'Katalog wird synchronisiert'))}</strong>
-    <span>${escapeHtml(state.t('syncingCatalogBody', 'Der App-Katalog wird initial repliziert. Einträge erscheinen automatisch, sobald die ersten Daten eintreffen.'))}</span>
-  `;
-  return syncing;
 }
 
 function renderEmptyCatalogState({ title, body }) {
@@ -2607,7 +2551,6 @@ export const __appStoreTestHooks = {
   appLifecycleBadge,
   appReleaseProjection,
   buildAppStoreExport,
-  catalogEmptyShowsSyncing,
   chooseCanonicalCatalogItem,
   compareVersions,
   creatorHashFromStore,

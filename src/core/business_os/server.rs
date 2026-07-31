@@ -2288,12 +2288,6 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "subtitle": format!("{class_name} · {state} · {cluster}"),
                     "summary": summary,
                     "markdown": markdown,
-                    "payload": {
-                        "markdown": markdown,
-                        "class": class_name,
-                        "state": state,
-                        "cluster": cluster
-                    },
                     "source_path": source_path,
                     "updated_at": updated_at,
                     "file_count": file_count,
@@ -2330,11 +2324,6 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "markdown": markdown,
                     "linked_runbook_ids": linked_runbook_ids,
                     "linked_runbooks_json": linked_runbooks_json,
-                    "payload": {
-                        "markdown": markdown,
-                        "linked_runbook_ids": linked_runbook_ids,
-                        "linked_runbooks_json": linked_runbooks_json
-                    },
                     "updated_at": updated_at,
                     "file_count": 1,
                     "has_table": false
@@ -2370,12 +2359,6 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "summary": summary,
                     "markdown": markdown,
                     "problem_domain": domain,
-                    "payload": {
-                        "markdown": markdown,
-                        "runbook_id": id,
-                        "skillbook_id": skillbook_id,
-                        "problem_domain": domain
-                    },
                     "updated_at": updated_at
                 });
                 items.push(serde_json::json!({
@@ -2387,7 +2370,6 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "subtitle": format!("Runbook · {} · {}", runbook["status"].as_str().unwrap_or(""), runbook["problem_domain"].as_str().unwrap_or("")),
                     "summary": runbook["summary"],
                     "markdown": runbook["markdown"],
-                    "payload": runbook["payload"],
                     "problem_domain": runbook["problem_domain"],
                     "updated_at": runbook["updated_at"],
                     "file_count": 1,
@@ -2426,14 +2408,6 @@ pub(super) fn knowledge_index_payload(root: &Path) -> anyhow::Result<Value> {
                     "subtitle": format!("Resource · {role}"),
                     "summary": canonical_url,
                     "markdown": markdown,
-                    "payload": {
-                        "markdown": markdown,
-                        "resource_id": id,
-                        "skillbook_id": skillbook_id,
-                        "resource_kind": kind,
-                        "canonical_url": canonical_url,
-                        "evidence_eligible": evidence_eligible
-                    },
                     "canonical_url": canonical_url,
                     "evidence_eligible": evidence_eligible,
                     "updated_at": updated_at,
@@ -2675,22 +2649,10 @@ fn skillbook_markdown(root: &Path, skillbook_id: &str) -> anyhow::Result<String>
             row.get::<_, String>(11)?,
         ))
     })?;
-    let mut text = format!("# {}\n", row.0);
-    if !row.3.trim().is_empty() && row.3.trim() != row.0.trim() {
-        text.push_str(&format!("\n{}\n", row.3.trim()));
-    }
-    text.push_str(&format!(
-        "\n- Version: `{}`\n- Status: `{}`\n- Aktualisiert: `{}`\n",
-        row.1, row.2, row.11
-    ));
-    append_markdown_section(&mut text, "Mission", &row.4);
-    append_markdown_section(&mut text, "Runtime Policy", &row.5);
-    append_markdown_section(&mut text, "Answer Contract", &row.6);
-    append_markdown_json_list(&mut text, "Nicht verhandelbare Regeln", &row.10, false);
-    append_markdown_json_list(&mut text, "Arbeitsablauf", &row.7, true);
-    append_markdown_json_list(&mut text, "Routing", &row.8, false);
-    append_markdown_json_list(&mut text, "Verknüpfte Runbooks", &row.9, false);
-    Ok(text)
+    Ok(format!(
+        "# {}\n\n{}\n\n- Version: `{}`\n- Status: `{}`\n- Aktualisiert: `{}`\n\n## Mission\n\n{}\n\n## Runtime Policy\n\n{}\n\n## Answer Contract\n\n{}\n\n## Non-Negotiable Rules\n\n```json\n{}\n```\n\n## Workflow Backbone\n\n```json\n{}\n```\n\n## Routing Taxonomy\n\n```json\n{}\n```\n\n## Linked Runbooks\n\n```json\n{}\n```",
+        row.0, row.3, row.1, row.2, row.11, row.4, row.5, row.6, row.10, row.7, row.8, row.9
+    ))
 }
 
 fn runbook_markdown(root: &Path, runbook_id: &str) -> anyhow::Result<String> {
@@ -2710,14 +2672,10 @@ fn runbook_markdown(root: &Path, runbook_id: &str) -> anyhow::Result<String> {
             row.get::<_, String>(6)?,
         ))
     })?;
-    let mut text = format!("# {}\n", row.0);
-    if !row.3.trim().is_empty() && row.3.trim() != row.0.trim() {
-        text.push_str(&format!("\n{}\n", row.3.trim()));
-    }
-    text.push_str(&format!(
-        "\n- Version: `{}`\n- Status: `{}`\n- Domain: `{}`\n- Aktualisiert: `{}`\n",
-        row.1, row.2, row.4, row.6
-    ));
+    let mut text = format!(
+        "# {}\n\n{}\n\n- Version: `{}`\n- Status: `{}`\n- Domain: `{}`\n- Labels: `{}`\n- Aktualisiert: `{}`\n",
+        row.0, row.3, row.1, row.2, row.4, row.5, row.6
+    );
     let mut items = conn.prepare(
         "SELECT label, title, problem_class, chunk_text, structured_json, status, version
            FROM knowledge_runbook_items
@@ -2731,61 +2689,14 @@ fn runbook_markdown(root: &Path, runbook_id: &str) -> anyhow::Result<String> {
         let title: String = item.get(1)?;
         let problem_class: String = item.get(2)?;
         let chunk_text: String = item.get(3)?;
-        let _structured_json: String = item.get(4)?;
+        let structured_json: String = item.get(4)?;
         let status: String = item.get(5)?;
         let version: String = item.get(6)?;
-        let chunk_text = strip_duplicate_markdown_title(&chunk_text, &title);
         text.push_str(&format!(
-            "\n\n## {label} · {title}\n\n- Problemklasse: `{problem_class}`\n- Status: `{status}`\n- Version: `{version}`\n\n{chunk_text}"
+            "\n\n## {label} · {title}\n\n- Problemklasse: `{problem_class}`\n- Status: `{status}`\n- Version: `{version}`\n\n{chunk_text}\n\n```json\n{structured_json}\n```"
         ));
     }
     Ok(text)
-}
-
-fn append_markdown_section(text: &mut String, title: &str, value: &str) {
-    let value = value.trim();
-    if value.is_empty() {
-        return;
-    }
-    text.push_str(&format!("\n## {title}\n\n{value}\n"));
-}
-
-fn append_markdown_json_list(text: &mut String, title: &str, raw: &str, ordered: bool) {
-    let values = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| match value {
-            Value::String(value) if !value.trim().is_empty() => Some(value),
-            value if !value.is_null() => Some(value.to_string()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return;
-    }
-    text.push_str(&format!("\n## {title}\n\n"));
-    for (index, value) in values.iter().enumerate() {
-        if ordered {
-            text.push_str(&format!("{}. {}\n", index + 1, value.trim()));
-        } else {
-            text.push_str(&format!("- {}\n", value.trim()));
-        }
-    }
-}
-
-fn strip_duplicate_markdown_title<'a>(markdown: &'a str, title: &str) -> &'a str {
-    let trimmed = markdown.trim();
-    let Some(first_line) = trimmed.lines().next() else {
-        return trimmed;
-    };
-    let heading = first_line.trim_start_matches('#').trim();
-    if heading.eq_ignore_ascii_case(title.trim()) {
-        trimmed[first_line.len()..].trim_start()
-    } else {
-        trimmed
-    }
 }
 
 fn knowledge_resource_markdown(root: &Path, resource_id: &str) -> anyhow::Result<String> {

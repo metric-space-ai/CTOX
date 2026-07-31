@@ -34517,17 +34517,6 @@ fn promote_systematic_research_workspace_outputs(
             require_manifest_claim: false,
         });
     }
-    if requested_dashboard_tables
-        .is_some_and(|tables| tables.contains_key("derived_propeller_load_points"))
-    {
-        outputs.push(SystematicResearchCsvOutput {
-            file_name: "derived_propeller_load_points.csv",
-            table_key: "derived_propeller_load_points",
-            title: "Derived Propeller Load Points",
-            require_manifest_evidence: true,
-            require_manifest_claim: false,
-        });
-    }
     if requested_dashboard_tables.is_some_and(|tables| tables.contains_key("derived_bearing_loads"))
     {
         outputs.push(SystematicResearchCsvOutput {
@@ -34729,8 +34718,10 @@ fn validate_systematic_research_csv(
                 "measurement_kind",
                 "is_derived",
                 "rpm",
+                "propeller_size",
                 "prop_diameter_in",
                 "prop_pitch_in",
+                "torque_Nm",
                 "archive_manifest_hash",
                 "archive_member_path",
                 "archive_member_hash",
@@ -34740,20 +34731,8 @@ fn validate_systematic_research_csv(
             require_any_header(
                 &headers,
                 output,
-                &["propeller_size", "propeller_size_original"],
-                "the original propeller size",
-            )?;
-            require_any_header(
-                &headers,
-                output,
-                &[
-                    "thrust_N",
-                    "force_N",
-                    "axial_load_N",
-                    "thrust_coefficient_CT",
-                    "power_coefficient_CP",
-                ],
-                "a direct physical load or nondimensional coefficient channel",
+                &["thrust_N", "force_N", "axial_load_N"],
+                "an axial force channel in newtons",
             )?;
             anyhow::ensure!(
                 !headers.iter().any(|header| header == "fact_label")
@@ -34761,30 +34740,6 @@ fn validate_systematic_research_csv(
                 "{} uses generic fact columns instead of row-based measurements",
                 output.file_name
             );
-        }
-        "derived_propeller_load_points" => {
-            for field in [
-                "source_row_ref",
-                "propeller_size_original",
-                "prop_diameter_in",
-                "prop_pitch_in",
-                "diameter_m_input",
-                "rpm_input",
-                "air_density_kg_m3_input",
-                "thrust_coefficient_CT_input",
-                "power_coefficient_CP_input",
-                "thrust_N_derived",
-                "shaft_power_W_derived",
-                "torque_Nm_derived",
-                "formula_thrust",
-                "formula_power",
-                "formula_torque",
-                "assumptions",
-                "derivation_method",
-                "is_derived",
-            ] {
-                require_header(&headers, output, field)?;
-            }
         }
         "derived_bearing_loads" => {
             for field in [
@@ -34911,26 +34866,21 @@ fn validate_systematic_research_csv(
                     output.file_name
                 );
                 anyhow::ensure!(
-                    [
-                        "thrust_N",
-                        "force_N",
-                        "axial_load_N",
-                        "thrust_coefficient_CT",
-                        "power_coefficient_CP",
-                    ]
-                    .iter()
-                    .any(|field| finite_number(record_value(&record, &headers, field)).is_some()),
-                    "{} row {rows} has no machine-readable direct load or coefficient value",
+                    ["thrust_N", "force_N", "axial_load_N"]
+                        .iter()
+                        .any(
+                            |field| finite_number(record_value(&record, &headers, field)).is_some()
+                        ),
+                    "{} row {rows} has no machine-readable axial force value in newtons",
                     output.file_name
                 );
-                let propeller_size = record_value(&record, &headers, "propeller_size")
-                    .or_else(|| record_value(&record, &headers, "propeller_size_original"));
                 anyhow::ensure!(
                     finite_number(record_value(&record, &headers, "prop_diameter_in"))
                         .is_some_and(|value| value > 0.0)
                         && finite_number(record_value(&record, &headers, "prop_pitch_in"))
                             .is_some_and(|value| value > 0.0)
-                        && propeller_size.is_some_and(|value| !value.is_empty()),
+                        && record_value(&record, &headers, "propeller_size")
+                            .is_some_and(|value| !value.is_empty()),
                     "{} row {rows} has incomplete propeller diameter/pitch provenance",
                     output.file_name
                 );
@@ -34958,74 +34908,6 @@ fn validate_systematic_research_csv(
                     record_value(&record, &headers, "archive_member_path")
                         .is_some_and(|value| !value.is_empty()),
                     "{} row {rows} has no archive_member_path",
-                    output.file_name
-                );
-            }
-            "derived_propeller_load_points" => {
-                let required_positive = [
-                    "prop_diameter_in",
-                    "prop_pitch_in",
-                    "diameter_m_input",
-                    "rpm_input",
-                    "air_density_kg_m3_input",
-                ];
-                for field in required_positive {
-                    anyhow::ensure!(
-                        finite_number(record_value(&record, &headers, field))
-                            .is_some_and(|value| value > 0.0),
-                        "{} row {rows} has no positive machine-readable {field}",
-                        output.file_name
-                    );
-                }
-                for field in [
-                    "thrust_coefficient_CT_input",
-                    "power_coefficient_CP_input",
-                    "thrust_N_derived",
-                    "shaft_power_W_derived",
-                    "torque_Nm_derived",
-                ] {
-                    anyhow::ensure!(
-                        finite_number(record_value(&record, &headers, field)).is_some(),
-                        "{} row {rows} has no machine-readable {field}",
-                        output.file_name
-                    );
-                }
-                anyhow::ensure!(
-                    matches!(
-                        record_value(&record, &headers, "is_derived")
-                            .unwrap_or_default()
-                            .to_ascii_lowercase()
-                            .as_str(),
-                        "true" | "1" | "yes"
-                    ),
-                    "{} row {rows} is not explicitly identified as derived",
-                    output.file_name
-                );
-                for field in [
-                    "source_row_ref",
-                    "propeller_size_original",
-                    "formula_thrust",
-                    "formula_power",
-                    "formula_torque",
-                    "assumptions",
-                    "derivation_method",
-                ] {
-                    anyhow::ensure!(
-                        record_value(&record, &headers, field)
-                            .is_some_and(|value| !value.is_empty()),
-                        "{} row {rows} has no {field}",
-                        output.file_name
-                    );
-                }
-                let torque_formula = record_value(&record, &headers, "formula_torque")
-                    .unwrap_or_default()
-                    .to_ascii_lowercase()
-                    .replace(' ', "");
-                anyhow::ensure!(
-                    torque_formula.contains("2*pi")
-                        || torque_formula.contains("2π")
-                        || torque_formula.contains("6.283"),
-                    "{} row {rows} torque formula does not include the 2π conversion",
                     output.file_name
                 );
             }
@@ -44744,7 +44626,6 @@ mod tests {
         SystematicResearchCsvOutput {
             file_name: match table_key {
                 "measured_load_points" => "measured_load_points.csv",
-                "derived_propeller_load_points" => "derived_propeller_load_points.csv",
                 "derived_bearing_loads" => "derived_bearing_loads.csv",
                 _ => "test.csv",
             },
@@ -44815,124 +44696,6 @@ mod tests {
         )?;
 
         assert_eq!(rows, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn systematic_research_accepts_direct_nondimensional_propeller_coefficients(
-    ) -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let path = temp.path().join("measured_load_points.csv");
-        fs::write(
-            &path,
-            concat!(
-                "research_run_id,research_command_id,source_id,canonical_url,snapshot_hash,",
-                "source_row_ref,measurement_kind,is_derived,rpm,propeller_size_original,",
-                "prop_diameter_in,prop_pitch_in,thrust_coefficient_CT,power_coefficient_CP,",
-                "archive_manifest_hash,archive_member_path,archive_member_hash\n",
-                "run,cmd,SRC,https://example.test/source,abc,row-42,experimental,false,",
-                "2489,8.5x6,8.5,6,0.1046,0.0567,",
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,",
-                "UIUC/ance_8.5x6_static_2848cm.txt,",
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
-            ),
-        )?;
-        let eligible = HashMap::from([(
-            "SRC".to_string(),
-            ("https://example.test/source".to_string(), "abc".to_string()),
-        )]);
-
-        let rows = validate_systematic_research_csv(
-            &path,
-            &research_csv_output("measured_load_points"),
-            "run",
-            "cmd",
-            &eligible,
-            &HashMap::new(),
-        )?;
-
-        assert_eq!(rows, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn systematic_research_accepts_auditable_derived_propeller_load() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let path = temp.path().join("derived_propeller_load_points.csv");
-        fs::write(
-            &path,
-            concat!(
-                "research_run_id,research_command_id,source_id,canonical_url,snapshot_hash,",
-                "source_row_ref,propeller_size_original,prop_diameter_in,prop_pitch_in,",
-                "diameter_m_input,rpm_input,air_density_kg_m3_input,",
-                "thrust_coefficient_CT_input,power_coefficient_CP_input,",
-                "thrust_N_derived,shaft_power_W_derived,torque_Nm_derived,",
-                "formula_thrust,formula_power,formula_torque,assumptions,",
-                "derivation_method,is_derived\n",
-                "run,cmd,SRC,https://example.test/source,abc,row-42,8.5x6,8.5,6,",
-                "0.2159,2489,1.225,0.1046,0.0567,0.479099,2.325966,0.008924,",
-                "\"T = CT * rho * n^2 * D^4\",\"P = CP * rho * n^3 * D^5\",",
-                "\"Q = P / (2*pi*n)\",\"rho=1.225 kg/m3; static J=0\",",
-                "coefficient_scaling,true\n"
-            ),
-        )?;
-        let eligible = HashMap::from([(
-            "SRC".to_string(),
-            ("https://example.test/source".to_string(), "abc".to_string()),
-        )]);
-
-        let rows = validate_systematic_research_csv(
-            &path,
-            &research_csv_output("derived_propeller_load_points"),
-            "run",
-            "cmd",
-            &eligible,
-            &HashMap::new(),
-        )?;
-
-        assert_eq!(rows, 1);
-        Ok(())
-    }
-
-    #[test]
-    fn systematic_research_rejects_derived_propeller_torque_without_two_pi() -> anyhow::Result<()> {
-        let temp = tempdir()?;
-        let path = temp.path().join("derived_propeller_load_points.csv");
-        fs::write(
-            &path,
-            concat!(
-                "research_run_id,research_command_id,source_id,canonical_url,snapshot_hash,",
-                "source_row_ref,propeller_size_original,prop_diameter_in,prop_pitch_in,",
-                "diameter_m_input,rpm_input,air_density_kg_m3_input,",
-                "thrust_coefficient_CT_input,power_coefficient_CP_input,",
-                "thrust_N_derived,shaft_power_W_derived,torque_Nm_derived,",
-                "formula_thrust,formula_power,formula_torque,assumptions,",
-                "derivation_method,is_derived\n",
-                "run,cmd,SRC,https://example.test/source,abc,row-42,8.5x6,8.5,6,",
-                "0.2159,2489,1.225,0.1046,0.0567,0.479099,2.325966,0.056071,",
-                "\"T = CT * rho * n^2 * D^4\",\"P = CP * rho * n^3 * D^5\",",
-                "\"Q = P / n\",\"rho=1.225 kg/m3; static J=0\",",
-                "coefficient_scaling,true\n"
-            ),
-        )?;
-        let eligible = HashMap::from([(
-            "SRC".to_string(),
-            ("https://example.test/source".to_string(), "abc".to_string()),
-        )]);
-
-        let error = validate_systematic_research_csv(
-            &path,
-            &research_csv_output("derived_propeller_load_points"),
-            "run",
-            "cmd",
-            &eligible,
-            &HashMap::new(),
-        )
-        .expect_err("torque without the 2pi conversion must fail closed");
-
-        assert!(error
-            .to_string()
-            .contains("torque formula does not include the 2π conversion"));
         Ok(())
     }
 
