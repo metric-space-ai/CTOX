@@ -25,6 +25,7 @@ pub mod directory;
 pub mod dnbhoovers;
 pub mod firmenabc;
 pub mod handelsregister;
+pub mod impressum;
 pub mod leadfeeder;
 pub mod linkedin;
 pub mod northdata;
@@ -442,6 +443,17 @@ pub trait SourceModule: Sync {
         &[]
     }
 
+    /// Whether this source's evidence URLs live on the researched company's
+    /// own host rather than a fixed host owned by the source.
+    ///
+    /// The default keeps evidence pinned to [`id`], [`aliases`], and
+    /// [`host_suffixes`]. Input-driven first-party sources override this so
+    /// their records may cite any valid HTTP(S) host; the scrape bridge still
+    /// applies its evidence and company-identity gates before accepting them.
+    fn first_party_evidence(&self) -> bool {
+        false
+    }
+
     fn tier(&self) -> Tier;
 
     /// Countries this source covers authoritatively or usefully.
@@ -557,6 +569,7 @@ pub static REGISTRY: &[fn() -> &'static dyn SourceModule] = &[
     directory::google,
     directory::google_maps,
     handelsregister::module,
+    impressum::module,
     leadfeeder::module,
     linkedin::module,
     directory::moneyhouse,
@@ -637,7 +650,7 @@ mod tests {
     #[test]
     fn registry_has_all_expected_sources() {
         let ids: Vec<_> = list().map(|m| m.id()).collect();
-        assert_eq!(ids.len(), 16, "expected exactly 16 registered sources");
+        assert_eq!(ids.len(), 17, "expected exactly 17 registered sources");
         for expected in [
             "bundesanzeiger.de",
             "companyhouse.de",
@@ -647,6 +660,7 @@ mod tests {
             "google.de",
             "maps.google.com",
             "handelsregister.de",
+            "impressum",
             "leadfeeder.com",
             "linkedin.com",
             "moneyhouse.ch",

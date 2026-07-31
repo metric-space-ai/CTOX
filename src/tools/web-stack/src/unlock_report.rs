@@ -2006,7 +2006,7 @@ const SOURCE_CONFIG = Object.freeze({
     }
 
     #[test]
-    fn real_registry_has_fourteen_adapters_with_valid_shared_config() {
+    fn real_registry_has_fifteen_adapters_with_valid_shared_config() {
         let adapters_dir = default_adapters_dir();
         let shared = std::fs::read_to_string(adapters_dir.join(SHARED_SCRIPT_REL)).unwrap();
         let source_config =
@@ -2016,8 +2016,8 @@ const SOURCE_CONFIG = Object.freeze({
         let discovered = discover_adapters(&adapters_dir).unwrap();
         assert_eq!(
             discovered.len(),
-            14,
-            "expected 14 registered production adapters"
+            15,
+            "expected 15 registered production adapters"
         );
         for (source_id, _) in &discovered {
             assert!(

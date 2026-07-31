@@ -829,25 +829,29 @@ fn valid_source_url(raw: &str, module: &dyn SourceModule) -> bool {
     let Ok(url) = url::Url::parse(raw) else {
         return false;
     };
-    matches!(url.scheme(), "http" | "https")
-        && url.host_str().is_some()
-        && (url.host_str().is_some_and(|host| {
-            let host = host
-                .trim_start_matches("www.")
-                .trim_start_matches("app.")
-                .trim_start_matches("api.")
-                .to_ascii_lowercase();
-            let matches_host = |candidate: &str| {
-                let candidate = candidate.to_ascii_lowercase();
-                host == candidate || host.ends_with(&format!(".{candidate}"))
-            };
-            matches_host(module.id())
-                || module.aliases().iter().any(|alias| matches_host(alias))
-                || module
-                    .host_suffixes()
-                    .iter()
-                    .any(|suffix| matches_host(suffix))
-        }))
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return false;
+    }
+    if module.first_party_evidence() {
+        return true;
+    }
+    url.host_str().is_some_and(|host| {
+        let host = host
+            .trim_start_matches("www.")
+            .trim_start_matches("app.")
+            .trim_start_matches("api.")
+            .to_ascii_lowercase();
+        let matches_host = |candidate: &str| {
+            let candidate = candidate.to_ascii_lowercase();
+            host == candidate || host.ends_with(&format!(".{candidate}"))
+        };
+        matches_host(module.id())
+            || module.aliases().iter().any(|alias| matches_host(alias))
+            || module
+                .host_suffixes()
+                .iter()
+                .any(|suffix| matches_host(suffix))
+    })
 }
 
 fn record_company_identity(record: &Value, field: FieldKey, value: &str) -> Option<String> {
@@ -949,6 +953,67 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_record(source_id: &str, source_url: &str) -> Value {
+        json!({
+            "field": "firma_anschrift",
+            "value": "Lechstrasse 28",
+            "confidence": "high",
+            "source_url": source_url,
+            "run_id": "scrape_run-first-party",
+            "source_id": source_id,
+            "company_name": "AKEMI GmbH",
+            "evidence_eligible": true,
+            "verification_status": "verified",
+            "http_status": 200,
+            "checked_at": now_ms(),
+            "snapshot_hash": "sha256:first-party"
+        })
+    }
+
+    #[test]
+    fn first_party_company_host_is_accepted_without_relaxing_fixed_host_sources() {
+        let company_url = "https://www.akemi.de/impressum";
+        let impressum = crate::sources::find("impressum").expect("impressum source");
+        let accepted = record_to_field_evidence(
+            &valid_record("impressum", company_url),
+            impressum,
+            "AKEMI GmbH",
+            Some("scrape_run-first-party"),
+        );
+        assert!(matches!(accepted, Ok(Some(_))));
+
+        let northdata = crate::sources::find("northdata.de").expect("northdata source");
+        let rejected = record_to_field_evidence(
+            &valid_record("northdata.de", company_url),
+            northdata,
+            "AKEMI GmbH",
+            Some("scrape_run-first-party"),
+        );
+        assert_eq!(rejected.unwrap_err(), "source_url_not_canonical_for_source");
+    }
+
+    #[test]
+    fn first_party_records_still_require_valid_http_urls() {
+        let impressum = crate::sources::find("impressum").expect("impressum source");
+        for invalid_url in [
+            "https://[::1",
+            "akemi.de/impressum",
+            "ftp://akemi.de/impressum",
+        ] {
+            let rejected = record_to_field_evidence(
+                &valid_record("impressum", invalid_url),
+                impressum,
+                "AKEMI GmbH",
+                Some("scrape_run-first-party"),
+            );
+            assert_eq!(
+                rejected.unwrap_err(),
+                "source_url_not_canonical_for_source",
+                "URL should be rejected: {invalid_url}"
+            );
+        }
+    }
 
     fn write_cached_run(root: &Path, checked_at: u64, finished_at: u64) {
         let run_id = "scrape_run-cached";

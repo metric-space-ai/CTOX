@@ -75,6 +75,11 @@ const SOURCE_CONFIG = Object.freeze({
   "maps.google.com": { native: false, domains: ["google.com", "google.de"] },
   "rocketreach.com": { native: false, domains: ["rocketreach.com", "rocketreach.co"] },
   "experte.de": { native: false, domains: ["experte.de"] },
+  // The Impressum is published on the researched company's OWN host, so this
+  // source has no fixed domain list. Its adapter derives the candidate host
+  // from the company name and verifies the company identity per fetch
+  // (impressum/scripts/v1.js), which is what google.de does here too.
+  "impressum": { native: true, native_only: true, domains: [] },
 });
 
 function isPortalOrLoginTitle(title) {
