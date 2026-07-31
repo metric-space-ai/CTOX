@@ -1,7 +1,7 @@
 {
   "target_key": "impressum",
   "display_name": "Impressum (first-party company legal notice)",
-  "start_url": null,
+  "start_url": "https://example.com/impressum",
   "target_kind": "prospect-research",
   "status": "active",
   "config": {
@@ -39,7 +39,9 @@
           "note"
         ]
       }
-    }
+    },
+    "start_url_is_placeholder": true,
+    "start_url_placeholder_reason": "This target is input-driven: the legal notice URL is derived from the company under research (see start_url_source). The manifest schema of the deployed runtime requires a non-empty start_url, and skip_probe keeps it from ever being fetched."
   },
   "output_schema": {
     "schema_key": "prospect.v1",
